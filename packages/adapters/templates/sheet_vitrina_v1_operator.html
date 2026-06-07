@@ -219,6 +219,7 @@
       display: grid;
       gap: 16px;
       margin-top: 28px;
+      min-width: 0;
     }
 
     .block {
@@ -226,6 +227,7 @@
       border-radius: 14px;
       background: #fbfcfd;
       padding: 20px;
+      min-width: 0;
     }
 
     .block-title {
@@ -335,6 +337,7 @@
     .daily-report {
       display: grid;
       gap: 18px;
+      min-width: 0;
     }
 
     .report-period {
@@ -550,77 +553,91 @@
     .stock-report-toolbar {
       display: flex;
       align-items: flex-end;
-      gap: 12px;
+      gap: 8px;
       flex-wrap: wrap;
       margin: 18px 0 14px;
     }
 
     .stock-selector-field {
-      flex: 1 1 320px;
-      min-width: 280px;
+      flex: 0 0 auto;
+      min-width: 0;
+    }
+
+    .stock-report-sku-field {
+      width: min(320px, 100%);
     }
 
     .stock-report-period-field {
-      flex: 0 0 220px;
-      min-width: 190px;
+      width: 150px;
+    }
+
+    .stock-report-columns-field {
+      width: 190px;
     }
 
     .stock-report-period-input {
       width: 100%;
-      min-height: 44px;
-      border: 1px solid rgba(15, 23, 42, 0.12);
-      border-radius: 12px;
-      padding: 10px 12px;
+      min-height: 36px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 7px 10px;
       font: inherit;
+      font-size: 12px;
+      font-weight: 700;
       color: var(--text);
-      background: #ffffff;
+      background: var(--control-bg);
     }
 
     .stock-selector-label {
       display: block;
-      margin-bottom: 6px;
+      margin-bottom: 5px;
       font-size: 12px;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
       color: var(--muted);
     }
 
-    .stock-selector-popover {
+    .stock-selector-popover,
+    .stock-report-column-popover {
       position: relative;
     }
 
-    .stock-selector-summary {
+    .stock-selector-summary,
+    .stock-report-column-summary {
       list-style: none;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      padding: 12px 14px;
+      gap: 8px;
+      min-height: 36px;
+      padding: 7px 10px;
       border: 1px solid var(--border);
-      border-radius: 12px;
-      background: #ffffff;
+      border-radius: 7px;
+      background: var(--control-bg);
       cursor: pointer;
-      font-size: 14px;
-      font-weight: 600;
+      font-size: 12px;
+      font-weight: 700;
       color: var(--text);
       user-select: none;
     }
 
-    .stock-selector-summary::-webkit-details-marker {
+    .stock-selector-summary::-webkit-details-marker,
+    .stock-report-column-summary::-webkit-details-marker {
       display: none;
     }
 
-    .stock-selector-summary::after {
+    .stock-selector-summary::after,
+    .stock-report-column-summary::after {
       content: "▾";
       font-size: 12px;
       color: var(--muted);
     }
 
-    .stock-selector-popover[open] .stock-selector-summary::after {
+    .stock-selector-popover[open] .stock-selector-summary::after,
+    .stock-report-column-popover[open] .stock-report-column-summary::after {
       content: "▴";
     }
 
-    .stock-selector-panel {
+    .stock-selector-panel,
+    .stock-report-column-panel {
       position: absolute;
       top: calc(100% + 8px);
       left: 0;
@@ -628,24 +645,26 @@
       z-index: 20;
       padding: 12px;
       border: 1px solid var(--border);
-      border-radius: 14px;
-      background: #ffffff;
+      border-radius: 8px;
+      background: var(--panel-elevated);
       box-shadow: 0 18px 42px rgba(15, 23, 42, 0.14);
     }
 
-    .stock-selector-actions {
+    .stock-selector-actions,
+    .stock-report-column-actions {
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
       margin-bottom: 10px;
     }
 
-    .stock-selector-action {
+    .stock-selector-action,
+    .stock-report-column-action {
       appearance: none;
-      border: 0;
+      border: 1px solid var(--accent-border);
       background: var(--accent-soft);
       color: #ddd6fe;
-      border-radius: 999px;
+      border-radius: 6px;
       padding: 6px 10px;
       font: inherit;
       font-size: 12px;
@@ -653,7 +672,8 @@
       cursor: pointer;
     }
 
-    .stock-selector-list {
+    .stock-selector-list,
+    .stock-report-column-list {
       display: grid;
       gap: 8px;
       max-height: 280px;
@@ -661,26 +681,34 @@
       padding-right: 2px;
     }
 
-    .stock-selector-option {
+    .stock-selector-option,
+    .stock-report-column-option {
       display: flex;
       align-items: flex-start;
       gap: 10px;
       padding: 10px 12px;
-      border: 1px solid rgba(15, 23, 42, 0.08);
-      border-radius: 12px;
-      background: #f8fbff;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--control-bg);
       cursor: pointer;
     }
 
-    .stock-selector-option input {
+    .stock-selector-option input,
+    .stock-report-column-option input {
       margin-top: 2px;
       flex: 0 0 auto;
     }
 
-    .stock-selector-option span {
-      font-size: 14px;
+    .stock-selector-option span,
+    .stock-report-column-option span {
+      font-size: 12px;
       line-height: 1.45;
       color: var(--text);
+    }
+
+    .stock-report-column-option.is-required {
+      opacity: 0.72;
+      cursor: not-allowed;
     }
 
     .stock-selector-hint,
@@ -705,17 +733,25 @@
       color: var(--muted);
     }
 
+    #stockReportRows {
+      min-width: 0;
+      max-width: 100%;
+    }
+
     .stock-report-table-wrap {
       width: 100%;
-      overflow: auto;
-      border: 1px solid rgba(15, 23, 42, 0.08);
-      border-radius: 12px;
-      background: #ffffff;
+      max-width: 100%;
+      min-width: 0;
+      overflow-x: auto;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--control-bg);
     }
 
     .stock-report-table {
       width: 100%;
-      min-width: 1380px;
+      min-width: var(--stock-report-table-min-width, 1180px);
       border-collapse: collapse;
       font-size: 12px;
     }
@@ -723,31 +759,46 @@
     .stock-report-table th,
     .stock-report-table td {
       padding: 9px 10px;
-      border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+      border-bottom: 1px solid var(--border);
       text-align: right;
       vertical-align: middle;
       white-space: nowrap;
+      background: var(--control-bg);
     }
 
     .stock-report-table th:first-child,
     .stock-report-table td:first-child {
+      position: sticky;
+      left: 0;
+      z-index: 2;
       text-align: left;
       min-width: 220px;
       max-width: 320px;
       white-space: normal;
+      background: var(--control-bg);
+      box-shadow: var(--sticky-shadow);
     }
 
     .stock-report-table thead th {
       position: sticky;
       top: 0;
       z-index: 1;
-      background: #f8fafc;
+      background: var(--panel-subtle);
       color: var(--muted-strong);
       font-weight: 800;
     }
 
+    .stock-report-table thead th:first-child {
+      z-index: 4;
+      background: var(--panel-subtle);
+    }
+
     .stock-report-table tbody tr:hover td {
-      background: #f8fafc;
+      background: var(--control-bg-hover);
+    }
+
+    .stock-report-table tbody tr:hover td:first-child {
+      background: var(--control-bg-hover);
     }
 
     .stock-report-sort-button {
@@ -776,6 +827,13 @@
 
     .stock-report-promo.is-no {
       color: var(--muted-strong);
+    }
+
+    .stock-report-apply-button {
+      min-height: 36px;
+      padding: 7px 12px;
+      align-self: flex-end;
+      white-space: nowrap;
     }
 
     .plan-report-toolbar {
@@ -2078,7 +2136,7 @@
                 Полная таблица active SKU по persisted ready snapshot / DATA_VITRINA / yesterday_closed.
               </p>
               <div class="stock-report-toolbar">
-                <div class="stock-selector-field">
+                <div class="stock-selector-field stock-report-sku-field">
                   <span class="stock-selector-label">SKU</span>
                   <details id="stockReportSkuSelector" class="stock-selector-popover">
                     <summary id="stockReportSkuSummary" class="stock-selector-summary">Выбраны все active SKU</summary>
@@ -2090,16 +2148,28 @@
                       <div id="stockReportSkuList" class="stock-selector-list"></div>
                     </div>
                   </details>
-                  <p class="stock-selector-hint">Список строится из current active SKU truth (`config_v2`). Изменения применяются после кнопки «Рассчитать».</p>
-                  <p id="stockReportSkuValidation" class="stock-selector-validation" hidden>Выберите хотя бы один SKU</p>
                 </div>
                 <label class="stock-selector-field stock-report-period-field" for="stockReportSalesAvgPeriodDays">
-                  <span class="stock-selector-label">Период усреднения продаж</span>
+                  <span class="stock-selector-label" title="Период усреднения продаж">Период продаж</span>
                   <input id="stockReportSalesAvgPeriodDays" class="stock-report-period-input" type="number" min="1" step="1" value="14" inputmode="numeric">
                 </label>
-                <button id="stockReportApplyButton" class="action-button secondary-button" type="button">Рассчитать</button>
+                <div class="stock-selector-field stock-report-columns-field">
+                  <span class="stock-selector-label">Столбцы</span>
+                  <details id="stockReportColumnSelector" class="stock-report-column-popover">
+                    <summary id="stockReportColumnSummary" class="stock-report-column-summary">Столбцы: база</summary>
+                    <div class="stock-report-column-panel">
+                      <div class="stock-report-column-actions">
+                        <button id="stockReportColumnsAllButton" class="stock-report-column-action" type="button">Все</button>
+                        <button id="stockReportColumnsBaseButton" class="stock-report-column-action" type="button">База</button>
+                      </div>
+                      <div id="stockReportColumnList" class="stock-report-column-list"></div>
+                    </div>
+                  </details>
+                </div>
+                <button id="stockReportApplyButton" class="action-button secondary-button stock-report-apply-button" type="button">Рассчитать</button>
               </div>
-              <p id="stockReportStatus" class="section-message">Читаем отчёт по остаткам...</p>
+              <p id="stockReportSkuValidation" class="stock-selector-validation" hidden>Выберите хотя бы один SKU</p>
+              <p id="stockReportStatus" class="section-message">Настройте SKU, период и столбцы, затем нажмите «Рассчитать».</p>
               <div id="stockReportContent" class="daily-report" hidden>
                 <div id="stockReportRows"></div>
               </div>
@@ -2659,6 +2729,11 @@
       const stockReportSelectAllButton = document.getElementById("stockReportSelectAllButton");
       const stockReportClearAllButton = document.getElementById("stockReportClearAllButton");
       const stockReportSalesAvgPeriodDays = document.getElementById("stockReportSalesAvgPeriodDays");
+      const stockReportColumnSelector = document.getElementById("stockReportColumnSelector");
+      const stockReportColumnSummary = document.getElementById("stockReportColumnSummary");
+      const stockReportColumnList = document.getElementById("stockReportColumnList");
+      const stockReportColumnsAllButton = document.getElementById("stockReportColumnsAllButton");
+      const stockReportColumnsBaseButton = document.getElementById("stockReportColumnsBaseButton");
       const stockReportApplyButton = document.getElementById("stockReportApplyButton");
       const planReportPeriod = document.getElementById("planReportPeriod");
       const planReportLead = document.getElementById("planReportLead");
@@ -2792,22 +2867,44 @@
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
       const STOCK_REPORT_DISTRICT_COLUMNS = [
-        { metric_key: "stock_ru_central", label: "Центральный" },
-        { metric_key: "stock_ru_northwest", label: "Северо-Западный" },
-        { metric_key: "stock_ru_volga", label: "Приволжский" },
-        { metric_key: "stock_ru_ural", label: "Уральский" },
-        { metric_key: "stock_ru_south_caucasus", label: "Юг/СКФО" }
+        { metric_key: "stock_ru_central", label: "Центр", title: "Центральный" },
+        { metric_key: "stock_ru_northwest", label: "СЗ", title: "Северо-Западный" },
+        { metric_key: "stock_ru_volga", label: "Прив.", title: "Приволжский" },
+        { metric_key: "stock_ru_ural", label: "Урал", title: "Уральский" },
+        { metric_key: "stock_ru_south_caucasus", label: "Юг", title: "Юг/СКФО" }
       ];
       const STOCK_REPORT_TABLE_COLUMNS = [
-        { key: "identity_label", label: "SKU", kind: "string" },
-        { key: "promotion_participation", label: "Акция", kind: "promo" },
-        { key: "stock_total", label: "Остаток всего", kind: "number", format: "stock" },
-        { key: "zero_district_count", label: "Ноль в округах", kind: "number", format: "integer" },
-        ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({ key: "stock:" + item.metric_key, label: item.label, kind: "number", format: "stock", metric_key: item.metric_key })),
-        { key: "avg_sales_per_day", label: "Сред. продаж/день", kind: "number", format: "avg" },
-        { key: "days_left_total", label: "Дней всего", kind: "number", format: "days" },
-        ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({ key: "days:" + item.metric_key, label: "Дней: " + item.label, kind: "number", format: "days", metric_key: item.metric_key }))
+        { key: "identity_label", label: "SKU", title: "SKU", kind: "string", required: true, defaultVisible: true },
+        { key: "promotion_participation", label: "Акция", title: "Участие в акции", kind: "promo", defaultVisible: true },
+        { key: "stock_total", label: "Ост. всего", title: "Остаток всего", kind: "number", format: "stock", defaultVisible: true },
+        { key: "zero_district_count", label: "Ноль", title: "Ноль в округах", kind: "number", format: "integer", defaultVisible: true },
+        ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({
+          key: "stock:" + item.metric_key,
+          label: item.label,
+          title: item.title,
+          kind: "number",
+          format: "stock",
+          metric_key: item.metric_key,
+          defaultVisible: true
+        })),
+        { key: "avg_sales_per_day", label: "Прод./дн.", title: "Сред. продаж/день", kind: "number", format: "avg", defaultVisible: true },
+        { key: "days_left_total", label: "Дн. всего", title: "Дней всего", kind: "number", format: "days", defaultVisible: true },
+        ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({
+          key: "days:" + item.metric_key,
+          label: "Дн. " + item.label,
+          title: "Дней: " + item.title,
+          kind: "number",
+          format: "days",
+          metric_key: item.metric_key,
+          defaultVisible: false
+        }))
       ];
+      const STOCK_REPORT_REQUIRED_COLUMN_KEYS = new Set(
+        STOCK_REPORT_TABLE_COLUMNS.filter((item) => item.required).map((item) => item.key)
+      );
+      const STOCK_REPORT_DEFAULT_COLUMN_KEYS = STOCK_REPORT_TABLE_COLUMNS
+        .filter((item) => item.required || item.defaultVisible !== false)
+        .map((item) => item.key);
       const VALID_PLAN_REPORT_PERIODS = new Set([
         "yesterday",
         "last_7_days",
@@ -2838,6 +2935,7 @@
       let factoryInboundSource = normalizeFactoryInboundSource(persistedOperatorUiState.factory_inbound_source);
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
+      let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
       let stockReportPayload = null;
       let stockReportSortState = { key: "active_order", direction: "asc" };
       let planReportPayload = null;
@@ -2955,6 +3053,81 @@
           return persistedApplied.slice();
         }
         return allStockReportSkuIds.slice();
+      }
+
+      function sanitizeStockReportVisibleColumnKeys(rawValue) {
+        if (!Array.isArray(rawValue)) {
+          return null;
+        }
+        const allowed = new Set(STOCK_REPORT_TABLE_COLUMNS.map((item) => item.key));
+        const seen = new Set();
+        const filtered = rawValue.reduce((acc, item) => {
+          const key = String(item || "").trim();
+          if (!key || !allowed.has(key) || seen.has(key)) {
+            return acc;
+          }
+          seen.add(key);
+          acc.push(key);
+          return acc;
+        }, []);
+        if (filtered.length !== rawValue.length) {
+          return null;
+        }
+        STOCK_REPORT_REQUIRED_COLUMN_KEYS.forEach((key) => {
+          if (!seen.has(key)) {
+            filtered.unshift(key);
+            seen.add(key);
+          }
+        });
+        return filtered.length ? filtered : null;
+      }
+
+      function sanitizeStockReportColumnCatalogKeys(rawValue) {
+        if (!Array.isArray(rawValue)) {
+          return null;
+        }
+        const current = new Set(STOCK_REPORT_TABLE_COLUMNS.map((item) => item.key));
+        const keys = rawValue
+          .map((item) => String(item || "").trim())
+          .filter((key) => key && current.has(key));
+        return keys.length ? new Set(keys) : null;
+      }
+
+      function resolveRestoredStockReportVisibleColumnKeys(storageState) {
+        const rawState = storageState && typeof storageState === "object" ? storageState : {};
+        const persisted = sanitizeStockReportVisibleColumnKeys(rawState.stock_report_visible_column_keys);
+        if (!persisted) {
+          return STOCK_REPORT_DEFAULT_COLUMN_KEYS.slice();
+        }
+        const previousCatalog = sanitizeStockReportColumnCatalogKeys(rawState.stock_report_column_catalog_keys);
+        if (!previousCatalog) {
+          return persisted;
+        }
+        const nextKeys = persisted.slice();
+        STOCK_REPORT_TABLE_COLUMNS.forEach((column) => {
+          if (
+            !previousCatalog.has(column.key)
+            && (column.required || column.defaultVisible !== false)
+            && !nextKeys.includes(column.key)
+          ) {
+            nextKeys.push(column.key);
+          }
+        });
+        return sanitizeStockReportVisibleColumnKeys(nextKeys) || STOCK_REPORT_DEFAULT_COLUMN_KEYS.slice();
+      }
+
+      function sanitizeStockReportSalesAvgPeriodDays(value) {
+        const normalized = String(value || "").trim();
+        if (!normalized) {
+          return "14";
+        }
+        const numericValue = Number(normalized);
+        return Number.isInteger(numericValue) && numericValue > 0 ? String(numericValue) : "14";
+      }
+
+      function resolveRestoredStockReportSalesAvgPeriodDays(storageState) {
+        const rawState = storageState && typeof storageState === "object" ? storageState : {};
+        return sanitizeStockReportSalesAvgPeriodDays(rawState.stock_report_sales_avg_period_days);
       }
 
       function sanitizePersistedPlanInputValue(value) {
@@ -3122,12 +3295,22 @@
 
       function setupOperatorFloatingControlListeners() {
         syncStockReportSkuSelectorAria();
+        syncStockReportColumnSelectorAria();
         if (stockReportSkuSelector) {
           stockReportSkuSelector.addEventListener("toggle", syncStockReportSkuSelectorAria);
         }
+        if (stockReportColumnSelector) {
+          stockReportColumnSelector.addEventListener("toggle", syncStockReportColumnSelectorAria);
+        }
         document.addEventListener("pointerdown", (event) => {
           postEmbeddedPointerDown();
-          if (stockReportSkuSelector && stockReportSkuSelector.open && !stockReportSkuSelector.contains(event.target)) {
+          const skuOpenOutside = stockReportSkuSelector
+            && stockReportSkuSelector.open
+            && !stockReportSkuSelector.contains(event.target);
+          const columnsOpenOutside = stockReportColumnSelector
+            && stockReportColumnSelector.open
+            && !stockReportColumnSelector.contains(event.target);
+          if (skuOpenOutside || columnsOpenOutside) {
             closeOperatorFloatingControls();
           }
         }, true);
@@ -3154,10 +3337,21 @@
         stockReportSkuSummary.setAttribute("aria-expanded", stockReportSkuSelector.open ? "true" : "false");
       }
 
+      function syncStockReportColumnSelectorAria() {
+        if (!stockReportColumnSelector || !stockReportColumnSummary) {
+          return;
+        }
+        stockReportColumnSummary.setAttribute("aria-expanded", stockReportColumnSelector.open ? "true" : "false");
+      }
+
       function closeOperatorFloatingControls() {
         if (stockReportSkuSelector) {
           stockReportSkuSelector.open = false;
           syncStockReportSkuSelectorAria();
+        }
+        if (stockReportColumnSelector) {
+          stockReportColumnSelector.open = false;
+          syncStockReportColumnSelectorAria();
         }
       }
 
@@ -3195,24 +3389,37 @@
         );
       }
 
-      function findScrollableAncestor(node) {
+      function findScrollableAncestor(node, axis) {
         let current = node && node.nodeType === 1 ? node : node && node.parentElement;
         while (current && current !== document.body && current !== document.documentElement) {
           const style = window.getComputedStyle(current);
-          const overflowY = String(style.overflowY || "");
-          if (/(auto|scroll)/.test(overflowY) && current.scrollHeight > current.clientHeight + 1) {
-            return current;
+          if (axis === "x") {
+            const overflowX = String(style.overflowX || "");
+            if (/(auto|scroll)/.test(overflowX) && current.scrollWidth > current.clientWidth + 1) {
+              return current;
+            }
+          } else {
+            const overflowY = String(style.overflowY || "");
+            if (/(auto|scroll)/.test(overflowY) && current.scrollHeight > current.clientHeight + 1) {
+              return current;
+            }
           }
           current = current.parentElement;
         }
         return null;
       }
 
-      function canScrollElementInDirection(element, deltaY) {
-        if (!element || !deltaY) {
+      function canScrollElementInDirection(element, delta, axis) {
+        if (!element || !delta) {
           return false;
         }
-        if (deltaY < 0) {
+        if (axis === "x") {
+          if (delta < 0) {
+            return element.scrollLeft > 0;
+          }
+          return element.scrollLeft + element.clientWidth < element.scrollWidth - 1;
+        }
+        if (delta < 0) {
           return element.scrollTop > 0;
         }
         return element.scrollTop + element.clientHeight < element.scrollHeight - 1;
@@ -3223,20 +3430,26 @@
           return;
         }
         window.addEventListener("wheel", (event) => {
-          const scrollable = findScrollableAncestor(event.target);
-          if (scrollable && canScrollElementInDirection(scrollable, event.deltaY)) {
+          const deltaX = Number(event.deltaX) || 0;
+          const deltaY = Number(event.deltaY) || 0;
+          const horizontalScrollable = deltaX ? findScrollableAncestor(event.target, "x") : null;
+          if (horizontalScrollable && canScrollElementInDirection(horizontalScrollable, deltaX, "x")) {
+            return;
+          }
+          const verticalScrollable = deltaY ? findScrollableAncestor(event.target, "y") : null;
+          if (verticalScrollable && canScrollElementInDirection(verticalScrollable, deltaY, "y")) {
             return;
           }
           const scrollingElement = document.scrollingElement || document.documentElement;
-          if (canScrollElementInDirection(scrollingElement, event.deltaY)) {
+          if (canScrollElementInDirection(scrollingElement, deltaY, "y")) {
             return;
           }
           window.parent.postMessage(
             {
               type: "sheet_vitrina_v1_operator_embed_wheel",
               tab: configuredInitialTab,
-              deltaX: Number(event.deltaX) || 0,
-              deltaY: Number(event.deltaY) || 0
+              deltaX,
+              deltaY
             },
             window.location.origin
           );
@@ -3475,6 +3688,81 @@
         });
       }
 
+      function visibleStockReportColumns() {
+        const visible = new Set(stockReportVisibleColumnKeys);
+        const columns = STOCK_REPORT_TABLE_COLUMNS.filter((column) => visible.has(column.key));
+        return columns.length ? columns : STOCK_REPORT_TABLE_COLUMNS.filter((column) => column.required);
+      }
+
+      function updateStockReportColumnSummary() {
+        if (!stockReportColumnSummary) {
+          return;
+        }
+        const visibleCount = visibleStockReportColumns().length;
+        const baseCount = STOCK_REPORT_DEFAULT_COLUMN_KEYS.length;
+        const totalCount = STOCK_REPORT_TABLE_COLUMNS.length;
+        if (visibleCount === totalCount) {
+          stockReportColumnSummary.textContent = "Столбцы: все";
+          return;
+        }
+        if (visibleCount === baseCount && STOCK_REPORT_DEFAULT_COLUMN_KEYS.every((key) => stockReportVisibleColumnKeys.includes(key))) {
+          stockReportColumnSummary.textContent = "Столбцы: база";
+          return;
+        }
+        stockReportColumnSummary.textContent = "Столбцы: " + visibleCount;
+      }
+
+      function persistStockReportVisibleColumnKeys() {
+        writePersistedOperatorUiState({
+          stock_report_visible_column_keys: stockReportVisibleColumnKeys.slice(),
+          stock_report_column_catalog_keys: STOCK_REPORT_TABLE_COLUMNS.map((column) => column.key)
+        });
+      }
+
+      function setStockReportVisibleColumnKeys(keys, options) {
+        const sanitized = sanitizeStockReportVisibleColumnKeys(keys) || STOCK_REPORT_DEFAULT_COLUMN_KEYS.slice();
+        stockReportVisibleColumnKeys = sanitized;
+        if (stockReportColumnList) {
+          Array.from(stockReportColumnList.querySelectorAll("input[type=\"checkbox\"]")).forEach((input) => {
+            input.checked = stockReportVisibleColumnKeys.includes(input.value);
+          });
+        }
+        updateStockReportColumnSummary();
+        if (!options || options.persist !== false) {
+          persistStockReportVisibleColumnKeys();
+        }
+        if (stockReportPayload) {
+          renderStockReport(stockReportPayload);
+        }
+      }
+
+      function renderStockReportColumnSelector() {
+        if (!stockReportColumnList) {
+          return;
+        }
+        stockReportColumnList.innerHTML = STOCK_REPORT_TABLE_COLUMNS.map((column) => {
+          const required = STOCK_REPORT_REQUIRED_COLUMN_KEYS.has(column.key);
+          return [
+            "<label class=\"stock-report-column-option" + (required ? " is-required" : "") + "\">",
+            "<input type=\"checkbox\" value=\"" + escapeHtml(column.key) + "\""
+              + (stockReportVisibleColumnKeys.includes(column.key) ? " checked" : "")
+              + (required ? " disabled" : "")
+              + ">",
+            "<span title=\"" + escapeHtml(column.title || column.label) + "\">" + escapeHtml(column.label) + "</span>",
+            "</label>"
+          ].join("");
+        }).join("");
+        Array.from(stockReportColumnList.querySelectorAll("input[type=\"checkbox\"]")).forEach((input) => {
+          input.addEventListener("change", () => {
+            const nextKeys = Array.from(stockReportColumnList.querySelectorAll("input[type=\"checkbox\"]"))
+              .filter((item) => item.checked || STOCK_REPORT_REQUIRED_COLUMN_KEYS.has(item.value))
+              .map((item) => item.value);
+            setStockReportVisibleColumnKeys(nextKeys);
+          });
+        });
+        updateStockReportColumnSummary();
+      }
+
       function filterStockReportRows(rows) {
         const items = Array.isArray(rows) ? rows : [];
         if (!stockReportActiveSkus.length) {
@@ -3500,6 +3788,9 @@
         writePersistedOperatorUiState({
           stock_report_selected_sku_ids: stockReportSelectedSkuIds.slice(),
           stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
+          stock_report_sales_avg_period_days: sanitizeStockReportSalesAvgPeriodDays(readStockReportSalesAvgPeriodDays()),
+          stock_report_visible_column_keys: stockReportVisibleColumnKeys.slice(),
+          stock_report_column_catalog_keys: STOCK_REPORT_TABLE_COLUMNS.map((column) => column.key),
         });
         closeOperatorFloatingControls();
         loadStockReport();
@@ -3687,6 +3978,16 @@
           .join("");
       }
 
+      function renderStockReportIdle() {
+        stockReportPeriod.textContent = "Дата отчёта: -";
+        stockReportLead.textContent = "Полная таблица active SKU по persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
+        stockReportStatus.textContent = "Настройте SKU, период и столбцы, затем нажмите «Рассчитать».";
+        stockReportStatus.className = "section-message";
+        stockReportContent.hidden = true;
+        stockReportRows.innerHTML = "";
+        renderStockReportNotes([]);
+      }
+
       function renderStockReportUnavailable(payload, fallbackMessage) {
         stockReportPeriod.textContent = "Дата отчёта: " + formatHumanDate(payload && payload.report_date);
         stockReportLead.textContent = "Полная таблица active SKU по persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
@@ -3823,11 +4124,12 @@
         const isActive = stockReportSortState.key === column.key;
         const indicator = isActive ? (stockReportSortState.direction === "asc" ? " ↑" : " ↓") : "";
         const ariaSort = isActive ? (stockReportSortState.direction === "asc" ? "ascending" : "descending") : "none";
-        return "<th aria-sort=\"" + ariaSort + "\"><button class=\"stock-report-sort-button" + (isActive ? " is-active" : "") + "\" type=\"button\" data-stock-report-sort=\"" + escapeHtml(column.key) + "\">" + escapeHtml(column.label + indicator) + "</button></th>";
+        return "<th aria-sort=\"" + ariaSort + "\" title=\"" + escapeHtml(column.title || column.label) + "\"><button class=\"stock-report-sort-button" + (isActive ? " is-active" : "") + "\" type=\"button\" data-stock-report-sort=\"" + escapeHtml(column.key) + "\">" + escapeHtml(column.label + indicator) + "</button></th>";
       }
 
       function renderStockReportRows(rows) {
         const sortedRows = sortedStockReportRows(rows);
+        const visibleColumns = visibleStockReportColumns();
         if (!Array.isArray(sortedRows) || !sortedRows.length) {
           const emptyMessage = stockReportActiveSkus.length
             && stockReportAppliedSkuIds.length
@@ -3837,16 +4139,17 @@
           stockReportRows.innerHTML = "<p class=\"report-empty\">" + escapeHtml(emptyMessage) + "</p>";
           return;
         }
+        const tableMinWidth = Math.max(960, 240 + (visibleColumns.length - 1) * 92);
         stockReportRows.innerHTML = [
           "<div class=\"stock-report-table-wrap\" data-stock-report-table-wrap>",
-          "<table class=\"stock-report-table\" data-stock-report-table>",
+          "<table class=\"stock-report-table\" data-stock-report-table style=\"--stock-report-table-min-width: " + escapeHtml(tableMinWidth) + "px;\">",
           "<thead><tr>",
-          STOCK_REPORT_TABLE_COLUMNS.map(stockReportHeaderMarkup).join(""),
+          visibleColumns.map(stockReportHeaderMarkup).join(""),
           "</tr></thead>",
           "<tbody>",
           sortedRows.map((item) => [
             "<tr>",
-            STOCK_REPORT_TABLE_COLUMNS.map((column) => "<td>" + stockReportCellMarkup(item, column) + "</td>").join(""),
+            visibleColumns.map((column) => "<td>" + stockReportCellMarkup(item, column) + "</td>").join(""),
             "</tr>"
           ].join("")).join(""),
           "</tbody>",
@@ -4294,13 +4597,13 @@
         ) {
           sellerRecoveryCycleActive = false;
           sellerRecoveryObservedRunId = String(normalized.run_id || sellerRecoveryObservedRunId || "");
-          Promise.all([loadStatus(), loadDailyReport(), loadStockReport()]).catch(() => {});
+          Promise.all([loadStatus(), loadDailyReport()]).catch(() => {});
         } else if (
           !sellerRecoveryCycleActive
           && previousStatus !== String(normalized.status || "")
           && String(normalized.status || "") === "completed"
         ) {
-          Promise.all([loadStatus(), loadDailyReport(), loadStockReport()]).catch(() => {});
+          Promise.all([loadStatus(), loadDailyReport()]).catch(() => {});
         }
       }
 
@@ -4792,6 +5095,10 @@
       async function loadStockReport() {
         stockReportApplyButton.disabled = true;
         stockReportApplyButton.textContent = "Считаем...";
+        stockReportStatus.textContent = "Читаем отчёт по остаткам...";
+        stockReportStatus.className = "section-message";
+        stockReportContent.hidden = true;
+        stockReportRows.innerHTML = "";
         try {
           const response = await fetch(buildStockReportUrl(), {
             method: "GET",
@@ -5026,7 +5333,7 @@
           if (finalJob.result) {
             renderStatusContexts(finalJob.result);
           }
-          await Promise.all([loadDailyReport(), loadStockReport()]);
+          await loadDailyReport();
         } catch (error) {
           renderError(
             actionName === "refresh" ? "Refresh завершился с ошибкой." : "Отправка завершилась с ошибкой.",
@@ -5440,6 +5747,12 @@
           stock_report_applied_sku_ids: stockReportAppliedSkuIds.slice(),
         });
       });
+      stockReportColumnsAllButton.addEventListener("click", () => {
+        setStockReportVisibleColumnKeys(STOCK_REPORT_TABLE_COLUMNS.map((column) => column.key));
+      });
+      stockReportColumnsBaseButton.addEventListener("click", () => {
+        setStockReportVisibleColumnKeys(STOCK_REPORT_DEFAULT_COLUMN_KEYS.slice());
+      });
       stockReportRows.addEventListener("click", (event) => {
         const button = event.target.closest("[data-stock-report-sort]");
         if (!button) {
@@ -5514,6 +5827,9 @@
 
       setupOperatorFloatingControlListeners();
       restorePlanReportInputs(persistedOperatorUiState);
+      if (stockReportSalesAvgPeriodDays) {
+        stockReportSalesAvgPeriodDays.value = resolveRestoredStockReportSalesAvgPeriodDays(persistedOperatorUiState);
+      }
       setFactoryInboundSource(factoryInboundSource, { persist: false });
       activateTab(
         isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),
@@ -5556,10 +5872,11 @@
         session_status_label: ""
       });
       renderStockReportSkuSelector();
+      renderStockReportColumnSelector();
+      renderStockReportIdle();
       loadStatus();
       loadSellerRecoveryStatus();
       loadDailyReport();
-      loadStockReport();
       loadPlanReportBaselineStatus();
       loadFactoryStatus();
       loadRegionalStatus();
