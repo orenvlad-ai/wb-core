@@ -34,6 +34,7 @@ from packages.application.sheet_vitrina_v1_feedbacks import (
 )
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
+from packages.application.demand_estimation import parse_sales_avg_period_days
 from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FACTORY_TO_FF,
     DATASET_INBOUND_FF_TO_WB,
@@ -1578,7 +1579,8 @@ def _build_handler(
             if parsed.path == DEFAULT_SHEET_STOCK_REPORT_PATH:
                 try:
                     payload = entrypoint.handle_sheet_stock_report_request(
-                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None
+                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None,
+                        sales_avg_period_days=_resolve_sales_avg_period_days_from_query(parsed.query),
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -2296,6 +2298,10 @@ def _resolve_optional_query_bool(query_string: str, name: str) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} query parameter must be true or false")
+
+
+def _resolve_sales_avg_period_days_from_query(query_string: str) -> int:
+    return parse_sales_avg_period_days(_resolve_single_query_param(query_string, "sales_avg_period_days"))
 
 
 def _resolve_web_vitrina_period_window_from_query(query_string: str) -> tuple[str | None, str | None]:

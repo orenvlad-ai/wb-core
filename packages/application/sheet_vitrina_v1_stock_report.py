@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
+from packages.application.demand_estimation import (
+    estimate_availability_adjusted_demand,
+    parse_sales_avg_period_days,
+    sales_lookup_days as calculate_sales_lookup_days,
+)
+from packages.application.factory_order_sales_history import (
+    SALES_HISTORY_SOURCE_KEY,
+    describe_runtime_sales_history_coverage,
+    load_runtime_sales_history_payloads,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_report_snapshot_selection import select_latest_ready_snapshot_dates
 from packages.business_time import (
@@ -17,20 +27,23 @@ from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
 TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 STOCK_ALERT_THRESHOLD = 50.0
+PROMO_PARTICIPATION_METRIC_KEY = "promo_participation"
 EPS = 1e-9
 STOCK_REPORT_DISTRICTS = (
-    ("stock_ru_central", "Центральный ФО"),
-    ("stock_ru_northwest", "Северо-Западный ФО"),
-    ("stock_ru_volga", "Приволжский ФО"),
-    ("stock_ru_ural", "Уральский ФО"),
-    ("stock_ru_south_caucasus", "Юг и СКФО"),
+    ("stock_ru_central", "Центральный"),
+    ("stock_ru_northwest", "Северо-Западный"),
+    ("stock_ru_volga", "Приволжский"),
+    ("stock_ru_ural", "Уральский"),
+    ("stock_ru_south_caucasus", "Юг/СКФО"),
 )
 REPORT_NOTES = (
     "По умолчанию отчёт использует previous closed business day через persisted ready snapshot и slot yesterday_closed.",
     "При explicit as_of_date route остаётся server-owned и читает именно requested closed business day, без upstream fetch.",
-    "В список попадают только SKU, у которых хотя бы по одному supported district stock меньше 50 единиц.",
+    "Строки отчёта строятся по всем active SKU из current config_v2; legacy threshold <50 больше не является критерием включения.",
+    "Период усреднения продаж означает целевое число валидных торговых дней; отчёт читает только persisted sales_funnel_history.",
+    "Участие в акции читается из canonical metric promo_participation: numeric >0 = Да, numeric 0 = Нет, missing = н/д.",
+    "Дней по округам считается по positive stock depletion между consecutive persisted ready snapshots; restock/increase и gaps не превращаются в расход.",
     "Merged bucket `ДВ и Сибирь` целиком исключён из текущего report contour: current truth не делит его на отдельный Дальний Восток и Сибирь.",
-    "Короткий label `Юг и СКФО` остаётся truthful к current merged bucket и не разрезается искусственно.",
 )
 
 
@@ -41,8 +54,35 @@ class SnapshotSlotView:
     sku_values: dict[int, dict[str, float | None]]
 
 
+@dataclass(frozen=True)
+class SalesSamplesWindow:
+    date_from: str
+    date_to: str
+    samples_by_nm_id: dict[int, list[tuple[str, float]]]
+    missing_date_count: int
+    missing_pair_count: int
+    available_date_count: int
+    coverage_earliest_date: str | None
+    coverage_latest_date: str | None
+    coverage_snapshot_count: int
+
+
+@dataclass(frozen=True)
+class DistrictBurnEstimate:
+    avg_daily_burn: float | None
+    valid_day_count: int
+    missing_day_count: int
+    restock_day_count: int
+    zero_depletion_day_count: int
+    gap_day_count: int
+    lookup_pair_count: int
+    earliest_used_date: str
+    latest_used_date: str
+    warning: str
+
+
 class SheetVitrinaV1StockReportBlock:
-    """Build a compact operator-facing closed-day stock report from the ready snapshot."""
+    """Build an operator-facing closed-day stock table from persisted server truth."""
 
     def __init__(
         self,
@@ -53,7 +93,14 @@ class SheetVitrinaV1StockReportBlock:
         self.runtime = runtime
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
 
-    def build(self, *, as_of_date: str | None = None) -> dict[str, Any]:
+    def build(
+        self,
+        *,
+        as_of_date: str | None = None,
+        sales_avg_period_days: int | str | None = None,
+    ) -> dict[str, Any]:
+        parsed_sales_avg_period_days = parse_sales_avg_period_days(sales_avg_period_days)
+        parsed_sales_lookup_days = calculate_sales_lookup_days(parsed_sales_avg_period_days)
         business_date = date.fromisoformat(current_business_date_iso(self.now_factory()))
         current_business_date = business_date.isoformat()
         explicit_as_of_date = str(as_of_date or "").strip() or None
@@ -69,7 +116,10 @@ class SheetVitrinaV1StockReportBlock:
             "explicit_as_of_date": explicit_as_of_date,
             "report_date": effective_as_of_date,
             "threshold_lt": int(STOCK_ALERT_THRESHOLD),
+            "sales_avg_period_days": parsed_sales_avg_period_days,
+            "sales_lookup_days": parsed_sales_lookup_days,
             "notes": list(REPORT_NOTES),
+            "warnings": [],
             "available_as_of_dates": [],
             "districts": [
                 {
@@ -84,6 +134,8 @@ class SheetVitrinaV1StockReportBlock:
                 "snapshot_as_of_date": effective_as_of_date,
                 "temporal_slot": TEMPORAL_SLOT_YESTERDAY_CLOSED,
                 "slot_date": effective_as_of_date,
+                "sales_history_source": SALES_HISTORY_SOURCE_KEY,
+                "district_burn_source": "persisted_ready_snapshot_consecutive_depletion",
             },
         }
 
@@ -144,45 +196,118 @@ class SheetVitrinaV1StockReportBlock:
                 "reason": f"Отчёт по остаткам пока недоступен: {exc}",
             }
 
+        active_items = _active_config_items(current_state.config_v2)
+        active_nm_ids = [int(item.nm_id) for item in active_items]
+        nomenclature_by_nm = _load_active_nomenclature_by_nm(self.runtime)
+        demand_reference_date = date.fromisoformat(closed_view.slot_date) + timedelta(days=1)
+        sales_window = _load_persisted_order_count_samples(
+            runtime=self.runtime,
+            date_from=(demand_reference_date - timedelta(days=parsed_sales_lookup_days)).isoformat(),
+            date_to=closed_view.slot_date,
+            nm_ids=active_nm_ids,
+        )
+        district_burn_by_key = _build_district_burn_lookup(
+            runtime=self.runtime,
+            report_date=closed_view.slot_date,
+            nm_ids=active_nm_ids,
+            sales_avg_period_days=parsed_sales_avg_period_days,
+            sales_lookup_days=parsed_sales_lookup_days,
+        )
+
         rows: list[dict[str, Any]] = []
-        for config_item in sorted(current_state.config_v2, key=lambda item: item.display_order):
-            if not config_item.enabled:
-                continue
-            sku_values = closed_view.sku_values.get(config_item.nm_id, {})
-            breached_districts = []
+        insufficient_sales_rows = 0
+        insufficient_district_rows = 0
+        for active_order, config_item in enumerate(active_items):
+            nm_id = int(config_item.nm_id)
+            sku_values = closed_view.sku_values.get(nm_id, {})
+            stock_total = sku_values.get("stock_total")
+            demand_estimate = estimate_availability_adjusted_demand(
+                sales_window.samples_by_nm_id.get(nm_id, []),
+                report_date=demand_reference_date,
+                sales_avg_period_days=parsed_sales_avg_period_days,
+                sales_lookup_days=parsed_sales_lookup_days,
+            )
+            if demand_estimate.valid_sales_day_count < parsed_sales_avg_period_days:
+                insufficient_sales_rows += 1
+            avg_sales_per_day = (
+                float(demand_estimate.daily_demand_total)
+                if demand_estimate.valid_sales_day_count > 0
+                else None
+            )
+            days_left_total = _days_left(stock_total, avg_sales_per_day)
+
+            districts: list[dict[str, Any]] = []
+            zero_district_count = 0
+            row_has_insufficient_district = False
             for metric_key, label in STOCK_REPORT_DISTRICTS:
                 stock_value = sku_values.get(metric_key)
-                if stock_value is None or stock_value >= STOCK_ALERT_THRESHOLD - EPS:
-                    continue
-                breached_districts.append(
+                if stock_value is not None and abs(float(stock_value)) <= EPS:
+                    zero_district_count += 1
+                burn_estimate = district_burn_by_key.get((nm_id, metric_key)) or _empty_district_burn_estimate(
+                    sales_avg_period_days=parsed_sales_avg_period_days,
+                )
+                if burn_estimate.valid_day_count < parsed_sales_avg_period_days:
+                    row_has_insufficient_district = True
+                avg_daily_burn = (
+                    burn_estimate.avg_daily_burn
+                    if burn_estimate.avg_daily_burn and burn_estimate.avg_daily_burn > 0
+                    else None
+                )
+                districts.append(
                     {
                         "metric_key": metric_key,
                         "label": label,
-                        "stock": float(stock_value),
+                        "stock": None if stock_value is None else float(stock_value),
+                        "avg_daily_burn": None if avg_daily_burn is None else float(avg_daily_burn),
+                        "days_left": _days_left(stock_value, avg_daily_burn),
+                        "diagnostics": asdict(burn_estimate),
                     }
                 )
-            if not breached_districts:
-                continue
-            stock_total = sku_values.get("stock_total")
+            if row_has_insufficient_district:
+                insufficient_district_rows += 1
+
+            nomenclature_item = nomenclature_by_nm.get(nm_id, {})
+            display_name = str(getattr(config_item, "display_name"))
+            nomenclature_name = str(nomenclature_item.get("nomenclature_name") or "").strip()
+            identity_name = nomenclature_name or display_name
+            promotion_payload = _promotion_participation_payload(
+                sku_values.get(PROMO_PARTICIPATION_METRIC_KEY)
+            )
             rows.append(
                 {
-                    "nm_id": config_item.nm_id,
-                    "display_name": config_item.display_name,
-                    "identity_label": f"{config_item.display_name} · nmId {config_item.nm_id}",
+                    "nm_id": nm_id,
+                    "display_name": display_name,
+                    "nomenclature_name": nomenclature_name,
+                    "identity_label": f"{identity_name} · nmId {nm_id}",
+                    "active_order": active_order,
+                    "promotion_participation": promotion_payload["value"],
+                    "promotion_participation_label": promotion_payload["label"],
                     "stock_total": None if stock_total is None else float(stock_total),
-                    "breached_districts": breached_districts,
-                    "breached_district_count": len(breached_districts),
-                    "min_breached_stock": min(item["stock"] for item in breached_districts),
+                    "zero_district_count": zero_district_count,
+                    "avg_sales_per_day": avg_sales_per_day,
+                    "days_left_total": days_left_total,
+                    "districts": districts,
+                    "diagnostics": {
+                        "sales": {
+                            **asdict(demand_estimate),
+                            "missing_sales_history_date_count": sales_window.missing_date_count,
+                            "missing_sales_history_pair_count": sales_window.missing_pair_count,
+                            "available_sales_history_date_count": sales_window.available_date_count,
+                            "coverage_earliest_date": sales_window.coverage_earliest_date,
+                            "coverage_latest_date": sales_window.coverage_latest_date,
+                            "coverage_snapshot_count": sales_window.coverage_snapshot_count,
+                        },
+                        "promotion": promotion_payload["diagnostics"],
+                    },
                 }
             )
 
-        rows.sort(
-            key=lambda item: (
-                float(item["min_breached_stock"]),
-                -int(item["breached_district_count"]),
-                _sort_stock_total(item.get("stock_total")),
-                str(item["identity_label"]),
-            )
+        warnings = _build_report_warnings(
+            sales_window=sales_window,
+            active_row_count=len(rows),
+            insufficient_sales_rows=insufficient_sales_rows,
+            insufficient_district_rows=insufficient_district_rows,
+            sales_avg_period_days=parsed_sales_avg_period_days,
         )
 
         return {
@@ -190,7 +315,20 @@ class SheetVitrinaV1StockReportBlock:
             "status": "available",
             "report_date": closed_view.slot_date,
             "row_count": len(rows),
+            "active_sku_count": len(rows),
             "rows": rows,
+            "warnings": warnings,
+            "notes": list(REPORT_NOTES) + warnings,
+            "sales_history_window": {
+                "date_from": sales_window.date_from,
+                "date_to": sales_window.date_to,
+                "available_date_count": sales_window.available_date_count,
+                "missing_date_count": sales_window.missing_date_count,
+                "missing_pair_count": sales_window.missing_pair_count,
+                "coverage_earliest_date": sales_window.coverage_earliest_date,
+                "coverage_latest_date": sales_window.coverage_latest_date,
+                "coverage_snapshot_count": sales_window.coverage_snapshot_count,
+            },
             "source_of_truth": {
                 **base_payload["source_of_truth"],
                 "slot_date": closed_view.slot_date,
@@ -199,10 +337,7 @@ class SheetVitrinaV1StockReportBlock:
 
 
 def list_active_sku_options(config_items: list[Any]) -> list[dict[str, Any]]:
-    active_items = sorted(
-        [item for item in config_items if getattr(item, "enabled", False)],
-        key=lambda item: getattr(item, "display_order", 0),
-    )
+    active_items = _active_config_items(config_items)
     options: list[dict[str, Any]] = []
     seen_nm_ids: set[int] = set()
     for item in active_items:
@@ -219,6 +354,13 @@ def list_active_sku_options(config_items: list[Any]) -> list[dict[str, Any]]:
             }
         )
     return options
+
+
+def _active_config_items(config_items: list[Any]) -> list[Any]:
+    return sorted(
+        [item for item in config_items if getattr(item, "enabled", False)],
+        key=lambda item: getattr(item, "display_order", 0),
+    )
 
 
 def _extract_closed_slot_view(
@@ -278,7 +420,282 @@ def _coerce_numeric(value: Any) -> float | None:
         return None
 
 
-def _sort_stock_total(value: Any) -> float:
-    if isinstance(value, (int, float)):
-        return float(value)
-    return float("inf")
+def _load_active_nomenclature_by_nm(runtime: RegistryUploadDbBackedRuntime) -> dict[int, dict[str, Any]]:
+    try:
+        items = runtime.list_nomenclature_items(active_only=True)
+    except Exception:
+        return {}
+    by_nm: dict[int, dict[str, Any]] = {}
+    for item in items:
+        nm_id = _optional_int(item.get("nm_id"))
+        if nm_id is None or nm_id in by_nm:
+            continue
+        by_nm[nm_id] = dict(item)
+    return by_nm
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        if value in ("", None):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_persisted_order_count_samples(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    date_from: str,
+    date_to: str,
+    nm_ids: list[int],
+) -> SalesSamplesWindow:
+    payloads = load_runtime_sales_history_payloads(
+        runtime=runtime,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    coverage = describe_runtime_sales_history_coverage(runtime)
+    samples_by_nm_id: dict[int, list[tuple[str, float]]] = {nm_id: [] for nm_id in nm_ids}
+    missing_dates: set[str] = set()
+    missing_pair_count = 0
+    available_date_count = 0
+    for snapshot_date in _iter_iso_dates(date_from, date_to):
+        payload = payloads.get(snapshot_date)
+        if payload is None or str(getattr(payload, "kind", "") or "") != "success":
+            missing_dates.add(snapshot_date)
+            missing_pair_count += len(nm_ids)
+            continue
+        available_date_count += 1
+        order_counts = _collect_order_count_map(payload)
+        for nm_id in nm_ids:
+            if nm_id in order_counts:
+                samples_by_nm_id[nm_id].append((snapshot_date, order_counts[nm_id]))
+            else:
+                missing_dates.add(snapshot_date)
+                missing_pair_count += 1
+    return SalesSamplesWindow(
+        date_from=date_from,
+        date_to=date_to,
+        samples_by_nm_id=samples_by_nm_id,
+        missing_date_count=len(missing_dates),
+        missing_pair_count=missing_pair_count,
+        available_date_count=available_date_count,
+        coverage_earliest_date=coverage.earliest_available_date,
+        coverage_latest_date=coverage.latest_available_date,
+        coverage_snapshot_count=coverage.exact_date_snapshot_count,
+    )
+
+
+def _collect_order_count_map(payload: Any) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for item in list(getattr(payload, "items", []) or []):
+        metric = str(getattr(item, "metric", "") or "")
+        nm_id = getattr(item, "nm_id", None)
+        value = getattr(item, "value", None)
+        if metric != "orderCount" or not isinstance(nm_id, int) or not isinstance(value, (int, float)):
+            continue
+        out[nm_id] = float(value)
+    return out
+
+
+def _build_district_burn_lookup(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    report_date: str,
+    nm_ids: list[int],
+    sales_avg_period_days: int,
+    sales_lookup_days: int,
+) -> dict[tuple[int, str], DistrictBurnEstimate]:
+    if not nm_ids:
+        return {}
+    report_date_obj = date.fromisoformat(report_date)
+    views = _load_historical_closed_slot_views(
+        runtime=runtime,
+        date_from=(report_date_obj - timedelta(days=sales_lookup_days + 1)).isoformat(),
+        date_to=report_date,
+    )
+    pair_payloads: list[tuple[SnapshotSlotView, SnapshotSlotView]] = []
+    gap_day_count = 0
+    for previous, current in zip(views, views[1:]):
+        previous_date = date.fromisoformat(previous.slot_date)
+        current_date = date.fromisoformat(current.slot_date)
+        if current_date != previous_date + timedelta(days=1):
+            gap_day_count += max((current_date - previous_date).days - 1, 1)
+            continue
+        pair_payloads.append((previous, current))
+
+    out: dict[tuple[int, str], DistrictBurnEstimate] = {}
+    for nm_id in nm_ids:
+        for metric_key, _ in STOCK_REPORT_DISTRICTS:
+            out[(nm_id, metric_key)] = _estimate_district_burn(
+                pair_payloads=pair_payloads,
+                nm_id=nm_id,
+                metric_key=metric_key,
+                sales_avg_period_days=sales_avg_period_days,
+                gap_day_count=gap_day_count,
+            )
+    return out
+
+
+def _load_historical_closed_slot_views(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    date_from: str,
+    date_to: str,
+) -> list[SnapshotSlotView]:
+    views: list[SnapshotSlotView] = []
+    for snapshot_date in runtime.list_sheet_vitrina_ready_snapshot_dates(
+        date_from=date_from,
+        date_to=date_to,
+        descending=False,
+    ):
+        try:
+            snapshot = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_date)
+            views.append(_extract_closed_slot_view(snapshot, expected_closed_date=snapshot_date))
+        except ValueError:
+            continue
+    return sorted(views, key=lambda item: item.slot_date)
+
+
+def _estimate_district_burn(
+    *,
+    pair_payloads: list[tuple[SnapshotSlotView, SnapshotSlotView]],
+    nm_id: int,
+    metric_key: str,
+    sales_avg_period_days: int,
+    gap_day_count: int,
+) -> DistrictBurnEstimate:
+    valid_samples: list[tuple[str, float]] = []
+    missing_day_count = 0
+    restock_day_count = 0
+    zero_depletion_day_count = 0
+    lookup_pair_count = 0
+    for previous, current in reversed(pair_payloads):
+        if len(valid_samples) >= sales_avg_period_days:
+            break
+        lookup_pair_count += 1
+        previous_stock = previous.sku_values.get(nm_id, {}).get(metric_key)
+        current_stock = current.sku_values.get(nm_id, {}).get(metric_key)
+        if previous_stock is None or current_stock is None:
+            missing_day_count += 1
+            continue
+        depletion = float(previous_stock) - float(current_stock)
+        if depletion > EPS:
+            valid_samples.append((current.slot_date, depletion))
+        elif depletion < -EPS:
+            restock_day_count += 1
+        else:
+            zero_depletion_day_count += 1
+
+    values = [value for _, value in valid_samples]
+    avg_daily_burn = sum(values) / len(values) if values else None
+    used_dates = sorted(snapshot_date for snapshot_date, _ in valid_samples)
+    warning = ""
+    if len(valid_samples) < sales_avg_period_days:
+        warning = (
+            f"Собрано {len(valid_samples)} district depletion days из {sales_avg_period_days}; "
+            "дней хватит по округу считается только при positive depletion history."
+        )
+    return DistrictBurnEstimate(
+        avg_daily_burn=avg_daily_burn,
+        valid_day_count=len(valid_samples),
+        missing_day_count=missing_day_count,
+        restock_day_count=restock_day_count,
+        zero_depletion_day_count=zero_depletion_day_count,
+        gap_day_count=gap_day_count,
+        lookup_pair_count=lookup_pair_count,
+        earliest_used_date=used_dates[0] if used_dates else "",
+        latest_used_date=used_dates[-1] if used_dates else "",
+        warning=warning,
+    )
+
+
+def _empty_district_burn_estimate(*, sales_avg_period_days: int) -> DistrictBurnEstimate:
+    return DistrictBurnEstimate(
+        avg_daily_burn=None,
+        valid_day_count=0,
+        missing_day_count=0,
+        restock_day_count=0,
+        zero_depletion_day_count=0,
+        gap_day_count=0,
+        lookup_pair_count=0,
+        earliest_used_date="",
+        latest_used_date="",
+        warning=(
+            f"Собрано 0 district depletion days из {sales_avg_period_days}; "
+            "дней хватит по округу считается только при positive depletion history."
+        ),
+    )
+
+
+def _promotion_participation_payload(value: float | None) -> dict[str, Any]:
+    if value is None:
+        return {
+            "value": None,
+            "label": "н/д",
+            "diagnostics": {
+                "metric_key": PROMO_PARTICIPATION_METRIC_KEY,
+                "status": "missing",
+            },
+        }
+    # Canonical mapping: numeric >0 means participates, numeric 0 means not participating.
+    participates = float(value) > 0
+    diagnostics_status = "participates" if participates else "not_participating"
+    if float(value) < 0:
+        diagnostics_status = "unexpected_negative_treated_as_not_participating"
+    return {
+        "value": participates,
+        "label": "Да" if participates else "Нет",
+        "diagnostics": {
+            "metric_key": PROMO_PARTICIPATION_METRIC_KEY,
+            "status": diagnostics_status,
+            "raw_value": float(value),
+        },
+    }
+
+
+def _days_left(stock: float | None, daily_burn: float | None) -> float | None:
+    if stock is None or daily_burn is None or daily_burn <= EPS:
+        return None
+    return float(stock) / float(daily_burn)
+
+
+def _build_report_warnings(
+    *,
+    sales_window: SalesSamplesWindow,
+    active_row_count: int,
+    insufficient_sales_rows: int,
+    insufficient_district_rows: int,
+    sales_avg_period_days: int,
+) -> list[str]:
+    warnings: list[str] = []
+    if sales_window.missing_date_count:
+        warnings.append(
+            "Sales history coverage partial: "
+            f"missing dates={sales_window.missing_date_count}, missing SKU/date pairs={sales_window.missing_pair_count}."
+        )
+    if active_row_count and insufficient_sales_rows:
+        warnings.append(
+            f"Сред. продаж/день рассчитан по неполному valid-day покрытию для {insufficient_sales_rows} из {active_row_count} SKU "
+            f"(target={sales_avg_period_days})."
+        )
+    if active_row_count and insufficient_district_rows:
+        warnings.append(
+            f"District days-left имеет неполное positive depletion покрытие для {insufficient_district_rows} из {active_row_count} SKU "
+            f"(target={sales_avg_period_days}); missing/restock/zero-depletion дни не фальсифицируются как расход."
+        )
+    return warnings
+
+
+def _iter_iso_dates(date_from: str, date_to: str) -> list[str]:
+    start = date.fromisoformat(date_from)
+    end = date.fromisoformat(date_to)
+    if start > end:
+        return []
+    values: list[str] = []
+    current = start
+    while current <= end:
+        values.append(current.isoformat())
+        current += timedelta(days=1)
+    return values
