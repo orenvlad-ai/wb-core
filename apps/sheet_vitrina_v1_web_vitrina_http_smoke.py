@@ -204,6 +204,10 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina historical selector mode mismatch, got {composition_payload}")
             if historical_access.get("selected_date_from") != "2026-04-07" or historical_access.get("selected_date_to") != "2026-04-20":
                 raise AssertionError(f"default history range must be rolling two-week period ending business today, got {historical_access}")
+            if historical_access.get("default_date_from") != "2026-04-07" or historical_access.get("default_date_to") != "2026-04-20":
+                raise AssertionError(f"default history metadata must expose canonical rolling two-week range, got {historical_access}")
+            if historical_access.get("default_preset_id") != "two_weeks" or historical_access.get("default_preset_label") != "2 недели":
+                raise AssertionError(f"default preset must remain two_weeks / 2 недели, got {historical_access}")
             if historical_access.get("supported_query_mode") != "date_window":
                 raise AssertionError(f"web-vitrina historical query mode mismatch, got {historical_access}")
             if [item.get("value") for item in historical_access.get("options") or []] != [
@@ -231,6 +235,13 @@ def main() -> None:
                 "year",
             ]:
                 raise AssertionError(f"web-vitrina preset options mismatch, got {historical_access}")
+            default_presets = [
+                item.get("preset_id")
+                for item in historical_access.get("preset_options") or []
+                if item.get("is_default")
+            ]
+            if default_presets != ["two_weeks"]:
+                raise AssertionError(f"only two_weeks preset must be marked as default, got {historical_access}")
             initial_activity_surface = composition_payload.get("activity_surface") or {}
             initial_loading_table = initial_activity_surface.get("loading_table") or {}
             if initial_loading_table.get("source_status_state") != "not_loaded":

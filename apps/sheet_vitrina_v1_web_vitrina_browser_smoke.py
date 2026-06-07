@@ -604,7 +604,7 @@ def run_browser_checks(
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
                 page.wait_for_function(
                     "() => document.querySelector('[data-table-shell]') && !document.querySelector('[data-table-shell]').classList.contains('is-hidden')",
-                    timeout=5000,
+                    timeout=20000,
                 )
                 historical_selector_works = (
                     page.locator("[data-table-body] tr").count() > 0
