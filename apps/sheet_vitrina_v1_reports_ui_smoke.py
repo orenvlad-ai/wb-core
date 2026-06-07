@@ -73,14 +73,28 @@ def main() -> None:
         'id="stockReportPeriod"',
         'id="stockReportSkuSelector"',
         'id="stockReportSalesAvgPeriodDays"',
+        'id="stockReportColumnSelector"',
+        'id="stockReportColumnSummary"',
+        'id="stockReportColumnList"',
+        'id="stockReportColumnsAllButton"',
+        'id="stockReportColumnsBaseButton"',
         'id="stockReportApplyButton"',
         'id="stockReportSkuValidation"',
         'id="stockReportSelectAllButton"',
         'id="stockReportClearAllButton"',
         "Период усреднения продаж",
+        "Период продаж",
+        "Столбцы",
+        "Столбцы: база",
+        "Настройте SKU, период и столбцы, затем нажмите «Рассчитать».",
+        "Ост. всего",
+        "Дн. всего",
+        "Прод./дн.",
         "stock-report-table",
+        "stock-report-table-wrap",
         "data-stock-report-sort",
         "STOCK_REPORT_TABLE_COLUMNS",
+        "STOCK_REPORT_DEFAULT_COLUMN_KEYS",
         'url.searchParams.set("sales_avg_period_days", readStockReportSalesAvgPeriodDays());',
         'id="planReportPeriodSelect"',
         'id="planReportH1Input"',
@@ -109,6 +123,11 @@ def main() -> None:
 
     if "dailyReportToggle" in html or "stockReportToggle" in html or "report-accordion" in html:
         raise AssertionError("legacy reports accordion contract must be removed from the operator page")
+    initial_status = '<p id="stockReportStatus" class="section-message">Настройте SKU, период и столбцы, затем нажмите «Рассчитать».</p>'
+    if initial_status not in html:
+        raise AssertionError("stock-report initial state must be idle/manual, not loading")
+    if '<p id="stockReportStatus" class="section-message">Читаем отчёт по остаткам...</p>' in html:
+        raise AssertionError("stock-report initial state must not show loading copy")
     if 'formatDailyComparisonLabel(payload.older_closed_date, payload.newer_closed_date)' not in html:
         raise AssertionError("daily-report period wording must be built from both closed dates")
     if "Ежедневный отчёт за " in html:
@@ -145,6 +164,28 @@ def main() -> None:
         raise AssertionError("plan-report contract start mode must be sent through explicit query params")
     if "setContractStartInputEnabled(planReportContractStartCheckbox.checked);" not in html:
         raise AssertionError("plan-report contract date input must be enabled only when the checkbox is active")
+    if ".stock-report-sku-field" not in html or "width: min(320px, 100%);" not in html:
+        raise AssertionError("stock-report SKU selector must stay compact instead of flexing across the row")
+    if ".stock-report-period-field" not in html or "width: 150px;" not in html:
+        raise AssertionError("stock-report sales period control must use compact width")
+    if ".stock-report-columns-field" not in html or "width: 190px;" not in html:
+        raise AssertionError("stock-report columns selector must use compact width")
+    if 'min-height: 36px;' not in html or '.stock-report-period-input' not in html or '.stock-selector-summary' not in html:
+        raise AssertionError("stock-report controls must share compact visual height")
+    if "overflow-x: auto;" not in html or "data-stock-report-table-wrap" not in html:
+        raise AssertionError("stock-report table must be horizontally scrollable inside its wrapper")
+    if "position: sticky;" not in html or "left: 0;" not in html or ".stock-report-table thead th:first-child" not in html:
+        raise AssertionError("stock-report SKU column/header must be sticky at the left edge")
+    if "stock_report_visible_column_keys" not in html or "stock_report_column_catalog_keys" not in html:
+        raise AssertionError("stock-report column visibility state must persist with safe catalog metadata")
+    if "stock_report_sales_avg_period_days" not in html:
+        raise AssertionError("stock-report sales period must persist as UI state without becoming data truth")
+    if "renderStockReportIdle();" not in html:
+        raise AssertionError("stock-report must render an idle state before manual calculation")
+    if "loadStockReport();" not in html.replace("stockReportApplyButton.addEventListener(\"click\", applyStockReportSelection);", ""):
+        raise AssertionError("stock-report manual load hook must remain present")
+    if "loadDailyReport(), loadStockReport()" in html or "loadStockReport();\n      loadPlanReportBaselineStatus" in html:
+        raise AssertionError("stock-report must not auto-load on init or refresh completion")
     if '<th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение %</th>' not in html:
         raise AssertionError("plan-report tables must use the compact five-column layout")
     if "<th>Статус</th>" in html:

@@ -48,27 +48,79 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
     page_url = f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=reports"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(viewport={"width": 1440, "height": 950})
+        context = browser.new_context(viewport={"width": 980, "height": 850})
         page = context.new_page()
+        stock_report_requests: list[str] = []
+        page.on(
+            "request",
+            lambda request: stock_report_requests.append(request.url)
+            if "/v1/sheet-vitrina-v1/stock-report" in request.url
+            else None,
+        )
         try:
             page.goto(page_url, wait_until="domcontentloaded")
             page.locator('[data-report-section-button="stock"]').click()
+            page.wait_for_timeout(500)
+            if stock_report_requests:
+                raise AssertionError(f"stock report must not auto-fetch before Рассчитать, got {stock_report_requests}")
+            page.locator(
+                "#stockReportStatus",
+                has_text="Настройте SKU, период и столбцы, затем нажмите «Рассчитать».",
+            ).wait_for(timeout=10000)
+            if not page.locator("#stockReportContent").evaluate("node => node.hidden"):
+                raise AssertionError("stock report table must stay hidden before the first manual calculation")
+            page.locator("#stockReportColumnSelector").wait_for(timeout=10000)
+            page.locator("#stockReportColumnSummary", has_text="Столбцы: база").wait_for(timeout=10000)
+
             page.locator("#stockReportSalesAvgPeriodDays").fill("3")
-            page.locator("#stockReportApplyButton").click()
+            with page.expect_response(lambda response: "/v1/sheet-vitrina-v1/stock-report" in response.url):
+                page.locator("#stockReportApplyButton").click()
             page.locator("#stockReportRows table.stock-report-table").wait_for(timeout=10000)
             page.locator("#stockReportLead", has_text="Период усреднения продаж: 3").wait_for(timeout=10000)
+            if len(stock_report_requests) != 1:
+                raise AssertionError(f"manual calculation must fetch stock-report exactly once, got {stock_report_requests}")
             row_count = page.locator("#stockReportRows tbody tr").count()
             if row_count < 4:
                 raise AssertionError(f"stock report table must render active SKU rows, got {row_count}")
-            for token in ("SKU", "Акция", "Остаток всего", "Дней: Центральный"):
+            for token in ("SKU", "Акция", "Ост. всего", "Ноль", "Центр", "СЗ", "Прив.", "Урал", "Юг", "Прод./дн.", "Дн. всего"):
                 page.locator("#stockReportRows thead", has_text=token).wait_for(timeout=10000)
+            header_text = page.locator("#stockReportRows thead").inner_text()
+            if "Остаток всего" in header_text or "Дней: Центральный" in header_text:
+                raise AssertionError(f"stock report table must use short visible labels, got {header_text!r}")
             if page.locator("#stockReportRows tbody", has_text="Да").count() < 1:
                 raise AssertionError("promotion participation column must render Да")
             if page.locator("#stockReportRows tbody", has_text="Нет").count() < 1:
                 raise AssertionError("promotion participation column must render Нет")
+            scroll_evidence = page.locator("[data-stock-report-table-wrap]").evaluate(
+                """node => {
+                    const firstHeader = node.querySelector('th:first-child');
+                    const firstCell = node.querySelector('td:first-child');
+                    node.scrollLeft = 120;
+                    const headerStyle = window.getComputedStyle(firstHeader);
+                    const cellStyle = window.getComputedStyle(firstCell);
+                    return {
+                        clientWidth: node.clientWidth,
+                        scrollWidth: node.scrollWidth,
+                        scrollLeft: node.scrollLeft,
+                        headerPosition: headerStyle.position,
+                        headerLeft: headerStyle.left,
+                        cellPosition: cellStyle.position,
+                        cellLeft: cellStyle.left
+                    };
+                }"""
+            )
+            if scroll_evidence["scrollWidth"] <= scroll_evidence["clientWidth"] or scroll_evidence["scrollLeft"] <= 0:
+                raise AssertionError(f"stock report wrapper must scroll horizontally, got {scroll_evidence}")
+            if scroll_evidence["headerPosition"] != "sticky" or scroll_evidence["cellPosition"] != "sticky":
+                raise AssertionError(f"SKU column must be sticky, got {scroll_evidence}")
+            if scroll_evidence["headerLeft"] != "0px" or scroll_evidence["cellLeft"] != "0px":
+                raise AssertionError(f"SKU sticky left must be 0px, got {scroll_evidence}")
 
             before_sort_first = _first_sku_cell_text(page)
             page.locator('[data-stock-report-sort="stock_total"]').click()
+            page.wait_for_timeout(250)
+            if len(stock_report_requests) != 1:
+                raise AssertionError("stock report sort must re-render locally without fetch")
             stock_sort_first = _first_sku_cell_text(page)
             stock_sort_value = _first_row_cell_text(page, 2)
             if stock_sort_first == before_sort_first or stock_sort_value != "40":
@@ -78,6 +130,9 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
                 )
 
             page.locator('[data-stock-report-sort="promotion_participation"]').click()
+            page.wait_for_timeout(250)
+            if len(stock_report_requests) != 1:
+                raise AssertionError("stock report promo sort must not fetch")
             promo_sort_first = _first_sku_cell_text(page)
             promo_sort_value = _first_row_cell_text(page, 1)
             if promo_sort_value != "Нет":
@@ -87,12 +142,45 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
             promo_desc_value = _first_row_cell_text(page, 1)
             if promo_desc_value != "Да":
                 raise AssertionError(f"promo descending sort must put Да first, got {promo_desc_first!r} / {promo_desc_value!r}")
+            page.wait_for_timeout(250)
+            if len(stock_report_requests) != 1:
+                raise AssertionError("stock report promo sort direction toggle must not fetch")
+
+            page.locator("#stockReportColumnSelector").click()
+            page.locator("#stockReportColumnsAllButton").click()
+            page.locator("#stockReportRows thead", has_text="Дн. Центр").wait_for(timeout=10000)
+            page.wait_for_timeout(250)
+            if len(stock_report_requests) != 1:
+                raise AssertionError("stock report column visibility change must not fetch")
+            persisted_columns = page.evaluate(
+                """() => {
+                    const raw = window.localStorage.getItem('wb-core:sheet-vitrina-v1:operator-ui-state:v1');
+                    return raw ? JSON.parse(raw) : {};
+                }"""
+            )
+            if "stock_report_visible_column_keys" not in persisted_columns:
+                raise AssertionError(f"stock report column visibility must persist, got {persisted_columns}")
+
+            page.locator("#stockReportSkuSelector").click()
+            first_checkbox = page.locator("#stockReportSkuList input[type='checkbox']").first
+            first_checkbox.uncheck()
+            page.wait_for_timeout(250)
+            if len(stock_report_requests) != 1:
+                raise AssertionError("stock report SKU draft changes must not fetch")
+            page.keyboard.press("Escape")
+            with page.expect_response(lambda response: "/v1/sheet-vitrina-v1/stock-report" in response.url):
+                page.locator("#stockReportApplyButton").click()
+            page.locator("#stockReportRows table.stock-report-table").wait_for(timeout=10000)
+            if len(stock_report_requests) != 2:
+                raise AssertionError("next Рассчитать after SKU draft change must fetch exactly once")
         finally:
             browser.close()
     return {
         "row_count": row_count,
         "stock_sort_first": stock_sort_first,
         "promo_sort_first": promo_sort_first,
+        "stock_report_request_count": len(stock_report_requests),
+        "scroll_evidence": scroll_evidence,
     }
 
 

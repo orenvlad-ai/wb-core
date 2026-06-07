@@ -1120,6 +1120,11 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         or hierarchy_state["visibleCountText"]
     ):
         raise AssertionError(f"expanded child metrics must show hierarchy guides without visible count text, got {hierarchy_state}")
+    _wait_for_metric_user_config_display(
+        page,
+        scope_id=scope_id,
+        expected_display={collapsed_one: "collapsed", hidden_key: "hidden"},
+    )
 
     page.reload(wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
@@ -1383,15 +1388,43 @@ def _seed_metric_presentation_storage(
     total_display: dict[str, str],
 ) -> None:
     page.evaluate(
-        """({storageKey, totalOrder, skuOrder, totalDisplay}) => {
-          window.localStorage.setItem(storageKey, JSON.stringify({
+        """async ({storageKey, totalOrder, skuOrder, totalDisplay}) => {
+          const payload = {
             version: 2,
             scopes: {
               total: {order: totalOrder, display: totalDisplay, manual: true},
               sku: {order: skuOrder, display: {}, manual: false}
             },
             expanded_anchors: []
-          }));
+          };
+          window.localStorage.setItem(storageKey, JSON.stringify(payload));
+          const config = window.WEB_VITRINA_CONFIG || {};
+          const path = String(config.user_config_path || "/v1/sheet-vitrina-v1/web-vitrina/user-config");
+          if (!path) {
+            return;
+          }
+          let baseRevision = 0;
+          try {
+            const currentResponse = await fetch(path, {method: "GET", headers: {"Accept": "application/json"}});
+            if (currentResponse.ok) {
+              const currentPayload = await currentResponse.json();
+              baseRevision = Number(currentPayload && currentPayload.revision ? currentPayload.revision : 0) || 0;
+            }
+          } catch (error) {
+            baseRevision = 0;
+          }
+          const response = await fetch(path, {
+            method: "POST",
+            headers: {"Accept": "application/json", "Content-Type": "application/json"},
+            body: JSON.stringify({
+              config_key: "metric_presentation",
+              base_revision: baseRevision,
+              config: payload
+            })
+          });
+          if (!response.ok) {
+            throw new Error("failed to seed metric_presentation user-config: " + response.status);
+          }
         }""",
         {
             "storageKey": storage_key,
@@ -1537,6 +1570,11 @@ def _check_metric_bulk_selection(page: object, *, scope_id: str, initial_order: 
         raise AssertionError(f"multi-drag order must persist, got {persisted_order}")
     if persisted_display.get(selected_a) != "collapsed" or persisted_display.get(selected_b) != "collapsed":
         raise AssertionError(f"bulk display statuses must persist, got {persisted_display}")
+    _wait_for_metric_user_config_display(
+        page,
+        scope_id=scope_id,
+        expected_display={selected_a: "collapsed", selected_b: "collapsed"},
+    )
 
     page.reload(wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
@@ -1860,6 +1898,42 @@ def _persisted_metric_display(page: object, storage_key: str, scope_id: str) -> 
           }
         }""",
         {"storageKey": storage_key, "scopeId": scope_id},
+    )
+
+
+def _wait_for_metric_user_config_display(
+    page: object,
+    *,
+    scope_id: str,
+    expected_display: dict[str, str],
+    timeout: int = 5000,
+) -> None:
+    deadline = time.monotonic() + (timeout / 1000)
+    last_display: dict[str, str] = {}
+    while time.monotonic() < deadline:
+        last_display = page.evaluate(
+            """async ({scopeId}) => {
+              try {
+                const response = await fetch('/v1/sheet-vitrina-v1/web-vitrina/user-config', {
+                  method: 'GET',
+                  headers: {'Accept': 'application/json'}
+                });
+                if (!response.ok) {
+                  return {};
+                }
+                const payload = await response.json();
+                return ((((payload || {}).config || {}).scopes || {})[scopeId] || {}).display || {};
+              } catch (error) {
+                return {};
+              }
+            }""",
+            {"scopeId": scope_id},
+        )
+        if all(last_display.get(metric_key) == status for metric_key, status in expected_display.items()):
+            return
+        time.sleep(0.1)
+    raise AssertionError(
+        f"metric-presentation user-config did not persist display={expected_display}, got {last_display}"
     )
 
 
