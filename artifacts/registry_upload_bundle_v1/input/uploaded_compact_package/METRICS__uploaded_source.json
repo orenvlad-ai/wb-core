@@ -216,6 +216,18 @@
     "section": "Цены"
   },
   {
+    "metric_key": "avg_spp_proxy",
+    "enabled": true,
+    "scope": "TOTAL",
+    "label_ru": "SPP-прокси средняя",
+    "calc_type": "metric",
+    "calc_ref": "spp_proxy",
+    "show_in_data": true,
+    "format": "percent",
+    "display_order": 185,
+    "section": "Цены"
+  },
+  {
     "metric_key": "ads_drr_total",
     "enabled": true,
     "scope": "TOTAL",
@@ -813,6 +825,18 @@
     "show_in_data": true,
     "format": "percent",
     "display_order": 680,
+    "section": "Цены"
+  },
+  {
+    "metric_key": "spp_proxy",
+    "enabled": true,
+    "scope": "SKU",
+    "label_ru": "SPP-прокси",
+    "calc_type": "metric",
+    "calc_ref": "spp_proxy",
+    "show_in_data": true,
+    "format": "percent",
+    "display_order": 685,
     "section": "Цены"
   },
   {

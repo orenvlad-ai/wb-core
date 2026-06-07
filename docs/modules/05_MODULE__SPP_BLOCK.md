@@ -24,6 +24,7 @@ related_runners:
   - "apps/spp_block_http_smoke.py"
 related_docs:
   - "00_INDEX__MODULES.md"
+  - "35_MODULE__SPP_PROXY_BLOCK.md"
   - "migration/33_spp_block_contract.md"
   - "migration/34_spp_block_parity_matrix.md"
   - "migration/35_spp_block_evidence_checklist.md"
@@ -45,6 +46,7 @@ update_note: "Обновлён current SPP source contract: visible/current SPP 
 # 2. Current-source и legacy semantics
 
 - Current-source для consumer-visible SPP фиксируется как Seller Portal `discounts-prices` table/API field `discountOnSite`.
+- Новая метрика `SPP-прокси` живёт в отдельном module/source `spp_proxy_block`; она не заменяет, не переименовывает и не меняет meaning текущего `spp`.
 - `discountOnSite` нормализуется в долю: `23 => 0.23`, `0.23 => 0.23`.
 - Этот source current-only: он доказывает текущую visible WB discount/SPP на момент fetch, но не даёт исторические date-specific values.
 - Successful current fetch persists exact business-date `accepted_current_snapshot`; на следующий business day этот exact-date accepted current может materialize-иться как `yesterday_closed` for the same date.

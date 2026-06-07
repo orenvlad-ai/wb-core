@@ -166,6 +166,10 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
         "label_ru": "СПП",
         "description_ru": "Скидка постоянного покупателя на выбранную дату.",
     },
+    "spp_proxy": {
+        "label_ru": "SPP-прокси",
+        "description_ru": "Прокси-оценка public-card SPP по цене продавца и анонимной цене покупателя WB.",
+    },
     "ads_bids": {
         "label_ru": "Ставки рекламы",
         "description_ru": "Ставки в поиске и рекомендациях по SKU.",
@@ -244,6 +248,10 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
     "spp": (
         "avg_spp",
         "spp",
+    ),
+    "spp_proxy": (
+        "avg_spp_proxy",
+        "spp_proxy",
     ),
     "ads_bids": (
         "avg_ads_bid_search",
@@ -343,6 +351,12 @@ WEB_VITRINA_SOURCE_GROUPS = {
             "promo_by_price",
         ),
     },
+    "wb_public_card_bot": {
+        "label_ru": "WB public card / бот",
+        "source_keys": (
+            "spp_proxy",
+        ),
+    },
     "other_sources": {
         "label_ru": "Прочие источники",
         "source_keys": (
@@ -360,6 +374,7 @@ WEB_VITRINA_SOURCE_GROUP_ORDER = (
     "wb_api",
     ONEC_STOCKS_SOURCE_GROUP_ID,
     "seller_portal_bot",
+    "wb_public_card_bot",
     "other_sources",
 )
 WEB_VITRINA_SOURCE_KEY_TO_GROUP = {

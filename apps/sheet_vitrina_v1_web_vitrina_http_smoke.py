@@ -320,13 +320,25 @@ def main() -> None:
             loading_groups = {item.get("group_id"): item for item in loading_table.get("groups") or []}
             if [row.get("source_key") for row in loading_rows] != [item.get("source_key") for item in upload_items]:
                 raise AssertionError(f"web-vitrina loading table must follow upload source truth, got {activity_surface}")
-            if sorted(loading_groups) != ["onec_product_capital", "other_sources", "seller_portal_bot", "wb_api"]:
+            if sorted(loading_groups) != [
+                "onec_product_capital",
+                "other_sources",
+                "seller_portal_bot",
+                "wb_api",
+                "wb_public_card_bot",
+            ]:
                 raise AssertionError(f"web-vitrina loading table must expose stable source groups, got {loading_groups}")
             if loading_groups["onec_product_capital"].get("label") != "1С":
                 raise AssertionError(f"1C product-capital group label mismatch, got {loading_groups}")
             if not loading_groups["seller_portal_bot"].get("session_controls"):
                 raise AssertionError(f"seller portal group must expose session controls, got {loading_groups}")
-            if {row.get("source_group_id") for row in loading_rows} != {"wb_api", "seller_portal_bot", "onec_product_capital", "other_sources"}:
+            if loading_groups["wb_public_card_bot"].get("session_controls"):
+                raise AssertionError(f"WB public card group must not expose Seller Portal session controls, got {loading_groups}")
+            row_group_ids = {row.get("source_group_id") for row in loading_rows}
+            expected_row_groups = {"wb_api", "seller_portal_bot", "onec_product_capital", "other_sources"}
+            if not expected_row_groups.issubset(row_group_ids) or not row_group_ids.issubset(
+                expected_row_groups | {"wb_public_card_bot"}
+            ):
                 raise AssertionError(f"loading table rows must be grouped by source group, got {loading_rows}")
             if not str((loading_columns.get("today_status") or {}).get("label") or "").startswith("Сегодня: "):
                 raise AssertionError(f"web-vitrina loading table today column mismatch, got {loading_table}")

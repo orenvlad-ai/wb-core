@@ -1,0 +1,11 @@
+{
+  "source": {
+    "mode": "public_wb_card_buyer_price",
+    "endpoint": "fixture public card buyer price",
+    "temporal_capability": "current_only",
+    "auth_context": "anonymous"
+  },
+  "data": {
+    "items": []
+  }
+}

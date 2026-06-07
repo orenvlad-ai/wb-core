@@ -362,11 +362,11 @@ update_note: "Обновлён под Google Sheets decommission and current pla
 - В bounded live contour используется следующая source-classification и temporal policy matrix:
   - group A `bot/web-source historical / closed-day-capable`: `seller_funnel_snapshot`, `web_source_snapshot`; allowed slots = `yesterday_closed + today_current`
   - group B `WB API historical/date-period capable`: `sales_funnel_history`, `sf_period`, `spp`, `stocks`, `ads_compact`, `fin_report_daily`; source family stays date/period-capable, but required-slot policy is source-aware
-  - group C `WB API current-snapshot-only`: `prices_snapshot`, `ads_bids`; accepted truth is captured only as current snapshot, but the accepted snapshot for closed business day D must materialize as `yesterday_closed=D` on D+1 without historical refetch
+  - group C current-snapshot-only accepted rollover: `prices_snapshot`, `ads_bids`, `spp_proxy`; accepted truth is captured only as current snapshot, but the accepted snapshot for closed business day D must materialize as `yesterday_closed=D` on D+1 without historical refetch. `spp_proxy` uses anonymous public WB card buyer price and existing `prices_snapshot.price_seller_discounted`; it does not replace current `spp`.
   - group D `other/non-WB/manual/browser-collector`: `cost_price`, `promo_by_price`; `cost_price` resolves `yesterday_closed + today_current` by `effective_from <= slot_date`, `promo_by_price` now reads bounded live/current truth from repo-owned promo collector sidecar + workbook seam
   - `dual_day_capable`: `seller_funnel_snapshot`, `sales_funnel_history`, `web_source_snapshot`, `sf_period`, `ads_compact`, `cost_price`, `promo_by_price`
   - `dual_day_intraday_tolerant`: `spp`, `fin_report_daily`
-  - `accepted_current_rollover`: `prices_snapshot`, `ads_bids`
+  - `accepted_current_rollover`: `prices_snapshot`, `ads_bids`, `spp_proxy`
   - `yesterday_closed_only`: `stocks`
 - Source-aware semantic reduction norm:
   - `seller_funnel_snapshot` и `web_source_snapshot` remain full two-slot sources; broken `today_current` stays warning/error and must keep top badge/cards degraded.

@@ -255,6 +255,20 @@
       "is_runtime_enabled": true
     },
     {
+      "metric_key": "avg_spp_proxy",
+      "metric_kind": "direct",
+      "value_unit": "ratio",
+      "value_scale": "ratio_0_1",
+      "missing_policy": "propagate_missing",
+      "period_agg": "scope_aggregate",
+      "formula_id": null,
+      "ratio_num_key": null,
+      "ratio_den_key": null,
+      "source_family": "derived",
+      "source_module": "sheet_vitrina_v1_live_plan",
+      "is_runtime_enabled": true
+    },
+    {
       "metric_key": "ads_drr_total",
       "metric_kind": "formula",
       "value_unit": "ratio",
@@ -952,6 +966,20 @@
       "ratio_den_key": null,
       "source_family": "official_api",
       "source_module": "spp_block",
+      "is_runtime_enabled": true
+    },
+    {
+      "metric_key": "spp_proxy",
+      "metric_kind": "direct",
+      "value_unit": "ratio",
+      "value_scale": "ratio_0_1",
+      "missing_policy": "null",
+      "period_agg": "last_snapshot",
+      "formula_id": null,
+      "ratio_num_key": null,
+      "ratio_den_key": null,
+      "source_family": "public_web",
+      "source_module": "spp_proxy_block",
       "is_runtime_enabled": true
     },
     {

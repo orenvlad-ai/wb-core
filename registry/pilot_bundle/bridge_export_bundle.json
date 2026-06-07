@@ -3,7 +3,7 @@
   "as_of_date": "2026-04-12",
   "pilot_scope": {
     "sku_count": 5,
-    "metric_count": 12,
+    "metric_count": 13,
     "formula_count": 2,
     "metric_kinds": [
       "direct",
@@ -86,6 +86,18 @@
           "section": "Цены",
           "bridge_calc_type": "metric",
           "bridge_calc_ref": "spp"
+        },
+        {
+          "display_order": 31,
+          "metric": "spp_proxy",
+          "enabled": "TRUE",
+          "scope": "SKU",
+          "label_ru": "SPP-прокси",
+          "show_in_data": "TRUE",
+          "ui_format": "percent",
+          "section": "Цены",
+          "bridge_calc_type": "metric",
+          "bridge_calc_ref": "spp_proxy"
         },
         {
           "display_order": 40,
