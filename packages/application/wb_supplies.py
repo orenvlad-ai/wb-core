@@ -305,7 +305,7 @@ class WbSuppliesBlock:
         try:
             return self.source.fetch_supply_details(lookup_id, is_preorder_id=is_preorder_id)
         except WbSuppliesHttpStatusError as exc:
-            if exc.status_code in {401, 403, 429}:
+            if exc.status_code in {401, 403}:
                 raise
             warnings.append(f"details fetch failed for {lookup_id}: status {exc.status_code}")
             return None
@@ -323,7 +323,7 @@ class WbSuppliesBlock:
         try:
             return self.source.fetch_supply_goods(lookup_id, limit=1000, offset=0, is_preorder_id=is_preorder_id)
         except WbSuppliesHttpStatusError as exc:
-            if exc.status_code in {401, 403, 429}:
+            if exc.status_code in {401, 403}:
                 raise
             warnings.append(f"goods fetch failed for {lookup_id}: status {exc.status_code}")
             return None

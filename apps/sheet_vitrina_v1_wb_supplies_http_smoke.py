@@ -23,7 +23,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_WB_SUPPLIES_SYNC_PATH,
     build_registry_upload_http_server,
 )
-from packages.adapters.wb_supplies import WbSuppliesListResult, WbSuppliesTransportError  # noqa: E402
+from packages.adapters.wb_supplies import WbSuppliesHttpStatusError, WbSuppliesListResult, WbSuppliesTransportError  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
@@ -37,6 +37,8 @@ class MissingTokenSource:
 class FakeWbSuppliesSource:
     def __init__(self) -> None:
         self.list_calls: list[dict[str, object]] = []
+        self.detail_http_errors: dict[str, int] = {}
+        self.goods_http_errors: dict[str, int] = {}
         self.warehouse_rows = [
             {"ID": 507, "name": "Коледино"},
             {"ID": 777, "name": "Электросталь"},
@@ -152,10 +154,15 @@ class FakeWbSuppliesSource:
         )
 
     def fetch_supply_details(self, supply_id, *, is_preorder_id=False):
-        return self.details[str(supply_id)]
+        key = str(supply_id)
+        if key in self.detail_http_errors:
+            raise WbSuppliesHttpStatusError(self.detail_http_errors[key], "{}")
+        return self.details[key]
 
     def fetch_supply_goods(self, supply_id, *, limit=1000, offset=0, is_preorder_id=False):
         key = str(supply_id)
+        if key in self.goods_http_errors:
+            raise WbSuppliesHttpStatusError(self.goods_http_errors[key], "{}")
         if key == "1004":
             raise WbSuppliesTransportError("goods unavailable in smoke")
         return self.goods.get(key, [])[offset : offset + limit]
@@ -220,6 +227,29 @@ def main() -> None:
             )
             if duplicate_status != 200 or duplicate_payload.get("meta", {}).get("cached_total_rows") != 4:
                 raise AssertionError(f"duplicate sync must not duplicate rows, got {duplicate_status} {duplicate_payload}")
+
+            fake_source.detail_http_errors = {"1002": 429}
+            fake_source.goods_http_errors = {"1003": 429}
+            rate_limited_status, rate_limited_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
+                {"limit": 100, "offset": 0, "enrich_details": True},
+            )
+            if rate_limited_status != 200 or rate_limited_payload.get("sync", {}).get("upserted_count") != 4:
+                raise AssertionError(
+                    f"detail/goods 429 must not fail list sync, got {rate_limited_status} {rate_limited_payload}"
+                )
+            rate_limited_detail_status, rate_limited_detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/1002")
+            rate_limited_warnings = rate_limited_detail_payload.get("supply", {}).get("warnings", [])
+            if rate_limited_detail_status != 200 or "details fetch failed for 1002: status 429" not in rate_limited_warnings:
+                raise AssertionError(f"detail 429 warning must be cached on the row, got {rate_limited_detail_payload}")
+            fake_source.detail_http_errors = {}
+            fake_source.goods_http_errors = {}
+            restore_status, restore_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
+                {"limit": 100, "offset": 0, "enrich_details": True},
+            )
+            if restore_status != 200 or restore_payload.get("sync", {}).get("upserted_count") != 4:
+                raise AssertionError(f"restore sync must keep fake cache usable, got {restore_status} {restore_payload}")
 
             main_status, main_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=main_250&limit=20")
             main_ids = {row["wb_supply_id"] for row in main_payload.get("rows", [])}
