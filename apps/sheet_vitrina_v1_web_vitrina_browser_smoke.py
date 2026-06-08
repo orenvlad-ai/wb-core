@@ -3259,7 +3259,7 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
     if not loading_ids:
         raise AssertionError(f"loading table must expose source rows, got {payload}")
     group_ids = [item["group_id"] for item in payload["loading"]["groups"]]
-    if group_ids != ["wb_api", "onec_product_capital", "seller_portal_bot", "other_sources"]:
+    if group_ids != ["wb_api", "onec_product_capital", "seller_portal_bot", "wb_public_card_bot", "other_sources"]:
         raise AssertionError(f"loading table must render grouped source headers, got {payload}")
     if not all(item["has_refresh_button"] for item in payload["loading"]["groups"]):
         raise AssertionError(f"each loading group must expose one group refresh button, got {payload}")
@@ -3274,6 +3274,14 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
         raise AssertionError(f"Seller Portal group must expose session controls, got {payload}")
     if not seller_group["session_state_in_main"] or seller_group["session_state_in_controls"]:
         raise AssertionError(f"Seller Portal session state must be placed in the left group header, got {payload}")
+    public_card_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "wb_public_card_bot")
+    if (
+        public_card_group["has_session_check"]
+        or public_card_group["has_session_recovery_start"]
+        or public_card_group["has_session_launcher"]
+        or public_card_group["session_state_in_main"]
+    ):
+        raise AssertionError(f"WB public card group must not expose Seller Portal controls, got {payload}")
     header_labels = [item["label"] for item in payload["loading"]["headers"]]
     for expected in ("Источник", "Причина сегодня", "Причина вчера", "Метрики", "Технический endpoint"):
         if expected not in header_labels:

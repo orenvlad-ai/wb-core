@@ -1281,17 +1281,28 @@ def _build_handler(
                     return
 
                 if surface == DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE:
-                    payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
-                        page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
-                        read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
-                        operator_route=sheet_operator_ui_path,
-                        job_path=sheet_job_path,
-                        as_of_date=as_of_date,
-                        date_from=date_from,
-                        date_to=date_to,
-                        include_source_status=_resolve_optional_query_bool(parsed.query, "include_source_status"),
-                        include_table_data=_resolve_optional_query_bool(parsed.query, "include_table_data"),
-                    )
+                    try:
+                        payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
+                            page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+                            read_route=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                            operator_route=sheet_operator_ui_path,
+                            job_path=sheet_job_path,
+                            as_of_date=as_of_date,
+                            date_from=date_from,
+                            date_to=date_to,
+                            include_source_status=_resolve_optional_query_bool(parsed.query, "include_source_status"),
+                            include_table_data=_resolve_optional_query_bool(parsed.query, "include_table_data"),
+                        )
+                    except Exception as exc:  # pragma: no cover - last-resort public JSON guard
+                        _write_json_response(
+                            self,
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {
+                                "error": f"sheet_vitrina_v1 page composition failed: {exc}",
+                                "surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
+                            },
+                        )
+                        return
                     _write_json_response(
                         self,
                         HTTPStatus.OK,
@@ -2580,6 +2591,13 @@ def _http_status_for_cost_price_result(result: CostPriceUploadResult) -> HTTPSta
     return HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+def _write_response_body(handler: BaseHTTPRequestHandler, body: bytes) -> None:
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client disconnected after headers
+        return
+
+
 def _write_json_response(
     handler: BaseHTTPRequestHandler,
     status: HTTPStatus,
@@ -2590,7 +2608,7 @@ def _write_json_response(
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _request_origin(handler: BaseHTTPRequestHandler) -> str:
@@ -2614,7 +2632,7 @@ def _write_html_response(
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _write_text_response(
@@ -2635,7 +2653,7 @@ def _write_text_response(
         ))
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _write_binary_response(
@@ -2656,7 +2674,7 @@ def _write_binary_response(
         ))
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _web_auth_config() -> dict[str, Any]:
@@ -2899,7 +2917,7 @@ def _write_redirect_response(
         handler.send_header(str(key), str(value))
     handler.send_header("Content-Length", "0")
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _load_login_payload(handler: BaseHTTPRequestHandler) -> dict[str, str]:
