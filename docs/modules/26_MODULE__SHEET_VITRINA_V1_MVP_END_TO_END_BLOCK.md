@@ -266,7 +266,8 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `cycle_order_days`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
   - server-side settings validation for regional block `sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`, `included_district_keys`
   - regional block renders six federal-district checkboxes for stock-depletion proportions. Default is all districts; excluding a district removes it only from valid-day validation/share normalization while keeping it visible in result district tables/XLSX with zero primary demand.
-  - regional result card keeps the main status compact; long fallback `nmId` lists and reason counters are available only in bounded expandable diagnostics and must not widen the card.
+  - guarded persistent-zero handling prevents selected SKU/district `0 -> 0` cold-start history from invalidating otherwise clean stock-depletion days when current stock is below one box (`current_stock < order_batch_qty`) and therefore not a usable signal. Neutralized districts keep `0` demand share, and selected persistent-zero districts may receive a separately diagnosed one-box test seed when `stock_ff` can cover it.
+  - regional result card keeps the main status compact; long fallback/persistent-zero `nmId` lists, seed details and reason counters are available only in bounded expandable diagnostics and must not widen the card.
   - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
   - operator-facing cycle vocabulary is unified: factory uses `Цикл заказов`, WB block uses `Цикл поставок`
   - page-load defaults are server/operator-owned contract: factory `30/30/15/15/15/14/250/14`, regional `14/7/15/15/250`, manual dates empty
@@ -284,7 +285,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - factory-order coverage includes `stock_total`, selected `stock_ff` source (manual Excel or 1C FF_STOCK), inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
   - regional block does not materialize inbound `ФФ -> Wildberries`; this input stays outside the current bounded scope
-  - regional result surface gives server-driven summary and a compact district table `Федеральный округ / Общее количество / Дефицит / Скачать Excel`; each row links to the existing district XLSX route for that federal district, so a duplicated lower `Excel/XLSX по округам` list is not rendered
+  - regional result surface gives server-driven summary and a compact district table `Федеральный округ / Общее количество / Дефицит / Скачать Excel`; each row links to the existing district XLSX route for that federal district, so a duplicated lower `Excel/XLSX по округам` list is not rendered. District XLSX shape stays compact (`nmId / SKU / Количество к поставке / Дефицит`); `Количество к поставке` includes both demand-based allocation and any allocated persistent-zero test seed, while seed-vs-demand split stays in API/UI diagnostics.
   - district XLSX files are keyed by the six canonical federal districts and include Russian headers `nmId / SKU / Количество к поставке / Дефицит`; the `Дефицит` value comes from the already calculated backend row-level deficit, not from browser/UI recomputation
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows

@@ -64,6 +64,13 @@ class WbRegionalSupplyDistrictRow:
     district_daily_demand: float
     raw_recommendation_qty: float = 0.0
     demand_diagnostics: dict[str, Any] | None = None
+    demand_recommendation_qty: int = 0
+    demand_allocated_qty: int = 0
+    seed_recommendation_qty: int = 0
+    seed_qty: int = 0
+    seed_unfulfilled_qty: int = 0
+    allocation_reason: str = ""
+    persistent_zero_seed_applied: bool = False
 
 
 @dataclass(frozen=True)

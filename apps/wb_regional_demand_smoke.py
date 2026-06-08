@@ -54,6 +54,11 @@ def main() -> None:
     _assert_zero_depletion_district_stays_present()
     _assert_far_siberia_no_depletion_stays_present()
     _assert_far_siberia_exclusion_changes_validation()
+    _assert_persistent_zero_neutralization_keeps_day_valid()
+    _assert_persistent_zero_low_current_stock_tolerance()
+    _assert_positive_to_zero_remains_invalid()
+    _assert_restock_remains_invalid()
+    _assert_all_districts_zero_do_not_create_fake_signal()
     _assert_district_selection_validation_errors()
     _assert_fallback_uses_selected_district_stock_share()
     _assert_insufficient_history_uses_explicit_fallback()
@@ -257,6 +262,162 @@ def _assert_far_siberia_exclusion_changes_validation() -> None:
             raise AssertionError("diagnostics must expose excluded far/siberia district")
 
 
+def _assert_persistent_zero_neutralization_keeps_day_valid() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 1)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=14,
+            order_count=70.0,
+            depletion_by_key={
+                DISTRICT_CENTRAL: 35.0,
+                DISTRICT_NORTHWEST: 35.0,
+                DISTRICT_VOLGA: 0.0,
+                DISTRICT_URAL: 0.0,
+                DISTRICT_SOUTH_CAUCASUS: 0.0,
+                DISTRICT_FAR_SIBERIA: 0.0,
+            },
+            initial_stock_by_key={DISTRICT_SOUTH_CAUCASUS: 0.0},
+        )
+        estimate = _estimate(
+            runtime,
+            report_date,
+            current_stock_by_key={
+                **{key: 100.0 for key in DISTRICT_KEYS},
+                DISTRICT_SOUTH_CAUCASUS: 0.0,
+            },
+        )
+        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_DEPLETION)
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_SOUTH_CAUCASUS], 0.0, "persistent-zero district share")
+        if estimate.diagnostics.get("selected_valid_day_count") != 14:
+            raise AssertionError(f"persistent-zero 0->0 must not invalidate clean days, got {estimate.diagnostics}")
+        if DISTRICT_SOUTH_CAUCASUS not in estimate.diagnostics.get("persistent_zero_district_keys", []):
+            raise AssertionError(f"persistent-zero district key must be exposed, got {estimate.diagnostics}")
+        if estimate.diagnostics.get("neutralized_day_count_by_district", {}).get(DISTRICT_SOUTH_CAUCASUS) != 14:
+            raise AssertionError(f"neutralized day count must be exposed, got {estimate.diagnostics}")
+
+
+def _assert_persistent_zero_low_current_stock_tolerance() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 1)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=14,
+            order_count=70.0,
+            depletion_by_key={
+                DISTRICT_CENTRAL: 35.0,
+                DISTRICT_NORTHWEST: 35.0,
+                DISTRICT_VOLGA: 0.0,
+                DISTRICT_URAL: 0.0,
+                DISTRICT_SOUTH_CAUCASUS: 0.0,
+                DISTRICT_FAR_SIBERIA: 0.0,
+            },
+            initial_stock_by_key={DISTRICT_SOUTH_CAUCASUS: 0.0},
+        )
+        estimate = _estimate(
+            runtime,
+            report_date,
+            current_stock_by_key={
+                **{key: 100.0 for key in DISTRICT_KEYS},
+                DISTRICT_SOUTH_CAUCASUS: 1.0,
+            },
+            persistent_zero_current_stock_max_qty=49.0,
+        )
+        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_DEPLETION)
+        if DISTRICT_SOUTH_CAUCASUS not in estimate.diagnostics.get("persistent_zero_district_keys", []):
+            raise AssertionError("stock below one-box threshold must be treated as no usable signal")
+        if estimate.diagnostics.get("persistent_zero_current_stock_max_qty") != 49.0:
+            raise AssertionError(f"persistent-zero stock threshold must be diagnostic, got {estimate.diagnostics}")
+
+
+def _assert_positive_to_zero_remains_invalid() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 2)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=1,
+            order_count=20.0,
+            depletion_by_key={
+                DISTRICT_CENTRAL: 5.0,
+                DISTRICT_NORTHWEST: 0.0,
+                DISTRICT_VOLGA: 0.0,
+                DISTRICT_URAL: 0.0,
+                DISTRICT_SOUTH_CAUCASUS: 10.0,
+                DISTRICT_FAR_SIBERIA: 0.0,
+            },
+            initial_stock_by_key={DISTRICT_SOUTH_CAUCASUS: 10.0},
+        )
+        estimate = _estimate(
+            runtime,
+            report_date,
+            requested_valid_day_count=1,
+            current_stock_by_key={
+                **{key: 100.0 for key in DISTRICT_KEYS},
+                DISTRICT_SOUTH_CAUCASUS: 0.0,
+            },
+        )
+        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        if estimate.diagnostics.get("excluded_day_reason_counts", {}).get("district_out_of_stock_risk") != 1:
+            raise AssertionError(f"positive->0 must remain OOS invalid, got {estimate.diagnostics}")
+
+
+def _assert_restock_remains_invalid() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 2)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=1,
+            order_count=20.0,
+            depletion_by_key={
+                DISTRICT_CENTRAL: 5.0,
+                DISTRICT_NORTHWEST: 0.0,
+                DISTRICT_VOLGA: 0.0,
+                DISTRICT_URAL: 0.0,
+                DISTRICT_SOUTH_CAUCASUS: -1.0,
+                DISTRICT_FAR_SIBERIA: 0.0,
+            },
+            initial_stock_by_key={DISTRICT_SOUTH_CAUCASUS: 0.0},
+        )
+        estimate = _estimate(
+            runtime,
+            report_date,
+            requested_valid_day_count=1,
+            current_stock_by_key={
+                **{key: 100.0 for key in DISTRICT_KEYS},
+                DISTRICT_SOUTH_CAUCASUS: 0.0,
+            },
+        )
+        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        if estimate.diagnostics.get("excluded_day_reason_counts", {}).get("district_restock_or_upward_correction") != 1:
+            raise AssertionError(f"0->positive restock must remain invalid, got {estimate.diagnostics}")
+
+
+def _assert_all_districts_zero_do_not_create_fake_signal() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 2)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=1,
+            order_count=20.0,
+            depletion_by_key={key: 0.0 for key in DISTRICT_KEYS},
+            initial_stock_by_key={key: 0.0 for key in DISTRICT_KEYS},
+        )
+        estimate = _estimate(
+            runtime,
+            report_date,
+            requested_valid_day_count=1,
+            current_stock_by_key={key: 0.0 for key in DISTRICT_KEYS},
+        )
+        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        if estimate.diagnostics.get("excluded_day_reason_counts", {}).get("zero_total_depletion_with_positive_order_count") != 1:
+            raise AssertionError(f"all-zero days must not become demand-valid, got {estimate.diagnostics}")
+
+
 def _assert_district_selection_validation_errors() -> None:
     with _runtime() as runtime:
         report_date = date(2026, 5, 1)
@@ -429,6 +590,7 @@ def _estimate(
     requested_valid_day_count: int = 14,
     current_stock_by_key: dict[str, float] | None = None,
     included_district_keys: tuple[str, ...] | None = None,
+    persistent_zero_current_stock_max_qty: float = 0.0,
 ):
     estimates = estimate_wb_regional_demand(
         runtime=runtime,
@@ -438,6 +600,7 @@ def _estimate(
         district_field_by_key=FIELD_BY_KEY,
         current_stock_by_nm={NM_ID: current_stock_by_key or {key: 100.0 for key in DISTRICT_KEYS}},
         included_district_keys=included_district_keys,
+        persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
     )
     return estimates[NM_ID]
 
@@ -451,6 +614,7 @@ def _seed_history(
     depletion_by_key: dict[str, float],
     extra_older_days: int = 0,
     overrides: dict[date, dict[str, float]] | None = None,
+    initial_stock_by_key: dict[str, float] | None = None,
 ) -> None:
     overrides = overrides or {}
     first_depletion_date = report_date - timedelta(days=requested_days + extra_older_days)
@@ -467,6 +631,7 @@ def _seed_history(
         DISTRICT_SOUTH_CAUCASUS: 5000.0,
         DISTRICT_FAR_SIBERIA: 5000.0,
     }
+    stock_by_key.update(initial_stock_by_key or {})
     _save_stock_snapshot(runtime, snapshot_dates[0], stock_by_key)
     sales_items: list[SalesFunnelHistoryItem] = []
     for depletion_date in snapshot_dates[1:]:

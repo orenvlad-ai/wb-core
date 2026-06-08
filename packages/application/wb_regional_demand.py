@@ -22,6 +22,7 @@ STOCKS_SOURCE_KEY = "stocks"
 REGIONAL_DEMAND_METHOD_STOCK_DEPLETION = "stock_depletion_valid_days"
 REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK = "current_stock_share_fallback"
 TOTAL_DAILY_DEMAND_SOURCE_ORDER_COUNT = "orderCount"
+PERSISTENT_ZERO_NEUTRALIZED_REASON = "district_persistent_zero_neutralized"
 
 DEFAULT_MIN_LOOKUP_DAYS = 120
 DEFAULT_MAX_LOOKUP_DAYS = 365
@@ -46,6 +47,7 @@ def estimate_wb_regional_demand(
     district_field_by_key: Mapping[str, str],
     current_stock_by_nm: Mapping[int, Mapping[str, float]],
     included_district_keys: list[str] | tuple[str, ...] | None = None,
+    persistent_zero_current_stock_max_qty: float = 0.0,
 ) -> dict[int, WbRegionalDemandEstimate]:
     """Estimate district demand for each SKU from clean historical stock depletion days."""
 
@@ -89,6 +91,7 @@ def estimate_wb_regional_demand(
             order_counts_by_date=order_counts_by_date,
             current_stock_by_district=current_stock_by_nm.get(int(nm_id), {}),
             included_district_keys=included_keys,
+            persistent_zero_current_stock_max_qty=float(persistent_zero_current_stock_max_qty),
         )
     return out
 
@@ -97,16 +100,37 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
     items = list(estimates.values())
     method_counts: dict[str, int] = {}
     fallback_sku_ids: list[int] = []
+    persistent_zero_sku_ids: list[int] = []
     warning_count = 0
     selected_counts: list[int] = []
     inspected_counts: list[int] = []
     excluded_reason_counts: dict[str, int] = {}
+    persistent_zero_day_count_by_district: dict[str, int] = {}
+    persistent_zero_district_counts: dict[str, int] = {}
+    persistent_zero_sku_district_count = 0
+    persistent_zero_day_count = 0
     for estimate in items:
         diagnostics = estimate.diagnostics
         method = str(diagnostics.get("regional_demand_method") or "")
         method_counts[method] = method_counts.get(method, 0) + 1
         if bool(diagnostics.get("fallback_used")):
             fallback_sku_ids.append(int(estimate.nm_id))
+        persistent_zero_keys = [
+            str(item)
+            for item in list(diagnostics.get("persistent_zero_district_keys") or [])
+            if str(item) in DISTRICT_KEYS
+        ]
+        if persistent_zero_keys:
+            persistent_zero_sku_ids.append(int(estimate.nm_id))
+            persistent_zero_sku_district_count += len(persistent_zero_keys)
+            for key in persistent_zero_keys:
+                persistent_zero_district_counts[key] = persistent_zero_district_counts.get(key, 0) + 1
+        persistent_zero_day_count += int(diagnostics.get("persistent_zero_day_count") or 0)
+        for key, count in dict(diagnostics.get("neutralized_day_count_by_district") or {}).items():
+            if str(key) in DISTRICT_KEYS:
+                persistent_zero_day_count_by_district[str(key)] = (
+                    persistent_zero_day_count_by_district.get(str(key), 0) + int(count)
+                )
         if (
             estimate.warning
             and int(diagnostics.get("initial_window_valid_day_count") or 0)
@@ -127,6 +151,13 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
             "included_district_keys": list(DISTRICT_KEYS),
             "excluded_district_keys": [],
             "district_selection_mode": "all_districts",
+            "persistent_zero_neutralization_enabled": True,
+            "persistent_zero_sku_count": 0,
+            "persistent_zero_sku_district_count": 0,
+            "persistent_zero_day_count": 0,
+            "persistent_zero_nm_ids": [],
+            "persistent_zero_day_count_by_district": {},
+            "persistent_zero_district_counts": {},
             "warnings": [],
         }
 
@@ -154,6 +185,19 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
         "fallback_nm_ids": fallback_sku_ids,
         "method_counts": method_counts,
         "primary_sku_count": primary_count,
+        "persistent_zero_neutralization_enabled": True,
+        "persistent_zero_sku_count": len(persistent_zero_sku_ids),
+        "persistent_zero_sku_district_count": persistent_zero_sku_district_count,
+        "persistent_zero_day_count": persistent_zero_day_count,
+        "persistent_zero_nm_ids": persistent_zero_sku_ids,
+        "persistent_zero_day_count_by_district": {
+            key: int(value)
+            for key, value in sorted(persistent_zero_day_count_by_district.items())
+        },
+        "persistent_zero_district_counts": {
+            key: int(value)
+            for key, value in sorted(persistent_zero_district_counts.items())
+        },
         "requested_valid_day_count": int(
             items[0].diagnostics.get("requested_valid_day_count") or 0
         ),
@@ -179,6 +223,7 @@ def _estimate_one_sku(
     order_counts_by_date: Mapping[str, Mapping[int, float]],
     current_stock_by_district: Mapping[str, float],
     included_district_keys: tuple[str, ...],
+    persistent_zero_current_stock_max_qty: float,
 ) -> WbRegionalDemandEstimate:
     order_values = [
         float(order_counts_by_date.get(candidate.isoformat(), {}).get(nm_id, 0.0))
@@ -192,6 +237,15 @@ def _estimate_one_sku(
         if baseline_daily_sales > 0
         else 0.0
     )
+    persistent_zero_district_keys = _classify_persistent_zero_districts(
+        nm_id=nm_id,
+        candidate_dates=candidate_dates,
+        stock_by_date=stock_by_date,
+        current_stock_by_district=current_stock_by_district,
+        included_district_keys=included_district_keys,
+        current_stock_max_qty=persistent_zero_current_stock_max_qty,
+    )
+    neutralized_day_count_by_district: dict[str, int] = {}
     selected: list[dict[str, Any]] = []
     excluded_reason_counts: dict[str, int] = {}
     inspected_day_count = 0
@@ -207,7 +261,13 @@ def _estimate_one_sku(
             order_counts_by_date=order_counts_by_date,
             valid_day_threshold=valid_day_threshold,
             included_district_keys=included_district_keys,
+            persistent_zero_district_keys=persistent_zero_district_keys,
         )
+        for key in validation.get("neutralized_district_keys", []):
+            if str(key) in DISTRICT_KEYS:
+                neutralized_day_count_by_district[str(key)] = (
+                    neutralized_day_count_by_district.get(str(key), 0) + 1
+                )
         if validation["valid"]:
             if inspected_day_count <= requested_valid_day_count:
                 initial_window_valid_day_count += 1
@@ -229,6 +289,9 @@ def _estimate_one_sku(
             baseline_daily_sales=baseline_daily_sales,
             valid_day_threshold=valid_day_threshold,
             included_district_keys=included_district_keys,
+            persistent_zero_district_keys=persistent_zero_district_keys,
+            neutralized_day_count_by_district=neutralized_day_count_by_district,
+            persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
         )
 
     return _fallback_estimate(
@@ -246,6 +309,9 @@ def _estimate_one_sku(
         order_counts_by_date=order_counts_by_date,
         current_stock_by_district=current_stock_by_district,
         included_district_keys=included_district_keys,
+        persistent_zero_district_keys=persistent_zero_district_keys,
+        neutralized_day_count_by_district=neutralized_day_count_by_district,
+        persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
     )
 
 
@@ -262,6 +328,9 @@ def _primary_estimate(
     baseline_daily_sales: float,
     valid_day_threshold: float,
     included_district_keys: tuple[str, ...],
+    persistent_zero_district_keys: tuple[str, ...],
+    neutralized_day_count_by_district: Mapping[str, int],
+    persistent_zero_current_stock_max_qty: float,
 ) -> WbRegionalDemandEstimate:
     shares = {key: 0.0 for key in DISTRICT_KEYS}
     for item in selected:
@@ -308,6 +377,9 @@ def _primary_estimate(
         fallback_used=False,
         fallback_reason="",
         included_district_keys=included_district_keys,
+        persistent_zero_district_keys=persistent_zero_district_keys,
+        neutralized_day_count_by_district=neutralized_day_count_by_district,
+        persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
     )
     return WbRegionalDemandEstimate(
         nm_id=nm_id,
@@ -335,6 +407,9 @@ def _fallback_estimate(
     order_counts_by_date: Mapping[str, Mapping[int, float]],
     current_stock_by_district: Mapping[str, float],
     included_district_keys: tuple[str, ...],
+    persistent_zero_district_keys: tuple[str, ...],
+    neutralized_day_count_by_district: Mapping[str, int],
+    persistent_zero_current_stock_max_qty: float,
 ) -> WbRegionalDemandEstimate:
     order_samples: list[tuple[str, float]] = []
     for candidate in candidate_dates:
@@ -396,6 +471,9 @@ def _fallback_estimate(
         fallback_used=True,
         fallback_reason=fallback_reason,
         included_district_keys=included_district_keys,
+        persistent_zero_district_keys=persistent_zero_district_keys,
+        neutralized_day_count_by_district=neutralized_day_count_by_district,
+        persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
     )
     return WbRegionalDemandEstimate(
         nm_id=nm_id,
@@ -415,6 +493,7 @@ def _validate_stock_depletion_day(
     order_counts_by_date: Mapping[str, Mapping[int, float]],
     valid_day_threshold: float,
     included_district_keys: tuple[str, ...],
+    persistent_zero_district_keys: tuple[str, ...],
 ) -> dict[str, Any]:
     current_date = depletion_date.isoformat()
     previous_date = (depletion_date - timedelta(days=1)).isoformat()
@@ -435,6 +514,8 @@ def _validate_stock_depletion_day(
         return _invalid_day(current_date, "low_order_count_signal")
 
     depletions: dict[str, float] = {}
+    persistent_zero_key_set = set(persistent_zero_district_keys)
+    neutralized_district_keys: list[str] = []
     for key in included_district_keys:
         if key not in previous_row or key not in current_row:
             return _invalid_day(current_date, "missing_district_stock")
@@ -449,6 +530,15 @@ def _validate_stock_depletion_day(
         if current_float > previous_float:
             return _invalid_day(current_date, "district_restock_or_upward_correction")
         depletion = previous_float - current_float
+        if (
+            key in persistent_zero_key_set
+            and previous_float == 0
+            and current_float == 0
+            and float(order_count) > 0
+        ):
+            depletions[key] = 0.0
+            neutralized_district_keys.append(key)
+            continue
         if (previous_float <= 0 or current_float <= 0) and (float(order_count) > 0 or depletion > 0):
             return _invalid_day(current_date, "district_out_of_stock_risk")
         depletions[key] = depletion
@@ -456,14 +546,23 @@ def _validate_stock_depletion_day(
     total_depletion = sum(depletions.values())
     if total_depletion <= 0:
         if float(order_count) > 0:
-            return _invalid_day(current_date, "zero_total_depletion_with_positive_order_count")
-        return _invalid_day(current_date, "zero_total_depletion")
+            return _invalid_day(
+                current_date,
+                "zero_total_depletion_with_positive_order_count",
+                neutralized_district_keys=neutralized_district_keys,
+            )
+        return _invalid_day(
+            current_date,
+            "zero_total_depletion",
+            neutralized_district_keys=neutralized_district_keys,
+        )
     return {
         "valid": True,
         "date": current_date,
         "order_count": float(order_count),
         "depletions": depletions,
         "total_depletion": float(total_depletion),
+        "neutralized_district_keys": neutralized_district_keys,
     }
 
 
@@ -485,8 +584,16 @@ def _base_diagnostics(
     fallback_used: bool,
     fallback_reason: str,
     included_district_keys: tuple[str, ...],
+    persistent_zero_district_keys: tuple[str, ...],
+    neutralized_day_count_by_district: Mapping[str, int],
+    persistent_zero_current_stock_max_qty: float,
 ) -> dict[str, Any]:
     excluded_district_keys = [key for key in DISTRICT_KEYS if key not in set(included_district_keys)]
+    neutralized_counts = {
+        key: int(value)
+        for key, value in sorted(dict(neutralized_day_count_by_district).items())
+        if key in DISTRICT_KEYS and int(value) > 0
+    }
     return {
         "regional_demand_method": method,
         "requested_valid_day_count": int(requested_valid_day_count),
@@ -511,12 +618,69 @@ def _base_diagnostics(
         "excluded_district_keys": excluded_district_keys,
         "district_selection_mode": "all_districts" if len(included_district_keys) == len(DISTRICT_KEYS) else "selected_districts",
         "total_daily_demand_source": TOTAL_DAILY_DEMAND_SOURCE_ORDER_COUNT,
+        "persistent_zero_neutralization_enabled": True,
+        "persistent_zero_current_stock_max_qty": float(persistent_zero_current_stock_max_qty),
+        "persistent_zero_district_keys": list(persistent_zero_district_keys),
+        "persistent_zero_sku_district_count": len(persistent_zero_district_keys),
+        "persistent_zero_day_count": sum(neutralized_counts.values()),
+        "neutralized_day_count_by_district": neutralized_counts,
+        "persistent_zero_neutralized_reason": PERSISTENT_ZERO_NEUTRALIZED_REASON,
         "fallback_used": bool(fallback_used),
         "fallback_reason": str(fallback_reason),
         "warning": str(warning),
         "baseline_daily_sales": float(baseline_daily_sales),
         "valid_day_threshold": float(valid_day_threshold),
     }
+
+
+def _classify_persistent_zero_districts(
+    *,
+    nm_id: int,
+    candidate_dates: list[date],
+    stock_by_date: Mapping[str, Mapping[int, Mapping[str, float]]],
+    current_stock_by_district: Mapping[str, float],
+    included_district_keys: tuple[str, ...],
+    current_stock_max_qty: float,
+) -> tuple[str, ...]:
+    """Classify SKU+district pairs where exact 0->0 pairs can be neutralized.
+
+    This deliberately does not salvage positive->0 stockouts, restocks, missing
+    rows or non-numeric data. The neutralizer only suppresses the specific
+    stable-zero day evidence for currently zero/no-signal districts.
+    """
+
+    persistent_keys: list[str] = []
+    for key in included_district_keys:
+        current_stock = current_stock_by_district.get(key)
+        if _is_number(current_stock) and float(current_stock) > max(float(current_stock_max_qty), 0.0):
+            continue
+        zero_zero_pair_count = 0
+        for depletion_date in candidate_dates:
+            current_date = depletion_date.isoformat()
+            previous_date = (depletion_date - timedelta(days=1)).isoformat()
+            previous_snapshot = stock_by_date.get(previous_date)
+            current_snapshot = stock_by_date.get(current_date)
+            if previous_snapshot is None or current_snapshot is None:
+                continue
+            previous_row = previous_snapshot.get(nm_id)
+            current_row = current_snapshot.get(nm_id)
+            if previous_row is None or current_row is None:
+                continue
+            if key not in previous_row or key not in current_row:
+                continue
+            previous_value = previous_row.get(key)
+            current_value = current_row.get(key)
+            if not _is_number(previous_value) or not _is_number(current_value):
+                continue
+            previous_float = float(previous_value)
+            current_float = float(current_value)
+            if previous_float < 0 or current_float < 0:
+                continue
+            if previous_float == 0 and current_float == 0:
+                zero_zero_pair_count += 1
+        if zero_zero_pair_count > 0:
+            persistent_keys.append(key)
+    return tuple(persistent_keys)
 
 
 def _load_temporal_payloads(
@@ -624,11 +788,12 @@ def _normalize_included_district_keys(value: list[str] | tuple[str, ...] | None)
     return included
 
 
-def _invalid_day(snapshot_date: str, reason: str) -> dict[str, Any]:
+def _invalid_day(snapshot_date: str, reason: str, **extra: Any) -> dict[str, Any]:
     return {
         "valid": False,
         "date": snapshot_date,
         "reason": reason,
+        **extra,
     }
 
 

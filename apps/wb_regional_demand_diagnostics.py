@@ -50,6 +50,7 @@ def main() -> None:
         nm_id: current_stock_by_nm.get(nm_id, {key: 0.0 for key in DISTRICT_KEYS})
         for nm_id in nm_ids
     }
+    order_batch_qty = int(settings.get("order_batch_qty") or 250)
 
     all_estimates = estimate_wb_regional_demand(
         runtime=runtime,
@@ -59,6 +60,7 @@ def main() -> None:
         district_field_by_key=_DISTRICT_FIELD_BY_KEY,
         current_stock_by_nm=current_stock_by_nm,
         included_district_keys=tuple(DISTRICT_KEYS),
+        persistent_zero_current_stock_max_qty=max(float(order_batch_qty - 1), 0.0),
     )
     without_far_keys = tuple(key for key in DISTRICT_KEYS if key != DISTRICT_FAR_SIBERIA)
     without_far_estimates = estimate_wb_regional_demand(
@@ -69,9 +71,18 @@ def main() -> None:
         district_field_by_key=_DISTRICT_FIELD_BY_KEY,
         current_stock_by_nm=current_stock_by_nm,
         included_district_keys=without_far_keys,
+        persistent_zero_current_stock_max_qty=max(float(order_batch_qty - 1), 0.0),
     )
-    all_summary = _summary(all_estimates)
-    without_far_summary = _summary(without_far_estimates)
+    all_summary = _summary(
+        all_estimates,
+        current_stock_by_nm=current_stock_by_nm,
+        order_batch_qty=order_batch_qty,
+    )
+    without_far_summary = _summary(
+        without_far_estimates,
+        current_stock_by_nm=current_stock_by_nm,
+        order_batch_qty=order_batch_qty,
+    )
     changed_to_valid = sorted(
         set(all_summary["fallback_nm_ids"]) - set(without_far_summary["fallback_nm_ids"])
     )
@@ -79,6 +90,7 @@ def main() -> None:
         "report_date": report_date.isoformat(),
         "active_sku_count": len(nm_ids),
         "requested_valid_day_count": requested_days,
+        "order_batch_qty": order_batch_qty,
         "with_far_siberia": all_summary,
         "without_far_siberia": without_far_summary,
         "changed_to_valid_count": len(changed_to_valid),
@@ -88,15 +100,33 @@ def main() -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def _summary(estimates: Mapping[int, Any]) -> dict[str, Any]:
+def _summary(
+    estimates: Mapping[int, Any],
+    *,
+    current_stock_by_nm: Mapping[int, Mapping[str, float]],
+    order_batch_qty: int,
+) -> dict[str, Any]:
     diagnostics = build_result_diagnostics(estimates)
     fallback_nm_ids = list(diagnostics.get("fallback_nm_ids") or [])
+    seed_candidate_summary = _seed_candidate_summary(
+        estimates,
+        current_stock_by_nm=current_stock_by_nm,
+        order_batch_qty=order_batch_qty,
+    )
     return {
         "included_district_keys": list(diagnostics.get("included_district_keys") or DISTRICT_KEYS),
         "excluded_district_keys": list(diagnostics.get("excluded_district_keys") or []),
         "valid_sku_count": int(diagnostics.get("primary_sku_count") or 0),
         "fallback_sku_count": int(diagnostics.get("fallback_sku_count") or 0),
         "fallback_nm_ids": fallback_nm_ids,
+        "persistent_zero_sku_count": int(diagnostics.get("persistent_zero_sku_count") or 0),
+        "persistent_zero_sku_district_count": int(diagnostics.get("persistent_zero_sku_district_count") or 0),
+        "persistent_zero_day_count": int(diagnostics.get("persistent_zero_day_count") or 0),
+        "persistent_zero_day_count_by_district": dict(diagnostics.get("persistent_zero_day_count_by_district") or {}),
+        "seed_candidate_sku_count": seed_candidate_summary["seed_candidate_sku_count"],
+        "seed_candidate_sku_district_count": seed_candidate_summary["seed_candidate_sku_district_count"],
+        "seed_requested_qty_total_before_ff_limit": seed_candidate_summary["seed_requested_qty_total_before_ff_limit"],
+        "seed_candidate_nm_ids": seed_candidate_summary["seed_candidate_nm_ids"],
         "min_selected_valid_day_count": int(diagnostics.get("min_selected_valid_day_count") or 0),
         "max_selected_valid_day_count": int(diagnostics.get("max_selected_valid_day_count") or 0),
         "max_inspected_day_count": int(diagnostics.get("max_inspected_day_count") or 0),
@@ -104,6 +134,47 @@ def _summary(estimates: Mapping[int, Any]) -> dict[str, Any]:
             dict(diagnostics.get("excluded_day_reason_counts") or {}).items(),
             key=lambda item: -int(item[1]),
         )[:10],
+    }
+
+
+def _seed_candidate_summary(
+    estimates: Mapping[int, Any],
+    *,
+    current_stock_by_nm: Mapping[int, Mapping[str, float]],
+    order_batch_qty: int,
+) -> dict[str, Any]:
+    candidate_nm_ids: list[int] = []
+    candidate_district_count = 0
+    for nm_id, estimate in estimates.items():
+        diagnostics = getattr(estimate, "diagnostics", {}) or {}
+        included = set(diagnostics.get("included_district_keys") or DISTRICT_KEYS)
+        persistent_zero_keys = [
+            str(item)
+            for item in list(diagnostics.get("persistent_zero_district_keys") or [])
+            if str(item) in included
+        ]
+        sku_candidate_count = 0
+        current_stock = current_stock_by_nm.get(int(nm_id), {})
+        district_daily_demand = getattr(estimate, "district_daily_demand_by_key", {}) or {}
+        if float(getattr(estimate, "daily_demand_total", 0.0) or 0.0) > 0:
+            for key in persistent_zero_keys:
+                try:
+                    stock_value = float(current_stock.get(key, 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    stock_value = 0.0
+                if stock_value >= max(float(order_batch_qty), 1.0):
+                    continue
+                if float(district_daily_demand.get(key, 0.0) or 0.0) != 0.0:
+                    continue
+                sku_candidate_count += 1
+        if sku_candidate_count:
+            candidate_nm_ids.append(int(nm_id))
+            candidate_district_count += sku_candidate_count
+    return {
+        "seed_candidate_sku_count": len(candidate_nm_ids),
+        "seed_candidate_sku_district_count": candidate_district_count,
+        "seed_requested_qty_total_before_ff_limit": int(candidate_district_count * max(int(order_batch_qty), 0)),
+        "seed_candidate_nm_ids": sorted(candidate_nm_ids),
     }
 
 
