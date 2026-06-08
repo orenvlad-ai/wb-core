@@ -23,6 +23,7 @@ from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, 
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.contracts.factory_order_supply import DATASET_STOCK_FF
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
+from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSuccess
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -72,6 +73,7 @@ def main() -> None:
         runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
         active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
         _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids)
+        _seed_runtime_stock_history(runtime, active_nm_ids=active_nm_ids)
 
         factory_block = FactoryOrderSupplyBlock(
             runtime=runtime,
@@ -132,6 +134,13 @@ def main() -> None:
         )
         if result.summary.total_qty != 100:
             raise AssertionError(f"regional summary total must reflect FF-limited allocation, got {result.summary.total_qty}")
+        if result.diagnostics is None or result.diagnostics.get("regional_demand_method") not in {
+            "stock_depletion_valid_days",
+            "mixed_stock_depletion_with_current_stock_share_fallback",
+        }:
+            raise AssertionError(f"result diagnostics must expose stock-depletion methodology, got {result.diagnostics}")
+        if result.diagnostics.get("requested_valid_day_count") != 14:
+            raise AssertionError("result diagnostics must expose requested valid depletion day count")
         if legacy_alias_result.summary.total_qty != result.summary.total_qty:
             raise AssertionError("legacy supply_horizon_days alias must keep the same WB regional math")
         districts = {item.district_key: item for item in result.districts}
@@ -143,6 +152,15 @@ def main() -> None:
             raise AssertionError("summary total must equal the sum of district totals")
         if sum(item.deficit_qty for item in result.districts) != 200:
             raise AssertionError("deficit totals must equal full recommendation minus allocated supply")
+        central_main_row = next(row for row in districts["central"].rows if row.nm_id == MAIN_NM_ID)
+        if not central_main_row.demand_diagnostics:
+            raise AssertionError("district row must carry regional demand diagnostics")
+        if central_main_row.demand_diagnostics.get("regional_demand_method") != "stock_depletion_valid_days":
+            raise AssertionError("main SKU must use stock-depletion valid-day methodology")
+        if central_main_row.demand_diagnostics.get("selected_valid_day_count") != 14:
+            raise AssertionError("main SKU must use 14 selected stock-depletion days")
+        if abs(central_main_row.daily_demand_total - 60.0) > 1e-9:
+            raise AssertionError("total demand must remain based on orderCount, not absolute depletion")
 
         central_workbook, central_filename = regional_block.download_district_recommendation("central")
         central_rows = read_first_sheet_rows(central_workbook)
@@ -202,6 +220,46 @@ def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, activ
         ),
         captured_at=ACTIVATED_AT,
     )
+
+
+def _seed_runtime_stock_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+    first_snapshot = date(2026, 4, 3)
+    for index in range(15):
+        snapshot_date = first_snapshot + timedelta(days=index)
+        items: list[StocksItem] = []
+        for nm_id in active_nm_ids:
+            central = 0.0
+            northwest = 0.0
+            idle_stock = 0.0
+            if nm_id == MAIN_NM_ID:
+                central = 1000.0 - (10.0 * index)
+                northwest = 1000.0 - (10.0 * index)
+                idle_stock = 500.0
+            items.append(
+                StocksItem(
+                    nm_id=int(nm_id),
+                    stock_total=central + northwest + (idle_stock * 4),
+                    stock_ru_central=central,
+                    stock_ru_northwest=northwest,
+                    stock_ru_volga=idle_stock,
+                    stock_ru_ural=idle_stock,
+                    stock_ru_south_caucasus=idle_stock,
+                    stock_ru_far_siberia=idle_stock,
+                )
+            )
+        runtime.save_temporal_source_snapshot(
+            source_key="stocks",
+            snapshot_date=snapshot_date.isoformat(),
+            captured_at=ACTIVATED_AT,
+            payload=StocksEnvelope(
+                result=StocksSuccess(
+                    kind="success",
+                    snapshot_date=snapshot_date.isoformat(),
+                    count=len(items),
+                    items=items,
+                )
+            ),
+        )
 
 
 if __name__ == "__main__":

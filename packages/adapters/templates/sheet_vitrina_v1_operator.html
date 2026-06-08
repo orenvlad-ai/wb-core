@@ -2804,8 +2804,8 @@
                 </div>
               </div>
               <p class="field-note" id="regionalMethodologyNote">
-                Сервер использует общий файл <strong>«Остатки ФФ»</strong>, продажи по SKU и текущие региональные остатки.
-                При дефиците доступного <code>stock_ff</code> применяется legacy allocation по коробам с truthfully рассчитанным дефицитом.
+                Сервер использует общий файл <strong>«Остатки ФФ»</strong>, total orderCount по SKU и доли округов по валидным дням
+                исторического выбывания остатков.
               </p>
             </section>
 
@@ -2848,6 +2848,7 @@
                 </div>
               </dl>
               <p id="regionalMessage" class="section-message"></p>
+              <p id="regionalDiagnosticsNote" class="field-note">Диагностика методологии появится после расчёта.</p>
               <div class="factory-actions">
                 <button id="calculateRegionalSupplyButton" class="action-button primary-button" type="button">Рассчитать поставку на Wildberries</button>
               </div>
@@ -3138,6 +3139,7 @@
       const regionalTotalVolume = document.getElementById("regionalTotalVolume");
       const regionalActiveSkuCount = document.getElementById("regionalActiveSkuCount");
       const regionalMessage = document.getElementById("regionalMessage");
+      const regionalDiagnosticsNote = document.getElementById("regionalDiagnosticsNote");
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
@@ -5228,6 +5230,42 @@
         });
       }
 
+      function renderRegionalDiagnostics(result) {
+        if (!regionalDiagnosticsNote) {
+          return;
+        }
+        if (!result) {
+          regionalDiagnosticsNote.textContent = "Диагностика методологии появится после расчёта.";
+          return;
+        }
+        const diagnostics = result.diagnostics || {};
+        const parts = [];
+        const method = diagnostics.regional_demand_method || "";
+        if (method === "stock_depletion_valid_days") {
+          parts.push("Метод: выбывание остатков по валидным дням");
+        } else if (method === "current_stock_share_fallback") {
+          parts.push("Метод: fallback на текущую структуру остатков");
+        } else if (method === "mixed_stock_depletion_with_current_stock_share_fallback") {
+          parts.push("Метод: смешанный, часть SKU в fallback");
+        } else if (method) {
+          parts.push("Метод: " + method);
+        }
+        if (diagnostics.requested_valid_day_count) {
+          parts.push("валидных дней: " + valueOrDash(diagnostics.min_selected_valid_day_count) + "-" + valueOrDash(diagnostics.max_selected_valid_day_count) + " из " + valueOrDash(diagnostics.requested_valid_day_count));
+        }
+        if (diagnostics.max_inspected_day_count) {
+          parts.push("проверено до " + valueOrDash(diagnostics.max_inspected_day_count) + " дней");
+        }
+        if (diagnostics.fallback_sku_count) {
+          parts.push("fallback SKU: " + valueOrDash(diagnostics.fallback_sku_count));
+        }
+        const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+        if (warnings.length) {
+          parts.push("Предупреждение: " + warnings[0]);
+        }
+        regionalDiagnosticsNote.textContent = parts.length ? parts.join(" · ") : "Диагностика методологии недоступна.";
+      }
+
       function renderRegionalResult(result, fallbackActiveSkuCount) {
         if (!result) {
           regionalResultStatus.textContent = "ещё не рассчитывался";
@@ -5238,6 +5276,7 @@
           regionalTotalWeight.textContent = "-";
           regionalTotalVolume.textContent = "-";
           regionalActiveSkuCount.textContent = valueOrDash(fallbackActiveSkuCount);
+          renderRegionalDiagnostics(null);
           renderRegionalDistricts([]);
           return;
         }
@@ -5250,6 +5289,7 @@
         regionalTotalQty.textContent = valueOrDash(summary.total_qty);
         regionalTotalWeight.textContent = valueOrDash(summary.estimated_weight);
         regionalTotalVolume.textContent = valueOrDash(summary.estimated_volume);
+        renderRegionalDiagnostics(result);
         renderRegionalDistricts(result.districts || []);
       }
 
@@ -6309,7 +6349,13 @@
           }
           renderRegionalResult(payload, payload.active_sku_count);
           regionalMethodologyNote.textContent = valueOrDash(payload.methodology_note);
-          setRegionalMessage("Расчёт завершён. XLSX по федеральным округам готовы к скачиванию.", "success");
+          const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
+          setRegionalMessage(
+            warnings.length
+              ? "Расчёт завершён с предупреждениями: " + warnings.join(" ")
+              : "Расчёт завершён. XLSX по федеральным округам готовы к скачиванию.",
+            warnings.length ? "warning" : "success"
+          );
           await loadRegionalStatus();
         } catch (error) {
           setRegionalMessage(

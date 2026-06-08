@@ -38,6 +38,7 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
+from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSuccess
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -113,6 +114,7 @@ def main() -> None:
 
             active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
             _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids)
+            _seed_runtime_stock_history(runtime, active_nm_ids=active_nm_ids)
             entrypoint.wb_regional_supply_block.stocks_block = FakeStocksBlock(active_nm_ids)
             entrypoint.wb_regional_supply_block.sales_funnel_history_block = NoopSalesHistoryBlock()
             entrypoint.wb_regional_supply_block.sales_history.sales_funnel_history_block = NoopSalesHistoryBlock()
@@ -127,6 +129,7 @@ def main() -> None:
                 "Доставка до склада Wildberries, дней",
                 "Рассчитать поставку на Wildberries",
                 "Сводка по федеральным округам",
+                "Диагностика методологии появится после расчёта.",
                 "Скачать Excel",
                 "<th>Общее количество</th>",
                 "<th>Дефицит</th>",
@@ -186,6 +189,14 @@ def main() -> None:
             )
             if calc_status != 200:
                 raise AssertionError(f"regional calculate route must succeed, got {calc_status} {calc_payload}")
+            diagnostics = calc_payload.get("diagnostics") or {}
+            if diagnostics.get("regional_demand_method") not in {
+                "stock_depletion_valid_days",
+                "mixed_stock_depletion_with_current_stock_share_fallback",
+            }:
+                raise AssertionError(f"regional diagnostics must expose stock-depletion methodology, got {diagnostics}")
+            if diagnostics.get("requested_valid_day_count") != 14:
+                raise AssertionError("regional diagnostics must expose requested depletion day count")
             districts = {item["district_key"]: item for item in calc_payload.get("districts", [])}
             if districts["central"]["total_qty"] != 50 or districts["central"]["deficit_qty"] != 100:
                 raise AssertionError("regional summary must expose truthful central allocation and deficit")
@@ -193,6 +204,14 @@ def main() -> None:
                 raise AssertionError("regional summary must expose truthful northwest allocation and deficit")
             if sum(int(item.get("total_qty", 0)) for item in calc_payload.get("districts", [])) != int(calc_payload.get("summary", {}).get("total_qty", 0)):
                 raise AssertionError("regional HTTP summary total must equal the sum of district totals")
+            central_main_row = next(row for row in districts["central"]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
+            row_diagnostics = central_main_row.get("demand_diagnostics") or {}
+            if row_diagnostics.get("regional_demand_method") != "stock_depletion_valid_days":
+                raise AssertionError(f"main SKU must use stock-depletion diagnostics, got {row_diagnostics}")
+            if row_diagnostics.get("selected_valid_day_count") != 14:
+                raise AssertionError("main SKU must use 14 selected stock-depletion days")
+            if abs(float(central_main_row.get("daily_demand_total", 0.0)) - 60.0) > 1e-9:
+                raise AssertionError("main SKU total daily demand must remain based on orderCount")
 
             central_download_path = districts["central"].get("download_path")
             if central_download_path != "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx":
@@ -266,6 +285,46 @@ def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, activ
         ),
         captured_at=ACTIVATED_AT,
     )
+
+
+def _seed_runtime_stock_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+    first_snapshot = date(2026, 4, 3)
+    for index in range(15):
+        snapshot_date = first_snapshot + timedelta(days=index)
+        items: list[StocksItem] = []
+        for nm_id in active_nm_ids:
+            central = 0.0
+            northwest = 0.0
+            idle_stock = 0.0
+            if nm_id == MAIN_NM_ID:
+                central = 1000.0 - (10.0 * index)
+                northwest = 1000.0 - (10.0 * index)
+                idle_stock = 500.0
+            items.append(
+                StocksItem(
+                    nm_id=int(nm_id),
+                    stock_total=central + northwest + (idle_stock * 4),
+                    stock_ru_central=central,
+                    stock_ru_northwest=northwest,
+                    stock_ru_volga=idle_stock,
+                    stock_ru_ural=idle_stock,
+                    stock_ru_south_caucasus=idle_stock,
+                    stock_ru_far_siberia=idle_stock,
+                )
+            )
+        runtime.save_temporal_source_snapshot(
+            source_key="stocks",
+            snapshot_date=snapshot_date.isoformat(),
+            captured_at=ACTIVATED_AT,
+            payload=StocksEnvelope(
+                result=StocksSuccess(
+                    kind="success",
+                    snapshot_date=snapshot_date.isoformat(),
+                    count=len(items),
+                    items=items,
+                )
+            ),
+        )
 
 
 def _reserve_free_port() -> int:
