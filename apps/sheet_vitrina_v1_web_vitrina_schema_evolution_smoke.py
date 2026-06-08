@@ -6,9 +6,13 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import socket
 import sys
 from tempfile import TemporaryDirectory
+import threading
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +20,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
+from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_SHEET_OPERATOR_UI_PATH,
+    DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
+    DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+    DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
+    DEFAULT_UPLOAD_PATH,
+    build_registry_upload_http_server,
+)
+from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
     SheetVitrinaV1TemporalSlot,
@@ -135,6 +151,8 @@ def main() -> None:
             "new average SPP proxy must be blank only where old snapshot lacks the row",
         )
 
+        _assert_page_composition_http_schema_evolution(runtime=runtime, runtime_dir=Path(tmp) / "runtime")
+
     print("web_vitrina_schema_evolution_period_read: ok")
 
 
@@ -238,6 +256,95 @@ def _build_snapshot(*, snapshot_id: str, as_of_date: str, rows: list[list[Any]])
 def _assert_values(actual: dict[str, Any], expected: dict[str, Any], label: str) -> None:
     if actual != expected:
         raise AssertionError(f"{label}: expected {expected!r}, got {actual!r}")
+
+
+def _assert_page_composition_http_schema_evolution(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    runtime_dir: Path,
+) -> None:
+    entrypoint = RegistryUploadHttpEntrypoint(
+        runtime_dir=runtime_dir,
+        runtime=runtime,
+        activated_at_factory=lambda: "2026-04-22T08:00:00Z",
+        now_factory=lambda: NOW,
+    )
+    config = RegistryUploadHttpEntrypointConfig(
+        host="127.0.0.1",
+        port=_reserve_free_port(),
+        upload_path=DEFAULT_UPLOAD_PATH,
+        sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+        sheet_refresh_path="/v1/sheet-vitrina-v1/refresh",
+        sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+        sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
+        runtime_dir=runtime_dir,
+    )
+    server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{config.port}"
+        old_period_url = (
+            f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}"
+            f"?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
+            f"&date_from={OLD_DATE}&date_to={OLD_DATE}"
+        )
+        old_period_status, old_period_payload = _get_json_strict(old_period_url)
+        if old_period_status != 200:
+            raise AssertionError(f"old-bundle page composition must return 200 JSON, got {old_period_status}")
+        if old_period_payload.get("composition_name") != "web_vitrina_page_composition":
+            raise AssertionError(f"old-bundle page composition identity mismatch, got {old_period_payload}")
+        if (old_period_payload.get("status_summary") or {}).get("source_status_snapshot_as_of_date") != OLD_DATE:
+            raise AssertionError(f"old-bundle source-status snapshot key mismatch, got {old_period_payload}")
+        old_loading_table = (old_period_payload.get("activity_surface") or {}).get("loading_table") or {}
+        if old_loading_table.get("source_status_state") != "not_loaded":
+            raise AssertionError(f"old-bundle page shell must stay lazy/not_loaded, got {old_loading_table}")
+
+        details_status, details_payload = _get_json_strict(old_period_url + "&include_source_status=1")
+        if details_status != 200:
+            raise AssertionError(f"old-bundle source-status page composition must return 200 JSON, got {details_status}")
+        details_loading_table = (details_payload.get("activity_surface") or {}).get("loading_table") or {}
+        if details_loading_table.get("source_status_state") == "missing_snapshot":
+            raise AssertionError(f"old-bundle source-status details must read any-bundle snapshot, got {details_loading_table}")
+        if not details_loading_table.get("rows"):
+            raise AssertionError(f"old-bundle source-status details must expose persisted status rows, got {details_loading_table}")
+
+        mixed_period_status, mixed_period_payload = _get_json_strict(
+            f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}"
+            f"?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
+            f"&date_from={OLD_DATE}&date_to={NEW_DATE}"
+        )
+        if mixed_period_status != 200:
+            raise AssertionError(f"mixed-bundle page composition must return 200 JSON, got {mixed_period_status}")
+        if (mixed_period_payload.get("status_summary") or {}).get("source_status_snapshot_as_of_date") != NEW_DATE:
+            raise AssertionError(f"mixed-bundle source-status snapshot key mismatch, got {mixed_period_payload}")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def _reserve_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _get_json_strict(url: str) -> tuple[int, dict[str, Any]]:
+    try:
+        with urllib_request.urlopen(url, timeout=20) as response:
+            body = response.read()
+            content_type = str(response.headers.get("Content-Type") or "")
+            if "application/json" not in content_type:
+                prefix = body[:500].decode("utf-8", "replace").replace("\n", " ")
+                raise AssertionError(f"expected JSON content-type, got {content_type!r}: {prefix}")
+            return int(response.status), json.loads(body.decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        body = exc.read()
+        content_type = str(exc.headers.get("Content-Type") or "")
+        if "application/json" not in content_type:
+            prefix = body[:500].decode("utf-8", "replace").replace("\n", " ")
+            raise AssertionError(f"expected JSON error response, got status={exc.code} content_type={content_type!r}: {prefix}") from exc
+        return int(exc.code), json.loads(body.decode("utf-8"))
 
 
 if __name__ == "__main__":

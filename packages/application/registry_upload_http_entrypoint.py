@@ -855,8 +855,9 @@ class RegistryUploadHttpEntrypoint:
             available_dates=group_refresh_available_dates,
             default_refresh_date=group_refresh_default_date,
             metric_labels_by_source=metric_labels_by_source,
-            group_last_updated_at=_source_group_last_updated_at_for_snapshot(
-                self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=source_status_snapshot_as_of_date),
+            group_last_updated_at=_source_group_last_updated_at_for_runtime_snapshot(
+                self.runtime,
+                snapshot_as_of_date=source_status_snapshot_as_of_date,
                 fallback_updated_at=str(contract.meta.refreshed_at),
             ),
         )
@@ -1373,7 +1374,7 @@ class RegistryUploadHttpEntrypoint:
         read_model: str,
         job_path: str,
     ) -> dict[str, Any]:
-        refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_as_of_date)
+        refresh_status = self.runtime.load_sheet_vitrina_refresh_status_any_bundle(as_of_date=snapshot_as_of_date)
         latest_refresh_job = self.operator_jobs.latest_relevant_job(
             operations=("refresh", "auto_update", "refresh_group"),
             preferred_as_of_date=snapshot_as_of_date,
@@ -1445,8 +1446,9 @@ class RegistryUploadHttpEntrypoint:
                 available_dates=group_refresh_available_dates,
                 default_refresh_date=group_refresh_default_date,
                 metric_labels_by_source=metric_labels_by_source,
-                group_last_updated_at=_source_group_last_updated_at_for_snapshot(
-                    self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date),
+                group_last_updated_at=_source_group_last_updated_at_for_runtime_snapshot(
+                    self.runtime,
+                    snapshot_as_of_date=snapshot_as_of_date,
                     fallback_updated_at=refreshed_at,
                 ),
             ),
@@ -3991,7 +3993,7 @@ def _web_vitrina_source_status_snapshot_id(
     if str(getattr(contract.meta, "as_of_date", "") or "") == snapshot_as_of_date:
         return contract_snapshot_id
     try:
-        return str(runtime.load_sheet_vitrina_ready_snapshot(as_of_date=snapshot_as_of_date).snapshot_id)
+        return str(runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=snapshot_as_of_date).snapshot_id)
     except Exception:  # pragma: no cover - best-effort display metadata
         return contract_snapshot_id
 
@@ -5965,6 +5967,22 @@ def _source_group_last_updated_at_for_snapshot(
     for group_id in WEB_VITRINA_SOURCE_GROUP_ORDER:
         result.setdefault(group_id, fallback_updated_at)
     return result
+
+
+def _source_group_last_updated_at_for_runtime_snapshot(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    snapshot_as_of_date: str,
+    fallback_updated_at: str,
+) -> dict[str, str]:
+    try:
+        snapshot = runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=snapshot_as_of_date)
+    except Exception:  # pragma: no cover - timestamp metadata is best-effort shell context
+        return _source_group_updated_at_metadata(metadata={}, fallback_updated_at=fallback_updated_at)
+    return _source_group_last_updated_at_for_snapshot(
+        snapshot,
+        fallback_updated_at=fallback_updated_at,
+    )
 
 
 def _web_vitrina_loading_table_columns(
