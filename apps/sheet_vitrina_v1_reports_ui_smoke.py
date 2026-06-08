@@ -188,7 +188,7 @@ def main() -> None:
         raise AssertionError("stock-report must not auto-load on init or refresh completion")
     if '<th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение %</th>' not in html:
         raise AssertionError("plan-report tables must use the compact five-column layout")
-    if "<th>Статус</th>" in html:
+    if '<table class="plan-report-table"' in html and "<th>Статус</th>" in html.split('<table class="plan-report-table"', 1)[1].split("</table>", 1)[0]:
         raise AssertionError("plan-report metric tables must not expose a separate Status column")
     if 'class="plan-report-card is-primary"' in html or ".plan-report-card.is-primary" in html:
         raise AssertionError("selected plan-report card must not keep a wide primary special case")

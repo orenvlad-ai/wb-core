@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from packages.contracts.factory_order_supply import FactoryOrderDatasetState
 
@@ -46,6 +47,8 @@ class WbRegionalSupplyDistrictRow:
     target_stock_after_arrival: float
     daily_demand_total: float
     district_daily_demand: float
+    raw_recommendation_qty: float = 0.0
+    demand_diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,8 @@ class WbRegionalSupplyCalculationResult:
     shared_datasets: dict[str, FactoryOrderDatasetState]
     summary: WbRegionalSupplySummary
     districts: list[WbRegionalSupplyDistrictResult]
+    diagnostics: dict[str, Any] | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

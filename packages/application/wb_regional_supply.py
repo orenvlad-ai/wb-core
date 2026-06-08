@@ -15,6 +15,10 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
 from packages.application.stocks_block import StocksBlock
+from packages.application.wb_regional_demand import (
+    build_result_diagnostics as _build_regional_demand_result_diagnostics,
+    estimate_wb_regional_demand as _estimate_wb_regional_demand,
+)
 from packages.business_time import current_business_date_iso
 from packages.contracts.factory_order_supply import (
     DATASET_STOCK_FF,
@@ -58,10 +62,12 @@ _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
 _DEFAULT_CYCLE_SUPPLY_DAYS = 7
 _METHODOLOGY_NOTE = (
     "Расчёт использует общий файл «Остатки ФФ» из этой же вкладки. "
-    "Сервер берёт total orderCount по SKU и current stock rows по 6 федеральным округам; "
-    "пока в wb-core нет отдельного authoritative district sales source, district daily demand "
-    "раскладывается по текущей структуре региональных остатков, после чего применяется legacy "
-    "box allocation against available stock_ff с truthfully рассчитанным deficit."
+    "Сервер берёт total orderCount по SKU, а региональные доли считает по историческому "
+    "выбыванию остатков на валидных clean days по 6 федеральным округам. "
+    "sales_avg_period_days означает запрошенное число валидных дней выбывания; dirty days "
+    "исключаются целиком, fallback на текущую структуру остатков допускается только явно "
+    "с diagnostics. Ограниченный stock_ff распределяется по коробам сначала по marginal saved units, "
+    "затем по coverage days и district demand."
 )
 
 
@@ -116,8 +122,6 @@ class WbRegionalSupplyBlock:
         stock_ff_rows = self._load_stock_ff_rows()
         report_date = settings.report_date_override or current_business_date_iso(self.now_factory())
         report_date_obj = date.fromisoformat(report_date)
-        history_from = report_date_obj - timedelta(days=settings.sales_avg_period_days)
-        history_to = report_date_obj - timedelta(days=1)
 
         nm_ids = [nm_id for nm_id, _ in active_skus]
         stock_response = self.stocks_block.execute(
@@ -141,27 +145,33 @@ class WbRegionalSupplyBlock:
                 f"{report_date}: " + ", ".join(str(item) for item in missing)
             )
 
-        order_counts_by_nm = self.sales_history.load_order_count_samples(
-            date_from=history_from.isoformat(),
-            date_to=history_to.isoformat(),
-            nm_ids=nm_ids,
-        )
         stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in stock_ff_rows}
+        current_stock_by_nm = {
+            nm_id: {
+                district_key: float(getattr(stock_items[nm_id], _DISTRICT_FIELD_BY_KEY[district_key], 0.0) or 0.0)
+                for district_key in DISTRICT_KEYS
+            }
+            for nm_id in nm_ids
+        }
+        regional_demand_by_nm = _estimate_wb_regional_demand(
+            runtime=self.runtime,
+            report_date=report_date_obj,
+            nm_ids=nm_ids,
+            requested_valid_day_count=settings.sales_avg_period_days,
+            district_field_by_key=_DISTRICT_FIELD_BY_KEY,
+            current_stock_by_nm=current_stock_by_nm,
+        )
+        result_diagnostics = _build_regional_demand_result_diagnostics(regional_demand_by_nm)
+        result_warnings = tuple(str(item) for item in result_diagnostics.get("warnings", []) if item)
         district_rows_by_key: dict[str, list[WbRegionalSupplyDistrictRow]] = {key: [] for key in DISTRICT_KEYS}
 
         for nm_id, sku_comment in active_skus:
-            stock_item = stock_items[nm_id]
-            order_samples = order_counts_by_nm.get(nm_id, [])
-            daily_demand_total = sum(order_samples) / len(order_samples) if order_samples else 0.0
-            district_stock_by_key = {
-                district_key: float(getattr(stock_item, _DISTRICT_FIELD_BY_KEY[district_key], 0.0) or 0.0)
-                for district_key in DISTRICT_KEYS
-            }
-            district_daily_demand_by_key = _split_daily_demand_by_district(
-                daily_demand_total=daily_demand_total,
-                district_stock_by_key=district_stock_by_key,
-            )
+            demand_estimate = regional_demand_by_nm[nm_id]
+            daily_demand_total = float(demand_estimate.daily_demand_total)
+            district_stock_by_key = current_stock_by_nm[nm_id]
+            district_daily_demand_by_key = demand_estimate.district_daily_demand_by_key
             full_recommendation_by_key: dict[str, int] = {}
+            raw_recommendation_by_key: dict[str, float] = {}
             row_payloads_by_key: dict[str, dict[str, Any]] = {}
             for district_key in DISTRICT_KEYS:
                 current_stock = district_stock_by_key[district_key]
@@ -180,12 +190,14 @@ class WbRegionalSupplyBlock:
                     else 0
                 )
                 full_recommendation_by_key[district_key] = full_recommendation_qty
+                raw_recommendation_by_key[district_key] = raw_recommendation
                 row_payloads_by_key[district_key] = {
                     "nm_id": nm_id,
                     "sku_comment": sku_comment,
                     "current_stock": current_stock,
                     "projected_stock_on_eta": projected_stock_on_eta,
                     "target_stock_after_arrival": target_stock_after_arrival,
+                    "raw_recommendation_qty": raw_recommendation,
                     "daily_demand_total": daily_demand_total,
                     "district_daily_demand": district_daily_demand,
                     "full_recommendation_qty": full_recommendation_qty,
@@ -193,6 +205,7 @@ class WbRegionalSupplyBlock:
 
             allocated_by_key = _allocate_boxes(
                 full_recommendation_by_key=full_recommendation_by_key,
+                raw_recommendation_by_key=raw_recommendation_by_key,
                 district_daily_demand_by_key=district_daily_demand_by_key,
                 projected_stock_by_key={
                     district_key: float(row_payloads_by_key[district_key]["projected_stock_on_eta"])
@@ -222,6 +235,10 @@ class WbRegionalSupplyBlock:
                         district_daily_demand=float(
                             row_payloads_by_key[district_key]["district_daily_demand"]
                         ),
+                        raw_recommendation_qty=float(
+                            row_payloads_by_key[district_key]["raw_recommendation_qty"]
+                        ),
+                        demand_diagnostics=dict(demand_estimate.diagnostics),
                     )
                 )
 
@@ -253,6 +270,8 @@ class WbRegionalSupplyBlock:
                 estimated_volume=round((total_qty * _WEIGHT_COEFFICIENT) / _VOLUME_DIVISOR, 2),
             ),
             districts=districts,
+            diagnostics=result_diagnostics,
+            warnings=result_warnings,
         )
         self._validate_result_consistency(result)
         for district in result.districts:
@@ -328,6 +347,8 @@ class WbRegionalSupplyBlock:
         summary_payload = payload.get("summary") or {}
         shared_datasets_payload = payload.get("shared_datasets") or {}
         districts_payload = payload.get("districts") or []
+        diagnostics_payload = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), Mapping) else None
+        warnings_payload = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
         return WbRegionalSupplyCalculationResult(
             status=str(payload.get("status", "")),
             calculation_id=str(payload.get("calculation_id", "")),
@@ -395,6 +416,12 @@ class WbRegionalSupplyBlock:
                             target_stock_after_arrival=float(row.get("target_stock_after_arrival", 0.0)),
                             daily_demand_total=float(row.get("daily_demand_total", 0.0)),
                             district_daily_demand=float(row.get("district_daily_demand", 0.0)),
+                            raw_recommendation_qty=float(row.get("raw_recommendation_qty", 0.0)),
+                            demand_diagnostics=(
+                                dict(row.get("demand_diagnostics"))
+                                if isinstance(row.get("demand_diagnostics"), Mapping)
+                                else None
+                            ),
                         )
                         for row in item.get("rows", [])
                         if isinstance(row, Mapping)
@@ -403,6 +430,8 @@ class WbRegionalSupplyBlock:
                 for item in districts_payload
                 if isinstance(item, Mapping)
             ],
+            diagnostics=dict(diagnostics_payload) if diagnostics_payload is not None else None,
+            warnings=tuple(str(item) for item in warnings_payload if item),
         )
 
     def _validate_result_consistency(self, result: WbRegionalSupplyCalculationResult) -> None:
@@ -557,26 +586,10 @@ def _parse_dotted_date(value: str) -> str | None:
         return None
 
 
-def _split_daily_demand_by_district(
-    *,
-    daily_demand_total: float,
-    district_stock_by_key: Mapping[str, float],
-) -> dict[str, float]:
-    if daily_demand_total <= 0:
-        return {key: 0.0 for key in DISTRICT_KEYS}
-    positive_stock_total = sum(max(float(district_stock_by_key.get(key, 0.0)), 0.0) for key in DISTRICT_KEYS)
-    if positive_stock_total <= 0:
-        equal_share = daily_demand_total / len(DISTRICT_KEYS)
-        return {key: equal_share for key in DISTRICT_KEYS}
-    return {
-        key: daily_demand_total * (max(float(district_stock_by_key.get(key, 0.0)), 0.0) / positive_stock_total)
-        for key in DISTRICT_KEYS
-    }
-
-
 def _allocate_boxes(
     *,
     full_recommendation_by_key: Mapping[str, int],
+    raw_recommendation_by_key: Mapping[str, float],
     district_daily_demand_by_key: Mapping[str, float],
     projected_stock_by_key: Mapping[str, float],
     available_stock_ff: float,
@@ -599,21 +612,33 @@ def _allocate_boxes(
         ]
         if not candidates:
             break
-        chosen = min(
+        chosen = max(
             candidates,
             key=lambda key: (
-                _coverage_days(
+                _marginal_saved_units(
+                    raw_shortage_units=raw_recommendation_by_key.get(key, 0.0),
+                    allocated_qty=allocated[key],
+                    order_batch_qty=order_batch_qty,
+                ),
+                -_coverage_days(
                     projected_stock=projected_stock_by_key.get(key, 0.0),
                     allocated_qty=allocated[key],
                     avg_day=district_daily_demand_by_key.get(key, 0.0),
                 ),
-                -float(district_daily_demand_by_key.get(key, 0.0)),
-                _DISTRICT_ORDER_INDEX[key],
+                float(district_daily_demand_by_key.get(key, 0.0)),
+                -_DISTRICT_ORDER_INDEX[key],
             ),
         )
         allocated[chosen] += order_batch_qty
         remaining -= order_batch_qty
     return allocated
+
+
+def _marginal_saved_units(*, raw_shortage_units: float, allocated_qty: int, order_batch_qty: int) -> float:
+    return min(
+        float(order_batch_qty),
+        max(float(raw_shortage_units) - float(allocated_qty), 0.0),
+    )
 
 
 def _coverage_days(*, projected_stock: float, allocated_qty: int, avg_day: float) -> float:
