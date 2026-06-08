@@ -133,7 +133,7 @@ def main() -> None:
                 raise AssertionError(f"web-vitrina rows mismatch, got {row_ids}")
 
             period_status, period_payload = _get_json(
-                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?date_from=2026-04-18&date_to=2026-04-20"
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?history_mode=explicit&date_from=2026-04-18&date_to=2026-04-20"
             )
             if period_status != 200:
                 raise AssertionError(f"web-vitrina period route must return 200, got {period_status}")
@@ -208,7 +208,7 @@ def main() -> None:
                 raise AssertionError(f"default history metadata must expose canonical rolling two-week range, got {historical_access}")
             if historical_access.get("default_preset_id") != "two_weeks" or historical_access.get("default_preset_label") != "2 недели":
                 raise AssertionError(f"default preset must remain two_weeks / 2 недели, got {historical_access}")
-            if historical_access.get("supported_query_mode") != "date_window":
+            if historical_access.get("supported_query_mode") != "history_mode_explicit_date_window":
                 raise AssertionError(f"web-vitrina historical query mode mismatch, got {historical_access}")
             if [item.get("value") for item in historical_access.get("options") or []] != [
                 "2026-04-20",
@@ -298,13 +298,27 @@ def main() -> None:
                 f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&date_from=2026-04-18&date_to=2026-04-20"
             )
             if period_composition_status != 200:
-                raise AssertionError(f"web-vitrina period page composition must return 200, got {period_composition_status}")
-            if period_composition_payload.get("historical_access", {}).get("current_mode") != "historical_period":
-                raise AssertionError(f"web-vitrina period page composition mode mismatch, got {period_composition_payload}")
-            if period_composition_payload.get("historical_access", {}).get("selected_date_from") != "2026-04-18":
-                raise AssertionError(f"web-vitrina period selected_date_from mismatch, got {period_composition_payload}")
-            if period_composition_payload.get("historical_access", {}).get("selected_date_to") != "2026-04-20":
-                raise AssertionError(f"web-vitrina period selected_date_to mismatch, got {period_composition_payload}")
+                raise AssertionError(f"web-vitrina legacy period page composition must return 200, got {period_composition_status}")
+            legacy_history = period_composition_payload.get("historical_access", {})
+            if legacy_history.get("selected_date_from") != "2026-04-07" or legacy_history.get("selected_date_to") != "2026-04-20":
+                raise AssertionError(f"legacy period query without history_mode must be ignored, got {period_composition_payload}")
+            invalid_marker_status, invalid_marker_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&history_mode=legacy&date_from=2026-04-18&date_to=2026-04-20"
+            )
+            invalid_marker_history = invalid_marker_payload.get("historical_access", {})
+            if invalid_marker_status != 200 or invalid_marker_history.get("selected_date_from") != "2026-04-07" or invalid_marker_history.get("selected_date_to") != "2026-04-20":
+                raise AssertionError(f"invalid history_mode must be ignored as no-query default, got {invalid_marker_status} {invalid_marker_payload}")
+            explicit_period_status, explicit_period_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&history_mode=explicit&date_from=2026-04-18&date_to=2026-04-20"
+            )
+            if explicit_period_status != 200:
+                raise AssertionError(f"web-vitrina explicit period page composition must return 200, got {explicit_period_status}")
+            if explicit_period_payload.get("historical_access", {}).get("current_mode") != "historical_period":
+                raise AssertionError(f"web-vitrina explicit period page composition mode mismatch, got {explicit_period_payload}")
+            if explicit_period_payload.get("historical_access", {}).get("selected_date_from") != "2026-04-18":
+                raise AssertionError(f"web-vitrina explicit period selected_date_from mismatch, got {explicit_period_payload}")
+            if explicit_period_payload.get("historical_access", {}).get("selected_date_to") != "2026-04-20":
+                raise AssertionError(f"web-vitrina explicit period selected_date_to mismatch, got {explicit_period_payload}")
             activity_surface = details_payload.get("activity_surface") or {}
             log_block = activity_surface.get("log_block", {})
             if log_block.get("tone") != "error":

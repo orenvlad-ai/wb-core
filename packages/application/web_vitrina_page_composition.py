@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import date, datetime, timedelta
 from typing import Any, Mapping
 
-from packages.business_time import CANONICAL_BUSINESS_TIMEZONE_NAME
+from packages.business_time import CANONICAL_BUSINESS_TIMEZONE_NAME, current_business_date_iso
 from packages.contracts.web_vitrina_contract import WebVitrinaContractV1
 from packages.contracts.web_vitrina_gravity_table_adapter import WebVitrinaGravityTableAdapterV1
 from packages.contracts.web_vitrina_view_model import WebVitrinaViewModelV1
@@ -16,6 +17,36 @@ WEB_VITRINA_PAGE_STATE_NAMESPACE = "wb-core:sheet-vitrina-v1:web-vitrina:page-st
 WEB_VITRINA_DEFAULT_PRESET_ID = "two_weeks"
 WEB_VITRINA_DEFAULT_PRESET_LABEL = "2 недели"
 _ALL_OPTION_VALUE = "__all__"
+
+
+@dataclass(frozen=True)
+class WebVitrinaDefaultPeriod:
+    date_from: str
+    date_to: str
+    preset_id: str = WEB_VITRINA_DEFAULT_PRESET_ID
+    source: str = "backend_default"
+    reason: str = "rolling_two_week_period_ending_backend_today"
+
+    def inclusive_dates(self) -> list[str]:
+        start = date.fromisoformat(self.date_from)
+        end = date.fromisoformat(self.date_to)
+        if end < start:
+            return []
+        return [
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        ]
+
+
+def resolve_web_vitrina_default_period(now: datetime) -> WebVitrinaDefaultPeriod:
+    """Backend-owned web-vitrina default period: rolling 14 days ending business today."""
+
+    date_to = current_business_date_iso(now)
+    end_date = date.fromisoformat(date_to)
+    return WebVitrinaDefaultPeriod(
+        date_from=(end_date - timedelta(days=13)).isoformat(),
+        date_to=date_to,
+    )
 
 
 def build_web_vitrina_page_composition(
@@ -919,7 +950,10 @@ def _build_historical_access(
         "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
         "browser_state_persistence": "none",
         "url_state_mode": "query_string",
-        "supported_query_mode": "date_window",
+        "supported_query_mode": "history_mode_explicit_date_window",
+        "history_mode_required": True,
+        "explicit_history_mode_param": "history_mode",
+        "explicit_history_mode_value": "explicit",
         "page_route": page_route,
         "default_as_of_date": default_as_of_date,
         "default_date_from": default_from,
@@ -927,6 +961,10 @@ def _build_historical_access(
         "default_preset_id": normalized_default_preset_id,
         "default_preset_label": WEB_VITRINA_DEFAULT_PRESET_LABEL,
         "default_period_semantics": "rolling_two_week_period_ending_backend_today",
+        "default_period_source": "backend_default",
+        "default_period_reason": "rolling_two_week_period_ending_backend_today",
+        "default_period_business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
+        "default_period_inclusive_days": _inclusive_date_count(default_from, default_to),
         "selected_as_of_date": selected_date,
         "selected_date_from": selected_from,
         "selected_date_to": selected_to,
@@ -938,6 +976,17 @@ def _build_historical_access(
         "preset_options": preset_options,
         "empty_message": "Исторические ready snapshots пока не materialized.",
     }
+
+
+def _inclusive_date_count(date_from: str, date_to: str) -> int:
+    try:
+        start = date.fromisoformat(date_from)
+        end = date.fromisoformat(date_to)
+    except ValueError:
+        return 0
+    if end < start:
+        return 0
+    return (end - start).days + 1
 
 
 def _resolve_ready_state_message(adapter_payload: Mapping[str, Any]) -> str:

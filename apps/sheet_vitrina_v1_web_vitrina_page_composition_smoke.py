@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -20,6 +21,7 @@ from packages.application.web_vitrina_gravity_table_adapter import (
 from packages.application.web_vitrina_page_composition import (
     build_web_vitrina_page_composition,
     build_web_vitrina_page_error_composition,
+    resolve_web_vitrina_default_period,
 )
 from packages.application.web_vitrina_view_model import build_web_vitrina_view_model
 from packages.contracts.sheet_vitrina_v1 import (
@@ -48,6 +50,7 @@ STATUS_HEADER = [
 
 
 def main() -> None:
+    _assert_backend_default_period_resolver()
     bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
     with TemporaryDirectory(prefix="sheet-vitrina-web-vitrina-page-composition-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
@@ -141,7 +144,7 @@ def main() -> None:
             raise AssertionError(f"historical mode mismatch, got {historical_access}")
         if historical_access["default_as_of_date"] != "2026-04-20":
             raise AssertionError(f"default as_of_date mismatch, got {historical_access}")
-        if historical_access["supported_query_mode"] != "date_window":
+        if historical_access["supported_query_mode"] != "history_mode_explicit_date_window":
             raise AssertionError(f"historical query mode mismatch, got {historical_access}")
         if [item["value"] for item in historical_access["options"]] != [
             "2026-04-20",
@@ -421,6 +424,19 @@ def main() -> None:
         print("web_vitrina_page_composition_table: ok ->", len(composition["table_surface"]["columns"]), len(composition["table_surface"]["rows"]))
         print("web_vitrina_page_composition_deferred_table: ok ->", deferred_table["table_data_state"], deferred_payload_bytes)
         print("web_vitrina_page_composition_error: ok ->", error_payload["meta"]["current_state"])
+
+
+def _assert_backend_default_period_resolver() -> None:
+    period = resolve_web_vitrina_default_period(
+        datetime(2026, 6, 8, 12, 0, tzinfo=ZoneInfo("Asia/Yekaterinburg"))
+    )
+    if period.date_to != "2026-06-08" or period.date_from != "2026-05-26":
+        raise AssertionError(f"default period resolver mismatch, got {period}")
+    if period.preset_id != "two_weeks" or period.source != "backend_default":
+        raise AssertionError(f"default period resolver metadata mismatch, got {period}")
+    inclusive_dates = period.inclusive_dates()
+    if len(inclusive_dates) != 14 or inclusive_dates[0] != "2026-05-26" or inclusive_dates[-1] != "2026-06-08":
+        raise AssertionError(f"default period must expose 14 inclusive dates, got {inclusive_dates}")
 
 
 def _build_plan(
