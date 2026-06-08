@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 DATASET_STOCK_FF = "stock_ff"
@@ -11,6 +12,8 @@ DATASET_INBOUND_FF_TO_WB = "inbound_ff_to_wb"
 
 FACTORY_INBOUND_SOURCE_MANUAL_EXCEL = "manual_excel"
 FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY = "supplier_registry"
+STOCK_FF_SOURCE_MANUAL_EXCEL = "manual_excel"
+STOCK_FF_SOURCE_ONEC_FF_STOCK = "onec_ff_stock"
 SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS = 30
 
 
@@ -26,6 +29,7 @@ class FactoryOrderSettings:
     report_date_override: str | None
     sales_avg_period_days: int
     factory_inbound_source: str = FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
+    stock_ff_source: str = STOCK_FF_SOURCE_MANUAL_EXCEL
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,23 @@ class FactoryOrderSupplierRegistryInboundState:
     shipment_summary: tuple[FactoryOrderSupplierRegistryShipmentSummary, ...]
     diagnostics: FactoryOrderSupplierRegistryDiagnostics
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FactoryOrderStockFfOnecState:
+    status: str
+    source: str
+    source_label_ru: str
+    snapshot_date: str
+    active_sku_count: int
+    covered_sku_count: int
+    positive_stock_sku_count: int
+    zero_stock_sku_count: int
+    missing_sku_count: int
+    total_stock_ff: float
+    warnings: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    sample_rows: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -182,8 +203,11 @@ class FactoryOrderCalculationResult:
     coverage_contract_note: str
     settings: FactoryOrderSettings
     factory_inbound_source: str
+    stock_ff_source: str
     datasets: dict[str, FactoryOrderDatasetState]
+    manual_stock_ff_dataset: FactoryOrderDatasetState
     manual_factory_inbound_dataset: FactoryOrderDatasetState
+    onec_stock_ff_summary: FactoryOrderStockFfOnecState
     supplier_registry_inbound_summary: FactoryOrderSupplierRegistryInboundState
     effective_inbound_factory_to_ff: list[FactoryOrderEffectiveInboundRow]
     summary: FactoryOrderSummary
@@ -197,7 +221,10 @@ class FactoryOrderStatus:
     active_sku_count: int
     coverage_contract_note: str
     factory_inbound_source: str
+    stock_ff_source: str
     datasets: dict[str, FactoryOrderDatasetState]
+    manual_stock_ff_dataset: FactoryOrderDatasetState
     manual_factory_inbound_dataset: FactoryOrderDatasetState
+    onec_stock_ff_summary: FactoryOrderStockFfOnecState
     supplier_registry_inbound_summary: FactoryOrderSupplierRegistryInboundState
     last_result: FactoryOrderCalculationResult | None

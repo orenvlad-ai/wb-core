@@ -44,6 +44,8 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx`
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check`
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx`
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx`
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/stock-ff`
@@ -418,9 +420,11 @@ Public probe validates:
 - when strict bot/web-source closed-day acceptance is active, `STATUS` / `plan` / job surfaces must disclose truthful closure states (`closure_pending`, `closure_retrying`, `closure_rate_limited`, `closure_exhausted`, `success`) instead of silently reusing provisional same-day values in `yesterday_closed`; if exact closed-day capture is currently blocked but an accepted current snapshot for that same date already exists, the visible closed-day cell may be restored only as `latest_confirmed` fallback (`resolution_rule=accepted_current_from_prior_closed_day_latest_confirmed`) without creating accepted closed truth
 - full refresh and date-scoped group refresh must keep prior confirmed visible cells when a selected source/date status is failed or unavailable, while still updating source STATUS/job diagnostics with the exact failure reason; failed bot/web-source materialization must not silently turn previous values into dashes
 - when promo live wiring is active, `STATUS` / `plan` surfaces must disclose truthful `promo_by_price[*]` source facts, including `success/incomplete/missing`, collector trace note and accepted-current preservation instead of keeping promo rows as a permanent blocked gap
-- `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count and recommendation path
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count, recommendation path, selected `stock_ff_source` and 1C FF_STOCK summary
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns JSON with active SKU count, methodology note, shared dataset state and optional last result
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` returns `200` + XLSX content type for all operator templates with Russian headers
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check` returns controlled JSON summary for the existing materialized 1C `FF_STOCK` source, including ready/partial/missing/error and coverage counts
+- `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx` returns `200` + XLSX with the same headers as the manual `Остатки ФФ` template when 1C coverage is ready, or truthful `422 {"error": ...}` when it is not ready
 - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-*` accepts zero-quantity rows, drops them from normalized runtime payload and coverage, and still accepts a workbook that becomes an empty inbound dataset after zero-row filtering
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/uploaded/*` returns the exact currently stored operator workbook when the dataset is uploaded, or truthful `422 {"error": ...}` when it is absent
 - `DELETE /v1/sheet-vitrina-v1/supply/factory-order/upload/*` returns a truthful deleted/absent state and is reflected back through `GET /v1/sheet-vitrina-v1/supply/factory-order/status`

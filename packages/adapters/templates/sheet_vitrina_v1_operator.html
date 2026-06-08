@@ -2547,16 +2547,68 @@
           <div class="dataset-grid">
             <article class="dataset-card">
               <h3>Остатки ФФ</h3>
+              <div class="source-selector" role="radiogroup" aria-labelledby="stockFfSourceTitle">
+                <h3 id="stockFfSourceTitle">Источник «Остатки ФФ»</h3>
+                <label class="source-option">
+                  <input type="radio" name="stockFfSource" value="manual_excel" checked>
+                  <span>
+                    <strong>Ручной Excel</strong>
+                    <span>Использовать загруженный файл «Остатки ФФ».</span>
+                  </span>
+                </label>
+                <label class="source-option">
+                  <input type="radio" name="stockFfSource" value="onec_ff_stock">
+                  <span>
+                    <strong>1С / Фулфилмент</strong>
+                    <span>Использовать остатки ФФ из 1С stage FF_STOCK.</span>
+                  </span>
+                </label>
+              </div>
               <p class="dataset-status" id="stockFfStatus">Читаем состояние...</p>
-              <div class="dataset-current-file" id="stockFfCurrentFile" hidden>
-                <a id="stockFfCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
-                <button id="deleteStockFfButton" class="dataset-delete-button" type="button" aria-label="Удалить текущий файл остатков ФФ" title="Удалить текущий файл">&times;</button>
+              <div id="stockFfManualPanel">
+                <div class="dataset-current-file" id="stockFfCurrentFile" hidden>
+                  <a id="stockFfCurrentFileLink" class="dataset-file-link" href="#">Скачать загруженный файл</a>
+                  <button id="deleteStockFfButton" class="dataset-delete-button" type="button" aria-label="Удалить текущий файл остатков ФФ" title="Удалить текущий файл">&times;</button>
+                </div>
+                <div class="dataset-actions">
+                  <button id="downloadStockFfTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон остатков ФФ</button>
+                  <input id="stockFfFileInput" type="file" accept=".xlsx">
+                </div>
+                <p class="dataset-upload-hint">После выбора файла загрузка запускается автоматически.</p>
               </div>
-              <div class="dataset-actions">
-                <button id="downloadStockFfTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон остатков ФФ</button>
-                <input id="stockFfFileInput" type="file" accept=".xlsx">
+              <div id="stockFfOnecPanel" hidden>
+                <div class="dataset-actions">
+                  <button id="checkStockFfOnecButton" class="action-button secondary-button" type="button">Проверить данные 1С</button>
+                  <button id="downloadStockFfOnecButton" class="action-button secondary-button" type="button">Скачать Excel для проверки</button>
+                </div>
+                <dl class="summary-grid">
+                  <div>
+                    <dt>Дата данных</dt>
+                    <dd id="stockFfOnecSnapshotDate">-</dd>
+                  </div>
+                  <div>
+                    <dt>Active SKU</dt>
+                    <dd id="stockFfOnecActiveSkuCount">-</dd>
+                  </div>
+                  <div>
+                    <dt>SKU с остатком</dt>
+                    <dd id="stockFfOnecPositiveSkuCount">-</dd>
+                  </div>
+                  <div>
+                    <dt>SKU с нулём</dt>
+                    <dd id="stockFfOnecZeroSkuCount">-</dd>
+                  </div>
+                  <div>
+                    <dt>Missing SKU</dt>
+                    <dd id="stockFfOnecMissingSkuCount">-</dd>
+                  </div>
+                  <div>
+                    <dt>Всего на ФФ</dt>
+                    <dd id="stockFfOnecTotalStock">-</dd>
+                  </div>
+                </dl>
+                <p class="dataset-status" id="stockFfOnecDiagnostics">Проверка 1С ещё не выполнялась.</p>
               </div>
-              <p class="dataset-upload-hint">После выбора файла загрузка запускается автоматически.</p>
               <p id="sharedStockMessage" class="section-message"></p>
             </article>
           </div>
@@ -2660,6 +2712,10 @@
                 <div>
                   <dt>Источник inbound фабрика</dt>
                   <dd id="factoryInboundSourceResult">-</dd>
+                </div>
+                <div>
+                  <dt>Источник Остатков ФФ</dt>
+                  <dd id="stockFfSourceResult">-</dd>
                 </div>
                 <div>
                   <dt>Результат обновлён</dt>
@@ -3085,6 +3141,7 @@
       const factoryResultTargetWindow = document.getElementById("factoryResultTargetWindow");
       const factoryResultInboundWindowEnd = document.getElementById("factoryResultInboundWindowEnd");
       const factoryInboundSourceResult = document.getElementById("factoryInboundSourceResult");
+      const stockFfSourceResult = document.getElementById("stockFfSourceResult");
       const factoryResultCalculatedAt = document.getElementById("factoryResultCalculatedAt");
       const factoryTotalQty = document.getElementById("factoryTotalQty");
       const factoryTotalWeight = document.getElementById("factoryTotalWeight");
@@ -3115,6 +3172,18 @@
       const inboundFactoryFileInput = document.getElementById("inboundFactoryFileInput");
       const inboundFfToWbFileInput = document.getElementById("inboundFfToWbFileInput");
       const factoryInboundSourceInputs = Array.from(document.querySelectorAll("input[name='factoryInboundSource']"));
+      const stockFfSourceInputs = Array.from(document.querySelectorAll("input[name='stockFfSource']"));
+      const stockFfManualPanel = document.getElementById("stockFfManualPanel");
+      const stockFfOnecPanel = document.getElementById("stockFfOnecPanel");
+      const checkStockFfOnecButton = document.getElementById("checkStockFfOnecButton");
+      const downloadStockFfOnecButton = document.getElementById("downloadStockFfOnecButton");
+      const stockFfOnecSnapshotDate = document.getElementById("stockFfOnecSnapshotDate");
+      const stockFfOnecActiveSkuCount = document.getElementById("stockFfOnecActiveSkuCount");
+      const stockFfOnecPositiveSkuCount = document.getElementById("stockFfOnecPositiveSkuCount");
+      const stockFfOnecZeroSkuCount = document.getElementById("stockFfOnecZeroSkuCount");
+      const stockFfOnecMissingSkuCount = document.getElementById("stockFfOnecMissingSkuCount");
+      const stockFfOnecTotalStock = document.getElementById("stockFfOnecTotalStock");
+      const stockFfOnecDiagnostics = document.getElementById("stockFfOnecDiagnostics");
       const downloadStockFfTemplateButton = document.getElementById("downloadStockFfTemplateButton");
       const downloadInboundFactoryTemplateButton = document.getElementById("downloadInboundFactoryTemplateButton");
       const downloadInboundFfToWbTemplateButton = document.getElementById("downloadInboundFfToWbTemplateButton");
@@ -3178,6 +3247,8 @@
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
+      const DEFAULT_STOCK_FF_SOURCE = "manual_excel";
+      const VALID_STOCK_FF_SOURCES = new Set(["manual_excel", "onec_ff_stock"]);
       const WB_SUPPLIES_DEFAULT_SIZE_FILTER = "main_250";
       const WB_SUPPLIES_DEFAULT_LIMIT = 20;
       const STOCK_REPORT_DISTRICT_COLUMNS = [
@@ -3247,6 +3318,7 @@
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
       let persistedOperatorUiState = readPersistedOperatorUiState();
       let factoryInboundSource = normalizeFactoryInboundSource(persistedOperatorUiState.factory_inbound_source);
+      let stockFfSource = normalizeStockFfSource(persistedOperatorUiState.stock_ff_source);
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
@@ -3315,9 +3387,20 @@
         return VALID_FACTORY_INBOUND_SOURCES.has(normalized) ? normalized : DEFAULT_FACTORY_INBOUND_SOURCE;
       }
 
+      function normalizeStockFfSource(value) {
+        const normalized = String(value || "").trim();
+        return VALID_STOCK_FF_SOURCES.has(normalized) ? normalized : DEFAULT_STOCK_FF_SOURCE;
+      }
+
       function factoryInboundSourceLabel(value) {
         return normalizeFactoryInboundSource(value) === "supplier_registry"
           ? "Реестр поставщика"
+          : "Ручной Excel";
+      }
+
+      function stockFfSourceLabel(value) {
+        return normalizeStockFfSource(value) === "onec_ff_stock"
+          ? "1С / Фулфилмент"
           : "Ручной Excel";
       }
 
@@ -3328,6 +3411,25 @@
         });
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ factory_inbound_source: factoryInboundSource });
+        }
+      }
+
+      function setStockFfSource(value, options) {
+        stockFfSource = normalizeStockFfSource(value);
+        stockFfSourceInputs.forEach((input) => {
+          input.checked = input.value === stockFfSource;
+        });
+        if (stockFfManualPanel) {
+          stockFfManualPanel.hidden = stockFfSource !== "manual_excel";
+        }
+        if (stockFfOnecPanel) {
+          stockFfOnecPanel.hidden = stockFfSource !== "onec_ff_stock";
+        }
+        if (stockFfSourceResult) {
+          stockFfSourceResult.textContent = stockFfSourceLabel(stockFfSource);
+        }
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ stock_ff_source: stockFfSource });
         }
       }
 
@@ -5010,6 +5112,7 @@
           payload[key] = factoryFields[key].value;
         });
         payload.factory_inbound_source = factoryInboundSource;
+        payload.stock_ff_source = stockFfSource;
         return payload;
       }
 
@@ -5018,6 +5121,7 @@
         Object.keys(regionalFields).forEach((key) => {
           payload[key] = regionalFields[key].value;
         });
+        payload.stock_ff_source = stockFfSource;
         return payload;
       }
 
@@ -5153,6 +5257,49 @@
         );
       }
 
+      function renderStockFfOnecSummary(state) {
+        const summary = state && typeof state === "object" ? state : {};
+        const status = String(summary.status || "missing");
+        if (stockFfOnecSnapshotDate) {
+          stockFfOnecSnapshotDate.textContent = valueOrDash(summary.snapshot_date);
+        }
+        if (stockFfOnecActiveSkuCount) {
+          stockFfOnecActiveSkuCount.textContent = valueOrDash(summary.active_sku_count);
+        }
+        if (stockFfOnecPositiveSkuCount) {
+          stockFfOnecPositiveSkuCount.textContent = valueOrDash(summary.positive_stock_sku_count);
+        }
+        if (stockFfOnecZeroSkuCount) {
+          stockFfOnecZeroSkuCount.textContent = valueOrDash(summary.zero_stock_sku_count);
+        }
+        if (stockFfOnecMissingSkuCount) {
+          stockFfOnecMissingSkuCount.textContent = valueOrDash(summary.missing_sku_count);
+        }
+        if (stockFfOnecTotalStock) {
+          stockFfOnecTotalStock.textContent = formatNumber(Number(summary.total_stock_ff || 0));
+        }
+        if (!stockFfOnecDiagnostics) {
+          return;
+        }
+        const warnings = Array.isArray(summary.warnings) ? summary.warnings.filter(Boolean) : [];
+        const errors = Array.isArray(summary.errors) ? summary.errors.filter(Boolean) : [];
+        const statusLabel = status === "ready"
+          ? "1С FF_STOCK готов."
+          : status === "partial"
+            ? "1С FF_STOCK покрывает не все active SKU."
+            : status === "error"
+              ? "1С FF_STOCK вернул ошибку проверки."
+              : "1С FF_STOCK пока недоступен.";
+        stockFfOnecDiagnostics.textContent = [
+          statusLabel,
+          warnings.join(" "),
+          errors.join(" ")
+        ].filter(Boolean).join(" ");
+        stockFfOnecDiagnostics.className = "dataset-status" + (
+          status === "ready" ? " is-success" : status === "partial" ? " is-warning" : " is-error"
+        );
+      }
+
       function renderFactoryResult(result) {
         if (!result) {
           factoryResultStatus.textContent = "ещё не рассчитывался";
@@ -5161,6 +5308,7 @@
           factoryResultTargetWindow.textContent = "-";
           factoryResultInboundWindowEnd.textContent = "-";
           factoryInboundSourceResult.textContent = factoryInboundSourceLabel(factoryInboundSource);
+          stockFfSourceResult.textContent = stockFfSourceLabel(stockFfSource);
           factoryResultCalculatedAt.textContent = "-";
           factoryTotalQty.textContent = "-";
           factoryTotalWeight.textContent = "-";
@@ -5174,6 +5322,7 @@
         factoryResultTargetWindow.textContent = valueOrDash(result.target_window_days);
         factoryResultInboundWindowEnd.textContent = valueOrDash(result.inbound_window_end);
         factoryInboundSourceResult.textContent = factoryInboundSourceLabel(result.factory_inbound_source || (result.settings && result.settings.factory_inbound_source) || factoryInboundSource);
+        stockFfSourceResult.textContent = stockFfSourceLabel(result.stock_ff_source || (result.settings && result.settings.stock_ff_source) || stockFfSource);
         factoryResultCalculatedAt.textContent = valueOrDash(result.calculated_at).replace("T", " ");
         const summary = result.summary || {};
         factoryTotalQty.textContent = valueOrDash(summary.total_qty);
@@ -5188,6 +5337,7 @@
         factoryActiveSkuCount.textContent = valueOrDash(payload && payload.active_sku_count);
         factoryCoverageNote.textContent = valueOrDash(payload && payload.coverage_contract_note);
         renderSharedStockState(datasets.stock_ff);
+        renderStockFfOnecSummary(payload ? payload.onec_stock_ff_summary : null);
         renderFactoryDatasetStatus(inboundFactoryStatus, inboundFactoryCurrentFile, inboundFactoryCurrentFileLink, deleteInboundFactoryButton, datasets.inbound_factory_to_ff, { optional: true });
         renderInboundFactoryShipmentSummary(datasets.inbound_factory_to_ff);
         renderSupplierRegistryInboundSummary(payload ? payload.supplier_registry_inbound_summary : null);
@@ -6291,6 +6441,41 @@
         }
       }
 
+      async function loadStockFfOnecCheck() {
+        if (!config.factory_order_stock_ff_onec_check_path || !checkStockFfOnecButton) {
+          return;
+        }
+        checkStockFfOnecButton.disabled = true;
+        checkStockFfOnecButton.textContent = "Проверяем...";
+        setSharedStockMessage("Проверяем 1С FF_STOCK...", "");
+        try {
+          const response = await fetch(config.factory_order_stock_ff_onec_check_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderStockFfOnecSummary(payload);
+          setSharedStockMessage(
+            payload.status === "ready"
+              ? "1С FF_STOCK готов к расчёту."
+              : "1С FF_STOCK требует проверки: " + valueOrDash(payload.status),
+            payload.status === "ready" ? "success" : "warning"
+          );
+        } catch (error) {
+          renderStockFfOnecSummary({ status: "error", errors: [error instanceof Error ? error.message : String(error)] });
+          setSharedStockMessage(
+            "Не удалось проверить 1С FF_STOCK: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          checkStockFfOnecButton.disabled = false;
+          checkStockFfOnecButton.textContent = "Проверить данные 1С";
+        }
+      }
+
       async function calculateFactoryOrder() {
         calculateFactoryOrderButton.disabled = true;
         calculateFactoryOrderButton.textContent = "Считаем...";
@@ -6428,6 +6613,20 @@
           }
         });
       });
+      stockFfSourceInputs.forEach((input) => {
+        input.addEventListener("change", () => {
+          if (input.checked) {
+            setStockFfSource(input.value);
+          }
+        });
+      });
+      checkStockFfOnecButton.addEventListener("click", loadStockFfOnecCheck);
+      downloadStockFfOnecButton.addEventListener("click", () => downloadBinary(
+        config.factory_order_stock_ff_onec_xlsx_path,
+        "sheet-vitrina-v1-factory-order-stock-ff-onec.xlsx",
+        "Excel для проверки 1С скачан.",
+        setSharedStockMessage
+      ));
       deleteStockFfButton.addEventListener("click", () => deleteDataset(
         deleteStockFfButton.dataset.deletePath,
         deleteStockFfButton,
@@ -6586,6 +6785,7 @@
         stockReportSalesAvgPeriodDays.value = resolveRestoredStockReportSalesAvgPeriodDays(persistedOperatorUiState);
       }
       setFactoryInboundSource(factoryInboundSource, { persist: false });
+      setStockFfSource(stockFfSource, { persist: false });
       if (wbSuppliesSizeFilterSelect) {
         wbSuppliesSizeFilterSelect.value = WB_SUPPLIES_DEFAULT_SIZE_FILTER;
       }

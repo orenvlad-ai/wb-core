@@ -109,6 +109,8 @@ WEB_AUTH_COOKIE_NAME = "wb_core_web_session"
 WEB_AUTH_DEFAULT_MAX_AGE_SECONDS = 8 * 60 * 60
 DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
 DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
+DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check"
+DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx"
 DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH = (
     "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
 )
@@ -1900,6 +1902,22 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, _with_factory_order_dataset_urls(payload))
                 return
 
+            if parsed.path == DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH:
+                try:
+                    payload = entrypoint.handle_factory_order_stock_ff_onec_check_request()
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order 1C stock FF check failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_WB_REGIONAL_STATUS_PATH:
                 try:
                     payload = entrypoint.handle_wb_regional_status_request()
@@ -1914,6 +1932,29 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, _with_wb_regional_urls(payload))
+                return
+
+            if parsed.path == DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH:
+                try:
+                    workbook_bytes, filename = entrypoint.handle_factory_order_stock_ff_onec_xlsx_request()
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"factory order 1C stock FF XLSX failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                    as_attachment=True,
+                )
                 return
 
             if parsed.path in {
@@ -3448,6 +3489,8 @@ def _auto_complaints_error_payload(exc: SheetVitrinaV1FeedbacksAutoComplaintsErr
 
 def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
+    normalized["stock_ff_onec_check_path"] = DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH
+    normalized["stock_ff_onec_xlsx_path"] = DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH
     normalized["datasets"] = _map_dataset_urls(normalized.get("datasets"))
     manual_state = normalized.get("manual_factory_inbound_dataset")
     if isinstance(manual_state, Mapping):
@@ -3456,6 +3499,8 @@ def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, An
     last_result = normalized.get("last_result")
     if isinstance(last_result, Mapping):
         nested = dict(last_result)
+        nested["stock_ff_onec_check_path"] = DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH
+        nested["stock_ff_onec_xlsx_path"] = DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH
         nested["datasets"] = _map_dataset_urls(nested.get("datasets"))
         manual_nested = nested.get("manual_factory_inbound_dataset")
         if isinstance(manual_nested, Mapping):
@@ -3577,6 +3622,8 @@ def _render_sheet_vitrina_operator_ui(
         "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
         "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
         "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+        "factory_order_stock_ff_onec_check_path": DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH,
+        "factory_order_stock_ff_onec_xlsx_path": DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH,
         "factory_order_template_inbound_factory_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
         "factory_order_template_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
         "factory_order_upload_stock_ff_path": DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
