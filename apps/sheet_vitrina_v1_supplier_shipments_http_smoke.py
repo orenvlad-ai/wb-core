@@ -13,13 +13,15 @@ import threading
 from urllib import error as urllib_error, request as urllib_request
 from uuid import uuid4
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_NOMENCLATURE_EXPORT_PATH,
+    DEFAULT_NOMENCLATURE_IMPORT_PATH,
     DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -85,6 +87,7 @@ def main() -> None:
                     "nomenclature_name": "Clear iPhone 14 Pro",
                     "product_type": "clear",
                     "match_key": "clear|iphone_14_pro",
+                    "purchase_price_yuan": "12,5",
                     "aliases": ["iPhone 14 Pro"],
                     "compatible_models_text": "iPhone 14 Pro",
                     "comment": "smoke",
@@ -92,6 +95,8 @@ def main() -> None:
             )
             if create_nom_status != 200 or create_nom_payload.get("item", {}).get("nm_id") != 210183919:
                 raise AssertionError(f"nomenclature create must persist item, got {create_nom_status} {create_nom_payload}")
+            if create_nom_payload.get("item", {}).get("purchase_price_yuan") != 12.5:
+                raise AssertionError("nomenclature create must normalize purchase_price_yuan decimal comma")
             if create_nom_payload.get("item", {}).get("compatible_model_keys") != ["iphone_14_pro"]:
                 raise AssertionError("nomenclature create must normalize compatible model keys")
             duplicate_nom_status, duplicate_nom_payload = _post_json(
@@ -124,6 +129,52 @@ def main() -> None:
                 "iphone_13_pro",
             ]:
                 raise AssertionError(f"compatible nomenclature item must save normalized keys, got {compat_nom_status} {compat_nom_payload}")
+            nomenclature_import_bytes = _build_nomenclature_import_fixture(
+                first_item_id=str(create_nom_payload["item"]["item_id"]),
+                compat_item_id=str(compat_nom_payload["item"]["item_id"]),
+            )
+            export_status, export_bytes, export_headers = _get_bytes(f"{base_url}{DEFAULT_NOMENCLATURE_EXPORT_PATH}")
+            if export_status != 200 or "spreadsheetml.sheet" not in str(export_headers.get("Content-Type", "")):
+                raise AssertionError(f"nomenclature export must return XLSX, got {export_status} {export_headers}")
+            exported = load_workbook(BytesIO(export_bytes), data_only=True)
+            exported_headers = [cell.value for cell in exported.active[1]]
+            expected_headers = [
+                "ID строки",
+                "Включено",
+                "nmId",
+                "Номенклатура",
+                "Тип",
+                "Match key",
+                "Цена закупки, ¥",
+                "Совместимые модели",
+                "Ключи совместимости",
+                "Обновлено",
+            ]
+            if exported_headers != expected_headers:
+                raise AssertionError(f"nomenclature export headers changed unexpectedly: {exported_headers}")
+            if {"Наш SKU", "Aliases", "Комментарий"} & set(exported_headers):
+                raise AssertionError("nomenclature export must not expose hidden legacy fields by default")
+            dry_run_status, dry_run_payload = _post_multipart(
+                f"{base_url}{DEFAULT_NOMENCLATURE_IMPORT_PATH}?dry_run=1",
+                nomenclature_import_bytes,
+                filename="nomenclature.xlsx",
+            )
+            if (
+                dry_run_status != 200
+                or dry_run_payload.get("dry_run") is not True
+                or dry_run_payload.get("created_count") != 1
+                or dry_run_payload.get("updated_count") != 1
+                or dry_run_payload.get("deactivated_count") != 1
+            ):
+                raise AssertionError(f"nomenclature import dry-run must validate counts, got {dry_run_status} {dry_run_payload}")
+            after_dry_run_status, after_dry_run_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
+            after_dry_run_items = {item["item_id"]: item for item in after_dry_run_payload.get("items", [])}
+            if (
+                after_dry_run_status != 200
+                or after_dry_run_items[str(create_nom_payload["item"]["item_id"])].get("purchase_price_yuan") != 12.5
+                or after_dry_run_items[str(compat_nom_payload["item"]["item_id"])].get("is_active") is not True
+            ):
+                raise AssertionError("nomenclature import dry-run must not mutate runtime DB")
 
             parse_status, parse_payload = _post_multipart(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
@@ -263,6 +314,95 @@ def main() -> None:
             if rematched_products[2].get("internal_nm_id") != 210184534:
                 raise AssertionError("rematch must fill previously unmatched rows from nomenclature")
 
+            import_status, import_payload = _post_multipart(
+                f"{base_url}{DEFAULT_NOMENCLATURE_IMPORT_PATH}",
+                nomenclature_import_bytes,
+                filename="nomenclature.xlsx",
+            )
+            if (
+                import_status != 200
+                or import_payload.get("created_count") != 1
+                or import_payload.get("updated_count") != 1
+                or import_payload.get("deactivated_count") != 1
+                or import_payload.get("error_count") != 0
+            ):
+                raise AssertionError(f"nomenclature import must apply batch changes, got {import_status} {import_payload}")
+            imported_list_status, imported_list_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
+            imported_items = {item["item_id"]: item for item in imported_list_payload.get("items", [])}
+            if imported_list_status != 200:
+                raise AssertionError(f"nomenclature list after import failed: {imported_list_status} {imported_list_payload}")
+            first_item = imported_items[str(create_nom_payload["item"]["item_id"])]
+            if (
+                first_item.get("purchase_price_yuan") != 13.75
+                or first_item.get("our_sku") != "SKU-CLEAR-14P"
+                or first_item.get("aliases") != ["iPhone 14 Pro"]
+                or first_item.get("comment") != "smoke"
+            ):
+                raise AssertionError(f"nomenclature import must preserve hidden fields while updating visible fields, got {first_item}")
+            compat_item = imported_items[str(compat_nom_payload["item"]["item_id"])]
+            if compat_item.get("is_active") is not False:
+                raise AssertionError("nomenclature import must support soft-disable through Включено=нет")
+            created_import_items = [item for item in imported_items.values() if item.get("match_key") == "matte|iphone_15"]
+            if len(created_import_items) != 1 or created_import_items[0].get("purchase_price_yuan") != 9.5:
+                raise AssertionError(f"nomenclature import must create new active rows, got {created_import_items}")
+            invalid_status, invalid_import_payload = _post_multipart(
+                f"{base_url}{DEFAULT_NOMENCLATURE_IMPORT_PATH}",
+                _build_invalid_nomenclature_import_fixture(),
+                filename="nomenclature-invalid.xlsx",
+            )
+            if (
+                invalid_status != 400
+                or invalid_import_payload.get("status") != "error"
+                or invalid_import_payload.get("error_count", 0) < 2
+            ):
+                raise AssertionError(f"invalid nomenclature import must return row-level errors, got {invalid_status} {invalid_import_payload}")
+            after_invalid_status, after_invalid_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
+            if after_invalid_status != 200 or len(after_invalid_payload.get("items", [])) != len(imported_list_payload.get("items", [])):
+                raise AssertionError("invalid nomenclature import must not partially mutate rows")
+            runtime.save_nomenclature_item(
+                {
+                    "item_id": "nom_duplicate_a",
+                    "is_active": True,
+                    "our_sku": "",
+                    "nm_id": 700001,
+                    "nomenclature_name": "Duplicate A",
+                    "product_type": "clear",
+                    "match_key": "clear|duplicate",
+                    "purchase_price_yuan": None,
+                    "aliases": [],
+                    "compatible_models_text": "",
+                    "compatible_model_keys": [],
+                    "comment": "",
+                    "created_at": "2026-05-30T08:20:00Z",
+                    "updated_at": "2026-05-30T08:20:00Z",
+                }
+            )
+            runtime.save_nomenclature_item(
+                {
+                    "item_id": "nom_duplicate_b",
+                    "is_active": True,
+                    "our_sku": "",
+                    "nm_id": 700002,
+                    "nomenclature_name": "Duplicate B",
+                    "product_type": "clear",
+                    "match_key": "clear|duplicate",
+                    "purchase_price_yuan": None,
+                    "aliases": [],
+                    "compatible_models_text": "",
+                    "compatible_model_keys": [],
+                    "comment": "",
+                    "created_at": "2026-05-30T08:20:00Z",
+                    "updated_at": "2026-05-30T08:20:00Z",
+                }
+            )
+            ambiguous_status, ambiguous_payload = _post_multipart(
+                f"{base_url}{DEFAULT_NOMENCLATURE_IMPORT_PATH}",
+                _build_ambiguous_nomenclature_import_fixture(),
+                filename="nomenclature-ambiguous.xlsx",
+            )
+            if ambiguous_status != 400 or "неоднозначен" not in json.dumps(ambiguous_payload, ensure_ascii=False):
+                raise AssertionError(f"ambiguous match_key import must return row-level error, got {ambiguous_status} {ambiguous_payload}")
+
             registry_status, registry_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
             if registry_status != 200 or len(registry_payload.get("shipments", [])) != 1:
                 raise AssertionError("list route must expose saved shipment")
@@ -344,6 +484,94 @@ def _build_invoice_fixture() -> bytes:
     sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 17e / 16e /14 / 13 / 13Pro", 4, 2, 8, ""])
     sheet.append([3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
     sheet.append([4, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_nomenclature_import_fixture(*, first_item_id: str, compat_item_id: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Номенклатура"
+    sheet.append(
+        [
+            "ID строки",
+            "Включено",
+            "nmId",
+            "Номенклатура",
+            "Тип",
+            "Match key",
+            "Цена закупки, ¥",
+            "Совместимые модели",
+            "Ключи совместимости",
+            "Обновлено",
+        ]
+    )
+    sheet.append(
+        [
+            first_item_id,
+            "да",
+            210183919,
+            "Clear iPhone 14 Pro",
+            "Прозрачное",
+            "clear|iphone_14_pro",
+            "13,75",
+            "iPhone 14 Pro",
+            "",
+            "",
+        ]
+    )
+    sheet.append(
+        [
+            compat_item_id,
+            "нет",
+            391662410,
+            "anti-spy iPhone 14 / 13 / 13Pro",
+            "anti_spy",
+            "anti_spy|iphone_14_13_13pro",
+            "",
+            "iPhone 14, iPhone 13, iPhone 13 Pro",
+            "iphone_14; iphone_13; iphone_13_pro",
+            "",
+        ]
+    )
+    sheet.append(
+        [
+            "",
+            "yes",
+            500001,
+            "Matte iPhone 15",
+            "Матовое",
+            "matte|iphone_15",
+            "9,5",
+            "iPhone 15",
+            "",
+            "",
+        ]
+    )
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_invalid_nomenclature_import_fixture() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Номенклатура"
+    sheet.append(["Включено", "nmId", "Номенклатура", "Тип", "Match key", "Цена закупки, ¥"])
+    sheet.append(["да", 900001, "Invalid type", "глянцевое", "clear|invalid_type", 1])
+    sheet.append(["да", 900002, "Invalid price", "clear", "clear|invalid_price", "-1"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_ambiguous_nomenclature_import_fixture() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Номенклатура"
+    sheet.append(["Включено", "nmId", "Номенклатура", "Тип", "Match key", "Цена закупки, ¥"])
+    sheet.append(["да", 700003, "Duplicate import", "clear", "clear|duplicate", 2])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

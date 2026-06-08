@@ -24,10 +24,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_NOMENCLATURE_EXPORT_PATH,
+    DEFAULT_NOMENCLATURE_IMPORT_PATH,
+    DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SETTINGS_UI_PATH,
-    DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -176,6 +178,23 @@ def main() -> None:
                     )
                 if forbidden_nomenclature_code != 403 or forbidden_nomenclature_payload.get("error") != "forbidden":
                         raise AssertionError("supplier role must not access nomenclature API")
+                forbidden_nomenclature_export_code, _, _ = _opener_text(
+                        supplier,
+                        f"{base_url}{DEFAULT_NOMENCLATURE_EXPORT_PATH}",
+                    )
+                if forbidden_nomenclature_export_code != 403:
+                        raise AssertionError("supplier role must not export nomenclature XLSX")
+                forbidden_nomenclature_import_code, forbidden_nomenclature_import_payload = _opener_post_multipart(
+                        supplier,
+                        f"{base_url}{DEFAULT_NOMENCLATURE_IMPORT_PATH}",
+                        supplier_invoice_bytes,
+                        filename="nomenclature.xlsx",
+                    )
+                if (
+                    forbidden_nomenclature_import_code != 403
+                    or forbidden_nomenclature_import_payload.get("error") != "forbidden"
+                ):
+                        raise AssertionError("supplier role must not import nomenclature XLSX")
                 supplier_rematch_code, supplier_rematch_payload = _opener_post_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/rematch",

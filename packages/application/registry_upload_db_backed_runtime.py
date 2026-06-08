@@ -1856,75 +1856,111 @@ class RegistryUploadDbBackedRuntime:
             return row is not None
 
     def save_nomenclature_item(self, item: Mapping[str, Any]) -> dict[str, Any]:
-        item_id = str(item.get("item_id") or "").strip()
-        if not item_id:
-            raise ValueError("nomenclature item_id is required")
-        created_at = str(item.get("created_at") or "").strip()
-        updated_at = str(item.get("updated_at") or "").strip()
-        _validate_timestamp(created_at, field_name="created_at")
-        _validate_timestamp(updated_at, field_name="updated_at")
-        aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
-        compatible_model_keys = (
-            item.get("compatible_model_keys") if isinstance(item.get("compatible_model_keys"), list) else []
-        )
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_nomenclature_items(
-                    item_id,
-                    is_active,
-                    our_sku,
-                    nm_id,
-                    nomenclature_name,
-                    product_type,
-                    match_key,
-                    aliases_json,
-                    compatible_models_text,
-                    compatible_model_keys_json,
-                    comment,
-                    created_at,
-                    updated_at
-                )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(item_id) DO UPDATE SET
-                    is_active = excluded.is_active,
-                    our_sku = excluded.our_sku,
-                    nm_id = excluded.nm_id,
-                    nomenclature_name = excluded.nomenclature_name,
-                    product_type = excluded.product_type,
-                    match_key = excluded.match_key,
-                    aliases_json = excluded.aliases_json,
-                    compatible_models_text = excluded.compatible_models_text,
-                    compatible_model_keys_json = excluded.compatible_model_keys_json,
-                    comment = excluded.comment,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    item_id,
-                    1 if bool(item.get("is_active")) else 0,
-                    str(item.get("our_sku") or ""),
-                    item.get("nm_id"),
-                    str(item.get("nomenclature_name") or ""),
-                    str(item.get("product_type") or ""),
-                    str(item.get("match_key") or ""),
-                    json.dumps([str(alias) for alias in aliases if str(alias or "").strip()], ensure_ascii=False),
-                    str(item.get("compatible_models_text") or ""),
-                    json.dumps(
+        saved_items = self.save_nomenclature_items_atomic([item])
+        if not saved_items:
+            raise ValueError("nomenclature item was not saved")
+        return saved_items[0]
+
+    def save_nomenclature_items_atomic(self, items: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        prepared_items: list[dict[str, Any]] = []
+        for item in items:
+            item_id = str(item.get("item_id") or "").strip()
+            if not item_id:
+                raise ValueError("nomenclature item_id is required")
+            created_at = str(item.get("created_at") or "").strip()
+            updated_at = str(item.get("updated_at") or "").strip()
+            _validate_timestamp(created_at, field_name="created_at")
+            _validate_timestamp(updated_at, field_name="updated_at")
+            aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
+            compatible_model_keys = (
+                item.get("compatible_model_keys") if isinstance(item.get("compatible_model_keys"), list) else []
+            )
+            purchase_price_yuan = item.get("purchase_price_yuan")
+            if purchase_price_yuan is not None:
+                purchase_price_yuan = float(purchase_price_yuan)
+            prepared_items.append(
+                {
+                    "item_id": item_id,
+                    "is_active": 1 if bool(item.get("is_active")) else 0,
+                    "our_sku": str(item.get("our_sku") or ""),
+                    "nm_id": item.get("nm_id"),
+                    "nomenclature_name": str(item.get("nomenclature_name") or ""),
+                    "product_type": str(item.get("product_type") or ""),
+                    "match_key": str(item.get("match_key") or ""),
+                    "purchase_price_yuan": purchase_price_yuan,
+                    "aliases_json": json.dumps([str(alias) for alias in aliases if str(alias or "").strip()], ensure_ascii=False),
+                    "compatible_models_text": str(item.get("compatible_models_text") or ""),
+                    "compatible_model_keys_json": json.dumps(
                         [str(model_key) for model_key in compatible_model_keys if str(model_key or "").strip()],
                         ensure_ascii=False,
                     ),
-                    str(item.get("comment") or ""),
-                    created_at,
-                    updated_at,
-                ),
+                    "comment": str(item.get("comment") or ""),
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                }
             )
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            for prepared in prepared_items:
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                        item_id,
+                        is_active,
+                        our_sku,
+                        nm_id,
+                        nomenclature_name,
+                        product_type,
+                        match_key,
+                        purchase_price_yuan,
+                        aliases_json,
+                        compatible_models_text,
+                        compatible_model_keys_json,
+                        comment,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(item_id) DO UPDATE SET
+                        is_active = excluded.is_active,
+                        our_sku = excluded.our_sku,
+                        nm_id = excluded.nm_id,
+                        nomenclature_name = excluded.nomenclature_name,
+                        product_type = excluded.product_type,
+                        match_key = excluded.match_key,
+                        purchase_price_yuan = excluded.purchase_price_yuan,
+                        aliases_json = excluded.aliases_json,
+                        compatible_models_text = excluded.compatible_models_text,
+                        compatible_model_keys_json = excluded.compatible_model_keys_json,
+                        comment = excluded.comment,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        prepared["item_id"],
+                        prepared["is_active"],
+                        prepared["our_sku"],
+                        prepared["nm_id"],
+                        prepared["nomenclature_name"],
+                        prepared["product_type"],
+                        prepared["match_key"],
+                        prepared["purchase_price_yuan"],
+                        prepared["aliases_json"],
+                        prepared["compatible_models_text"],
+                        prepared["compatible_model_keys_json"],
+                        prepared["comment"],
+                        prepared["created_at"],
+                        prepared["updated_at"],
+                    ),
+                )
             conn.commit()
-        loaded = self.load_nomenclature_item(item_id)
-        if loaded is None:
-            raise ValueError(f"nomenclature item was not saved: {item_id}")
-        return loaded
+        loaded_items: list[dict[str, Any]] = []
+        for prepared in prepared_items:
+            loaded = self.load_nomenclature_item(str(prepared["item_id"]))
+            if loaded is None:
+                raise ValueError(f"nomenclature item was not saved: {prepared['item_id']}")
+            loaded_items.append(loaded)
+        return loaded_items
 
     def delete_nomenclature_item(self, item_id: str, *, updated_at: str) -> dict[str, Any]:
         _validate_timestamp(updated_at, field_name="updated_at")
@@ -3218,6 +3254,7 @@ def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "nomenclature_name": row["nomenclature_name"] or "",
         "product_type": row["product_type"] or "",
         "match_key": row["match_key"] or "",
+        "purchase_price_yuan": row["purchase_price_yuan"],
         "aliases": [str(item) for item in _loads_json_list(row["aliases_json"]) if str(item or "").strip()],
         "compatible_models_text": row["compatible_models_text"] or "",
         "compatible_model_keys": [
@@ -3604,6 +3641,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             nomenclature_name TEXT NOT NULL,
             product_type TEXT NOT NULL,
             match_key TEXT NOT NULL,
+            purchase_price_yuan REAL,
             aliases_json TEXT NOT NULL,
             compatible_models_text TEXT NOT NULL DEFAULT '',
             compatible_model_keys_json TEXT NOT NULL DEFAULT '[]',
@@ -3615,6 +3653,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_nomenclature_items_by_match_key
         ON sheet_vitrina_v1_nomenclature_items(is_active, match_key);
         """
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_nomenclature_items",
+        column_name="purchase_price_yuan",
+        column_sql="REAL",
     )
     _ensure_column(
         conn,

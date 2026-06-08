@@ -142,6 +142,8 @@ DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipment
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
+DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
+DEFAULT_NOMENCLATURE_IMPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
@@ -1006,6 +1008,31 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if parsed.path == DEFAULT_NOMENCLATURE_IMPORT_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    result = entrypoint.handle_nomenclature_import_request(
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        dry_run=_resolve_optional_query_bool(parsed.query, "dry_run"),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"nomenclature import failed: {exc}"},
+                    )
+                    return
+                response_status = HTTPStatus.OK if result.get("status") == "ok" else HTTPStatus.BAD_REQUEST
+                _write_json_response(self, response_status, result)
+                return
+
             if parsed.path == DEFAULT_NOMENCLATURE_PATH:
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -1699,6 +1726,28 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_NOMENCLATURE_EXPORT_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    workbook_bytes, filename, content_type = entrypoint.handle_nomenclature_export_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"nomenclature export failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
                 return
 
             if parsed.path == DEFAULT_NOMENCLATURE_PATH:
@@ -3440,6 +3489,8 @@ def _render_sheet_vitrina_settings_ui() -> str:
     config_payload = {
         "page_title": "Настройки",
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
+        "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
+        "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
     }

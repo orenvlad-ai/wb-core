@@ -35,6 +35,8 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
+  - "GET /v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
+  - "POST /v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
   - "PATCH /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}"
   - "DELETE /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}"
 related_runners:
@@ -49,7 +51,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching. Operator nomenclature settings hide legacy SKU/alias/comment fields by default, add nullable purchase_price_yuan, and support operator-only XLSX export/import with dry-run validation; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
 ---
 
 # 1. Contract
@@ -89,7 +91,11 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 # 3. Nomenclature And Matching
 
 - Server-side nomenclature lives in `sheet_vitrina_v1_nomenclature_items` and is edited through `Настройки -> Справочник номенклатуры`.
-- Nomenclature rows include `item_id`, `is_active`, `our_sku`, `nm_id`, `nomenclature_name`, `product_type`, `match_key`, `aliases`, `compatible_models_text`, normalized `compatible_model_keys`, `comment`, `created_at`, `updated_at`.
+- Nomenclature rows include `item_id`, `is_active`, `our_sku`, `nm_id`, `nomenclature_name`, `product_type`, `match_key`, nullable `purchase_price_yuan`, `aliases`, `compatible_models_text`, normalized `compatible_model_keys`, `comment`, `created_at`, `updated_at`.
+- Default operator settings UI shows only `Вкл.`, `nmId`, `Номенклатура`, `Тип`, `Match key`, `Цена закупки, ¥`, `Совместимые модели`, `Обновлено` and compact row actions. Legacy backend fields `our_sku`, `aliases` and `comment` remain stored/API-compatible but are not shown in the default table/export.
+- `product_type` canonical values remain `clear`, `anti_spy`, `matte`, `extra`, `other`; the settings UI displays Russian labels and sends canonical values in JSON payloads.
+- `purchase_price_yuan` is an optional fixed factory purchase price in CNY for the nomenclature dictionary only. It accepts blank/null or a numeric value `>= 0` with decimal dot/comma normalization; it is not used by shipment totals, matching, factory-order calculations, reports or web-vitrina metrics.
+- `GET /v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx` returns the current dictionary as XLSX with Russian headers and without default legacy `Наш SKU`/`Aliases`/`Комментарий` columns. `POST /v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx` accepts `.xlsx`, supports `?dry_run=1`, returns row-level validation errors/counts, rejects invalid rows atomically with no partial mutation, preserves hidden legacy fields when columns are absent, and keeps DELETE/import disable semantics as soft-disable (`is_active = 0`).
 - If the nomenclature table is empty and current `registry config_v2` is available, active SKU rows seed deterministic entries from `display_name`/`group`/`nm_id`; no SKU is invented beyond current config truth.
 - Active duplicate `match_key` values are rejected. Active product rows require non-empty `match_key` and `nomenclature_name`.
 - Matching is deterministic only. Resolution order is exact active `match_key`, exact alias/normalized alias, then compatibility by `product_type + intersection(invoice_model_keys, compatible_model_keys)`.
@@ -100,12 +106,12 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 
 # 4. Auth Boundary
 
-- Operator role can access the full WebCore shell, `Настройки`, nomenclature API and supplier shipment APIs including delete/rematch and order-status update.
+- Operator role can access the full WebCore shell, `Настройки`, nomenclature CRUD/export/import API and supplier shipment APIs including delete/rematch and order-status update.
 - Supplier role is optional and configured only through runtime env:
   - `WB_CORE_SUPPLIER_AUTH_USERNAME`
   - `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH`
   - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`
-- Supplier role can access only `/sheet-vitrina-v1/supplier`, read/create/edit supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature APIs, supplier delete/rematch, order-status mutation or unrelated `/v1/sheet-vitrina-v1/...` APIs.
+- Supplier role can access only `/sheet-vitrina-v1/supplier`, read/create/edit supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature CRUD/export/import APIs, supplier delete/rematch, order-status mutation or unrelated `/v1/sheet-vitrina-v1/...` APIs.
 - Supplier credentials are never committed as plaintext, hashes, cookies or tokens. A live supplier account may use machine-safe username `hanshang` and display label `HanShang Technology` / `Ханшанг`, but the password and PBKDF2-HMAC hash remain runtime-only values outside Git/log output.
 
 # 5. Factory-Order Inbound Source
