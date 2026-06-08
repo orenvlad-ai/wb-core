@@ -1670,6 +1670,24 @@ class RegistryUploadHttpEntrypoint:
     def handle_nomenclature_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_nomenclature()
 
+    def handle_nomenclature_export_request(self) -> tuple[bytes, str, str]:
+        return self.supplier_shipments_block.export_nomenclature_xlsx()
+
+    def handle_nomenclature_import_request(
+        self,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        return self.supplier_shipments_block.import_nomenclature_xlsx(
+            workbook_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+            dry_run=dry_run,
+        )
+
     def handle_nomenclature_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.supplier_shipments_block.create_nomenclature_item(payload)
 

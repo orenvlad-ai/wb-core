@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import date, datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ import re
 import shutil
 from typing import Any, Mapping
 from uuid import uuid4
+
+from openpyxl import Workbook, load_workbook
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.supplier_invoice_parser import (
@@ -38,6 +41,31 @@ from packages.contracts.supplier_shipments import (
 
 
 DEFAULT_SUPPLIER_NAME = "HanShang Technology"
+NOMENCLATURE_XLSX_FILENAME = "nomenclature.xlsx"
+NOMENCLATURE_XLSX_CONTENT_TYPE = SUPPLIER_INVOICE_CONTENT_TYPE
+NOMENCLATURE_XLSX_HEADERS = [
+    "ID строки",
+    "Включено",
+    "nmId",
+    "Номенклатура",
+    "Тип",
+    "Match key",
+    "Цена закупки, ¥",
+    "Совместимые модели",
+    "Ключи совместимости",
+    "Обновлено",
+]
+NOMENCLATURE_PRODUCT_TYPE_LABELS = {
+    "clear": "Прозрачное",
+    "anti_spy": "Антишпион",
+    "matte": "Матовое",
+    "extra": "Доп. строка",
+    "other": "Другое",
+}
+NOMENCLATURE_PRODUCT_TYPE_BY_LABEL = {
+    **{key: key for key in NOMENCLATURE_PRODUCT_TYPE_LABELS},
+    **{value.casefold(): key for key, value in NOMENCLATURE_PRODUCT_TYPE_LABELS.items()},
+}
 
 
 class SupplierShipmentsBlock:
@@ -304,6 +332,126 @@ class SupplierShipmentsBlock:
             "items": self.runtime.list_nomenclature_items(),
         }
 
+    def export_nomenclature_xlsx(self) -> tuple[bytes, str, str]:
+        self._ensure_nomenclature_ready()
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Номенклатура"
+        worksheet.append(NOMENCLATURE_XLSX_HEADERS)
+        for item in self.runtime.list_nomenclature_items():
+            worksheet.append(
+                [
+                    str(item.get("item_id") or ""),
+                    "да" if bool(item.get("is_active")) else "нет",
+                    item.get("nm_id") if item.get("nm_id") is not None else "",
+                    str(item.get("nomenclature_name") or ""),
+                    NOMENCLATURE_PRODUCT_TYPE_LABELS.get(str(item.get("product_type") or ""), str(item.get("product_type") or "")),
+                    str(item.get("match_key") or ""),
+                    item.get("purchase_price_yuan") if item.get("purchase_price_yuan") is not None else "",
+                    str(item.get("compatible_models_text") or ""),
+                    ", ".join(str(key) for key in item.get("compatible_model_keys") or [] if str(key or "").strip()),
+                    str(item.get("updated_at") or ""),
+                ]
+            )
+        worksheet.freeze_panes = "A2"
+        for index, width in enumerate([24, 12, 14, 34, 18, 28, 18, 34, 34, 24], start=1):
+            worksheet.column_dimensions[worksheet.cell(row=1, column=index).column_letter].width = width
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue(), NOMENCLATURE_XLSX_FILENAME, NOMENCLATURE_XLSX_CONTENT_TYPE
+
+    def import_nomenclature_xlsx(
+        self,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        del uploaded_content_type
+        filename = _safe_filename(uploaded_filename or NOMENCLATURE_XLSX_FILENAME)
+        if not filename.lower().endswith(".xlsx"):
+            raise ValueError("nomenclature import upload must be an .xlsx file")
+        try:
+            workbook = load_workbook(BytesIO(workbook_bytes), data_only=True)
+        except Exception as exc:  # pragma: no cover - openpyxl owns exact exception types
+            raise ValueError("nomenclature import upload must be a readable .xlsx file") from exc
+
+        self._ensure_nomenclature_ready()
+        worksheet = workbook.active
+        header_row = next(worksheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        header_keys = _nomenclature_import_header_keys(header_row or [])
+        if not any(header_keys):
+            raise ValueError("nomenclature import workbook must contain a header row")
+
+        existing_items = self.runtime.list_nomenclature_items()
+        existing_by_id = {str(item.get("item_id") or ""): dict(item) for item in existing_items}
+        active_by_match_key: dict[str, list[dict[str, Any]]] = {}
+        for item in existing_items:
+            if bool(item.get("is_active")) and str(item.get("match_key") or "").strip():
+                active_by_match_key.setdefault(str(item.get("match_key") or "").strip(), []).append(dict(item))
+
+        now = self.timestamp_factory()
+        operations: list[dict[str, Any]] = []
+        skipped_count = 0
+        errors: list[dict[str, Any]] = []
+        for row_number, row in enumerate(worksheet.iter_rows(min_row=2, values_only=True), start=2):
+            row_values = {
+                key: row[index]
+                for index, key in enumerate(header_keys)
+                if key and index < len(row)
+            }
+            if _nomenclature_import_row_empty(row_values):
+                skipped_count += 1
+                continue
+            try:
+                operation = _normalize_nomenclature_import_row(
+                    row_values,
+                    row_number=row_number,
+                    existing_by_id=existing_by_id,
+                    active_by_match_key=active_by_match_key,
+                    now=now,
+                )
+            except ValueError as exc:
+                errors.append({"row": row_number, "message": str(exc)})
+                continue
+            if operation is None:
+                skipped_count += 1
+                continue
+            operations.append(operation)
+
+        duplicate_errors = _nomenclature_import_duplicate_errors(existing_items, operations)
+        errors.extend(duplicate_errors)
+        if errors:
+            return _nomenclature_import_result(
+                status="error",
+                dry_run=dry_run,
+                operations=operations,
+                skipped_count=skipped_count,
+                errors=errors,
+                items=[],
+            )
+
+        if dry_run:
+            return _nomenclature_import_result(
+                status="ok",
+                dry_run=True,
+                operations=operations,
+                skipped_count=skipped_count,
+                errors=[],
+                items=[],
+            )
+
+        saved_items = self.runtime.save_nomenclature_items_atomic([operation["item"] for operation in operations])
+        return _nomenclature_import_result(
+            status="ok",
+            dry_run=False,
+            operations=operations,
+            skipped_count=skipped_count,
+            errors=[],
+            items=saved_items,
+        )
+
     def create_nomenclature_item(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         now = self.timestamp_factory()
         item = _normalize_nomenclature_payload(
@@ -449,6 +597,7 @@ class SupplierShipmentsBlock:
                     "aliases": [],
                     "compatible_models_text": model_text,
                     "compatible_model_keys": compatible_model_keys,
+                    "purchase_price_yuan": None,
                     "comment": "seeded from current registry config_v2",
                     "created_at": now,
                     "updated_at": now,
@@ -819,6 +968,10 @@ def _normalize_nomenclature_payload(
             raise ValueError("active product nomenclature item requires match_key")
         if not nomenclature_name:
             raise ValueError("active product nomenclature item requires nomenclature_name")
+    purchase_price_yuan = _optional_nonnegative_number(
+        payload.get("purchase_price_yuan"),
+        field_name="nomenclature purchase_price_yuan",
+    )
     return {
         "item_id": item_id,
         "is_active": is_active,
@@ -827,6 +980,7 @@ def _normalize_nomenclature_payload(
         "nomenclature_name": nomenclature_name,
         "product_type": product_type,
         "match_key": match_key,
+        "purchase_price_yuan": purchase_price_yuan,
         "aliases": _normalize_alias_list(payload.get("aliases")),
         "compatible_models_text": compatible_models_text,
         "compatible_model_keys": compatible_model_keys,
@@ -895,6 +1049,277 @@ def _normalize_compatible_model_keys(
                 seen.add(key)
                 keys.append(key)
     return keys
+
+
+def _nomenclature_import_header_keys(header_row: tuple[Any, ...]) -> list[str]:
+    header_aliases = {
+        "id строки": "item_id",
+        "id": "item_id",
+        "item_id": "item_id",
+        "включено": "is_active",
+        "active": "is_active",
+        "is_active": "is_active",
+        "nmid": "nm_id",
+        "nm id": "nm_id",
+        "nm_id": "nm_id",
+        "номенклатура": "nomenclature_name",
+        "nomenclature": "nomenclature_name",
+        "nomenclature_name": "nomenclature_name",
+        "тип": "product_type",
+        "product_type": "product_type",
+        "match key": "match_key",
+        "match_key": "match_key",
+        "цена закупки, ¥": "purchase_price_yuan",
+        "цена закупки": "purchase_price_yuan",
+        "purchase_price_yuan": "purchase_price_yuan",
+        "совместимые модели": "compatible_models_text",
+        "compatible_models_text": "compatible_models_text",
+        "ключи совместимости": "compatible_model_keys",
+        "compatible_model_keys": "compatible_model_keys",
+        "обновлено": "updated_at",
+        "updated_at": "updated_at",
+    }
+    return [header_aliases.get(_normalize_nomenclature_header(value), "") for value in header_row]
+
+
+def _normalize_nomenclature_header(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold().replace("ё", "е"))
+
+
+def _nomenclature_import_row_empty(row_values: Mapping[str, Any]) -> bool:
+    for key, value in row_values.items():
+        if key == "updated_at":
+            continue
+        if _cell_text(value):
+            return False
+    return True
+
+
+def _normalize_nomenclature_import_row(
+    row_values: Mapping[str, Any],
+    *,
+    row_number: int,
+    existing_by_id: Mapping[str, dict[str, Any]],
+    active_by_match_key: Mapping[str, list[dict[str, Any]]],
+    now: str,
+) -> dict[str, Any] | None:
+    raw_item_id = _cell_text(row_values.get("item_id"))
+    existing: dict[str, Any] | None = None
+    if raw_item_id:
+        existing = existing_by_id.get(raw_item_id)
+        if existing is None:
+            raise ValueError(f"Строка {row_number}: ID строки не найден: {raw_item_id}")
+    raw_match_key = _normalize_match_key(row_values.get("match_key")) if "match_key" in row_values else ""
+    if existing is None and raw_match_key:
+        candidates = active_by_match_key.get(raw_match_key, [])
+        if len(candidates) == 1:
+            existing = candidates[0]
+        elif len(candidates) > 1:
+            raise ValueError(f"Строка {row_number}: match key неоднозначен: {raw_match_key}")
+
+    base = dict(existing) if existing is not None else {}
+    is_active = (
+        _parse_nomenclature_bool(row_values.get("is_active"), default=bool(base.get("is_active", True)))
+        if "is_active" in row_values
+        else bool(base.get("is_active", True))
+    )
+    product_type = (
+        _parse_nomenclature_product_type(row_values.get("product_type"))
+        if "product_type" in row_values and _cell_text(row_values.get("product_type"))
+        else str(base.get("product_type") or "")
+    )
+    if not product_type:
+        raise ValueError(f"Строка {row_number}: Тип обязателен")
+    nomenclature_name = (
+        _cell_text(row_values.get("nomenclature_name"))
+        if "nomenclature_name" in row_values
+        else str(base.get("nomenclature_name") or "")
+    )
+    match_key = raw_match_key if "match_key" in row_values else str(base.get("match_key") or "")
+    nm_id = _parse_nomenclature_nm_id(row_values.get("nm_id"), row_number=row_number) if "nm_id" in row_values else base.get("nm_id")
+    compatible_models_text = (
+        _cell_text(row_values.get("compatible_models_text"))
+        if "compatible_models_text" in row_values
+        else str(base.get("compatible_models_text") or "")
+    )
+    if "compatible_model_keys" in row_values and _cell_text(row_values.get("compatible_model_keys")):
+        compatible_model_keys_source: Any = _cell_text(row_values.get("compatible_model_keys"))
+    elif "compatible_model_keys" in row_values:
+        compatible_model_keys_source = []
+    else:
+        compatible_model_keys_source = base.get("compatible_model_keys") or []
+    if "purchase_price_yuan" in row_values:
+        try:
+            purchase_price_yuan = _optional_nonnegative_number(
+                row_values.get("purchase_price_yuan"),
+                field_name="Цена закупки, ¥",
+            )
+        except ValueError as exc:
+            raise ValueError(f"Строка {row_number}: {exc}") from exc
+    else:
+        purchase_price_yuan = base.get("purchase_price_yuan")
+
+    item_id = str(base.get("item_id") or raw_item_id or ("nom_" + uuid4().hex))
+    created_at = str(base.get("created_at") or now)
+    item = _normalize_nomenclature_payload(
+        {
+            **base,
+            "is_active": is_active,
+            "nm_id": nm_id,
+            "nomenclature_name": nomenclature_name,
+            "product_type": product_type,
+            "match_key": match_key,
+            "purchase_price_yuan": purchase_price_yuan,
+            "compatible_models_text": compatible_models_text,
+            "compatible_model_keys": compatible_model_keys_source,
+        },
+        item_id=item_id,
+        created_at=created_at,
+        updated_at=now,
+    )
+    if existing is not None and not _nomenclature_item_changed(existing, item):
+        return None
+    action = "created"
+    if existing is not None:
+        action = "deactivated" if bool(existing.get("is_active")) and not bool(item.get("is_active")) else "updated"
+    return {"row": row_number, "action": action, "item": item}
+
+
+def _parse_nomenclature_bool(value: Any, *, default: bool) -> bool:
+    if value is None or _cell_text(value) == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if float(value) == 1.0:
+            return True
+        if float(value) == 0.0:
+            return False
+    normalized = _cell_text(value).casefold()
+    if normalized in {"да", "true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"нет", "false", "0", "no", "n", "off"}:
+        return False
+    raise ValueError("Включено должно быть да/нет, true/false или 1/0")
+
+
+def _parse_nomenclature_product_type(value: Any) -> str:
+    normalized = _cell_text(value).casefold().replace("ё", "е")
+    if normalized in NOMENCLATURE_PRODUCT_TYPE_BY_LABEL:
+        return NOMENCLATURE_PRODUCT_TYPE_BY_LABEL[normalized]
+    normalized_no_dot = normalized.replace(".", "")
+    if normalized_no_dot in {"доп строка", "дополнительная строка"}:
+        return "extra"
+    raise ValueError("Тип должен быть clear, anti_spy, matte, extra, other или русским label")
+
+
+def _parse_nomenclature_nm_id(value: Any, *, row_number: int) -> int | None:
+    if value is None or _cell_text(value) == "":
+        return None
+    parsed = _optional_int(value)
+    if parsed is None:
+        raise ValueError(f"Строка {row_number}: nmId должен быть целым числом")
+    return parsed
+
+
+def _optional_nonnegative_number(value: Any, *, field_name: str) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    parsed = _optional_number(value)
+    if parsed is None or parsed < 0:
+        raise ValueError(f"{field_name} должна быть числом >= 0")
+    return parsed
+
+
+def _cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value)).strip()
+    return str(value).strip()
+
+
+def _nomenclature_item_changed(existing: Mapping[str, Any], item: Mapping[str, Any]) -> bool:
+    keys = [
+        "is_active",
+        "our_sku",
+        "nm_id",
+        "nomenclature_name",
+        "product_type",
+        "match_key",
+        "purchase_price_yuan",
+        "aliases",
+        "compatible_models_text",
+        "compatible_model_keys",
+        "comment",
+    ]
+    for key in keys:
+        if key == "purchase_price_yuan":
+            left = _optional_number(existing.get(key))
+            right = _optional_number(item.get(key))
+        else:
+            left = existing.get(key)
+            right = item.get(key)
+        if left != right:
+            return True
+    return False
+
+
+def _nomenclature_import_duplicate_errors(
+    existing_items: list[dict[str, Any]],
+    operations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    projected: dict[str, set[str]] = {}
+    for item in existing_items:
+        if bool(item.get("is_active")) and str(item.get("match_key") or "").strip():
+            projected.setdefault(str(item.get("match_key") or "").strip(), set()).add(str(item.get("item_id") or ""))
+    for operation in operations:
+        item = operation["item"]
+        item_id = str(item.get("item_id") or "")
+        for match_key in list(projected.keys()):
+            projected[match_key].discard(item_id)
+            if not projected[match_key]:
+                del projected[match_key]
+        if bool(item.get("is_active")) and str(item.get("match_key") or "").strip():
+            projected.setdefault(str(item.get("match_key") or "").strip(), set()).add(item_id)
+    duplicate_match_keys = {match_key for match_key, item_ids in projected.items() if len(item_ids) > 1}
+    errors: list[dict[str, Any]] = []
+    for operation in operations:
+        item = operation["item"]
+        match_key = str(item.get("match_key") or "").strip()
+        if bool(item.get("is_active")) and match_key in duplicate_match_keys:
+            errors.append(
+                {
+                    "row": operation["row"],
+                    "message": f"Строка {operation['row']}: duplicate active match key: {match_key}",
+                }
+            )
+    return errors
+
+
+def _nomenclature_import_result(
+    *,
+    status: str,
+    dry_run: bool,
+    operations: list[dict[str, Any]],
+    skipped_count: int,
+    errors: list[dict[str, Any]],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "contract_name": "sheet_vitrina_v1_nomenclature_import",
+        "status": status,
+        "dry_run": dry_run,
+        "created_count": sum(1 for operation in operations if operation["action"] == "created"),
+        "updated_count": sum(1 for operation in operations if operation["action"] == "updated"),
+        "deactivated_count": sum(1 for operation in operations if operation["action"] == "deactivated"),
+        "skipped_count": skipped_count,
+        "error_count": len(errors),
+        "errors": errors,
+        "items": items,
+    }
 
 
 def _line_compatible_model_keys(line: Mapping[str, Any]) -> list[str]:
