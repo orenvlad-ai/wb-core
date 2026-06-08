@@ -1479,6 +1479,220 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return cursor.rowcount > 0
 
+    def upsert_wb_supplies(
+        self,
+        *,
+        rows: list[Mapping[str, Any]],
+        warehouses: list[Mapping[str, Any]],
+        synced_at: str,
+        last_successful_sync_at: str,
+        last_error: str,
+        last_limit: int,
+        last_offset: int,
+        latest_synced_count: int,
+    ) -> None:
+        _validate_timestamp(str(synced_at or ""), field_name="synced_at")
+        _validate_timestamp(str(last_successful_sync_at or ""), field_name="last_successful_sync_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supplies_warehouses(
+                    warehouse_id,
+                    warehouse_name,
+                    raw_json,
+                    synced_at
+                )
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(warehouse_id) DO UPDATE SET
+                    warehouse_name = excluded.warehouse_name,
+                    raw_json = excluded.raw_json,
+                    synced_at = excluded.synced_at
+                """,
+                [
+                    (
+                        str(_first_existing_value(item, "warehouse_id", "ID", "id") or "").strip(),
+                        str(_first_existing_value(item, "warehouse_name", "name", "warehouseName") or "").strip(),
+                        json.dumps(dict(item), ensure_ascii=False),
+                        synced_at,
+                    )
+                    for item in warehouses
+                    if str(_first_existing_value(item, "warehouse_id", "ID", "id") or "").strip()
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supplies(
+                    supply_id,
+                    preorder_id,
+                    normalized_row_json,
+                    raw_list_json,
+                    raw_detail_json,
+                    raw_goods_json,
+                    raw_package_json,
+                    warehouse_id,
+                    status_id,
+                    quantity_for_size_filter,
+                    source_created_at,
+                    supply_date,
+                    updated_date,
+                    synced_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(supply_id) DO UPDATE SET
+                    preorder_id = excluded.preorder_id,
+                    normalized_row_json = excluded.normalized_row_json,
+                    raw_list_json = excluded.raw_list_json,
+                    raw_detail_json = excluded.raw_detail_json,
+                    raw_goods_json = excluded.raw_goods_json,
+                    raw_package_json = excluded.raw_package_json,
+                    warehouse_id = excluded.warehouse_id,
+                    status_id = excluded.status_id,
+                    quantity_for_size_filter = excluded.quantity_for_size_filter,
+                    source_created_at = excluded.source_created_at,
+                    supply_date = excluded.supply_date,
+                    updated_date = excluded.updated_date,
+                    synced_at = excluded.synced_at
+                """,
+                [_wb_supply_row_values(row, synced_at) for row in rows],
+            )
+            _upsert_wb_supplies_sync_state(
+                conn,
+                last_synced_at=synced_at,
+                last_successful_sync_at=last_successful_sync_at,
+                last_error=last_error,
+                last_limit=last_limit,
+                last_offset=last_offset,
+                latest_synced_count=latest_synced_count,
+            )
+            conn.commit()
+
+    def save_wb_supplies_sync_state(
+        self,
+        *,
+        last_synced_at: str,
+        last_successful_sync_at: str | None,
+        last_error: str,
+        last_limit: int,
+        last_offset: int,
+        latest_synced_count: int,
+    ) -> None:
+        _validate_timestamp(str(last_synced_at or ""), field_name="last_synced_at")
+        if last_successful_sync_at:
+            _validate_timestamp(str(last_successful_sync_at), field_name="last_successful_sync_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            _upsert_wb_supplies_sync_state(
+                conn,
+                last_synced_at=last_synced_at,
+                last_successful_sync_at=last_successful_sync_at,
+                last_error=last_error,
+                last_limit=last_limit,
+                last_offset=last_offset,
+                latest_synced_count=latest_synced_count,
+            )
+            conn.commit()
+
+    def load_wb_supplies_sync_state(self) -> dict[str, Any]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT last_synced_at,
+                       last_successful_sync_at,
+                       last_error,
+                       last_limit,
+                       last_offset,
+                       latest_synced_count
+                FROM sheet_vitrina_v1_wb_supplies_sync_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return {
+                    "last_synced_at": "",
+                    "last_successful_sync_at": "",
+                    "last_error": "",
+                    "last_limit": None,
+                    "last_offset": None,
+                    "latest_synced_count": None,
+                }
+            return {
+                "last_synced_at": row["last_synced_at"] or "",
+                "last_successful_sync_at": row["last_successful_sync_at"] or "",
+                "last_error": row["last_error"] or "",
+                "last_limit": row["last_limit"],
+                "last_offset": row["last_offset"],
+                "latest_synced_count": row["latest_synced_count"],
+            }
+
+    def list_wb_supplies(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT normalized_row_json
+                FROM sheet_vitrina_v1_wb_supplies
+                ORDER BY COALESCE(updated_date, supply_date, source_created_at, synced_at) DESC,
+                         supply_id DESC
+                """
+            ).fetchall()
+            return [json.loads(row["normalized_row_json"]) for row in rows]
+
+    def list_wb_supplies_warehouses(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT warehouse_id,
+                       warehouse_name,
+                       raw_json,
+                       synced_at
+                FROM sheet_vitrina_v1_wb_supplies_warehouses
+                ORDER BY warehouse_name ASC, warehouse_id ASC
+                """
+            ).fetchall()
+            result = []
+            for row in rows:
+                payload = json.loads(row["raw_json"])
+                payload.setdefault("warehouse_id", row["warehouse_id"])
+                payload.setdefault("warehouse_name", row["warehouse_name"])
+                payload.setdefault("synced_at", row["synced_at"])
+                result.append(payload)
+            return result
+
+    def load_wb_supply(self, supply_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT normalized_row_json,
+                       raw_list_json,
+                       raw_detail_json,
+                       raw_goods_json,
+                       raw_package_json
+                FROM sheet_vitrina_v1_wb_supplies
+                WHERE supply_id = ?
+                """,
+                (str(supply_id or "").strip(),),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row["normalized_row_json"])
+            payload["raw"] = {
+                "list": json.loads(row["raw_list_json"]) if row["raw_list_json"] else None,
+                "detail": json.loads(row["raw_detail_json"]) if row["raw_detail_json"] else None,
+                "goods": json.loads(row["raw_goods_json"]) if row["raw_goods_json"] else None,
+                "package": json.loads(row["raw_package_json"]) if row["raw_package_json"] else None,
+            }
+            return payload
+
     def save_supplier_shipment_upload(
         self,
         *,
@@ -3245,6 +3459,81 @@ def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _first_existing_value(mapping: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping and mapping.get(key) is not None:
+            return mapping.get(key)
+    return None
+
+
+def _wb_supply_row_values(row: Mapping[str, Any], synced_at: str) -> tuple[Any, ...]:
+    supply_id = str(row.get("supply_id") or "").strip()
+    if not supply_id:
+        raise ValueError("WB supply_id is required")
+    normalized_row = dict(row)
+    raw_list = normalized_row.pop("raw_list", None)
+    raw_detail = normalized_row.pop("raw_detail", None)
+    raw_goods = normalized_row.pop("raw_goods", None)
+    raw_package = normalized_row.pop("raw_package", None)
+    return (
+        supply_id,
+        str(row.get("preorder_id") or "").strip(),
+        json.dumps(normalized_row, ensure_ascii=False),
+        json.dumps(raw_list, ensure_ascii=False) if raw_list is not None else None,
+        json.dumps(raw_detail, ensure_ascii=False) if raw_detail is not None else None,
+        json.dumps(raw_goods, ensure_ascii=False) if raw_goods is not None else None,
+        json.dumps(raw_package, ensure_ascii=False) if raw_package is not None else None,
+        str(row.get("warehouse_id") or "").strip(),
+        row.get("status_id"),
+        row.get("quantity_for_size_filter"),
+        str(row.get("source_created_at") or "").strip(),
+        str(row.get("supply_date") or "").strip(),
+        str(row.get("updated_date") or "").strip(),
+        synced_at,
+    )
+
+
+def _upsert_wb_supplies_sync_state(
+    conn: sqlite3.Connection,
+    *,
+    last_synced_at: str,
+    last_successful_sync_at: str | None,
+    last_error: str,
+    last_limit: int,
+    last_offset: int,
+    latest_synced_count: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_wb_supplies_sync_state(
+            slot,
+            last_synced_at,
+            last_successful_sync_at,
+            last_error,
+            last_limit,
+            last_offset,
+            latest_synced_count
+        )
+        VALUES(1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slot) DO UPDATE SET
+            last_synced_at = excluded.last_synced_at,
+            last_successful_sync_at = COALESCE(excluded.last_successful_sync_at, last_successful_sync_at),
+            last_error = excluded.last_error,
+            last_limit = excluded.last_limit,
+            last_offset = excluded.last_offset,
+            latest_synced_count = excluded.latest_synced_count
+        """,
+        (
+            last_synced_at,
+            last_successful_sync_at,
+            str(last_error or ""),
+            int(last_limit or 0),
+            int(last_offset or 0),
+            int(latest_synced_count or 0),
+        ),
+    )
+
+
 def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "item_id": row["item_id"],
@@ -3564,6 +3853,49 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             slot INTEGER PRIMARY KEY CHECK (slot = 1),
             calculated_at TEXT NOT NULL,
             result_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies (
+            supply_id TEXT PRIMARY KEY,
+            preorder_id TEXT,
+            normalized_row_json TEXT NOT NULL,
+            raw_list_json TEXT,
+            raw_detail_json TEXT,
+            raw_goods_json TEXT,
+            raw_package_json TEXT,
+            warehouse_id TEXT,
+            status_id INTEGER,
+            quantity_for_size_filter REAL,
+            source_created_at TEXT,
+            supply_date TEXT,
+            updated_date TEXT,
+            synced_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supplies_by_status
+        ON sheet_vitrina_v1_wb_supplies(status_id, supply_date DESC, updated_date DESC);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supplies_by_warehouse
+        ON sheet_vitrina_v1_wb_supplies(warehouse_id, supply_date DESC, updated_date DESC);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supplies_by_quantity
+        ON sheet_vitrina_v1_wb_supplies(quantity_for_size_filter);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies_sync_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            last_synced_at TEXT,
+            last_successful_sync_at TEXT,
+            last_error TEXT,
+            last_limit INTEGER,
+            last_offset INTEGER,
+            latest_synced_count INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies_warehouses (
+            warehouse_id TEXT PRIMARY KEY,
+            warehouse_name TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            synced_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_uploads (

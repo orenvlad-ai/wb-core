@@ -33,6 +33,7 @@ from packages.application.sheet_vitrina_v1_feedbacks import (
     FEEDBACKS_EXPORT_CONTENT_TYPE,
     SheetVitrinaV1FeedbacksError,
 )
+from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
 from packages.application.demand_estimation import parse_sales_avg_period_days
@@ -140,6 +141,8 @@ DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory
 DEFAULT_WB_REGIONAL_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/status"
 DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/calculate"
 DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
+DEFAULT_WB_SUPPLIES_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies"
+DEFAULT_WB_SUPPLIES_SYNC_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
@@ -1127,6 +1130,30 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, _with_wb_regional_urls(result))
                 return
 
+            if parsed.path == DEFAULT_WB_SUPPLIES_SYNC_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_wb_supplies_sync_request(payload)
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB supplies sync failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -1731,6 +1758,47 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"supplier shipments list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_SUPPLIES_PATH:
+                try:
+                    payload = entrypoint.handle_wb_supplies_list_request(_flatten_query_params(parsed.query))
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB supplies list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_wb_supply_detail_path(parsed.path):
+                try:
+                    supply_id = _resolve_wb_supply_id_from_detail_path(parsed.path)
+                    payload = entrypoint.handle_wb_supplies_detail_request(supply_id)
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB supply detail failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -2377,6 +2445,15 @@ def _resolve_optional_query_float(query_string: str, name: str) -> float | None:
         raise ValueError(f"{name} query parameter must be numeric") from exc
 
 
+def _flatten_query_params(query_string: str) -> dict[str, Any]:
+    query = urllib_parse.parse_qs(query_string or "", keep_blank_values=False)
+    flattened: dict[str, Any] = {}
+    for key, values in query.items():
+        if values:
+            flattened[key] = values[-1]
+    return flattened
+
+
 def _resolve_optional_query_bool(query_string: str, name: str) -> bool:
     value = _resolve_single_query_param(query_string, name).lower()
     if not value:
@@ -2626,6 +2703,13 @@ def _is_supplier_shipment_rematch_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "rematch"
 
 
+def _is_wb_supply_detail_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_WB_SUPPLIES_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_WB_SUPPLIES_PATH) + 1 :]
+    return bool(suffix) and "/" not in suffix and suffix != "sync"
+
+
 def _is_nomenclature_item_path(path: str) -> bool:
     if not path.startswith(DEFAULT_NOMENCLATURE_PATH + "/"):
         return False
@@ -2655,6 +2739,12 @@ def _resolve_supplier_shipment_id_from_rematch_path(path: str) -> str:
         raise ValueError(f"unsupported supplier shipment rematch path: {path}")
     suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
     return suffix.split("/", 1)[0]
+
+
+def _resolve_wb_supply_id_from_detail_path(path: str) -> str:
+    if not _is_wb_supply_detail_path(path):
+        raise ValueError(f"unsupported WB supply detail path: {path}")
+    return urllib_parse.unquote(path[len(DEFAULT_WB_SUPPLIES_PATH) + 1 :])
 
 
 def _resolve_nomenclature_item_id(path: str) -> str:
@@ -3496,6 +3586,8 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+        "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
+        "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,

@@ -72,6 +72,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
+    DEFAULT_WB_SUPPLIES_PATH,
 )
 
 
@@ -646,6 +647,13 @@ def collect_public_surface(
             name="wb_regional_status",
             method="GET",
             url=f"{base_url}{DEFAULT_WB_REGIONAL_STATUS_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="wb_supplies_list",
+            method="GET",
+            url=f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -2324,6 +2332,26 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "wb_supplies_list":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "contract_name",
+                "contract_version",
+                "meta",
+                "filters",
+                "summary",
+                "pagination",
+                "schema",
+                "rows",
+            ],
+        )
+        if evaluation["ok"] and payload.get("contract_name") != "sheet_vitrina_v1_wb_supplies":
+            evaluation["ok"] = False
+            evaluation["detail"] = f"expected sheet_vitrina_v1_wb_supplies contract, got {payload.get('contract_name')!r}"
+        return evaluation
+
     if route == "load_route":
         error_text = str(payload.get("error", "") or "")
         evaluation["ok"] = status == 404 and "unsupported path" in error_text
@@ -2777,6 +2805,7 @@ results = [
     _collect("factory_order_template_inbound_ff_to_wb", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"),
     _collect("factory_order_recommendation", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"),
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
+    _collect("wb_supplies_list", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_SUPPLIES_PATH!r}),
     _collect("wb_regional_district_central", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx"),
 ]
 if PAYLOAD["include_feedbacks"]:
