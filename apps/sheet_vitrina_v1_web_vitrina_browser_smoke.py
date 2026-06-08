@@ -249,7 +249,7 @@ def run_browser_checks(
 ) -> dict[str, object]:
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     if as_of_date:
-        page_url = f"{page_url}?as_of_date={as_of_date}"
+        page_url = f"{page_url}?history_mode=explicit&as_of_date={as_of_date}"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(
@@ -598,7 +598,7 @@ def run_browser_checks(
                 preset_calendar_sync = _check_preset_calendar_sync(page)
                 page.locator("[data-history-save]").click()
                 page.wait_for_function(
-                    "() => new URL(window.location.href).searchParams.get('date_from') === '2026-04-15' && new URL(window.location.href).searchParams.get('date_to') === '2026-04-21'",
+                    "() => { const params = new URL(window.location.href).searchParams; return params.get('history_mode') === 'explicit' && params.get('date_from') === '2026-04-15' && params.get('date_to') === '2026-04-21'; }",
                     timeout=5000,
                 )
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
@@ -614,7 +614,7 @@ def run_browser_checks(
                 page.wait_for_selector("[data-history-popover]:not([hidden])", timeout=5000)
                 page.locator("[data-history-reset]").click()
                 page.wait_for_function(
-                    "() => !new URL(window.location.href).searchParams.has('date_from') && !new URL(window.location.href).searchParams.has('date_to') && !new URL(window.location.href).searchParams.has('as_of_date')",
+                    "() => { const params = new URL(window.location.href).searchParams; return !params.has('history_mode') && !params.has('date_from') && !params.has('date_to') && !params.has('as_of_date'); }",
                     timeout=5000,
                 )
                 page.wait_for_function("() => document.querySelector('[data-history-popover]').hidden", timeout=5000)
@@ -695,7 +695,7 @@ def run_error_state_check(base_url: str, *, ignore_https_errors: bool) -> dict[s
             browser.close()
     if error_title != "Витрина недоступна":
         raise AssertionError(f"error state title mismatch, got {error_title!r}")
-    if "ready snapshot" not in error_body:
+    if "ready snapshot" not in error_body and "period window" not in error_body:
         raise AssertionError(f"error state body mismatch, got {error_body!r}")
     return {
         "error_state": {
@@ -787,7 +787,7 @@ def _check_stale_history_storage_ignored(page: object, base_url: str) -> dict[st
         return {"skipped": "public base-url mode"}
     page.evaluate(
         """async () => {
-          const response = await fetch('/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&date_from=2026-04-20&date_to=2026-04-24&include_table_data=1');
+          const response = await fetch('/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&history_mode=explicit&date_from=2026-04-20&date_to=2026-04-24&include_table_data=1');
           const payload = await response.json();
           localStorage.setItem('wb-core:sheet-vitrina-v1:web-vitrina:legacy-period:v0', JSON.stringify({
             date_from: '2026-04-20',
@@ -815,6 +815,7 @@ def _check_stale_history_storage_ignored(page: object, base_url: str) -> dict[st
           dateTo: (document.querySelector('[data-history-date-to]') || {}).value || '',
           query: window.location.search,
           freshnessClass: ((document.querySelector('[data-table-freshness-indicator]') || {}).getAttribute('class') || ''),
+          bodyText: document.body ? (document.body.innerText || '') : '',
           cachePresent: !!localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1'),
           legacyPeriodPresent: !!localStorage.getItem('wb-core:sheet-vitrina-v1:web-vitrina:legacy-period:v0'),
           legacyRangePresent: !!localStorage.getItem('wb_core_web_vitrina_legacy_history_range'),
@@ -827,6 +828,8 @@ def _check_stale_history_storage_ignored(page: object, base_url: str) -> dict[st
         raise AssertionError(f"stale/broken history storage must fall back to no-query default, got {state}")
     if "20.04.2026 - 24.04.2026" in state["label"]:
         raise AssertionError(f"legacy April range leaked into history label, got {state}")
+    if "20.04.2026 - 24.04.2026" in state["bodyText"] or "2026-04-20..2026-04-24" in state["bodyText"]:
+        raise AssertionError(f"legacy April range leaked into rendered page, got {state}")
     if state["cachePresent"] or state["legacyPeriodPresent"] or state["legacyRangePresent"] or state["brokenPeriodPresent"]:
         raise AssertionError(f"obsolete persisted history state must be reset on no-query load, got {state}")
     if "is-stale-loading" in state["freshnessClass"] or "is-stale-error" in state["freshnessClass"]:
@@ -2002,7 +2005,7 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
 def _check_table_snapshot_cache(page: object) -> dict[str, object]:
     marker = "OLD-CACHE-TABLE-SNAPSHOT"
     page_url = page.url.split("?", 1)[0]
-    explicit_period_url = f"{page_url}?date_from=2026-04-15&date_to=2026-04-21"
+    explicit_period_url = f"{page_url}?history_mode=explicit&date_from=2026-04-15&date_to=2026-04-21"
     cache_page = page.context.new_page()
     try:
         cache_page.goto(explicit_period_url, wait_until="commit")
@@ -2010,49 +2013,54 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
         cache_page.wait_for_function(
             """() => {
               const indicator = document.querySelector('[data-table-freshness-indicator]');
+              const label = (document.querySelector('[data-history-label]') || {}).textContent || '';
               return !!indicator &&
                 indicator.classList.contains('is-fresh') &&
-                !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1');
+                label.trim() === '15.04.2026 - 21.04.2026' &&
+                !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1');
             }""",
             timeout=20000,
         )
-        cache_state = cache_page.evaluate(
+        initial_state = cache_page.evaluate(
+            """() => ({
+              query: window.location.search,
+              cache_present: !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1'),
+              label: (document.querySelector('[data-history-label]') || {}).textContent || ''
+            })"""
+        )
+        if "history_mode=explicit" not in initial_state["query"]:
+            raise AssertionError(f"explicit period URL must carry history_mode marker, got {initial_state}")
+        if initial_state["cache_present"]:
+            raise AssertionError(f"explicit period must not persist table snapshot cache, got {initial_state}")
+
+        seeded_state = cache_page.evaluate(
             """(marker) => {
               const key = 'wb_core_web_vitrina_table_snapshot_v1';
-              const raw = window.localStorage.getItem(key);
-              if (!raw) {
-                return {ok: false, reason: 'missing cache'};
-              }
-              const cached = JSON.parse(raw);
-              const payload = cached.payload || {};
-              const table = payload.table_surface || {};
-              const rows = Array.isArray(table.rows) ? table.rows : [];
-              if (!rows.length) {
-                return {ok: false, reason: 'empty cached rows'};
-              }
-              const row = rows[0];
-              const values = row.values || {};
-              const cell = values.metric_label || values.scope_label || Object.values(values)[0];
-              if (!cell) {
-                return {ok: false, reason: 'no editable cached cell'};
-              }
-              cell.display_text = marker;
-              cell.value = marker;
-              row.search_text = String(row.search_text || '') + ' ' + marker;
-              window.localStorage.setItem(key, JSON.stringify(cached));
+              window.localStorage.setItem(key, JSON.stringify({
+                version: 1,
+                request_key: '/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&history_mode=explicit&date_from=2026-04-15&date_to=2026-04-21',
+                saved_at: '2026-04-24T12:00:00Z',
+                snapshot_id: 'obsolete-cache-smoke',
+                as_of_date: '2026-04-24',
+                payload: {
+                  composition_name: 'web_vitrina_page_composition',
+                  meta: {current_state: 'ready'},
+                  table_surface: {
+                    table_data_state: 'included',
+                    columns: [],
+                    groupings: [],
+                    rows: [{values: {metric_label: {display_text: marker, value: marker}}, search_text: marker}]
+                  }
+                }
+              }));
               return {
-                ok: true,
-                request_key: cached.request_key || '',
-                snapshot_id: cached.snapshot_id || '',
-                row_count: rows.length
+                cache_present: !!window.localStorage.getItem(key)
               };
             }""",
             arg=marker,
         )
-        if not cache_state.get("ok"):
-            raise AssertionError(f"table snapshot cache must contain a successful table payload, got {cache_state}")
-        if "date_from=2026-04-15" not in str(cache_state.get("request_key") or ""):
-            raise AssertionError(f"table snapshot cache must be scoped to explicit period URLs, got {cache_state}")
+        if not seeded_state["cache_present"]:
+            raise AssertionError(f"smoke failed to seed fake table snapshot cache, got {seeded_state}")
 
         cache_page.reload(wait_until="domcontentloaded")
         cache_page.wait_for_function(
@@ -2060,44 +2068,22 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
               const indicator = document.querySelector('[data-table-freshness-indicator]');
               const bodyText = document.body ? (document.body.innerText || '') : '';
               return !!indicator &&
-                indicator.classList.contains('is-stale-loading') &&
-                bodyText.includes(marker) &&
-                document.querySelectorAll('[data-table-body] tr').length > 0;
-            }""",
-            arg=marker,
-            timeout=3000,
-        )
-        stale_state = cache_page.evaluate(
-            """(marker) => {
-              const indicator = document.querySelector('[data-table-freshness-indicator]');
-              return {
-                indicator_class: indicator ? (indicator.getAttribute('class') || '') : '',
-                indicator_text: indicator ? ((indicator.textContent || '').trim()) : '',
-                marker_visible: (document.body.innerText || '').includes(marker),
-                row_count: document.querySelectorAll('[data-table-body] tr').length
-              };
-            }""",
-            arg=marker,
-        )
-        cache_page.wait_for_function(
-            """(marker) => {
-              const indicator = document.querySelector('[data-table-freshness-indicator]');
-              const bodyText = document.body ? (document.body.innerText || '') : '';
-              return !!indicator &&
                 indicator.classList.contains('is-fresh') &&
                 !bodyText.includes(marker) &&
+                !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
                 document.querySelectorAll('[data-table-body] tr').length > 0;
             }""",
             arg=marker,
             timeout=20000,
         )
-        fresh_state = cache_page.evaluate(
+        reload_state = cache_page.evaluate(
             """(marker) => {
               const indicator = document.querySelector('[data-table-freshness-indicator]');
               return {
                 indicator_class: indicator ? (indicator.getAttribute('class') || '') : '',
                 indicator_text: indicator ? ((indicator.textContent || '').trim()) : '',
                 marker_visible: (document.body.innerText || '').includes(marker),
+                cache_present: !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1'),
                 row_count: document.querySelectorAll('[data-table-body] tr').length
               };
             }""",
@@ -2127,12 +2113,10 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
             }"""
         )
         return {
-            "cached_row_count": cache_state["row_count"],
-            "explicit_period_request_key": cache_state["request_key"],
-            "stale_indicator": stale_state["indicator_text"],
-            "stale_marker_visible": stale_state["marker_visible"],
-            "fresh_indicator": fresh_state["indicator_text"],
-            "fresh_marker_visible": fresh_state["marker_visible"],
+            "cache_disabled_for_explicit_period": not initial_state["cache_present"],
+            "seeded_cache_purged_on_reload": not reload_state["cache_present"],
+            "stale_marker_visible": reload_state["marker_visible"],
+            "fresh_indicator": reload_state["indicator_text"],
             "no_query_cache_present": no_query_state["cache_present"],
             "no_query_label": no_query_state["label"],
         }

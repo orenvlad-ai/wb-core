@@ -75,6 +75,7 @@ from packages.application.web_vitrina_gravity_table_adapter import (
 from packages.application.web_vitrina_page_composition import (
     build_web_vitrina_page_composition,
     build_web_vitrina_page_error_composition,
+    resolve_web_vitrina_default_period,
 )
 from packages.application.web_vitrina_view_model import build_web_vitrina_view_model
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
@@ -754,37 +755,24 @@ class RegistryUploadHttpEntrypoint:
         include_table_data: bool = False,
     ) -> dict[str, Any]:
         page_composition_started_perf = time.perf_counter()
-        effective_as_of_date = as_of_date or default_business_as_of_date(self.now_factory())
+        now = self.now_factory()
+        default_period = resolve_web_vitrina_default_period(now)
+        canonical_default_range: tuple[str, str] = (default_period.date_from, default_period.date_to)
+        effective_as_of_date = as_of_date or default_period.date_to
         available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
-        default_as_of_date = default_business_as_of_date(self.now_factory())
+        default_as_of_date = default_business_as_of_date(now)
         selected_date_from = date_from
         selected_date_to = date_to
-        canonical_default_range: tuple[str, str] | None = None
         try:
             if not as_of_date and not date_from and not date_to:
-                seed_contract = self.web_vitrina_block.build(
+                selected_date_from, selected_date_to = canonical_default_range
+                contract = self.web_vitrina_block.build(
                     page_route=page_route,
                     read_route=read_route,
                     as_of_date=None,
-                    date_from=None,
-                    date_to=None,
+                    date_from=selected_date_from,
+                    date_to=selected_date_to,
                 )
-                default_range = _default_web_vitrina_page_period(
-                    seed_contract,
-                    available_snapshot_dates=available_snapshot_dates,
-                )
-                canonical_default_range = default_range
-                if default_range is not None:
-                    selected_date_from, selected_date_to = default_range
-                    contract = self.web_vitrina_block.build(
-                        page_route=page_route,
-                        read_route=read_route,
-                        as_of_date=None,
-                        date_from=selected_date_from,
-                        date_to=selected_date_to,
-                    )
-                else:
-                    contract = seed_contract
             else:
                 contract = self.web_vitrina_block.build(
                     page_route=page_route,
@@ -792,11 +780,6 @@ class RegistryUploadHttpEntrypoint:
                     as_of_date=as_of_date,
                     date_from=date_from,
                     date_to=date_to,
-                )
-            if canonical_default_range is None:
-                canonical_default_range = _default_web_vitrina_page_period(
-                    contract,
-                    available_snapshot_dates=available_snapshot_dates,
                 )
             view_model = build_web_vitrina_view_model(contract)
             adapter = build_web_vitrina_gravity_table_adapter(view_model)
@@ -822,8 +805,8 @@ class RegistryUploadHttpEntrypoint:
                     selected_as_of_date=as_of_date,
                     selected_date_from=selected_date_from,
                     selected_date_to=selected_date_to,
-                    default_date_from=(canonical_default_range or ("", ""))[0],
-                    default_date_to=(canonical_default_range or ("", ""))[1],
+                    default_date_from=canonical_default_range[0],
+                    default_date_to=canonical_default_range[1],
                     activity_surface=activity_surface,
                 ),
                 started_perf=page_composition_started_perf,
@@ -894,8 +877,8 @@ class RegistryUploadHttpEntrypoint:
                 selected_as_of_date=as_of_date,
                 selected_date_from=selected_date_from,
                 selected_date_to=selected_date_to,
-                default_date_from=(canonical_default_range or ("", ""))[0],
-                default_date_to=(canonical_default_range or ("", ""))[1],
+                default_date_from=canonical_default_range[0],
+                default_date_to=canonical_default_range[1],
                 contract=contract,
                 view_model=view_model,
                 adapter=adapter,
@@ -3963,27 +3946,6 @@ def _target_snapshot_as_of_date_for_group_refresh(selected_as_of_date: str, *, n
     if selected_as_of_date == current_date:
         return default_business_as_of_date(now)
     return selected_as_of_date
-
-
-def _default_web_vitrina_page_period(
-    contract: Any,
-    *,
-    available_snapshot_dates: Iterable[str],
-) -> tuple[str, str] | None:
-    """Default UI period: rolling two-week preset ending on backend-owned business today."""
-
-    del available_snapshot_dates
-    status_summary = contract.status_summary
-    current_business_date = str(getattr(status_summary, "current_business_date", "") or "")
-    if not current_business_date:
-        current_business_date = str(getattr(contract.meta, "as_of_date", "") or "")
-    period_end = current_business_date
-    try:
-        end_date = date.fromisoformat(period_end)
-    except ValueError:
-        return None
-    period_start = (end_date - timedelta(days=13)).isoformat()
-    return period_start, period_end
 
 
 def _web_vitrina_source_status_snapshot_as_of_date(contract: Any) -> str:

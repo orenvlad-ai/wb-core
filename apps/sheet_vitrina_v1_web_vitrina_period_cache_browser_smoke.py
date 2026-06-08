@@ -37,6 +37,7 @@ def main() -> None:
     print("web_vitrina_period_cache_base_url: ok ->", result["base_url"])
     print("web_vitrina_period_cache_no_query_default: ok ->", result["no_query_default"])
     print("web_vitrina_period_cache_stale_april_reset: ok ->", result["stale_april_reset"])
+    print("web_vitrina_period_cache_old_query_ignored: ok ->", result["old_query_ignored"])
     print("web_vitrina_period_cache_operator_default: ok ->", result["operator_default"])
     print("web_vitrina_period_cache_explicit_period: ok ->", result["explicit_period"])
 
@@ -63,8 +64,9 @@ def run_browser_check(base_url: str) -> dict[str, object]:
                 raise AssertionError(f"no-query load must reset obsolete period state, got {stale_april_reset}")
             if "is-stale-loading" in stale_april_reset["freshnessClass"] or "is-stale-error" in stale_april_reset["freshnessClass"]:
                 raise AssertionError(f"no-query load must not be driven by stale cache freshness, got {stale_april_reset}")
+            old_query_ignored = _assert_old_query_ignored(page, page_url)
             operator_default = _open_and_assert_no_query_default(page, base_url + DEFAULT_SHEET_OPERATOR_UI_PATH)
-            explicit_period = _assert_explicit_period_cache(page, page_url)
+            explicit_period = _assert_explicit_period(page, page_url)
         finally:
             context.close()
             browser.close()
@@ -73,6 +75,7 @@ def run_browser_check(base_url: str) -> dict[str, object]:
         "base_url": base_url,
         "no_query_default": no_query_default,
         "stale_april_reset": stale_april_reset,
+        "old_query_ignored": old_query_ignored,
         "operator_default": operator_default,
         "explicit_period": explicit_period,
     }
@@ -99,6 +102,7 @@ def _open_and_assert_no_query_default(page: object, page_url: str) -> dict[str, 
           dateTo: (document.querySelector('[data-history-date-to]') || {}).value || '',
           query: window.location.search,
           freshnessClass: ((document.querySelector('[data-table-freshness-indicator]') || {}).getAttribute('class') || ''),
+          bodyText: document.body ? (document.body.innerText || '') : '',
           cachePresent: !!localStorage.getItem(tableCacheKey),
           legacyPeriodPresent: !!localStorage.getItem(legacyPeriodKey),
           legacyRangePresent: !!localStorage.getItem(legacyRangeKey),
@@ -117,13 +121,15 @@ def _open_and_assert_no_query_default(page: object, page_url: str) -> dict[str, 
         raise AssertionError(f"no-query fields must use backend default without URL period, got {state}")
     if state["cachePresent"]:
         raise AssertionError(f"no-query page must not persist table snapshot cache, got {state}")
+    if "20.04.2026 - 24.04.2026" in state["bodyText"] or "2026-04-20..2026-04-24" in state["bodyText"]:
+        raise AssertionError(f"stale April range must not be visible on no-query page, got {state}")
     return state
 
 
 def _seed_stale_april_no_query_state(page: object) -> None:
     page.evaluate(
         """async ({tableCacheKey, legacyPeriodKey, legacyRangeKey, brokenPeriodKey}) => {
-          const response = await fetch('/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&date_from=2026-04-20&date_to=2026-04-24&include_table_data=1');
+          const response = await fetch('/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&history_mode=explicit&date_from=2026-04-20&date_to=2026-04-24&include_table_data=1');
           const payload = await response.json();
           localStorage.setItem(legacyPeriodKey, JSON.stringify({
             date_from: '2026-04-20',
@@ -150,49 +156,71 @@ def _seed_stale_april_no_query_state(page: object) -> None:
     )
 
 
-def _assert_explicit_period_cache(page: object, page_url: str) -> dict[str, object]:
+def _assert_old_query_ignored(page: object, page_url: str) -> dict[str, object]:
+    old_query_url = f"{page_url}?date_from=2026-04-20&date_to=2026-04-24"
+    page.goto(old_query_url, wait_until="commit")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.wait_for_function(
+        """() => {
+          const indicator = document.querySelector('[data-table-freshness-indicator]');
+          const label = (document.querySelector('[data-history-label]') || {}).textContent || '';
+          const params = new URL(window.location.href).searchParams;
+          return !!indicator &&
+            indicator.classList.contains('is-fresh') &&
+            label.trim() === '08.04.2026 - 21.04.2026' &&
+            !params.has('date_from') &&
+            !params.has('date_to') &&
+            !params.has('history_mode');
+        }""",
+        timeout=20000,
+    )
+    state = page.evaluate(
+        """() => ({
+          label: (document.querySelector('[data-history-label]') || {}).textContent || '',
+          query: window.location.search,
+          bodyText: document.body ? (document.body.innerText || '') : ''
+        })"""
+    )
+    if "20.04.2026 - 24.04.2026" in state["bodyText"] or "2026-04-20..2026-04-24" in state["bodyText"]:
+        raise AssertionError(f"legacy URL without history_mode must not render stale April range, got {state}")
+    return state
+
+
+def _assert_explicit_period(page: object, page_url: str) -> dict[str, object]:
     marker = "EXPLICIT-PERIOD-CACHED-TABLE"
-    explicit_url = f"{page_url}?date_from={EXPLICIT_DATE_FROM}&date_to={EXPLICIT_DATE_TO}"
+    explicit_url = f"{page_url}?history_mode=explicit&date_from={EXPLICIT_DATE_FROM}&date_to={EXPLICIT_DATE_TO}"
     page.goto(explicit_url, wait_until="commit")
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     page.wait_for_function(
-        """(tableCacheKey) => {
+        """() => {
           const indicator = document.querySelector('[data-table-freshness-indicator]');
+          const label = (document.querySelector('[data-history-label]') || {}).textContent || '';
           return !!indicator &&
             indicator.classList.contains('is-fresh') &&
-            !!window.localStorage.getItem(tableCacheKey);
+            label.trim() === '15.04.2026 - 21.04.2026' &&
+            !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1');
         }""",
-        arg=TABLE_CACHE_KEY,
         timeout=20000,
     )
-    cache_state = page.evaluate(
+    state = page.evaluate(
         """({tableCacheKey, marker}) => {
-          const raw = window.localStorage.getItem(tableCacheKey);
-          const cached = JSON.parse(raw || '{}');
-          const payload = cached.payload || {};
-          const table = payload.table_surface || {};
-          const rows = Array.isArray(table.rows) ? table.rows : [];
-          const row = rows[0] || {};
-          const values = row.values || {};
-          const cell = values.metric_label || values.scope_label || Object.values(values)[0];
-          if (cell) {
-            cell.display_text = marker;
-            cell.value = marker;
-            row.search_text = String(row.search_text || '') + ' ' + marker;
-          }
-          window.localStorage.setItem(tableCacheKey, JSON.stringify(cached));
+          window.localStorage.setItem(tableCacheKey, JSON.stringify({
+            version: 1,
+            request_key: '/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition&history_mode=explicit&date_from=2026-04-15&date_to=2026-04-21',
+            saved_at: '2026-04-24T12:00:00Z',
+            snapshot_id: 'obsolete-explicit-cache',
+            as_of_date: '2026-04-24',
+            payload: {table_surface: {rows: [{values: {metric_label: {display_text: marker, value: marker}}}], columns: [], groupings: []}}
+          }));
           return {
-            request_key: cached.request_key || '',
-            row_count: rows.length,
+            cachePresentAfterSeed: !!window.localStorage.getItem(tableCacheKey),
             label: (document.querySelector('[data-history-label]') || {}).textContent || ''
           };
         }""",
         {"tableCacheKey": TABLE_CACHE_KEY, "marker": marker},
     )
-    if f"date_from={EXPLICIT_DATE_FROM}" not in cache_state["request_key"]:
-        raise AssertionError(f"explicit period cache must be scoped by URL period, got {cache_state}")
-    if not cache_state["row_count"]:
-        raise AssertionError(f"explicit period cache must contain table rows, got {cache_state}")
+    if not state["cachePresentAfterSeed"]:
+        raise AssertionError(f"smoke failed to seed explicit cache, got {state}")
 
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function(
@@ -200,28 +228,9 @@ def _assert_explicit_period_cache(page: object, page_url: str) -> dict[str, obje
           const indicator = document.querySelector('[data-table-freshness-indicator]');
           const bodyText = document.body ? (document.body.innerText || '') : '';
           return !!indicator &&
-            indicator.classList.contains('is-stale-loading') &&
-            bodyText.includes(marker) &&
-            document.querySelectorAll('[data-table-body] tr').length > 0;
-        }""",
-        arg=marker,
-        timeout=3000,
-    )
-    stale_state = page.evaluate(
-        """(marker) => ({
-          marker_visible: (document.body.innerText || '').includes(marker),
-          freshnessClass: ((document.querySelector('[data-table-freshness-indicator]') || {}).getAttribute('class') || ''),
-          label: (document.querySelector('[data-history-label]') || {}).textContent || ''
-        })""",
-        arg=marker,
-    )
-    page.wait_for_function(
-        """(marker) => {
-          const indicator = document.querySelector('[data-table-freshness-indicator]');
-          const bodyText = document.body ? (document.body.innerText || '') : '';
-          return !!indicator &&
             indicator.classList.contains('is-fresh') &&
             !bodyText.includes(marker) &&
+            !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
             document.querySelectorAll('[data-table-body] tr').length > 0;
         }""",
         arg=marker,
@@ -232,16 +241,15 @@ def _assert_explicit_period_cache(page: object, page_url: str) -> dict[str, obje
           marker_visible: (document.body.innerText || '').includes(marker),
           freshnessClass: ((document.querySelector('[data-table-freshness-indicator]') || {}).getAttribute('class') || ''),
           label: (document.querySelector('[data-history-label]') || {}).textContent || '',
-          query: window.location.search
+          query: window.location.search,
+          cachePresent: !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1')
         })""",
         arg=marker,
     )
     if fresh_state["marker_visible"]:
         raise AssertionError(f"explicit period cache marker must disappear after fresh payload, got {fresh_state}")
     return {
-        "request_key": cache_state["request_key"],
-        "cached_row_count": cache_state["row_count"],
-        "stale_state": stale_state,
+        "cache_disabled": not fresh_state["cachePresent"],
         "fresh_state": fresh_state,
     }
 

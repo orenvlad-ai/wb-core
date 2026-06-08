@@ -4654,11 +4654,11 @@
     const FEEDBACKS_RANGE_STORAGE_TTL_MS = 12 * 60 * 60 * 1000;
     const FEEDBACKS_MIN_COLUMN_WIDTH = 72;
     const TABLE_SNAPSHOT_STORAGE_KEY = "wb_core_web_vitrina_table_snapshot_v1";
-    const TABLE_SNAPSHOT_STORAGE_VERSION = 1;
     const OBSOLETE_HISTORY_STORAGE_KEYS = [
       "wb-core:sheet-vitrina-v1:web-vitrina:legacy-period:v0",
       "wb_core_web_vitrina_legacy_history_range",
-      "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:period"
+      "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1:period",
+      TABLE_SNAPSHOT_STORAGE_KEY
     ];
 	    const FEEDBACKS_DEFAULT_COLUMN_WIDTHS = {
 	      select: 54,
@@ -4983,6 +4983,9 @@
     };
     let sellerRecoveryPollHandle = null;
     let metricPresentationDragState = null;
+
+    purgeObsoleteHistoryStorage();
+    cleanupLegacyHistoryQueryFromUrl();
 
     if (openOperatorLink) {
       openOperatorLink.href = WEB_VITRINA_CONFIG.operator_path;
@@ -5337,11 +5340,14 @@
       const historyQuery = currentExplicitHistoryQuery();
       const explicitAsOfDate = normalizeIsoDate(normalizedOptions.asOfDate || "");
       if (explicitAsOfDate) {
+        url.searchParams.set("history_mode", "explicit");
         url.searchParams.set("as_of_date", explicitAsOfDate);
       } else if (historyQuery.mode === "period") {
+        url.searchParams.set("history_mode", "explicit");
         url.searchParams.set("date_from", historyQuery.dateFrom);
         url.searchParams.set("date_to", historyQuery.dateTo);
       } else if (historyQuery.mode === "as_of_date") {
+        url.searchParams.set("history_mode", "explicit");
         url.searchParams.set("as_of_date", historyQuery.asOfDate);
       }
       if (surface && surface !== "contract") {
@@ -5377,6 +5383,15 @@
 
     function currentExplicitHistoryQuery() {
       const params = new URLSearchParams(window.location.search);
+      if (String(params.get("history_mode") || "").trim() !== "explicit") {
+        return {
+          mode: "default",
+          dateFrom: "",
+          dateTo: "",
+          asOfDate: "",
+          hasSelection: false
+        };
+      }
       const rawDateFrom = String(params.get("date_from") || "").trim();
       const rawDateTo = String(params.get("date_to") || "").trim();
       const rawAsOfDate = String(params.get("as_of_date") || "").trim();
@@ -5410,8 +5425,23 @@
       };
     }
 
-    function currentUrlHasExplicitHistorySelection() {
-      return currentExplicitHistoryQuery().hasSelection;
+    function shouldPurgeWebVitrinaHistoryStorageKey(key) {
+      const normalized = String(key || "").toLowerCase();
+      const isWebVitrinaKey =
+        normalized.indexOf("web_vitrina") !== -1 ||
+        normalized.indexOf("web-vitrina") !== -1;
+      if (!isWebVitrinaKey) {
+        return false;
+      }
+      return [
+        "history",
+        "period",
+        "range",
+        "table_snapshot",
+        "snapshot"
+      ].some(function(fragment) {
+        return normalized.indexOf(fragment) !== -1;
+      });
     }
 
     function purgeObsoleteHistoryStorage() {
@@ -5422,12 +5452,36 @@
         OBSOLETE_HISTORY_STORAGE_KEYS.forEach(function(key) {
           window.localStorage.removeItem(key);
         });
-        if (!currentUrlHasExplicitHistorySelection()) {
-          window.localStorage.removeItem(TABLE_SNAPSHOT_STORAGE_KEY);
-        }
+        Object.keys(window.localStorage).forEach(function(key) {
+          if (shouldPurgeWebVitrinaHistoryStorageKey(key)) {
+            window.localStorage.removeItem(key);
+          }
+        });
       } catch (error) {
         // Broken localStorage must not make the backend-owned default period unusable.
       }
+    }
+
+    function cleanupLegacyHistoryQueryFromUrl() {
+      const url = new URL(window.location.href);
+      const params = url.searchParams;
+      const historyMode = String(params.get("history_mode") || "").trim();
+      const hasHistoryParams =
+        params.has("history_mode") ||
+        params.has("date_from") ||
+        params.has("date_to") ||
+        params.has("as_of_date");
+      if (!hasHistoryParams) {
+        return;
+      }
+      if (historyMode === "explicit" && currentExplicitHistoryQuery().hasSelection) {
+        return;
+      }
+      params.delete("history_mode");
+      params.delete("date_from");
+      params.delete("date_to");
+      params.delete("as_of_date");
+      window.history.replaceState({}, "", url.toString());
     }
 
     function hasDisplayedCachedTableForRequest(requestKey) {
@@ -5436,86 +5490,6 @@
         state.tableSnapshot.displayedRequestKey &&
         state.tableSnapshot.displayedRequestKey === requestKey
       );
-    }
-
-    function isSuccessfulTableSnapshotPayload(payload) {
-      const tableSurface = (payload && payload.table_surface) || {};
-      return Boolean(
-        payload &&
-        payload.composition_name === "web_vitrina_page_composition" &&
-        String(((payload.meta || {}).current_state) || "") !== "error" &&
-        String(tableSurface.table_data_state || "included") === "included" &&
-        Array.isArray(tableSurface.columns) &&
-        Array.isArray(tableSurface.rows) &&
-        Array.isArray(tableSurface.groupings)
-      );
-    }
-
-    function readCachedTableSnapshotForCurrentRequest() {
-      if (!window || !window.localStorage) {
-        return null;
-      }
-      purgeObsoleteHistoryStorage();
-      if (!currentUrlHasExplicitHistorySelection()) {
-        return null;
-      }
-      try {
-        const raw = window.localStorage.getItem(TABLE_SNAPSHOT_STORAGE_KEY);
-        if (!raw) {
-          return null;
-        }
-        const cached = JSON.parse(raw);
-        if (!cached || Number(cached.version) !== TABLE_SNAPSHOT_STORAGE_VERSION) {
-          return null;
-        }
-        if (String(cached.request_key || "") !== tableSnapshotRequestKey()) {
-          return null;
-        }
-        if (!isSuccessfulTableSnapshotPayload(cached.payload)) {
-          return null;
-        }
-        return cached;
-      } catch (error) {
-        return null;
-      }
-    }
-
-    function persistSuccessfulTableSnapshot(payload) {
-      if (!window || !window.localStorage || !isSuccessfulTableSnapshotPayload(payload)) {
-        return;
-      }
-      purgeObsoleteHistoryStorage();
-      if (!currentUrlHasExplicitHistorySelection()) {
-        return;
-      }
-      try {
-        window.localStorage.setItem(TABLE_SNAPSHOT_STORAGE_KEY, JSON.stringify({
-          version: TABLE_SNAPSHOT_STORAGE_VERSION,
-          request_key: tableSnapshotRequestKey(),
-          saved_at: new Date().toISOString(),
-          snapshot_id: String((payload.meta && payload.meta.snapshot_id) || ""),
-          as_of_date: String((payload.meta && (payload.meta.snapshot_as_of_date || payload.meta.as_of_date)) || ""),
-          payload: payload
-        }));
-      } catch (error) {
-        // Storage quota or privacy mode must not block the live table.
-      }
-    }
-
-    function renderCachedTableSnapshotForCurrentRequest() {
-      const cached = readCachedTableSnapshotForCurrentRequest();
-      if (!cached) {
-        return false;
-      }
-      const payload = cached.payload;
-      state.tableSnapshot.displayedRequestKey = String(cached.request_key || "");
-      state.tableSnapshot.displayedSnapshotId = String(cached.snapshot_id || ((payload.meta || {}).snapshot_id) || "");
-      state.tableSnapshot.displayedSavedAt = String(cached.saved_at || "");
-      state.tableSnapshot.showingCached = true;
-      state.tableSnapshot.freshLoading = true;
-      resetFilterState(payload);
-      renderPage(payload, {tableFreshness: "stale_loading"});
-      return true;
     }
 
     function markFreshTableDisplayed(payload) {
@@ -5907,10 +5881,12 @@
       const dateFrom = String((payload && payload.dateFrom) || "").trim();
       const dateTo = String((payload && payload.dateTo) || "").trim();
       if (dateFrom && dateTo) {
+        url.searchParams.set("history_mode", "explicit");
         url.searchParams.set("date_from", dateFrom);
         url.searchParams.set("date_to", dateTo);
         url.searchParams.delete("as_of_date");
       } else {
+        url.searchParams.delete("history_mode");
         url.searchParams.delete("date_from");
         url.searchParams.delete("date_to");
         url.searchParams.delete("as_of_date");
@@ -8165,7 +8141,7 @@
         default_preset_id: "two_weeks",
         url_state_mode: "query_string",
         browser_state_persistence: "none",
-        supported_query_mode: "date_window",
+        supported_query_mode: "history_mode_explicit_date_window",
         preset_options: [],
         empty_message: "Исторические ready snapshots пока не materialized."
       };
@@ -8324,27 +8300,11 @@
       if (
         serverDefaultFrom &&
         serverDefaultTo &&
-        serverDefaultFrom <= serverDefaultTo &&
-        state.history.availableDateSet.has(serverDefaultFrom) &&
-        state.history.availableDateSet.has(serverDefaultTo) &&
-        isContinuousAvailableRange(serverDefaultFrom, serverDefaultTo)
+        serverDefaultFrom <= serverDefaultTo
       ) {
         return {dateFrom: serverDefaultFrom, dateTo: serverDefaultTo};
       }
-      const meta = (payload && payload.meta) || {};
-      const endCandidate = normalizeIsoDate(meta.today_current_date || meta.snapshot_as_of_date || meta.as_of_date || state.history.defaultAsOfDate || "");
-      if (!endCandidate) {
-        return null;
-      }
-      const dateFrom = shiftIsoDate(endCandidate, -13);
-      const dateTo = endCandidate;
-      if (!state.history.availableDateSet.has(dateFrom) || !state.history.availableDateSet.has(dateTo)) {
-        return null;
-      }
-      if (!isContinuousAvailableRange(dateFrom, dateTo)) {
-        return null;
-      }
-      return {dateFrom: dateFrom, dateTo: dateTo};
+      return null;
     }
 
     function renderHistoryCompactLabel() {
@@ -13839,7 +13799,6 @@
         const renderPayload = mergeDeferredShellWithFreshTable(shellPayload, payload);
         resetFilterState(renderPayload);
         renderPage(renderPayload, {tableFreshness: "fresh"});
-        persistSuccessfulTableSnapshot(renderPayload);
         markFreshTableDisplayed(renderPayload);
       } catch (error) {
         if (requestId !== state.requestSequence) {
@@ -13915,7 +13874,6 @@
         } else {
           resetFilterState(payload);
           renderPage(payload, {tableFreshness: "fresh"});
-          persistSuccessfulTableSnapshot(payload);
           markFreshTableDisplayed(payload);
         }
         refreshSellerRecoveryStatus();
@@ -13973,7 +13931,6 @@
     activateUnifiedTab(initialUnifiedTab(), {persist: false});
     loadVitrinaAutoSchedules();
     purgeObsoleteHistoryStorage();
-    renderCachedTableSnapshotForCurrentRequest();
     loadPageComposition();
   </script>
 </body>

@@ -328,7 +328,7 @@ def _page_composition_payload() -> dict[str, object]:
             "default_as_of_date": "2026-05-06",
             "url_state_mode": "query_string",
             "browser_state_persistence": "localStorage",
-            "supported_query_mode": "date_window",
+            "supported_query_mode": "history_mode_explicit_date_window",
             "preset_options": [],
             "empty_message": "",
         },
