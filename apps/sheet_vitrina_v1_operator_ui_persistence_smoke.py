@@ -36,6 +36,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
+    DEFAULT_WB_REGIONAL_CALCULATE_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     _render_sheet_vitrina_operator_ui,
 )
@@ -552,6 +553,107 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     }
     if factory_state != {"top_tab": "factory-order", "supply_section": "regional"}:
         raise AssertionError(f"top tab + supply subsection must survive reload, got {factory_state}")
+    if page.locator('input[name="regionalIncludedDistrict"]').count() != 6:
+        raise AssertionError("regional district selector must render six district checkboxes")
+    if page.locator('input[name="regionalIncludedDistrict"]:checked').count() != 6:
+        raise AssertionError("regional district selector must default to all districts")
+    page.click("#regionalDistrictExcludeFarSiberiaButton")
+    page.wait_for_function(
+        """(storageKey) => {
+            const raw = window.localStorage.getItem(storageKey);
+            if (!raw) return false;
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed.wb_regional_included_district_keys) &&
+                parsed.wb_regional_included_district_keys.length === 5 &&
+                !parsed.wb_regional_included_district_keys.includes("far_siberia");
+        }""",
+        arg=STORAGE_KEY,
+    )
+    regional_requests: list[dict[str, object]] = []
+    regional_result_payload: dict[str, object] = {}
+
+    def _capture_regional_status(route) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json; charset=utf-8",
+            body=json.dumps(
+                {
+                    "active_sku_count": len(ACTIVE_SKUS),
+                    "methodology_note": "-",
+                    "shared_datasets": {},
+                    "last_result": regional_result_payload or None,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    def _capture_regional_calculate(route) -> None:
+        nonlocal regional_result_payload
+        body = route.request.post_data or "{}"
+        regional_requests.append(json.loads(body))
+        regional_result_payload = {
+            "status": "success",
+            "report_date": "2026-04-20",
+            "horizon_days": 7,
+            "active_sku_count": 33,
+            "methodology_note": "test methodology note",
+            "settings": {
+                "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
+            },
+            "summary": {"total_qty": 0, "estimated_weight": 0.0, "estimated_volume": 0.0},
+            "diagnostics": {
+                "regional_demand_method": "mixed_stock_depletion_with_current_stock_share_fallback",
+                "fallback_sku_count": 32,
+                "fallback_nm_ids": list(range(100000001, 100000041)),
+                "requested_valid_day_count": 14,
+                "min_selected_valid_day_count": 0,
+                "max_selected_valid_day_count": 14,
+                "max_inspected_day_count": 120,
+                "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
+                "excluded_district_keys": ["far_siberia"],
+                "excluded_day_reason_counts": {
+                    "district_out_of_stock_risk": 1397,
+                    "district_restock_or_upward_correction": 30,
+                },
+                "method_counts": {
+                    "stock_depletion_valid_days": 1,
+                    "current_stock_share_fallback": 32,
+                },
+            },
+            "warnings": ["Fallback current-stock-share used for SKU count=32"],
+            "districts": [],
+        }
+        route.fulfill(
+            status=200,
+            content_type="application/json; charset=utf-8",
+            body=json.dumps(regional_result_payload, ensure_ascii=False),
+        )
+
+    page.route("**" + DEFAULT_WB_REGIONAL_STATUS_PATH, _capture_regional_status)
+    page.route("**" + DEFAULT_WB_REGIONAL_CALCULATE_PATH, _capture_regional_calculate)
+    page.click("#calculateRegionalSupplyButton")
+    page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('32 SKU рассчитаны через fallback')")
+    if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central", "northwest", "volga", "ural", "south_caucasus"]:
+        raise AssertionError(f"regional calculate payload must include selected districts, got {regional_requests}")
+    if "100000001" in page.locator("#regionalMessage").inner_text():
+        raise AssertionError("regional main result message must not include long fallback nmIds")
+    if page.locator("#regionalDiagnosticsDetails").is_hidden():
+        raise AssertionError("regional diagnostics details must be visible after fallback result")
+    overflow_state = page.evaluate(
+        """() => {
+            const card = document.querySelector('[aria-labelledby="regional-summary-title"]');
+            const details = document.getElementById('regionalDiagnosticsDetails');
+            return {
+                cardOverflow: card ? card.scrollWidth > card.clientWidth + 2 : true,
+                detailsOverflow: details ? details.scrollWidth > details.clientWidth + 2 : true,
+                detailsText: details ? details.textContent : ""
+            };
+        }"""
+    )
+    if overflow_state["cardOverflow"] or overflow_state["detailsOverflow"]:
+        raise AssertionError(f"regional fallback diagnostics must not overflow card, got {overflow_state}")
+    if "100000001" not in str(overflow_state["detailsText"]):
+        raise AssertionError("regional fallback nmIds must remain available inside diagnostics details")
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():
         raise AssertionError("factory-order inbound source selection must survive reload")

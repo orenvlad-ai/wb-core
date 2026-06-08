@@ -53,6 +53,9 @@ def main() -> None:
     _assert_out_of_stock_day_is_excluded()
     _assert_zero_depletion_district_stays_present()
     _assert_far_siberia_no_depletion_stays_present()
+    _assert_far_siberia_exclusion_changes_validation()
+    _assert_district_selection_validation_errors()
+    _assert_fallback_uses_selected_district_stock_share()
     _assert_insufficient_history_uses_explicit_fallback()
     _assert_allocation_prefers_marginal_saved_units()
     _assert_allocation_tie_breaks()
@@ -214,6 +217,103 @@ def _assert_far_siberia_no_depletion_stays_present() -> None:
         _assert_close(estimate.district_daily_demand_by_key[DISTRICT_FAR_SIBERIA], 0.0, "far/siberia no-depletion demand")
 
 
+def _assert_far_siberia_exclusion_changes_validation() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 1)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=14,
+            order_count=70.0,
+            depletion_by_key={
+                DISTRICT_CENTRAL: 20.0,
+                DISTRICT_NORTHWEST: 20.0,
+                DISTRICT_VOLGA: 0.0,
+                DISTRICT_URAL: 0.0,
+                DISTRICT_SOUTH_CAUCASUS: 0.0,
+                DISTRICT_FAR_SIBERIA: 999999.0,
+            },
+        )
+        included = _estimate(runtime, report_date)
+        _assert_method(included, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        if "district_out_of_stock_risk" not in included.diagnostics.get("excluded_day_reason_counts", {}):
+            raise AssertionError(f"far/siberia OOS must invalidate included-district days, got {included.diagnostics}")
+
+        excluded = _estimate(
+            runtime,
+            report_date,
+            included_district_keys=tuple(key for key in DISTRICT_KEYS if key != DISTRICT_FAR_SIBERIA),
+        )
+        _assert_method(excluded, REGIONAL_DEMAND_METHOD_STOCK_DEPLETION)
+        if excluded.diagnostics.get("selected_valid_day_count") != 14:
+            raise AssertionError(f"excluding far/siberia must collect clean days, got {excluded.diagnostics}")
+        _assert_close(excluded.average_depletion_share_by_district[DISTRICT_FAR_SIBERIA], 0.0, "excluded district share")
+        _assert_close(
+            sum(excluded.average_depletion_share_by_district[key] for key in DISTRICT_KEYS if key != DISTRICT_FAR_SIBERIA),
+            1.0,
+            "included shares must normalize to 1",
+        )
+        if excluded.diagnostics.get("excluded_district_keys") != [DISTRICT_FAR_SIBERIA]:
+            raise AssertionError("diagnostics must expose excluded far/siberia district")
+
+
+def _assert_district_selection_validation_errors() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 1)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=1,
+            order_count=10.0,
+            depletion_by_key={key: (1.0 if key == DISTRICT_CENTRAL else 0.0) for key in DISTRICT_KEYS},
+        )
+        try:
+            _estimate(runtime, report_date, included_district_keys=())
+        except ValueError as exc:
+            if "Выберите хотя бы один округ" not in str(exc):
+                raise AssertionError(f"empty district selection must return clear error, got {exc}") from exc
+        else:
+            raise AssertionError("empty district selection must be rejected")
+        try:
+            _estimate(runtime, report_date, included_district_keys=("central", "unknown"))
+        except ValueError as exc:
+            if "unknown" not in str(exc):
+                raise AssertionError(f"invalid district key must be named, got {exc}") from exc
+        else:
+            raise AssertionError("invalid district key must be rejected")
+
+
+def _assert_fallback_uses_selected_district_stock_share() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 1)
+        _seed_history(
+            runtime,
+            report_date=report_date,
+            requested_days=7,
+            order_count=100.0,
+            depletion_by_key={key: (10.0 if key == DISTRICT_CENTRAL else 0.0) for key in DISTRICT_KEYS},
+        )
+        estimate = _estimate(
+            runtime,
+            report_date,
+            requested_valid_day_count=14,
+            included_district_keys=(DISTRICT_CENTRAL, DISTRICT_NORTHWEST),
+            current_stock_by_key={
+                DISTRICT_CENTRAL: 10.0,
+                DISTRICT_NORTHWEST: 30.0,
+                DISTRICT_VOLGA: 1000.0,
+                DISTRICT_URAL: 1000.0,
+                DISTRICT_SOUTH_CAUCASUS: 1000.0,
+                DISTRICT_FAR_SIBERIA: 1000.0,
+            },
+        )
+        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_CENTRAL], 0.25, "selected fallback central share")
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_NORTHWEST], 0.75, "selected fallback northwest share")
+        for district_key in (DISTRICT_VOLGA, DISTRICT_URAL, DISTRICT_SOUTH_CAUCASUS, DISTRICT_FAR_SIBERIA):
+            _assert_close(estimate.average_depletion_share_by_district[district_key], 0.0, f"excluded fallback share {district_key}")
+
+
 def _assert_insufficient_history_uses_explicit_fallback() -> None:
     with _runtime() as runtime:
         report_date = date(2026, 5, 1)
@@ -328,6 +428,7 @@ def _estimate(
     *,
     requested_valid_day_count: int = 14,
     current_stock_by_key: dict[str, float] | None = None,
+    included_district_keys: tuple[str, ...] | None = None,
 ):
     estimates = estimate_wb_regional_demand(
         runtime=runtime,
@@ -336,6 +437,7 @@ def _estimate(
         requested_valid_day_count=requested_valid_day_count,
         district_field_by_key=FIELD_BY_KEY,
         current_stock_by_nm={NM_ID: current_stock_by_key or {key: 100.0 for key in DISTRICT_KEYS}},
+        included_district_keys=included_district_keys,
     )
     return estimates[NM_ID]
 

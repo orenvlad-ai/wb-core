@@ -45,6 +45,7 @@ from packages.contracts.factory_order_supply import (
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
+from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -3633,6 +3634,14 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+        "wb_regional_district_options": [
+            {
+                "district_key": key,
+                "district_name_ru": DISTRICT_LABELS_RU[key],
+            }
+            for key in DISTRICT_KEYS
+        ],
+        "wb_regional_default_included_district_keys": list(DISTRICT_KEYS),
         "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
         "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,

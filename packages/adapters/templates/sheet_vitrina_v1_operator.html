@@ -1186,6 +1186,10 @@
       color: var(--muted);
     }
 
+    .field-note.is-error {
+      color: var(--error-text);
+    }
+
     .dataset-grid {
       display: grid;
       gap: 14px;
@@ -1494,6 +1498,135 @@
       font-size: 14px;
       line-height: 1.7;
       color: var(--muted);
+    }
+
+    .district-selector {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-subtle);
+    }
+
+    .district-selector-head {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+
+    .district-selector-head h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .district-selector-actions {
+      display: inline-flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .district-selector-button {
+      appearance: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--muted-strong);
+      padding: 5px 8px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .district-selector-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .district-check {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--control-bg);
+      padding: 8px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.35;
+      cursor: pointer;
+    }
+
+    .district-check input {
+      width: 15px;
+      height: 15px;
+      margin: 1px 0 0;
+    }
+
+    .district-check span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .regional-diagnostics-details {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-subtle);
+      color: var(--muted);
+      padding: 8px 10px;
+    }
+
+    .regional-diagnostics-details[hidden] {
+      display: none;
+    }
+
+    .regional-diagnostics-details summary {
+      cursor: pointer;
+      color: var(--muted-strong);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .regional-diagnostics-body {
+      max-height: 220px;
+      overflow: auto;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+    .regional-diagnostics-body dl {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.6fr) minmax(0, 1.4fr);
+      gap: 6px 10px;
+      margin: 0;
+    }
+
+    .regional-diagnostics-body dt {
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .regional-diagnostics-body dd {
+      margin: 0;
+      min-width: 0;
+      color: var(--muted-strong);
+      overflow-wrap: anywhere;
     }
 
     .district-table-wrap {
@@ -2863,6 +2996,17 @@
                 Сервер использует общий файл <strong>«Остатки ФФ»</strong>, total orderCount по SKU и доли округов по валидным дням
                 исторического выбывания остатков.
               </p>
+              <div class="district-selector" aria-labelledby="regionalDistrictSelectorTitle">
+                <div class="district-selector-head">
+                  <h3 id="regionalDistrictSelectorTitle">Округа для расчёта пропорций</h3>
+                  <div class="district-selector-actions">
+                    <button id="regionalDistrictSelectAllButton" class="district-selector-button" type="button">Все</button>
+                    <button id="regionalDistrictExcludeFarSiberiaButton" class="district-selector-button" type="button">Без ДВ/Сибирь</button>
+                  </div>
+                </div>
+                <div id="regionalDistrictSelectorList" class="district-selector-list"></div>
+                <p id="regionalDistrictSelectorMessage" class="field-note">По умолчанию участвуют все федеральные округа.</p>
+              </div>
             </section>
 
             <section class="block summary-card" aria-labelledby="regional-summary-title">
@@ -2905,6 +3049,10 @@
               </dl>
               <p id="regionalMessage" class="section-message"></p>
               <p id="regionalDiagnosticsNote" class="field-note">Диагностика методологии появится после расчёта.</p>
+              <details id="regionalDiagnosticsDetails" class="regional-diagnostics-details" hidden>
+                <summary>Показать диагностику</summary>
+                <div id="regionalDiagnosticsBody" class="regional-diagnostics-body"></div>
+              </details>
               <div class="factory-actions">
                 <button id="calculateRegionalSupplyButton" class="action-button primary-button" type="button">Рассчитать поставку на Wildberries</button>
               </div>
@@ -3199,6 +3347,10 @@
         report_date_override: document.getElementById("regionalReportDateOverride")
       };
       const regionalMethodologyNote = document.getElementById("regionalMethodologyNote");
+      const regionalDistrictSelectorList = document.getElementById("regionalDistrictSelectorList");
+      const regionalDistrictSelectorMessage = document.getElementById("regionalDistrictSelectorMessage");
+      const regionalDistrictSelectAllButton = document.getElementById("regionalDistrictSelectAllButton");
+      const regionalDistrictExcludeFarSiberiaButton = document.getElementById("regionalDistrictExcludeFarSiberiaButton");
       const regionalResultStatus = document.getElementById("regionalResultStatus");
       const regionalResultReportDate = document.getElementById("regionalResultReportDate");
       const regionalResultHorizon = document.getElementById("regionalResultHorizon");
@@ -3209,6 +3361,8 @@
       const regionalActiveSkuCount = document.getElementById("regionalActiveSkuCount");
       const regionalMessage = document.getElementById("regionalMessage");
       const regionalDiagnosticsNote = document.getElementById("regionalDiagnosticsNote");
+      const regionalDiagnosticsDetails = document.getElementById("regionalDiagnosticsDetails");
+      const regionalDiagnosticsBody = document.getElementById("regionalDiagnosticsBody");
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
@@ -3249,6 +3403,19 @@
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
       const DEFAULT_STOCK_FF_SOURCE = "manual_excel";
       const VALID_STOCK_FF_SOURCES = new Set(["manual_excel", "onec_ff_stock"]);
+      const WB_REGIONAL_DISTRICT_OPTIONS = Array.isArray(config.wb_regional_district_options)
+        ? config.wb_regional_district_options
+            .filter((item) => item && item.district_key)
+            .map((item) => ({
+              district_key: String(item.district_key || "").trim(),
+              district_name_ru: String(item.district_name_ru || item.district_key || "").trim()
+            }))
+        : [];
+      const WB_REGIONAL_DISTRICT_KEYS = WB_REGIONAL_DISTRICT_OPTIONS.map((item) => item.district_key);
+      const DEFAULT_WB_REGIONAL_INCLUDED_DISTRICTS = sanitizeRegionalDistrictKeys(
+        config.wb_regional_default_included_district_keys,
+        { fallbackToAll: true }
+      );
       const WB_SUPPLIES_DEFAULT_SIZE_FILTER = "main_250";
       const WB_SUPPLIES_DEFAULT_LIMIT = 20;
       const STOCK_REPORT_DISTRICT_COLUMNS = [
@@ -3319,6 +3486,10 @@
       let persistedOperatorUiState = readPersistedOperatorUiState();
       let factoryInboundSource = normalizeFactoryInboundSource(persistedOperatorUiState.factory_inbound_source);
       let stockFfSource = normalizeStockFfSource(persistedOperatorUiState.stock_ff_source);
+      let regionalIncludedDistrictKeys = sanitizeRegionalDistrictKeys(
+        persistedOperatorUiState.wb_regional_included_district_keys,
+        { fallbackToAll: true }
+      );
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
@@ -3402,6 +3573,78 @@
         return normalizeStockFfSource(value) === "onec_ff_stock"
           ? "1С / Фулфилмент"
           : "Ручной Excel";
+      }
+
+      function sanitizeRegionalDistrictKeys(value, options) {
+        const fallbackToAll = Boolean(options && options.fallbackToAll);
+        const allowed = new Set(WB_REGIONAL_DISTRICT_KEYS);
+        const rawValues = Array.isArray(value)
+          ? value
+          : (typeof value === "string" ? value.split(",") : []);
+        const seen = new Set();
+        const normalized = rawValues.reduce((acc, item) => {
+          const key = String(item || "").trim();
+          if (!key || !allowed.has(key) || seen.has(key)) {
+            return acc;
+          }
+          seen.add(key);
+          acc.push(key);
+          return acc;
+        }, []);
+        if (normalized.length) {
+          return WB_REGIONAL_DISTRICT_KEYS.filter((key) => seen.has(key));
+        }
+        return fallbackToAll ? WB_REGIONAL_DISTRICT_KEYS.slice() : [];
+      }
+
+      function regionalDistrictLabel(key) {
+        const match = WB_REGIONAL_DISTRICT_OPTIONS.find((item) => item.district_key === key);
+        return match ? match.district_name_ru : key;
+      }
+
+      function setRegionalIncludedDistrictKeys(value, options) {
+        regionalIncludedDistrictKeys = sanitizeRegionalDistrictKeys(value, { fallbackToAll: false });
+        Array.from(document.querySelectorAll("input[name='regionalIncludedDistrict']")).forEach((input) => {
+          input.checked = regionalIncludedDistrictKeys.includes(input.value);
+        });
+        if (regionalDistrictSelectorMessage) {
+          if (!regionalIncludedDistrictKeys.length) {
+            regionalDistrictSelectorMessage.textContent = "Выберите хотя бы один округ для расчёта пропорций.";
+            regionalDistrictSelectorMessage.className = "field-note is-error";
+          } else if (regionalIncludedDistrictKeys.length === WB_REGIONAL_DISTRICT_KEYS.length) {
+            regionalDistrictSelectorMessage.textContent = "Участвуют все федеральные округа.";
+            regionalDistrictSelectorMessage.className = "field-note";
+          } else {
+            const excluded = WB_REGIONAL_DISTRICT_KEYS
+              .filter((key) => !regionalIncludedDistrictKeys.includes(key))
+              .map(regionalDistrictLabel);
+            regionalDistrictSelectorMessage.textContent = "Исключены из методологии: " + excluded.join(", ") + ".";
+            regionalDistrictSelectorMessage.className = "field-note";
+          }
+        }
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ wb_regional_included_district_keys: regionalIncludedDistrictKeys.slice() });
+        }
+      }
+
+      function renderRegionalDistrictSelector() {
+        if (!regionalDistrictSelectorList) {
+          return;
+        }
+        regionalDistrictSelectorList.innerHTML = WB_REGIONAL_DISTRICT_OPTIONS.map((item) => [
+          "<label class=\"district-check\">",
+          "<input type=\"checkbox\" name=\"regionalIncludedDistrict\" value=\"" + escapeHtml(item.district_key) + "\">",
+          "<span>" + escapeHtml(item.district_name_ru) + "</span>",
+          "</label>"
+        ].join("")).join("");
+        Array.from(regionalDistrictSelectorList.querySelectorAll("input[name='regionalIncludedDistrict']")).forEach((input) => {
+          input.addEventListener("change", () => {
+            const selected = Array.from(document.querySelectorAll("input[name='regionalIncludedDistrict']:checked"))
+              .map((item) => item.value);
+            setRegionalIncludedDistrictKeys(selected);
+          });
+        });
+        setRegionalIncludedDistrictKeys(regionalIncludedDistrictKeys.length ? regionalIncludedDistrictKeys : DEFAULT_WB_REGIONAL_INCLUDED_DISTRICTS, { persist: false });
       }
 
       function setFactoryInboundSource(value, options) {
@@ -5122,6 +5365,7 @@
           payload[key] = regionalFields[key].value;
         });
         payload.stock_ff_source = stockFfSource;
+        payload.included_district_keys = regionalIncludedDistrictKeys.slice();
         return payload;
       }
 
@@ -5386,6 +5630,12 @@
         }
         if (!result) {
           regionalDiagnosticsNote.textContent = "Диагностика методологии появится после расчёта.";
+          if (regionalDiagnosticsDetails) {
+            regionalDiagnosticsDetails.hidden = true;
+          }
+          if (regionalDiagnosticsBody) {
+            regionalDiagnosticsBody.innerHTML = "";
+          }
           return;
         }
         const diagnostics = result.diagnostics || {};
@@ -5407,13 +5657,61 @@
           parts.push("проверено до " + valueOrDash(diagnostics.max_inspected_day_count) + " дней");
         }
         if (diagnostics.fallback_sku_count) {
-          parts.push("fallback SKU: " + valueOrDash(diagnostics.fallback_sku_count));
+          parts.push(valueOrDash(diagnostics.fallback_sku_count) + " SKU через fallback");
         }
-        const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
-        if (warnings.length) {
-          parts.push("Предупреждение: " + warnings[0]);
+        const included = Array.isArray(diagnostics.included_district_keys) ? diagnostics.included_district_keys : [];
+        const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
+        if (included.length && excluded.length) {
+          parts.push("округа: " + included.length + " из " + WB_REGIONAL_DISTRICT_KEYS.length);
         }
         regionalDiagnosticsNote.textContent = parts.length ? parts.join(" · ") : "Диагностика методологии недоступна.";
+        renderRegionalDiagnosticsDetails(diagnostics);
+      }
+
+      function renderRegionalDiagnosticsDetails(diagnostics) {
+        if (!regionalDiagnosticsDetails || !regionalDiagnosticsBody) {
+          return;
+        }
+        if (!diagnostics || typeof diagnostics !== "object") {
+          regionalDiagnosticsDetails.hidden = true;
+          regionalDiagnosticsBody.innerHTML = "";
+          return;
+        }
+        const fallbackNmIds = Array.isArray(diagnostics.fallback_nm_ids) ? diagnostics.fallback_nm_ids : [];
+        const reasonCounts = diagnostics.excluded_day_reason_counts && typeof diagnostics.excluded_day_reason_counts === "object"
+          ? diagnostics.excluded_day_reason_counts
+          : {};
+        const included = Array.isArray(diagnostics.included_district_keys) ? diagnostics.included_district_keys : [];
+        const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
+        const rows = [
+          ["Округа в методологии", included.length ? included.map(regionalDistrictLabel).join(", ") : "-"],
+          ["Исключённые округа", excluded.length ? excluded.map(regionalDistrictLabel).join(", ") : "-"],
+          ["Fallback SKU", fallbackNmIds.length ? fallbackNmIds.join(", ") : "-"],
+          ["Причины исключения дней", formatReasonCounts(reasonCounts)],
+          ["Запрошено valid days", valueOrDash(diagnostics.requested_valid_day_count)],
+          ["Valid days min/max", valueOrDash(diagnostics.min_selected_valid_day_count) + " / " + valueOrDash(diagnostics.max_selected_valid_day_count)],
+          ["Max inspected days", valueOrDash(diagnostics.max_inspected_day_count)],
+          ["Method counts", formatReasonCounts(diagnostics.method_counts || {})]
+        ];
+        regionalDiagnosticsBody.innerHTML = "<dl>" + rows.map((row) => [
+          "<dt>" + escapeHtml(row[0]) + "</dt>",
+          "<dd>" + escapeHtml(row[1]) + "</dd>"
+        ].join("")).join("") + "</dl>";
+        regionalDiagnosticsDetails.hidden = false;
+      }
+
+      function formatReasonCounts(value) {
+        if (!value || typeof value !== "object") {
+          return "-";
+        }
+        const items = Object.keys(value)
+          .map((key) => [key, Number(value[key] || 0)])
+          .filter((item) => item[1] > 0)
+          .sort((a, b) => b[1] - a[1]);
+        if (!items.length) {
+          return "-";
+        }
+        return items.map((item) => item[0] + ": " + item[1]).join("; ");
       }
 
       function renderRegionalResult(result, fallbackActiveSkuCount) {
@@ -6516,6 +6814,14 @@
       }
 
       async function calculateRegionalSupply() {
+        if (!regionalIncludedDistrictKeys.length) {
+          setRegionalMessage("Выберите хотя бы один округ для расчёта пропорций.", "error");
+          if (regionalDistrictSelectorMessage) {
+            regionalDistrictSelectorMessage.textContent = "Выберите хотя бы один округ для расчёта пропорций.";
+            regionalDistrictSelectorMessage.className = "field-note is-error";
+          }
+          return;
+        }
         calculateRegionalSupplyButton.disabled = true;
         calculateRegionalSupplyButton.textContent = "Считаем...";
         setRegionalMessage("Выполняем расчёт по федеральным округам на сервере...", "");
@@ -6534,12 +6840,17 @@
           }
           renderRegionalResult(payload, payload.active_sku_count);
           regionalMethodologyNote.textContent = valueOrDash(payload.methodology_note);
+          const diagnostics = payload.diagnostics || {};
+          const fallbackCount = Number(diagnostics.fallback_sku_count || 0);
+          const warningSummary = fallbackCount > 0
+            ? (fallbackCount + " SKU рассчитаны через fallback")
+            : "";
           const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
           setRegionalMessage(
-            warnings.length
-              ? "Расчёт завершён с предупреждениями: " + warnings.join(" ")
+            warningSummary || warnings.length
+              ? "Расчёт завершён с предупреждениями: " + (warningSummary || warnings[0])
               : "Расчёт завершён. XLSX по федеральным округам готовы к скачиванию.",
-            warnings.length ? "warning" : "success"
+            warningSummary || warnings.length ? "warning" : "success"
           );
           await loadRegionalStatus();
         } catch (error) {
@@ -6619,6 +6930,12 @@
             setStockFfSource(input.value);
           }
         });
+      });
+      regionalDistrictSelectAllButton.addEventListener("click", () => {
+        setRegionalIncludedDistrictKeys(WB_REGIONAL_DISTRICT_KEYS.slice());
+      });
+      regionalDistrictExcludeFarSiberiaButton.addEventListener("click", () => {
+        setRegionalIncludedDistrictKeys(WB_REGIONAL_DISTRICT_KEYS.filter((key) => key !== "far_siberia"));
       });
       checkStockFfOnecButton.addEventListener("click", loadStockFfOnecCheck);
       downloadStockFfOnecButton.addEventListener("click", () => downloadBinary(
@@ -6781,6 +7098,7 @@
 
       setupOperatorFloatingControlListeners();
       restorePlanReportInputs(persistedOperatorUiState);
+      renderRegionalDistrictSelector();
       if (stockReportSalesAvgPeriodDays) {
         stockReportSalesAvgPeriodDays.value = resolveRestoredStockReportSalesAvgPeriodDays(persistedOperatorUiState);
       }
