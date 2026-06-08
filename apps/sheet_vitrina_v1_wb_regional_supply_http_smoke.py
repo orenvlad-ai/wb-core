@@ -282,6 +282,53 @@ def main() -> None:
             if district_deficit_sum != districts["central"]["deficit_qty"]:
                 raise AssertionError("district XLSX deficit must match the regional summary deficit for the same district")
 
+            _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=True)
+            _seed_runtime_stock_history(
+                runtime,
+                active_nm_ids=active_nm_ids,
+                all_active_signal=True,
+                persistent_zero_south_for_main=True,
+            )
+            seed_stock_upload_rows = [list(row) for row in stock_rows]
+            for row in seed_stock_upload_rows[1:]:
+                row[2] = 0
+            for row in seed_stock_upload_rows[1:]:
+                if int(row[0]) == MAIN_NM_ID:
+                    row[2] = 400
+                    break
+            seed_upload_status, _ = _post_multipart(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH}",
+                build_single_sheet_workbook_bytes("Остатки ФФ", seed_stock_upload_rows),
+                filename="shared-stock-ff-seed.xlsx",
+            )
+            if seed_upload_status != 200:
+                raise AssertionError("seed stock_ff upload must succeed")
+            seed_status, seed_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days": 2,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST, "south_caucasus"],
+                },
+            )
+            if seed_status != 200:
+                raise AssertionError(f"persistent-zero seed calculate must succeed, got {seed_status} {seed_payload}")
+            seed_diagnostics = seed_payload.get("diagnostics") or {}
+            if seed_diagnostics.get("fallback_sku_count") != 0:
+                raise AssertionError(f"persistent-zero fixture must not fallback, got {seed_diagnostics}")
+            if seed_diagnostics.get("seed_sku_count") != 1 or seed_diagnostics.get("seed_allocated_qty_total") != 50:
+                raise AssertionError(f"HTTP seed diagnostics must expose one allocated test box, got {seed_diagnostics}")
+            seed_districts = {item["district_key"]: item for item in seed_payload.get("districts", [])}
+            south_seed_row = next(row for row in seed_districts["south_caucasus"]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
+            if int(south_seed_row.get("seed_qty", 0)) != 50 or not bool(south_seed_row.get("persistent_zero_seed_applied")):
+                raise AssertionError(f"HTTP row must expose seed fields, got {south_seed_row}")
+            if int(south_seed_row.get("demand_allocated_qty", -1)) != 0 or int(south_seed_row.get("allocated_qty", 0)) != 50:
+                raise AssertionError("HTTP row must separate seed qty from demand allocation")
+
             delete_status, delete_payload = _delete_json(f"{base_url}{DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH}")
             if delete_status != 200 or delete_payload.get("status") != "deleted":
                 raise AssertionError("shared stock_ff delete route must still work")
@@ -304,6 +351,7 @@ def main() -> None:
             print(f"regional_central_deficit: ok -> {districts['central']['deficit_qty']}")
             print(f"regional_district_xlsx_sum: ok -> {district_qty_sum}")
             print(f"regional_district_xlsx_deficit_sum: ok -> {district_deficit_sum}")
+            print(f"regional_persistent_zero_seed: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
             print(f"regional_missing_shared_blocker: ok -> {blocked_payload.get('error')}")
         finally:
             server.shutdown()
@@ -311,13 +359,18 @@ def main() -> None:
             server.server_close()
 
 
-def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+def _seed_runtime_sales_history(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    active_nm_ids: list[int],
+    all_active_signal: bool = False,
+) -> None:
     report_date = date(2026, 4, 18)
     items: list[SalesFunnelHistoryItem] = []
     for offset in range(14, 0, -1):
         snapshot_date = (report_date - timedelta(days=offset)).isoformat()
         for nm_id in active_nm_ids:
-            value = 60.0 if nm_id == MAIN_NM_ID else 0.0
+            value = 60.0 if nm_id == MAIN_NM_ID or all_active_signal else 0.0
             items.append(
                 SalesFunnelHistoryItem(
                     date=snapshot_date,
@@ -339,7 +392,13 @@ def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, activ
     )
 
 
-def _seed_runtime_stock_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+def _seed_runtime_stock_history(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    active_nm_ids: list[int],
+    all_active_signal: bool = False,
+    persistent_zero_south_for_main: bool = False,
+) -> None:
     first_snapshot = date(2026, 4, 3)
     for index in range(15):
         snapshot_date = first_snapshot + timedelta(days=index)
@@ -347,21 +406,27 @@ def _seed_runtime_stock_history(runtime: RegistryUploadDbBackedRuntime, *, activ
         for nm_id in active_nm_ids:
             central = 0.0
             northwest = 0.0
-            idle_stock = 0.0
-            if nm_id == MAIN_NM_ID:
+            volga = 0.0
+            ural = 0.0
+            south = 0.0
+            far = 0.0
+            if nm_id == MAIN_NM_ID or all_active_signal:
                 central = 1000.0 - (10.0 * index)
                 northwest = 1000.0 - (10.0 * index)
-                idle_stock = 500.0
+                volga = 500.0
+                ural = 500.0
+                south = 0.0 if persistent_zero_south_for_main and nm_id == MAIN_NM_ID else 500.0
+                far = 500.0
             items.append(
                 StocksItem(
                     nm_id=int(nm_id),
-                    stock_total=central + northwest + (idle_stock * 4),
+                    stock_total=central + northwest + volga + ural + south + far,
                     stock_ru_central=central,
                     stock_ru_northwest=northwest,
-                    stock_ru_volga=idle_stock,
-                    stock_ru_ural=idle_stock,
-                    stock_ru_south_caucasus=idle_stock,
-                    stock_ru_far_siberia=idle_stock,
+                    stock_ru_volga=volga,
+                    stock_ru_ural=ural,
+                    stock_ru_south_caucasus=south,
+                    stock_ru_far_siberia=far,
                 )
             )
         runtime.save_temporal_source_snapshot(

@@ -605,6 +605,25 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 "regional_demand_method": "mixed_stock_depletion_with_current_stock_share_fallback",
                 "fallback_sku_count": 32,
                 "fallback_nm_ids": list(range(100000001, 100000041)),
+                "persistent_zero_sku_count": 6,
+                "persistent_zero_nm_ids": [497413772, 497415593],
+                "persistent_zero_day_count_by_district": {
+                    "south_caucasus": 28,
+                    "ural": 12,
+                },
+                "seed_candidate_sku_count": 6,
+                "seed_candidate_sku_district_count": 8,
+                "seed_sku_count": 5,
+                "seed_sku_district_count": 7,
+                "seed_allocated_qty_total": 1750,
+                "seed_unfulfilled_qty_total": 250,
+                "seed_by_nm_id": {
+                    "497413772": {
+                        "seed_district_keys": ["south_caucasus"],
+                        "seed_qty_by_district": {"south_caucasus": 250},
+                        "seed_reason_by_district": {"south_caucasus": "persistent_zero_seed"},
+                    }
+                },
                 "requested_valid_day_count": 14,
                 "min_selected_valid_day_count": 0,
                 "max_selected_valid_day_count": 14,
@@ -637,6 +656,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError(f"regional calculate payload must include selected districts, got {regional_requests}")
     if "100000001" in page.locator("#regionalMessage").inner_text():
         raise AssertionError("regional main result message must not include long fallback nmIds")
+    if "тестовые коробки" not in page.locator("#regionalDiagnosticsNote").inner_text():
+        raise AssertionError("regional diagnostics note must include compact seed summary")
     if page.locator("#regionalDiagnosticsDetails").is_hidden():
         raise AssertionError("regional diagnostics details must be visible after fallback result")
     overflow_state = page.evaluate(
@@ -654,6 +675,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError(f"regional fallback diagnostics must not overflow card, got {overflow_state}")
     if "100000001" not in str(overflow_state["detailsText"]):
         raise AssertionError("regional fallback nmIds must remain available inside diagnostics details")
+    if "persistent_zero_seed" not in str(overflow_state["detailsText"]):
+        raise AssertionError("regional seed diagnostics must remain available inside diagnostics details")
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():
         raise AssertionError("factory-order inbound source selection must survive reload")

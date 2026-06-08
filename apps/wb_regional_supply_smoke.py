@@ -195,6 +195,7 @@ def main() -> None:
         selected_far_main = next(row for row in selected_far.rows if row.nm_id == MAIN_NM_ID)
         if selected_far.total_qty != 0 or selected_far_main.district_daily_demand != 0:
             raise AssertionError("excluded district must remain visible but receive zero selected-methodology demand")
+
         try:
             regional_block.calculate(
                 {
@@ -237,21 +238,80 @@ def main() -> None:
             raise AssertionError("district with zero allocation must still materialize an empty operator-friendly workbook")
         load_workbook(BytesIO(far_workbook), data_only=True)
 
+        _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=True)
+        _seed_runtime_stock_history(
+            runtime,
+            active_nm_ids=active_nm_ids,
+            all_active_signal=True,
+            persistent_zero_south_for_main=True,
+        )
+        seed_stock_upload_rows = [list(row) for row in stock_rows]
+        for row in seed_stock_upload_rows[1:]:
+            row[2] = 0
+        for row in seed_stock_upload_rows[1:]:
+            if int(row[0]) == MAIN_NM_ID:
+                row[2] = 400
+                break
+        factory_block.upload_dataset(
+            DATASET_STOCK_FF,
+            build_single_sheet_workbook_bytes("Остатки ФФ", seed_stock_upload_rows),
+            uploaded_filename="shared-stock-ff-seed.xlsx",
+        )
+        seed_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST, "south_caucasus"],
+            }
+        )
+        seed_diagnostics = seed_result.diagnostics or {}
+        if seed_diagnostics.get("fallback_sku_count") != 0:
+            raise AssertionError(f"persistent-zero fixture must not need current-stock fallback, got {seed_diagnostics}")
+        if seed_diagnostics.get("persistent_zero_sku_count", 0) < 1:
+            raise AssertionError(f"persistent-zero diagnostics must count affected SKU, got {seed_diagnostics}")
+        if seed_diagnostics.get("seed_sku_count") != 1 or seed_diagnostics.get("seed_allocated_qty_total") != 50:
+            raise AssertionError(f"seed diagnostics must expose one allocated test box, got {seed_diagnostics}")
+        seed_districts = {item.district_key: item for item in seed_result.districts}
+        south_seed_row = next(row for row in seed_districts["south_caucasus"].rows if row.nm_id == MAIN_NM_ID)
+        if south_seed_row.district_daily_demand != 0:
+            raise AssertionError("persistent-zero seed must not create demand-based district demand")
+        if south_seed_row.seed_qty != 50 or not south_seed_row.persistent_zero_seed_applied:
+            raise AssertionError(f"south_caucasus row must carry one seed box, got {south_seed_row}")
+        if south_seed_row.demand_allocated_qty != 0 or south_seed_row.allocated_qty != 50:
+            raise AssertionError("seed row must separate demand allocation from test-box allocation")
+        if seed_result.summary.total_qty > 400:
+            raise AssertionError("seed allocation must not exceed available stock_ff")
+        south_workbook, _ = regional_block.download_district_recommendation("south_caucasus")
+        south_rows = read_first_sheet_rows(south_workbook)
+        south_allocated_sum = sum(int(row[2]) for row in south_rows[3:] if len(row) >= 3 and str(row[2]).strip())
+        if south_allocated_sum != seed_districts["south_caucasus"].total_qty:
+            raise AssertionError("district XLSX total must include persistent-zero seed qty")
+
         print(f"shared_stock_ff_reuse: ok -> {regional_status.shared_datasets['stock_ff'].uploaded_filename}")
         print(f"regional_total_qty: ok -> {result.summary.total_qty}")
         print(f"central_deficit: ok -> {districts['central'].deficit_qty}")
         print(f"northwest_deficit: ok -> {districts['northwest'].deficit_qty}")
+        print(f"persistent_zero_seed: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
         print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
 
 
-def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+def _seed_runtime_sales_history(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    active_nm_ids: list[int],
+    all_active_signal: bool = False,
+) -> None:
     report_date = date(2026, 4, 18)
     items: list[SalesFunnelHistoryItem] = []
     for offset in range(14, 0, -1):
         snapshot_date = (report_date - timedelta(days=offset)).isoformat()
         for nm_id in active_nm_ids:
-            value = 60.0 if nm_id == MAIN_NM_ID else 0.0
+            value = 60.0 if nm_id == MAIN_NM_ID or all_active_signal else 0.0
             items.append(
                 SalesFunnelHistoryItem(
                     date=snapshot_date,
@@ -273,7 +333,13 @@ def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, activ
     )
 
 
-def _seed_runtime_stock_history(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+def _seed_runtime_stock_history(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    active_nm_ids: list[int],
+    all_active_signal: bool = False,
+    persistent_zero_south_for_main: bool = False,
+) -> None:
     first_snapshot = date(2026, 4, 3)
     for index in range(15):
         snapshot_date = first_snapshot + timedelta(days=index)
@@ -281,21 +347,27 @@ def _seed_runtime_stock_history(runtime: RegistryUploadDbBackedRuntime, *, activ
         for nm_id in active_nm_ids:
             central = 0.0
             northwest = 0.0
-            idle_stock = 0.0
-            if nm_id == MAIN_NM_ID:
+            volga = 0.0
+            ural = 0.0
+            south = 0.0
+            far = 0.0
+            if nm_id == MAIN_NM_ID or all_active_signal:
                 central = 1000.0 - (10.0 * index)
                 northwest = 1000.0 - (10.0 * index)
-                idle_stock = 500.0
+                volga = 500.0
+                ural = 500.0
+                south = 0.0 if persistent_zero_south_for_main and nm_id == MAIN_NM_ID else 500.0
+                far = 500.0
             items.append(
                 StocksItem(
                     nm_id=int(nm_id),
-                    stock_total=central + northwest + (idle_stock * 4),
+                    stock_total=central + northwest + volga + ural + south + far,
                     stock_ru_central=central,
                     stock_ru_northwest=northwest,
-                    stock_ru_volga=idle_stock,
-                    stock_ru_ural=idle_stock,
-                    stock_ru_south_caucasus=idle_stock,
-                    stock_ru_far_siberia=idle_stock,
+                    stock_ru_volga=volga,
+                    stock_ru_ural=ural,
+                    stock_ru_south_caucasus=south,
+                    stock_ru_far_siberia=far,
                 )
             )
         runtime.save_temporal_source_snapshot(
