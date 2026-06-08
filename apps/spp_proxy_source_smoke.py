@@ -40,6 +40,7 @@ def main() -> None:
     _assert_formula_and_percent_normalization()
     _assert_missing_inputs_stay_blank()
     _assert_current_only_source_does_not_fetch_historical()
+    _assert_public_api_v4_fallback_after_card_antibot()
     print("spp_proxy_source: ok")
 
 
@@ -156,6 +157,50 @@ def _assert_current_only_source_does_not_fetch_historical() -> None:
     )
     _assert_equal(len(calls), 1, "current source must fetch public card URL")
     _assert_equal(current["data"]["items"][0]["public_buyer_price"], 770.0, "current source buyer price")
+
+
+def _assert_public_api_v4_fallback_after_card_antibot() -> None:
+    calls: list[str] = []
+    api_payload = {
+        "products": [
+            {
+                "id": 259460529,
+                "sizes": [
+                    {
+                        "price": {
+                            "basic": 169600,
+                            "product": 35400,
+                        }
+                    }
+                ],
+            }
+        ]
+    }
+
+    def http_get(url: str, timeout_seconds: float) -> tuple[int, str, dict[str, str]]:
+        del timeout_seconds
+        calls.append(url)
+        if "detail.aspx" in url:
+            return 498, '<html><script src="/__wbaas/challenges/antibot/app.js"></script></html>', {"server": "wbaas"}
+        if "/cards/v4/detail" in url:
+            return 200, json.dumps(api_payload), {"content-type": "application/json"}
+        raise AssertionError(f"v4 public card API must be attempted before older fallbacks, got {url}")
+
+    source = HttpBackedPublicWbCardBuyerPriceSource(
+        http_get=http_get,
+        business_date_factory=lambda: "2026-06-08",
+    )
+    current = source.fetch(
+        SppProxyRequest(
+            snapshot_type="spp_proxy",
+            snapshot_date="2026-06-08",
+            nm_ids=[259460529],
+        )
+    )
+    _assert_equal(len(calls), 2, "card antibot should fall through to v4 API once")
+    _assert_equal(current["data"]["items"][0]["public_buyer_price"], 354.0, "v4 sizes.price.product extraction")
+    if "/cards/v4/detail" not in calls[1]:
+        raise AssertionError(f"v4 public card API must be first fallback, got {calls}")
 
 
 if __name__ == "__main__":

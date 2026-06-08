@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    _activity_reason_ru,
     _build_web_vitrina_loading_table,
     _web_vitrina_source_status_not_loaded_activity_surface,
 )
@@ -26,6 +27,7 @@ def main() -> None:
     _assert_stocks_today_not_required_is_ok()
     _assert_promo_latest_confirmed_is_ok()
     _assert_fin_report_yesterday_latest_confirmed_is_ok()
+    _assert_spp_proxy_missing_public_price_reason_is_human()
     print("web_vitrina_source_aware_statuses: ok")
 
 
@@ -239,6 +241,17 @@ def _assert_fin_report_yesterday_latest_confirmed_is_ok() -> None:
         raise AssertionError(f"fin_report_daily yesterday accepted truth must be OK, got {row}")
     if row["yesterday"]["label"] != "OK":
         raise AssertionError(f"fin_report_daily yesterday label must be OK, got {row}")
+
+
+def _assert_spp_proxy_missing_public_price_reason_is_human() -> None:
+    reason = _activity_reason_ru(
+        tone="warning",
+        detail="",
+        note="missing_public_buyer_price=3; resolution_rule=accepted_current_current_attempt",
+    )
+    expected = "публичная цена WB не получена для 3 SKU"
+    if reason != expected:
+        raise AssertionError(f"SPP proxy missing public price reason mismatch: expected {expected!r}, got {reason!r}")
 
 
 def _rows(items: list[dict[str, object]]) -> list[dict[str, object]]:

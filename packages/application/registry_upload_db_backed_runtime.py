@@ -326,6 +326,25 @@ class RegistryUploadDbBackedRuntime:
                 raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: {detail}")
             return _deserialize_sheet_vitrina_plan(row["plan_json"])
 
+    def load_sheet_vitrina_ready_snapshot_any_bundle(self, *, as_of_date: str) -> SheetVitrinaV1Envelope:
+        if not str(as_of_date or "").strip():
+            raise ValueError("as_of_date is required for cross-bundle ready snapshot read")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT plan_json
+                FROM sheet_vitrina_v1_ready_snapshots
+                WHERE as_of_date = ?
+                ORDER BY activated_at DESC, refreshed_at DESC, bundle_version DESC
+                LIMIT 1
+                """,
+                (as_of_date,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: as_of_date={as_of_date}")
+            return _deserialize_sheet_vitrina_plan(row["plan_json"])
+
     def list_sheet_vitrina_ready_snapshot_dates(
         self,
         *,
@@ -347,6 +366,34 @@ class RegistryUploadDbBackedRuntime:
             SELECT as_of_date
             FROM sheet_vitrina_v1_ready_snapshots
             WHERE {" AND ".join(conditions)}
+            ORDER BY as_of_date {order}
+        """
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [str(row["as_of_date"]) for row in rows]
+
+    def list_sheet_vitrina_ready_snapshot_dates_any_bundle(
+        self,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        descending: bool = False,
+    ) -> list[str]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if date_from:
+            conditions.append("as_of_date >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("as_of_date <= ?")
+            params.append(date_to)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        order = "DESC" if descending else "ASC"
+        query = f"""
+            SELECT DISTINCT as_of_date
+            FROM sheet_vitrina_v1_ready_snapshots
+            {where}
             ORDER BY as_of_date {order}
         """
         with _connect(self.db_path) as conn:
@@ -392,6 +439,47 @@ class RegistryUploadDbBackedRuntime:
             return SheetVitrinaV1RefreshResult(
                 status="success",
                 bundle_version=current_state.bundle_version,
+                activated_at=row["activated_at"],
+                refreshed_at=row["refreshed_at"],
+                as_of_date=row["as_of_date"],
+                date_columns=plan.date_columns,
+                temporal_slots=plan.temporal_slots,
+                source_temporal_policies=effective_policies,
+                snapshot_id=row["snapshot_id"],
+                plan_version=row["plan_version"],
+                sheet_row_counts=_sheet_row_counts_from_plan(plan),
+                semantic_status=semantic_summary["status"],
+                semantic_label=semantic_summary["label"],
+                semantic_tone=semantic_summary["tone"],
+                semantic_reason=semantic_summary["reason"],
+                source_outcome_counts=dict(semantic_summary["counts"]),
+                source_outcomes=list(semantic_summary["sources"]),
+            )
+
+    def load_sheet_vitrina_refresh_status_any_bundle(self, *, as_of_date: str) -> SheetVitrinaV1RefreshResult:
+        if not str(as_of_date or "").strip():
+            raise ValueError("as_of_date is required for cross-bundle ready snapshot status read")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT bundle_version, activated_at, as_of_date, snapshot_id, plan_version, refreshed_at, plan_json
+                FROM sheet_vitrina_v1_ready_snapshots
+                WHERE as_of_date = ?
+                ORDER BY activated_at DESC, refreshed_at DESC, bundle_version DESC
+                LIMIT 1
+                """,
+                (as_of_date,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: as_of_date={as_of_date}")
+
+            plan = _deserialize_sheet_vitrina_plan(row["plan_json"])
+            semantic_summary = _derive_sheet_vitrina_refresh_semantic_summary(plan)
+            effective_policies = effective_source_temporal_policies(plan.source_temporal_policies)
+            return SheetVitrinaV1RefreshResult(
+                status="success",
+                bundle_version=row["bundle_version"],
                 activated_at=row["activated_at"],
                 refreshed_at=row["refreshed_at"],
                 as_of_date=row["as_of_date"],

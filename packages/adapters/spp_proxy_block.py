@@ -228,6 +228,7 @@ class HttpBackedPublicWbCardBuyerPriceSource:
             }
         )
         return [
+            f"{self._card_api_base_url}/cards/v4/detail?{legacy_query}",
             f"{self._card_api_base_url}/cards/v2/detail?{query}",
             f"{self._card_api_base_url}/cards/detail?{legacy_query}",
         ]
@@ -436,6 +437,12 @@ def _normalize_public_price(value: Any, *, path: tuple[str | int, ...]) -> float
         return None
     path_text = ".".join(str(item) for item in path).lower()
     if path_text.endswith("u") or path_text.endswith("priceu") or "priceu" in path_text:
+        numeric = numeric / 100.0
+    elif (
+        ".price." in path_text
+        and path_text.rsplit(".", 1)[-1] in {"basic", "product", "logistics", "return", "cashback"}
+        and numeric >= 10000
+    ):
         numeric = numeric / 100.0
     return round(float(numeric), 2)
 
