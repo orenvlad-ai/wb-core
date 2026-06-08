@@ -54,6 +54,9 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status`
 - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate`
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx`
+- `GET /v1/sheet-vitrina-v1/supply/wb-supplies`
+- `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync`
+- `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 - `GET /sheet-vitrina-v1/supplier`
 - `GET /v1/sheet-vitrina-v1/supply/supplier-shipments`
 - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse`
@@ -239,6 +242,7 @@ Optional runtime overrides remain the same as in current official-api boundary:
 - `WB_SELLER_ANALYTICS_API_BASE_URL`
 - `WB_STATISTICS_API_BASE_URL`
 - `WB_FEEDBACKS_API_BASE_URL`
+- `WB_SUPPLIES_API_BASE_URL`
 - `OPENAI_MODEL`
 - `OPENAI_API_BASE_URL`
 - `OPENAI_TIMEOUT_SECONDS`

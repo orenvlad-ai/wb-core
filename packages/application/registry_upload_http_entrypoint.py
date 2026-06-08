@@ -79,6 +79,7 @@ from packages.application.web_vitrina_page_composition import (
 )
 from packages.application.web_vitrina_view_model import build_web_vitrina_view_model
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
+from packages.application.wb_supplies import WbSuppliesBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -627,6 +628,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.supplier_shipments_block = SupplierShipmentsBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.wb_supplies_block = WbSuppliesBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -1649,6 +1654,15 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_supplier_shipments_invoice_request(self, shipment_id: str) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.download_invoice(shipment_id)
+
+    def handle_wb_supplies_list_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        return self.wb_supplies_block.list_supplies(params)
+
+    def handle_wb_supplies_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.wb_supplies_block.sync_supplies(payload)
+
+    def handle_wb_supplies_detail_request(self, supply_id: str) -> dict[str, Any]:
+        return self.wb_supplies_block.get_supply(supply_id)
 
     def handle_nomenclature_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_nomenclature()

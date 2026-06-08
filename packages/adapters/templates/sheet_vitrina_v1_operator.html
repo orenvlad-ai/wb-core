@@ -1892,6 +1892,224 @@
       background: #0f1117;
     }
 
+    .wb-supplies-block {
+      margin-top: 18px;
+    }
+
+    .wb-supplies-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .wb-supplies-title {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+      letter-spacing: 0;
+      color: var(--text);
+    }
+
+    .wb-supplies-lead,
+    .wb-supplies-source,
+    .wb-supplies-summary,
+    .wb-supplies-state {
+      color: var(--muted);
+    }
+
+    .wb-supplies-lead {
+      margin: 6px 0 0;
+      font-size: 13px;
+    }
+
+    .wb-supplies-source {
+      margin: 10px 0 0;
+      font-size: 12px;
+    }
+
+    .wb-supplies-filters {
+      display: grid;
+      grid-template-columns: minmax(180px, 1.1fr) minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(170px, 0.9fr);
+      gap: 10px;
+      margin-top: 18px;
+      align-items: end;
+    }
+
+    .wb-supplies-message {
+      margin: 12px 0 0;
+      min-height: 18px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .wb-supplies-message.is-error {
+      color: var(--error-text);
+    }
+
+    .wb-supplies-message.is-warning {
+      color: var(--warning-text);
+    }
+
+    .wb-supplies-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 12px;
+    }
+
+    .wb-supplies-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--control-bg);
+      color: var(--muted-strong);
+      white-space: nowrap;
+    }
+
+    .wb-supplies-table-wrap {
+      margin-top: 14px;
+      max-height: 590px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--control-bg);
+    }
+
+    .wb-supplies-table {
+      width: 100%;
+      min-width: 1080px;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 12px;
+    }
+
+    .wb-supplies-table th,
+    .wb-supplies-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    .wb-supplies-table th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #1b1e26;
+      color: var(--muted-strong);
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .wb-supplies-table tbody tr:hover td {
+      background: #181c23;
+    }
+
+    .wb-supplies-main {
+      display: block;
+      color: var(--text);
+      font-weight: 800;
+      line-height: 1.25;
+    }
+
+    .wb-supplies-sub {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .wb-supplies-status-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--idle-bg);
+      color: var(--idle-text);
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .wb-supplies-status-pill.is-success {
+      border-color: rgba(34, 197, 94, 0.32);
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .wb-supplies-status-pill.is-warning {
+      border-color: rgba(245, 158, 11, 0.34);
+      background: var(--warning-bg);
+      color: var(--warning-text);
+    }
+
+    .wb-supplies-empty {
+      padding: 28px 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .wb-supplies-pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .wb-supplies-page-size {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .wb-supplies-pages {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .wb-supplies-page-button {
+      min-width: 34px;
+      min-height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .wb-supplies-page-button:hover:not(:disabled) {
+      border-color: var(--accent-border);
+      background: var(--accent-soft);
+    }
+
+    .wb-supplies-page-button.is-active {
+      border-color: var(--accent-border);
+      background: var(--accent-soft);
+      color: #ddd6fe;
+    }
+
+    .wb-supplies-page-button:disabled {
+      cursor: not-allowed;
+      color: #697180;
+      background: rgba(31, 34, 42, 0.58);
+    }
+
     @media (max-width: 760px) {
       .page {
         padding: 28px 16px;
@@ -1909,6 +2127,10 @@
       .field-grid,
       .factory-grid,
       .dataset-card--with-summary {
+        grid-template-columns: 1fr;
+      }
+
+      .wb-supplies-filters {
         grid-template-columns: 1fr;
       }
 
@@ -2303,12 +2525,13 @@
       <section class="operator-panel" data-tab-panel="factory-order" hidden>
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
-          Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», а реестр заказов поставщика
-          доступен в «От поставщика».
+          Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», WB/FBW registry живёт
+          в «Wildberries», а реестр заказов поставщика доступен в «От поставщика».
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы поставок">
           <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="wildberries" aria-selected="false">Wildberries</button>
           <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
         </div>
 
@@ -2659,6 +2882,83 @@
         <section class="supply-mode-panel" data-supply-mode-panel="supplier" hidden>
           <iframe id="supplierShipmentsFrame" class="supplier-shipments-frame" title="От поставщика"></iframe>
         </section>
+
+        <section class="supply-mode-panel" data-supply-mode-panel="wildberries" hidden>
+          <section class="block wb-supplies-block" aria-labelledby="wbSuppliesTitle">
+            <div class="wb-supplies-header">
+              <div>
+                <h2 id="wbSuppliesTitle" class="wb-supplies-title">Все поставки</h2>
+                <p class="wb-supplies-lead">Read-only список поставок WB API / FBW Supplies</p>
+                <p class="wb-supplies-source">WB API / FBW Supplies · read-only</p>
+              </div>
+              <div class="block-actions">
+                <button id="wbSuppliesRefreshButton" class="action-button primary-button" type="button">Обновить поставки</button>
+              </div>
+            </div>
+
+            <div class="wb-supplies-filters" aria-label="Фильтры поставок Wildberries">
+              <div class="field">
+                <label for="wbSuppliesSearchInput">Поиск</label>
+                <input id="wbSuppliesSearchInput" type="search" placeholder="Номер поставки" autocomplete="off">
+              </div>
+              <div class="field">
+                <label for="wbSuppliesWarehouseSelect">Склад</label>
+                <select id="wbSuppliesWarehouseSelect">
+                  <option value="">Все склады</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="wbSuppliesStatusSelect">Статус</label>
+                <select id="wbSuppliesStatusSelect">
+                  <option value="">Все статусы</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="wbSuppliesSizeFilterSelect">Размер поставки</label>
+                <select id="wbSuppliesSizeFilterSelect">
+                  <option value="main_250" selected>Основные от 250 шт</option>
+                  <option value="all">Все поставки</option>
+                  <option value="small_lt_250">Мелкие до 249 шт</option>
+                </select>
+              </div>
+            </div>
+
+            <p id="wbSuppliesMessage" class="wb-supplies-message">Читаем cache...</p>
+            <div id="wbSuppliesSummary" class="wb-supplies-summary" aria-live="polite"></div>
+            <div class="wb-supplies-table-wrap">
+              <table class="wb-supplies-table">
+                <thead>
+                  <tr>
+                    <th>Номер и тип</th>
+                    <th>Дата поставки</th>
+                    <th>Склад</th>
+                    <th>Статус</th>
+                    <th>Добавлено, шт / Упаковано → Принято</th>
+                    <th>Коэф. приёмки</th>
+                    <th>Стоимость</th>
+                  </tr>
+                </thead>
+                <tbody id="wbSuppliesTableBody">
+                  <tr>
+                    <td colspan="7" class="wb-supplies-empty">Данные ещё не загружены.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="wb-supplies-pagination">
+              <label class="wb-supplies-page-size" for="wbSuppliesPageSizeSelect">
+                <span>Показать записей</span>
+                <select id="wbSuppliesPageSizeSelect">
+                  <option value="20" selected>20</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </label>
+              <div id="wbSuppliesPageButtons" class="wb-supplies-pages" aria-label="Страницы поставок"></div>
+            </div>
+          </section>
+        </section>
       </section>
     </section>
   </main>
@@ -2841,6 +3141,16 @@
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
+      const wbSuppliesRefreshButton = document.getElementById("wbSuppliesRefreshButton");
+      const wbSuppliesSearchInput = document.getElementById("wbSuppliesSearchInput");
+      const wbSuppliesWarehouseSelect = document.getElementById("wbSuppliesWarehouseSelect");
+      const wbSuppliesStatusSelect = document.getElementById("wbSuppliesStatusSelect");
+      const wbSuppliesSizeFilterSelect = document.getElementById("wbSuppliesSizeFilterSelect");
+      const wbSuppliesMessage = document.getElementById("wbSuppliesMessage");
+      const wbSuppliesSummary = document.getElementById("wbSuppliesSummary");
+      const wbSuppliesTableBody = document.getElementById("wbSuppliesTableBody");
+      const wbSuppliesPageSizeSelect = document.getElementById("wbSuppliesPageSizeSelect");
+      const wbSuppliesPageButtons = document.getElementById("wbSuppliesPageButtons");
 
       const actionLabels = {
         refresh: {
@@ -2862,10 +3172,12 @@
       const DEFAULT_SUPPLY_SECTION = "factory";
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
-      const VALID_SUPPLY_MODES = new Set(["calculations", "supplier"]);
+      const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "supplier"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
+      const WB_SUPPLIES_DEFAULT_SIZE_FILTER = "main_250";
+      const WB_SUPPLIES_DEFAULT_LIMIT = 20;
       const STOCK_REPORT_DISTRICT_COLUMNS = [
         { metric_key: "stock_ru_central", label: "Центр", title: "Центральный" },
         { metric_key: "stock_ru_northwest", label: "СЗ", title: "Северо-Западный" },
@@ -2939,6 +3251,19 @@
       let stockReportPayload = null;
       let stockReportSortState = { key: "active_order", direction: "asc" };
       let planReportPayload = null;
+      let wbSuppliesPayload = null;
+      let wbSuppliesInitialized = false;
+      let wbSuppliesLoading = false;
+      let wbSuppliesSyncing = false;
+      let wbSuppliesSearchTimer = 0;
+      const wbSuppliesState = {
+        search: "",
+        warehouse_id: "",
+        status_id: "",
+        size_filter: WB_SUPPLIES_DEFAULT_SIZE_FILTER,
+        limit: WB_SUPPLIES_DEFAULT_LIMIT,
+        offset: 0
+      };
 
       function readPersistedOperatorUiState() {
         if (!window || !window.localStorage) {
@@ -3249,6 +3574,9 @@
           const supplierUrl = new URL(config.supplier_ui_path || "/sheet-vitrina-v1/supplier", window.location.origin);
           supplierUrl.searchParams.set("embedded", "operator");
           supplierShipmentsFrame.src = supplierUrl.pathname + supplierUrl.search;
+        }
+        if (activeModeName === "wildberries") {
+          ensureWbSuppliesLoaded();
         }
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ supply_mode: activeModeName });
@@ -4935,6 +5263,350 @@
         renderRegionalResult(payload ? payload.last_result : null, payload && payload.active_sku_count);
       }
 
+      function setWbSuppliesMessage(message, tone) {
+        if (!wbSuppliesMessage) {
+          return;
+        }
+        wbSuppliesMessage.textContent = message || "";
+        wbSuppliesMessage.className = "wb-supplies-message" + (tone ? " is-" + tone : "");
+      }
+
+      function updateWbSuppliesBusyState() {
+        if (wbSuppliesRefreshButton) {
+          wbSuppliesRefreshButton.disabled = wbSuppliesLoading || wbSuppliesSyncing;
+          wbSuppliesRefreshButton.textContent = wbSuppliesSyncing ? "Обновляем..." : "Обновить поставки";
+        }
+      }
+
+      function ensureWbSuppliesLoaded() {
+        if (wbSuppliesInitialized || wbSuppliesLoading || wbSuppliesSyncing) {
+          return;
+        }
+        wbSuppliesInitialized = true;
+        loadWbSupplies({ initial: true });
+      }
+
+      function wbSuppliesQueryString() {
+        const params = new URLSearchParams();
+        if (wbSuppliesState.search) {
+          params.set("search", wbSuppliesState.search);
+        }
+        if (wbSuppliesState.warehouse_id) {
+          params.set("warehouse_id", wbSuppliesState.warehouse_id);
+        }
+        if (wbSuppliesState.status_id) {
+          params.set("status_id", wbSuppliesState.status_id);
+        }
+        params.set("size_filter", wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER);
+        params.set("limit", String(wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT));
+        params.set("offset", String(wbSuppliesState.offset || 0));
+        return params.toString();
+      }
+
+      async function loadWbSupplies(options) {
+        if (!config.wb_supplies_path || wbSuppliesLoading) {
+          return;
+        }
+        wbSuppliesLoading = true;
+        updateWbSuppliesBusyState();
+        setWbSuppliesMessage("Читаем cache...", "");
+        try {
+          const query = wbSuppliesQueryString();
+          const response = await fetch(config.wb_supplies_path + (query ? "?" + query : ""), {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          wbSuppliesPayload = payload;
+          renderWbSupplies(payload);
+          if (options && options.initial && payload.meta && payload.meta.cache_empty && !wbSuppliesSyncing) {
+            await syncWbSupplies({ initial: true, limit: 100, offset: 0 });
+          }
+        } catch (error) {
+          setWbSuppliesMessage(
+            "Не удалось прочитать поставки WB: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+          renderWbSuppliesRows([]);
+        } finally {
+          wbSuppliesLoading = false;
+          updateWbSuppliesBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      async function syncWbSupplies(options) {
+        if (!config.wb_supplies_sync_path || wbSuppliesSyncing) {
+          return;
+        }
+        const request = {
+          limit: options && options.limit ? Number(options.limit) : 100,
+          offset: options && options.offset ? Number(options.offset) : 0,
+          enrich_details: true
+        };
+        wbSuppliesSyncing = true;
+        updateWbSuppliesBusyState();
+        setWbSuppliesMessage(
+          options && options.initial ? "Первичная загрузка последних 100 поставок..." : "Обновляем поставки...",
+          ""
+        );
+        try {
+          const response = await fetch(config.wb_supplies_sync_path, {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify(request)
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (options && typeof options.targetOffset === "number") {
+            wbSuppliesState.offset = Math.max(0, options.targetOffset);
+            await loadWbSupplies({ skipInitialSync: true });
+            return;
+          }
+          wbSuppliesPayload = payload;
+          renderWbSupplies(payload);
+          const sync = payload.sync || {};
+          setWbSuppliesMessage("Sync завершён: " + valueOrDash(sync.upserted_count) + " rows.", "");
+        } catch (error) {
+          setWbSuppliesMessage(
+            "WB supplies sync не выполнен: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+          if (wbSuppliesPayload) {
+            renderWbSupplies(wbSuppliesPayload);
+          }
+        } finally {
+          wbSuppliesSyncing = false;
+          updateWbSuppliesBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      function renderWbSupplies(payload) {
+        const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+        renderWbSuppliesOptions(payload);
+        renderWbSuppliesSummary(payload);
+        renderWbSuppliesRows(rows);
+        renderWbSuppliesPagination(payload);
+        const meta = payload && payload.meta ? payload.meta : {};
+        if (meta.cache_warning) {
+          setWbSuppliesMessage(meta.cache_warning, "warning");
+        } else if (meta.cache_empty) {
+          setWbSuppliesMessage("Cache пуст. Запускаем первичную загрузку при наличии WB_API_TOKEN.", "");
+        } else if (!wbSuppliesSyncing) {
+          setWbSuppliesMessage("Последний sync: " + valueOrDash(meta.last_successful_sync_at || meta.last_synced_at), "");
+        }
+      }
+
+      function renderWbSuppliesOptions(payload) {
+        const filters = payload && payload.filters ? payload.filters : {};
+        const options = filters.options || {};
+        renderSelectOptions(
+          wbSuppliesWarehouseSelect,
+          [{ value: "", label: "Все склады" }].concat(options.warehouses || []),
+          wbSuppliesState.warehouse_id
+        );
+        renderSelectOptions(
+          wbSuppliesStatusSelect,
+          [{ value: "", label: "Все статусы" }].concat(options.statuses || []),
+          wbSuppliesState.status_id
+        );
+        if (wbSuppliesSizeFilterSelect) {
+          wbSuppliesSizeFilterSelect.value = wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER;
+        }
+        if (wbSuppliesPageSizeSelect) {
+          wbSuppliesPageSizeSelect.value = String(wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT);
+        }
+      }
+
+      function renderSelectOptions(select, options, selectedValue) {
+        if (!select) {
+          return;
+        }
+        const selected = String(selectedValue || "");
+        select.innerHTML = options.map((item) => {
+          const value = String(item.value || "");
+          const label = String(item.label || value || "");
+          return "<option value=\"" + escapeHtml(value) + "\"" + (value === selected ? " selected" : "") + ">" + escapeHtml(label) + "</option>";
+        }).join("");
+      }
+
+      function renderWbSuppliesSummary(payload) {
+        if (!wbSuppliesSummary) {
+          return;
+        }
+        const summary = payload && payload.summary ? payload.summary : {};
+        const meta = payload && payload.meta ? payload.meta : {};
+        const items = [
+          "В cache: " + valueOrDash(summary.cached_total_rows),
+          "После фильтров: " + valueOrDash(summary.filtered_rows),
+          "Скрыто размером: " + valueOrDash(summary.hidden_by_size_filter_count),
+          "Unknown qty: " + valueOrDash(summary.unknown_quantity_count),
+          "Last sync: " + valueOrDash(meta.last_successful_sync_at || meta.last_synced_at)
+        ];
+        wbSuppliesSummary.innerHTML = items.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
+      }
+
+      function renderWbSuppliesRows(rows) {
+        if (!wbSuppliesTableBody) {
+          return;
+        }
+        if (!rows.length) {
+          wbSuppliesTableBody.innerHTML = "<tr><td colspan=\"7\" class=\"wb-supplies-empty\">Поставки не найдены.</td></tr>";
+          return;
+        }
+        wbSuppliesTableBody.innerHTML = rows.map((row) => {
+          const statusTone = row.status_tone ? " is-" + row.status_tone : "";
+          const quantitySub = row.accepted_quantity !== null && row.accepted_quantity !== undefined
+            ? "<span class=\"wb-supplies-sub\">Упаковано " + escapeHtml(formatWbNumber(row.packed_quantity)) + " → Принято " + escapeHtml(formatWbNumber(row.accepted_quantity)) + "</span>"
+            : "";
+          const costSub = row.has_transit_cost_marker
+            ? "<span class=\"wb-supplies-sub\">с транзитом</span>"
+            : "";
+          const warehouseFact = row.warehouse_fact_line
+            ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.warehouse_fact_line) + "</span>"
+            : "";
+          return [
+            "<tr>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(row.number_label || row.visible_number || "—") + "</span><span class=\"wb-supplies-sub\">" + escapeHtml(row.type_label || "—") + "</span></td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbDateRange(row)) + "</span></td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(row.warehouse_display || "—") + "</span>" + warehouseFact + "</td>",
+            "<td><span class=\"wb-supplies-status-pill" + statusTone + "\">" + escapeHtml(row.status_label || "—") + "</span></td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbNumber(row.quantity_added)) + "</span>" + quantitySub + "</td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbCoefficient(row.acceptance_coefficient)) + "</span></td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(row.acceptance_cost)) + "</span>" + costSub + "</td>",
+            "</tr>"
+          ].join("");
+        }).join("");
+      }
+
+      function renderWbSuppliesPagination(payload) {
+        if (!wbSuppliesPageButtons) {
+          return;
+        }
+        const pagination = payload && payload.pagination ? payload.pagination : {};
+        const page = Number(pagination.page || 1);
+        const pageCount = Number(pagination.page_count || 0);
+        const limit = Number(pagination.limit || wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT);
+        const total = Number(pagination.total || 0);
+        const hasPrevious = Boolean(pagination.has_previous);
+        const hasNext = Boolean(pagination.has_next);
+        const canLoadMore = canLoadMoreWbSupplies(payload);
+        const buttons = [];
+        buttons.push(wbSuppliesPageButton("‹", Math.max(0, Number(pagination.offset || 0) - limit), !hasPrevious, false));
+        if (pageCount > 0) {
+          const start = Math.max(1, page - 2);
+          const end = Math.min(pageCount, page + 2);
+          if (start > 1) {
+            buttons.push(wbSuppliesPageButton("1", 0, false, page === 1));
+          }
+          if (start > 2) {
+            buttons.push("<span class=\"wb-supplies-chip\">...</span>");
+          }
+          for (let current = start; current <= end; current += 1) {
+            buttons.push(wbSuppliesPageButton(String(current), (current - 1) * limit, false, current === page));
+          }
+          if (end < pageCount - 1) {
+            buttons.push("<span class=\"wb-supplies-chip\">...</span>");
+          }
+          if (end < pageCount) {
+            buttons.push(wbSuppliesPageButton(String(pageCount), (pageCount - 1) * limit, false, page === pageCount));
+          }
+        }
+        const nextOffset = hasNext ? Number(pagination.offset || 0) + limit : total;
+        buttons.push(wbSuppliesPageButton("›", nextOffset, !hasNext && !canLoadMore, false));
+        wbSuppliesPageButtons.innerHTML = buttons.join("");
+      }
+
+      function wbSuppliesPageButton(label, offset, disabled, active) {
+        return "<button class=\"wb-supplies-page-button" + (active ? " is-active" : "") + "\" type=\"button\" data-wb-supplies-offset=\"" + escapeHtml(String(offset)) + "\"" + (disabled ? " disabled" : "") + ">" + escapeHtml(label) + "</button>";
+      }
+
+      function canLoadMoreWbSupplies(payload) {
+        const meta = payload && payload.meta ? payload.meta : {};
+        const lastLimit = Number(meta.last_limit || 0);
+        const latestCount = Number(meta.latest_synced_count || 0);
+        return lastLimit > 0 && latestCount >= lastLimit;
+      }
+
+      async function goToWbSuppliesOffset(offset) {
+        const normalizedOffset = Math.max(0, Number(offset || 0));
+        const pagination = wbSuppliesPayload && wbSuppliesPayload.pagination ? wbSuppliesPayload.pagination : {};
+        const cachedTotal = Number(pagination.cached_total_rows || 0);
+        const hasNext = Boolean(pagination.has_next);
+        if (!hasNext && normalizedOffset >= Number(pagination.total || 0) && canLoadMoreWbSupplies(wbSuppliesPayload)) {
+          await syncWbSupplies({ limit: 100, offset: cachedTotal, targetOffset: normalizedOffset });
+          return;
+        }
+        wbSuppliesState.offset = normalizedOffset;
+        await loadWbSupplies({ skipInitialSync: true });
+      }
+
+      function formatWbDateRange(row) {
+        const start = formatShortRuDate(row && row.supply_date);
+        const end = formatShortRuDate(row && row.fact_date);
+        if (start && end && start !== end) {
+          return start + " → " + end;
+        }
+        return start || end || "—";
+      }
+
+      function formatShortRuDate(value) {
+        const datePart = String(value || "").slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+          return "";
+        }
+        const parsed = new Date(datePart + "T00:00:00Z");
+        if (!Number.isFinite(parsed.getTime())) {
+          return "";
+        }
+        return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", timeZone: "UTC" }).format(parsed);
+      }
+
+      function formatWbNumber(value) {
+        if (value === null || value === undefined || value === "") {
+          return "—";
+        }
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return "—";
+        }
+        return formatNumber(numeric);
+      }
+
+      function formatWbCoefficient(value) {
+        if (value === null || value === undefined || value === "") {
+          return "—";
+        }
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return "—";
+        }
+        if (Math.abs(numeric) < 0.0001) {
+          return "Бесплатно";
+        }
+        return formatNumber(numeric);
+      }
+
+      function formatWbRub(value) {
+        if (value === null || value === undefined || value === "") {
+          return "—";
+        }
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return "—";
+        }
+        if (Math.abs(numeric) < 0.005) {
+          return "0 ₽";
+        }
+        return numberFormatter.format(numeric) + " ₽";
+      }
+
       async function readJson(response) {
         const raw = await response.text();
         if (!raw) {
@@ -5732,6 +6404,43 @@
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
+      wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 100, offset: 0 }));
+      wbSuppliesSearchInput.addEventListener("input", () => {
+        window.clearTimeout(wbSuppliesSearchTimer);
+        wbSuppliesSearchTimer = window.setTimeout(() => {
+          wbSuppliesState.search = String(wbSuppliesSearchInput.value || "").trim();
+          wbSuppliesState.offset = 0;
+          loadWbSupplies({ skipInitialSync: true });
+        }, 250);
+      });
+      wbSuppliesWarehouseSelect.addEventListener("change", () => {
+        wbSuppliesState.warehouse_id = String(wbSuppliesWarehouseSelect.value || "").trim();
+        wbSuppliesState.offset = 0;
+        loadWbSupplies({ skipInitialSync: true });
+      });
+      wbSuppliesStatusSelect.addEventListener("change", () => {
+        wbSuppliesState.status_id = String(wbSuppliesStatusSelect.value || "").trim();
+        wbSuppliesState.offset = 0;
+        loadWbSupplies({ skipInitialSync: true });
+      });
+      wbSuppliesSizeFilterSelect.addEventListener("change", () => {
+        wbSuppliesState.size_filter = String(wbSuppliesSizeFilterSelect.value || "").trim() || WB_SUPPLIES_DEFAULT_SIZE_FILTER;
+        wbSuppliesState.offset = 0;
+        loadWbSupplies({ skipInitialSync: true });
+      });
+      wbSuppliesPageSizeSelect.addEventListener("change", () => {
+        const nextLimit = Number(wbSuppliesPageSizeSelect.value || WB_SUPPLIES_DEFAULT_LIMIT);
+        wbSuppliesState.limit = [20, 50, 100].includes(nextLimit) ? nextLimit : WB_SUPPLIES_DEFAULT_LIMIT;
+        wbSuppliesState.offset = 0;
+        loadWbSupplies({ skipInitialSync: true });
+      });
+      wbSuppliesPageButtons.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-wb-supplies-offset]");
+        if (!button || button.disabled) {
+          return;
+        }
+        goToWbSuppliesOffset(button.getAttribute("data-wb-supplies-offset"));
+      });
       stockReportSelectAllButton.addEventListener("click", () => {
         setStockReportDraftSelection(allStockReportSkuIds);
         writePersistedOperatorUiState({
@@ -5831,6 +6540,12 @@
         stockReportSalesAvgPeriodDays.value = resolveRestoredStockReportSalesAvgPeriodDays(persistedOperatorUiState);
       }
       setFactoryInboundSource(factoryInboundSource, { persist: false });
+      if (wbSuppliesSizeFilterSelect) {
+        wbSuppliesSizeFilterSelect.value = WB_SUPPLIES_DEFAULT_SIZE_FILTER;
+      }
+      if (wbSuppliesPageSizeSelect) {
+        wbSuppliesPageSizeSelect.value = String(WB_SUPPLIES_DEFAULT_LIMIT);
+      }
       activateTab(
         isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),
         { persist: !isEmbeddedMode }

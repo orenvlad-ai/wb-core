@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 import time
+from urllib import parse as urllib_parse
 
 from playwright.sync_api import sync_playwright
 
@@ -348,7 +349,8 @@ class LocalOperatorFixtureServer:
 def _build_handler(payloads: dict[str, tuple[str, bytes, HTTPStatus]]):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            payload = payloads.get(self.path)
+            parsed_path = urllib_parse.urlparse(self.path).path
+            payload = payloads.get(parsed_path)
             if payload is None:
                 self.send_response(HTTPStatus.NOT_FOUND)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -479,8 +481,11 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
 
     page.click('[data-tab-button="reports"]')
     page.click('[data-report-section-button="stock"]')
+    if "Настройте SKU" not in page.locator("#stockReportStatus").inner_text():
+        raise AssertionError("stock report must start in manual-calculate idle state")
+    page.click("#stockReportApplyButton")
     page.wait_for_function(
-        "() => document.querySelectorAll('#stockReportRows .report-list-title, #stockReportRows .report-empty').length > 0"
+        "() => document.querySelectorAll('#stockReportRows .stock-report-table tbody tr, #stockReportRows .report-empty').length > 0"
     )
     page.reload(wait_until="domcontentloaded")
     reports_state = {
@@ -494,7 +499,10 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if reports_state != {"top_tab": "reports", "report_section": "stock"}:
         raise AssertionError(f"reports subsection must survive reload, got {reports_state}")
 
-    page.wait_for_function("() => document.querySelectorAll('#stockReportRows .report-list-title').length > 0")
+    if "Настройте SKU" not in page.locator("#stockReportStatus").inner_text():
+        raise AssertionError("stock report reload must keep manual-calculate idle state before explicit apply")
+    page.click("#stockReportApplyButton")
+    page.wait_for_function("() => document.querySelectorAll('#stockReportRows .stock-report-table tbody tr').length > 0")
     visible_rows = _visible_stock_report_titles(page)
     if len(visible_rows) < 1:
         raise AssertionError("stock report must render at least one row for the persistence smoke")
@@ -513,6 +521,9 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.click("#stockReportApplyButton")
     _wait_for_row_titles(page, [kept_label])
     page.reload(wait_until="domcontentloaded")
+    if "Настройте SKU" not in page.locator("#stockReportStatus").inner_text():
+        raise AssertionError("stock report reload must keep manual-calculate idle state before applying persisted SKU subset")
+    page.click("#stockReportApplyButton")
     _wait_for_row_titles(page, [kept_label])
     _open_stock_selector(page)
     selected_labels_after_reload = _checked_stock_selector_labels(page)
@@ -778,7 +789,7 @@ def _checked_stock_selector_labels(page) -> list[str]:
 
 def _visible_stock_report_titles(page) -> list[str]:
     return page.evaluate(
-        """() => Array.from(document.querySelectorAll('#stockReportRows .report-list-title'))
+        """() => Array.from(document.querySelectorAll('#stockReportRows .stock-report-table tbody tr td:first-child'))
             .map((item) => item.textContent.trim())
             .filter(Boolean)"""
     )

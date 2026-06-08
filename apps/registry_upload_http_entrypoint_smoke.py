@@ -59,6 +59,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
+    DEFAULT_WB_SUPPLIES_PATH,
+    DEFAULT_WB_SUPPLIES_SYNC_PATH,
     build_registry_upload_http_server,
 )
 from packages.application.registry_upload_bundle_v1 import RegistryUploadBundleV1Block
@@ -300,6 +302,8 @@ def main() -> None:
                 "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
                 "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
                 "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+                "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
+                "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
                 "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
                 "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
                 "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
@@ -319,7 +323,7 @@ def main() -> None:
                 },
             }:
                 raise AssertionError(
-                    "operator UI config must expose refresh/status paths, both report routes, both supply blocks and the full active SKU selector source"
+                    "operator UI config must expose refresh/status paths, reports, supply blocks and the full active SKU selector source"
                 )
 
             missing_plan_status, missing_plan_payload = _get_json(plan_url)
