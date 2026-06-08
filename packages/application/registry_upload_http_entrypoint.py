@@ -6881,6 +6881,10 @@ def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
         "получена неполная версия",
         "incomplete",
     )
+    missing_public_buyer_price_count = _activity_reason_marker_value(
+        lowered,
+        marker="missing_public_buyer_price=",
+    )
     requested_date_mismatch = (
         ("requested_date=" in lowered and "latest_available_date=" in lowered)
         or ("requested_window=" in lowered and "latest_available_window=" in lowered)
@@ -6929,7 +6933,11 @@ def _summarize_activity_reason_part(text: str, *, prefix: str = "") -> str:
         failure_clause = "запрос завершился по таймауту"
 
     data_clause = ""
-    if no_data:
+    if missing_public_buyer_price_count:
+        data_clause = f"публичная цена WB не получена для {missing_public_buyer_price_count} SKU"
+    elif "missing_public_buyer_price" in lowered:
+        data_clause = "публичная цена WB не получена для части SKU"
+    elif no_data:
         data_clause = "данные не получены"
     elif empty:
         data_clause = "источник вернул пустой результат"
@@ -7030,6 +7038,14 @@ def _activity_reason_has_any(text: str, *markers: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _activity_reason_marker_value(text: str, *, marker: str) -> str:
+    marker_index = text.find(marker)
+    if marker_index < 0:
+        return ""
+    raw_value = text[marker_index + len(marker) :].split(";", 1)[0].split(" ", 1)[0].strip()
+    return "".join(ch for ch in raw_value if ch.isdigit())
+
+
 def _activity_reason_part_rank(raw_text: str, humanized: str) -> int:
     lowered = _normalize_activity_reason_text(raw_text).lower()
     if _activity_reason_has_any(
@@ -7045,6 +7061,7 @@ def _activity_reason_part_rank(raw_text: str, humanized: str) -> int:
         "zero_filled",
         "invalid_exact_snapshot",
         "collector_status=blocked",
+        "missing_public_buyer_price",
     ):
         return 0
     if _activity_reason_has_any(
@@ -7079,6 +7096,7 @@ def _activity_reason_is_success_only(lowered: str) -> bool:
         "no payload returned",
         "empty result",
         "no compact ads rows returned",
+        "missing_public_buyer_price",
         "runtime cache",
         "preserved_after_invalid_attempt",
         "accepted_closed_from_",

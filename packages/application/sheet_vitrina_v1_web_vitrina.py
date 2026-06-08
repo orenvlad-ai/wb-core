@@ -87,7 +87,7 @@ class SheetVitrinaV1WebVitrinaBlock:
         descending: bool = False,
     ) -> list[str]:
         try:
-            exact_ready_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(
+            exact_ready_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
                 date_from=date_from,
                 date_to=date_to,
             )
@@ -318,7 +318,7 @@ def _build_period_snapshot(
             continue
         snapshots_by_as_of_date.setdefault(
             binding.snapshot_as_of_date,
-            runtime.load_sheet_vitrina_ready_snapshot(as_of_date=binding.snapshot_as_of_date),
+            runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=binding.snapshot_as_of_date),
         )
     materialized_bindings = [binding for binding in period_date_bindings if not binding.missing]
     if not materialized_bindings:
@@ -437,7 +437,7 @@ def _resolve_period_date_bindings(
         for offset in range((end - start).days + 1)
     ]
     exact_ready_dates = set(
-        runtime.list_sheet_vitrina_ready_snapshot_dates(
+        runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
             date_from=date_from,
             date_to=date_to,
         )
@@ -516,7 +516,7 @@ def _resolve_period_refreshed_at(
     period_date_bindings: list[_PeriodDateBinding],
 ) -> str:
     refreshed_values = [
-        runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_as_of_date).refreshed_at
+        runtime.load_sheet_vitrina_refresh_status_any_bundle(as_of_date=snapshot_as_of_date).refreshed_at
         for snapshot_as_of_date in sorted(
             {
                 binding.snapshot_as_of_date
@@ -536,7 +536,7 @@ def _resolve_period_refresh_summary(
     period_date_bindings: list[_PeriodDateBinding],
 ) -> dict[str, Any]:
     statuses = [
-        runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot_as_of_date)
+        runtime.load_sheet_vitrina_refresh_status_any_bundle(as_of_date=snapshot_as_of_date)
         for snapshot_as_of_date in sorted(
             {
                 binding.snapshot_as_of_date

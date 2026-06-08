@@ -19,6 +19,7 @@ related_modules:
 related_tables: []
 related_endpoints:
   - "GET https://www.wildberries.ru/catalog/{nmId}/detail.aspx [anonymous current-only]"
+  - "GET https://card.wb.ru/cards/v4/detail?...&nm={nmId} [anonymous current-only fallback]"
   - "public WB card API fallback [anonymous current-only]"
 related_runners:
   - "apps/spp_proxy_source_smoke.py"
@@ -59,6 +60,7 @@ update_note: "Добавлен отдельный current-only public-card sourc
 - Public fetch is anonymous. The adapter does not print cookies, headers with secrets or Seller Portal state.
 - Parser priority:
   - hydrated/script JSON and public card API payloads first;
+  - WB `cards/v4/detail` is the primary API fallback when the public detail HTML returns an anti-bot/challenge page;
   - bounded HTML/meta/DOM price fallback only when JSON/API price is unavailable.
 - Live WB can return anti-bot/challenge pages. That state is a controlled missing/error diagnostic, not a false green source outcome.
 
@@ -97,6 +99,7 @@ update_note: "Добавлен отдельный current-only public-card sourc
   - missing/zero seller price and missing public price stay blank;
   - public price above seller price stays blank with diagnostic;
   - historical current-only fetch does not hit live public card.
+  - public detail anti-bot response falls through to `cards/v4/detail` and normalizes WB minor-unit `sizes.price.product` values.
 - `apps/sheet_vitrina_v1_spp_proxy_integration_smoke.py`
   - live-plan materializes `SPP-прокси`;
   - web-vitrina contract exposes the row;
