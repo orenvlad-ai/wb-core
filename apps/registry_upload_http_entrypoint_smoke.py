@@ -69,6 +69,7 @@ from packages.application.registry_upload_bundle_v1 import RegistryUploadBundleV
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
+from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
 
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_http_entrypoint"
 INPUT_BUNDLE_FIXTURE = ARTIFACTS_DIR / "input" / "registry_upload_bundle__fixture.json"
@@ -306,6 +307,14 @@ def main() -> None:
                 "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
                 "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
                 "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+                "wb_regional_district_options": [
+                    {
+                        "district_key": key,
+                        "district_name_ru": DISTRICT_LABELS_RU[key],
+                    }
+                    for key in DISTRICT_KEYS
+                ],
+                "wb_regional_default_included_district_keys": list(DISTRICT_KEYS),
                 "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
                 "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
                 "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,

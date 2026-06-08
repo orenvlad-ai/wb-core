@@ -34,6 +34,7 @@ from packages.contracts.wb_regional_supply import (
     DISTRICT_CENTRAL,
     DISTRICT_FAR_SIBERIA,
     DISTRICT_KEYS,
+    DISTRICT_LABELS_RU,
     DISTRICT_NORTHWEST,
     DISTRICT_SOUTH_CAUCASUS,
     DISTRICT_URAL,
@@ -48,12 +49,12 @@ from packages.contracts.wb_regional_supply import (
 
 
 _DISTRICT_SPECS = (
-    (DISTRICT_CENTRAL, "Центральный федеральный округ", "stock_ru_central"),
-    (DISTRICT_NORTHWEST, "Северо-Западный федеральный округ", "stock_ru_northwest"),
-    (DISTRICT_VOLGA, "Приволжский федеральный округ", "stock_ru_volga"),
-    (DISTRICT_URAL, "Уральский федеральный округ", "stock_ru_ural"),
-    (DISTRICT_SOUTH_CAUCASUS, "Южный и Северо-Кавказский федеральный округ", "stock_ru_south_caucasus"),
-    (DISTRICT_FAR_SIBERIA, "Дальневосточный и Сибирский федеральный округ", "stock_ru_far_siberia"),
+    (DISTRICT_CENTRAL, DISTRICT_LABELS_RU[DISTRICT_CENTRAL], "stock_ru_central"),
+    (DISTRICT_NORTHWEST, DISTRICT_LABELS_RU[DISTRICT_NORTHWEST], "stock_ru_northwest"),
+    (DISTRICT_VOLGA, DISTRICT_LABELS_RU[DISTRICT_VOLGA], "stock_ru_volga"),
+    (DISTRICT_URAL, DISTRICT_LABELS_RU[DISTRICT_URAL], "stock_ru_ural"),
+    (DISTRICT_SOUTH_CAUCASUS, DISTRICT_LABELS_RU[DISTRICT_SOUTH_CAUCASUS], "stock_ru_south_caucasus"),
+    (DISTRICT_FAR_SIBERIA, DISTRICT_LABELS_RU[DISTRICT_FAR_SIBERIA], "stock_ru_far_siberia"),
 )
 _DISTRICT_NAME_BY_KEY = {key: name for key, name, _ in _DISTRICT_SPECS}
 _DISTRICT_FIELD_BY_KEY = {key: field_name for key, _, field_name in _DISTRICT_SPECS}
@@ -67,9 +68,10 @@ _DEFAULT_CYCLE_SUPPLY_DAYS = 7
 _METHODOLOGY_NOTE = (
     "Расчёт использует общий источник «Остатки ФФ» из этой же вкладки: manual Excel или read-only 1C FF_STOCK. "
     "Сервер берёт total orderCount по SKU, а региональные доли считает по историческому "
-    "выбыванию остатков на валидных clean days по 6 федеральным округам. "
+    "выбыванию остатков на валидных clean days по выбранным федеральным округам "
+    "(по умолчанию все 6). "
     "sales_avg_period_days означает запрошенное число валидных дней выбывания; dirty days "
-    "исключаются целиком, fallback на текущую структуру остатков допускается только явно "
+    "исключаются целиком внутри выбранных округов, fallback на текущую структуру остатков допускается только явно "
     "с diagnostics. Ограниченный stock_ff распределяется по коробам сначала по marginal saved units, "
     "затем по coverage days и district demand."
 )
@@ -110,6 +112,8 @@ class WbRegionalSupplyBlock:
             active_sku_count=len(active_skus),
             methodology_note=self.sales_history.build_operator_note(_METHODOLOGY_NOTE),
             stock_ff_source=stock_ff_source,
+            district_options=_district_options(),
+            default_included_district_keys=tuple(DISTRICT_KEYS),
             shared_datasets=shared_datasets,
             manual_stock_ff_dataset=shared_datasets[DATASET_STOCK_FF],
             onec_stock_ff_summary=onec_stock_ff_state,
@@ -174,6 +178,7 @@ class WbRegionalSupplyBlock:
             requested_valid_day_count=settings.sales_avg_period_days,
             district_field_by_key=_DISTRICT_FIELD_BY_KEY,
             current_stock_by_nm=current_stock_by_nm,
+            included_district_keys=settings.included_district_keys,
         )
         result_diagnostics = _build_regional_demand_result_diagnostics(regional_demand_by_nm)
         result_warnings = tuple(str(item) for item in result_diagnostics.get("warnings", []) if item)
@@ -430,6 +435,7 @@ class WbRegionalSupplyBlock:
                     else None
                 ),
                 stock_ff_source=stock_ff_source,
+                included_district_keys=_parse_included_district_keys(settings_payload.get("included_district_keys")),
             ),
             stock_ff_source=stock_ff_source,
             shared_datasets=shared_datasets,
@@ -549,6 +555,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
             field_label="Дата расчёта",
         ),
         stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
+        included_district_keys=_parse_included_district_keys(payload.get("included_district_keys")),
     )
 
 
@@ -564,6 +571,38 @@ def _normalize_stock_ff_source(value: Any) -> str:
         return _parse_stock_ff_source(value)
     except ValueError:
         return STOCK_FF_SOURCE_MANUAL_EXCEL
+
+
+def _parse_included_district_keys(value: Any) -> tuple[str, ...]:
+    if value in ("", None):
+        return tuple(DISTRICT_KEYS)
+    if isinstance(value, str):
+        raw_values = [item.strip() for item in value.split(",")]
+    elif isinstance(value, (list, tuple)):
+        raw_values = [str(item or "").strip() for item in value]
+    else:
+        raise ValueError("included_district_keys должен быть списком федеральных округов")
+    requested = [item.lower() for item in raw_values if item]
+    if not requested:
+        raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
+    unknown = sorted({item for item in requested if item not in DISTRICT_KEYS})
+    if unknown:
+        raise ValueError("Неизвестный федеральный округ: " + ", ".join(unknown))
+    requested_set = set(requested)
+    included = tuple(key for key in DISTRICT_KEYS if key in requested_set)
+    if not included:
+        raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
+    return included
+
+
+def _district_options() -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "district_key": key,
+            "district_name_ru": _DISTRICT_NAME_BY_KEY[key],
+        }
+        for key in DISTRICT_KEYS
+    )
 
 
 def _parse_onec_stock_ff_state(value: Any) -> FactoryOrderStockFfOnecState:

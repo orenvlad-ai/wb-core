@@ -39,6 +39,11 @@ from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, 
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
 from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSuccess
+from packages.contracts.wb_regional_supply import (
+    DISTRICT_CENTRAL,
+    DISTRICT_FAR_SIBERIA,
+    DISTRICT_NORTHWEST,
+)
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -130,6 +135,8 @@ def main() -> None:
                 "Рассчитать поставку на Wildberries",
                 "Сводка по федеральным округам",
                 "Диагностика методологии появится после расчёта.",
+                "Округа для расчёта пропорций",
+                "Без ДВ/Сибирь",
                 "Скачать Excel",
                 "<th>Общее количество</th>",
                 "<th>Дефицит</th>",
@@ -175,6 +182,10 @@ def main() -> None:
                 raise AssertionError("regional status must expose the shared stock_ff filename")
             if shared_dataset.get("download_path") != "/v1/sheet-vitrina-v1/supply/factory-order/uploaded/stock-ff.xlsx":
                 raise AssertionError("regional status must point to the shared stock_ff download route")
+            if len(regional_status_payload.get("district_options") or []) != 6:
+                raise AssertionError("regional status must expose district options")
+            if DISTRICT_FAR_SIBERIA not in regional_status_payload.get("default_included_district_keys", []):
+                raise AssertionError("regional status must default to all districts")
 
             calc_status, calc_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
@@ -197,6 +208,8 @@ def main() -> None:
                 raise AssertionError(f"regional diagnostics must expose stock-depletion methodology, got {diagnostics}")
             if diagnostics.get("requested_valid_day_count") != 14:
                 raise AssertionError("regional diagnostics must expose requested depletion day count")
+            if diagnostics.get("district_selection_mode") != "all_districts":
+                raise AssertionError(f"old calculate payload must default to all districts, got {diagnostics}")
             districts = {item["district_key"]: item for item in calc_payload.get("districts", [])}
             if districts["central"]["total_qty"] != 50 or districts["central"]["deficit_qty"] != 100:
                 raise AssertionError("regional summary must expose truthful central allocation and deficit")
@@ -212,6 +225,45 @@ def main() -> None:
                 raise AssertionError("main SKU must use 14 selected stock-depletion days")
             if abs(float(central_main_row.get("daily_demand_total", 0.0)) - 60.0) > 1e-9:
                 raise AssertionError("main SKU total daily demand must remain based on orderCount")
+
+            selected_status, selected_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days": 2,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST],
+                },
+            )
+            if selected_status != 200:
+                raise AssertionError(f"regional selected-district calculate must succeed, got {selected_status} {selected_payload}")
+            selected_diagnostics = selected_payload.get("diagnostics") or {}
+            if selected_diagnostics.get("included_district_keys") != [DISTRICT_CENTRAL, DISTRICT_NORTHWEST]:
+                raise AssertionError(f"selected district diagnostics must be returned, got {selected_diagnostics}")
+            if DISTRICT_FAR_SIBERIA not in selected_diagnostics.get("excluded_district_keys", []):
+                raise AssertionError("selected district diagnostics must include excluded far/siberia")
+            selected_districts = {item["district_key"]: item for item in selected_payload.get("districts", [])}
+            selected_far_row = next(row for row in selected_districts[DISTRICT_FAR_SIBERIA]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
+            if float(selected_far_row.get("district_daily_demand", 1.0)) != 0.0:
+                raise AssertionError("excluded district must stay visible with zero demand")
+
+            invalid_status, invalid_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days": 2,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "included_district_keys": [],
+                },
+            )
+            if invalid_status != 422 or "Выберите хотя бы один округ" not in str(invalid_payload.get("error", "")):
+                raise AssertionError(f"empty district selection must return controlled 422, got {invalid_status} {invalid_payload}")
 
             central_download_path = districts["central"].get("download_path")
             if central_download_path != "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx":

@@ -28,6 +28,15 @@ DISTRICT_KEYS = (
     DISTRICT_FAR_SIBERIA,
 )
 
+DISTRICT_LABELS_RU = {
+    DISTRICT_CENTRAL: "Центральный федеральный округ",
+    DISTRICT_NORTHWEST: "Северо-Западный федеральный округ",
+    DISTRICT_VOLGA: "Приволжский федеральный округ",
+    DISTRICT_URAL: "Уральский федеральный округ",
+    DISTRICT_SOUTH_CAUCASUS: "Южный и Северо-Кавказский федеральный округ",
+    DISTRICT_FAR_SIBERIA: "Дальневосточный и Сибирский федеральный округ",
+}
+
 
 @dataclass(frozen=True)
 class WbRegionalSupplySettings:
@@ -38,6 +47,7 @@ class WbRegionalSupplySettings:
     order_batch_qty: int
     report_date_override: str | None
     stock_ff_source: str = STOCK_FF_SOURCE_MANUAL_EXCEL
+    included_district_keys: tuple[str, ...] = DISTRICT_KEYS
 
 
 @dataclass(frozen=True)
@@ -99,6 +109,8 @@ class WbRegionalSupplyStatus:
     active_sku_count: int
     methodology_note: str
     stock_ff_source: str
+    district_options: tuple[dict[str, str], ...]
+    default_included_district_keys: tuple[str, ...]
     shared_datasets: dict[str, FactoryOrderDatasetState]
     manual_stock_ff_dataset: FactoryOrderDatasetState
     onec_stock_ff_summary: FactoryOrderStockFfOnecState

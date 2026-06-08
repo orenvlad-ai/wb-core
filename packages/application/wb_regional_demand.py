@@ -45,10 +45,12 @@ def estimate_wb_regional_demand(
     requested_valid_day_count: int,
     district_field_by_key: Mapping[str, str],
     current_stock_by_nm: Mapping[int, Mapping[str, float]],
+    included_district_keys: list[str] | tuple[str, ...] | None = None,
 ) -> dict[int, WbRegionalDemandEstimate]:
     """Estimate district demand for each SKU from clean historical stock depletion days."""
 
     requested_count = max(int(requested_valid_day_count), 1)
+    included_keys = _normalize_included_district_keys(included_district_keys)
     max_lookup_days = _stock_depletion_lookup_days(requested_count)
     candidate_dates = [
         report_date - timedelta(days=offset)
@@ -86,6 +88,7 @@ def estimate_wb_regional_demand(
             stock_by_date=stock_by_date,
             order_counts_by_date=order_counts_by_date,
             current_stock_by_district=current_stock_by_nm.get(int(nm_id), {}),
+            included_district_keys=included_keys,
         )
     return out
 
@@ -121,6 +124,9 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
             "sku_count": 0,
             "fallback_sku_count": 0,
             "method_counts": {},
+            "included_district_keys": list(DISTRICT_KEYS),
+            "excluded_district_keys": [],
+            "district_selection_mode": "all_districts",
             "warnings": [],
         }
 
@@ -137,7 +143,7 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
     if fallback_sku_ids:
         warnings.append(
             "Fallback current-stock-share used for SKU count="
-            f"{len(fallback_sku_ids)}; nmIds={','.join(str(item) for item in fallback_sku_ids[:20])}"
+            f"{len(fallback_sku_ids)}"
         )
     if warning_count and not fallback_sku_ids:
         warnings.append(f"Rows with stock-depletion lookup warnings: {warning_count}")
@@ -147,9 +153,13 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
         "fallback_sku_count": len(fallback_sku_ids),
         "fallback_nm_ids": fallback_sku_ids,
         "method_counts": method_counts,
+        "primary_sku_count": primary_count,
         "requested_valid_day_count": int(
             items[0].diagnostics.get("requested_valid_day_count") or 0
         ),
+        "included_district_keys": list(items[0].diagnostics.get("included_district_keys") or DISTRICT_KEYS),
+        "excluded_district_keys": list(items[0].diagnostics.get("excluded_district_keys") or []),
+        "district_selection_mode": str(items[0].diagnostics.get("district_selection_mode") or "all_districts"),
         "min_selected_valid_day_count": min(selected_counts) if selected_counts else 0,
         "max_selected_valid_day_count": max(selected_counts) if selected_counts else 0,
         "max_inspected_day_count": max(inspected_counts) if inspected_counts else 0,
@@ -168,6 +178,7 @@ def _estimate_one_sku(
     stock_by_date: Mapping[str, Mapping[int, Mapping[str, float]]],
     order_counts_by_date: Mapping[str, Mapping[int, float]],
     current_stock_by_district: Mapping[str, float],
+    included_district_keys: tuple[str, ...],
 ) -> WbRegionalDemandEstimate:
     order_values = [
         float(order_counts_by_date.get(candidate.isoformat(), {}).get(nm_id, 0.0))
@@ -195,6 +206,7 @@ def _estimate_one_sku(
             stock_by_date=stock_by_date,
             order_counts_by_date=order_counts_by_date,
             valid_day_threshold=valid_day_threshold,
+            included_district_keys=included_district_keys,
         )
         if validation["valid"]:
             if inspected_day_count <= requested_valid_day_count:
@@ -216,6 +228,7 @@ def _estimate_one_sku(
             excluded_reason_counts=excluded_reason_counts,
             baseline_daily_sales=baseline_daily_sales,
             valid_day_threshold=valid_day_threshold,
+            included_district_keys=included_district_keys,
         )
 
     return _fallback_estimate(
@@ -232,6 +245,7 @@ def _estimate_one_sku(
         candidate_dates=candidate_dates,
         order_counts_by_date=order_counts_by_date,
         current_stock_by_district=current_stock_by_district,
+        included_district_keys=included_district_keys,
     )
 
 
@@ -247,13 +261,17 @@ def _primary_estimate(
     excluded_reason_counts: Mapping[str, int],
     baseline_daily_sales: float,
     valid_day_threshold: float,
+    included_district_keys: tuple[str, ...],
 ) -> WbRegionalDemandEstimate:
     shares = {key: 0.0 for key in DISTRICT_KEYS}
     for item in selected:
         total_depletion = float(item["total_depletion"])
-        for key in DISTRICT_KEYS:
+        for key in included_district_keys:
             shares[key] += float(item["depletions"].get(key, 0.0)) / total_depletion
-    shares = _normalize_shares({key: value / len(selected) for key, value in shares.items()})
+    shares = _normalize_shares(
+        {key: value / len(selected) for key, value in shares.items()},
+        included_district_keys=included_district_keys,
+    )
     daily_demand_total = sum(float(item["order_count"]) for item in selected) / len(selected)
     district_daily_demand = {
         key: float(daily_demand_total) * float(shares.get(key, 0.0))
@@ -289,6 +307,7 @@ def _primary_estimate(
         warning=warning,
         fallback_used=False,
         fallback_reason="",
+        included_district_keys=included_district_keys,
     )
     return WbRegionalDemandEstimate(
         nm_id=nm_id,
@@ -315,6 +334,7 @@ def _fallback_estimate(
     candidate_dates: list[date],
     order_counts_by_date: Mapping[str, Mapping[int, float]],
     current_stock_by_district: Mapping[str, float],
+    included_district_keys: tuple[str, ...],
 ) -> WbRegionalDemandEstimate:
     order_samples: list[tuple[str, float]] = []
     for candidate in candidate_dates:
@@ -341,7 +361,10 @@ def _fallback_estimate(
         if order_samples
         else 0.0
     )
-    shares = _current_stock_shares(current_stock_by_district)
+    shares = _current_stock_shares(
+        current_stock_by_district,
+        included_district_keys=included_district_keys,
+    )
     district_daily_demand = {
         key: float(daily_demand_total) * float(shares.get(key, 0.0))
         for key in DISTRICT_KEYS
@@ -372,6 +395,7 @@ def _fallback_estimate(
         warning=warning,
         fallback_used=True,
         fallback_reason=fallback_reason,
+        included_district_keys=included_district_keys,
     )
     return WbRegionalDemandEstimate(
         nm_id=nm_id,
@@ -390,6 +414,7 @@ def _validate_stock_depletion_day(
     stock_by_date: Mapping[str, Mapping[int, Mapping[str, float]]],
     order_counts_by_date: Mapping[str, Mapping[int, float]],
     valid_day_threshold: float,
+    included_district_keys: tuple[str, ...],
 ) -> dict[str, Any]:
     current_date = depletion_date.isoformat()
     previous_date = (depletion_date - timedelta(days=1)).isoformat()
@@ -410,7 +435,7 @@ def _validate_stock_depletion_day(
         return _invalid_day(current_date, "low_order_count_signal")
 
     depletions: dict[str, float] = {}
-    for key in DISTRICT_KEYS:
+    for key in included_district_keys:
         if key not in previous_row or key not in current_row:
             return _invalid_day(current_date, "missing_district_stock")
         previous_value = previous_row.get(key)
@@ -459,7 +484,9 @@ def _base_diagnostics(
     warning: str,
     fallback_used: bool,
     fallback_reason: str,
+    included_district_keys: tuple[str, ...],
 ) -> dict[str, Any]:
+    excluded_district_keys = [key for key in DISTRICT_KEYS if key not in set(included_district_keys)]
     return {
         "regional_demand_method": method,
         "requested_valid_day_count": int(requested_valid_day_count),
@@ -480,6 +507,9 @@ def _base_diagnostics(
             key: float(average_shares.get(key, 0.0))
             for key in DISTRICT_KEYS
         },
+        "included_district_keys": list(included_district_keys),
+        "excluded_district_keys": excluded_district_keys,
+        "district_selection_mode": "all_districts" if len(included_district_keys) == len(DISTRICT_KEYS) else "selected_districts",
         "total_daily_demand_source": TOTAL_DAILY_DEMAND_SOURCE_ORDER_COUNT,
         "fallback_used": bool(fallback_used),
         "fallback_reason": str(fallback_reason),
@@ -547,25 +577,51 @@ def _order_count_by_nm_id(payload: Any) -> dict[int, float]:
     return out
 
 
-def _current_stock_shares(current_stock_by_district: Mapping[str, float]) -> dict[str, float]:
-    positive_total = sum(max(float(current_stock_by_district.get(key, 0.0)), 0.0) for key in DISTRICT_KEYS)
+def _current_stock_shares(
+    current_stock_by_district: Mapping[str, float],
+    *,
+    included_district_keys: tuple[str, ...],
+) -> dict[str, float]:
+    positive_total = sum(max(float(current_stock_by_district.get(key, 0.0)), 0.0) for key in included_district_keys)
+    shares = {key: 0.0 for key in DISTRICT_KEYS}
     if positive_total <= 0:
-        equal_share = 1.0 / len(DISTRICT_KEYS)
-        return {key: equal_share for key in DISTRICT_KEYS}
-    return {
-        key: max(float(current_stock_by_district.get(key, 0.0)), 0.0) / positive_total
-        for key in DISTRICT_KEYS
-    }
+        equal_share = 1.0 / len(included_district_keys)
+        for key in included_district_keys:
+            shares[key] = equal_share
+        return shares
+    for key in included_district_keys:
+        shares[key] = max(float(current_stock_by_district.get(key, 0.0)), 0.0) / positive_total
+    return shares
 
 
-def _normalize_shares(shares: Mapping[str, float]) -> dict[str, float]:
-    total = sum(max(float(shares.get(key, 0.0)), 0.0) for key in DISTRICT_KEYS)
+def _normalize_shares(
+    shares: Mapping[str, float],
+    *,
+    included_district_keys: tuple[str, ...],
+) -> dict[str, float]:
+    total = sum(max(float(shares.get(key, 0.0)), 0.0) for key in included_district_keys)
+    normalized = {key: 0.0 for key in DISTRICT_KEYS}
     if total <= 0:
-        return {key: 0.0 for key in DISTRICT_KEYS}
-    return {
-        key: max(float(shares.get(key, 0.0)), 0.0) / total
-        for key in DISTRICT_KEYS
-    }
+        return normalized
+    for key in included_district_keys:
+        normalized[key] = max(float(shares.get(key, 0.0)), 0.0) / total
+    return normalized
+
+
+def _normalize_included_district_keys(value: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    if value is None:
+        return tuple(DISTRICT_KEYS)
+    raw_values = list(value)
+    if not raw_values:
+        raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
+    requested = {str(item or "").strip().lower() for item in raw_values}
+    unknown = sorted(item for item in requested if item not in DISTRICT_KEYS)
+    if unknown:
+        raise ValueError("Неизвестный федеральный округ: " + ", ".join(unknown))
+    included = tuple(key for key in DISTRICT_KEYS if key in requested)
+    if not included:
+        raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
+    return included
 
 
 def _invalid_day(snapshot_date: str, reason: str) -> dict[str, Any]:

@@ -24,6 +24,11 @@ from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.contracts.factory_order_supply import DATASET_STOCK_FF
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
 from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSuccess
+from packages.contracts.wb_regional_supply import (
+    DISTRICT_CENTRAL,
+    DISTRICT_FAR_SIBERIA,
+    DISTRICT_NORTHWEST,
+)
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -111,6 +116,10 @@ def main() -> None:
             raise AssertionError("factory status must expose the shared stock_ff filename")
         if regional_status.shared_datasets["stock_ff"].uploaded_filename != "shared-stock-ff.xlsx":
             raise AssertionError("regional status must reuse the shared stock_ff state")
+        if len(regional_status.district_options) != 6:
+            raise AssertionError("regional status must expose district options for the operator selector")
+        if DISTRICT_FAR_SIBERIA not in regional_status.default_included_district_keys:
+            raise AssertionError("regional status default district selection must include far/siberia")
 
         result = regional_block.calculate(
             {
@@ -141,6 +150,10 @@ def main() -> None:
             raise AssertionError(f"result diagnostics must expose stock-depletion methodology, got {result.diagnostics}")
         if result.diagnostics.get("requested_valid_day_count") != 14:
             raise AssertionError("result diagnostics must expose requested valid depletion day count")
+        if result.settings.included_district_keys != regional_status.default_included_district_keys:
+            raise AssertionError("old payload without included_district_keys must default to all districts")
+        if result.diagnostics.get("district_selection_mode") != "all_districts":
+            raise AssertionError("default district selection must be all_districts")
         if legacy_alias_result.summary.total_qty != result.summary.total_qty:
             raise AssertionError("legacy supply_horizon_days alias must keep the same WB regional math")
         districts = {item.district_key: item for item in result.districts}
@@ -161,6 +174,44 @@ def main() -> None:
             raise AssertionError("main SKU must use 14 selected stock-depletion days")
         if abs(central_main_row.daily_demand_total - 60.0) > 1e-9:
             raise AssertionError("total demand must remain based on orderCount, not absolute depletion")
+
+        selected_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST],
+            }
+        )
+        selected_diagnostics = selected_result.diagnostics or {}
+        if selected_diagnostics.get("included_district_keys") != [DISTRICT_CENTRAL, DISTRICT_NORTHWEST]:
+            raise AssertionError(f"selected district diagnostics not exposed: {selected_diagnostics}")
+        if DISTRICT_FAR_SIBERIA not in selected_diagnostics.get("excluded_district_keys", []):
+            raise AssertionError("selected district diagnostics must include excluded far/siberia")
+        selected_far = next(item for item in selected_result.districts if item.district_key == DISTRICT_FAR_SIBERIA)
+        selected_far_main = next(row for row in selected_far.rows if row.nm_id == MAIN_NM_ID)
+        if selected_far.total_qty != 0 or selected_far_main.district_daily_demand != 0:
+            raise AssertionError("excluded district must remain visible but receive zero selected-methodology demand")
+        try:
+            regional_block.calculate(
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days": 2,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "included_district_keys": [],
+                }
+            )
+        except ValueError as exc:
+            if "Выберите хотя бы один округ" not in str(exc):
+                raise AssertionError(f"empty selected districts must return clear validation error, got {exc}") from exc
+        else:
+            raise AssertionError("empty selected districts must be rejected")
 
         central_workbook, central_filename = regional_block.download_district_recommendation("central")
         central_rows = read_first_sheet_rows(central_workbook)

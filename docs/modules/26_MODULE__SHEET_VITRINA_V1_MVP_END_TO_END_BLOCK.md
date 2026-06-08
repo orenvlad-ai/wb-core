@@ -98,6 +98,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_seller_portal_recovery_live_smoke.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
+  - "apps/wb_regional_demand_diagnostics.py"
   - "apps/web_source_temporal_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
@@ -263,7 +264,9 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - explicit actions `Скачать шаблон остатков ФФ`, `Скачать шаблон товаров в пути от фабрики`, `Скачать шаблон товаров в пути от ФФ на Wildberries`, `Рассчитать заказ на фабрике`, `Скачать рекомендацию`, `Рассчитать поставку на Wildberries`
   - uploads for all operator XLSX files start automatically right after file selection; current uploaded file download/delete lifecycle stays visible in the same block
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `cycle_order_days`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
-  - server-side settings validation for regional block `sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`
+  - server-side settings validation for regional block `sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`, `included_district_keys`
+  - regional block renders six federal-district checkboxes for stock-depletion proportions. Default is all districts; excluding a district removes it only from valid-day validation/share normalization while keeping it visible in result district tables/XLSX with zero primary demand.
+  - regional result card keeps the main status compact; long fallback `nmId` lists and reason counters are available only in bounded expandable diagnostics and must not widen the card.
   - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
   - operator-facing cycle vocabulary is unified: factory uses `Цикл заказов`, WB block uses `Цикл поставок`
   - page-load defaults are server/operator-owned contract: factory `30/30/15/15/15/14/250/14`, regional `14/7/15/15/250`, manual dates empty
