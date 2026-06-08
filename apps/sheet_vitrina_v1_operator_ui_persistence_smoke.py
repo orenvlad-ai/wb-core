@@ -20,7 +20,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
+    DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH,
     DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
@@ -228,6 +230,23 @@ class LocalOperatorFixtureServer:
                         "coverage_contract_note": "-",
                         "datasets": {},
                         "factory_inbound_source": "manual_excel",
+                        "stock_ff_source": "manual_excel",
+                        "manual_stock_ff_dataset": {},
+                        "onec_stock_ff_summary": {
+                            "status": "ready",
+                            "source": "onec_ff_stock",
+                            "source_label_ru": "1С / Фулфилмент",
+                            "snapshot_date": "2026-04-20",
+                            "active_sku_count": len(ACTIVE_SKUS),
+                            "covered_sku_count": len(ACTIVE_SKUS),
+                            "positive_stock_sku_count": 2,
+                            "zero_stock_sku_count": 1,
+                            "missing_sku_count": 0,
+                            "total_stock_ff": 125.0,
+                            "warnings": [],
+                            "errors": [],
+                            "sample_rows": [],
+                        },
                         "manual_factory_inbound_dataset": {},
                         "supplier_registry_inbound_summary": {
                             "acceptance_days": 30,
@@ -247,6 +266,28 @@ class LocalOperatorFixtureServer:
                             "warnings": [],
                         },
                         "last_result": None,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                HTTPStatus.OK,
+            ),
+            DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH: (
+                "application/json; charset=utf-8",
+                json.dumps(
+                    {
+                        "status": "ready",
+                        "source": "onec_ff_stock",
+                        "source_label_ru": "1С / Фулфилмент",
+                        "snapshot_date": "2026-04-20",
+                        "active_sku_count": len(ACTIVE_SKUS),
+                        "covered_sku_count": len(ACTIVE_SKUS),
+                        "positive_stock_sku_count": 2,
+                        "zero_stock_sku_count": 1,
+                        "missing_sku_count": 0,
+                        "total_stock_ff": 125.0,
+                        "warnings": [],
+                        "errors": [],
+                        "sample_rows": [],
                     },
                     ensure_ascii=False,
                 ).encode("utf-8"),
@@ -443,16 +484,62 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.click('[data-tab-button="factory-order"]')
     if not page.locator('input[name="factoryInboundSource"][value="manual_excel"]').is_checked():
         raise AssertionError("factory-order UI must default factory inbound source to manual_excel")
+    if not page.locator('input[name="stockFfSource"][value="manual_excel"]').is_checked():
+        raise AssertionError("stock_ff UI must default source to manual_excel")
+    if page.locator("#stockFfManualPanel").is_hidden() or not page.locator("#stockFfOnecPanel").is_hidden():
+        raise AssertionError("manual stock_ff controls must be visible only in manual mode")
     page.check('input[name="factoryInboundSource"][value="supplier_registry"]')
+    page.check('input[name="stockFfSource"][value="onec_ff_stock"]')
     page.wait_for_function(
         """(storageKey) => {
             const raw = window.localStorage.getItem(storageKey);
             if (!raw) return false;
             const parsed = JSON.parse(raw);
-            return parsed.factory_inbound_source === "supplier_registry";
+            return parsed.factory_inbound_source === "supplier_registry" &&
+                parsed.stock_ff_source === "onec_ff_stock";
         }""",
         arg=STORAGE_KEY,
     )
+    if not page.locator("#stockFfManualPanel").is_hidden() or page.locator("#stockFfOnecPanel").is_hidden():
+        raise AssertionError("1C stock_ff controls must be visible only in 1C mode")
+    page.click("#checkStockFfOnecButton")
+    page.wait_for_function(
+        "() => document.getElementById('stockFfOnecDiagnostics') && document.getElementById('stockFfOnecDiagnostics').textContent.includes('готов')"
+    )
+    calculate_requests: list[dict[str, object]] = []
+
+    def _capture_factory_calculate(route) -> None:
+        body = route.request.post_data or "{}"
+        calculate_requests.append(json.loads(body))
+        route.fulfill(
+            status=200,
+            content_type="application/json; charset=utf-8",
+            body=json.dumps(
+                {
+                    "status": "success",
+                    "report_date": "2026-04-20",
+                    "horizon_days": 45,
+                    "target_window_days": 74,
+                    "inbound_window_end": "2026-07-03",
+                    "factory_inbound_source": "supplier_registry",
+                    "stock_ff_source": "onec_ff_stock",
+                    "settings": {
+                        "factory_inbound_source": "supplier_registry",
+                        "stock_ff_source": "onec_ff_stock",
+                    },
+                    "summary": {"total_qty": 0, "estimated_weight": 0.0, "estimated_volume": 0.0},
+                    "warnings": [],
+                    "recommendation_download_path": "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx",
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    page.route("**" + DEFAULT_FACTORY_ORDER_CALCULATE_PATH, _capture_factory_calculate)
+    page.click("#calculateFactoryOrderButton")
+    page.wait_for_function("() => document.getElementById('factoryMessage') && document.getElementById('factoryMessage').textContent.includes('Расчёт завершён')")
+    if not calculate_requests or calculate_requests[-1].get("stock_ff_source") != "onec_ff_stock":
+        raise AssertionError(f"factory calculate payload must include selected stock_ff_source, got {calculate_requests}")
     page.click('[data-supply-section-button="regional"]')
     page.reload(wait_until="domcontentloaded")
     factory_state = {
@@ -468,8 +555,12 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():
         raise AssertionError("factory-order inbound source selection must survive reload")
+    if not page.locator('input[name="stockFfSource"][value="onec_ff_stock"]').is_checked():
+        raise AssertionError("stock_ff source selection must survive reload")
     factory_source_state = {
         "selected": page.locator('input[name="factoryInboundSource"]:checked').input_value(),
+        "stock_ff_selected": page.locator('input[name="stockFfSource"]:checked').input_value(),
+        "calculate_payload": calculate_requests[-1] if calculate_requests else {},
         "storage_state": page.evaluate(
             """(storageKey) => {
                 const raw = window.localStorage.getItem(storageKey);

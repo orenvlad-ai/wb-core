@@ -24,6 +24,7 @@ related_modules:
   - "packages/application/cost_price_upload.py"
   - "packages/application/factory_order_sales_history.py"
   - "packages/application/factory_order_supply.py"
+  - "packages/application/stock_ff_onec_source.py"
   - "packages/application/supplier_invoice_parser.py"
   - "packages/application/supplier_shipments.py"
   - "packages/application/registry_upload_http_entrypoint.py"
@@ -89,6 +90,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/status"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/stock-ff"
@@ -314,6 +317,8 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
     - `export_layer`
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` = cheap JSON status surface для bounded factory-order flow
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` = operator template downloads с русскими headers
+  - `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check` = read-only 1C FF_STOCK coverage/summary check for shared `Остатки ФФ`
+  - `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx` = проверочный XLSX из 1C FF_STOCK with the same headers as the manual `stock_ff` template
   - `POST /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = server-side XLSX parse/validation/upload
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/uploaded/*` = download exactly the current uploaded operator workbook for the selected dataset
   - `DELETE /v1/sheet-vitrina-v1/supply/factory-order/upload/*` = delete the current uploaded dataset/file for the selected dataset
@@ -394,10 +399,10 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - broken, outdated or foreign storage payload must fall back to the same default UI state without breaking the page;
   - restored stock-report selection is revalidated against current active `config_v2`, so removed `nmId` values are silently dropped and new active SKU default to selected only when no valid stored subset remains.
 - Во второй tab `Расчёт поставок` current bounded scope materialize-ит два sibling block внутри одного narrow operator page:
-  - shared block `Остатки ФФ` остаётся один для обоих расчётов и хранится в одном server-owned dataset state;
+  - shared block `Остатки ФФ` остаётся один для обоих расчётов: manual Excel хранится в одном server-owned dataset state, while optional `1С / Фулфилмент` reads current materialized 1C `FF_STOCK` rows without writing them into the manual upload state;
   - block `Заказ на фабрике` сохраняет existing behavior, но vocabulary/settings now include explicit `cycle_order_days` (`Цикл заказов`) as an additive day tail in `target_qty`;
   - sibling selector/button label для второго блока сокращён до `Поставка на Wildberries`, while the block itself still publishes district-level outputs;
-  - block `Поставка на Wildberries` использует тот же shared `stock_ff`, свои settings (`sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`) и отдельный result/download surface;
+  - block `Поставка на Wildberries` использует тот же shared `stock_ff` source selector, свои settings (`sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`) и отдельный result/download surface;
   - WB regional district demand primary methodology no longer uses current stock share. Total SKU demand remains authoritative `orderCount`, while district proportions are calculated from average historical stock-depletion shares across clean valid days in runtime `temporal_source_snapshots[source_key=stocks]`;
   - для WB regional `sales_avg_period_days` означает requested count валидных stock-depletion days. Backend сначала проверяет последние N closed days before `report_date`, исключает dirty days целиком and walks backward one calendar day at a time until N valid days are collected or bounded lookup is exhausted (`max_lookup_days = min(365, max(120, N * 8))`);
   - valid stock-depletion day requires paired `D-1`/`D` stock snapshots, full SKU/district coverage across all 6 supported districts, numeric non-negative stocks, no district restock/upward correction, no out-of-stock risk on positive SKU order signal, positive total depletion signal and an `orderCount` sample above the same low-signal tolerance idea as factory demand (`median_positive_orderCount * 0.45`, floor `1`);
@@ -422,7 +427,10 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - existing `POST /v1/sheet-vitrina-v1/refresh` current flow продолжает materialize-ить future exact-date `sales_funnel_history` snapshots в тот же runtime seam, поэтому historical bootstrap не должен повторяться вручную для следующих дней;
   - все operator XLSX templates используют русские headers, а backend держит stable mapping `operator label -> internal field id`;
   - XLSX generation hardening обязана отдавать файлы, которые нормально открываются стандартными XLSX readers/Excel без recovery prompt;
-  - `Остатки ФФ` требуют ровно одну строку на активный SKU и truthfully reject duplicate `nmId`;
+  - `Остатки ФФ` в manual mode требуют ровно одну строку на активный SKU и truthfully reject duplicate `nmId`;
+  - `Остатки ФФ` now has mutually exclusive source selection: `manual_excel` (default/backward-compatible uploaded XLSX) or `onec_ff_stock` (`1С / Фулфилмент`). The 1C source is read-only over existing `onec_stocks` / `onec_product_capital` materialized ready snapshot rows and uses only metric `onec_FF_STOCK_qty` from stage bucket `FF_STOCK`; `onec_total_qty` is intentionally not a valid `stock_ff` input because it includes other stages;
+  - when `onec_ff_stock` is selected, factory-order and WB regional calculations do not require an uploaded manual `stock_ff` file. The resolver requires active SKU coverage from materialized `onec_FF_STOCK_qty`; explicit zero qty is valid, missing/non-numeric/negative rows produce controlled check/partial/error state and block calculation instead of fabricating stock;
+  - `GET .../stock-ff/onec-check` returns `status`, `source`, `snapshot_date`, active/covered/positive/zero/missing SKU counts, `total_stock_ff`, warnings/errors and sample rows. `GET .../stock-ff/onec.xlsx` emits the same `nmId / Комментарий SKU / Остаток ФФ / Дата остатка / Комментарий` shape as the manual template for operator verification;
   - `Товары в пути от фабрики` и `Товары в пути от ФФ на Wildberries` трактуют одну строку как один отдельный inbound event;
   - duplicate `nmId` в inbound templates допустимы и expected, если это разные ожидаемые поставки;
   - inbound datasets optional: если `Товары в пути от фабрики` и/или `Товары в пути от ФФ на Wildberries` не загружены либо удалены, расчёт не блокируется, а соответствующие coverage terms truthfully считаются как `0`;
@@ -438,7 +446,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - when `manual_excel` is selected, current uploaded `Товары в пути от фабрики` rows are used with the corrected `report_date..target_window` inbound window; when `supplier_registry` is selected, manual Excel factory-inbound rows stay stored/downloadable but are not used for that calculation;
   - supplier registry source converts saved supplier orders into factory inbound rows only from product lines that are deterministically resolved to `nmId` (`matched` / `matched_by_compatibility`), have positive quantity and belong to a saved shipment with valid `shipment_date`; unmatched/ambiguous/missing-date/invalid-quantity lines are skipped with diagnostics instead of entering coverage silently;
   - current bounded acceptance rule for supplier registry source is `planned_arrival_date = shipment_date + 30 days` (`SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS = 30`). This is a backend constant for now and must later move to explicit settings before being treated as operator-configurable;
-  - factory-order status/calculate responses expose selected `factory_inbound_source`, manual inbound dataset state, supplier registry shipment summary/diagnostics/warnings, `target_window_days`, `inbound_window_end` and effective `inbound_factory_to_ff` rows that actually entered the calculation;
+  - factory-order status/calculate responses expose selected `factory_inbound_source`, selected `stock_ff_source`, manual stock FF dataset state, 1C FF_STOCK summary, manual inbound dataset state, supplier registry shipment summary/diagnostics/warnings, `target_window_days`, `inbound_window_end` and effective `inbound_factory_to_ff` rows that actually entered the calculation;
   - if `supplier_registry` is selected but usable matched supplier rows inside the calculation window are zero, calculation still succeeds with `inbound_factory_to_ff = 0` and a truthful warning/empty state;
   - итоговые summary/result values (`Общее количество`, `Расчётный вес`, `Расчётный объём`, recommendation XLSX) остаются server-driven и не вычисляются в browser или sheet.
 - Для regional supply block result contract теперь также server-driven:
@@ -694,6 +702,8 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - `packages/application/registry_upload_http_entrypoint.py`
   - `packages/business_time.py`
   - `packages/application/factory_order_sales_history.py`
+  - `packages/application/factory_order_supply.py`
+  - `packages/application/stock_ff_onec_source.py`
 - reused runtime:
   - `packages/application/registry_upload_db_backed_runtime.py`
 - adapter:

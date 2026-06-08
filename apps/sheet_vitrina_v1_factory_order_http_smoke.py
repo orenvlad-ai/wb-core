@@ -23,6 +23,8 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
+    DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH,
+    DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
@@ -42,9 +44,16 @@ from packages.adapters.registry_upload_http_entrypoint import (
 from packages.application.factory_order_sales_history import persist_sales_history_result_exact_dates
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.sheet_vitrina_v1_live_plan import STATUS_HEADER
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
+from packages.application.stock_ff_onec_source import ONEC_FF_STOCK_QTY_METRIC_KEY
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
+from packages.contracts.sheet_vitrina_v1 import (
+    SheetVitrinaV1Envelope,
+    SheetVitrinaV1TemporalSlot,
+    SheetVitrinaWriteTarget,
+)
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -148,6 +157,14 @@ def main() -> None:
 
             active_nm_ids = [item.nm_id for item in runtime.load_current_state().config_v2 if item.enabled]
             _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids)
+            _seed_onec_ff_stock_ready_snapshot(
+                runtime,
+                stock_by_nm={
+                    active_nm_ids[0]: 17.0,
+                    active_nm_ids[1]: 0.0,
+                    **{nm_id: 0.0 for nm_id in active_nm_ids[2:]},
+                },
+            )
             entrypoint.factory_order_supply_block.stocks_block = FakeStocksBlock(active_nm_ids)
             fake_history_block = FakeSalesHistoryBlock()
             entrypoint.factory_order_supply_block.sales_funnel_history_block = fake_history_block
@@ -168,6 +185,10 @@ def main() -> None:
                 "Сводка поставок",
                 "Общее количество товаров",
                 "Источник «Товары в пути от фабрики»",
+                "Источник «Остатки ФФ»",
+                "1С / Фулфилмент",
+                "Проверить данные 1С",
+                "Скачать Excel для проверки",
                 "Товары в пути из реестра поставщика",
                 "Реестр поставщика",
             ):
@@ -211,6 +232,52 @@ def main() -> None:
             inbound_factory_template_rows = read_first_sheet_rows(inbound_factory_bytes)
             if inbound_factory_template_rows[0][-1] != "Поставка":
                 raise AssertionError("inbound_factory template must include a shipment column for summary grouping")
+
+            onec_check_status, onec_check_payload = _get_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH}"
+            )
+            if onec_check_status != 200 or onec_check_payload.get("status") != "ready":
+                raise AssertionError(f"1C FF_STOCK check route must return ready summary, got {onec_check_status} {onec_check_payload}")
+            if (
+                onec_check_payload.get("positive_stock_sku_count") != 1
+                or onec_check_payload.get("zero_stock_sku_count") != len(active_nm_ids) - 1
+                or onec_check_payload.get("total_stock_ff") != 17.0
+            ):
+                raise AssertionError(f"1C FF_STOCK check summary must count positive/zero/total, got {onec_check_payload}")
+
+            onec_xlsx_status, onec_xlsx_bytes, onec_xlsx_headers = _get_bytes(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH}"
+            )
+            if onec_xlsx_status != 200 or "spreadsheetml.sheet" not in str(onec_xlsx_headers.get("Content-Type", "")):
+                raise AssertionError("1C FF_STOCK XLSX route must return a valid XLSX")
+            onec_xlsx_rows = read_first_sheet_rows(onec_xlsx_bytes)
+            if onec_xlsx_rows[0] != ["nmId", "Комментарий SKU", "Остаток ФФ", "Дата остатка", "Комментарий"]:
+                raise AssertionError("1C FF_STOCK XLSX must keep manual stock_ff headers")
+            if len(onec_xlsx_rows) - 1 != len(active_nm_ids) or onec_xlsx_rows[1][2] != 17.0 or onec_xlsx_rows[2][2] != 0.0:
+                raise AssertionError(f"1C FF_STOCK XLSX must expose full active SKU coverage including zero rows, got {onec_xlsx_rows}")
+
+            onec_calc_status, onec_calc_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 14,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                    "stock_ff_source": "onec_ff_stock",
+                },
+            )
+            if onec_calc_status != 200:
+                raise AssertionError(f"1C FF_STOCK calc must not require manual stock_ff upload, got {onec_calc_status} {onec_calc_payload}")
+            onec_calc_sku = next(item for item in onec_calc_payload.get("rows", []) if item.get("nm_id") == active_nm_ids[0])
+            if onec_calc_payload.get("stock_ff_source") != "onec_ff_stock" or onec_calc_sku.get("stock_ff") != 17.0:
+                raise AssertionError(f"1C FF_STOCK calc must use selected source and FF_STOCK qty, got {onec_calc_payload}")
+            if onec_calc_payload.get("manual_stock_ff_dataset", {}).get("status") != "missing":
+                raise AssertionError("1C FF_STOCK calc must not write or require manual stock_ff upload")
 
             stock_upload_rows = [list(row) for row in stock_rows]
             for row in stock_upload_rows[1:]:
@@ -406,6 +473,12 @@ def main() -> None:
             supplier_registry_summary = status_payload.get("supplier_registry_inbound_summary", {})
             if supplier_registry_summary.get("acceptance_days") != 30:
                 raise AssertionError("status must expose supplier registry +30 day acceptance default")
+            if status_payload.get("stock_ff_onec_check_path") != DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH:
+                raise AssertionError("status must expose the 1C FF_STOCK check route")
+            if status_payload.get("stock_ff_onec_xlsx_path") != DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_XLSX_PATH:
+                raise AssertionError("status must expose the 1C FF_STOCK XLSX route")
+            if status_payload.get("onec_stock_ff_summary", {}).get("status") != "ready":
+                raise AssertionError("status must expose current 1C FF_STOCK summary")
 
             current_inbound_status, _, current_inbound_headers = _get_bytes(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_UPLOADED_INBOUND_FACTORY_PATH}"
@@ -681,6 +754,7 @@ def main() -> None:
                 raise AssertionError("HTTP calc must expose insufficient-history demand warning")
 
             print(f"scenario_without_inbound_http: ok -> total_qty={calc_without_inbound_payload['summary']['total_qty']}")
+            print("scenario_onec_stock_ff_http: ok -> check route, XLSX route and calc without manual stock_ff upload")
             print("scenario_zero_only_inbound_http: ok -> accepted_row_count=0, coverage=0")
             print(f"scenario_current_file_lifecycle_http: ok -> {inbound_factory_state['uploaded_filename']}")
             print(
@@ -782,6 +856,95 @@ def _seed_runtime_sales_history(runtime: RegistryUploadDbBackedRuntime, *, activ
             items=items,
         ),
         captured_at=ACTIVATED_AT,
+    )
+
+
+def _seed_onec_ff_stock_ready_snapshot(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    stock_by_nm: dict[int, float],
+) -> None:
+    snapshot_date = "2026-04-18"
+    current_state = runtime.load_current_state()
+    active_skus = [
+        (int(item.nm_id), str(item.display_name))
+        for item in current_state.config_v2
+        if item.enabled
+    ]
+    data_rows: list[list[object]] = []
+    for nm_id, display_name in active_skus:
+        data_rows.append(
+            [
+                f"{display_name} · 1C FF_STOCK",
+                f"SKU:{nm_id}|{ONEC_FF_STOCK_QTY_METRIC_KEY}",
+                float(stock_by_nm.get(nm_id, 0.0)),
+            ]
+        )
+        data_rows.append(
+            [
+                f"{display_name} · 1C total qty distractor",
+                f"SKU:{nm_id}|onec_total_qty",
+                9999.0,
+            ]
+        )
+    plan = SheetVitrinaV1Envelope(
+        plan_version="factory_order_http_smoke__onec_ff_stock",
+        snapshot_id="factory_order_http_smoke__onec_ff_stock__ready",
+        as_of_date=snapshot_date,
+        date_columns=[snapshot_date],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(
+                slot_key="today_current",
+                slot_label="current",
+                column_date=snapshot_date,
+            )
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect=f"A1:C{len(data_rows) + 1}",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", snapshot_date],
+                rows=data_rows,
+                row_count=len(data_rows),
+                column_count=3,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=STATUS_HEADER,
+                rows=[
+                    [
+                        "onec_stocks[today_current]",
+                        "success",
+                        "loaded",
+                        snapshot_date,
+                        snapshot_date,
+                        snapshot_date,
+                        snapshot_date,
+                        len(active_skus),
+                        len(active_skus),
+                        "",
+                        "factory-order HTTP 1C FF_STOCK smoke fixture",
+                    ]
+                ],
+                row_count=1,
+                column_count=len(STATUS_HEADER),
+            ),
+        ],
+    )
+    runtime.save_sheet_vitrina_ready_snapshot(
+        current_state=current_state,
+        refreshed_at=ACTIVATED_AT,
+        plan=plan,
     )
 
 

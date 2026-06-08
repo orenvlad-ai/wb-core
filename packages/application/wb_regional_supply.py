@@ -15,6 +15,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
 from packages.application.stocks_block import StocksBlock
+from packages.application.stock_ff_onec_source import build_onec_stock_ff_state, resolve_onec_stock_ff_rows
 from packages.application.wb_regional_demand import (
     build_result_diagnostics as _build_regional_demand_result_diagnostics,
     estimate_wb_regional_demand as _estimate_wb_regional_demand,
@@ -22,7 +23,10 @@ from packages.application.wb_regional_demand import (
 from packages.business_time import current_business_date_iso
 from packages.contracts.factory_order_supply import (
     DATASET_STOCK_FF,
+    STOCK_FF_SOURCE_MANUAL_EXCEL,
+    STOCK_FF_SOURCE_ONEC_FF_STOCK,
     FactoryOrderDatasetState,
+    FactoryOrderStockFfOnecState,
     FactoryOrderStockFfRow,
 )
 from packages.contracts.stocks_block import StocksRequest
@@ -61,7 +65,7 @@ _VOLUME_DIVISOR = 204.38
 _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
 _DEFAULT_CYCLE_SUPPLY_DAYS = 7
 _METHODOLOGY_NOTE = (
-    "Расчёт использует общий файл «Остатки ФФ» из этой же вкладки. "
+    "Расчёт использует общий источник «Остатки ФФ» из этой же вкладки: manual Excel или read-only 1C FF_STOCK. "
     "Сервер берёт total orderCount по SKU, а региональные доли считает по историческому "
     "выбыванию остатков на валидных clean days по 6 федеральным округам. "
     "sales_avg_period_days означает запрошенное число валидных дней выбывания; dirty days "
@@ -99,11 +103,16 @@ class WbRegionalSupplyBlock:
         active_skus = self._load_active_skus()
         shared_datasets = {DATASET_STOCK_FF: self._load_shared_stock_ff_state()}
         last_result = self._load_last_result()
+        onec_stock_ff_state = self.build_onec_stock_ff_check()
+        stock_ff_source = last_result.stock_ff_source if last_result is not None else STOCK_FF_SOURCE_MANUAL_EXCEL
         return WbRegionalSupplyStatus(
             status="ready" if last_result is not None else "idle",
             active_sku_count=len(active_skus),
             methodology_note=self.sales_history.build_operator_note(_METHODOLOGY_NOTE),
+            stock_ff_source=stock_ff_source,
             shared_datasets=shared_datasets,
+            manual_stock_ff_dataset=shared_datasets[DATASET_STOCK_FF],
+            onec_stock_ff_summary=onec_stock_ff_state,
             last_result=last_result,
         )
 
@@ -114,12 +123,17 @@ class WbRegionalSupplyBlock:
             raise ValueError("current registry config_v2 does not contain enabled rows for расчёта")
 
         shared_state = self._load_shared_stock_ff_state()
-        if shared_state.status != "uploaded":
+        stock_ff_source = settings.stock_ff_source
+        if stock_ff_source == STOCK_FF_SOURCE_MANUAL_EXCEL and shared_state.status != "uploaded":
             raise ValueError(
                 "Для расчёта по федеральным округам нужен общий загруженный файл: Остатки ФФ"
             )
         shared_datasets = {DATASET_STOCK_FF: shared_state}
-        stock_ff_rows = self._load_stock_ff_rows()
+        if stock_ff_source == STOCK_FF_SOURCE_ONEC_FF_STOCK:
+            stock_ff_rows, onec_stock_ff_state = self._load_onec_stock_ff_rows(require_ready=True)
+        else:
+            stock_ff_rows = self._load_stock_ff_rows()
+            onec_stock_ff_state = self.build_onec_stock_ff_check()
         report_date = settings.report_date_override or current_business_date_iso(self.now_factory())
         report_date_obj = date.fromisoformat(report_date)
 
@@ -263,7 +277,10 @@ class WbRegionalSupplyBlock:
             active_sku_count=len(active_skus),
             methodology_note=self.sales_history.build_operator_note(_METHODOLOGY_NOTE),
             settings=settings,
+            stock_ff_source=stock_ff_source,
             shared_datasets=shared_datasets,
+            manual_stock_ff_dataset=shared_datasets[DATASET_STOCK_FF],
+            onec_stock_ff_summary=onec_stock_ff_state,
             summary=WbRegionalSupplySummary(
                 total_qty=total_qty,
                 estimated_weight=round(total_qty * _WEIGHT_COEFFICIENT, 2),
@@ -339,6 +356,25 @@ class WbRegionalSupplyBlock:
             for item in payload["rows"]
         ]
 
+    def build_onec_stock_ff_check(self) -> FactoryOrderStockFfOnecState:
+        return build_onec_stock_ff_state(runtime=self.runtime, active_skus=self._load_active_skus())
+
+    def _load_onec_stock_ff_rows(
+        self,
+        *,
+        require_ready: bool,
+    ) -> tuple[list[FactoryOrderStockFfRow], FactoryOrderStockFfOnecState]:
+        result = resolve_onec_stock_ff_rows(runtime=self.runtime, active_skus=self._load_active_skus())
+        if require_ready and result.state.status != "ready":
+            details = list(result.state.errors) + list(result.state.warnings)
+            if not details:
+                details = [f"status={result.state.status}"]
+            raise ValueError(
+                "Источник «1С / Фулфилмент» для «Остатки ФФ» не готов: "
+                + "; ".join(details)
+            )
+        return result.rows, result.state
+
     def _load_last_result(self) -> WbRegionalSupplyCalculationResult | None:
         payload = self.runtime.load_wb_regional_supply_result_state()
         if not isinstance(payload, Mapping):
@@ -349,6 +385,24 @@ class WbRegionalSupplyBlock:
         districts_payload = payload.get("districts") or []
         diagnostics_payload = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), Mapping) else None
         warnings_payload = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+        stock_ff_source = _normalize_stock_ff_source(
+            payload.get("stock_ff_source", settings_payload.get("stock_ff_source"))
+        )
+        shared_datasets = {
+            key: FactoryOrderDatasetState(
+                dataset_type=str(value.get("dataset_type", key)),
+                label_ru=str(value.get("label_ru", _SHARED_STOCK_LABEL)),
+                status=str(value.get("status", "missing")),
+                uploaded_at=str(value.get("uploaded_at")) if value.get("uploaded_at") else None,
+                row_count=int(value.get("row_count", 0)),
+                required=bool(value.get("required", True)),
+                uploaded_filename=str(value.get("uploaded_filename")) if value.get("uploaded_filename") else None,
+                file_available=bool(value.get("file_available", False)),
+            )
+            for key, value in shared_datasets_payload.items()
+            if isinstance(value, Mapping)
+        }
+        manual_stock_ff_dataset = shared_datasets.get(DATASET_STOCK_FF) or self._load_shared_stock_ff_state()
         return WbRegionalSupplyCalculationResult(
             status=str(payload.get("status", "")),
             calculation_id=str(payload.get("calculation_id", "")),
@@ -375,21 +429,12 @@ class WbRegionalSupplyBlock:
                     if settings_payload.get("report_date_override")
                     else None
                 ),
+                stock_ff_source=stock_ff_source,
             ),
-            shared_datasets={
-                key: FactoryOrderDatasetState(
-                    dataset_type=str(value.get("dataset_type", key)),
-                    label_ru=str(value.get("label_ru", _SHARED_STOCK_LABEL)),
-                    status=str(value.get("status", "missing")),
-                    uploaded_at=str(value.get("uploaded_at")) if value.get("uploaded_at") else None,
-                    row_count=int(value.get("row_count", 0)),
-                    required=bool(value.get("required", True)),
-                    uploaded_filename=str(value.get("uploaded_filename")) if value.get("uploaded_filename") else None,
-                    file_available=bool(value.get("file_available", False)),
-                )
-                for key, value in shared_datasets_payload.items()
-                if isinstance(value, Mapping)
-            },
+            stock_ff_source=stock_ff_source,
+            shared_datasets=shared_datasets,
+            manual_stock_ff_dataset=manual_stock_ff_dataset,
+            onec_stock_ff_summary=_parse_onec_stock_ff_state(payload.get("onec_stock_ff_summary")),
             summary=WbRegionalSupplySummary(
                 total_qty=int(summary_payload.get("total_qty", 0)),
                 estimated_weight=float(summary_payload.get("estimated_weight", 0.0)),
@@ -503,6 +548,60 @@ def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
             payload.get("report_date_override"),
             field_label="Дата расчёта",
         ),
+        stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
+    )
+
+
+def _parse_stock_ff_source(value: Any) -> str:
+    normalized = str(value or "").strip() or STOCK_FF_SOURCE_MANUAL_EXCEL
+    if normalized not in {STOCK_FF_SOURCE_MANUAL_EXCEL, STOCK_FF_SOURCE_ONEC_FF_STOCK}:
+        raise ValueError("Источник остатков ФФ должен быть manual_excel или onec_ff_stock")
+    return normalized
+
+
+def _normalize_stock_ff_source(value: Any) -> str:
+    try:
+        return _parse_stock_ff_source(value)
+    except ValueError:
+        return STOCK_FF_SOURCE_MANUAL_EXCEL
+
+
+def _parse_onec_stock_ff_state(value: Any) -> FactoryOrderStockFfOnecState:
+    if not isinstance(value, Mapping):
+        return _empty_onec_stock_ff_state()
+    sample_rows = []
+    for item in value.get("sample_rows") or []:
+        if isinstance(item, Mapping):
+            sample_rows.append(dict(item))
+    return FactoryOrderStockFfOnecState(
+        status=str(value.get("status", "missing") or "missing"),
+        source=STOCK_FF_SOURCE_ONEC_FF_STOCK,
+        source_label_ru=str(value.get("source_label_ru", "1С / Фулфилмент") or "1С / Фулфилмент"),
+        snapshot_date=str(value.get("snapshot_date", "") or ""),
+        active_sku_count=int(value.get("active_sku_count", 0)),
+        covered_sku_count=int(value.get("covered_sku_count", 0)),
+        positive_stock_sku_count=int(value.get("positive_stock_sku_count", 0)),
+        zero_stock_sku_count=int(value.get("zero_stock_sku_count", 0)),
+        missing_sku_count=int(value.get("missing_sku_count", 0)),
+        total_stock_ff=float(value.get("total_stock_ff", 0.0)),
+        warnings=tuple(str(item) for item in value.get("warnings", []) if str(item or "").strip()),
+        errors=tuple(str(item) for item in value.get("errors", []) if str(item or "").strip()),
+        sample_rows=tuple(sample_rows),
+    )
+
+
+def _empty_onec_stock_ff_state() -> FactoryOrderStockFfOnecState:
+    return FactoryOrderStockFfOnecState(
+        status="missing",
+        source=STOCK_FF_SOURCE_ONEC_FF_STOCK,
+        source_label_ru="1С / Фулфилмент",
+        snapshot_date="",
+        active_sku_count=0,
+        covered_sku_count=0,
+        positive_stock_sku_count=0,
+        zero_stock_sku_count=0,
+        missing_sku_count=0,
+        total_stock_ff=0.0,
     )
 
 

@@ -72,6 +72,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/research/sku-group-comparison/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/status"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check"
+  - "GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-factory.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/template/inbound-ff-to-wb.xlsx"
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/stock-ff"
@@ -271,12 +273,12 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - live `DATA_VITRINA` may seed a one-time bounded historical reconcile window `2026-03-01..2026-04-18`, but this is migration input only; ongoing source of truth stays server-side and future exact-date days continue through existing refresh/runtime flow
   - operator XLSX templates stay compact and Russian-headed; backend keeps stable internal mapping
   - generated XLSX files must stay readable without repair prompt in standard XLSX readers/Excel
-  - `Остатки ФФ` require one row per active SKU and reject duplicate `nmId`
-  - the same exact uploaded `Остатки ФФ` dataset/state is reused by the regional block; there is no second `stock_ff` upload contract/entity
+  - `Остатки ФФ` manual Excel source requires one row per active SKU and rejects duplicate `nmId`
+  - the same shared `Остатки ФФ` source selector is reused by factory-order and regional blocks; manual uploaded dataset/state remains one entity, while `1С / Фулфилмент` reads existing materialized 1C `FF_STOCK` metric `onec_FF_STOCK_qty` and does not create a second `stock_ff` upload contract/entity
   - inbound templates allow duplicate `nmId`; one row = one separate planned delivery
   - inbound datasets are optional for calculation; when a file is absent or deleted, its coverage term is treated as `0`
   - each upload block exposes the current uploaded file as a downloadable link and a bounded delete action for the stored dataset
-  - factory-order coverage includes `stock_total`, uploaded `stock_ff`, inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
+  - factory-order coverage includes `stock_total`, selected `stock_ff` source (manual Excel or 1C FF_STOCK), inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
   - regional block does not materialize inbound `ФФ -> Wildberries`; this input stays outside the current bounded scope
   - regional result surface gives server-driven summary and a compact district table `Федеральный округ / Общее количество / Дефицит / Скачать Excel`; each row links to the existing district XLSX route for that federal district, so a duplicated lower `Excel/XLSX по округам` list is not rendered

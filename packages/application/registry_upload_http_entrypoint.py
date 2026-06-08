@@ -1574,6 +1574,12 @@ class RegistryUploadHttpEntrypoint:
     def handle_factory_order_template_request(self, dataset_type: str) -> tuple[bytes, str]:
         return self.factory_order_supply_block.build_template(dataset_type)
 
+    def handle_factory_order_stock_ff_onec_check_request(self) -> dict[str, Any]:
+        return asdict(self.factory_order_supply_block.build_onec_stock_ff_check())
+
+    def handle_factory_order_stock_ff_onec_xlsx_request(self) -> tuple[bytes, str]:
+        return self.factory_order_supply_block.download_onec_stock_ff_workbook()
+
     def handle_factory_order_upload_request(
         self,
         dataset_type: str,

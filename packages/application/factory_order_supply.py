@@ -23,6 +23,11 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.application.stocks_block import StocksBlock
+from packages.application.stock_ff_onec_source import (
+    ONEC_FF_STOCK_QTY_METRIC_KEY,
+    build_onec_stock_ff_state,
+    resolve_onec_stock_ff_rows,
+)
 from packages.business_time import current_business_date_iso
 from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FACTORY_TO_FF,
@@ -30,6 +35,8 @@ from packages.contracts.factory_order_supply import (
     DATASET_STOCK_FF,
     FACTORY_INBOUND_SOURCE_MANUAL_EXCEL,
     FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY,
+    STOCK_FF_SOURCE_MANUAL_EXCEL,
+    STOCK_FF_SOURCE_ONEC_FF_STOCK,
     SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS,
     FactoryOrderCalculationResult,
     FactoryOrderDatasetDeleteResult,
@@ -40,6 +47,7 @@ from packages.contracts.factory_order_supply import (
     FactoryOrderRecommendationRow,
     FactoryOrderSettings,
     FactoryOrderStatus,
+    FactoryOrderStockFfOnecState,
     FactoryOrderStockFfRow,
     FactoryOrderSummary,
     FactoryOrderSupplierRegistryDiagnostics,
@@ -108,6 +116,8 @@ _COVERAGE_CONTRACT_NOTE = (
     "до полного target window: производство + фабрика→ФФ + ФФ→WB + safety MP + safety ФФ + цикл заказа. "
     "В пути ФФ -> Wildberries учитываются только из отдельного загруженного шаблона, "
     "потому что в текущем wb-core нет другого authoritative source для этого члена формулы. "
+    "Для «Остатки ФФ» оператор может выбрать manual Excel или read-only 1C source "
+    f"по materialized metric {ONEC_FF_STOCK_QTY_METRIC_KEY}; общий onec_total_qty не используется. "
     "Для «Товары в пути от фабрики» оператор может выбрать manual Excel или read-only source из supplier registry; "
     "supplier registry uses shipment_date + 30 days as current bounded factory-to-FF acceptance default. "
     "Средний спрос считается availability-adjusted: sales_avg_period_days означает число валидных торговых дней, "
@@ -163,18 +173,27 @@ class FactoryOrderSupplyBlock:
         datasets = {dataset_type: self._load_dataset_state(dataset_type) for dataset_type in _DATASET_LABELS}
         last_result = self._load_last_result()
         supplier_registry_state = self._build_supplier_registry_inbound_state()
+        onec_stock_ff_state = self.build_onec_stock_ff_check()
         factory_inbound_source = (
             last_result.factory_inbound_source
             if last_result is not None
             else FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
+        )
+        stock_ff_source = (
+            last_result.stock_ff_source
+            if last_result is not None
+            else STOCK_FF_SOURCE_MANUAL_EXCEL
         )
         return FactoryOrderStatus(
             status="ready" if last_result is not None else "idle",
             active_sku_count=len(active_skus),
             coverage_contract_note=self.sales_history.build_operator_note(_COVERAGE_CONTRACT_NOTE),
             factory_inbound_source=factory_inbound_source,
+            stock_ff_source=stock_ff_source,
             datasets=datasets,
+            manual_stock_ff_dataset=datasets[DATASET_STOCK_FF],
             manual_factory_inbound_dataset=datasets[DATASET_INBOUND_FACTORY_TO_FF],
+            onec_stock_ff_summary=onec_stock_ff_state,
             supplier_registry_inbound_summary=supplier_registry_state,
             last_result=last_result,
         )
@@ -199,6 +218,25 @@ class FactoryOrderSupplyBlock:
         return (
             build_single_sheet_workbook_bytes(_DATASET_SHEET_NAMES[dataset_type], rows),
             _DATASET_FILENAMES[dataset_type],
+        )
+
+    def build_onec_stock_ff_check(self) -> FactoryOrderStockFfOnecState:
+        active_skus = self._load_active_skus()
+        return build_onec_stock_ff_state(runtime=self.runtime, active_skus=active_skus)
+
+    def download_onec_stock_ff_workbook(self) -> tuple[bytes, str]:
+        rows, state = self._load_onec_stock_ff_rows(require_ready=True)
+        workbook_rows: list[list[Any]] = [_TEMPLATE_HEADERS[DATASET_STOCK_FF]]
+        workbook_rows.extend(
+            [
+                [row.nm_id, row.sku_comment, row.stock_ff, row.snapshot_date or "", row.comment]
+                for row in rows
+            ]
+        )
+        snapshot_date = state.snapshot_date or current_business_date_iso(self.now_factory())
+        return (
+            build_single_sheet_workbook_bytes(_DATASET_SHEET_NAMES[DATASET_STOCK_FF], workbook_rows),
+            f"sheet-vitrina-v1-factory-order-stock-ff-onec-{snapshot_date}.xlsx",
         )
 
     def upload_dataset(
@@ -295,17 +333,25 @@ class FactoryOrderSupplyBlock:
             raise ValueError("current registry config_v2 does not contain enabled rows for расчёта")
 
         datasets = {dataset_type: self._load_dataset_state(dataset_type) for dataset_type in _DATASET_LABELS}
+        stock_ff_source = settings.stock_ff_source
         missing_required = [
             state.label_ru
             for state in datasets.values()
-            if state.required and state.status != "uploaded"
+            if state.required
+            and state.status != "uploaded"
+            and not (state.dataset_type == DATASET_STOCK_FF and stock_ff_source == STOCK_FF_SOURCE_ONEC_FF_STOCK)
         ]
         if missing_required:
             raise ValueError(
                 "Для расчёта не хватает загруженных файлов: " + ", ".join(missing_required)
             )
 
-        stock_ff_rows = self._load_stock_ff_rows()
+        onec_stock_ff_state = self.build_onec_stock_ff_check()
+        stock_ff_rows = (
+            self._load_onec_stock_ff_rows(require_ready=True)[0]
+            if stock_ff_source == STOCK_FF_SOURCE_ONEC_FF_STOCK
+            else self._load_stock_ff_rows()
+        )
         factory_inbound_source = settings.factory_inbound_source
         supplier_registry_state = self._build_supplier_registry_inbound_state()
         inbound_factory_rows = (
@@ -461,8 +507,11 @@ class FactoryOrderSupplyBlock:
             coverage_contract_note=self.sales_history.build_operator_note(_COVERAGE_CONTRACT_NOTE),
             settings=settings,
             factory_inbound_source=factory_inbound_source,
+            stock_ff_source=stock_ff_source,
             datasets=datasets,
+            manual_stock_ff_dataset=datasets[DATASET_STOCK_FF],
             manual_factory_inbound_dataset=datasets[DATASET_INBOUND_FACTORY_TO_FF],
+            onec_stock_ff_summary=onec_stock_ff_state,
             supplier_registry_inbound_summary=supplier_registry_state,
             effective_inbound_factory_to_ff=effective_inbound_factory_rows,
             summary=summary,
@@ -547,6 +596,22 @@ class FactoryOrderSupplyBlock:
             )
             for item in payload["rows"]
         ]
+
+    def _load_onec_stock_ff_rows(
+        self,
+        *,
+        require_ready: bool,
+    ) -> tuple[list[FactoryOrderStockFfRow], FactoryOrderStockFfOnecState]:
+        result = resolve_onec_stock_ff_rows(runtime=self.runtime, active_skus=self._load_active_skus())
+        if require_ready and result.state.status != "ready":
+            details = list(result.state.errors) + list(result.state.warnings)
+            if not details:
+                details = [f"status={result.state.status}"]
+            raise ValueError(
+                "Источник «1С / Фулфилмент» для «Остатки ФФ» не готов: "
+                + "; ".join(details)
+            )
+        return result.rows, result.state
 
     def _load_inbound_rows(self, dataset_type: str) -> list[FactoryOrderInboundRow]:
         payload = self.runtime.load_factory_order_dataset_state(dataset_type)
@@ -722,6 +787,10 @@ class FactoryOrderSupplyBlock:
             payload.get("supplier_registry_inbound_summary")
         )
         manual_dataset = datasets.get(DATASET_INBOUND_FACTORY_TO_FF) or self._load_dataset_state(DATASET_INBOUND_FACTORY_TO_FF)
+        manual_stock_ff_dataset = datasets.get(DATASET_STOCK_FF) or self._load_dataset_state(DATASET_STOCK_FF)
+        stock_ff_source = _normalize_stock_ff_source(
+            payload.get("stock_ff_source", settings_payload.get("stock_ff_source"))
+        )
         return FactoryOrderCalculationResult(
             status=str(payload.get("status", "")),
             calculation_id=str(payload.get("calculation_id", "")),
@@ -748,10 +817,14 @@ class FactoryOrderSupplyBlock:
                 factory_inbound_source=_normalize_factory_inbound_source(
                     settings_payload.get("factory_inbound_source", payload.get("factory_inbound_source"))
                 ),
+                stock_ff_source=stock_ff_source,
             ),
             factory_inbound_source=_normalize_factory_inbound_source(payload.get("factory_inbound_source")),
+            stock_ff_source=stock_ff_source,
             datasets=datasets,
+            manual_stock_ff_dataset=manual_stock_ff_dataset,
             manual_factory_inbound_dataset=manual_dataset,
+            onec_stock_ff_summary=_parse_onec_stock_ff_state(payload.get("onec_stock_ff_summary")),
             supplier_registry_inbound_summary=supplier_registry_state,
             effective_inbound_factory_to_ff=_parse_effective_inbound_payload(
                 payload.get("effective_inbound_factory_to_ff")
@@ -934,6 +1007,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> FactoryOrderSettings:
         report_date_override=_parse_optional_date(payload.get("report_date_override"), row_index=None, field_label="Дата отчёта"),
         sales_avg_period_days=_parse_sales_avg_period_days(payload.get("sales_avg_period_days")),
         factory_inbound_source=_parse_factory_inbound_source(payload.get("factory_inbound_source")),
+        stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
     )
 
 
@@ -951,6 +1025,22 @@ def _normalize_factory_inbound_source(value: Any) -> str:
         return _parse_factory_inbound_source(value)
     except ValueError:
         return FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
+
+
+def _parse_stock_ff_source(value: Any) -> str:
+    normalized = str(value or "").strip() or STOCK_FF_SOURCE_MANUAL_EXCEL
+    if normalized not in {STOCK_FF_SOURCE_MANUAL_EXCEL, STOCK_FF_SOURCE_ONEC_FF_STOCK}:
+        raise ValueError(
+            "Источник остатков ФФ должен быть manual_excel или onec_ff_stock"
+        )
+    return normalized
+
+
+def _normalize_stock_ff_source(value: Any) -> str:
+    try:
+        return _parse_stock_ff_source(value)
+    except ValueError:
+        return STOCK_FF_SOURCE_MANUAL_EXCEL
 
 
 def _parse_cycle_order_days(value: Any) -> int:
@@ -1183,6 +1273,45 @@ def _parse_supplier_registry_inbound_state(value: Any) -> FactoryOrderSupplierRe
         shipment_summary=tuple(summaries),
         diagnostics=diagnostics,
         warnings=tuple(str(item) for item in value.get("warnings", []) if str(item or "").strip()),
+    )
+
+
+def _parse_onec_stock_ff_state(value: Any) -> FactoryOrderStockFfOnecState:
+    if not isinstance(value, Mapping):
+        return _empty_onec_stock_ff_state()
+    sample_rows = []
+    for item in value.get("sample_rows") or []:
+        if isinstance(item, Mapping):
+            sample_rows.append(dict(item))
+    return FactoryOrderStockFfOnecState(
+        status=str(value.get("status", "missing") or "missing"),
+        source=STOCK_FF_SOURCE_ONEC_FF_STOCK,
+        source_label_ru=str(value.get("source_label_ru", "1С / Фулфилмент") or "1С / Фулфилмент"),
+        snapshot_date=str(value.get("snapshot_date", "") or ""),
+        active_sku_count=int(value.get("active_sku_count", 0)),
+        covered_sku_count=int(value.get("covered_sku_count", 0)),
+        positive_stock_sku_count=int(value.get("positive_stock_sku_count", 0)),
+        zero_stock_sku_count=int(value.get("zero_stock_sku_count", 0)),
+        missing_sku_count=int(value.get("missing_sku_count", 0)),
+        total_stock_ff=float(value.get("total_stock_ff", 0.0)),
+        warnings=tuple(str(item) for item in value.get("warnings", []) if str(item or "").strip()),
+        errors=tuple(str(item) for item in value.get("errors", []) if str(item or "").strip()),
+        sample_rows=tuple(sample_rows),
+    )
+
+
+def _empty_onec_stock_ff_state() -> FactoryOrderStockFfOnecState:
+    return FactoryOrderStockFfOnecState(
+        status="missing",
+        source=STOCK_FF_SOURCE_ONEC_FF_STOCK,
+        source_label_ru="1С / Фулфилмент",
+        snapshot_date="",
+        active_sku_count=0,
+        covered_sku_count=0,
+        positive_stock_sku_count=0,
+        zero_stock_sku_count=0,
+        missing_sku_count=0,
+        total_stock_ff=0.0,
     )
 
 

@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from packages.contracts.factory_order_supply import FactoryOrderDatasetState
+from packages.contracts.factory_order_supply import (
+    STOCK_FF_SOURCE_MANUAL_EXCEL,
+    FactoryOrderDatasetState,
+    FactoryOrderStockFfOnecState,
+)
 
 
 DISTRICT_CENTRAL = "central"
@@ -33,6 +37,7 @@ class WbRegionalSupplySettings:
     safety_days: int
     order_batch_qty: int
     report_date_override: str | None
+    stock_ff_source: str = STOCK_FF_SOURCE_MANUAL_EXCEL
 
 
 @dataclass(frozen=True)
@@ -78,7 +83,10 @@ class WbRegionalSupplyCalculationResult:
     active_sku_count: int
     methodology_note: str
     settings: WbRegionalSupplySettings
+    stock_ff_source: str
     shared_datasets: dict[str, FactoryOrderDatasetState]
+    manual_stock_ff_dataset: FactoryOrderDatasetState
+    onec_stock_ff_summary: FactoryOrderStockFfOnecState
     summary: WbRegionalSupplySummary
     districts: list[WbRegionalSupplyDistrictResult]
     diagnostics: dict[str, Any] | None = None
@@ -90,5 +98,8 @@ class WbRegionalSupplyStatus:
     status: str
     active_sku_count: int
     methodology_note: str
+    stock_ff_source: str
     shared_datasets: dict[str, FactoryOrderDatasetState]
+    manual_stock_ff_dataset: FactoryOrderDatasetState
+    onec_stock_ff_summary: FactoryOrderStockFfOnecState
     last_result: WbRegionalSupplyCalculationResult | None
