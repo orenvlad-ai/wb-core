@@ -7067,7 +7067,7 @@
           const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
           setFactoryMessage(
             warnings.length
-              ? "Расчёт завершён с предупреждениями: " + warnings.join(" ")
+              ? "Расчёт выполнен. Есть предупреждения: " + warnings.join(" ")
               : "Расчёт завершён. Рекомендация готова к скачиванию.",
             warnings.length ? "warning" : "success"
           );
