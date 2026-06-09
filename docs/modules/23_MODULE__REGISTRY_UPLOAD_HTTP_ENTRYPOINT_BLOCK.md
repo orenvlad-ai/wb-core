@@ -99,6 +99,10 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-regional/status"
+  - "POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments"
@@ -129,6 +133,8 @@ related_runners:
   - "apps/factory_order_sales_history_reconcile.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
+  - "apps/wb_regional_supply_smoke.py"
+  - "apps/sheet_vitrina_v1_wb_regional_supply_http_smoke.py"
   - "apps/wb_regional_demand_diagnostics.py"
   - "apps/supplier_invoice_parser_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
@@ -328,6 +334,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` = cheap JSON status surface для bounded WB regional supply flow
   - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate` = server-side district allocation calculation
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` = отдельный operator-facing XLSX download по федеральному округу
+  - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` = ZIP download всех included district XLSX recommendations из последнего расчёта
 - Для compact daily-report compare basis current live rule остаётся fully server-side:
   - `current_business_date` = now in `Asia/Yekaterinburg`
   - `newer_closed_day` читается как `yesterday_closed` из latest persisted ready snapshot `<= default_business_as_of_date(now)`
@@ -410,7 +417,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - partial district-day observation is valid when previous/current district stock is numeric, non-negative, both strictly positive, no upward correction exists, and `ratio_observation = clamp((previous-current)/orderCount, 0, 1)` can be computed. `previous > 0 && current == 0` is stockout risk, `current > previous` is restock/upward correction, `0 -> 0` is `no_signal`, and `0 -> positive` is restock/start-stock no-signal. These invalid cells do not invalidate other districts' cells for the same SKU/day;
   - partial own scores are robust median ratios per district with explicit observation/positive/zero/no-signal/stockout/restock counts. If own confidence is high (`observation_count / requested >= 0.75`) it is used directly; low/medium own signal is blended with the best available prior rather than replaced by a seed box;
   - SKU group prior is deterministic and conservative: config/display metadata builds `product_type + model` when available, then `product_type`; peers exclude the current SKU and must have usable full/partial demand-based shares. If group prior is unavailable, global prior uses other active SKU with usable demand-based shares. Current-stock-share fallback is not a normal path for the current active SKU set;
-  - operator can choose federal districts participating in regional share validation/normalization. Default is all repo-owned districts. Excluded districts are not removed from output tables/XLSX, do not invalidate days, receive `0` share/demand, and `calculate` rejects empty/unknown district selections with controlled validation errors;
+  - operator can choose federal districts participating in regional share validation/normalization. Default is all repo-owned districts. Excluded districts remain available in selector/options and are listed in diagnostics text, but they are hidden from result summary/download tables, excluded from ZIP content, blocked for direct district XLSX download with controlled `422 {"error": "Округ не участвовал в последнем расчёте: ..."}`, do not invalidate days and receive `0` share/demand inside the methodology. `calculate` rejects empty/unknown district selections with controlled validation errors;
   - for the full-clean level, per-day district shares are `district_depletion / total_depletion` across selected districts and average shares are normalized across selected districts. For partial/prior levels, final scores are normalized across selected districts after own/prior selection or blending. A selected district with clean zero depletion remains present with `0` own score; the Far/Siberia merged district is never removed from the system;
   - result and row diagnostics expose `regional_share_method_counts`, `share_source_counts`, `fallback_sku_count`, `primary_sku_count`, low-confidence and partial/group/global/seed SKU-district counts, per-SKU `district_share_sources`, observation counts, `group_prior_key`, peer counts, final shares, confidence, seed reasons, and row-level `share_source`, `share_confidence`, `demand_recommendation_qty`, `seed_qty`, `allocation_reason`;
   - limited `stock_ff` box allocation now chooses the next demand-based box by `marginal_saved_units = min(order_batch_qty, remaining_raw_shortage_units_for_district)` before coverage-days, district-demand and stable-order tie-breaks. Full demand recommendation, truthful deficit and box multiple semantics stay unchanged;
@@ -456,10 +463,11 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - итоговые summary/result values (`Общее количество`, `Расчётный вес`, `Расчётный объём`, recommendation XLSX) остаются server-driven и не вычисляются в browser или sheet.
 - Для regional supply block result contract теперь также server-driven:
   - top summary surface = `Статус`, `Дата отчёта`, `Цикл поставок, дней`, `Активных SKU`, `Общее количество`, `Расчётный вес`, `Расчётный объём`;
-  - compact diagnostics surface under result shows ladder method, requested/selected full-clean days, order-count-valid days, inspected lookup depth, `fallback: 0` for the normal path, share source counts (`full clean / partial / group prior / global prior / seed`) and seed summary using `SKU / направлений SKU-округ`; long affected `nmId` lists, seed details and reason counters are kept inside a bounded expandable diagnostics panel so the result card cannot expand horizontally; district XLSX stays compact and does not add service columns, while `Количество к поставке` includes any allocated seed qty;
-  - compact district table = `Федеральный округ / Общее количество / Дефицит / Скачать Excel`; district XLSX action находится в строке округа, без отдельного нижнего блока-списка;
-  - server хранит и публикует отдельный XLSX на каждый округ, а не один общий recommendation workbook;
-  - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке / Дефицит`; quantity берётся из фактической allocation после ограничения `stock_ff`, а `Дефицит` берётся из уже рассчитанного row-level backend deficit.
+  - visible result/diagnostics copy is human-readable Russian: normal ladder recovery is `Расчёт выполнен по расширенной методологии`, not a false warning; technical labels such as `partial_district_observations`, `district_zero_zero_no_signal` and `district_restock_or_upward_correction` are translated in visible diagnostics to `частичные наблюдения по округам`, `нулевой остаток без сигнала продаж`, `пополнение или скачок остатка вверх` and similar labels. Real warning tone is reserved for fallback > 0, unfulfilled seed, invalid selection, missing result/download and equivalent controlled problems;
+  - expandable diagnostics keeps share source counts, low-confidence directions, full-clean day range, max lookup depth, top excluded-day reasons, no-signal counts by district, fallback/seed details and bounded long `nmId` lists. It uses `направлений SKU-округ` wording and explains that one direction is one SKU in one selected federal district;
+  - compact district table is placed directly near the result summary and shows only included districts: `Федеральный округ / Рекомендовано / к поставке / Дефицит / Скачать XLSX`; excluded districts are shown only in diagnostics text and not as hidden/zero download rows;
+  - server хранит и публикует отдельный XLSX на каждый included округ and one ZIP archive for all included recommendations. Individual district filenames and ZIP member names are stable ASCII translit, e.g. `wb_regional_central_fo.xlsx`, `wb_regional_northwest_fo.xlsx`, `wb_regional_south_caucasus_fo.xlsx`; ZIP filename is `wb_regional_recommendations_<report_date>.zip`;
+  - district XLSX содержит district identification + compact operator rows `nmId / SKU / Количество к поставке / Дефицит`; quantity берётся из фактической allocation после ограничения `stock_ff`, а `Дефицит` берётся из уже рассчитанного row-level backend deficit. ZIP members use the same workbook shape and exclude districts outside the latest methodology selection.
 - Current repo state не имел другого authoritative source для legacy parity term `FO_INBOUND_FF_TO_WB`, поэтому entrypoint получил narrow explicit upload contract `Товары в пути от ФФ на Wildberries`; silent drop этого члена формулы считается некорректным.
 - Operator page keeps narrow Russian chrome for operator-visible labels: compact manual block `Ручная загрузка данных` with active action `Загрузить данные`; former Google Sheets send/load action `Отправить данные` is archived/disabled and is not a runtime/update/write/load/verify target. The page keeps two persisted manual-success timestamp fields `Последняя удачная загрузка` / `Последняя удачная отправка` plus short persisted semantic summaries for the latest manual refresh/archived-load state, separate `Лог` block and separate compact auto block `Автообновления`; page reload must not present persisted refresh metadata as standalone proof of a Google Sheets write.
 - Operator page добавляет отдельный top-level tab `Отчёты` с одним sibling selector по образцу supply tab:

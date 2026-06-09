@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 import threading
 from types import SimpleNamespace
 from urllib import error, request as urllib_request
+import zipfile
 
 from openpyxl import load_workbook
 
@@ -29,6 +30,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+    DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     build_registry_upload_http_server,
 )
@@ -137,10 +139,11 @@ def main() -> None:
                 "Диагностика методологии появится после расчёта.",
                 "Округа для расчёта пропорций",
                 "Без ДВ/Сибирь",
+                "Скачать все рекомендации",
                 "Скачать Excel",
-                "<th>Общее количество</th>",
+                "<th>Рекомендовано / к поставке</th>",
                 "<th>Дефицит</th>",
-                "<th>Скачать Excel</th>",
+                "<th>Скачать XLSX</th>",
                 "data-regional-district-download",
             ):
                 if expected not in operator_html:
@@ -250,9 +253,8 @@ def main() -> None:
             if DISTRICT_FAR_SIBERIA not in selected_diagnostics.get("excluded_district_keys", []):
                 raise AssertionError("selected district diagnostics must include excluded far/siberia")
             selected_districts = {item["district_key"]: item for item in selected_payload.get("districts", [])}
-            selected_far_row = next(row for row in selected_districts[DISTRICT_FAR_SIBERIA]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
-            if float(selected_far_row.get("district_daily_demand", 1.0)) != 0.0:
-                raise AssertionError("excluded district must stay visible with zero demand")
+            if sorted(selected_districts) != [DISTRICT_CENTRAL, DISTRICT_NORTHWEST]:
+                raise AssertionError(f"selected district response must include selected districts only, got {sorted(selected_districts)}")
 
             invalid_status, invalid_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
@@ -275,6 +277,12 @@ def main() -> None:
             district_status, district_bytes, district_headers = _get_bytes(f"{base_url}{central_download_path}")
             if district_status != 200 or "spreadsheetml.sheet" not in str(district_headers.get("Content-Type", "")):
                 raise AssertionError("district download route must return XLSX")
+            central_disposition = str(district_headers.get("Content-Disposition", ""))
+            if (
+                'filename="wb_regional_central_fo.xlsx"' not in central_disposition
+                or not _is_ascii(central_disposition)
+            ):
+                raise AssertionError(f"central district download filename must be ASCII translit, got {central_disposition!r}")
             load_workbook(BytesIO(district_bytes), data_only=True)
             district_rows = read_first_sheet_rows(district_bytes)
             if district_rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
@@ -285,6 +293,46 @@ def main() -> None:
                 raise AssertionError("district XLSX must match the regional summary total for the same district")
             if district_deficit_sum != districts["central"]["deficit_qty"]:
                 raise AssertionError("district XLSX deficit must match the regional summary deficit for the same district")
+
+            northwest_download_path = selected_districts[DISTRICT_NORTHWEST].get("download_path")
+            northwest_status, northwest_bytes, northwest_headers = _get_bytes(f"{base_url}{northwest_download_path}")
+            northwest_disposition = str(northwest_headers.get("Content-Disposition", ""))
+            if northwest_status != 200 or "spreadsheetml.sheet" not in str(northwest_headers.get("Content-Type", "")):
+                raise AssertionError("included northwest district download route must return XLSX")
+            if (
+                'filename="wb_regional_northwest_fo.xlsx"' not in northwest_disposition
+                or not _is_ascii(northwest_disposition)
+            ):
+                raise AssertionError(f"northwest district filename must be ASCII translit, got {northwest_disposition!r}")
+            load_workbook(BytesIO(northwest_bytes), data_only=True)
+
+            far_status, far_payload = _get_json(
+                f"{base_url}/v1/sheet-vitrina-v1/supply/wb-regional/district/{DISTRICT_FAR_SIBERIA}.xlsx"
+            )
+            if far_status != 422 or "Округ не участвовал в последнем расчёте: far_siberia" not in str(far_payload.get("error", "")):
+                raise AssertionError(f"excluded district direct download must return controlled 422, got {far_status} {far_payload}")
+
+            zip_status, zip_bytes, zip_headers = _get_bytes(f"{base_url}{DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH}")
+            zip_disposition = str(zip_headers.get("Content-Disposition", ""))
+            if zip_status != 200 or str(zip_headers.get("Content-Type", "")).split(";")[0] != "application/zip":
+                raise AssertionError(f"ZIP route must return application/zip, got {zip_status} {zip_headers}")
+            if (
+                'filename="wb_regional_recommendations_2026-04-18.zip"' not in zip_disposition
+                or not _is_ascii(zip_disposition)
+            ):
+                raise AssertionError(f"ZIP content-disposition filename must be ASCII, got {zip_disposition!r}")
+            with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
+                archive_names = sorted(archive.namelist())
+                if archive_names != ["wb_regional_central_fo.xlsx", "wb_regional_northwest_fo.xlsx"]:
+                    raise AssertionError(f"ZIP must contain one XLSX per included district only, got {archive_names}")
+                for name in archive_names:
+                    if not _is_ascii(name):
+                        raise AssertionError(f"ZIP member filename must be ASCII translit, got {name!r}")
+                    workbook_bytes = archive.read(name)
+                    load_workbook(BytesIO(workbook_bytes), data_only=True)
+                    rows = read_first_sheet_rows(workbook_bytes)
+                    if rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
+                        raise AssertionError(f"ZIP workbook {name} must keep expected headers, got {rows[2]}")
 
             _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=False)
             _seed_runtime_stock_history(
@@ -359,6 +407,7 @@ def main() -> None:
             print(f"regional_central_deficit: ok -> {districts['central']['deficit_qty']}")
             print(f"regional_district_xlsx_sum: ok -> {district_qty_sum}")
             print(f"regional_district_xlsx_deficit_sum: ok -> {district_deficit_sum}")
+            print(f"regional_recommendations_zip: ok -> {archive_names}")
             print(f"regional_seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
             print(f"regional_missing_shared_blocker: ok -> {blocked_payload.get('error')}")
         finally:
@@ -497,6 +546,14 @@ def _get_text(url: str) -> tuple[int, str]:
 def _get_bytes(url: str) -> tuple[int, bytes, dict[str, str]]:
     status, body, headers = _request(url)
     return status, body, dict(headers.items())
+
+
+def _is_ascii(value: str) -> bool:
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _post_multipart(url: str, workbook_bytes: bytes, *, filename: str) -> tuple[int, dict[str, object]]:

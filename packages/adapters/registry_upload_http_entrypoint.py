@@ -144,6 +144,7 @@ DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory
 DEFAULT_WB_REGIONAL_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/status"
 DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/calculate"
 DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
+DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
 DEFAULT_WB_SUPPLIES_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies"
 DEFAULT_WB_SUPPLIES_SYNC_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
@@ -2009,6 +2010,29 @@ def _build_handler(
                 )
                 return
 
+            if parsed.path == DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH:
+                try:
+                    archive_bytes, filename = entrypoint.handle_wb_regional_recommendations_zip_request()
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"wb regional supply recommendations ZIP failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    archive_bytes,
+                    content_type="application/zip",
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
             if (
                 parsed.path.startswith(DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX + "/")
                 and parsed.path.endswith(".xlsx")
@@ -3513,17 +3537,62 @@ def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, An
 
 def _with_wb_regional_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
+    normalized["recommendations_zip_path"] = DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH
     normalized["shared_datasets"] = _map_dataset_urls(normalized.get("shared_datasets"))
     if isinstance(normalized.get("districts"), list):
-        normalized["districts"] = _map_wb_regional_districts(normalized.get("districts"))
+        normalized["districts"] = _map_wb_regional_districts(_filter_wb_regional_districts(normalized))
     last_result = normalized.get("last_result")
     if isinstance(last_result, Mapping):
         nested = dict(last_result)
+        nested["recommendations_zip_path"] = DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH
         nested["shared_datasets"] = _map_dataset_urls(nested.get("shared_datasets"))
         if isinstance(nested.get("districts"), list):
-            nested["districts"] = _map_wb_regional_districts(nested.get("districts"))
+            nested["districts"] = _map_wb_regional_districts(_filter_wb_regional_districts(nested))
         normalized["last_result"] = nested
     return normalized
+
+
+def _filter_wb_regional_districts(result_payload: Mapping[str, Any]) -> list[Any]:
+    districts = result_payload.get("districts")
+    if not isinstance(districts, list):
+        return []
+    included = set(_wb_regional_included_keys_from_result(result_payload))
+    if not included:
+        return list(districts)
+    filtered: list[Any] = []
+    for item in districts:
+        if not isinstance(item, Mapping):
+            filtered.append(item)
+            continue
+        district_key = str(item.get("district_key", "") or "").strip().lower()
+        if district_key in included:
+            filtered.append(item)
+    return filtered
+
+
+def _wb_regional_included_keys_from_result(result_payload: Mapping[str, Any]) -> tuple[str, ...]:
+    diagnostics = result_payload.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        parsed = _parse_wb_regional_included_keys(diagnostics.get("included_district_keys"))
+        if parsed:
+            return parsed
+    settings = result_payload.get("settings")
+    if isinstance(settings, Mapping):
+        parsed = _parse_wb_regional_included_keys(settings.get("included_district_keys"))
+        if parsed:
+            return parsed
+    return tuple(DISTRICT_KEYS)
+
+
+def _parse_wb_regional_included_keys(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw_values = [item.strip().lower() for item in value.split(",")]
+    elif isinstance(value, (list, tuple)):
+        raw_values = [str(item or "").strip().lower() for item in value]
+    else:
+        return ()
+    requested = {item for item in raw_values if item in DISTRICT_KEYS}
+    return tuple(key for key in DISTRICT_KEYS if key in requested)
 
 
 def _map_dataset_urls(datasets: Any) -> Any:
@@ -3634,6 +3703,7 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+        "wb_regional_recommendations_zip_path": DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
         "wb_regional_district_options": [
             {
                 "district_key": key,

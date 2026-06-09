@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 import math
 from typing import Any, Mapping
 from uuid import uuid4
+import zipfile
 
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.adapters.stocks_block import HttpBackedStocksSource
@@ -59,6 +61,14 @@ _DISTRICT_SPECS = (
 _DISTRICT_NAME_BY_KEY = {key: name for key, name, _ in _DISTRICT_SPECS}
 _DISTRICT_FIELD_BY_KEY = {key: field_name for key, _, field_name in _DISTRICT_SPECS}
 _DISTRICT_ORDER_INDEX = {key: index for index, key in enumerate(DISTRICT_KEYS)}
+_DISTRICT_FILENAME_STEMS = {
+    DISTRICT_CENTRAL: "central",
+    DISTRICT_NORTHWEST: "northwest",
+    DISTRICT_VOLGA: "volga",
+    DISTRICT_URAL: "ural",
+    DISTRICT_SOUTH_CAUCASUS: "south_caucasus",
+    DISTRICT_FAR_SIBERIA: "far_siberia",
+}
 _SHARED_STOCK_LABEL = "Остатки ФФ"
 _DISTRICT_FILE_HEADERS = ["nmId", "SKU", "Количество к поставке", "Дефицит"]
 _WEIGHT_COEFFICIENT = 0.08593
@@ -67,12 +77,12 @@ _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
 _DEFAULT_CYCLE_SUPPLY_DAYS = 7
 _METHODOLOGY_NOTE = (
     "Расчёт использует общий источник «Остатки ФФ» из этой же вкладки: manual Excel или read-only 1C FF_STOCK. "
-    "Сервер берёт total orderCount по SKU, а региональные доли восстанавливает по ladder: "
-    "full clean days -> partial district-day observations -> SKU group prior -> global prior -> seed floor. "
-    "sales_avg_period_days означает запрошенное число качественных дней; dirty district/day cells не ломают "
-    "наблюдения других округов. Current-stock-share fallback не является нормальным путём. "
-    "Ограниченный stock_ff распределяется по коробам сначала по marginal saved units, затем по coverage days "
-    "и district demand. Seed floor: только тестовая коробка для сбора будущего сигнала, а не расчётная доля спроса."
+    "Сервер берёт общий спрос SKU из orderCount, а доли по округам восстанавливает по расширенной методологии: "
+    "идеальные дни, частичные наблюдения по округам, похожие SKU, общий профиль и только затем тестовая поставка. "
+    "Период усреднения продаж означает запрошенное число качественных дней; проблемная ячейка округа/дня не ломает "
+    "наблюдения других округов. Старый резервный способ по текущим остаткам не является нормальным путём. "
+    "Ограниченный stock_ff распределяется по коробам сначала по спасённым штукам, затем по дням покрытия и спросу округа. "
+    "Тестовая поставка нужна для сбора будущего сигнала, а не как расчётная доля спроса."
 )
 
 
@@ -410,10 +420,10 @@ class WbRegionalSupplyBlock:
                 district_name_ru=_DISTRICT_NAME_BY_KEY[district_key],
                 total_qty=sum(row.allocated_qty for row in district_rows_by_key[district_key]),
                 deficit_qty=sum(row.deficit_qty for row in district_rows_by_key[district_key]),
-                filename=f"{_DISTRICT_NAME_BY_KEY[district_key]}.xlsx",
+                filename=_district_filename(district_key),
                 rows=district_rows_by_key[district_key],
             )
-            for district_key in DISTRICT_KEYS
+            for district_key in settings.included_district_keys
         ]
         total_qty = sum(item.total_qty for item in districts)
         result = WbRegionalSupplyCalculationResult(
@@ -454,10 +464,34 @@ class WbRegionalSupplyBlock:
         result = self._load_last_result()
         if result is None:
             raise ValueError("Результат расчёта по федеральным округам ещё не подготовлен")
+        included_keys = set(result.settings.included_district_keys or DISTRICT_KEYS)
+        if normalized_key not in included_keys:
+            raise ValueError(f"Округ не участвовал в последнем расчёте: {normalized_key}")
         district = next((item for item in result.districts if item.district_key == normalized_key), None)
         if district is None:
             raise ValueError(f"В последнем результате нет округа: {district_key}")
         return self._build_district_workbook_bytes(district), district.filename
+
+    def download_all_recommendations_archive(self) -> tuple[bytes, str]:
+        result = self._load_last_result()
+        if result is None:
+            raise ValueError("Результат расчёта по федеральным округам ещё не подготовлен")
+        included_keys = tuple(result.settings.included_district_keys or DISTRICT_KEYS)
+        districts_by_key = {item.district_key: item for item in result.districts}
+        included_districts = [
+            districts_by_key[key]
+            for key in included_keys
+            if key in districts_by_key
+        ]
+        if not included_districts:
+            raise ValueError("В последнем результате нет рекомендаций для выбранных округов")
+
+        archive_buffer = BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for district in included_districts:
+                archive.writestr(district.filename, self._build_district_workbook_bytes(district))
+        report_date = _safe_report_date_for_filename(result.report_date)
+        return archive_buffer.getvalue(), f"wb_regional_recommendations_{report_date}.zip"
 
     def _load_active_skus(self) -> list[tuple[int, str]]:
         current_state = self.runtime.load_current_state()
@@ -608,7 +642,7 @@ class WbRegionalSupplyBlock:
                     ),
                     total_qty=int(item.get("total_qty", 0)),
                     deficit_qty=int(item.get("deficit_qty", 0)),
-                    filename=str(item.get("filename", "")),
+                    filename=_district_filename(str(item.get("district_key", ""))),
                     rows=[
                         WbRegionalSupplyDistrictRow(
                             nm_id=int(row.get("nm_id", 0)),
@@ -890,6 +924,22 @@ def _parse_dotted_date(value: str) -> str | None:
         return datetime.strptime(value, "%d.%m.%Y").date().isoformat()
     except ValueError:
         return None
+
+
+def _district_filename(district_key: str) -> str:
+    normalized_key = str(district_key or "").strip().lower()
+    raw_stem = _DISTRICT_FILENAME_STEMS.get(normalized_key, normalized_key or "district")
+    stem = "".join(char if char.isascii() and (char.isalnum() or char == "_") else "_" for char in raw_stem).strip("_")
+    stem = stem or "district"
+    return f"wb_regional_{stem}_fo.xlsx"
+
+
+def _safe_report_date_for_filename(value: Any) -> str:
+    normalized = str(value or "").strip()
+    try:
+        return date.fromisoformat(normalized).isoformat()
+    except ValueError:
+        return _default_now_factory().date().isoformat()
 
 
 def _allocate_boxes(

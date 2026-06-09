@@ -1476,6 +1476,10 @@
       color: var(--muted);
     }
 
+    #regionalMessage {
+      white-space: pre-line;
+    }
+
     .section-message.is-error {
       color: var(--error-text);
     }
@@ -1608,6 +1612,46 @@
       line-height: 1.55;
       overflow-wrap: anywhere;
       white-space: normal;
+    }
+
+    .regional-diagnostics-body h4 {
+      margin: 12px 0 6px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .regional-diagnostics-body h4:first-child {
+      margin-top: 0;
+    }
+
+    .regional-diagnostics-body p {
+      margin: 4px 0 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .regional-diagnostics-list {
+      margin: 0 0 8px;
+      padding-left: 18px;
+    }
+
+    .regional-diagnostics-list li {
+      margin: 3px 0;
+    }
+
+    .regional-diagnostics-pre {
+      max-height: 90px;
+      overflow: auto;
+      margin: 4px 0 8px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--control-bg);
+      color: var(--muted-strong);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
 
     .regional-diagnostics-body dl {
@@ -3047,6 +3091,26 @@
                   <dd id="regionalActiveSkuCount">-</dd>
                 </div>
               </dl>
+              <div class="block-header" style="margin: 2px 0 0;">
+                <h3 id="regional-districts-title" class="block-title">Сводка по федеральным округам</h3>
+              </div>
+              <div class="district-table-wrap">
+                <table class="district-table">
+                  <thead>
+                    <tr>
+                      <th>Федеральный округ</th>
+                      <th>Рекомендовано / к поставке</th>
+                      <th>Дефицит</th>
+                      <th>Скачать XLSX</th>
+                    </tr>
+                  </thead>
+                  <tbody id="regionalDistrictTableBody">
+                    <tr>
+                      <td colspan="4">Результат ещё не подготовлен.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
               <p id="regionalMessage" class="section-message"></p>
               <p id="regionalDiagnosticsNote" class="field-note">Диагностика методологии появится после расчёта.</p>
               <details id="regionalDiagnosticsDetails" class="regional-diagnostics-details" hidden>
@@ -3055,32 +3119,10 @@
               </details>
               <div class="factory-actions">
                 <button id="calculateRegionalSupplyButton" class="action-button primary-button" type="button">Рассчитать поставку на Wildberries</button>
+                <button id="downloadRegionalRecommendationsZipButton" class="action-button secondary-button" type="button" disabled>Скачать все рекомендации</button>
               </div>
             </section>
           </div>
-
-          <section class="block" aria-labelledby="regional-districts-title" style="margin-top: 28px;">
-            <div class="block-header">
-              <h2 id="regional-districts-title" class="block-title">Сводка по федеральным округам</h2>
-            </div>
-            <div class="district-table-wrap">
-              <table class="district-table">
-                <thead>
-                  <tr>
-                    <th>Федеральный округ</th>
-                    <th>Общее количество</th>
-                    <th>Дефицит</th>
-                    <th>Скачать Excel</th>
-                  </tr>
-                </thead>
-                <tbody id="regionalDistrictTableBody">
-                  <tr>
-                    <td colspan="4">Результат ещё не подготовлен.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
         </section>
         </section>
 
@@ -3364,6 +3406,7 @@
       const regionalDiagnosticsDetails = document.getElementById("regionalDiagnosticsDetails");
       const regionalDiagnosticsBody = document.getElementById("regionalDiagnosticsBody");
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
+      const downloadRegionalRecommendationsZipButton = document.getElementById("downloadRegionalRecommendationsZipButton");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
       const wbSuppliesRefreshButton = document.getElementById("wbSuppliesRefreshButton");
@@ -5589,8 +5632,8 @@
         renderFactoryResult(payload ? payload.last_result : null);
       }
 
-      function renderRegionalDistricts(districts) {
-        const items = Array.isArray(districts) ? districts : [];
+      function renderRegionalDistricts(districts, result) {
+        const items = filterRegionalDistrictsForResult(districts, result);
         if (!items.length) {
           regionalDistrictTableBody.innerHTML = "<tr><td colspan=\"4\">Результат ещё не подготовлен.</td></tr>";
           return;
@@ -5616,12 +5659,34 @@
             }
             await downloadBinary(
               downloadPath,
-              button.dataset.downloadFilename || "regional-supply-district.xlsx",
+              button.dataset.downloadFilename || "wb_regional_district_fo.xlsx",
               "Файл округа скачан.",
               setRegionalMessage
             );
           });
         });
+      }
+
+      function filterRegionalDistrictsForResult(districts, result) {
+        const items = Array.isArray(districts) ? districts : [];
+        const included = regionalIncludedKeysFromResult(result);
+        if (!included.length) {
+          return items;
+        }
+        const includedSet = new Set(included);
+        return items.filter((item) => includedSet.has(String(item && item.district_key || "").trim()));
+      }
+
+      function regionalIncludedKeysFromResult(result) {
+        if (!result || typeof result !== "object") {
+          return [];
+        }
+        const diagnostics = result.diagnostics && typeof result.diagnostics === "object" ? result.diagnostics : {};
+        const settings = result.settings && typeof result.settings === "object" ? result.settings : {};
+        return sanitizeRegionalDistrictKeys(
+          diagnostics.included_district_keys || settings.included_district_keys || [],
+          { fallbackToAll: false }
+        );
       }
 
       function renderRegionalDiagnostics(result) {
@@ -5639,53 +5704,31 @@
           return;
         }
         const diagnostics = result.diagnostics || {};
-        const parts = [];
-        const method = diagnostics.regional_demand_method || "";
-        if (method === "full_clean_days") {
-          parts.push("Метод: full clean days");
-        } else if (method === "regional_share_ladder") {
-          parts.push("Метод: ladder долей");
-        } else if (method === "current_stock_share_fallback") {
-          parts.push("Метод: fallback на текущую структуру остатков");
-        } else if (method === "mixed_stock_depletion_with_current_stock_share_fallback") {
-          parts.push("Метод: смешанный, часть SKU в fallback");
-        } else if (method) {
-          parts.push("Метод: " + method);
-        }
+        const parts = ["Доли восстановлены по расширенной методологии."];
         if (diagnostics.requested_valid_day_count) {
-          parts.push("валидных дней: " + valueOrDash(diagnostics.min_selected_valid_day_count) + "-" + valueOrDash(diagnostics.max_selected_valid_day_count) + " из " + valueOrDash(diagnostics.requested_valid_day_count));
+          parts.push("Идеальные дни по всем округам: " + valueOrDash(diagnostics.min_selected_valid_day_count) + "-" + valueOrDash(diagnostics.max_selected_valid_day_count) + " из " + valueOrDash(diagnostics.requested_valid_day_count) + ".");
         }
-        if (diagnostics.max_inspected_day_count) {
-          parts.push("проверено до " + valueOrDash(diagnostics.max_inspected_day_count) + " дней");
+        parts.push("Fallback на старую формулу: " + Number(diagnostics.fallback_sku_count || 0) + " SKU.");
+        const lowConfidence = Number(diagnostics.low_confidence_sku_district_count || 0);
+        if (lowConfidence > 0) {
+          parts.push("Низкая уверенность: " + lowConfidence + " направлений SKU-округ.");
         }
-        if (diagnostics.fallback_sku_count) {
-          parts.push(valueOrDash(diagnostics.fallback_sku_count) + " SKU через fallback");
-        } else if (diagnostics.sku_count) {
-          parts.push("fallback: 0");
+        const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
+        if (excluded.length) {
+          parts.push("Исключённые округа: " + excluded.map(regionalDistrictLabel).join(", ") + ".");
         }
-        if (diagnostics.share_source_counts && typeof diagnostics.share_source_counts === "object") {
-          parts.push("доли: " + formatRegionalShareSources(diagnostics.share_source_counts));
-        }
-        if (diagnostics.seed_sku_count || diagnostics.seed_allocated_qty_total) {
+        if (Number(diagnostics.seed_sku_count || 0) > 0 || Number(diagnostics.seed_allocated_qty_total || 0) > 0) {
           parts.push(
-            "тестовые коробки: " +
+            "Тестовые коробки: " +
             valueOrDash(diagnostics.seed_sku_count || 0) +
             " SKU / " +
             valueOrDash(diagnostics.seed_sku_district_count || 0) +
-            " направлений SKU-округ, " +
+            " направлений SKU-округ, всего " +
             valueOrDash(diagnostics.seed_allocated_qty_total || 0) +
             " шт."
           );
         }
-        if (diagnostics.persistent_zero_sku_count) {
-          parts.push("structural zero: " + valueOrDash(diagnostics.persistent_zero_sku_count) + " SKU");
-        }
-        const included = Array.isArray(diagnostics.included_district_keys) ? diagnostics.included_district_keys : [];
-        const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
-        if (included.length && excluded.length) {
-          parts.push("округа: " + included.length + " из " + WB_REGIONAL_DISTRICT_KEYS.length);
-        }
-        regionalDiagnosticsNote.textContent = parts.length ? parts.join(" · ") : "Диагностика методологии недоступна.";
+        regionalDiagnosticsNote.textContent = parts.length ? parts.join(" ") : "Диагностика методологии недоступна.";
         renderRegionalDiagnosticsDetails(diagnostics);
       }
 
@@ -5699,44 +5742,68 @@
           return;
         }
         const fallbackNmIds = Array.isArray(diagnostics.fallback_nm_ids) ? diagnostics.fallback_nm_ids : [];
-        const reasonCounts = diagnostics.excluded_day_reason_counts && typeof diagnostics.excluded_day_reason_counts === "object"
-          ? diagnostics.excluded_day_reason_counts
-          : {};
+        const reasonCounts = mergeRegionalReasonCounts(
+          diagnostics.excluded_day_reason_counts,
+          diagnostics.partial_global_day_reason_counts
+        );
         const neutralizedCounts = diagnostics.zero_zero_no_signal_day_count_by_district && typeof diagnostics.zero_zero_no_signal_day_count_by_district === "object"
           ? diagnostics.zero_zero_no_signal_day_count_by_district
           : {};
-        const persistentZeroNmIds = Array.isArray(diagnostics.persistent_zero_nm_ids) ? diagnostics.persistent_zero_nm_ids : [];
         const seedByNmId = diagnostics.seed_by_nm_id && typeof diagnostics.seed_by_nm_id === "object"
           ? diagnostics.seed_by_nm_id
           : {};
         const included = Array.isArray(diagnostics.included_district_keys) ? diagnostics.included_district_keys : [];
         const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
-        const rows = [
-          ["Округа в методологии", included.length ? included.map(regionalDistrictLabel).join(", ") : "-"],
-          ["Исключённые округа", excluded.length ? excluded.map(regionalDistrictLabel).join(", ") : "-"],
-          ["Доли по источникам", formatRegionalShareSources(diagnostics.share_source_counts || {})],
-          ["Low confidence", valueOrDash(diagnostics.low_confidence_sku_district_count || 0) + " направлений SKU-округ"],
-          ["Fallback SKU", fallbackNmIds.length ? fallbackNmIds.join(", ") : "-"],
-          ["Persistent-zero SKU", persistentZeroNmIds.length ? persistentZeroNmIds.join(", ") : "-"],
-          ["Тестовые коробки", formatRegionalSeedSummary(diagnostics)],
-          ["Seed details", formatRegionalSeedByNmId(seedByNmId)],
-          ["0 -> 0 no-signal дни", formatReasonCounts(neutralizedCounts)],
-          ["Причины исключения дней", formatReasonCounts(reasonCounts)],
-          ["Запрошено valid days", valueOrDash(diagnostics.requested_valid_day_count)],
-          ["Valid days min/max", valueOrDash(diagnostics.min_selected_valid_day_count) + " / " + valueOrDash(diagnostics.max_selected_valid_day_count)],
-          ["Max inspected days", valueOrDash(diagnostics.max_inspected_day_count)],
-          ["Method counts", formatReasonCounts(diagnostics.method_counts || {})]
+        const qualityRows = [
+          "Fallback на старую формулу: " + valueOrDash(diagnostics.fallback_sku_count || 0) + " SKU",
+          "Низкая уверенность: " + valueOrDash(diagnostics.low_confidence_sku_district_count || 0) + " направлений SKU-округ",
+          "Идеальные дни по всем округам: " + valueOrDash(diagnostics.min_selected_valid_day_count) + "-" + valueOrDash(diagnostics.max_selected_valid_day_count) + " из " + valueOrDash(diagnostics.requested_valid_day_count),
+          "Максимальная глубина поиска: " + valueOrDash(diagnostics.max_inspected_day_count) + " дней"
         ];
-        regionalDiagnosticsBody.innerHTML = "<dl>" + rows.map((row) => [
-          "<dt>" + escapeHtml(row[0]) + "</dt>",
-          "<dd>" + escapeHtml(row[1]) + "</dd>"
-        ].join("")).join("") + "</dl>";
+        const htmlParts = [
+          "<h4>Как считались доли</h4>",
+          renderRegionalDiagnosticsList(regionalShareSourceRows(diagnostics.share_source_counts || {})),
+          "<p>Направление SKU-округ = одна SKU в одном выбранном федеральном округе.</p>",
+          "<h4>Качество расчёта</h4>",
+          renderRegionalDiagnosticsList(qualityRows),
+          "<p>Если идеальных дней не хватило, система восстановила доли по частичным наблюдениям.</p>",
+          "<h4>Почему отдельные дни/округа не использовались</h4>",
+          renderRegionalDiagnosticsList(formatReasonCountRows(reasonCounts, { limit: 5 })),
+          "<h4>Нулевой остаток без сигнала по округам</h4>",
+          renderRegionalDiagnosticsList(formatReasonCountRows(neutralizedCounts, { districtLabels: true })),
+          "<h4>Округа</h4>",
+          renderRegionalDiagnosticsList([
+            "В методологии: " + (included.length ? included.map(regionalDistrictLabel).join(", ") : "-"),
+            "Исключённые округа: " + (excluded.length ? excluded.map(regionalDistrictLabel).join(", ") : "нет")
+          ]),
+          "<h4>Fallback и тестовые коробки</h4>",
+          renderRegionalDiagnosticsList([
+            "Fallback SKU: " + (fallbackNmIds.length ? fallbackNmIds.length + " SKU" : "нет"),
+            "Тестовые коробки: " + formatRegionalSeedSummary(diagnostics)
+          ])
+        ];
+        if (fallbackNmIds.length) {
+          htmlParts.push("<div class=\"regional-diagnostics-pre\">" + escapeHtml(fallbackNmIds.join(", ")) + "</div>");
+        }
+        const seedDetails = formatRegionalSeedByNmId(seedByNmId);
+        if (seedDetails !== "нет") {
+          htmlParts.push("<div class=\"regional-diagnostics-pre\">" + escapeHtml(seedDetails) + "</div>");
+        }
+        regionalDiagnosticsBody.innerHTML = htmlParts.join("");
         regionalDiagnosticsDetails.hidden = false;
+      }
+
+      function renderRegionalDiagnosticsList(rows) {
+        const items = Array.isArray(rows) ? rows.filter(Boolean) : [];
+        if (!items.length) {
+          return "<p>Нет данных.</p>";
+        }
+        return "<ul class=\"regional-diagnostics-list\">" + items.map((item) => "<li>" + escapeHtml(item) + "</li>").join("") + "</ul>";
       }
 
       function formatRegionalSeedSummary(diagnostics) {
         if (!diagnostics || typeof diagnostics !== "object") {
-          return "-";
+          return "нет";
         }
         const candidateSku = Number(diagnostics.seed_candidate_sku_count || 0);
         const candidateDistricts = Number(diagnostics.seed_candidate_sku_district_count || 0);
@@ -5745,7 +5812,7 @@
         const allocatedQty = Number(diagnostics.seed_allocated_qty_total || 0);
         const unfulfilledQty = Number(diagnostics.seed_unfulfilled_qty_total || 0);
         if (!candidateSku && !allocatedSku && !allocatedQty && !unfulfilledQty) {
-          return "-";
+          return "нет";
         }
         const parts = [
           "кандидаты: " + candidateSku + " SKU / " + candidateDistricts + " направлений SKU-округ",
@@ -5759,38 +5826,37 @@
 
       function formatRegionalSeedByNmId(seedByNmId) {
         if (!seedByNmId || typeof seedByNmId !== "object") {
-          return "-";
+          return "нет";
         }
         const keys = Object.keys(seedByNmId).sort();
         if (!keys.length) {
-          return "-";
+          return "нет";
         }
         return keys.map((nmId) => {
           const item = seedByNmId[nmId] || {};
           const districts = Array.isArray(item.seed_district_keys)
             ? item.seed_district_keys.map(regionalDistrictLabel).join(", ")
-            : "-";
+            : "нет";
           const qtyByDistrict = item.seed_qty_by_district && typeof item.seed_qty_by_district === "object"
-            ? formatReasonCounts(item.seed_qty_by_district)
-            : "-";
+            ? formatReasonCounts(item.seed_qty_by_district, { districtLabels: true })
+            : "нет";
           const reasonByDistrict = item.seed_reason_by_district && typeof item.seed_reason_by_district === "object"
-            ? Object.keys(item.seed_reason_by_district).map((key) => item.seed_reason_by_district[key]).filter(Boolean).join(", ")
+            ? Object.keys(item.seed_reason_by_district).map((key) => regionalDiagnosticLabel(item.seed_reason_by_district[key])).filter(Boolean).join(", ")
             : "";
           return nmId + ": " + districts + " · " + qtyByDistrict + (reasonByDistrict ? " · " + reasonByDistrict : "");
         }).join("; ");
       }
 
-      function formatRegionalShareSources(value) {
-        if (!value || typeof value !== "object") {
-          return "-";
-        }
+      function regionalShareSourceRows(value) {
+        const sourceCounts = value && typeof value === "object" ? value : {};
         const labels = {
-          full_clean_days: "full clean",
-          partial_district_observations: "partial",
-          partial_observations_blended_with_prior: "partial+prior",
-          sku_group_prior: "group prior",
-          global_prior: "global prior",
-          seed_floor: "seed"
+          full_clean_days: "Идеальные дни",
+          partial_district_observations: "Частичные наблюдения по округам",
+          partial_observations_blended_with_prior: "Частичные данные + похожие SKU",
+          sku_group_prior: "Похожие SKU",
+          global_prior: "Общий профиль",
+          seed_floor: "Тестовая поставка",
+          seed_floor_candidate: "Тестовая поставка"
         };
         const ordered = [
           "full_clean_days",
@@ -5798,26 +5864,74 @@
           "partial_observations_blended_with_prior",
           "sku_group_prior",
           "global_prior",
-          "seed_floor"
+          "seed_floor",
+          "seed_floor_candidate"
         ];
-        return ordered
-          .filter((key) => Number(value[key] || 0) > 0)
-          .map((key) => labels[key] + " " + Number(value[key] || 0))
-          .join(" / ") || "-";
+        return ordered.map((key) => labels[key] + ": " + Number(sourceCounts[key] || 0) + " направлений SKU-округ");
       }
 
-      function formatReasonCounts(value) {
+      function mergeRegionalReasonCounts() {
+        const out = {};
+        Array.from(arguments).forEach((value) => {
+          if (!value || typeof value !== "object") {
+            return;
+          }
+          Object.keys(value).forEach((key) => {
+            const count = Number(value[key] || 0);
+            if (count > 0) {
+              out[key] = Number(out[key] || 0) + count;
+            }
+          });
+        });
+        return out;
+      }
+
+      function formatReasonCounts(value, options) {
+        const rows = formatReasonCountRows(value, options);
+        return rows.length ? rows.join("; ") : "нет";
+      }
+
+      function formatReasonCountRows(value, options) {
         if (!value || typeof value !== "object") {
-          return "-";
+          return [];
         }
+        const opts = options || {};
         const items = Object.keys(value)
           .map((key) => [key, Number(value[key] || 0)])
           .filter((item) => item[1] > 0)
           .sort((a, b) => b[1] - a[1]);
-        if (!items.length) {
-          return "-";
-        }
-        return items.map((item) => item[0] + ": " + item[1]).join("; ");
+        const limited = opts.limit ? items.slice(0, opts.limit) : items;
+        return limited.map((item) => {
+          const label = opts.districtLabels ? regionalDistrictLabel(item[0]) : regionalDiagnosticLabel(item[0]);
+          return label + ": " + item[1];
+        });
+      }
+
+      function regionalDiagnosticLabel(key) {
+        const labels = {
+          full_clean_days: "идеальные дни",
+          partial_district_observations: "частичные наблюдения по округам",
+          partial_observations_blended_with_prior: "частичные данные + похожие SKU",
+          sku_group_prior: "похожие SKU",
+          global_prior: "общий профиль по всем SKU",
+          seed_floor: "тестовая поставка",
+          seed_floor_candidate: "тестовая поставка",
+          current_stock_share_fallback: "старый резервный способ по текущим остаткам",
+          district_zero_zero_no_signal: "нулевой остаток без сигнала продаж",
+          district_restock_or_upward_correction: "пополнение или скачок остатка вверх",
+          district_out_of_stock_risk: "риск отсутствия товара в округе",
+          low_order_count_signal: "слишком мало заказов для надёжного сигнала",
+          missing_previous_stock_snapshot: "нет снимка остатков за предыдущий день",
+          missing_current_stock_snapshot: "нет снимка остатков за текущий день",
+          zero_order_count_signal: "нулевые заказы",
+          missing_order_count: "нет данных по заказам",
+          missing_sku_stock_coverage: "нет строки SKU в снимке остатков",
+          missing_district_stock: "нет остатка по округу",
+          non_numeric_district_stock: "остаток по округу не число",
+          negative_district_stock: "отрицательный остаток по округу",
+          no_recoverable_own_group_or_global_share_with_zero_or_no_usable_stock: "нет собственного/похожего сигнала и нет полезного остатка"
+        };
+        return labels[String(key || "")] || String(key || "");
       }
 
       function renderRegionalResult(result, fallbackActiveSkuCount) {
@@ -5830,11 +5944,14 @@
           regionalTotalWeight.textContent = "-";
           regionalTotalVolume.textContent = "-";
           regionalActiveSkuCount.textContent = valueOrDash(fallbackActiveSkuCount);
+          if (downloadRegionalRecommendationsZipButton) {
+            downloadRegionalRecommendationsZipButton.disabled = true;
+          }
           renderRegionalDiagnostics(null);
-          renderRegionalDistricts([]);
+          renderRegionalDistricts([], null);
           return;
         }
-        regionalResultStatus.textContent = valueOrDash(result.status);
+        regionalResultStatus.textContent = result.status === "success" ? "выполнен" : valueOrDash(result.status);
         regionalResultReportDate.textContent = valueOrDash(result.report_date);
         regionalResultHorizon.textContent = valueOrDash(result.horizon_days);
         regionalResultCalculatedAt.textContent = valueOrDash(result.calculated_at).replace("T", " ");
@@ -5843,8 +5960,55 @@
         regionalTotalQty.textContent = valueOrDash(summary.total_qty);
         regionalTotalWeight.textContent = valueOrDash(summary.estimated_weight);
         regionalTotalVolume.textContent = valueOrDash(summary.estimated_volume);
+        if (downloadRegionalRecommendationsZipButton) {
+          downloadRegionalRecommendationsZipButton.disabled = !regionalRecommendationsZipPath(result);
+        }
+        const resultSummary = buildRegionalResultSummary(result);
+        setRegionalMessage(resultSummary.text, resultSummary.tone);
         renderRegionalDiagnostics(result);
-        renderRegionalDistricts(result.districts || []);
+        renderRegionalDistricts(result.districts || [], result);
+      }
+
+      function buildRegionalResultSummary(result) {
+        const diagnostics = result && result.diagnostics && typeof result.diagnostics === "object" ? result.diagnostics : {};
+        const methodCounts = diagnostics.method_counts && typeof diagnostics.method_counts === "object" ? diagnostics.method_counts : {};
+        const skuCount = Number(diagnostics.sku_count || result.active_sku_count || 0);
+        const fallbackSku = Number(diagnostics.fallback_sku_count || 0);
+        const idealSku = Number(methodCounts.full_clean_days || 0);
+        const recoveredSku = Math.max(skuCount - idealSku - fallbackSku, 0);
+        const seedSku = Number(diagnostics.seed_sku_count || 0);
+        const seedDirections = Number(diagnostics.seed_sku_district_count || 0);
+        const seedQty = Number(diagnostics.seed_allocated_qty_total || 0);
+        const seedUnfulfilledQty = Number(diagnostics.seed_unfulfilled_qty_total || 0);
+        const lines = ["Расчёт выполнен по расширенной методологии."];
+        if (skuCount > 0) {
+          if (fallbackSku > 0) {
+            lines.push((skuCount - fallbackSku) + " SKU рассчитаны без старого fallback.");
+          } else {
+            lines.push("Все " + skuCount + " SKU рассчитаны без старого fallback.");
+          }
+        }
+        lines.push(idealSku + " SKU посчитаны по идеальным дням.");
+        lines.push(recoveredSku + " SKU восстановлены по частичным наблюдениям по округам.");
+        lines.push("Fallback на текущие остатки: " + fallbackSku + " SKU.");
+        if (seedQty > 0 || seedSku > 0) {
+          lines.push("Тестовые коробки: " + seedSku + " SKU / " + seedDirections + " направлений SKU-округ, всего " + seedQty + " шт.");
+        } else {
+          lines.push("Тестовые коробки: нет.");
+        }
+        const realWarning = fallbackSku > 0 || seedUnfulfilledQty > 0;
+        if (realWarning) {
+          lines.push("Есть предупреждения: см. диагностику ниже.");
+        }
+        return { text: lines.join("\n"), tone: realWarning ? "warning" : "success" };
+      }
+
+      function regionalRecommendationsZipPath(result) {
+        return String(
+          (result && result.recommendations_zip_path) ||
+          config.wb_regional_recommendations_zip_path ||
+          ""
+        );
       }
 
       function renderRegionalStatus(payload) {
@@ -6839,7 +7003,7 @@
           reportMessage(successMessage, "success");
         } catch (error) {
           reportMessage(
-            "Не удалось скачать XLSX: " + (error instanceof Error ? error.message : String(error)),
+            "Не удалось скачать файл: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
         }
@@ -6946,33 +7110,6 @@
           }
           renderRegionalResult(payload, payload.active_sku_count);
           regionalMethodologyNote.textContent = valueOrDash(payload.methodology_note);
-          const diagnostics = payload.diagnostics || {};
-          const fallbackCount = Number(diagnostics.fallback_sku_count || 0);
-          const warningSummary = fallbackCount > 0
-            ? (fallbackCount + " SKU рассчитаны через fallback")
-            : "";
-          const seedSummary = Number(diagnostics.seed_allocated_qty_total || 0) > 0
-            ? (
-              "тестовые коробки: " +
-              Number(diagnostics.seed_sku_count || 0) +
-              " SKU / " +
-              Number(diagnostics.seed_sku_district_count || 0) +
-              " направлений SKU-округ, " +
-              Number(diagnostics.seed_allocated_qty_total || 0) +
-              " шт."
-            )
-            : "";
-          const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
-          const completionSummary = [warningSummary, seedSummary].filter(Boolean).join("; ");
-          setRegionalMessage(
-            warningSummary || warnings.length
-              ? "Расчёт завершён с предупреждениями: " + (completionSummary || warnings[0])
-              : (
-                "Расчёт завершён. XLSX по федеральным округам готовы к скачиванию." +
-                (seedSummary ? " " + seedSummary + "." : "")
-              ),
-            warningSummary || warnings.length ? "warning" : "success"
-          );
           await loadRegionalStatus();
         } catch (error) {
           setRegionalMessage(
@@ -6998,6 +7135,20 @@
         );
       }
 
+      async function downloadRegionalRecommendationsZip() {
+        const zipPath = regionalRecommendationsZipPath(null);
+        if (!zipPath) {
+          setRegionalMessage("Архив рекомендаций ещё не доступен.", "error");
+          return;
+        }
+        await downloadBinary(
+          zipPath,
+          "wb_regional_recommendations.zip",
+          "Архив рекомендаций скачан.",
+          setRegionalMessage
+        );
+      }
+
       refreshButton.addEventListener("click", () => runAction("refresh"));
       loadButton.addEventListener("click", () => runAction("load"));
       downloadButton.addEventListener("click", downloadCurrentLog);
@@ -7005,6 +7156,9 @@
       sellerRecoveryStartButton.addEventListener("click", startSellerRecovery);
       sellerRecoveryLauncherButton.addEventListener("click", downloadSellerRecoveryLauncher);
       sellerRecoveryStopButton.addEventListener("click", stopSellerRecovery);
+      if (downloadRegionalRecommendationsZipButton) {
+        downloadRegionalRecommendationsZipButton.addEventListener("click", downloadRegionalRecommendationsZip);
+      }
 
       downloadStockFfTemplateButton.addEventListener("click", () => downloadBinary(
         config.factory_order_template_stock_ff_path,

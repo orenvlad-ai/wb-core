@@ -81,6 +81,10 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/upload/inbound-ff-to-wb"
   - "POST /v1/sheet-vitrina-v1/supply/factory-order/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-regional/status"
+  - "POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
 related_runners:
   - "apps/seller_portal_relogin_session.py"
   - "apps/seller_portal_relogin_session_smoke.py"
@@ -98,6 +102,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_seller_portal_recovery_live_smoke.py"
   - "apps/factory_order_supply_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
+  - "apps/wb_regional_supply_smoke.py"
+  - "apps/sheet_vitrina_v1_wb_regional_supply_http_smoke.py"
   - "apps/wb_regional_demand_diagnostics.py"
   - "apps/web_source_temporal_adapter_smoke.py"
   - "apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py"
@@ -265,9 +271,9 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - uploads for all operator XLSX files start automatically right after file selection; current uploaded file download/delete lifecycle stays visible in the same block
   - server-side settings validation for `prod_lead_time_days`, `lead_time_factory_to_ff_days`, `lead_time_ff_to_wb_days`, `safety_days_mp`, `safety_days_ff`, `cycle_order_days`, `order_batch_qty`, `report_date_override`, `sales_avg_period_days`
   - server-side settings validation for regional block `sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`, `included_district_keys`
-  - regional block renders six federal-district checkboxes for regional share methodology. Default is all districts; excluding a district removes it only from share validation/normalization while keeping it visible in result district tables/XLSX with zero primary demand.
+  - regional block renders six federal-district checkboxes for regional share methodology. Default is all districts; excluding a district removes it from share validation/normalization and from result/download surfaces while keeping it visible in selector/options and in the diagnostics text line `Исключённые округа: ...`; direct XLSX download for an excluded district returns a controlled JSON error instead of a 500 or empty workbook.
   - regional share methodology is a bounded ladder: full clean days stay preferred; if they are insufficient, backend uses valid `SKU + district + day` partial observations; missing cells are then filled from deterministic SKU group prior and global prior; seed floor is last resort only. `0 -> 0` is counted as no-signal, not demand evidence and not an early seed trigger; `positive -> 0` remains stockout risk, restock/upward correction remains invalid for that district/day.
-  - regional result card keeps the main status compact; long affected `nmId` lists, share source counts, low-confidence details, seed details and reason counters are available only in bounded expandable diagnostics and must not widen the card. Seed wording uses `SKU / направлений SKU-округ`.
+  - regional result card keeps the main status compact and human-readable in Russian: normal ladder recovery is shown as `Расчёт выполнен по расширенной методологии`, technical method/reason codes are translated in visible diagnostics, and ladder recovery alone is not shown as a warning. Long affected `nmId` lists, share source counts, low-confidence details, seed details and reason counters are available only in bounded expandable diagnostics and must not widen the card. Seed wording uses `SKU / направлений SKU-округ`.
   - operator-facing label for `order_batch_qty` = `Кратность штук в коробке`
   - operator-facing cycle vocabulary is unified: factory uses `Цикл заказов`, WB block uses `Цикл поставок`
   - page-load defaults are server/operator-owned contract: factory `30/30/15/15/15/14/250/14`, regional `14/7/15/15/250`, manual dates empty
@@ -285,8 +291,9 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - factory-order coverage includes `stock_total`, selected `stock_ff` source (manual Excel or 1C FF_STOCK), inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
   - regional block does not materialize inbound `ФФ -> Wildberries`; this input stays outside the current bounded scope
-  - regional result surface gives server-driven summary and a compact district table `Федеральный округ / Общее количество / Дефицит / Скачать Excel`; each row links to the existing district XLSX route for that federal district, so a duplicated lower `Excel/XLSX по округам` list is not rendered. District XLSX shape stays compact (`nmId / SKU / Количество к поставке / Дефицит`); `Количество к поставке` includes both demand-based allocation and any allocated seed-floor test box, while seed-vs-demand split stays in API/UI diagnostics.
-  - district XLSX files are keyed by the six canonical federal districts and include Russian headers `nmId / SKU / Количество к поставке / Дефицит`; the `Дефицит` value comes from the already calculated backend row-level deficit, not from browser/UI recomputation
+  - regional result surface gives server-driven summary and a compact district table immediately under the result totals: `Федеральный округ / Рекомендовано / к поставке / Дефицит / Скачать XLSX`. It shows only included districts from the latest methodology settings; excluded districts stay out of summary/download rows. Each included row links to the district XLSX route, so a duplicated lower `Excel/XLSX по округам` list is not rendered.
+  - district XLSX files are keyed by the canonical federal district keys but use stable ASCII translit filenames (`wb_regional_central_fo.xlsx`, `wb_regional_northwest_fo.xlsx`, `wb_regional_volga_fo.xlsx`, `wb_regional_ural_fo.xlsx`, `wb_regional_south_caucasus_fo.xlsx`, `wb_regional_far_siberia_fo.xlsx`) and include Russian headers `nmId / SKU / Количество к поставке / Дефицит`; the `Дефицит` value comes from the already calculated backend row-level deficit, not from browser/UI recomputation
+  - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` and button `Скачать все рекомендации` download one district XLSX per included district from the latest result. ZIP filename is `wb_regional_recommendations_<report_date>.zip`; ZIP member filenames use the same ASCII translit names and excluded districts are not included.
 - Канонический prepare output:
   - `CONFIG` с uploaded compact rows
   - `METRICS` с uploaded compact rows

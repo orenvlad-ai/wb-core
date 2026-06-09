@@ -1620,6 +1620,9 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_regional_district_recommendation_request(self, district_key: str) -> tuple[bytes, str]:
         return self.wb_regional_supply_block.download_district_recommendation(district_key)
 
+    def handle_wb_regional_recommendations_zip_request(self) -> tuple[bytes, str]:
+        return self.wb_regional_supply_block.download_all_recommendations_archive()
+
     def handle_supplier_shipments_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_shipments()
 

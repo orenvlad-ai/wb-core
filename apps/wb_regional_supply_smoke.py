@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import zipfile
 
 from openpyxl import load_workbook
 
@@ -195,10 +196,9 @@ def main() -> None:
             raise AssertionError(f"selected district diagnostics not exposed: {selected_diagnostics}")
         if DISTRICT_FAR_SIBERIA not in selected_diagnostics.get("excluded_district_keys", []):
             raise AssertionError("selected district diagnostics must include excluded far/siberia")
-        selected_far = next(item for item in selected_result.districts if item.district_key == DISTRICT_FAR_SIBERIA)
-        selected_far_main = next(row for row in selected_far.rows if row.nm_id == MAIN_NM_ID)
-        if selected_far.total_qty != 0 or selected_far_main.district_daily_demand != 0:
-            raise AssertionError("excluded district must remain visible but receive zero selected-methodology demand")
+        selected_district_keys = [item.district_key for item in selected_result.districts]
+        if selected_district_keys != [DISTRICT_CENTRAL, DISTRICT_NORTHWEST]:
+            raise AssertionError(f"selected result must expose included districts only, got {selected_district_keys}")
 
         try:
             regional_block.calculate(
@@ -220,8 +220,8 @@ def main() -> None:
 
         central_workbook, central_filename = regional_block.download_district_recommendation("central")
         central_rows = read_first_sheet_rows(central_workbook)
-        if central_filename != "Центральный федеральный округ.xlsx":
-            raise AssertionError("central district filename must be operator-friendly and Russian")
+        if central_filename != "wb_regional_central_fo.xlsx" or not _is_ascii(central_filename):
+            raise AssertionError(f"central district filename must be stable ASCII, got {central_filename!r}")
         if central_rows[0][:2] != ["Федеральный округ", "Центральный федеральный округ"]:
             raise AssertionError("district workbook must start with district identification")
         if central_rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
@@ -234,13 +234,25 @@ def main() -> None:
         if central_deficit_sum != districts["central"].deficit_qty:
             raise AssertionError("district workbook deficit sum must equal district deficit in summary")
 
-        far_workbook, far_filename = regional_block.download_district_recommendation("far_siberia")
-        far_rows = read_first_sheet_rows(far_workbook)
-        if far_filename != "Дальневосточный и Сибирский федеральный округ.xlsx":
-            raise AssertionError("far_siberia filename must follow the Russian district label")
-        if len(far_rows) != 3:
-            raise AssertionError("district with zero allocation must still materialize an empty operator-friendly workbook")
-        load_workbook(BytesIO(far_workbook), data_only=True)
+        try:
+            regional_block.download_district_recommendation("far_siberia")
+        except ValueError as exc:
+            if "Округ не участвовал в последнем расчёте: far_siberia" not in str(exc):
+                raise AssertionError(f"excluded district download must return clear error, got {exc}") from exc
+        else:
+            raise AssertionError("excluded district direct download must be blocked")
+
+        archive_bytes, archive_filename = regional_block.download_all_recommendations_archive()
+        if archive_filename != "wb_regional_recommendations_2026-04-18.zip" or not _is_ascii(archive_filename):
+            raise AssertionError(f"ZIP filename must be stable ASCII with report date, got {archive_filename!r}")
+        with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+            archive_names = sorted(archive.namelist())
+            if archive_names != ["wb_regional_central_fo.xlsx", "wb_regional_northwest_fo.xlsx"]:
+                raise AssertionError(f"ZIP must contain only included district XLSX files, got {archive_names}")
+            for name in archive_names:
+                if not _is_ascii(name):
+                    raise AssertionError(f"ZIP member filename must be ASCII, got {name!r}")
+                load_workbook(BytesIO(archive.read(name)), data_only=True)
 
         _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=False)
         _seed_runtime_stock_history(
@@ -304,6 +316,15 @@ def main() -> None:
         print(f"seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
         print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
+        print(f"recommendations_zip: ok -> {archive_names}")
+
+
+def _is_ascii(value: str) -> bool:
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _seed_runtime_sales_history(
