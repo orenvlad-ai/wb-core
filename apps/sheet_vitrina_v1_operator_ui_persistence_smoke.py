@@ -602,12 +602,21 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             },
             "summary": {"total_qty": 0, "estimated_weight": 0.0, "estimated_volume": 0.0},
             "diagnostics": {
-                "regional_demand_method": "mixed_stock_depletion_with_current_stock_share_fallback",
-                "fallback_sku_count": 32,
+                "regional_demand_method": "regional_share_ladder",
+                "sku_count": 33,
+                "fallback_sku_count": 0,
                 "fallback_nm_ids": list(range(100000001, 100000041)),
+                "share_source_counts": {
+                    "full_clean_days": 1,
+                    "partial_district_observations": 18,
+                    "sku_group_prior": 82,
+                    "global_prior": 57,
+                    "seed_floor": 7,
+                },
+                "low_confidence_sku_district_count": 24,
                 "persistent_zero_sku_count": 6,
                 "persistent_zero_nm_ids": [497413772, 497415593],
-                "persistent_zero_day_count_by_district": {
+                "zero_zero_no_signal_day_count_by_district": {
                     "south_caucasus": 28,
                     "ural": 12,
                 },
@@ -621,7 +630,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                     "497413772": {
                         "seed_district_keys": ["south_caucasus"],
                         "seed_qty_by_district": {"south_caucasus": 250},
-                        "seed_reason_by_district": {"south_caucasus": "persistent_zero_seed"},
+                        "seed_reason_by_district": {"south_caucasus": "seed_floor"},
                     }
                 },
                 "requested_valid_day_count": 14,
@@ -635,11 +644,13 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                     "district_restock_or_upward_correction": 30,
                 },
                 "method_counts": {
-                    "stock_depletion_valid_days": 1,
-                    "current_stock_share_fallback": 32,
+                    "full_clean_days": 1,
+                    "partial_district_observations": 9,
+                    "sku_group_prior": 10,
+                    "global_prior": 13,
                 },
             },
-            "warnings": ["Fallback current-stock-share used for SKU count=32"],
+            "warnings": ["Low-confidence SKU-district regional shares: 24"],
             "districts": [],
         }
         route.fulfill(
@@ -651,13 +662,16 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.route("**" + DEFAULT_WB_REGIONAL_STATUS_PATH, _capture_regional_status)
     page.route("**" + DEFAULT_WB_REGIONAL_CALCULATE_PATH, _capture_regional_calculate)
     page.click("#calculateRegionalSupplyButton")
-    page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('32 SKU рассчитаны через fallback')")
+    page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('тестовые коробки')")
     if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central", "northwest", "volga", "ural", "south_caucasus"]:
         raise AssertionError(f"regional calculate payload must include selected districts, got {regional_requests}")
     if "100000001" in page.locator("#regionalMessage").inner_text():
         raise AssertionError("regional main result message must not include long fallback nmIds")
-    if "тестовые коробки" not in page.locator("#regionalDiagnosticsNote").inner_text():
-        raise AssertionError("regional diagnostics note must include compact seed summary")
+    diagnostics_note = page.locator("#regionalDiagnosticsNote").inner_text()
+    if "тестовые коробки" not in diagnostics_note or "направлений SKU-округ" not in diagnostics_note:
+        raise AssertionError("regional diagnostics note must include compact seed direction summary")
+    if "доли:" not in diagnostics_note or "fallback: 0" not in diagnostics_note:
+        raise AssertionError(f"regional diagnostics note must include share ladder summary, got {diagnostics_note}")
     if page.locator("#regionalDiagnosticsDetails").is_hidden():
         raise AssertionError("regional diagnostics details must be visible after fallback result")
     overflow_state = page.evaluate(
@@ -675,7 +689,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError(f"regional fallback diagnostics must not overflow card, got {overflow_state}")
     if "100000001" not in str(overflow_state["detailsText"]):
         raise AssertionError("regional fallback nmIds must remain available inside diagnostics details")
-    if "persistent_zero_seed" not in str(overflow_state["detailsText"]):
+    if "seed_floor" not in str(overflow_state["detailsText"]):
         raise AssertionError("regional seed diagnostics must remain available inside diagnostics details")
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():

@@ -144,10 +144,14 @@ def main() -> None:
         if result.summary.total_qty != 100:
             raise AssertionError(f"regional summary total must reflect FF-limited allocation, got {result.summary.total_qty}")
         if result.diagnostics is None or result.diagnostics.get("regional_demand_method") not in {
-            "stock_depletion_valid_days",
-            "mixed_stock_depletion_with_current_stock_share_fallback",
+            "full_clean_days",
+            "regional_share_ladder",
         }:
-            raise AssertionError(f"result diagnostics must expose stock-depletion methodology, got {result.diagnostics}")
+            raise AssertionError(f"result diagnostics must expose share ladder methodology, got {result.diagnostics}")
+        if result.diagnostics.get("fallback_sku_count") != 0:
+            raise AssertionError(f"share ladder must not use current-stock fallback in this fixture, got {result.diagnostics}")
+        if not result.diagnostics.get("share_source_counts"):
+            raise AssertionError(f"share source counts must be exposed, got {result.diagnostics}")
         if result.diagnostics.get("requested_valid_day_count") != 14:
             raise AssertionError("result diagnostics must expose requested valid depletion day count")
         if result.settings.included_district_keys != regional_status.default_included_district_keys:
@@ -168,8 +172,8 @@ def main() -> None:
         central_main_row = next(row for row in districts["central"].rows if row.nm_id == MAIN_NM_ID)
         if not central_main_row.demand_diagnostics:
             raise AssertionError("district row must carry regional demand diagnostics")
-        if central_main_row.demand_diagnostics.get("regional_demand_method") != "stock_depletion_valid_days":
-            raise AssertionError("main SKU must use stock-depletion valid-day methodology")
+        if central_main_row.demand_diagnostics.get("regional_demand_method") != "full_clean_days":
+            raise AssertionError("main SKU must use full-clean-day methodology")
         if central_main_row.demand_diagnostics.get("selected_valid_day_count") != 14:
             raise AssertionError("main SKU must use 14 selected stock-depletion days")
         if abs(central_main_row.daily_demand_total - 60.0) > 1e-9:
@@ -238,11 +242,11 @@ def main() -> None:
             raise AssertionError("district with zero allocation must still materialize an empty operator-friendly workbook")
         load_workbook(BytesIO(far_workbook), data_only=True)
 
-        _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=True)
+        _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=False)
         _seed_runtime_stock_history(
             runtime,
             active_nm_ids=active_nm_ids,
-            all_active_signal=True,
+            all_active_signal=False,
             persistent_zero_south_for_main=True,
         )
         seed_stock_upload_rows = [list(row) for row in stock_rows]
@@ -270,32 +274,34 @@ def main() -> None:
         )
         seed_diagnostics = seed_result.diagnostics or {}
         if seed_diagnostics.get("fallback_sku_count") != 0:
-            raise AssertionError(f"persistent-zero fixture must not need current-stock fallback, got {seed_diagnostics}")
-        if seed_diagnostics.get("persistent_zero_sku_count", 0) < 1:
-            raise AssertionError(f"persistent-zero diagnostics must count affected SKU, got {seed_diagnostics}")
+            raise AssertionError(f"seed-floor fixture must not need current-stock fallback, got {seed_diagnostics}")
+        if seed_diagnostics.get("seed_floor_sku_district_count", 0) < 1:
+            raise AssertionError(f"seed-floor diagnostics must count affected SKU-districts, got {seed_diagnostics}")
         if seed_diagnostics.get("seed_sku_count") != 1 or seed_diagnostics.get("seed_allocated_qty_total") != 50:
             raise AssertionError(f"seed diagnostics must expose one allocated test box, got {seed_diagnostics}")
         seed_districts = {item.district_key: item for item in seed_result.districts}
         south_seed_row = next(row for row in seed_districts["south_caucasus"].rows if row.nm_id == MAIN_NM_ID)
         if south_seed_row.district_daily_demand != 0:
-            raise AssertionError("persistent-zero seed must not create demand-based district demand")
-        if south_seed_row.seed_qty != 50 or not south_seed_row.persistent_zero_seed_applied:
+            raise AssertionError("seed floor must not create demand-based district demand")
+        if south_seed_row.seed_qty != 50 or not south_seed_row.seed_floor_applied:
             raise AssertionError(f"south_caucasus row must carry one seed box, got {south_seed_row}")
         if south_seed_row.demand_allocated_qty != 0 or south_seed_row.allocated_qty != 50:
             raise AssertionError("seed row must separate demand allocation from test-box allocation")
+        if south_seed_row.share_source != "seed_floor":
+            raise AssertionError(f"seed row must expose seed_floor share source, got {south_seed_row}")
         if seed_result.summary.total_qty > 400:
             raise AssertionError("seed allocation must not exceed available stock_ff")
         south_workbook, _ = regional_block.download_district_recommendation("south_caucasus")
         south_rows = read_first_sheet_rows(south_workbook)
         south_allocated_sum = sum(int(row[2]) for row in south_rows[3:] if len(row) >= 3 and str(row[2]).strip())
         if south_allocated_sum != seed_districts["south_caucasus"].total_qty:
-            raise AssertionError("district XLSX total must include persistent-zero seed qty")
+            raise AssertionError("district XLSX total must include seed-floor qty")
 
         print(f"shared_stock_ff_reuse: ok -> {regional_status.shared_datasets['stock_ff'].uploaded_filename}")
         print(f"regional_total_qty: ok -> {result.summary.total_qty}")
         print(f"central_deficit: ok -> {districts['central'].deficit_qty}")
         print(f"northwest_deficit: ok -> {districts['northwest'].deficit_qty}")
-        print(f"persistent_zero_seed: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
+        print(f"seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
         print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
 

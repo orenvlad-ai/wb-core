@@ -71,6 +71,9 @@ class WbRegionalSupplyDistrictRow:
     seed_unfulfilled_qty: int = 0
     allocation_reason: str = ""
     persistent_zero_seed_applied: bool = False
+    seed_floor_applied: bool = False
+    share_source: str = ""
+    share_confidence: float = 0.0
 
 
 @dataclass(frozen=True)
