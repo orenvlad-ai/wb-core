@@ -207,7 +207,6 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
     zero_zero_no_signal_by_district: dict[str, int] = {}
     stockout_risk_by_district: dict[str, int] = {}
     restock_by_district: dict[str, int] = {}
-    warnings: list[str] = []
 
     for estimate in items:
         diagnostics = estimate.diagnostics
@@ -266,9 +265,6 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
                     confidence = 0.0
                 if confidence < OWN_HIGH_CONFIDENCE_THRESHOLD:
                     low_confidence_sku_district_count += 1
-        if estimate.warning and method != REGIONAL_SHARE_SOURCE_FULL_CLEAN_DAYS:
-            warnings.append(estimate.warning)
-
     if not items:
         return {
             "regional_demand_method": REGIONAL_SHARE_SOURCE_FULL_CLEAN_DAYS,
@@ -306,12 +302,6 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
             "Fallback current-stock-share used for SKU count="
             f"{len(fallback_sku_ids)}"
         )
-    if low_confidence_sku_district_count:
-        compact_warnings.append(
-            "Low-confidence SKU-district regional shares: "
-            f"{low_confidence_sku_district_count}"
-        )
-    compact_warnings.extend(warnings[:3])
 
     first = items[0].diagnostics
     return {

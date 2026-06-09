@@ -71,6 +71,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX,
+    DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
 )
@@ -479,6 +480,13 @@ def collect_public_surface(
             auth_cookie=auth_cookie,
         ),
         _collect_http_probe(
+            name="operator_factory_order",
+            method="GET",
+            url=f"{base_url}{route_paths['SHEET_VITRINA_OPERATOR_UI_PATH']}?embedded_tab=factory-order",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
             name="web_vitrina_page",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}",
@@ -661,6 +669,13 @@ def collect_public_surface(
             name="wb_regional_district_central",
             method="GET",
             url=f"{base_url}{DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX}/central.xlsx",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="wb_regional_recommendations_zip",
+            method="GET",
+            url=f"{base_url}{DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -1963,6 +1978,32 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "operator_factory_order":
+        body = str(result.get("body_excerpt", ""))
+        tokens = [
+            "Поставки",
+            "Общий вход для двух расчётов",
+            "Заказ на фабрике",
+            "Поставка на Wildberries",
+            "Остатки ФФ",
+            "Округа для расчёта пропорций",
+            "Скачать все рекомендации",
+            "Сводка по федеральным округам",
+            "Рекомендовано / к поставке",
+            DEFAULT_FACTORY_ORDER_STATUS_PATH,
+            DEFAULT_WB_REGIONAL_STATUS_PATH,
+            DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
+            'data-supply-section-button="regional"',
+        ]
+        missing_tokens = [token for token in tokens if token not in body]
+        evaluation["ok"] = status == 200 and "text/html" in content_type and not missing_tokens
+        evaluation["detail"] = (
+            "operator factory-order embedded panel ok"
+            if evaluation["ok"]
+            else f"expected 200 text/html with factory/regional supply tokens, missing={missing_tokens}"
+        )
+        return evaluation
+
     if route == "seller_session_check":
         json_body = result.get("json_body") or {}
         allowed_statuses = {
@@ -2120,6 +2161,15 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "wb-regional district route returned XLSX"
             if evaluation["ok"]
             else "expected XLSX content-type for successful district route"
+        )
+        return evaluation
+
+    if route == "wb_regional_recommendations_zip" and status == 200:
+        evaluation["ok"] = "application/zip" in content_type
+        evaluation["detail"] = (
+            "wb-regional recommendations ZIP route returned archive"
+            if evaluation["ok"]
+            else "expected application/zip content-type for successful recommendations ZIP route"
         )
         return evaluation
 
@@ -2399,6 +2449,16 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "wb-regional district route published with truthful 422 before calculation"
             if evaluation["ok"]
             else "expected 200 XLSX or 422 JSON error for district route"
+        )
+        return evaluation
+
+    if route == "wb_regional_recommendations_zip":
+        error_text = str(payload.get("error", "") or "")
+        evaluation["ok"] = status == 422 and bool(error_text)
+        evaluation["detail"] = (
+            "wb-regional recommendations ZIP route published with truthful 422 before calculation"
+            if evaluation["ok"]
+            else "expected 200 ZIP or 422 JSON error for recommendations ZIP route"
         )
         return evaluation
 
@@ -2785,6 +2845,7 @@ def _collect(name, method, url, json_payload=None):
 results = [
     _collect("operator", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"]),
     _collect("operator_reports", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"] + "?embedded_tab=reports"),
+    _collect("operator_factory_order", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"] + "?embedded_tab=factory-order"),
     _collect("web_vitrina_page", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_UI_PATH!r}),
     _collect("load_route", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/load"),
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
@@ -2807,6 +2868,7 @@ results = [
     _collect("wb_regional_status", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/status"),
     _collect("wb_supplies_list", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_SUPPLIES_PATH!r}),
     _collect("wb_regional_district_central", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx"),
+    _collect("wb_regional_recommendations_zip", "GET", PAYLOAD["base_url"] + {DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH!r}),
 ]
 if PAYLOAD["include_feedbacks"]:
     results.append(

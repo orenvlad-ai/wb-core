@@ -651,7 +651,63 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 },
             },
             "warnings": ["Low-confidence SKU-district regional shares: 24"],
-            "districts": [],
+            "recommendations_zip_path": "/v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip",
+            "districts": [
+                {
+                    "district_key": "central",
+                    "district_name_ru": "Центральный федеральный округ",
+                    "total_qty": 100,
+                    "deficit_qty": 10,
+                    "filename": "wb_regional_central_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx",
+                    "rows": [],
+                },
+                {
+                    "district_key": "northwest",
+                    "district_name_ru": "Северо-Западный федеральный округ",
+                    "total_qty": 200,
+                    "deficit_qty": 20,
+                    "filename": "wb_regional_northwest_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/northwest.xlsx",
+                    "rows": [],
+                },
+                {
+                    "district_key": "volga",
+                    "district_name_ru": "Приволжский федеральный округ",
+                    "total_qty": 300,
+                    "deficit_qty": 30,
+                    "filename": "wb_regional_volga_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/volga.xlsx",
+                    "rows": [],
+                },
+                {
+                    "district_key": "ural",
+                    "district_name_ru": "Уральский федеральный округ",
+                    "total_qty": 400,
+                    "deficit_qty": 40,
+                    "filename": "wb_regional_ural_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/ural.xlsx",
+                    "rows": [],
+                },
+                {
+                    "district_key": "south_caucasus",
+                    "district_name_ru": "Южный и Северо-Кавказский федеральный округ",
+                    "total_qty": 500,
+                    "deficit_qty": 50,
+                    "filename": "wb_regional_south_caucasus_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/south_caucasus.xlsx",
+                    "rows": [],
+                },
+                {
+                    "district_key": "far_siberia",
+                    "district_name_ru": "Дальневосточный и Сибирский федеральный округ",
+                    "total_qty": 600,
+                    "deficit_qty": 60,
+                    "filename": "wb_regional_far_siberia_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/far_siberia.xlsx",
+                    "rows": [],
+                },
+            ],
         }
         route.fulfill(
             status=200,
@@ -662,18 +718,43 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.route("**" + DEFAULT_WB_REGIONAL_STATUS_PATH, _capture_regional_status)
     page.route("**" + DEFAULT_WB_REGIONAL_CALCULATE_PATH, _capture_regional_calculate)
     page.click("#calculateRegionalSupplyButton")
-    page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('тестовые коробки')")
+    page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('Расчёт выполнен')")
     if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central", "northwest", "volga", "ural", "south_caucasus"]:
         raise AssertionError(f"regional calculate payload must include selected districts, got {regional_requests}")
-    if "100000001" in page.locator("#regionalMessage").inner_text():
+    regional_message = page.locator("#regionalMessage").inner_text()
+    if "100000001" in regional_message:
         raise AssertionError("regional main result message must not include long fallback nmIds")
+    if "Расчёт завершён с предупреждениями" in regional_message:
+        raise AssertionError("normal ladder recovery must not look like a warning in the main result")
+    if "Все 33 SKU рассчитаны без старого fallback" not in regional_message:
+        raise AssertionError(f"regional main result must explain fallback-free calculation, got {regional_message!r}")
+    if "Тестовые коробки: 5 SKU / 7 направлений SKU-округ, всего 1750 шт." not in regional_message:
+        raise AssertionError(f"regional main result must use SKU-district wording for seed, got {regional_message!r}")
+    for technical in ("partial_district_observations", "district_zero_zero_no_signal", "district_restock_or_upward_correction"):
+        if technical in regional_message:
+            raise AssertionError(f"technical code {technical!r} must not be visible in the main result")
     diagnostics_note = page.locator("#regionalDiagnosticsNote").inner_text()
-    if "тестовые коробки" not in diagnostics_note or "направлений SKU-округ" not in diagnostics_note:
-        raise AssertionError("regional diagnostics note must include compact seed direction summary")
-    if "доли:" not in diagnostics_note or "fallback: 0" not in diagnostics_note:
-        raise AssertionError(f"regional diagnostics note must include share ladder summary, got {diagnostics_note}")
+    if "Доли восстановлены по расширенной методологии" not in diagnostics_note or "направлений SKU-округ" not in diagnostics_note:
+        raise AssertionError(f"regional diagnostics note must include compact Russian methodology summary, got {diagnostics_note}")
+    if "Fallback на старую формулу: 0 SKU" not in diagnostics_note:
+        raise AssertionError(f"regional diagnostics note must show human fallback wording, got {diagnostics_note}")
+    for technical in ("partial_district_observations", "district_zero_zero_no_signal", "district_restock_or_upward_correction"):
+        if technical in diagnostics_note:
+            raise AssertionError(f"technical code {technical!r} must not be visible in diagnostics note")
     if page.locator("#regionalDiagnosticsDetails").is_hidden():
         raise AssertionError("regional diagnostics details must be visible after fallback result")
+    district_rows = page.locator("#regionalDistrictTableBody tr")
+    if district_rows.count() != 5:
+        raise AssertionError(f"regional district table must show only included districts, got {district_rows.count()} rows")
+    district_table_text = page.locator("#regionalDistrictTableBody").inner_text()
+    if "Дальневосточный и Сибирский" in district_table_text or "far_siberia" in district_table_text:
+        raise AssertionError(f"excluded far_siberia must not be visible in summary/download table, got {district_table_text!r}")
+    if not page.locator('input[name="regionalIncludedDistrict"][value="far_siberia"]').count():
+        raise AssertionError("excluded far_siberia must remain available in selector options")
+    if page.locator('input[name="regionalIncludedDistrict"][value="far_siberia"]').is_checked():
+        raise AssertionError("far_siberia selector checkbox must stay unchecked after exclusion")
+    if page.locator("#downloadRegionalRecommendationsZipButton").is_disabled():
+        raise AssertionError("regional ZIP download button must be enabled after successful result")
     overflow_state = page.evaluate(
         """() => {
             const card = document.querySelector('[aria-labelledby="regional-summary-title"]');
@@ -689,8 +770,20 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError(f"regional fallback diagnostics must not overflow card, got {overflow_state}")
     if "100000001" not in str(overflow_state["detailsText"]):
         raise AssertionError("regional fallback nmIds must remain available inside diagnostics details")
-    if "seed_floor" not in str(overflow_state["detailsText"]):
-        raise AssertionError("regional seed diagnostics must remain available inside diagnostics details")
+    details_text = str(overflow_state["detailsText"])
+    for expected in (
+        "Как считались доли",
+        "Частичные наблюдения по округам",
+        "пополнение или скачок остатка вверх",
+        "Нулевой остаток без сигнала по округам",
+        "Исключённые округа: Дальневосточный и Сибирский федеральный округ",
+        "тестовая поставка",
+    ):
+        if expected not in details_text:
+            raise AssertionError(f"regional diagnostics details must include {expected!r}, got {details_text!r}")
+    for technical in ("partial_district_observations", "district_zero_zero_no_signal", "district_restock_or_upward_correction", "seed_floor"):
+        if technical in details_text:
+            raise AssertionError(f"technical code {technical!r} must be translated in visible diagnostics details")
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():
         raise AssertionError("factory-order inbound source selection must survive reload")
