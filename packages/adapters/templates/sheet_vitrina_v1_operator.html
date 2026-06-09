@@ -2993,8 +2993,8 @@
                 </div>
               </div>
               <p class="field-note" id="regionalMethodologyNote">
-                Сервер использует общий файл <strong>«Остатки ФФ»</strong>, total orderCount по SKU и доли округов по валидным дням
-                исторического выбывания остатков.
+                Сервер использует общий файл <strong>«Остатки ФФ»</strong>, total orderCount по SKU и ladder долей:
+                full clean days → partial observations → group/global prior → seed floor.
               </p>
               <div class="district-selector" aria-labelledby="regionalDistrictSelectorTitle">
                 <div class="district-selector-head">
@@ -5641,8 +5641,10 @@
         const diagnostics = result.diagnostics || {};
         const parts = [];
         const method = diagnostics.regional_demand_method || "";
-        if (method === "stock_depletion_valid_days") {
-          parts.push("Метод: выбывание остатков по валидным дням");
+        if (method === "full_clean_days") {
+          parts.push("Метод: full clean days");
+        } else if (method === "regional_share_ladder") {
+          parts.push("Метод: ladder долей");
         } else if (method === "current_stock_share_fallback") {
           parts.push("Метод: fallback на текущую структуру остатков");
         } else if (method === "mixed_stock_depletion_with_current_stock_share_fallback") {
@@ -5658,14 +5660,19 @@
         }
         if (diagnostics.fallback_sku_count) {
           parts.push(valueOrDash(diagnostics.fallback_sku_count) + " SKU через fallback");
+        } else if (diagnostics.sku_count) {
+          parts.push("fallback: 0");
+        }
+        if (diagnostics.share_source_counts && typeof diagnostics.share_source_counts === "object") {
+          parts.push("доли: " + formatRegionalShareSources(diagnostics.share_source_counts));
         }
         if (diagnostics.seed_sku_count || diagnostics.seed_allocated_qty_total) {
           parts.push(
             "тестовые коробки: " +
             valueOrDash(diagnostics.seed_sku_count || 0) +
-            " SKU/" +
+            " SKU / " +
             valueOrDash(diagnostics.seed_sku_district_count || 0) +
-            " округов, " +
+            " направлений SKU-округ, " +
             valueOrDash(diagnostics.seed_allocated_qty_total || 0) +
             " шт."
           );
@@ -5695,8 +5702,8 @@
         const reasonCounts = diagnostics.excluded_day_reason_counts && typeof diagnostics.excluded_day_reason_counts === "object"
           ? diagnostics.excluded_day_reason_counts
           : {};
-        const neutralizedCounts = diagnostics.persistent_zero_day_count_by_district && typeof diagnostics.persistent_zero_day_count_by_district === "object"
-          ? diagnostics.persistent_zero_day_count_by_district
+        const neutralizedCounts = diagnostics.zero_zero_no_signal_day_count_by_district && typeof diagnostics.zero_zero_no_signal_day_count_by_district === "object"
+          ? diagnostics.zero_zero_no_signal_day_count_by_district
           : {};
         const persistentZeroNmIds = Array.isArray(diagnostics.persistent_zero_nm_ids) ? diagnostics.persistent_zero_nm_ids : [];
         const seedByNmId = diagnostics.seed_by_nm_id && typeof diagnostics.seed_by_nm_id === "object"
@@ -5707,11 +5714,13 @@
         const rows = [
           ["Округа в методологии", included.length ? included.map(regionalDistrictLabel).join(", ") : "-"],
           ["Исключённые округа", excluded.length ? excluded.map(regionalDistrictLabel).join(", ") : "-"],
+          ["Доли по источникам", formatRegionalShareSources(diagnostics.share_source_counts || {})],
+          ["Low confidence", valueOrDash(diagnostics.low_confidence_sku_district_count || 0) + " направлений SKU-округ"],
           ["Fallback SKU", fallbackNmIds.length ? fallbackNmIds.join(", ") : "-"],
           ["Persistent-zero SKU", persistentZeroNmIds.length ? persistentZeroNmIds.join(", ") : "-"],
           ["Тестовые коробки", formatRegionalSeedSummary(diagnostics)],
           ["Seed details", formatRegionalSeedByNmId(seedByNmId)],
-          ["Нейтрализованные 0 -> 0 дни", formatReasonCounts(neutralizedCounts)],
+          ["0 -> 0 no-signal дни", formatReasonCounts(neutralizedCounts)],
           ["Причины исключения дней", formatReasonCounts(reasonCounts)],
           ["Запрошено valid days", valueOrDash(diagnostics.requested_valid_day_count)],
           ["Valid days min/max", valueOrDash(diagnostics.min_selected_valid_day_count) + " / " + valueOrDash(diagnostics.max_selected_valid_day_count)],
@@ -5739,8 +5748,8 @@
           return "-";
         }
         const parts = [
-          "кандидаты: " + candidateSku + " SKU/" + candidateDistricts + " округов",
-          "выделено: " + allocatedSku + " SKU/" + allocatedDistricts + " округов, " + allocatedQty + " шт."
+          "кандидаты: " + candidateSku + " SKU / " + candidateDistricts + " направлений SKU-округ",
+          "выделено: " + allocatedSku + " SKU / " + allocatedDistricts + " направлений SKU-округ, " + allocatedQty + " шт."
         ];
         if (unfulfilledQty > 0) {
           parts.push("не хватило: " + unfulfilledQty + " шт.");
@@ -5769,6 +5778,32 @@
             : "";
           return nmId + ": " + districts + " · " + qtyByDistrict + (reasonByDistrict ? " · " + reasonByDistrict : "");
         }).join("; ");
+      }
+
+      function formatRegionalShareSources(value) {
+        if (!value || typeof value !== "object") {
+          return "-";
+        }
+        const labels = {
+          full_clean_days: "full clean",
+          partial_district_observations: "partial",
+          partial_observations_blended_with_prior: "partial+prior",
+          sku_group_prior: "group prior",
+          global_prior: "global prior",
+          seed_floor: "seed"
+        };
+        const ordered = [
+          "full_clean_days",
+          "partial_district_observations",
+          "partial_observations_blended_with_prior",
+          "sku_group_prior",
+          "global_prior",
+          "seed_floor"
+        ];
+        return ordered
+          .filter((key) => Number(value[key] || 0) > 0)
+          .map((key) => labels[key] + " " + Number(value[key] || 0))
+          .join(" / ") || "-";
       }
 
       function formatReasonCounts(value) {
@@ -6920,9 +6955,9 @@
             ? (
               "тестовые коробки: " +
               Number(diagnostics.seed_sku_count || 0) +
-              " SKU/" +
+              " SKU / " +
               Number(diagnostics.seed_sku_district_count || 0) +
-              " округов, " +
+              " направлений SKU-округ, " +
               Number(diagnostics.seed_allocated_qty_total || 0) +
               " шт."
             )

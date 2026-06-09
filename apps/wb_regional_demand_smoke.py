@@ -15,7 +15,11 @@ from packages.application.factory_order_sales_history import persist_sales_histo
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.wb_regional_demand import (
     REGIONAL_DEMAND_METHOD_STOCK_DEPLETION,
-    REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK,
+    REGIONAL_SHARE_SOURCE_GLOBAL_PRIOR,
+    REGIONAL_SHARE_SOURCE_GROUP_PRIOR,
+    REGIONAL_SHARE_SOURCE_PARTIAL_BLENDED,
+    REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS,
+    REGIONAL_SHARE_SOURCE_SEED_FLOOR,
     STOCKS_SOURCE_KEY,
     build_result_diagnostics,
     estimate_wb_regional_demand,
@@ -54,14 +58,18 @@ def main() -> None:
     _assert_zero_depletion_district_stays_present()
     _assert_far_siberia_no_depletion_stays_present()
     _assert_far_siberia_exclusion_changes_validation()
-    _assert_persistent_zero_neutralization_keeps_day_valid()
-    _assert_persistent_zero_low_current_stock_tolerance()
+    _assert_zero_zero_becomes_no_signal_without_breaking_other_districts()
+    _assert_seed_floor_uses_low_current_stock_threshold()
     _assert_positive_to_zero_remains_invalid()
     _assert_restock_remains_invalid()
     _assert_all_districts_zero_do_not_create_fake_signal()
     _assert_district_selection_validation_errors()
-    _assert_fallback_uses_selected_district_stock_share()
-    _assert_insufficient_history_uses_explicit_fallback()
+    _assert_insufficient_full_clean_uses_partial_not_current_stock_share()
+    _assert_alternating_dirty_districts_use_partial_observations()
+    _assert_partial_observations_blend_with_prior()
+    _assert_group_prior_fills_missing_district()
+    _assert_global_prior_fills_missing_district()
+    _assert_true_seed_floor_requires_no_recoverable_share()
     _assert_allocation_prefers_marginal_saved_units()
     _assert_allocation_tie_breaks()
     _assert_allocation_ff_enough_equals_full_recommendation()
@@ -240,9 +248,11 @@ def _assert_far_siberia_exclusion_changes_validation() -> None:
             },
         )
         included = _estimate(runtime, report_date)
-        _assert_method(included, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        _assert_method(included, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
         if "district_out_of_stock_risk" not in included.diagnostics.get("excluded_day_reason_counts", {}):
             raise AssertionError(f"far/siberia OOS must invalidate included-district days, got {included.diagnostics}")
+        if included.diagnostics.get("fallback_used"):
+            raise AssertionError(f"partial ladder must not use current-stock fallback, got {included.diagnostics}")
 
         excluded = _estimate(
             runtime,
@@ -262,7 +272,7 @@ def _assert_far_siberia_exclusion_changes_validation() -> None:
             raise AssertionError("diagnostics must expose excluded far/siberia district")
 
 
-def _assert_persistent_zero_neutralization_keeps_day_valid() -> None:
+def _assert_zero_zero_becomes_no_signal_without_breaking_other_districts() -> None:
     with _runtime() as runtime:
         report_date = date(2026, 5, 1)
         _seed_history(
@@ -288,17 +298,19 @@ def _assert_persistent_zero_neutralization_keeps_day_valid() -> None:
                 DISTRICT_SOUTH_CAUCASUS: 0.0,
             },
         )
-        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_DEPLETION)
-        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_SOUTH_CAUCASUS], 0.0, "persistent-zero district share")
-        if estimate.diagnostics.get("selected_valid_day_count") != 14:
-            raise AssertionError(f"persistent-zero 0->0 must not invalidate clean days, got {estimate.diagnostics}")
-        if DISTRICT_SOUTH_CAUCASUS not in estimate.diagnostics.get("persistent_zero_district_keys", []):
-            raise AssertionError(f"persistent-zero district key must be exposed, got {estimate.diagnostics}")
-        if estimate.diagnostics.get("neutralized_day_count_by_district", {}).get(DISTRICT_SOUTH_CAUCASUS) != 14:
-            raise AssertionError(f"neutralized day count must be exposed, got {estimate.diagnostics}")
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_CENTRAL], 0.5, "central partial share")
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_NORTHWEST], 0.5, "northwest partial share")
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_SOUTH_CAUCASUS], 0.0, "zero-zero district share")
+        if estimate.diagnostics.get("selected_full_clean_day_count") != 0:
+            raise AssertionError(f"0->0 must not be treated as a full clean day, got {estimate.diagnostics}")
+        if estimate.diagnostics.get("district_zero_zero_no_signal_counts", {}).get(DISTRICT_SOUTH_CAUCASUS) != 14:
+            raise AssertionError(f"0->0 no-signal count must be exposed, got {estimate.diagnostics}")
+        if estimate.diagnostics.get("district_observation_counts", {}).get(DISTRICT_CENTRAL) != 14:
+            raise AssertionError("0->0 in one district must not discard clean observations in other districts")
 
 
-def _assert_persistent_zero_low_current_stock_tolerance() -> None:
+def _assert_seed_floor_uses_low_current_stock_threshold() -> None:
     with _runtime() as runtime:
         report_date = date(2026, 5, 1)
         _seed_history(
@@ -325,11 +337,12 @@ def _assert_persistent_zero_low_current_stock_tolerance() -> None:
             },
             persistent_zero_current_stock_max_qty=49.0,
         )
-        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_DEPLETION)
-        if DISTRICT_SOUTH_CAUCASUS not in estimate.diagnostics.get("persistent_zero_district_keys", []):
-            raise AssertionError("stock below one-box threshold must be treated as no usable signal")
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
+        seed_reason = estimate.diagnostics.get("seed_reason_by_district", {})
+        if DISTRICT_SOUTH_CAUCASUS not in seed_reason:
+            raise AssertionError(f"stock below one-box threshold must be seed-floor eligible only after ladder, got {estimate.diagnostics}")
         if estimate.diagnostics.get("persistent_zero_current_stock_max_qty") != 49.0:
-            raise AssertionError(f"persistent-zero stock threshold must be diagnostic, got {estimate.diagnostics}")
+            raise AssertionError(f"stock threshold must be diagnostic, got {estimate.diagnostics}")
 
 
 def _assert_positive_to_zero_remains_invalid() -> None:
@@ -359,9 +372,11 @@ def _assert_positive_to_zero_remains_invalid() -> None:
                 DISTRICT_SOUTH_CAUCASUS: 0.0,
             },
         )
-        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
         if estimate.diagnostics.get("excluded_day_reason_counts", {}).get("district_out_of_stock_risk") != 1:
             raise AssertionError(f"positive->0 must remain OOS invalid, got {estimate.diagnostics}")
+        if estimate.diagnostics.get("district_stockout_risk_counts", {}).get(DISTRICT_SOUTH_CAUCASUS) != 1:
+            raise AssertionError(f"positive->0 must be counted as district stockout risk, got {estimate.diagnostics}")
 
 
 def _assert_restock_remains_invalid() -> None:
@@ -391,9 +406,11 @@ def _assert_restock_remains_invalid() -> None:
                 DISTRICT_SOUTH_CAUCASUS: 0.0,
             },
         )
-        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
         if estimate.diagnostics.get("excluded_day_reason_counts", {}).get("district_restock_or_upward_correction") != 1:
             raise AssertionError(f"0->positive restock must remain invalid, got {estimate.diagnostics}")
+        if estimate.diagnostics.get("district_restock_counts", {}).get(DISTRICT_SOUTH_CAUCASUS) != 1:
+            raise AssertionError(f"restock must be counted at district level, got {estimate.diagnostics}")
 
 
 def _assert_all_districts_zero_do_not_create_fake_signal() -> None:
@@ -413,9 +430,11 @@ def _assert_all_districts_zero_do_not_create_fake_signal() -> None:
             requested_valid_day_count=1,
             current_stock_by_key={key: 0.0 for key in DISTRICT_KEYS},
         )
-        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
-        if estimate.diagnostics.get("excluded_day_reason_counts", {}).get("zero_total_depletion_with_positive_order_count") != 1:
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_SEED_FLOOR)
+        if estimate.diagnostics.get("excluded_day_reason_counts", {}).get("district_zero_zero_no_signal") != 1:
             raise AssertionError(f"all-zero days must not become demand-valid, got {estimate.diagnostics}")
+        if sum(estimate.average_depletion_share_by_district.values()) != 0:
+            raise AssertionError("all-zero no-signal history must not fabricate regional shares")
 
 
 def _assert_district_selection_validation_errors() -> None:
@@ -444,7 +463,7 @@ def _assert_district_selection_validation_errors() -> None:
             raise AssertionError("invalid district key must be rejected")
 
 
-def _assert_fallback_uses_selected_district_stock_share() -> None:
+def _assert_insufficient_full_clean_uses_partial_not_current_stock_share() -> None:
     with _runtime() as runtime:
         report_date = date(2026, 5, 1)
         _seed_history(
@@ -468,43 +487,190 @@ def _assert_fallback_uses_selected_district_stock_share() -> None:
                 DISTRICT_FAR_SIBERIA: 1000.0,
             },
         )
-        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
-        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_CENTRAL], 0.25, "selected fallback central share")
-        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_NORTHWEST], 0.75, "selected fallback northwest share")
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
+        if estimate.diagnostics.get("fallback_used"):
+            raise AssertionError(f"insufficient full clean must not use current-stock fallback, got {estimate.diagnostics}")
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_CENTRAL], 1.0, "partial central share")
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_NORTHWEST], 0.0, "partial northwest zero-demand share")
         for district_key in (DISTRICT_VOLGA, DISTRICT_URAL, DISTRICT_SOUTH_CAUCASUS, DISTRICT_FAR_SIBERIA):
-            _assert_close(estimate.average_depletion_share_by_district[district_key], 0.0, f"excluded fallback share {district_key}")
+            _assert_close(estimate.average_depletion_share_by_district[district_key], 0.0, f"excluded partial share {district_key}")
 
 
-def _assert_insufficient_history_uses_explicit_fallback() -> None:
+def _assert_alternating_dirty_districts_use_partial_observations() -> None:
     with _runtime() as runtime:
-        report_date = date(2026, 5, 1)
+        report_date = date(2026, 5, 10)
+        stock = {DISTRICT_CENTRAL: 500.0, DISTRICT_NORTHWEST: 500.0}
+        for key in DISTRICT_KEYS:
+            stock.setdefault(key, 500.0)
+        first_snapshot = report_date - timedelta(days=7)
+        _save_stock_snapshot_multi(runtime, first_snapshot, {NM_ID: dict(stock)})
+        sales_items: list[SalesFunnelHistoryItem] = []
+        for offset in range(6, 0, -1):
+            snapshot_date = report_date - timedelta(days=offset)
+            if offset % 2 == 0:
+                stock[DISTRICT_CENTRAL] -= 10.0
+                stock[DISTRICT_NORTHWEST] += 5.0
+            else:
+                stock[DISTRICT_CENTRAL] += 5.0
+                stock[DISTRICT_NORTHWEST] -= 20.0
+            _save_stock_snapshot_multi(runtime, snapshot_date, {NM_ID: dict(stock)})
+            sales_items.append(
+                SalesFunnelHistoryItem(
+                    date=snapshot_date.isoformat(),
+                    nm_id=NM_ID,
+                    metric="orderCount",
+                    value=100.0,
+                )
+            )
+        _save_sales_history(runtime, sales_items)
+        estimate = _estimate(
+            runtime,
+            report_date,
+            requested_valid_day_count=6,
+            included_district_keys=(DISTRICT_CENTRAL, DISTRICT_NORTHWEST),
+        )
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
+        if estimate.diagnostics.get("selected_full_clean_day_count") != 0:
+            raise AssertionError(f"alternating dirty districts must have no full clean day, got {estimate.diagnostics}")
+        if estimate.diagnostics.get("district_observation_counts", {}).get(DISTRICT_CENTRAL) != 3:
+            raise AssertionError(f"central must keep 3 partial observations, got {estimate.diagnostics}")
+        if estimate.diagnostics.get("district_observation_counts", {}).get(DISTRICT_NORTHWEST) != 3:
+            raise AssertionError(f"northwest must keep 3 partial observations, got {estimate.diagnostics}")
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_CENTRAL], 1.0 / 3.0, "alternating central share")
+        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_NORTHWEST], 2.0 / 3.0, "alternating northwest share")
+        if estimate.diagnostics.get("fallback_used"):
+            raise AssertionError("alternating dirty fixture must not use current-stock fallback")
+
+
+def _assert_partial_observations_blend_with_prior() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 20)
+        target_nm = NM_ID
+        peer_nm = NM_ID + 1
+        _seed_peer_and_sparse_target(
+            runtime,
+            report_date=report_date,
+            target_nm=target_nm,
+            peer_nm=peer_nm,
+            target_observation_days=5,
+            target_south_no_signal=False,
+        )
+        estimates = _estimate_many(
+            runtime,
+            report_date,
+            nm_ids=[target_nm, peer_nm],
+            current_stock_by_nm={
+                target_nm: {key: 100.0 for key in DISTRICT_KEYS},
+                peer_nm: {key: 100.0 for key in DISTRICT_KEYS},
+            },
+            sku_metadata_by_nm={
+                target_nm: {"display_name": "clean iPhone 15 Pro", "group": "Clean"},
+                peer_nm: {"display_name": "clean iPhone 15 Pro", "group": "Clean"},
+            },
+        )
+        target = estimates[target_nm]
+        _assert_method(target, REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS)
+        if target.diagnostics.get("district_share_sources", {}).get(DISTRICT_CENTRAL) != REGIONAL_SHARE_SOURCE_PARTIAL_BLENDED:
+            raise AssertionError(f"low-count own observations must blend with prior, got {target.diagnostics}")
+        if target.diagnostics.get("group_prior_peer_count") != 1:
+            raise AssertionError(f"group prior peer count must be surfaced, got {target.diagnostics}")
+        if target.diagnostics.get("seed_reason_by_district"):
+            raise AssertionError(f"blended prior must avoid early seed, got {target.diagnostics}")
+
+
+def _assert_group_prior_fills_missing_district() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 20)
+        target_nm = NM_ID
+        peer_nm = NM_ID + 2
+        _seed_peer_and_sparse_target(
+            runtime,
+            report_date=report_date,
+            target_nm=target_nm,
+            peer_nm=peer_nm,
+            target_observation_days=14,
+            target_south_no_signal=True,
+        )
+        estimates = _estimate_many(
+            runtime,
+            report_date,
+            nm_ids=[target_nm, peer_nm],
+            current_stock_by_nm={
+                target_nm: {**{key: 100.0 for key in DISTRICT_KEYS}, DISTRICT_SOUTH_CAUCASUS: 0.0},
+                peer_nm: {key: 100.0 for key in DISTRICT_KEYS},
+            },
+            sku_metadata_by_nm={
+                target_nm: {"display_name": "clean iPhone 15 Pro", "group": "Clean"},
+                peer_nm: {"display_name": "clean iPhone 15 Pro", "group": "Clean"},
+            },
+        )
+        target = estimates[target_nm]
+        if target.diagnostics.get("district_share_sources", {}).get(DISTRICT_SOUTH_CAUCASUS) != REGIONAL_SHARE_SOURCE_GROUP_PRIOR:
+            raise AssertionError(f"missing target district must be filled by group prior, got {target.diagnostics}")
+        if target.average_depletion_share_by_district[DISTRICT_SOUTH_CAUCASUS] <= 0:
+            raise AssertionError("group prior must create a positive demand-based south share")
+        if target.diagnostics.get("seed_reason_by_district"):
+            raise AssertionError(f"group prior must prevent seed, got {target.diagnostics}")
+
+
+def _assert_global_prior_fills_missing_district() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 20)
+        target_nm = NM_ID
+        peer_nm = NM_ID + 3
+        _seed_peer_and_sparse_target(
+            runtime,
+            report_date=report_date,
+            target_nm=target_nm,
+            peer_nm=peer_nm,
+            target_observation_days=14,
+            target_south_no_signal=True,
+        )
+        estimates = _estimate_many(
+            runtime,
+            report_date,
+            nm_ids=[target_nm, peer_nm],
+            current_stock_by_nm={
+                target_nm: {**{key: 100.0 for key in DISTRICT_KEYS}, DISTRICT_SOUTH_CAUCASUS: 0.0},
+                peer_nm: {key: 100.0 for key in DISTRICT_KEYS},
+            },
+            sku_metadata_by_nm={
+                target_nm: {"display_name": "matte iPhone 15 Pro", "group": "Matte"},
+                peer_nm: {"display_name": "clean iPhone 15 Pro", "group": "Clean"},
+            },
+        )
+        target = estimates[target_nm]
+        if target.diagnostics.get("district_share_sources", {}).get(DISTRICT_SOUTH_CAUCASUS) != REGIONAL_SHARE_SOURCE_GLOBAL_PRIOR:
+            raise AssertionError(f"missing target district must be filled by global prior, got {target.diagnostics}")
+        if target.average_depletion_share_by_district[DISTRICT_SOUTH_CAUCASUS] <= 0:
+            raise AssertionError("global prior must create a positive demand-based south share")
+        if target.diagnostics.get("seed_reason_by_district"):
+            raise AssertionError(f"global prior must prevent seed, got {target.diagnostics}")
+
+
+def _assert_true_seed_floor_requires_no_recoverable_share() -> None:
+    with _runtime() as runtime:
+        report_date = date(2026, 5, 2)
         _seed_history(
             runtime,
             report_date=report_date,
-            requested_days=7,
-            order_count=100.0,
-            depletion_by_key={key: (10.0 if key == DISTRICT_CENTRAL else 0.0) for key in DISTRICT_KEYS},
+            requested_days=1,
+            order_count=20.0,
+            depletion_by_key={key: 0.0 for key in DISTRICT_KEYS},
+            initial_stock_by_key={key: 0.0 for key in DISTRICT_KEYS},
         )
         estimate = _estimate(
             runtime,
             report_date,
-            requested_valid_day_count=14,
-            current_stock_by_key={
-                DISTRICT_CENTRAL: 10.0,
-                DISTRICT_NORTHWEST: 30.0,
-                DISTRICT_VOLGA: 0.0,
-                DISTRICT_URAL: 0.0,
-                DISTRICT_SOUTH_CAUCASUS: 0.0,
-                DISTRICT_FAR_SIBERIA: 0.0,
-            },
+            requested_valid_day_count=1,
+            current_stock_by_key={key: 0.0 for key in DISTRICT_KEYS},
+            persistent_zero_current_stock_max_qty=49.0,
         )
-        _assert_method(estimate, REGIONAL_DEMAND_METHOD_STOCK_SHARE_FALLBACK)
-        if not estimate.diagnostics.get("fallback_used"):
-            raise AssertionError("insufficient history must use explicit fallback")
-        if "fallback" not in estimate.warning:
-            raise AssertionError("fallback must produce a human-readable warning")
-        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_CENTRAL], 0.25, "fallback central stock share")
-        _assert_close(estimate.average_depletion_share_by_district[DISTRICT_NORTHWEST], 0.75, "fallback northwest stock share")
+        _assert_method(estimate, REGIONAL_SHARE_SOURCE_SEED_FLOOR)
+        if len(estimate.diagnostics.get("seed_reason_by_district", {})) != len(DISTRICT_KEYS):
+            raise AssertionError(f"true no-signal fixture must mark every selected district seed-floor eligible, got {estimate.diagnostics}")
+        if any(value > 0 for value in estimate.average_depletion_share_by_district.values()):
+            raise AssertionError("seed floor must not fabricate a demand-based share")
 
 
 def _assert_allocation_prefers_marginal_saved_units() -> None:
@@ -605,6 +771,85 @@ def _estimate(
     return estimates[NM_ID]
 
 
+def _estimate_many(
+    runtime: RegistryUploadDbBackedRuntime,
+    report_date: date,
+    *,
+    nm_ids: list[int],
+    requested_valid_day_count: int = 14,
+    current_stock_by_nm: dict[int, dict[str, float]] | None = None,
+    included_district_keys: tuple[str, ...] | None = None,
+    persistent_zero_current_stock_max_qty: float = 0.0,
+    sku_metadata_by_nm: dict[int, dict[str, object]] | None = None,
+):
+    default_stock = {nm_id: {key: 100.0 for key in DISTRICT_KEYS} for nm_id in nm_ids}
+    if current_stock_by_nm:
+        default_stock.update(current_stock_by_nm)
+    return estimate_wb_regional_demand(
+        runtime=runtime,
+        report_date=report_date,
+        nm_ids=nm_ids,
+        requested_valid_day_count=requested_valid_day_count,
+        district_field_by_key=FIELD_BY_KEY,
+        current_stock_by_nm=default_stock,
+        included_district_keys=included_district_keys,
+        persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
+        sku_metadata_by_nm=sku_metadata_by_nm or {},
+    )
+
+
+def _seed_peer_and_sparse_target(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    report_date: date,
+    target_nm: int,
+    peer_nm: int,
+    target_observation_days: int,
+    target_south_no_signal: bool,
+) -> None:
+    first_snapshot = report_date - timedelta(days=15)
+    peer_stock = {key: 2000.0 for key in DISTRICT_KEYS}
+    target_stock = {key: 1000.0 for key in DISTRICT_KEYS}
+    if target_south_no_signal:
+        target_stock[DISTRICT_SOUTH_CAUCASUS] = 0.0
+    target_start = report_date - timedelta(days=target_observation_days + 1)
+    sales_items: list[SalesFunnelHistoryItem] = []
+    for index in range(15):
+        snapshot_date = first_snapshot + timedelta(days=index)
+        depletion_date = snapshot_date
+        if index > 0:
+            peer_stock[DISTRICT_CENTRAL] -= 20.0
+            peer_stock[DISTRICT_NORTHWEST] -= 20.0
+            peer_stock[DISTRICT_SOUTH_CAUCASUS] -= 20.0
+            if depletion_date >= target_start + timedelta(days=1):
+                target_stock[DISTRICT_CENTRAL] -= 10.0
+                if not target_south_no_signal:
+                    target_stock[DISTRICT_NORTHWEST] -= 0.0
+        rows: dict[int, dict[str, float]] = {peer_nm: dict(peer_stock)}
+        if snapshot_date >= target_start:
+            rows[target_nm] = dict(target_stock)
+        _save_stock_snapshot_multi(runtime, snapshot_date, rows)
+        if index == 0:
+            continue
+        sales_items.append(
+            SalesFunnelHistoryItem(
+                date=depletion_date.isoformat(),
+                nm_id=peer_nm,
+                metric="orderCount",
+                value=120.0,
+            )
+        )
+        sales_items.append(
+            SalesFunnelHistoryItem(
+                date=depletion_date.isoformat(),
+                nm_id=target_nm,
+                metric="orderCount",
+                value=100.0,
+            )
+        )
+    _save_sales_history(runtime, sales_items)
+
+
 def _seed_history(
     runtime: RegistryUploadDbBackedRuntime,
     *,
@@ -661,17 +906,47 @@ def _seed_history(
     )
 
 
-def _save_stock_snapshot(runtime: RegistryUploadDbBackedRuntime, snapshot_date: date, stock_by_key: dict[str, float]) -> None:
-    item = StocksItem(
-        nm_id=NM_ID,
-        stock_total=sum(float(stock_by_key[key]) for key in DISTRICT_KEYS),
-        stock_ru_central=float(stock_by_key[DISTRICT_CENTRAL]),
-        stock_ru_northwest=float(stock_by_key[DISTRICT_NORTHWEST]),
-        stock_ru_volga=float(stock_by_key[DISTRICT_VOLGA]),
-        stock_ru_ural=float(stock_by_key[DISTRICT_URAL]),
-        stock_ru_south_caucasus=float(stock_by_key[DISTRICT_SOUTH_CAUCASUS]),
-        stock_ru_far_siberia=float(stock_by_key[DISTRICT_FAR_SIBERIA]),
+def _save_sales_history(runtime: RegistryUploadDbBackedRuntime, items: list[SalesFunnelHistoryItem]) -> None:
+    dates = sorted({item.date for item in items})
+    if not dates:
+        return
+    persist_sales_history_result_exact_dates(
+        runtime=runtime,
+        payload=SalesFunnelHistorySuccess(
+            kind="success",
+            date_from=dates[0],
+            date_to=dates[-1],
+            count=len(items),
+            items=items,
+        ),
+        captured_at=NOW_ISO,
     )
+
+
+def _save_stock_snapshot(runtime: RegistryUploadDbBackedRuntime, snapshot_date: date, stock_by_key: dict[str, float]) -> None:
+    _save_stock_snapshot_multi(runtime, snapshot_date, {NM_ID: stock_by_key})
+
+
+def _save_stock_snapshot_multi(
+    runtime: RegistryUploadDbBackedRuntime,
+    snapshot_date: date,
+    stock_by_nm_key: dict[int, dict[str, float]],
+) -> None:
+    items = []
+    for nm_id, stock_by_key in stock_by_nm_key.items():
+        normalized = {key: float(stock_by_key.get(key, 0.0)) for key in DISTRICT_KEYS}
+        items.append(
+            StocksItem(
+                nm_id=int(nm_id),
+                stock_total=sum(float(normalized[key]) for key in DISTRICT_KEYS),
+                stock_ru_central=float(normalized[DISTRICT_CENTRAL]),
+                stock_ru_northwest=float(normalized[DISTRICT_NORTHWEST]),
+                stock_ru_volga=float(normalized[DISTRICT_VOLGA]),
+                stock_ru_ural=float(normalized[DISTRICT_URAL]),
+                stock_ru_south_caucasus=float(normalized[DISTRICT_SOUTH_CAUCASUS]),
+                stock_ru_far_siberia=float(normalized[DISTRICT_FAR_SIBERIA]),
+            )
+        )
     runtime.save_temporal_source_snapshot(
         source_key=STOCKS_SOURCE_KEY,
         snapshot_date=snapshot_date.isoformat(),
@@ -680,8 +955,8 @@ def _save_stock_snapshot(runtime: RegistryUploadDbBackedRuntime, snapshot_date: 
             result=StocksSuccess(
                 kind="success",
                 snapshot_date=snapshot_date.isoformat(),
-                count=1,
-                items=[item],
+                count=len(items),
+                items=items,
             )
         ),
     )

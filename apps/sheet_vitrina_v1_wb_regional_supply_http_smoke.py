@@ -202,10 +202,14 @@ def main() -> None:
                 raise AssertionError(f"regional calculate route must succeed, got {calc_status} {calc_payload}")
             diagnostics = calc_payload.get("diagnostics") or {}
             if diagnostics.get("regional_demand_method") not in {
-                "stock_depletion_valid_days",
-                "mixed_stock_depletion_with_current_stock_share_fallback",
+                "full_clean_days",
+                "regional_share_ladder",
             }:
-                raise AssertionError(f"regional diagnostics must expose stock-depletion methodology, got {diagnostics}")
+                raise AssertionError(f"regional diagnostics must expose share ladder methodology, got {diagnostics}")
+            if diagnostics.get("fallback_sku_count") != 0:
+                raise AssertionError(f"share ladder fixture must not use current-stock fallback, got {diagnostics}")
+            if not diagnostics.get("share_source_counts"):
+                raise AssertionError(f"share source counts must be exposed, got {diagnostics}")
             if diagnostics.get("requested_valid_day_count") != 14:
                 raise AssertionError("regional diagnostics must expose requested depletion day count")
             if diagnostics.get("district_selection_mode") != "all_districts":
@@ -219,8 +223,8 @@ def main() -> None:
                 raise AssertionError("regional HTTP summary total must equal the sum of district totals")
             central_main_row = next(row for row in districts["central"]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
             row_diagnostics = central_main_row.get("demand_diagnostics") or {}
-            if row_diagnostics.get("regional_demand_method") != "stock_depletion_valid_days":
-                raise AssertionError(f"main SKU must use stock-depletion diagnostics, got {row_diagnostics}")
+            if row_diagnostics.get("regional_demand_method") != "full_clean_days":
+                raise AssertionError(f"main SKU must use full-clean diagnostics, got {row_diagnostics}")
             if row_diagnostics.get("selected_valid_day_count") != 14:
                 raise AssertionError("main SKU must use 14 selected stock-depletion days")
             if abs(float(central_main_row.get("daily_demand_total", 0.0)) - 60.0) > 1e-9:
@@ -282,11 +286,11 @@ def main() -> None:
             if district_deficit_sum != districts["central"]["deficit_qty"]:
                 raise AssertionError("district XLSX deficit must match the regional summary deficit for the same district")
 
-            _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=True)
+            _seed_runtime_sales_history(runtime, active_nm_ids=active_nm_ids, all_active_signal=False)
             _seed_runtime_stock_history(
                 runtime,
                 active_nm_ids=active_nm_ids,
-                all_active_signal=True,
+                all_active_signal=False,
                 persistent_zero_south_for_main=True,
             )
             seed_stock_upload_rows = [list(row) for row in stock_rows]
@@ -316,18 +320,22 @@ def main() -> None:
                 },
             )
             if seed_status != 200:
-                raise AssertionError(f"persistent-zero seed calculate must succeed, got {seed_status} {seed_payload}")
+                raise AssertionError(f"seed-floor calculate must succeed, got {seed_status} {seed_payload}")
             seed_diagnostics = seed_payload.get("diagnostics") or {}
             if seed_diagnostics.get("fallback_sku_count") != 0:
-                raise AssertionError(f"persistent-zero fixture must not fallback, got {seed_diagnostics}")
+                raise AssertionError(f"seed-floor fixture must not fallback, got {seed_diagnostics}")
+            if seed_diagnostics.get("seed_floor_sku_district_count", 0) < 1:
+                raise AssertionError(f"HTTP seed-floor diagnostics must count affected directions, got {seed_diagnostics}")
             if seed_diagnostics.get("seed_sku_count") != 1 or seed_diagnostics.get("seed_allocated_qty_total") != 50:
                 raise AssertionError(f"HTTP seed diagnostics must expose one allocated test box, got {seed_diagnostics}")
             seed_districts = {item["district_key"]: item for item in seed_payload.get("districts", [])}
             south_seed_row = next(row for row in seed_districts["south_caucasus"]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
-            if int(south_seed_row.get("seed_qty", 0)) != 50 or not bool(south_seed_row.get("persistent_zero_seed_applied")):
+            if int(south_seed_row.get("seed_qty", 0)) != 50 or not bool(south_seed_row.get("seed_floor_applied")):
                 raise AssertionError(f"HTTP row must expose seed fields, got {south_seed_row}")
             if int(south_seed_row.get("demand_allocated_qty", -1)) != 0 or int(south_seed_row.get("allocated_qty", 0)) != 50:
                 raise AssertionError("HTTP row must separate seed qty from demand allocation")
+            if south_seed_row.get("share_source") != "seed_floor":
+                raise AssertionError(f"HTTP row must expose seed_floor share source, got {south_seed_row}")
 
             delete_status, delete_payload = _delete_json(f"{base_url}{DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH}")
             if delete_status != 200 or delete_payload.get("status") != "deleted":
@@ -351,7 +359,7 @@ def main() -> None:
             print(f"regional_central_deficit: ok -> {districts['central']['deficit_qty']}")
             print(f"regional_district_xlsx_sum: ok -> {district_qty_sum}")
             print(f"regional_district_xlsx_deficit_sum: ok -> {district_deficit_sum}")
-            print(f"regional_persistent_zero_seed: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
+            print(f"regional_seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
             print(f"regional_missing_shared_blocker: ok -> {blocked_payload.get('error')}")
         finally:
             server.shutdown()

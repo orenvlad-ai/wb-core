@@ -67,14 +67,12 @@ _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
 _DEFAULT_CYCLE_SUPPLY_DAYS = 7
 _METHODOLOGY_NOTE = (
     "Расчёт использует общий источник «Остатки ФФ» из этой же вкладки: manual Excel или read-only 1C FF_STOCK. "
-    "Сервер берёт total orderCount по SKU, а региональные доли считает по историческому "
-    "выбыванию остатков на валидных clean days по выбранным федеральным округам "
-    "(по умолчанию все 6). "
-    "sales_avg_period_days означает запрошенное число валидных дней выбывания; dirty days "
-    "исключаются целиком внутри выбранных округов, fallback на текущую структуру остатков допускается только явно "
-    "с diagnostics. Ограниченный stock_ff распределяется по коробам сначала по marginal saved units, "
-    "затем по coverage days и district demand. Exact 0->0 persistent-zero cases не ломают clean day; "
-    "для выбранных persistent-zero округов может добавляться отдельная тестовая коробка, чтобы собрать будущий signal."
+    "Сервер берёт total orderCount по SKU, а региональные доли восстанавливает по ladder: "
+    "full clean days -> partial district-day observations -> SKU group prior -> global prior -> seed floor. "
+    "sales_avg_period_days означает запрошенное число качественных дней; dirty district/day cells не ломают "
+    "наблюдения других округов. Current-stock-share fallback не является нормальным путём. "
+    "Ограниченный stock_ff распределяется по коробам сначала по marginal saved units, затем по coverage days "
+    "и district demand. Seed floor: только тестовая коробка для сбора будущего сигнала, а не расчётная доля спроса."
 )
 
 
@@ -143,6 +141,7 @@ class WbRegionalSupplyBlock:
         report_date_obj = date.fromisoformat(report_date)
 
         nm_ids = [nm_id for nm_id, _ in active_skus]
+        sku_metadata_by_nm = self._load_active_sku_metadata()
         stock_response = self.stocks_block.execute(
             StocksRequest(
                 snapshot_type="stocks",
@@ -181,6 +180,7 @@ class WbRegionalSupplyBlock:
             current_stock_by_nm=current_stock_by_nm,
             included_district_keys=settings.included_district_keys,
             persistent_zero_current_stock_max_qty=max(float(settings.order_batch_qty - 1), 0.0),
+            sku_metadata_by_nm=sku_metadata_by_nm,
         )
         result_diagnostics = _build_regional_demand_result_diagnostics(regional_demand_by_nm)
         district_rows_by_key: dict[str, list[WbRegionalSupplyDistrictRow]] = {key: [] for key in DISTRICT_KEYS}
@@ -241,7 +241,7 @@ class WbRegionalSupplyBlock:
                 available_stock_ff=float(stock_ff_by_nm.get(nm_id, 0.0)),
                 order_batch_qty=settings.order_batch_qty,
             )
-            seed_recommendation_by_key = _persistent_zero_seed_recommendation_by_key(
+            seed_recommendation_by_key = _seed_floor_recommendation_by_key(
                 demand_diagnostics=demand_estimate.diagnostics,
                 district_stock_by_key=district_stock_by_key,
                 district_daily_demand_by_key=district_daily_demand_by_key,
@@ -280,9 +280,6 @@ class WbRegionalSupplyBlock:
             if seed_candidate_keys:
                 seed_by_nm_id[str(nm_id)] = {
                     "nm_id": int(nm_id),
-                    "persistent_zero_district_keys": list(
-                        demand_estimate.diagnostics.get("persistent_zero_district_keys") or []
-                    ),
                     "seed_district_keys": seed_candidate_keys,
                     "seed_allocated_district_keys": seed_allocated_keys,
                     "seed_unfulfilled_district_keys": seed_unfulfilled_keys,
@@ -295,9 +292,15 @@ class WbRegionalSupplyBlock:
                         for key in seed_candidate_keys
                     },
                     "seed_reason_by_district": {
-                        key: "persistent_zero_seed"
+                        key: str(
+                            dict(demand_estimate.diagnostics.get("seed_reason_by_district") or {}).get(
+                                key,
+                                "seed_floor",
+                            )
+                        )
                         for key in seed_candidate_keys
                     },
+                    "seed_note": "Это тестовая поставка для сбора будущего сигнала, а не расчётная доля спроса.",
                 }
             for district_key in DISTRICT_KEYS:
                 demand_allocated_qty = int(demand_allocated_by_key.get(district_key, 0))
@@ -308,6 +311,13 @@ class WbRegionalSupplyBlock:
                 full_recommendation_qty = demand_recommendation_qty + seed_recommendation_qty
                 allocated_qty = demand_allocated_qty + seed_qty
                 row_diagnostics = dict(demand_estimate.diagnostics)
+                share_sources = dict(demand_estimate.diagnostics.get("district_share_sources") or {})
+                share_confidences = dict(demand_estimate.diagnostics.get("confidence_by_district") or {})
+                share_source = str(share_sources.get(district_key) or "")
+                try:
+                    share_confidence = float(share_confidences.get(district_key, 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    share_confidence = 0.0
                 if seed_recommendation_qty > 0:
                     row_diagnostics["seed_district_keys"] = seed_candidate_keys
                     row_diagnostics["seed_qty_by_district"] = {
@@ -319,14 +329,24 @@ class WbRegionalSupplyBlock:
                         for key in seed_candidate_keys
                     }
                     row_diagnostics["seed_reason_by_district"] = {
-                        key: "persistent_zero_seed"
+                        key: str(
+                            dict(demand_estimate.diagnostics.get("seed_reason_by_district") or {}).get(
+                                key,
+                                "seed_floor",
+                            )
+                        )
                         for key in seed_candidate_keys
                     }
+                row_diagnostics["share_source"] = share_source
+                row_diagnostics["share_confidence"] = share_confidence
+                row_diagnostics["demand_recommendation_qty"] = demand_recommendation_qty
+                row_diagnostics["seed_qty"] = seed_qty
                 allocation_reason = "demand_based"
                 if seed_qty > 0:
-                    allocation_reason = "demand_based_plus_persistent_zero_seed" if demand_allocated_qty > 0 else "persistent_zero_seed"
+                    allocation_reason = "demand_based_plus_seed_floor" if demand_allocated_qty > 0 else "seed_floor"
                 elif seed_recommendation_qty > 0:
-                    allocation_reason = "persistent_zero_seed_unfulfilled"
+                    allocation_reason = "seed_floor_unfulfilled"
+                row_diagnostics["allocation_reason"] = allocation_reason
                 district_rows_by_key[district_key].append(
                     WbRegionalSupplyDistrictRow(
                         nm_id=nm_id,
@@ -356,6 +376,9 @@ class WbRegionalSupplyBlock:
                         seed_unfulfilled_qty=seed_unfulfilled_qty,
                         allocation_reason=allocation_reason,
                         persistent_zero_seed_applied=seed_qty > 0,
+                        seed_floor_applied=seed_qty > 0,
+                        share_source=share_source,
+                        share_confidence=share_confidence,
                     )
                 )
 
@@ -375,7 +398,7 @@ class WbRegionalSupplyBlock:
         warnings = [str(item) for item in result_diagnostics.get("warnings", []) if item]
         if seed_unfulfilled_qty_total > 0:
             warnings.append(
-                "Не хватило stock_ff для всех тестовых коробок persistent-zero: "
+                "Не хватило stock_ff для всех тестовых коробок seed floor: "
                 f"{int(seed_unfulfilled_qty_total)} шт."
             )
         result_diagnostics["warnings"] = warnings
@@ -443,6 +466,17 @@ class WbRegionalSupplyBlock:
             key=lambda item: item.display_order,
         )
         return [(int(item.nm_id), str(item.display_name)) for item in enabled]
+
+    def _load_active_sku_metadata(self) -> dict[int, dict[str, Any]]:
+        current_state = self.runtime.load_current_state()
+        return {
+            int(item.nm_id): {
+                "display_name": str(item.display_name),
+                "group": str(getattr(item, "group", "") or ""),
+            }
+            for item in current_state.config_v2
+            if item.enabled
+        }
 
     def _load_shared_stock_ff_state(self) -> FactoryOrderDatasetState:
         payload = self.runtime.load_factory_order_dataset_state(DATASET_STOCK_FF)
@@ -604,6 +638,9 @@ class WbRegionalSupplyBlock:
                             seed_unfulfilled_qty=int(row.get("seed_unfulfilled_qty", 0)),
                             allocation_reason=str(row.get("allocation_reason", "") or ""),
                             persistent_zero_seed_applied=bool(row.get("persistent_zero_seed_applied", False)),
+                            seed_floor_applied=bool(row.get("seed_floor_applied", row.get("persistent_zero_seed_applied", False))),
+                            share_source=str(row.get("share_source", "") or ""),
+                            share_confidence=float(row.get("share_confidence", 0.0) or 0.0),
                         )
                         for row in item.get("rows", [])
                         if isinstance(row, Mapping)
@@ -903,7 +940,7 @@ def _allocate_boxes(
     return allocated
 
 
-def _persistent_zero_seed_recommendation_by_key(
+def _seed_floor_recommendation_by_key(
     *,
     demand_diagnostics: Mapping[str, Any],
     district_stock_by_key: Mapping[str, float],
@@ -916,13 +953,9 @@ def _persistent_zero_seed_recommendation_by_key(
     if float(daily_demand_total) <= 0 or int(order_batch_qty) <= 0:
         return seed
     included = set(included_district_keys)
-    persistent_zero_keys = {
-        str(item)
-        for item in list(demand_diagnostics.get("persistent_zero_district_keys") or [])
-        if str(item) in DISTRICT_KEYS
-    }
+    seed_reasons = dict(demand_diagnostics.get("seed_reason_by_district") or {})
     for key in DISTRICT_KEYS:
-        if key not in included or key not in persistent_zero_keys:
+        if key not in included or key not in seed_reasons:
             continue
         if float(district_daily_demand_by_key.get(key, 0.0) or 0.0) != 0.0:
             continue
