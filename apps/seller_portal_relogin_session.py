@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -129,6 +129,10 @@ class ReloginSessionConfig:
     def backup_state_path(self) -> Path:
         timestamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
         return self.state_dir / f"storage_state.backup.{timestamp}.json"
+
+    @property
+    def probe_history_path(self) -> Path:
+        return self.state_dir / "session_probe_history.jsonl"
 
     @property
     def xvfb_log_path(self) -> Path:
@@ -342,6 +346,7 @@ def read_session_status(
         payload.setdefault("finished_at", _iso_now())
     if with_probe:
         payload["current_storage_probe"] = probe_storage_state(config.storage_state_path, wb_bot_python=config.wb_bot_python)
+        _append_session_probe_history(config, payload["current_storage_probe"])
     if requested_run_id and requested_run_id != current_run_id:
         payload = _build_requested_run_mismatch_payload(payload, requested_run_id=requested_run_id)
     payload["run_id"] = str(payload.get("run_id") or "")
@@ -600,26 +605,39 @@ def run_login_capture(
                                 "supplier_context": read_storage_state_supplier_context(config.candidate_state_path),
                             },
                         )
+                        backup_path: Path | None = None
                         if config.storage_state_path.exists():
-                            config.storage_state_path.replace(config.backup_state_path)
-                        context.storage_state(path=str(config.storage_state_path))
-                        if organization_switch_applied:
-                            _rewrite_storage_state_supplier(
-                                config.storage_state_path,
-                                supplier_id=str(config.canonical_supplier_id or "").strip(),
-                            )
+                            backup_path = config.backup_state_path
+                            shutil.copy2(config.storage_state_path, backup_path)
+                        staged_path = config.state_dir / f"storage_state.staged.{uuid4().hex}.json"
+                        shutil.copy2(config.candidate_state_path, staged_path)
+                        staged_path.replace(config.storage_state_path)
                         _write_status(
                             config,
                             {
                                 "status": "validating_session",
                                 "message": "seller storage_state.json saved; validating the updated seller session",
                                 "supplier_context": read_storage_state_supplier_context(config.storage_state_path),
+                                "storage_state_write": {
+                                    "protocol": "validated_candidate_atomic_replace",
+                                    "backup_path": str(backup_path or ""),
+                                    "candidate_path": str(config.candidate_state_path),
+                                },
                             },
                         )
                         validated_payload = probe(config.storage_state_path)
                         if not bool(validated_payload.get("ok")):
+                            rollback_payload: dict[str, Any] = {}
+                            if backup_path is not None and backup_path.exists():
+                                shutil.copy2(backup_path, config.storage_state_path)
+                                rollback_payload = probe(config.storage_state_path)
                             raise RuntimeError(
                                 "saved seller storage_state.json did not pass validation after relogin"
+                                + (
+                                    "; previous storage_state restored from backup"
+                                    if rollback_payload
+                                    else "; no previous backup was available"
+                                )
                             )
                         _write_status(
                             config,
@@ -708,9 +726,12 @@ def probe_storage_state(storage_state_path: Path, *, wb_bot_python: Path) -> dic
             "ok": False,
             "status": "seller_portal_session_missing",
             "message": "storage_state.json is missing",
+            "storage_state_meta": _public_storage_state_metadata(storage_state_path),
         }
     if not wb_bot_python.exists():
-        return _build_storage_probe_unavailable_payload(wb_bot_python)
+        payload = _build_storage_probe_unavailable_payload(wb_bot_python)
+        payload["storage_state_meta"] = _public_storage_state_metadata(storage_state_path)
+        return payload
     try:
         probe = subprocess.run(
             [
@@ -725,7 +746,9 @@ def probe_storage_state(storage_state_path: Path, *, wb_bot_python: Path) -> dic
             timeout=60,
         )
     except (FileNotFoundError, PermissionError) as exc:
-        return _build_storage_probe_unavailable_payload(wb_bot_python, detail=str(exc))
+        payload = _build_storage_probe_unavailable_payload(wb_bot_python, detail=str(exc))
+        payload["storage_state_meta"] = _public_storage_state_metadata(storage_state_path)
+        return payload
     stdout = str(probe.stdout or "").strip()
     stderr = str(probe.stderr or "").strip()
     payload: dict[str, Any]
@@ -741,6 +764,7 @@ def probe_storage_state(storage_state_path: Path, *, wb_bot_python: Path) -> dic
     if stderr:
         payload["stderr_tail"] = stderr[-1000:]
     payload.setdefault("supplier_context", read_storage_state_supplier_context(storage_state_path))
+    payload.setdefault("storage_state_meta", _public_storage_state_metadata(storage_state_path))
     return payload
 
 
@@ -1522,6 +1546,160 @@ def read_storage_state_supplier_context(storage_state_path: Path) -> dict[str, A
         "analytics_user_id": analytics_user_id,
         "unique_supplier_ids": unique_supplier_ids,
     }
+
+
+def _public_storage_state_metadata(storage_state_path: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "path": str(storage_state_path),
+        "exists": storage_state_path.exists(),
+    }
+    if not storage_state_path.exists():
+        return payload
+    try:
+        stat = storage_state_path.stat()
+    except OSError:
+        return payload
+    payload.update(
+        {
+            "size": stat.st_size,
+            "mtime": _iso_at(datetime.fromtimestamp(stat.st_mtime, UTC)),
+            "ctime": _iso_at(datetime.fromtimestamp(stat.st_ctime, UTC)),
+            "sha256": _sha256_file(storage_state_path),
+        }
+    )
+    try:
+        raw = json.loads(storage_state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        payload.update({"json_ok": False, "json_error": type(exc).__name__})
+        return payload
+    if not isinstance(raw, dict):
+        payload.update({"json_ok": False, "json_error": type(raw).__name__})
+        return payload
+    cookies = [item for item in (raw.get("cookies") or []) if isinstance(item, dict)]
+    origins = [item for item in (raw.get("origins") or []) if isinstance(item, dict)]
+    seller_cookies = [
+        item
+        for item in cookies
+        if "seller.wildberries.ru" in str(item.get("domain") or "")
+    ]
+    now = time.time()
+    expiries = [
+        float(item.get("expires"))
+        for item in seller_cookies
+        if isinstance(item.get("expires"), (int, float)) and float(item.get("expires")) > 0
+    ]
+    seller_local_storage_names: set[str] = set()
+    for origin in origins:
+        if str(origin.get("origin") or "").strip() != DEFAULT_SELLER_URL:
+            continue
+        for item in origin.get("localStorage") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                seller_local_storage_names.add(name)
+    payload.update(
+        {
+            "json_ok": True,
+            "cookie_count": len(cookies),
+            "origin_count": len(origins),
+            "seller_cookie_count": len(seller_cookies),
+            "seller_cookie_names": sorted(
+                {
+                    str(item.get("name") or "").strip()
+                    for item in seller_cookies
+                    if str(item.get("name") or "").strip()
+                }
+            ),
+            "seller_cookie_expired_count": sum(1 for value in expiries if value <= now),
+            "seller_cookie_expiry_min": _iso_at(datetime.fromtimestamp(min(expiries), UTC)) if expiries else "",
+            "seller_cookie_expiry_max": _iso_at(datetime.fromtimestamp(max(expiries), UTC)) if expiries else "",
+            "seller_local_storage_names": sorted(seller_local_storage_names),
+        }
+    )
+    return payload
+
+
+def _append_session_probe_history(config: ReloginSessionConfig, probe_payload: Mapping[str, Any]) -> None:
+    try:
+        config.state_dir.mkdir(parents=True, exist_ok=True)
+        history_item = _session_probe_history_item(probe_payload)
+        with config.probe_history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(history_item, ensure_ascii=False, separators=(",", ":")) + "\n")
+        _trim_probe_history(config.probe_history_path)
+    except Exception:
+        return
+
+
+def _session_probe_history_item(probe_payload: Mapping[str, Any]) -> dict[str, Any]:
+    supplier_context = probe_payload.get("supplier_context") if isinstance(probe_payload, Mapping) else {}
+    storage_meta = probe_payload.get("storage_state_meta") if isinstance(probe_payload, Mapping) else {}
+    return {
+        "checked_at": _iso_now(),
+        "ok": bool(probe_payload.get("ok")),
+        "status": _safe_text(str(probe_payload.get("status") or ""), 120),
+        "reason": _safe_text(str(probe_payload.get("reason") or ""), 160),
+        "final_url": _sanitize_probe_url(str(probe_payload.get("final_url") or "")),
+        "title": _safe_text(str(probe_payload.get("title") or ""), 220),
+        "has_validate_401": bool(probe_payload.get("has_validate_401")),
+        "auth_validate_statuses": [
+            int(item)
+            for item in (probe_payload.get("auth_validate_statuses") or [])
+            if isinstance(item, int)
+        ][-10:],
+        "body_markers": dict(probe_payload.get("body_markers") or {}),
+        "supplier_context": supplier_context if isinstance(supplier_context, Mapping) else {},
+        "storage_state_meta": storage_meta if isinstance(storage_meta, Mapping) else {},
+    }
+
+
+def _trim_probe_history(path: Path, *, keep_last: int = 200) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    if len(lines) <= keep_last:
+        return
+    path.write_text("\n".join(lines[-keep_last:]) + "\n", encoding="utf-8")
+
+
+def _sanitize_probe_url(value: str) -> str:
+    parsed = urllib_parse.urlsplit(str(value or ""))
+    if not parsed.scheme or not parsed.netloc:
+        return _safe_text(str(value or ""), 500)
+    safe_query: list[tuple[str, str]] = []
+    for key, item in urllib_parse.parse_qsl(parsed.query, keep_blank_values=True):
+        if any(marker in key.lower() for marker in ("token", "code", "secret", "session", "signature", "sig")):
+            safe_query.append((key, "[redacted]"))
+        else:
+            safe_query.append((key, item))
+    return urllib_parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urllib_parse.urlencode(safe_query),
+            "",
+        )
+    )
+
+
+def _safe_text(value: str, max_length: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max(0, max_length - 1)] + "…"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
 def _rewrite_storage_state_supplier(storage_state_path: Path, *, supplier_id: str) -> None:

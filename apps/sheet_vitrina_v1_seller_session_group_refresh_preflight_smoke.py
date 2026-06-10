@@ -76,15 +76,25 @@ def _assert_session_probe_payload_normalization() -> None:
         ),
         (
             "session_invalid",
-            {"current_storage_probe": {"ok": False, "status": "seller_portal_session_invalid"}},
+            {
+                "current_storage_probe": {
+                    "ok": False,
+                    "status": "seller_portal_session_invalid",
+                    "reason": "validate_401",
+                    "has_validate_401": True,
+                }
+            },
+            "validate_401",
         ),
         (
             "session_missing",
             {"current_storage_probe": {"ok": False, "status": "seller_portal_session_missing"}},
+            "",
         ),
         (
             "session_probe_error",
             {"current_storage_probe": {"ok": False, "status": "seller_portal_session_probe_failed"}},
+            "",
         ),
         (
             "session_valid_wrong_org",
@@ -98,9 +108,14 @@ def _assert_session_probe_payload_normalization() -> None:
                     },
                 }
             },
+            "",
         ),
     ]
-    for expected_status, raw in cases:
+    normalized_cases = [
+        item if len(item) == 3 else (item[0], item[1], "")
+        for item in cases
+    ]
+    for expected_status, raw, expected_reason in normalized_cases:
         payload = _build_seller_portal_session_check_payload(
             raw,
             config=config,
@@ -110,6 +125,8 @@ def _assert_session_probe_payload_normalization() -> None:
             raise AssertionError(f"expected {expected_status}, got {payload}")
         if payload.get("storage_state_path") != "/opt/wb-web-bot/storage_state.json":
             raise AssertionError(f"session payload must expose sanitized storage path, got {payload}")
+        if expected_reason and payload.get("probe_reason") != expected_reason:
+            raise AssertionError(f"session payload must expose normalized probe reason {expected_reason!r}, got {payload}")
 
 
 def _assert_invalid_session_blocks_heavy_group_refresh() -> None:
@@ -119,6 +136,7 @@ def _assert_invalid_session_blocks_heavy_group_refresh() -> None:
             "status_label": "Нужен вход",
             "status_tone": "error",
             "summary": "Сохранённая seller-сессия больше не действует.",
+            "probe_reason": "login_redirect",
             "instruction": "Нажмите «Восстановить сессию».",
             "storage_state_path": "/opt/wb-web-bot/storage_state.json",
         }
@@ -143,6 +161,8 @@ def _assert_invalid_session_blocks_heavy_group_refresh() -> None:
         raise AssertionError(f"action_required result must identify the group, got {result}")
     if result.get("session_status") != "session_invalid" or not result.get("action_required"):
         raise AssertionError(f"action_required result must carry session status/action, got {result}")
+    if result.get("session_probe_reason") != "login_redirect":
+        raise AssertionError(f"action_required result must preserve probe reason, got {result}")
     if invalid.check_calls != 1:
         raise AssertionError(f"seller session preflight must run exactly once, got {invalid.check_calls}")
 

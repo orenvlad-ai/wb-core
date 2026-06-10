@@ -673,23 +673,64 @@ with sync_playwright() as playwright:
 
 login_redirect = "seller-auth.wildberries.ru" in final_url
 has_validate_401 = 401 in auth_validate_statuses
-login_markers = any(
-    marker in body_text
-    for marker in (
-        "вход в wb партнёры",
-        "введите номер телефона",
-        "войти",
-        "seller-auth",
-    )
-)
+body_markers = {
+    "login_page": any(
+        marker in body_text
+        for marker in (
+            "вход в wb партнёры",
+            "вход на портал",
+            "введите номер телефона",
+            "войти",
+            "seller-auth",
+        )
+    ),
+    "captcha_or_challenge": any(
+        marker in body_text
+        for marker in (
+            "captcha",
+            "капча",
+            "подтвердите, что вы не робот",
+            "checking your browser",
+            "security check",
+            "challenge",
+        )
+    ),
+    "access_denied": any(
+        marker in body_text
+        for marker in (
+            "доступ запрещ",
+            "access denied",
+            "forbidden",
+        )
+    ),
+}
+login_markers = bool(body_markers["login_page"])
 ok = not login_redirect and not has_validate_401 and not login_markers
+if ok:
+    reason = "valid"
+elif login_redirect:
+    reason = "login_redirect"
+elif has_validate_401:
+    reason = "validate_401"
+elif body_markers["captcha_or_challenge"]:
+    reason = "security_challenge"
+elif body_markers["access_denied"]:
+    reason = "access_denied"
+elif login_markers:
+    reason = "login_page"
+else:
+    reason = "unknown_invalid"
 print(
     json.dumps(
         {
             "ok": ok,
             "status": "ok" if ok else "seller_portal_session_invalid",
+            "reason": reason,
             "final_url": final_url,
             "title": title,
+            "body_markers": body_markers,
+            "body_excerpt": body_text[:360] if not ok else "",
+            "auth_validate_statuses": auth_validate_statuses[-10:],
             "has_validate_401": has_validate_401,
             "supplier_context": {
                 "current_supplier_id": current_supplier_id,

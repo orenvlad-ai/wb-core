@@ -130,7 +130,7 @@ class _FakeSellerRecoveryController:
             "status_label": "Нужен вход",
             "status_tone": "error",
             "summary": "Сохранённая seller-сессия больше не действует.",
-            "instruction": "Нажмите «Восстановить сессию» и войдите через launcher для Mac.",
+            "instruction": "Нажмите «Восстановить сессию»: launcher скачается автоматически после готовности окна входа.",
             "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
             "running": self.running,
             "can_start": True,
@@ -152,7 +152,7 @@ class _FakeSellerRecoveryController:
                 status="error",
                 launcher_download_path=launcher_download_path,
                 summary="Текущий launcher больше не смотрит на свой запуск: этот recovery run уже не является текущим.",
-                instruction="Откройте operator page заново и скачайте launcher для нового запуска.",
+                instruction="Откройте operator page заново и при необходимости запустите восстановление для нового launcher.",
                 running=False,
                 launcher_enabled=False,
             )
@@ -170,7 +170,7 @@ class _FakeSellerRecoveryController:
             return self._build_run_payload(
                 status="awaiting_login",
                 launcher_download_path=launcher_download_path,
-                summary="Временное окно входа готово. Откройте launcher и войдите в seller portal.",
+                summary="Временное окно входа готово. Откройте скачанный launcher и войдите в seller portal.",
                 instruction="После входа система сама сохранит storage_state.json и завершит текущий запуск.",
                 running=True,
                 launcher_enabled=True,
@@ -188,7 +188,7 @@ class _FakeSellerRecoveryController:
             status="idle",
             launcher_download_path=launcher_download_path,
             summary="Новый запуск восстановления сейчас не выполняется. Сохранённая seller-сессия больше не действует.",
-            instruction="Нажмите «Восстановить сессию», затем скачайте launcher и выполните вход.",
+            instruction="Нажмите «Восстановить сессию»: launcher скачается автоматически после готовности окна входа.",
             running=False,
             launcher_enabled=False,
         )

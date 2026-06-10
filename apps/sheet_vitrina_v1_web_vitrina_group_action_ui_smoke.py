@@ -78,13 +78,18 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
             page.wait_for_function(
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
-                  return !!node && node.textContent.includes('Сессия Seller: актуальна');
+                  return !!node
+                    && node.textContent.trim() === 'сессия'
+                    && node.classList.contains('tone-success')
+                    && !node.querySelector('[data-session-recovery-start]');
                 }""",
                 timeout=10000,
             )
             initial_payload = page.evaluate(
                 """() => ({
                   seller_top_text: document.querySelector('[data-seller-top-session]').textContent.trim(),
+                  seller_top_class: document.querySelector('[data-seller-top-session]').className,
+                  seller_top_recovery_buttons: document.querySelectorAll('[data-seller-top-session] [data-session-recovery-start]').length,
                   shell_hidden: document.querySelector('[data-loading-table-shell]').classList.contains('is-hidden'),
                   empty_hidden: document.querySelector('[data-loading-table-empty]').classList.contains('is-hidden'),
                   empty_text: document.querySelector('[data-loading-table-empty]').textContent.trim(),
@@ -104,7 +109,9 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 or initial_payload["source_row_count"] != 0
                 or initial_payload["empty_source_rows"] != 0
                 or "не OK" in initial_payload["empty_text"]
-                or "Сессия Seller: актуальна" not in initial_payload["seller_top_text"]
+                or initial_payload["seller_top_text"] != "сессия"
+                or "tone-success" not in initial_payload["seller_top_class"]
+                or initial_payload["seller_top_recovery_buttons"] != 0
             ):
                 raise AssertionError(f"initial source status surface must be lazy/neutral, got {initial_payload}")
             if refresh_hits["count"] != 0:
@@ -193,11 +200,13 @@ def _assert_group_action_launch_error() -> None:
                   log_text: document.querySelector('[data-activity-log-body]').textContent.trim(),
                   top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
                   request_date: document.querySelector('[data-refresh-source-group-date="wb_api"]').value,
-                  session_controls: document.querySelectorAll('[data-session-check]').length
+                  session_check_controls: document.querySelectorAll('[data-session-check]').length,
+                  session_recovery_controls: document.querySelectorAll('[data-session-recovery-start]').length,
+                  session_launcher_controls: document.querySelectorAll('[data-session-launcher]').length
                 })"""
             )
-            if payload["session_controls"] != 1:
-                raise AssertionError(f"session-check controls must remain rendered, got {payload}")
+            if payload["session_check_controls"] != 0 or payload["session_recovery_controls"] != 1 or payload["session_launcher_controls"] != 0:
+                raise AssertionError(f"seller session controls must render one recovery action and no mandatory launcher/check action, got {payload}")
             if payload["top_status_badge_count"] != 0:
                 raise AssertionError(f"top status badge must not be rendered, got {payload}")
 
@@ -325,17 +334,29 @@ def _assert_seller_session_invalid_top_action() -> None:
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
                   return !!node
-                    && node.textContent.includes('Сессия Seller: требуется вход')
-                    && !!node.querySelector('[data-session-recovery-start]');
+                    && node.textContent.trim() === 'сессия'
+                    && node.classList.contains('tone-error')
+                    && node.classList.contains('is-actionable')
+                    && !node.querySelector('[data-session-recovery-start]');
                 }""",
                 timeout=10000,
             )
             with page.expect_response("**/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start") as response_info:
-                page.locator("[data-seller-top-session] [data-session-recovery-start]").click()
+                page.locator("[data-seller-top-session]").click()
             response = response_info.value
             if response.status != 202 or recovery_hits["count"] != 1:
                 raise AssertionError(f"invalid seller session action must call existing recovery start route, got {response.status} / {recovery_hits}")
-            print("web_vitrina_seller_session_invalid_action: ok -> top indicator exposes recovery action")
+            page.wait_for_function(
+                """() => {
+                  const node = document.querySelector('[data-seller-top-session]');
+                  return !!node
+                    && node.textContent.trim() === 'сессия'
+                    && node.classList.contains('tone-warning')
+                    && !node.classList.contains('is-actionable');
+                }""",
+                timeout=5000,
+            )
+            print("web_vitrina_seller_session_invalid_action: ok -> compact top indicator starts one-click recovery")
             browser.close()
 
 

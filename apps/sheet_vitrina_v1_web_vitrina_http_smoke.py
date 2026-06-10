@@ -430,9 +430,8 @@ def main() -> None:
                 "data-loading-table-body",
                 "Загрузка данных",
                 "Обновить группу",
-                "Проверить сессию",
+                "data-seller-top-session",
                 "Восстановить сессию",
-                "Скачать лаунчер",
                 "seller_recovery_status_path",
                 "Лог",
             ):
