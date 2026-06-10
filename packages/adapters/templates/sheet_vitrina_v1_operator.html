@@ -2114,6 +2114,93 @@
       align-items: end;
     }
 
+    .wb-supplies-status-filter {
+      position: relative;
+    }
+
+    .wb-supplies-status-filter-button {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+      text-align: left;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+
+    .wb-supplies-status-filter-button:hover,
+    .wb-supplies-status-filter-button:focus-visible {
+      border-color: var(--accent-border);
+      outline: none;
+    }
+
+    .wb-supplies-status-menu {
+      position: absolute;
+      z-index: 12;
+      top: calc(100% + 6px);
+      left: 0;
+      width: min(310px, 88vw);
+      max-height: 360px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #11141a;
+      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.36);
+      padding: 10px;
+    }
+
+    .wb-supplies-status-actions {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    .wb-supplies-status-actions button {
+      min-height: 30px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--muted-strong);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      padding: 4px 8px;
+    }
+
+    .wb-supplies-status-actions button:hover {
+      border-color: var(--accent-border);
+      color: var(--text);
+    }
+
+    .wb-supplies-status-options {
+      display: grid;
+      gap: 6px;
+    }
+
+    .wb-supplies-status-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 30px;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.25;
+      cursor: pointer;
+    }
+
+    .wb-supplies-status-option input {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+      accent-color: #8b5cf6;
+    }
+
     .wb-supplies-message {
       margin: 12px 0 0;
       min-height: 18px;
@@ -3199,10 +3286,18 @@
                 </select>
               </div>
               <div class="field">
-                <label for="wbSuppliesStatusSelect">Статус</label>
-                <select id="wbSuppliesStatusSelect">
-                  <option value="">Все статусы</option>
-                </select>
+                <label for="wbSuppliesStatusMenuButton">Статус</label>
+                <div class="wb-supplies-status-filter" id="wbSuppliesStatusFilter">
+                  <button id="wbSuppliesStatusMenuButton" class="wb-supplies-status-filter-button" type="button" aria-haspopup="true" aria-expanded="false">Статусы: все</button>
+                  <div id="wbSuppliesStatusMenu" class="wb-supplies-status-menu" hidden>
+                    <div class="wb-supplies-status-actions" aria-label="Быстрый выбор статусов">
+                      <button type="button" data-wb-supplies-status-action="all">Все</button>
+                      <button type="button" data-wb-supplies-status-action="active">Активные</button>
+                      <button type="button" data-wb-supplies-status-action="reset">Сброс</button>
+                    </div>
+                    <div id="wbSuppliesStatusOptions" class="wb-supplies-status-options"></div>
+                  </div>
+                </div>
               </div>
               <div class="field">
                 <label for="wbSuppliesSizeFilterSelect">Размер поставки</label>
@@ -3492,7 +3587,10 @@
       const wbSuppliesSupplyDateSortArrow = document.getElementById("wbSuppliesSupplyDateSortArrow");
       const wbSuppliesSearchInput = document.getElementById("wbSuppliesSearchInput");
       const wbSuppliesWarehouseSelect = document.getElementById("wbSuppliesWarehouseSelect");
-      const wbSuppliesStatusSelect = document.getElementById("wbSuppliesStatusSelect");
+      const wbSuppliesStatusFilter = document.getElementById("wbSuppliesStatusFilter");
+      const wbSuppliesStatusMenuButton = document.getElementById("wbSuppliesStatusMenuButton");
+      const wbSuppliesStatusMenu = document.getElementById("wbSuppliesStatusMenu");
+      const wbSuppliesStatusOptions = document.getElementById("wbSuppliesStatusOptions");
       const wbSuppliesSizeFilterSelect = document.getElementById("wbSuppliesSizeFilterSelect");
       const wbSuppliesMessage = document.getElementById("wbSuppliesMessage");
       const wbSuppliesSummary = document.getElementById("wbSuppliesSummary");
@@ -3548,6 +3646,8 @@
       );
       const WB_SUPPLIES_DEFAULT_SIZE_FILTER = "main_250";
       const WB_SUPPLIES_DEFAULT_LIMIT = 20;
+      const WB_SUPPLIES_OFFICIAL_STATUS_IDS = [1, 2, 3, 4, 5, 6];
+      const WB_SUPPLIES_ACTIVE_STATUS_IDS = [2, 3, 4, 5, 6];
       const STOCK_REPORT_DISTRICT_COLUMNS = [
         { metric_key: "stock_ru_central", label: "Центр", title: "Центральный" },
         { metric_key: "stock_ru_northwest", label: "СЗ", title: "Северо-Западный" },
@@ -3635,15 +3735,19 @@
       let wbSuppliesDetailLoading = false;
       let wbSuppliesBackfillPollHandle = 0;
       let wbSuppliesSearchTimer = 0;
+      let wbSuppliesLoadSeq = 0;
+      let wbSuppliesSyncSeq = 0;
       const wbSuppliesState = {
-        search: "",
-        warehouse_id: "",
-        status_id: "",
-        size_filter: WB_SUPPLIES_DEFAULT_SIZE_FILTER,
-        limit: WB_SUPPLIES_DEFAULT_LIMIT,
+        search: String(persistedOperatorUiState.wb_supplies_search || "").trim(),
+        warehouse_id: String(persistedOperatorUiState.wb_supplies_warehouse_id || "").trim(),
+        status_ids: normalizeWbSuppliesStatusIds(
+          persistedOperatorUiState.wb_supplies_status_ids || persistedOperatorUiState.wb_supplies_status_id
+        ),
+        size_filter: normalizeWbSuppliesSizeFilter(persistedOperatorUiState.wb_supplies_size_filter),
+        limit: normalizeWbSuppliesLimit(persistedOperatorUiState.wb_supplies_limit),
         offset: 0,
         sort_key: "supply_date",
-        sort_dir: "desc"
+        sort_dir: normalizeWbSuppliesSortDir(persistedOperatorUiState.wb_supplies_sort_dir)
       };
 
       function readPersistedOperatorUiState() {
@@ -3682,6 +3786,70 @@
         } catch (error) {
           return;
         }
+      }
+
+      function normalizeWbSuppliesStatusIds(value) {
+        const rawValues = Array.isArray(value)
+          ? value
+          : String(value || "").split(",");
+        const result = [];
+        rawValues.forEach((item) => {
+          const numeric = Number(String(item || "").trim());
+          if (Number.isInteger(numeric) && numeric > 0 && !result.includes(numeric)) {
+            result.push(numeric);
+          }
+        });
+        return result;
+      }
+
+      function normalizeWbSuppliesSizeFilter(value) {
+        const normalized = String(value || "").trim();
+        return ["main_250", "all", "small_lt_250"].includes(normalized) ? normalized : WB_SUPPLIES_DEFAULT_SIZE_FILTER;
+      }
+
+      function normalizeWbSuppliesLimit(value) {
+        const numeric = Number(value || WB_SUPPLIES_DEFAULT_LIMIT);
+        return [20, 50, 100].includes(numeric) ? numeric : WB_SUPPLIES_DEFAULT_LIMIT;
+      }
+
+      function normalizeWbSuppliesSortDir(value) {
+        const normalized = String(value || "").trim().toLowerCase();
+        return normalized === "asc" || normalized === "desc" ? normalized : "desc";
+      }
+
+      function persistWbSuppliesState() {
+        writePersistedOperatorUiState({
+          wb_supplies_search: wbSuppliesState.search,
+          wb_supplies_warehouse_id: wbSuppliesState.warehouse_id,
+          wb_supplies_status_ids: wbSuppliesState.status_ids.slice(),
+          wb_supplies_size_filter: wbSuppliesState.size_filter,
+          wb_supplies_limit: wbSuppliesState.limit,
+          wb_supplies_sort_dir: wbSuppliesState.sort_dir
+        });
+      }
+
+      function sortedWbSuppliesStatusIds(values) {
+        return normalizeWbSuppliesStatusIds(values).sort((left, right) => left - right);
+      }
+
+      function wbSuppliesStatusSummary(options) {
+        const selected = sortedWbSuppliesStatusIds(wbSuppliesState.status_ids);
+        if (!selected.length) {
+          return "Статусы: все";
+        }
+        const byId = new Map((options || []).map((item) => [Number(item.value), String(item.label || item.value)]));
+        if (selected.length === 1) {
+          return byId.get(selected[0]) || ("Статус " + selected[0]);
+        }
+        return "Статусы: " + selected.length;
+      }
+
+      function setWbSuppliesStatusMenuOpen(isOpen) {
+        if (!wbSuppliesStatusMenu || !wbSuppliesStatusMenuButton) {
+          return;
+        }
+        wbSuppliesStatusMenu.hidden = !isOpen;
+        wbSuppliesStatusMenuButton.setAttribute("aria-expanded", isOpen ? "true" : "false");
       }
 
       function normalizePersistedSectionName(value, validValues, fallbackValue) {
@@ -6152,8 +6320,9 @@
         if (wbSuppliesState.warehouse_id) {
           params.set("warehouse_id", wbSuppliesState.warehouse_id);
         }
-        if (wbSuppliesState.status_id) {
-          params.set("status_id", wbSuppliesState.status_id);
+        const statusIds = sortedWbSuppliesStatusIds(wbSuppliesState.status_ids);
+        if (statusIds.length) {
+          params.set("status_ids", statusIds.join(","));
         }
         params.set("size_filter", wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER);
         params.set("limit", String(wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT));
@@ -6164,9 +6333,11 @@
       }
 
       async function loadWbSupplies(options) {
-        if (!config.wb_supplies_path || wbSuppliesLoading) {
+        if (!config.wb_supplies_path) {
           return;
         }
+        const requestSeq = wbSuppliesLoadSeq + 1;
+        wbSuppliesLoadSeq = requestSeq;
         wbSuppliesLoading = true;
         updateWbSuppliesBusyState();
         setWbSuppliesMessage("Читаем cache...", "");
@@ -6180,21 +6351,29 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
+          if (requestSeq !== wbSuppliesLoadSeq) {
+            return;
+          }
           wbSuppliesPayload = payload;
           renderWbSupplies(payload);
           if (options && options.initial && payload.meta && payload.meta.cache_empty && !wbSuppliesSyncing) {
             await syncWbSupplies({ initial: true, limit: 1000, offset: 0 });
           }
         } catch (error) {
+          if (requestSeq !== wbSuppliesLoadSeq) {
+            return;
+          }
           setWbSuppliesMessage(
             "Не удалось прочитать поставки WB: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
           renderWbSuppliesRows([]);
         } finally {
-          wbSuppliesLoading = false;
-          updateWbSuppliesBusyState();
-          scheduleEmbeddedHeightPost();
+          if (requestSeq === wbSuppliesLoadSeq) {
+            wbSuppliesLoading = false;
+            updateWbSuppliesBusyState();
+            scheduleEmbeddedHeightPost();
+          }
         }
       }
 
@@ -6202,10 +6381,22 @@
         if (!config.wb_supplies_sync_path || wbSuppliesSyncing) {
           return;
         }
+        const requestSeq = wbSuppliesSyncSeq + 1;
+        wbSuppliesSyncSeq = requestSeq;
         const request = {
           mode: "incremental_refresh",
           limit: options && options.limit ? Number(options.limit) : 1000,
-          enrich: "changed_only"
+          enrich: "changed_only",
+          list_params: {
+            search: wbSuppliesState.search,
+            warehouse_id: wbSuppliesState.warehouse_id,
+            status_ids: sortedWbSuppliesStatusIds(wbSuppliesState.status_ids),
+            size_filter: wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER,
+            limit: wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT,
+            offset: wbSuppliesState.offset || 0,
+            sort_key: wbSuppliesState.sort_key || "supply_date",
+            sort_dir: wbSuppliesState.sort_dir || "desc"
+          }
         };
         wbSuppliesSyncing = true;
         updateWbSuppliesBusyState();
@@ -6223,22 +6414,26 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
+          if (requestSeq !== wbSuppliesSyncSeq) {
+            return;
+          }
           if (options && typeof options.targetOffset === "number") {
             wbSuppliesState.offset = Math.max(0, options.targetOffset);
             await loadWbSupplies({ skipInitialSync: true });
             return;
           }
-          wbSuppliesPayload = payload;
-          renderWbSupplies(payload);
           const sync = payload.sync || {};
-          setWbSuppliesMessage(
-            "Incremental refresh завершён: new " + valueOrDash(sync.new_rows) +
-              ", changed " + valueOrDash(sync.changed_rows) +
-              ", unchanged " + valueOrDash(sync.unchanged_rows) +
-              ", enriched " + valueOrDash(sync.enriched) + ".",
-            sync.failed_enrich ? "warning" : ""
-          );
+          const syncMessage = "Incremental refresh завершён: new " + valueOrDash(sync.new_rows) +
+            ", changed " + valueOrDash(sync.changed_rows) +
+            ", unchanged " + valueOrDash(sync.unchanged_rows) +
+            ", enriched " + valueOrDash(sync.enriched) + ".";
+          const syncTone = sync.failed_enrich ? "warning" : "";
+          await loadWbSupplies({ skipInitialSync: true });
+          setWbSuppliesMessage(syncMessage, syncTone);
         } catch (error) {
+          if (requestSeq !== wbSuppliesSyncSeq) {
+            return;
+          }
           setWbSuppliesMessage(
             "WB supplies sync не выполнен: " + (error instanceof Error ? error.message : String(error)),
             "error"
@@ -6359,11 +6554,7 @@
           [{ value: "", label: "Все склады" }].concat(options.warehouses || []),
           wbSuppliesState.warehouse_id
         );
-        renderSelectOptions(
-          wbSuppliesStatusSelect,
-          [{ value: "", label: "Все статусы" }].concat(options.statuses || []),
-          wbSuppliesState.status_id
-        );
+        renderWbSuppliesStatusOptions(options.statuses || []);
         if (wbSuppliesSizeFilterSelect) {
           wbSuppliesSizeFilterSelect.value = wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER;
         }
@@ -6384,6 +6575,43 @@
         }).join("");
       }
 
+      function renderWbSuppliesStatusOptions(rawOptions) {
+        const optionsById = new Map();
+        (rawOptions || []).forEach((item) => {
+          const value = Number(item && item.value);
+          if (Number.isInteger(value) && value > 0) {
+            optionsById.set(value, { value, label: String(item.label || ("Статус " + value)) });
+          }
+        });
+        WB_SUPPLIES_OFFICIAL_STATUS_IDS.forEach((statusId) => {
+          if (!optionsById.has(statusId)) {
+            optionsById.set(statusId, { value: statusId, label: "Статус " + statusId });
+          }
+        });
+        sortedWbSuppliesStatusIds(wbSuppliesState.status_ids).forEach((statusId) => {
+          if (!optionsById.has(statusId)) {
+            optionsById.set(statusId, { value: statusId, label: "Статус " + statusId });
+          }
+        });
+        const options = Array.from(optionsById.values()).sort((left, right) => Number(left.value) - Number(right.value));
+        const selected = new Set(sortedWbSuppliesStatusIds(wbSuppliesState.status_ids));
+        if (wbSuppliesStatusMenuButton) {
+          wbSuppliesStatusMenuButton.textContent = wbSuppliesStatusSummary(options);
+        }
+        if (!wbSuppliesStatusOptions) {
+          return;
+        }
+        wbSuppliesStatusOptions.innerHTML = options.map((item) => {
+          const value = Number(item.value);
+          return [
+            "<label class=\"wb-supplies-status-option\">",
+            "<input type=\"checkbox\" value=\"" + escapeHtml(String(value)) + "\" data-wb-supplies-status-checkbox" + (selected.has(value) ? " checked" : "") + ">",
+            "<span>" + escapeHtml(item.label || ("Статус " + value)) + "</span>",
+            "</label>"
+          ].join("");
+        }).join("");
+      }
+
       function renderWbSuppliesSummary(payload) {
         if (!wbSuppliesSummary) {
           return;
@@ -6392,9 +6620,11 @@
         const meta = payload && payload.meta ? payload.meta : {};
         const state = payload && payload.sync_state ? payload.sync_state : {};
         const activeRun = payload && payload.active_run ? payload.active_run : null;
+        const statusOptions = (((payload && payload.filters) || {}).options || {}).statuses || [];
         const items = [
           "В cache: " + valueOrDash(summary.cached_total_rows),
           "После фильтров: " + valueOrDash(summary.filtered_rows),
+          wbSuppliesStatusSummary(statusOptions),
           "Скрыто размером: " + valueOrDash(summary.hidden_by_size_filter_count),
           "Unknown qty: " + valueOrDash(summary.unknown_quantity_count),
           "История: " + valueOrDash(state.cache_completeness_label || meta.cache_completeness_label || summary.cache_completeness),
@@ -6635,24 +6865,44 @@
       }
 
       function formatWbDateRange(row) {
-        const start = formatShortRuDate(row && row.supply_date);
-        const end = formatShortRuDate(row && row.fact_date);
+        if (row && row.supply_date_range_display) {
+          return row.supply_date_range_display;
+        }
+        const startDate = parseWbIsoDate(row && row.supply_date);
+        const endDate = parseWbIsoDate(row && row.fact_date);
+        const includeYear = Boolean(startDate && endDate && startDate.getTime() !== endDate.getTime() && (
+          startDate.getUTCFullYear() !== endDate.getUTCFullYear() || startDate.getUTCFullYear() !== new Date().getFullYear()
+        ));
+        const start = formatShortRuDate(startDate, { forceYear: includeYear });
+        const end = formatShortRuDate(endDate, { forceYear: includeYear });
         if (start && end && start !== end) {
           return start + " → " + end;
         }
         return start || end || "—";
       }
 
-      function formatShortRuDate(value) {
+      function parseWbIsoDate(value) {
         const datePart = String(value || "").slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
-          return "";
+          return null;
         }
         const parsed = new Date(datePart + "T00:00:00Z");
         if (!Number.isFinite(parsed.getTime())) {
+          return null;
+        }
+        return parsed;
+      }
+
+      function formatShortRuDate(value, options) {
+        const parsed = value instanceof Date ? value : parseWbIsoDate(value);
+        if (!parsed) {
           return "";
         }
-        return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", timeZone: "UTC" }).format(parsed);
+        const dateOptions = { day: "numeric", month: "long", timeZone: "UTC" };
+        if ((options && options.forceYear) || parsed.getUTCFullYear() !== new Date().getFullYear()) {
+          dateOptions.year = "numeric";
+        }
+        return new Intl.DateTimeFormat("ru-RU", dateOptions).format(parsed);
       }
 
       function formatWbNumber(value) {
@@ -7611,6 +7861,7 @@
         wbSuppliesState.sort_key = "supply_date";
         wbSuppliesState.sort_dir = wbSuppliesState.sort_dir === "asc" ? "desc" : "asc";
         wbSuppliesState.offset = 0;
+        persistWbSuppliesState();
         loadWbSupplies({ skipInitialSync: true });
       });
       wbSuppliesSearchInput.addEventListener("input", () => {
@@ -7618,29 +7869,74 @@
         wbSuppliesSearchTimer = window.setTimeout(() => {
           wbSuppliesState.search = String(wbSuppliesSearchInput.value || "").trim();
           wbSuppliesState.offset = 0;
+          persistWbSuppliesState();
           loadWbSupplies({ skipInitialSync: true });
         }, 250);
       });
       wbSuppliesWarehouseSelect.addEventListener("change", () => {
         wbSuppliesState.warehouse_id = String(wbSuppliesWarehouseSelect.value || "").trim();
         wbSuppliesState.offset = 0;
+        persistWbSuppliesState();
         loadWbSupplies({ skipInitialSync: true });
       });
-      wbSuppliesStatusSelect.addEventListener("change", () => {
-        wbSuppliesState.status_id = String(wbSuppliesStatusSelect.value || "").trim();
-        wbSuppliesState.offset = 0;
-        loadWbSupplies({ skipInitialSync: true });
-      });
+      if (wbSuppliesStatusMenuButton) {
+        wbSuppliesStatusMenuButton.addEventListener("click", () => {
+          setWbSuppliesStatusMenuOpen(wbSuppliesStatusMenu ? wbSuppliesStatusMenu.hidden : true);
+        });
+      }
+      if (wbSuppliesStatusOptions) {
+        wbSuppliesStatusOptions.addEventListener("change", (event) => {
+          const checkbox = event.target.closest("[data-wb-supplies-status-checkbox]");
+          if (!checkbox) {
+            return;
+          }
+          const selected = Array.from(wbSuppliesStatusOptions.querySelectorAll("[data-wb-supplies-status-checkbox]:checked"))
+            .map((item) => Number(item.value))
+            .filter((value) => Number.isInteger(value) && value > 0);
+          wbSuppliesState.status_ids = sortedWbSuppliesStatusIds(selected);
+          wbSuppliesState.offset = 0;
+          persistWbSuppliesState();
+          loadWbSupplies({ skipInitialSync: true });
+        });
+      }
+      if (wbSuppliesStatusFilter) {
+        wbSuppliesStatusFilter.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-wb-supplies-status-action]");
+          if (!action) {
+            return;
+          }
+          const actionName = String(action.getAttribute("data-wb-supplies-status-action") || "");
+          if (actionName === "active") {
+            wbSuppliesState.status_ids = WB_SUPPLIES_ACTIVE_STATUS_IDS.slice();
+          } else {
+            wbSuppliesState.status_ids = [];
+          }
+          wbSuppliesState.offset = 0;
+          persistWbSuppliesState();
+          renderWbSuppliesStatusOptions((((wbSuppliesPayload || {}).filters || {}).options || {}).statuses || []);
+          loadWbSupplies({ skipInitialSync: true });
+        });
+      }
       wbSuppliesSizeFilterSelect.addEventListener("change", () => {
         wbSuppliesState.size_filter = String(wbSuppliesSizeFilterSelect.value || "").trim() || WB_SUPPLIES_DEFAULT_SIZE_FILTER;
         wbSuppliesState.offset = 0;
+        persistWbSuppliesState();
         loadWbSupplies({ skipInitialSync: true });
       });
       wbSuppliesPageSizeSelect.addEventListener("change", () => {
         const nextLimit = Number(wbSuppliesPageSizeSelect.value || WB_SUPPLIES_DEFAULT_LIMIT);
         wbSuppliesState.limit = [20, 50, 100].includes(nextLimit) ? nextLimit : WB_SUPPLIES_DEFAULT_LIMIT;
         wbSuppliesState.offset = 0;
+        persistWbSuppliesState();
         loadWbSupplies({ skipInitialSync: true });
+      });
+      document.addEventListener("click", (event) => {
+        if (!wbSuppliesStatusFilter || !wbSuppliesStatusMenu || wbSuppliesStatusMenu.hidden) {
+          return;
+        }
+        if (!wbSuppliesStatusFilter.contains(event.target)) {
+          setWbSuppliesStatusMenuOpen(false);
+        }
       });
       wbSuppliesPageButtons.addEventListener("click", (event) => {
         const button = event.target.closest("[data-wb-supplies-offset]");
@@ -7763,12 +8059,16 @@
       }
       setFactoryInboundSource(factoryInboundSource, { persist: false });
       setStockFfSource(stockFfSource, { persist: false });
+      if (wbSuppliesSearchInput) {
+        wbSuppliesSearchInput.value = wbSuppliesState.search || "";
+      }
       if (wbSuppliesSizeFilterSelect) {
-        wbSuppliesSizeFilterSelect.value = WB_SUPPLIES_DEFAULT_SIZE_FILTER;
+        wbSuppliesSizeFilterSelect.value = wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER;
       }
       if (wbSuppliesPageSizeSelect) {
-        wbSuppliesPageSizeSelect.value = String(WB_SUPPLIES_DEFAULT_LIMIT);
+        wbSuppliesPageSizeSelect.value = String(wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT);
       }
+      renderWbSuppliesStatusOptions([]);
       activateTab(
         isEmbeddedMode ? configuredInitialTab : (persistedOperatorUiState.active_tab || DEFAULT_ACTIVE_TAB),
         { persist: !isEmbeddedMode }
