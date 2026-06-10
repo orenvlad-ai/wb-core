@@ -319,6 +319,8 @@ def main() -> None:
                 "wb_regional_default_included_district_keys": list(DISTRICT_KEYS),
                 "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
                 "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
+                "wb_supplies_backfill_path": "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
+                "wb_supplies_sync_status_path": "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
                 "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
                 "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
                 "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,

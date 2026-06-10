@@ -20,13 +20,19 @@ related_modules:
 related_tables:
   - "sheet_vitrina_v1_wb_supplies"
   - "sheet_vitrina_v1_wb_supplies_sync_state"
+  - "sheet_vitrina_v1_wb_supplies_sync_runs"
   - "sheet_vitrina_v1_wb_supplies_warehouses"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync"
+  - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}"
 related_runners:
   - "apps/wb_supplies_api_adapter_smoke.py"
+  - "apps/wb_supplies_backfill_live.py"
+  - "apps/wb_supplies_backfill_smoke.py"
+  - "apps/wb_supplies_incremental_sync_smoke.py"
   - "apps/wb_supplies_live_diagnostics.py"
   - "apps/wb_supplies_normalization_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
@@ -35,7 +41,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry now has field-level route/warehouse/quantity/cost evidence normalization, 1000-row latest-window sync and sanitized live diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry now separates quick incremental latest-window refresh from resumable full history backfill, stores sync runs/progress and raw hashes, sorts by supply date before pagination, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -76,8 +82,9 @@ update_note: "Read-only WB/FBW supplies registry now has field-level route/wareh
 Runtime truth is server-owned SQLite under `RegistryUploadDbBackedRuntime`.
 
 Tables:
-- `sheet_vitrina_v1_wb_supplies`: primary cached rows keyed by normalized `supply_id`, normalized row JSON, raw list/detail/goods/package evidence, `warehouse_id`, `status_id`, `quantity_for_size_filter`, source dates and `synced_at`.
-- `sheet_vitrina_v1_wb_supplies_sync_state`: `last_synced_at`, `last_successful_sync_at`, `last_error`, `last_limit`, `last_offset`, `latest_synced_count`.
+- `sheet_vitrina_v1_wb_supplies`: primary cached rows keyed by legacy-compatible normalized `supply_id`, plus explicit stable `cache_key` (`supply:<supplyID>` / `preorder:<preorderID>`), normalized row JSON, sanitized raw list/detail/goods/package evidence, `wb_supply_id`, `preorder_id`, `warehouse_id`, `status_id`, `quantity_for_size_filter`, source dates, raw evidence hashes, `last_list_synced_at`, `last_enriched_at`, `enrichment_status` and `enrichment_error`.
+- `sheet_vitrina_v1_wb_supplies_sync_state`: last sync fields plus `backfill_complete`, `backfill_started_at`, `backfill_completed_at`, `highest_synced_offset`, `last_successful_offset`, `last_mode`, latest-window counters, `may_have_more` and sanitized `last_error`.
+- `sheet_vitrina_v1_wb_supplies_sync_runs`: per-run progress for `incremental_refresh`, `full_backfill` and future `enrich_missing`: status/phase, offset/limit, pages/raw/upserted/new/changed/unchanged/enriched/failed counters, `may_have_more`, last error and compact sanitized logs.
 - `sheet_vitrina_v1_wb_supplies_warehouses`: cached warehouse dictionary/options.
 
 The cache is an operator registry/cache only:
@@ -98,7 +105,9 @@ Query params:
 - `status_id`;
 - `size_filter = main_250 | all | small_lt_250`;
 - `limit = 20 | 50 | 100`;
-- `offset`.
+- `offset`;
+- `sort_key = supply_date`;
+- `sort_dir = asc | desc`.
 
 Response shape:
 - `contract_name = sheet_vitrina_v1_wb_supplies`;
@@ -109,15 +118,40 @@ Response shape:
 - `pagination`;
 - `schema.columns`;
 - `rows`.
+- `sync_state`;
+- `active_run` when a backfill/latest run is still queued/running.
 
 `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync`
 
-Performs a bounded upstream fetch and DB upsert.
+Performs ordinary incremental/latest-window refresh. It must not full-scan history.
 
 Body:
+- `mode`, default `incremental_refresh`;
 - `limit`, default `1000`, max `1000`;
-- `offset`, default `0`;
-- `enrich_details`, default `true`.
+- `enrich`, default `changed_only`.
+
+Algorithm:
+- fetch latest page/window from official WB API at `offset=0`;
+- calculate stable `raw_list_hash`;
+- upsert and enrich only new rows, rows whose `updatedDate`/raw hash changed, or rows with missing critical fields that have not already had a failed/attempted enrichment;
+- unchanged historical rows are counted as `unchanged` and do not call detail/goods again.
+
+`POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill`
+
+Starts background full history backfill and returns `202` with `run_id`.
+
+Body:
+- `limit`, default/max `1000`;
+- `start_offset`, default `0`;
+- `resume`, default `true`;
+- `enrich`, default `true`;
+- optional `max_pages` for diagnostic bounded runs.
+
+Full backfill walks `POST /api/v1/supplies?limit=<limit>&offset=<offset>` until a short/empty upstream page proves the end of available API history. It saves progress after each page, uses idempotent upsert, never deletes old rows just because a page omits them, and can resume from `highest_synced_offset` after 429/timeout/non-JSON/upstream failures.
+
+`GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status?run_id=...`
+
+Returns the requested run or active run plus sync state and cached row count.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 
@@ -186,6 +220,10 @@ Summary exposes:
 - `unknown_quantity_count`;
 - threshold `250`.
 - cache completeness label; if the last upstream page was full, the UI reports that history may still be incomplete.
+- explicit states:
+  - `История: latest window only`;
+  - `История: частично загружена до offset N`;
+  - `История: полная загрузка завершена`.
 
 # 7. UI
 
@@ -220,8 +258,32 @@ The status selector always exposes the official status set `1..6`, even before r
 
 First open behavior:
 - GET reads cache;
-- if cache is empty, the authenticated UI starts bounded `POST .../sync` with `limit=1000`;
+- if cache is empty, the authenticated UI starts bounded incremental latest-window `POST .../sync` with `limit=1000`;
 - if token/API is unavailable, the UI shows a controlled error instead of a silent empty table.
+
+Buttons:
+- `Обновить поставки` = incremental latest-window refresh only; it does not scan all offsets and does not re-enrich unchanged rows.
+- `Загрузить всю историю` = one-time full backfill job; UI polls `sync-status` and shows offset/pages/fetched/upserted/enriched counters and last error.
+
+Sorting:
+- `Дата поставки` is clickable and toggles `asc/desc`.
+- Sort is server-side over all filtered rows before pagination.
+- Date sort key priority is `supply_date`, then `fact_date`, then `updated_date`, then `source_created_at`, then stable id.
+
+Error diagnostics:
+- WB adapter checks status/content-type/body before JSON parsing.
+- Upstream HTML/empty/non-JSON responses become controlled `WbSuppliesTransportError`/`WbSuppliesHttpStatusError` with sanitized status, content-type and body prefix.
+- WebCore routes return JSON errors for controlled failures.
+- UI non-JSON fallback displays route/status/content-type/body prefix; login HTML is shown as a session-expired/auth hint.
+
+Operational full backfill command:
+
+```bash
+WB_API_TOKEN=... REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state \
+  python3 apps/wb_supplies_backfill_live.py --limit 1000
+```
+
+The runner prints compact progress/result JSON without secrets and exits non-zero if full history cannot be marked complete.
 
 # 8. Diagnostics And Smokes
 
@@ -232,6 +294,8 @@ Live diagnostics:
 Targeted smokes:
 - `python3 apps/wb_supplies_api_adapter_smoke.py`;
 - `python3 apps/wb_supplies_normalization_smoke.py`;
+- `python3 apps/wb_supplies_backfill_smoke.py`;
+- `python3 apps/wb_supplies_incremental_sync_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_http_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py`.
 

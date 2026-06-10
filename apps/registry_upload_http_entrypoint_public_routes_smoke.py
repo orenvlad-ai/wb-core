@@ -66,6 +66,8 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
         "/v1/sheet-vitrina-v1/supply/wb-supplies",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/sync",
+        "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
+        "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments/",
@@ -110,6 +112,10 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include WB supplies list exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/sync {") != 1:
         raise AssertionError("rendered nginx block must include WB supplies sync exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/backfill {") != 1:
+        raise AssertionError("rendered nginx block must include WB supplies backfill exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status {") != 1:
+        raise AssertionError("rendered nginx block must include WB supplies sync status exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/wb-supplies/ {") != 1:
         raise AssertionError("rendered nginx block must include WB supplies detail prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/supplier-shipments {") != 1:

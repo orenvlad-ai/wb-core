@@ -1751,6 +1751,12 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_supplies_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.sync_supplies(payload)
 
+    def handle_wb_supplies_backfill_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.wb_supplies_block.start_full_backfill(payload)
+
+    def handle_wb_supplies_sync_status_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        return self.wb_supplies_block.get_sync_status(params)
+
     def handle_wb_supplies_detail_request(self, supply_id: str) -> dict[str, Any]:
         return self.wb_supplies_block.get_supply(supply_id)
 

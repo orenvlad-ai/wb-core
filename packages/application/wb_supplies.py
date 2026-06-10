@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from math import ceil
+import threading
+import time
 from typing import Any, Mapping, Protocol
+import uuid
 
 from packages.adapters.official_api_runtime import OfficialApiRuntimeError
 from packages.adapters.wb_supplies import (
@@ -23,7 +26,14 @@ CONTRACT_NAME = "sheet_vitrina_v1_wb_supplies"
 CONTRACT_VERSION = "v1"
 DEFAULT_SYNC_LIMIT = 1000
 DEFAULT_PAGE_LIMIT = 20
+SYNC_MODE_INCREMENTAL_REFRESH = "incremental_refresh"
+SYNC_MODE_FULL_BACKFILL = "full_backfill"
+SYNC_MODE_ENRICH_MISSING = "enrich_missing"
+RUN_ACTIVE_STATUSES = {"queued", "running"}
 ALLOWED_PAGE_LIMITS = (20, 50, 100)
+ALLOWED_SORT_KEYS = {"supply_date"}
+DEFAULT_SORT_KEY = "supply_date"
+DEFAULT_SORT_DIR = "desc"
 SIZE_FILTER_MAIN_250 = "main_250"
 SIZE_FILTER_ALL = "all"
 SIZE_FILTER_SMALL_LT_250 = "small_lt_250"
@@ -105,14 +115,16 @@ class WbSuppliesBlock:
         self.runtime = runtime
         self.source = source or HttpBackedWbSuppliesSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
+        self._run_lock = threading.Lock()
 
     def list_supplies(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_list_request(params or {})
         rows = self.runtime.list_wb_supplies()
         warehouses = self.runtime.list_wb_supplies_warehouses()
         state = self.runtime.load_wb_supplies_sync_state()
+        active_run = self.runtime.load_active_wb_supplies_sync_run()
         cache_completeness = _cache_completeness(state, rows)
-        sorted_rows = sorted(rows, key=_row_sort_key, reverse=True)
+        sorted_rows = _sort_rows(rows, request["sort_key"], request["sort_dir"])
         after_non_size_filters = [
             row
             for row in sorted_rows
@@ -161,6 +173,8 @@ class WbSuppliesBlock:
                     "size_filter": request["size_filter"],
                     "limit": limit,
                     "offset": offset,
+                    "sort_key": request["sort_key"],
+                    "sort_dir": request["sort_dir"],
                 },
                 "options": {
                     "warehouses": _warehouse_options(rows, warehouses),
@@ -193,46 +207,52 @@ class WbSuppliesBlock:
                 "has_next": offset + limit < len(filtered_rows),
                 "cached_total_rows": len(rows),
             },
+            "sort": {
+                "key": request["sort_key"],
+                "dir": request["sort_dir"],
+            },
             "schema": {"columns": SCHEMA_COLUMNS},
             "rows": page_rows,
+            "sync_state": _public_sync_state(state, cache_completeness),
+            "active_run": active_run if active_run and active_run.get("status") in RUN_ACTIVE_STATUSES else None,
         }
 
     def sync_supplies(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_sync_request(payload or {})
+        if request["mode"] == SYNC_MODE_FULL_BACKFILL:
+            return self.start_full_backfill(request)
         synced_at = self.timestamp_factory()
         warnings: list[str] = []
+        run_id = _new_run_id()
+        self.runtime.create_wb_supplies_sync_run(
+            run_id=run_id,
+            mode=SYNC_MODE_INCREMENTAL_REFRESH,
+            status="running",
+            phase="latest_window",
+            started_at=synced_at,
+            limit=request["limit"],
+            offset=0,
+            logs=[_run_log(synced_at, "latest-window sync started")],
+        )
         try:
             warehouses = self._fetch_warehouses(warnings)
             list_result = _coerce_list_result(
                 self.source.list_supplies(
                     limit=request["limit"],
-                    offset=request["offset"],
+                    offset=0,
                     status_ids=request["status_ids"],
                     dates=request["dates"],
                 )
             )
             warehouse_by_id = _warehouse_map(warehouses)
-            normalized_rows: list[dict[str, Any]] = []
-            for raw_row in list_result.rows:
-                detail_payload: Mapping[str, Any] | None = None
-                goods_payload: list[Mapping[str, Any]] | None = None
-                package_payload: list[Mapping[str, Any]] | None = None
-                row_warnings: list[str] = []
-                lookup_id, is_preorder_id = _resolve_upstream_lookup_id(raw_row)
-                if request["enrich_details"] and lookup_id:
-                    detail_payload = self._fetch_detail(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
-                    goods_payload = self._fetch_goods(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
-                normalized_rows.append(
-                    _normalize_supply_row(
-                        raw_list=raw_row,
-                        raw_detail=detail_payload,
-                        raw_goods=goods_payload,
-                        raw_package=package_payload,
-                        warehouse_by_id=warehouse_by_id,
-                        synced_at=synced_at,
-                        warnings=row_warnings,
-                    )
-                )
+            sync_result = self._prepare_list_rows_for_upsert(
+                raw_rows=list_result.rows,
+                warehouse_by_id=warehouse_by_id,
+                synced_at=synced_at,
+                enrich=request["enrich"] != "none",
+                changed_only=True,
+            )
+            normalized_rows = sync_result["rows"]
             self.runtime.upsert_wb_supplies(
                 rows=normalized_rows,
                 warehouses=warehouses,
@@ -240,8 +260,13 @@ class WbSuppliesBlock:
                 last_successful_sync_at=synced_at,
                 last_error="",
                 last_limit=list_result.limit,
-                last_offset=list_result.offset,
-                latest_synced_count=len(normalized_rows),
+                last_offset=0,
+                latest_synced_count=list_result.raw_count,
+                last_mode=SYNC_MODE_INCREMENTAL_REFRESH,
+                latest_window_synced_at=synced_at,
+                latest_window_limit=list_result.limit,
+                latest_window_returned_count=list_result.raw_count,
+                may_have_more=list_result.raw_count >= list_result.limit,
             )
         except Exception as exc:
             block_error = _to_block_error(exc)
@@ -250,29 +275,142 @@ class WbSuppliesBlock:
                 last_successful_sync_at=None,
                 last_error=str(block_error),
                 last_limit=request["limit"],
-                last_offset=request["offset"],
+                last_offset=0,
                 latest_synced_count=0,
+                last_mode=SYNC_MODE_INCREMENTAL_REFRESH,
+            )
+            self.runtime.update_wb_supplies_sync_run(
+                run_id,
+                status="failed",
+                phase="failed",
+                updated_at=synced_at,
+                completed_at=synced_at,
+                last_error=str(block_error),
+                logs=[_run_log(synced_at, str(block_error))],
             )
             raise block_error from exc
 
+        completed_at = self.timestamp_factory()
+        self.runtime.update_wb_supplies_sync_run(
+            run_id,
+            status="success" if sync_result["failed_enrich"] == 0 else "partial",
+            phase="completed",
+            updated_at=completed_at,
+            completed_at=completed_at,
+            offset=0,
+            limit=list_result.limit,
+            pages_fetched=1,
+            raw_fetched=list_result.raw_count,
+            upserted=len(normalized_rows),
+            new_rows=sync_result["new_rows"],
+            changed_rows=sync_result["changed_rows"],
+            unchanged_rows=sync_result["unchanged_rows"],
+            enriched=sync_result["enriched"],
+            failed_enrich=sync_result["failed_enrich"],
+            may_have_more=list_result.raw_count >= list_result.limit,
+            logs=[_run_log(completed_at, "latest-window sync completed")],
+        )
         response = self.list_supplies(
             {
                 "limit": DEFAULT_PAGE_LIMIT,
                 "offset": 0,
                 "size_filter": SIZE_FILTER_MAIN_250,
+                "sort_key": DEFAULT_SORT_KEY,
+                "sort_dir": DEFAULT_SORT_DIR,
             }
         )
         response["sync"] = {
             "status": "ok",
+            "mode": SYNC_MODE_INCREMENTAL_REFRESH,
+            "run_id": run_id,
             "synced_at": synced_at,
             "limit": list_result.limit,
-            "offset": list_result.offset,
+            "offset": 0,
             "raw_fetched_count": list_result.raw_count,
             "upserted_count": len(normalized_rows),
-            "enrich_details": request["enrich_details"],
+            "new_rows": sync_result["new_rows"],
+            "changed_rows": sync_result["changed_rows"],
+            "unchanged_rows": sync_result["unchanged_rows"],
+            "enriched": sync_result["enriched"],
+            "failed_enrich": sync_result["failed_enrich"],
+            "may_have_more": list_result.raw_count >= list_result.limit,
+            "latest_window_only": True,
+            "enrich": request["enrich"],
             "warnings": warnings,
         }
         return response
+
+    def start_full_backfill(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        request = _normalize_backfill_request(payload or {})
+        with self._run_lock:
+            active_run = self.runtime.load_active_wb_supplies_sync_run()
+            if active_run:
+                return {
+                    "contract_name": CONTRACT_NAME,
+                    "contract_version": CONTRACT_VERSION,
+                    "status": active_run.get("status") or "running",
+                    "accepted": True,
+                    "run_id": active_run.get("run_id"),
+                    "active_run": active_run,
+                    "sync_state": self.runtime.load_wb_supplies_sync_state(),
+                }
+            run_id = _new_run_id()
+            queued_at = self.timestamp_factory()
+            run = self.runtime.create_wb_supplies_sync_run(
+                run_id=run_id,
+                mode=SYNC_MODE_FULL_BACKFILL,
+                status="queued",
+                phase="queued",
+                started_at=queued_at,
+                limit=request["limit"],
+                offset=request["start_offset"],
+                logs=[_run_log(queued_at, "full backfill queued")],
+            )
+            thread = threading.Thread(
+                target=self._run_full_backfill_guarded,
+                args=(run_id, request),
+                name=f"wb-supplies-backfill-{run_id[:8]}",
+                daemon=True,
+            )
+            thread.start()
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "status": "queued",
+            "accepted": True,
+            "run_id": run_id,
+            "active_run": run,
+            "sync_state": self.runtime.load_wb_supplies_sync_state(),
+        }
+
+    def run_full_backfill(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        request = _normalize_backfill_request(payload or {})
+        run_id = str(request.get("run_id") or _new_run_id())
+        started_at = self.timestamp_factory()
+        self.runtime.create_wb_supplies_sync_run(
+            run_id=run_id,
+            mode=SYNC_MODE_FULL_BACKFILL,
+            status="running",
+            phase="starting",
+            started_at=started_at,
+            limit=request["limit"],
+            offset=request["start_offset"],
+            logs=[_run_log(started_at, "full backfill started")],
+        )
+        return self._run_full_backfill(run_id, request)
+
+    def get_sync_status(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        run_id = str((params or {}).get("run_id") or "").strip()
+        run = self.runtime.load_wb_supplies_sync_run(run_id) if run_id else self.runtime.load_active_wb_supplies_sync_run()
+        state = self.runtime.load_wb_supplies_sync_state()
+        rows = self.runtime.list_wb_supplies()
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "run": run,
+            "sync_state": _public_sync_state(state, _cache_completeness(state, rows)),
+            "cached_total_rows": len(rows),
+        }
 
     def get_supply(self, supply_id: str) -> dict[str, Any]:
         normalized_id = str(supply_id or "").strip()
@@ -287,6 +425,330 @@ class WbSuppliesBlock:
             "meta": {"source": WB_SUPPLIES_SOURCE_LABEL, "read_only": True},
             "supply": detail,
         }
+
+    def _run_full_backfill_guarded(self, run_id: str, request: Mapping[str, Any]) -> None:
+        try:
+            self._run_full_backfill(run_id, request)
+        except Exception as exc:  # noqa: BLE001 - background job must persist controlled failure.
+            failed_at = self.timestamp_factory()
+            block_error = _to_block_error(exc)
+            self.runtime.update_wb_supplies_sync_run(
+                run_id,
+                status="failed",
+                phase="failed",
+                updated_at=failed_at,
+                completed_at=failed_at,
+                last_error=str(block_error),
+                logs=[_run_log(failed_at, str(block_error))],
+            )
+            self.runtime.save_wb_supplies_sync_state(
+                last_synced_at=failed_at,
+                last_successful_sync_at=None,
+                last_error=str(block_error),
+                last_limit=int(request.get("limit") or DEFAULT_SYNC_LIMIT),
+                last_offset=int(request.get("start_offset") or 0),
+                latest_synced_count=0,
+                last_mode=SYNC_MODE_FULL_BACKFILL,
+                backfill_complete=False,
+                may_have_more=True,
+            )
+
+    def _run_full_backfill(self, run_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        started_at = self.timestamp_factory()
+        limit = int(request.get("limit") or DEFAULT_SYNC_LIMIT)
+        state = self.runtime.load_wb_supplies_sync_state()
+        requested_offset = int(request.get("start_offset") or 0)
+        if request.get("resume") and requested_offset == 0 and not bool(state.get("backfill_complete")):
+            offset = int(state.get("highest_synced_offset") or 0)
+        else:
+            offset = requested_offset
+        max_pages = _optional_int(request.get("max_pages"))
+        enrich = bool(request.get("enrich"))
+        warnings: list[str] = []
+        counters = {
+            "pages_fetched": 0,
+            "raw_fetched": 0,
+            "upserted": 0,
+            "new_rows": 0,
+            "changed_rows": 0,
+            "unchanged_rows": 0,
+            "enriched": 0,
+            "failed_enrich": 0,
+        }
+        logs = [_run_log(started_at, f"full backfill started at offset {offset}")]
+        self.runtime.update_wb_supplies_sync_run(
+            run_id,
+            status="running",
+            phase="fetching",
+            updated_at=started_at,
+            offset=offset,
+            limit=limit,
+            logs=logs,
+        )
+        try:
+            warehouses = self._fetch_warehouses(warnings)
+            warehouse_by_id = _warehouse_map(warehouses)
+            backfill_complete = False
+            may_have_more = True
+            while True:
+                if max_pages is not None and counters["pages_fetched"] >= max_pages:
+                    logs.append(_run_log(self.timestamp_factory(), f"stopped by max_pages={max_pages} at offset {offset}"))
+                    may_have_more = True
+                    break
+                page_started_at = self.timestamp_factory()
+                list_result = self._fetch_list_page_with_retry(limit=limit, offset=offset)
+                rows = list_result.rows
+                returned_count = list_result.raw_count
+                counters["pages_fetched"] += 1
+                counters["raw_fetched"] += returned_count
+                if returned_count == 0:
+                    backfill_complete = True
+                    may_have_more = False
+                    logs.append(_run_log(page_started_at, f"offset {offset}: empty page, history complete"))
+                    self.runtime.save_wb_supplies_sync_state(
+                        last_synced_at=page_started_at,
+                        last_successful_sync_at=page_started_at,
+                        last_error="",
+                        last_limit=limit,
+                        last_offset=offset,
+                        latest_synced_count=0,
+                        last_mode=SYNC_MODE_FULL_BACKFILL,
+                        backfill_complete=True,
+                        backfill_started_at=started_at,
+                        backfill_completed_at=page_started_at,
+                        highest_synced_offset=offset,
+                        last_successful_offset=offset,
+                        may_have_more=False,
+                    )
+                    break
+                sync_result = self._prepare_list_rows_for_upsert(
+                    raw_rows=rows,
+                    warehouse_by_id=warehouse_by_id,
+                    synced_at=page_started_at,
+                    enrich=enrich,
+                    changed_only=True,
+                )
+                normalized_rows = sync_result["rows"]
+                for key in ("new_rows", "changed_rows", "unchanged_rows", "enriched", "failed_enrich"):
+                    counters[key] += int(sync_result[key])
+                counters["upserted"] += len(normalized_rows)
+                next_offset = offset + returned_count
+                may_have_more = returned_count >= limit
+                backfill_complete = not may_have_more
+                self.runtime.upsert_wb_supplies(
+                    rows=normalized_rows,
+                    warehouses=warehouses,
+                    synced_at=page_started_at,
+                    last_successful_sync_at=page_started_at,
+                    last_error="",
+                    last_limit=limit,
+                    last_offset=offset,
+                    latest_synced_count=returned_count,
+                    last_mode=SYNC_MODE_FULL_BACKFILL,
+                    backfill_started_at=started_at,
+                    backfill_completed_at=page_started_at if backfill_complete else None,
+                    highest_synced_offset=next_offset,
+                    last_successful_offset=offset,
+                    may_have_more=may_have_more,
+                    backfill_complete=backfill_complete,
+                )
+                logs = (logs + [_run_log(page_started_at, f"offset {offset}: fetched {returned_count}, upserted {len(normalized_rows)}")])[-20:]
+                self.runtime.update_wb_supplies_sync_run(
+                    run_id,
+                    status="running",
+                    phase="fetching" if may_have_more else "completing",
+                    updated_at=page_started_at,
+                    offset=next_offset,
+                    limit=limit,
+                    pages_fetched=counters["pages_fetched"],
+                    raw_fetched=counters["raw_fetched"],
+                    upserted=counters["upserted"],
+                    new_rows=counters["new_rows"],
+                    changed_rows=counters["changed_rows"],
+                    unchanged_rows=counters["unchanged_rows"],
+                    enriched=counters["enriched"],
+                    failed_enrich=counters["failed_enrich"],
+                    may_have_more=may_have_more,
+                    logs=logs,
+                )
+                offset = next_offset
+                if backfill_complete:
+                    break
+        except Exception as exc:
+            failed_at = self.timestamp_factory()
+            block_error = _to_block_error(exc)
+            logs = (logs + [_run_log(failed_at, str(block_error))])[-20:]
+            self.runtime.save_wb_supplies_sync_state(
+                last_synced_at=failed_at,
+                last_successful_sync_at=None,
+                last_error=str(block_error),
+                last_limit=limit,
+                last_offset=offset,
+                latest_synced_count=0,
+                last_mode=SYNC_MODE_FULL_BACKFILL,
+                backfill_started_at=started_at,
+                highest_synced_offset=offset,
+                may_have_more=True,
+                backfill_complete=False,
+            )
+            status = "partial" if counters["raw_fetched"] > 0 else "failed"
+            return self.runtime.update_wb_supplies_sync_run(
+                run_id,
+                status=status,
+                phase="failed",
+                updated_at=failed_at,
+                completed_at=failed_at,
+                offset=offset,
+                limit=limit,
+                pages_fetched=counters["pages_fetched"],
+                raw_fetched=counters["raw_fetched"],
+                upserted=counters["upserted"],
+                new_rows=counters["new_rows"],
+                changed_rows=counters["changed_rows"],
+                unchanged_rows=counters["unchanged_rows"],
+                enriched=counters["enriched"],
+                failed_enrich=counters["failed_enrich"],
+                may_have_more=True,
+                last_error=str(block_error),
+                logs=logs,
+            )
+        completed_at = self.timestamp_factory()
+        status = "success" if backfill_complete and counters["failed_enrich"] == 0 else "partial"
+        if backfill_complete:
+            self.runtime.save_wb_supplies_sync_state(
+                last_synced_at=completed_at,
+                last_successful_sync_at=completed_at,
+                last_error="",
+                last_limit=limit,
+                last_offset=offset,
+                latest_synced_count=0,
+                last_mode=SYNC_MODE_FULL_BACKFILL,
+                backfill_started_at=started_at,
+                backfill_completed_at=completed_at,
+                highest_synced_offset=offset,
+                last_successful_offset=offset,
+                may_have_more=False,
+                backfill_complete=True,
+            )
+        logs = (logs + [_run_log(completed_at, f"full backfill {status}")])[-20:]
+        return self.runtime.update_wb_supplies_sync_run(
+            run_id,
+            status=status,
+            phase="completed" if backfill_complete else "partial",
+            updated_at=completed_at,
+            completed_at=completed_at,
+            offset=offset,
+            limit=limit,
+            pages_fetched=counters["pages_fetched"],
+            raw_fetched=counters["raw_fetched"],
+            upserted=counters["upserted"],
+            new_rows=counters["new_rows"],
+            changed_rows=counters["changed_rows"],
+            unchanged_rows=counters["unchanged_rows"],
+            enriched=counters["enriched"],
+            failed_enrich=counters["failed_enrich"],
+            may_have_more=may_have_more,
+            logs=logs,
+        )
+
+    def _fetch_list_page_with_retry(self, *, limit: int, offset: int) -> WbSuppliesListResult:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                return _coerce_list_result(self.source.list_supplies(limit=limit, offset=offset))
+            except WbSuppliesHttpStatusError as exc:
+                last_error = exc
+                if exc.status_code != 429 and exc.status_code < 500:
+                    break
+            except WbSuppliesTransportError as exc:
+                last_error = exc
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+        if last_error:
+            raise last_error
+        raise WbSuppliesBlockError("WB supplies list page fetch failed", http_status=502)
+
+    def _prepare_list_rows_for_upsert(
+        self,
+        *,
+        raw_rows: list[Mapping[str, Any]],
+        warehouse_by_id: Mapping[str, str],
+        synced_at: str,
+        enrich: bool,
+        changed_only: bool,
+    ) -> dict[str, Any]:
+        records = self.runtime.list_wb_supplies_cache_records()
+        existing_by_key = _cache_record_index(records)
+        rows_to_upsert: list[dict[str, Any]] = []
+        counters = {
+            "new_rows": 0,
+            "changed_rows": 0,
+            "unchanged_rows": 0,
+            "enriched": 0,
+            "failed_enrich": 0,
+        }
+        for raw_row in raw_rows:
+            cache_key = _stable_cache_key(raw_row)
+            lookup_id, is_preorder_id = _resolve_upstream_lookup_id(raw_row)
+            existing = existing_by_key.get(cache_key) or existing_by_key.get(lookup_id)
+            raw_list_hash = _stable_payload_hash(raw_row)
+            raw_updated_date = _first_string(raw_row, "updatedDate", "updated_at", "updated_date")
+            existing_hash = str((existing or {}).get("raw_list_hash") or "")
+            existing_updated_date = str(((existing or {}).get("normalized") or {}).get("updated_date") or "")
+            is_new = existing is None
+            is_changed = (not is_new) and (
+                not existing_hash
+                or existing_hash != raw_list_hash
+                or (raw_updated_date and raw_updated_date != existing_updated_date)
+            )
+            needs_enrichment = bool(existing and _row_needs_enrichment(existing.get("normalized") or {}))
+            if is_new:
+                counters["new_rows"] += 1
+            elif is_changed or needs_enrichment:
+                counters["changed_rows"] += 1
+            else:
+                counters["unchanged_rows"] += 1
+                if changed_only:
+                    continue
+            raw_detail = (existing or {}).get("raw_detail")
+            raw_goods = (existing or {}).get("raw_goods")
+            raw_package = (existing or {}).get("raw_package")
+            row_warnings: list[str] = []
+            attempted_enrichment = bool(enrich and lookup_id and (is_new or is_changed or needs_enrichment or not changed_only))
+            if attempted_enrichment:
+                fetched_detail = self._fetch_detail(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
+                fetched_goods = self._fetch_goods(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
+                if fetched_detail is not None:
+                    raw_detail = fetched_detail
+                if fetched_goods is not None:
+                    raw_goods = fetched_goods
+            failed_enrich = bool(row_warnings and attempted_enrichment)
+            if attempted_enrichment and not failed_enrich:
+                counters["enriched"] += 1
+            if failed_enrich:
+                counters["failed_enrich"] += 1
+            normalized = _normalize_supply_row(
+                raw_list=raw_row,
+                raw_detail=raw_detail if isinstance(raw_detail, Mapping) else None,
+                raw_goods=raw_goods if isinstance(raw_goods, list) else None,
+                raw_package=raw_package if isinstance(raw_package, list) else None,
+                warehouse_by_id=warehouse_by_id,
+                synced_at=synced_at,
+                warnings=row_warnings,
+            )
+            normalized["cache_key"] = cache_key
+            normalized["raw_list_hash"] = raw_list_hash
+            normalized["raw_detail_hash"] = _stable_payload_hash(raw_detail) if raw_detail is not None else ""
+            normalized["raw_goods_hash"] = _stable_payload_hash(raw_goods) if raw_goods is not None else ""
+            normalized["raw_package_hash"] = _stable_payload_hash(raw_package) if raw_package is not None else ""
+            normalized["last_list_synced_at"] = synced_at
+            normalized["last_enriched_at"] = synced_at if attempted_enrichment and not failed_enrich else str((existing or {}).get("last_enriched_at") or "")
+            normalized["enrichment_status"] = (
+                "failed" if failed_enrich else "ok" if attempted_enrichment else str((existing or {}).get("enrichment_status") or "not_requested")
+            )
+            normalized["enrichment_error"] = "; ".join(row_warnings) if failed_enrich else ""
+            rows_to_upsert.append(normalized)
+        return {"rows": rows_to_upsert, **counters}
 
     def _fetch_warehouses(self, warnings: list[str]) -> list[Mapping[str, Any]]:
         try:
@@ -352,16 +814,41 @@ def _normalize_list_request(params: Mapping[str, Any]) -> dict[str, Any]:
         "size_filter": _normalize_size_filter(params.get("size_filter")),
         "limit": limit,
         "offset": max(0, _optional_int(params.get("offset")) or 0),
+        "sort_key": _normalize_sort_key(params.get("sort_key")),
+        "sort_dir": _normalize_sort_dir(params.get("sort_dir")),
     }
 
 
 def _normalize_sync_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+    mode = str(payload.get("mode") or SYNC_MODE_INCREMENTAL_REFRESH).strip()
+    if mode not in {SYNC_MODE_INCREMENTAL_REFRESH, SYNC_MODE_FULL_BACKFILL}:
+        mode = SYNC_MODE_INCREMENTAL_REFRESH
+    enrich = str(payload.get("enrich") or "").strip()
+    if not enrich:
+        enrich = "changed_only" if payload.get("enrich_details") is not False else "none"
+    if enrich not in {"changed_only", "none", "true"}:
+        enrich = "changed_only"
     return {
+        "mode": mode,
         "limit": min(max(_optional_int(payload.get("limit")) or DEFAULT_SYNC_LIMIT, 1), 1000),
-        "offset": max(0, _optional_int(payload.get("offset")) or 0),
-        "enrich_details": payload.get("enrich_details") is not False,
+        "offset": 0,
+        "enrich": enrich,
         "status_ids": _normalize_status_ids(payload.get("status_ids") or payload.get("statusIDs")),
         "dates": [dict(item) for item in payload.get("dates") or [] if isinstance(item, Mapping)],
+    }
+
+
+def _normalize_backfill_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+    enrich_value = payload.get("enrich")
+    enrich = True if enrich_value is None else bool(enrich_value)
+    return {
+        "mode": SYNC_MODE_FULL_BACKFILL,
+        "limit": min(max(_optional_int(payload.get("limit")) or DEFAULT_SYNC_LIMIT, 1), 1000),
+        "start_offset": max(0, _optional_int(payload.get("start_offset") or payload.get("offset")) or 0),
+        "resume": payload.get("resume") is not False,
+        "enrich": enrich,
+        "max_pages": _optional_int(payload.get("max_pages")),
+        "run_id": str(payload.get("run_id") or "").strip(),
     }
 
 
@@ -375,6 +862,16 @@ def _normalize_size_filter(value: Any) -> str:
     if normalized in {SIZE_FILTER_MAIN_250, SIZE_FILTER_ALL, SIZE_FILTER_SMALL_LT_250}:
         return normalized
     return SIZE_FILTER_MAIN_250
+
+
+def _normalize_sort_key(value: Any) -> str:
+    normalized = str(value or "").strip()
+    return normalized if normalized in ALLOWED_SORT_KEYS else DEFAULT_SORT_KEY
+
+
+def _normalize_sort_dir(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"asc", "desc"} else DEFAULT_SORT_DIR
 
 
 def _normalize_status_ids(value: Any) -> list[int]:
@@ -948,15 +1445,76 @@ def _warehouse_fact_line(
     return ""
 
 
+def _stable_cache_key(row: Mapping[str, Any]) -> str:
+    supply_id = _id_to_string(_first_value(row, "supplyID", "supplyId", "supply_id", "ID", "id"))
+    if supply_id:
+        return f"supply:{supply_id}"
+    preorder_id = _id_to_string(_first_value(row, "preorderID", "preorderId", "preorder_id", "orderID", "orderId"))
+    if preorder_id:
+        return f"preorder:{preorder_id}"
+    return _raw_row_cache_id(row)
+
+
+def _stable_payload_hash(payload: Any) -> str:
+    if payload is None:
+        return ""
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_record_index(records: list[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        cache_key = str(record.get("cache_key") or "").strip()
+        wb_supply_id = str(record.get("wb_supply_id") or "").strip()
+        supply_id = str(record.get("supply_id") or "").strip()
+        preorder_id = str(record.get("preorder_id") or "").strip()
+        for key in (
+            cache_key,
+            f"supply:{wb_supply_id}" if wb_supply_id else "",
+            wb_supply_id,
+            supply_id,
+            f"preorder:{preorder_id}" if preorder_id else "",
+            preorder_id,
+        ):
+            if key and key not in result:
+                result[key] = record
+    return result
+
+
+def _row_needs_enrichment(row: Mapping[str, Any]) -> bool:
+    if str(row.get("enrichment_status") or "") == "failed":
+        return False
+    if str(row.get("last_enriched_at") or "").strip():
+        return False
+    return (
+        row.get("quantity_for_size_filter") is None
+        or not str(row.get("warehouse_display") or "").strip()
+        or row.get("status_id") is None
+    )
+
+
+def _new_run_id() -> str:
+    return "wb_supplies_" + uuid.uuid4().hex
+
+
+def _run_log(timestamp: str, message: str) -> dict[str, str]:
+    return {"at": timestamp, "message": str(message or "")[:500]}
+
+
 def _cache_completeness(state: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if bool(state.get("backfill_complete")):
+        return {"status": "complete", "label": "полная загрузка завершена", "can_backfill_more": False}
     last_limit = _optional_int(state.get("last_limit"))
     latest_synced_count = _optional_int(state.get("latest_synced_count"))
     if not rows:
         return {"status": "empty", "label": "Cache пуст", "can_backfill_more": False}
-    if last_limit and latest_synced_count is not None and latest_synced_count >= last_limit:
+    if state.get("last_mode") == SYNC_MODE_INCREMENTAL_REFRESH:
+        return {"status": "latest_window", "label": "latest window only", "can_backfill_more": True}
+    if bool(state.get("may_have_more")) or (last_limit and latest_synced_count is not None and latest_synced_count >= last_limit):
         return {
             "status": "partial",
-            "label": "История может быть неполной: последняя страница WB заполнена",
+            "label": f"частично загружена до offset {state.get('highest_synced_offset') or state.get('last_offset') or 0}",
             "can_backfill_more": True,
         }
     if last_limit and latest_synced_count is not None and latest_synced_count < last_limit:
@@ -971,20 +1529,55 @@ def _cache_warning(state: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> s
     return ""
 
 
-def _row_sort_key(row: Mapping[str, Any]) -> tuple[str, str, str, str]:
-    return (
-        str(row.get("updated_date") or ""),
-        str(row.get("supply_date") or ""),
-        str(row.get("source_created_at") or ""),
-        str(row.get("visible_number") or row.get("supply_id") or ""),
+def _sort_rows(rows: list[Mapping[str, Any]], sort_key: str, sort_dir: str) -> list[Mapping[str, Any]]:
+    reverse = sort_dir == "desc"
+    if sort_key == "supply_date":
+        return sorted(rows, key=_supply_date_sort_key, reverse=reverse)
+    return sorted(rows, key=_supply_date_sort_key, reverse=True)
+
+
+def _supply_date_sort_key(row: Mapping[str, Any]) -> tuple[str, str]:
+    date_value = (
+        str(row.get("supply_date") or "")
+        or str(row.get("fact_date") or "")
+        or str(row.get("updated_date") or "")
+        or str(row.get("source_created_at") or "")
     )
+    stable_id = str(row.get("visible_number") or row.get("wb_supply_id") or row.get("supply_id") or "")
+    return (date_value, stable_id)
+
+
+def _public_sync_state(state: Mapping[str, Any], cache_completeness: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "backfill_complete": bool(state.get("backfill_complete")),
+        "backfill_started_at": state.get("backfill_started_at") or "",
+        "backfill_completed_at": state.get("backfill_completed_at") or "",
+        "highest_synced_offset": state.get("highest_synced_offset") or 0,
+        "last_successful_offset": state.get("last_successful_offset"),
+        "last_limit": state.get("last_limit"),
+        "last_mode": state.get("last_mode") or "",
+        "latest_window_synced_at": state.get("latest_window_synced_at") or "",
+        "latest_window_limit": state.get("latest_window_limit"),
+        "latest_window_returned_count": state.get("latest_window_returned_count"),
+        "may_have_more": bool(state.get("may_have_more")),
+        "last_error": state.get("last_error") or "",
+        "cache_completeness": cache_completeness.get("status") or "",
+        "cache_completeness_label": cache_completeness.get("label") or "",
+    }
 
 
 def _to_block_error(exc: Exception) -> WbSuppliesBlockError:
     if isinstance(exc, WbSuppliesBlockError):
         return exc
     if isinstance(exc, WbSuppliesHttpStatusError):
-        return WbSuppliesBlockError(_friendly_http_error_message(exc.status_code), http_status=_mapped_http_status(exc.status_code))
+        return WbSuppliesBlockError(
+            _friendly_http_error_message(
+                exc.status_code,
+                content_type=getattr(exc, "content_type", ""),
+                body_prefix=getattr(exc, "body_prefix", ""),
+            ),
+            http_status=_mapped_http_status(exc.status_code),
+        )
     if isinstance(exc, WbSuppliesTransportError):
         return WbSuppliesBlockError(str(exc), http_status=502)
     if isinstance(exc, OfficialApiRuntimeError):
@@ -998,14 +1591,23 @@ def _to_block_error(exc: Exception) -> WbSuppliesBlockError:
     return WbSuppliesBlockError(f"WB supplies runtime failed: {exc}", http_status=500)
 
 
-def _friendly_http_error_message(status_code: int) -> str:
+def _friendly_http_error_message(status_code: int, *, content_type: str = "", body_prefix: str = "") -> str:
     if status_code in {401, 403}:
-        return "WB API token has no Supplies permission or is invalid"
-    if status_code == 429:
-        return "WB supplies API rate limit returned 429; retry later"
-    if status_code >= 500:
-        return f"WB supplies API upstream is unavailable: status {status_code}"
-    return f"WB supplies API request failed with status {status_code}"
+        message = "WB API token has no Supplies permission or is invalid"
+    elif status_code == 429:
+        message = "WB supplies API rate limit returned 429; retry later"
+    elif status_code >= 500:
+        message = f"WB supplies API upstream is unavailable: status {status_code}"
+    else:
+        message = f"WB supplies API request failed with status {status_code}"
+    details: list[str] = []
+    if content_type:
+        details.append(f"content-type={content_type}")
+    if body_prefix:
+        details.append(f"body_prefix={body_prefix}")
+    if details:
+        message += " (" + "; ".join(details) + ")"
+    return message
 
 
 def _mapped_http_status(status_code: int) -> int:
