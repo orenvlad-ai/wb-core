@@ -525,7 +525,7 @@ class WbSuppliesBlock:
                     raw_rows=rows,
                     warehouse_by_id=warehouse_by_id,
                     synced_at=page_started_at,
-                    enrich=enrich,
+                    enrich=False,
                     changed_only=True,
                 )
                 normalized_rows = sync_result["rows"]
@@ -552,6 +552,38 @@ class WbSuppliesBlock:
                     may_have_more=may_have_more,
                     backfill_complete=backfill_complete,
                 )
+                if enrich and sync_result["touched_cache_keys"]:
+                    enrich_started_at = self.timestamp_factory()
+                    enrich_result = self._prepare_list_rows_for_upsert(
+                        raw_rows=rows,
+                        warehouse_by_id=warehouse_by_id,
+                        synced_at=enrich_started_at,
+                        enrich=True,
+                        changed_only=True,
+                        force_enrich_cache_keys=set(sync_result["touched_cache_keys"]),
+                    )
+                    enriched_rows = enrich_result["rows"]
+                    counters["enriched"] += int(enrich_result["enriched"])
+                    counters["failed_enrich"] += int(enrich_result["failed_enrich"])
+                    counters["upserted"] += len(enriched_rows)
+                    if enriched_rows:
+                        self.runtime.upsert_wb_supplies(
+                            rows=enriched_rows,
+                            warehouses=[],
+                            synced_at=enrich_started_at,
+                            last_successful_sync_at=enrich_started_at,
+                            last_error="",
+                            last_limit=limit,
+                            last_offset=offset,
+                            latest_synced_count=returned_count,
+                            last_mode=SYNC_MODE_FULL_BACKFILL,
+                            backfill_started_at=started_at,
+                            backfill_completed_at=page_started_at if backfill_complete else None,
+                            highest_synced_offset=next_offset,
+                            last_successful_offset=offset,
+                            may_have_more=may_have_more,
+                            backfill_complete=backfill_complete,
+                        )
                 logs = (logs + [_run_log(page_started_at, f"offset {offset}: fetched {returned_count}, upserted {len(normalized_rows)}")])[-20:]
                 self.runtime.update_wb_supplies_sync_run(
                     run_id,
@@ -676,6 +708,7 @@ class WbSuppliesBlock:
         synced_at: str,
         enrich: bool,
         changed_only: bool,
+        force_enrich_cache_keys: set[str] | None = None,
     ) -> dict[str, Any]:
         records = self.runtime.list_wb_supplies_cache_records()
         existing_by_key = _cache_record_index(records)
@@ -695,6 +728,7 @@ class WbSuppliesBlock:
             raw_updated_date = _first_string(raw_row, "updatedDate", "updated_at", "updated_date")
             existing_hash = str((existing or {}).get("raw_list_hash") or "")
             existing_updated_date = str(((existing or {}).get("normalized") or {}).get("updated_date") or "")
+            force_enrich = bool(force_enrich_cache_keys and cache_key in force_enrich_cache_keys)
             is_new = existing is None
             is_changed = (not is_new) and (
                 not existing_hash
@@ -708,13 +742,15 @@ class WbSuppliesBlock:
                 counters["changed_rows"] += 1
             else:
                 counters["unchanged_rows"] += 1
-                if changed_only:
+                if changed_only and not force_enrich:
                     continue
             raw_detail = (existing or {}).get("raw_detail")
             raw_goods = (existing or {}).get("raw_goods")
             raw_package = (existing or {}).get("raw_package")
             row_warnings: list[str] = []
-            attempted_enrichment = bool(enrich and lookup_id and (is_new or is_changed or needs_enrichment or not changed_only))
+            attempted_enrichment = bool(
+                enrich and lookup_id and (force_enrich or is_new or is_changed or needs_enrichment or not changed_only)
+            )
             if attempted_enrichment:
                 fetched_detail = self._fetch_detail(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
                 fetched_goods = self._fetch_goods(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
@@ -748,7 +784,7 @@ class WbSuppliesBlock:
             )
             normalized["enrichment_error"] = "; ".join(row_warnings) if failed_enrich else ""
             rows_to_upsert.append(normalized)
-        return {"rows": rows_to_upsert, **counters}
+        return {"rows": rows_to_upsert, "touched_cache_keys": [str(row.get("cache_key") or "") for row in rows_to_upsert], **counters}
 
     def _fetch_warehouses(self, warnings: list[str]) -> list[Mapping[str, Any]]:
         try:
