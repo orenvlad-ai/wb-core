@@ -58,6 +58,7 @@ def main() -> None:
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
             raise SystemExit(2)
         rows: list[Mapping[str, Any]] = []
+        download_attempted = False
         for attempt in range(max(1, args.poll_attempts)):
             if attempt:
                 time.sleep(max(1.0, args.poll_interval_seconds))
@@ -65,12 +66,13 @@ def main() -> None:
             status_value = _extract_task_status(status_payload)
             report["status_checks"].append({"attempt": attempt + 1, "status": status_value})
             if status_value == "done":
+                download_attempted = True
                 rows = client.download_report(task_id)
                 break
             if status_value in {"failed", "canceled", "cancelled"}:
                 break
         report["download"] = {
-            "status": "ok" if rows else "not_downloaded",
+            "status": "ok" if download_attempted else "not_downloaded",
             "row_count": len(rows),
             "key_sets": _row_key_sets(rows),
         }
