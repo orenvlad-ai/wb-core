@@ -1292,9 +1292,11 @@ def _build_handler(
             if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH:
                 try:
                     run_id = _resolve_single_query_param(parsed.query, "run_id")
+                    with_probe = _resolve_query_bool_default_true(parsed.query, "probe")
                     payload = entrypoint.handle_seller_portal_recovery_status_request(
                         launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
                         run_id=run_id or None,
+                        with_probe=with_probe,
                     )
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2549,6 +2551,17 @@ def _resolve_optional_query_bool(query_string: str, name: str) -> bool:
     value = _resolve_single_query_param(query_string, name).lower()
     if not value:
         return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} query parameter must be true or false")
+
+
+def _resolve_query_bool_default_true(query_string: str, name: str) -> bool:
+    value = _resolve_single_query_param(query_string, name).lower()
+    if not value:
+        return True
     if value in {"1", "true", "yes", "on"}:
         return True
     if value in {"0", "false", "no", "off"}:

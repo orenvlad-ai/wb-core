@@ -42,6 +42,21 @@ OLD_REFRESHED_AT = "2026-04-20T10:00:00Z"
 NEW_REFRESHED_AT = "2026-04-20T11:00:00Z"
 
 
+class _ValidSellerPortalRecoveryController:
+    def check_session(self, *, launcher_download_path: str) -> dict[str, object]:
+        return {
+            "status": "session_valid_canonical",
+            "status_label": "Сессия активна",
+            "status_tone": "success",
+            "summary": "Сохранённая seller-сессия активна, нужный кабинет подтверждён.",
+            "launcher_download_path": launcher_download_path,
+            "storage_state_path": "/opt/wb-web-bot/storage_state.json",
+        }
+
+    def read_status(self, **_: object) -> dict[str, object]:
+        return self.check_session(launcher_download_path="/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip")
+
+
 def main() -> None:
     bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
     with TemporaryDirectory(prefix="sheet-vitrina-group-refresh-") as tmp:
@@ -60,6 +75,7 @@ def main() -> None:
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=Path(tmp),
             runtime=runtime,
+            seller_portal_recovery_controller=_ValidSellerPortalRecoveryController(),  # type: ignore[arg-type]
             activated_at_factory=lambda: NEW_REFRESHED_AT,
             refreshed_at_factory=lambda: NEW_REFRESHED_AT,
             now_factory=lambda: datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc),
@@ -204,6 +220,14 @@ def main() -> None:
         failed_snapshot = _wait_job(entrypoint, str(failed_job["job_id"]))
         if failed_snapshot["status"] != "error" or "failed at source_fetch" not in str(failed_snapshot.get("error") or ""):
             raise AssertionError(f"group refresh failures must be stage-aware, got {failed_snapshot}")
+        failed_result = failed_snapshot.get("result") or {}
+        if (
+            failed_result.get("source_group_id") != "seller_portal_bot"
+            or failed_result.get("source_group_label") != "Seller Portal / бот"
+            or failed_result.get("failed_stage") != "source_fetch"
+            or "failed_stage=source_fetch" not in str(failed_result.get("semantic_reason") or "")
+        ):
+            raise AssertionError(f"group refresh failure must expose structured group/stage context, got {failed_snapshot}")
 
         log_text, _ = entrypoint.handle_sheet_operator_job_text_request(str(job["job_id"]))
         for expected in (

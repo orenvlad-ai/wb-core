@@ -11,6 +11,9 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib import parse as urllib_parse
 import zipfile
 
 
@@ -283,11 +286,106 @@ def main() -> None:
         if config.pid_path.exists():
             raise AssertionError("stop must remove supervisor.pid after cleanup")
 
+        auth_env_file = temp_dir / "web-auth.env"
+        auth_env_file.write_text(
+            "\n".join(
+                [
+                    "WB_CORE_WEB_AUTH_USERNAME=owner",
+                    "WB_CORE_WEB_AUTH_SESSION_SECRET=relogin-smoke-secret",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        refresh_server, refresh_hits = _start_refresh_server()
+        refresh_thread = threading.Thread(target=refresh_server.serve_forever, daemon=True)
+        refresh_thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{refresh_server.server_port}"
+            refresh_config = MODULE.ReloginSessionConfig(
+                state_dir=temp_dir,
+                storage_state_path=temp_dir / "storage_state.json",
+                wb_bot_python=Path(sys.executable),
+                refresh_url=base_url + "/refresh",
+                job_url=base_url + "/job",
+                status_url=base_url + "/status",
+                page_composition_url=base_url + "/page",
+                web_auth_env_file=auth_env_file,
+                canonical_supplier_id="canonical-supplier-id",
+                canonical_supplier_label="ИП Сагитов В. Р.",
+            )
+            refresh_result = MODULE.trigger_refresh_and_wait(refresh_config)
+        finally:
+            refresh_server.shutdown()
+            refresh_server.server_close()
+            refresh_thread.join(timeout=5)
+        if refresh_result.get("status") != "success":
+            raise AssertionError(f"post-login refresh must accept app auth and success job status, got {refresh_result}")
+        if refresh_hits.get("refresh_cookie") != 1 or refresh_hits.get("job_cookie") != 1:
+            raise AssertionError(f"refresh/job requests must include sanitized app session cookie, got {refresh_hits}")
+
         print("seller_portal_relogin_session_capture: ok -> capture_completed after browser login")
         print("seller_portal_relogin_session_supplier_switch: ok -> canonical supplier enforced before final save")
         print("seller_portal_relogin_session_launcher: ok -> archive contains reusable Mac launcher script")
         print("seller_portal_relogin_session_stop: ok -> operator stop reports stopped, not unexpected_exit")
+        print("seller_portal_relogin_session_post_login_refresh_auth: ok -> WebCore auth cookie and success job status accepted")
         print("smoke-check passed")
+
+
+def _start_refresh_server() -> tuple[ThreadingHTTPServer, dict[str, int]]:
+    hits = {
+        "refresh_cookie": 0,
+        "job_cookie": 0,
+        "status_cookie": 0,
+        "page_cookie": 0,
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path != "/refresh":
+                self.send_error(404)
+                return
+            if not _has_auth_cookie(self):
+                self._write_json(401, {"error": "authentication_required"})
+                return
+            hits["refresh_cookie"] += 1
+            self._write_json(202, {"job_id": "refresh-job-1"})
+
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urllib_parse.urlparse(self.path)
+            if not _has_auth_cookie(self):
+                self._write_json(401, {"error": "authentication_required"})
+                return
+            if parsed.path == "/job":
+                hits["job_cookie"] += 1
+                self._write_json(200, {"job_id": "refresh-job-1", "status": "success", "result": {"semantic_status": "success"}})
+                return
+            if parsed.path == "/status":
+                hits["status_cookie"] += 1
+                self._write_json(200, {"semantic_status": "success", "semantic_reason": "ok", "source_outcomes": []})
+                return
+            if parsed.path == "/page":
+                hits["page_cookie"] += 1
+                self._write_json(200, {"activity_surface": {"loading_table": {"rows": []}}})
+                return
+            self.send_error(404)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+        def _write_json(self, status: int, payload: dict[str, object]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    return server, hits
+
+
+def _has_auth_cookie(handler: BaseHTTPRequestHandler) -> bool:
+    return "wb_core_web_session=" in str(handler.headers.get("Cookie") or "")
 
 
 if __name__ == "__main__":
