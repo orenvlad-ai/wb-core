@@ -173,6 +173,7 @@ class LocalWebVitrinaFixtureServer:
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,
+            seller_portal_recovery_controller=_FixtureSellerPortalRecoveryController(),
             activated_at_factory=lambda: "2026-04-21T15:00:00Z",
             refreshed_at_factory=self._next_refreshed_at,
             now_factory=lambda: self.now,
@@ -223,6 +224,68 @@ class LocalWebVitrinaFixtureServer:
         refreshed_at = self.now + timedelta(minutes=10 + self._refresh_counter)
         self._refresh_counter += 1
         return refreshed_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+class _FixtureSellerPortalRecoveryController:
+    def check_session(self, *, launcher_download_path: str) -> dict[str, object]:
+        return {
+            "status": "session_valid_canonical",
+            "status_label": "Сессия активна",
+            "status_tone": "success",
+            "summary": "Сохранённая seller-сессия активна, нужный кабинет подтверждён.",
+            "instruction": "Восстановление не требуется.",
+            "technical_line": "Нужный кабинет: ИП Сагитов В. Р. · supplier canonical-supplier-id",
+            "launcher_download_path": launcher_download_path,
+            "storage_state_path": "/opt/wb-web-bot/storage_state.json",
+        }
+
+    def read_status(self, *, launcher_download_path: str, run_id: str | None = None, with_probe: bool = True) -> dict[str, object]:
+        del run_id, with_probe
+        return {
+            "status": "idle",
+            "status_label": "Не запущено",
+            "status_tone": "idle",
+            "run_status": "idle",
+            "run_status_label": "Не запущено",
+            "run_status_tone": "idle",
+            "summary": "Новый запуск восстановления сейчас не выполняется.",
+            "instruction": "Восстановление не требуется.",
+            "running": False,
+            "can_start": True,
+            "can_stop": False,
+            "launcher_enabled": False,
+            "launcher_ready": False,
+            "can_download_launcher": False,
+            "launcher_download_path": launcher_download_path,
+            "session_status": "session_valid_canonical" if with_probe else "",
+            "session_status_label": "Сессия активна" if with_probe else "",
+            "session_status_tone": "success" if with_probe else "",
+        }
+
+    def start(self, *, replace: bool, launcher_download_path: str) -> dict[str, object]:
+        del replace
+        return {
+            "status": "not_needed",
+            "status_label": "Не потребовалось",
+            "status_tone": "success",
+            "run_status": "not_needed",
+            "run_status_label": "Не потребовалось",
+            "run_status_tone": "success",
+            "summary": "Повторный вход не потребовался.",
+            "instruction": "Сессия уже активна.",
+            "running": False,
+            "run_is_final": True,
+            "run_final_status": "not_needed",
+            "final_marker": "not_needed",
+            "launcher_download_path": launcher_download_path,
+            "session_status": "session_valid_canonical",
+        }
+
+    def stop(self, *, launcher_download_path: str) -> dict[str, object]:
+        return self.read_status(launcher_download_path=launcher_download_path)
+
+    def build_launcher_archive(self, **_: object) -> tuple[bytes, str]:
+        return b"", "seller-portal-relogin-macos.zip"
 
 
 def _trigger_hidden_reset(page: object) -> None:

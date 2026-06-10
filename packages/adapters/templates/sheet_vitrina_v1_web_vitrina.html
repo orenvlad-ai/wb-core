@@ -1934,6 +1934,73 @@
       background: #fbbf24;
     }
 
+    .seller-top-session {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 24px;
+      padding: 3px 7px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: #ffffff;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .seller-top-session-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--muted);
+      opacity: .75;
+      flex: 0 0 auto;
+    }
+
+    .seller-top-session.tone-success {
+      border-color: rgba(20, 184, 122, .35);
+      color: var(--success-text);
+      background: var(--success-bg);
+    }
+
+    .seller-top-session.tone-success .seller-top-session-dot {
+      background: var(--success);
+    }
+
+    .seller-top-session.tone-warning {
+      border-color: rgba(217, 119, 6, .35);
+      color: var(--warning-text);
+      background: var(--warning-bg);
+    }
+
+    .seller-top-session.tone-warning .seller-top-session-dot {
+      background: var(--warning);
+      animation: table-snapshot-blink 950ms ease-in-out infinite;
+    }
+
+    .seller-top-session.tone-error {
+      border-color: rgba(220, 38, 38, .35);
+      color: var(--error-text);
+      background: var(--error-bg);
+    }
+
+    .seller-top-session.tone-error .seller-top-session-dot {
+      background: var(--danger);
+    }
+
+    .seller-top-session-action {
+      border: 0;
+      border-left: 1px solid rgba(0, 0, 0, .14);
+      margin-left: 2px;
+      padding: 0 0 0 6px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
     @keyframes table-snapshot-blink {
       0%, 100% {
         opacity: 1;
@@ -3909,6 +3976,10 @@
                 <span class="table-freshness-dot" aria-hidden="true"></span>
                 <span data-table-freshness-label>акт</span>
               </span>
+              <span class="seller-top-session tone-neutral" data-seller-top-session title="Сессия Seller: неизвестно" aria-label="Сессия Seller: неизвестно">
+                <span class="seller-top-session-dot" aria-hidden="true"></span>
+                <span data-seller-top-session-label>Сессия Seller: неизвестно</span>
+              </span>
               <p class="table-summary-line" data-table-summary-line hidden></p>
               <div class="table-header-controls" data-table-header-controls>
                 <div class="toolbar-field toolbar-field-range">
@@ -4534,6 +4605,8 @@
     const tableObjectLabelNode = document.querySelector("[data-table-object-label]");
     const tableFreshnessIndicatorNode = document.querySelector("[data-table-freshness-indicator]");
     const tableFreshnessLabelNode = document.querySelector("[data-table-freshness-label]");
+    const sellerTopSessionNode = document.querySelector("[data-seller-top-session]");
+    const sellerTopSessionLabelNode = document.querySelector("[data-seller-top-session-label]");
     const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
     const columnManagerNoteNode = document.querySelector("[data-column-manager-note]");
     const columnVisibilityControlsNode = document.querySelector("[data-column-visibility-controls]");
@@ -4814,9 +4887,13 @@
         }
       },
       sellerSession: {
+        status: "unknown",
         statusLabel: "",
         tone: "neutral",
-        checkedAt: ""
+        checkedAt: "",
+        summary: "",
+        instruction: "",
+        loading: false
       },
       sellerRecovery: {
         launcherEnabled: false,
@@ -4982,6 +5059,8 @@
       sessionHighlights: {}
     };
     let sellerRecoveryPollHandle = null;
+    let sellerSessionIndicatorStarted = false;
+    let sellerSessionIndicatorInFlight = false;
     let metricPresentationDragState = null;
 
     purgeObsoleteHistoryStorage();
@@ -5246,14 +5325,27 @@
       }
       const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
       if (recoveryStartButton) {
+        event.preventDefault();
         runSellerRecoveryStart();
         return;
       }
       const launcherButton = event.target.closest("[data-session-launcher]");
       if (launcherButton) {
+        event.preventDefault();
         downloadSellerRecoveryLauncher();
       }
     });
+
+    if (sellerTopSessionNode) {
+      sellerTopSessionNode.addEventListener("click", function(event) {
+        const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
+        if (!recoveryStartButton) {
+          return;
+        }
+        event.preventDefault();
+        runSellerRecoveryStart();
+      });
+    }
 
     loadingTableBodyNode.addEventListener("change", function(event) {
       const dateInput = event.target.closest("[data-refresh-source-group-date]");
@@ -5874,6 +5966,23 @@
         return fallbackSuccessText;
       }
       return label + (reason ? ": " + reason : "");
+    }
+
+    function groupRefreshFailureMessage(jobPayload, groupLabel, selectedDate) {
+      const result = (jobPayload && jobPayload.result) || {};
+      const parts = [
+        "Группа: " + String(result.source_group_label || groupLabel || result.source_group_id || "—"),
+        "Дата: " + String(result.selected_as_of_date || selectedDate || "—")
+      ];
+      if (result.failed_stage) {
+        parts.push("stage: " + String(result.failed_stage));
+      }
+      if (result.session_status) {
+        parts.push("session: " + String(result.session_status));
+      }
+      const reason = String(result.semantic_reason || result.status_reason || result.error || (jobPayload && jobPayload.error) || "source group refresh job failed");
+      const nextStep = String(result.operator_next_step || "");
+      return parts.join(" · ") + ". " + reason + (nextStep ? " " + nextStep : "");
     }
 
     function updatePageHistoryPeriod(payload) {
@@ -13249,6 +13358,7 @@
       if (!resolvedJobPath) {
         throw new Error("job path is missing for refresh action");
       }
+      const guardedByAction = typeof actionId === "number" && Number.isFinite(actionId);
       while (true) {
         const response = await fetch(
           resolvedJobPath,
@@ -13258,7 +13368,7 @@
           }
         );
         const payload = await readJsonResponse(response, "non-json response from sheet job route");
-        if (actionId !== state.actionSequence) {
+        if (guardedByAction && actionId !== state.actionSequence) {
           return null;
         }
         if (!response.ok) {
@@ -13442,7 +13552,7 @@
           return;
         }
         if (!finalJob || finalJob.status !== "success") {
-          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "source group refresh job failed");
+          throw new Error(groupRefreshFailureMessage(finalJob, groupLabel, selectedDate));
         }
         setSessionHighlightsFromJob(finalJob);
         const semanticTone = jobSemanticTone(finalJob);
@@ -13515,6 +13625,7 @@
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller session check job failed");
         }
         applySellerSessionResult(finalJob.result || {});
+        renderSellerSessionIndicator();
         setStatusBadge({
           label: state.sellerSession.statusLabel || "Проверено",
           tone: state.sellerSession.tone,
@@ -13526,13 +13637,18 @@
           return;
         }
         const checkedAt = new Date().toISOString();
-        state.sellerSession = {
-          statusLabel: "неуспешно",
-          tone: "error",
-          checkedAt: checkedAt
-        };
-        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
         const message = String(error && error.message ? error.message : error);
+        state.sellerSession = {
+          status: "session_probe_error",
+          statusLabel: "ошибка проверки",
+          tone: "error",
+          checkedAt: checkedAt,
+          summary: message,
+          instruction: "",
+          loading: false
+        };
+        renderSellerSessionIndicator();
+        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
         setStatusBadge({label: "Ошибка", tone: "error", detail: message});
       } finally {
         if (actionId === state.actionSequence) {
@@ -13541,9 +13657,64 @@
       }
     }
 
+    async function startSellerSessionIndicatorCheck() {
+      if (sellerSessionIndicatorStarted || sellerSessionIndicatorInFlight) {
+        return;
+      }
+      sellerSessionIndicatorStarted = true;
+      sellerSessionIndicatorInFlight = true;
+      state.sellerSession = Object.assign({}, state.sellerSession, {
+        status: "checking",
+        statusLabel: "проверка...",
+        tone: "warning",
+        loading: true
+      });
+      renderSellerSessionIndicator();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.seller_session_check_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify({async: true})
+        });
+        const payload = await readJsonResponse(response, "non-json response from seller session check route");
+        if (!response.ok) {
+          throw new Error((payload && payload.error) ? payload.error : "seller session check route returned " + response.status);
+        }
+        const resolvedJobPath = String(
+          (payload && payload.job_path) ||
+          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
+        );
+        const finalJob = await pollSheetJob(resolvedJobPath, null);
+        if (!finalJob || finalJob.status !== "success") {
+          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller session check job failed");
+        }
+        applySellerSessionResult(finalJob.result || {}, {renderLoadingTable: false});
+      } catch (error) {
+        const message = String(error && error.message ? error.message : error);
+        state.sellerSession = {
+          status: "session_probe_error",
+          statusLabel: "ошибка проверки",
+          tone: "error",
+          checkedAt: new Date().toISOString(),
+          summary: message,
+          instruction: "Повторите проверку или запустите восстановление Seller Portal.",
+          loading: false
+        };
+        renderSellerSessionIndicator();
+      } finally {
+        sellerSessionIndicatorInFlight = false;
+      }
+    }
+
     async function runSellerRecoveryStart() {
       const actionId = state.actionSequence + 1;
       state.actionSequence = actionId;
+      if (activityPanelNode) {
+        activityPanelNode.open = true;
+      }
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Запуск", tone: "warning", detail: "запрашиваем восстановление Seller Portal session"});
       try {
@@ -13607,16 +13778,25 @@
       }
     }
 
-    function applySellerSessionResult(result) {
-      const ok = Boolean(result && result.session_ok);
+    function applySellerSessionResult(result, options) {
+      const sessionStatus = String((result && (result.session_status || result.status)) || "").trim();
+      const ok = Boolean(result && result.session_ok) || sessionStatus === "session_valid_canonical";
       const checkedAt = String((result && result.checked_at) || new Date().toISOString());
+      const mapped = sellerSessionDisplay(sessionStatus, result || {});
       state.sellerSession = {
-        statusLabel: ok ? "успешно" : "неуспешно",
-        tone: ok ? "success" : "error",
-        checkedAt: checkedAt
+        status: sessionStatus || (ok ? "session_valid_canonical" : "session_probe_error"),
+        statusLabel: mapped.label,
+        tone: mapped.tone,
+        checkedAt: checkedAt,
+        summary: String((result && (result.summary || result.reason || result.message)) || ""),
+        instruction: String((result && result.instruction) || ""),
+        loading: false
       };
       applySellerRecoveryPayload(result || {}, {render: false});
-      renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+      renderSellerSessionIndicator();
+      if (!options || options.renderLoadingTable !== false) {
+        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+      }
     }
 
     function applySellerRecoveryPayload(payload, options) {
@@ -13640,6 +13820,19 @@
         tone: normalizeTone(normalized.run_status_tone || normalized.status_tone || "neutral"),
         checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString())
       };
+      if ((!options || options.updateSession !== false) && normalized.session_status) {
+        const mapped = sellerSessionDisplay(String(normalized.session_status || ""), normalized);
+        state.sellerSession = Object.assign({}, state.sellerSession, {
+          status: String(normalized.session_status || ""),
+          statusLabel: mapped.label,
+          tone: mapped.tone,
+          checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
+          summary: String(normalized.summary || normalized.reason || ""),
+          instruction: String(normalized.instruction || ""),
+          loading: false
+        });
+        renderSellerSessionIndicator();
+      }
       if (sellerRecoveryIsActive(normalized)) {
         scheduleSellerRecoveryPoll(1500);
       } else {
@@ -13647,6 +13840,57 @@
       }
       if (!options || options.render !== false) {
         renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+      }
+    }
+
+    function sellerSessionDisplay(status, payload) {
+      const normalized = String(status || "").trim();
+      if (normalized === "checking") {
+        return {label: "проверка...", tone: "warning"};
+      }
+      if (normalized === "session_valid_canonical") {
+        return {label: "актуальна", tone: "success"};
+      }
+      if (normalized === "session_valid_wrong_org") {
+        return {label: "требуется вход", tone: "error"};
+      }
+      if (normalized === "session_invalid" || normalized === "session_missing") {
+        return {label: "требуется вход", tone: "error"};
+      }
+      if (normalized === "session_probe_error") {
+        return {label: "ошибка проверки", tone: "error"};
+      }
+      if (payload && payload.status_label) {
+        return {label: String(payload.status_label), tone: normalizeTone(payload.status_tone || "neutral")};
+      }
+      return {label: "неизвестно", tone: "neutral"};
+    }
+
+    function renderSellerSessionIndicator() {
+      if (!sellerTopSessionNode || !sellerTopSessionLabelNode) {
+        return;
+      }
+      const session = state.sellerSession || {};
+      const mapped = sellerSessionDisplay(session.loading ? "checking" : session.status, session);
+      const label = "Сессия Seller: " + mapped.label;
+      const titleParts = [label, session.summary || "", session.instruction || ""].filter(Boolean);
+      sellerTopSessionNode.className = "seller-top-session tone-" + normalizeTone(mapped.tone);
+      sellerTopSessionNode.title = titleParts.join(" · ");
+      sellerTopSessionNode.setAttribute("aria-label", titleParts.join(" · ") || label);
+      const needsRecovery = ["session_invalid", "session_missing", "session_valid_wrong_org", "session_probe_error"].includes(String(session.status || ""));
+      sellerTopSessionLabelNode.textContent = label;
+      const existingAction = sellerTopSessionNode.querySelector("[data-session-recovery-start]");
+      if (needsRecovery) {
+        if (!existingAction) {
+          const action = document.createElement("button");
+          action.className = "seller-top-session-action";
+          action.type = "button";
+          action.setAttribute("data-session-recovery-start", "");
+          action.textContent = "Войти";
+          sellerTopSessionNode.appendChild(action);
+        }
+      } else if (existingAction) {
+        existingAction.remove();
       }
     }
 
@@ -13658,6 +13902,9 @@
       const statusUrl = new URL(statusPath, window.location.origin);
       if (state.sellerRecovery.runId) {
         statusUrl.searchParams.set("run_id", state.sellerRecovery.runId);
+      }
+      if (options && options.probe === false) {
+        statusUrl.searchParams.set("probe", "0");
       }
       const response = await fetch(statusUrl.toString(), {
         method: "GET",
@@ -13876,7 +14123,9 @@
           renderPage(payload, {tableFreshness: "fresh"});
           markFreshTableDisplayed(payload);
         }
-        refreshSellerRecoveryStatus();
+        renderSellerSessionIndicator();
+        fetchSellerRecoveryStatus({probe: false, render: true, updateSession: false}).catch(function() {});
+        startSellerSessionIndicatorCheck();
       } catch (error) {
         if (requestId !== state.requestSequence) {
           return;

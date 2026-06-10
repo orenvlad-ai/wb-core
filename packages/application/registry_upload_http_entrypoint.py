@@ -119,7 +119,9 @@ SHEET_VITRINA_LOAD_ROUTE = "/v1/sheet-vitrina-v1/load"
 SHEET_VITRINA_GROUP_REFRESH_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/group-refresh"
 SHEET_VITRINA_AUTO_SCHEDULES_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 SHEET_VITRINA_AUTO_SCHEDULES_RUN_NOW_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now"
+SHEET_VITRINA_SELLER_SESSION_CHECK_ROUTE = "/v1/sheet-vitrina-v1/seller-portal-session/check"
 SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
+SHEET_VITRINA_SELLER_RECOVERY_LAUNCHER_ROUTE = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
 SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for website/operator web-vitrina"
 SHEET_VITRINA_DAILY_BUSINESS_TIMES = ", ".join(
@@ -424,6 +426,7 @@ class SellerPortalRecoveryController:
         *,
         launcher_download_path: str,
         run_id: str | None = None,
+        with_probe: bool = True,
     ) -> dict[str, Any]:
         config = self._config()
         raw = (
@@ -432,7 +435,7 @@ class SellerPortalRecoveryController:
             else self._tool().read_session_status(config, with_probe=False, requested_run_id=run_id)
         )
         running = bool(raw.get("running"))
-        if not running:
+        if with_probe and not running:
             raw = (
                 self._status_reader(config, True, requested_run_id=run_id)
                 if self._status_reader is not None
@@ -1279,11 +1282,19 @@ class RegistryUploadHttpEntrypoint:
         *,
         launcher_download_path: str,
         run_id: str | None = None,
+        with_probe: bool = True,
     ) -> dict[str, Any]:
-        return self.seller_portal_recovery.read_status(
-            launcher_download_path=launcher_download_path,
-            run_id=run_id,
-        )
+        try:
+            return self.seller_portal_recovery.read_status(
+                launcher_download_path=launcher_download_path,
+                run_id=run_id,
+                with_probe=with_probe,
+            )
+        except TypeError:
+            return self.seller_portal_recovery.read_status(
+                launcher_download_path=launcher_download_path,
+                run_id=run_id,
+            )
 
     def handle_seller_portal_recovery_start_request(
         self,
@@ -2213,6 +2224,69 @@ class RegistryUploadHttpEntrypoint:
         )
         with self._sheet_cycle_lock:
             try:
+                session_preflight: dict[str, Any] | None = None
+                if source_group_id == "seller_portal_bot":
+                    stage = "session_preflight"
+                    emit(
+                        _format_log_event(
+                            "group_refresh_session_preflight_start",
+                            stage=stage,
+                            source_group_id=source_group_id,
+                            source_group_label=group_label,
+                            as_of_date=selected_as_of_date,
+                            target_snapshot_as_of_date=target_snapshot_as_of_date,
+                        )
+                    )
+                    session_preflight = self.handle_seller_portal_session_check_request(
+                        launcher_download_path=SHEET_VITRINA_SELLER_RECOVERY_LAUNCHER_ROUTE,
+                    )
+                    session_status = str(session_preflight.get("status") or "").strip()
+                    if session_status != "session_valid_canonical":
+                        finished_at = self.activated_at_factory()
+                        payload = _build_group_refresh_session_action_required_payload(
+                            source_group_id=source_group_id,
+                            source_group_label=group_label,
+                            selected_as_of_date=selected_as_of_date,
+                            target_snapshot_as_of_date=target_snapshot_as_of_date,
+                            source_keys=source_keys,
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            session_preflight=session_preflight,
+                        )
+                        emit(
+                            _format_log_event(
+                                "group_refresh_session_preflight_finish",
+                                stage=stage,
+                                status="action_required",
+                                source_group_id=source_group_id,
+                                session_status=session_status,
+                                reason=str(payload.get("semantic_reason") or ""),
+                            )
+                        )
+                        emit(
+                            _format_log_event(
+                                "group_refresh_finish",
+                                status="action_required",
+                                failed_stage=stage,
+                                source_group_id=source_group_id,
+                                as_of_date=selected_as_of_date,
+                                target_snapshot_as_of_date=target_snapshot_as_of_date,
+                                session_status=session_status,
+                                reason=str(payload.get("semantic_reason") or ""),
+                                duration_seconds=_duration_seconds(started_at, finished_at),
+                            )
+                        )
+                        return payload
+                    emit(
+                        _format_log_event(
+                            "group_refresh_session_preflight_finish",
+                            stage=stage,
+                            status="success",
+                            source_group_id=source_group_id,
+                            session_status=session_status,
+                        )
+                    )
+
                 current_state = self.runtime.load_current_state()
                 metric_keys = _metric_keys_for_source_keys(
                     extend_metrics_with_onec_stock_metrics(current_state.metrics_v2),
@@ -2347,6 +2421,7 @@ class RegistryUploadHttpEntrypoint:
                         "target_snapshot_as_of_date": target_snapshot_as_of_date,
                         "source_keys": source_keys,
                         "metric_keys": metric_keys,
+                        "session_preflight": session_preflight or {},
                         "started_at": started_at,
                         "finished_at": finished_at,
                         "duration_seconds": duration_seconds,
@@ -2387,6 +2462,17 @@ class RegistryUploadHttpEntrypoint:
                 return payload
             except Exception as exc:
                 finished_at = self.activated_at_factory()
+                error_payload = _build_group_refresh_error_payload(
+                    source_group_id=source_group_id,
+                    source_group_label=group_label,
+                    selected_as_of_date=selected_as_of_date,
+                    target_snapshot_as_of_date=target_snapshot_as_of_date,
+                    source_keys=source_keys,
+                    failed_stage=stage,
+                    error=str(exc),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
                 emit(
                     _format_log_event(
                         "group_refresh_finish",
@@ -2399,7 +2485,10 @@ class RegistryUploadHttpEntrypoint:
                         duration_seconds=_duration_seconds(started_at, finished_at),
                     )
                 )
-                raise RuntimeError(f"failed at {stage}: {exc}") from exc
+                raise SheetVitrinaV1OperatorJobError(
+                    f"failed at {stage}: {exc}",
+                    result_payload=error_payload,
+                ) from exc
 
     def _run_seller_portal_session_check(
         self,
@@ -2920,6 +3009,7 @@ def _build_seller_portal_recovery_payload(
         "session_status": session_status,
         "session_status_label": _seller_portal_session_check_status_label(session_status),
         "session_status_tone": _seller_portal_session_check_status_tone(session_status),
+        "storage_state_path": str(getattr(config, "storage_state_path", "") or ""),
         "message": str(raw.get("message") or "").strip(),
         "run_failure_code": _seller_portal_recovery_failure_code(raw),
     }
@@ -3005,7 +3095,194 @@ def _build_seller_portal_session_check_payload(
         "current_supplier_external_id": str(supplier_context.get("current_supplier_external_id") or ""),
         "current_storage_probe": current_probe_payload,
         "message": str(raw.get("message") or "").strip(),
+        "storage_state_path": str(getattr(config, "storage_state_path", "") or ""),
     }
+
+
+def _build_group_refresh_session_action_required_payload(
+    *,
+    source_group_id: str,
+    source_group_label: str,
+    selected_as_of_date: str,
+    target_snapshot_as_of_date: str,
+    source_keys: list[str],
+    started_at: str,
+    finished_at: str,
+    session_preflight: Mapping[str, Any],
+) -> dict[str, Any]:
+    session_status = str(session_preflight.get("status") or "session_probe_error").strip()
+    reason = _seller_session_action_required_reason(session_preflight)
+    return {
+        "operation": "refresh_group",
+        "status": "action_required",
+        "technical_status": "blocked",
+        "semantic_status": "action_required",
+        "semantic_label": "Требуется вход Seller",
+        "semantic_tone": "error",
+        "semantic_reason": reason,
+        "status_label": "Требуется вход Seller",
+        "status_reason": reason,
+        "source_group_id": source_group_id,
+        "source_group_label": source_group_label,
+        "selected_as_of_date": selected_as_of_date,
+        "target_snapshot_as_of_date": target_snapshot_as_of_date,
+        "source_keys": list(source_keys),
+        "failed_stage": "session_preflight",
+        "action_required": True,
+        "action": "run_seller_portal_recovery",
+        "operator_next_step": "Запустите восстановление Seller Portal, дождитесь валидной сессии и повторите обновление группы.",
+        "seller_recovery_start_path": SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE,
+        "seller_session_check_path": SHEET_VITRINA_SELLER_SESSION_CHECK_ROUTE,
+        "session_status": session_status,
+        "session_status_label": str(session_preflight.get("status_label") or ""),
+        "session_status_tone": str(session_preflight.get("status_tone") or ""),
+        "session_probe_reason": str(
+            session_preflight.get("summary")
+            or session_preflight.get("reason")
+            or session_preflight.get("message")
+            or ""
+        ),
+        "session_technical_line": str(session_preflight.get("technical_line") or ""),
+        "session_preflight": dict(session_preflight),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_seconds": _duration_seconds(started_at, finished_at),
+        "merge_summary": {
+            "rows_updated": 0,
+            "rows_preserved": 0,
+            "status_rows_updated": 0,
+            "updated_cells": [],
+            "updated_cell_count": 0,
+            "latest_confirmed_cell_count": 0,
+        },
+        "updated_cells": [],
+        "updated_cell_count": 0,
+        "latest_confirmed_cell_count": 0,
+    }
+
+
+def _build_group_refresh_error_payload(
+    *,
+    source_group_id: str,
+    source_group_label: str,
+    selected_as_of_date: str,
+    target_snapshot_as_of_date: str,
+    source_keys: list[str],
+    failed_stage: str,
+    error: str,
+    started_at: str,
+    finished_at: str,
+) -> dict[str, Any]:
+    session_related = _group_refresh_error_is_session_related(error)
+    session_status = _session_status_from_error_text(error) if session_related else ""
+    reason = _group_refresh_error_reason(
+        error,
+        failed_stage=failed_stage,
+        session_status=session_status,
+    )
+    payload = {
+        "operation": "refresh_group",
+        "status": "error",
+        "technical_status": "error",
+        "semantic_status": "error",
+        "semantic_label": "Ошибка обновления группы",
+        "semantic_tone": "error",
+        "semantic_reason": reason,
+        "status_label": "Ошибка обновления группы",
+        "status_reason": reason,
+        "source_group_id": source_group_id,
+        "source_group_label": source_group_label,
+        "selected_as_of_date": selected_as_of_date,
+        "target_snapshot_as_of_date": target_snapshot_as_of_date,
+        "source_keys": list(source_keys),
+        "failed_stage": failed_stage,
+        "command_phase_label": failed_stage,
+        "error": str(error or ""),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_seconds": _duration_seconds(started_at, finished_at),
+        "action_required": session_related,
+        "operator_next_step": (
+            "Запустите восстановление Seller Portal и повторите обновление группы."
+            if session_related
+            else "Откройте лог job и проверьте указанный failed_stage."
+        ),
+        "updated_cells": [],
+        "updated_cell_count": 0,
+        "latest_confirmed_cell_count": 0,
+    }
+    if session_related:
+        payload.update(
+            {
+                "session_status": session_status,
+                "session_probe_reason": _seller_session_error_reason(error, session_status=session_status),
+                "seller_recovery_start_path": SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE,
+            }
+        )
+    return payload
+
+
+def _seller_session_action_required_reason(session_preflight: Mapping[str, Any]) -> str:
+    status = str(session_preflight.get("status") or "").strip()
+    summary = str(
+        session_preflight.get("summary")
+        or session_preflight.get("reason")
+        or session_preflight.get("message")
+        or ""
+    ).strip()
+    prefix = "Сессия Seller Portal недействительна"
+    if status == "session_missing":
+        prefix = "Сессия Seller Portal отсутствует"
+    elif status == "session_valid_wrong_org":
+        prefix = "Сессия Seller Portal открыта не в том кабинете"
+    elif status == "session_probe_error":
+        prefix = "Ошибка проверки Seller Portal session"
+    return f"{prefix}: {summary}" if summary else prefix
+
+
+def _group_refresh_error_reason(error: str, *, failed_stage: str, session_status: str) -> str:
+    normalized_error = str(error or "").strip()
+    if session_status:
+        return (
+            f"failed_stage={failed_stage}; "
+            f"{_seller_session_error_reason(normalized_error, session_status=session_status)}"
+        )
+    return f"failed_stage={failed_stage}; {normalized_error}" if normalized_error else f"failed_stage={failed_stage}"
+
+
+def _group_refresh_error_is_session_related(error: str) -> bool:
+    lowered = str(error or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "seller_portal_session_invalid",
+            "seller_portal_session_missing",
+            "seller_portal_wrong_supplier",
+            "seller_portal_session_probe_failed",
+            "manual_relogin_required=login_and_save_state",
+        )
+    )
+
+
+def _session_status_from_error_text(error: str) -> str:
+    lowered = str(error or "").lower()
+    if "seller_portal_session_missing" in lowered:
+        return "session_missing"
+    if "seller_portal_wrong_supplier" in lowered:
+        return "session_valid_wrong_org"
+    if "seller_portal_session_invalid" in lowered or "manual_relogin_required=login_and_save_state" in lowered:
+        return "session_invalid"
+    return "session_probe_error"
+
+
+def _seller_session_error_reason(error: str, *, session_status: str) -> str:
+    if session_status == "session_missing":
+        return "Сессия Seller Portal отсутствует; запустите recovery/relogin flow."
+    if session_status == "session_valid_wrong_org":
+        return "Выбран не canonical supplier; запустите recovery/relogin flow и переключите кабинет."
+    if session_status == "session_invalid":
+        return "Сессия Seller Portal недействительна; запустите recovery/relogin flow."
+    return f"Проверка Seller Portal session завершилась ошибкой: {str(error or '').strip()}"
 
 
 def _seller_portal_recovery_supplier_context(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -3731,6 +4008,12 @@ class SheetVitrinaV1OperatorJob:
         return payload
 
 
+class SheetVitrinaV1OperatorJobError(RuntimeError):
+    def __init__(self, message: str, *, result_payload: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.result_payload = dict(result_payload or {})
+
+
 class SheetVitrinaV1OperatorJobStore:
     def __init__(self, timestamp_factory: Callable[[], str]) -> None:
         self.timestamp_factory = timestamp_factory
@@ -3833,6 +4116,8 @@ class SheetVitrinaV1OperatorJobStore:
                 job.status = "error"
                 job.finished_at = self.timestamp_factory()
                 job.error = str(exc)
+                if isinstance(exc, SheetVitrinaV1OperatorJobError) and exc.result_payload:
+                    job.result = dict(exc.result_payload)
             SHEET_OPERATOR_JOB_ID.reset(token)
             return
 

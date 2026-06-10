@@ -79,6 +79,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/job"
   - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/status"
   - "GET /v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
+  - "POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh"
   - "GET /sheet-vitrina-v1/operator"
   - "GET /sheet-vitrina-v1/vitrina"
   - "GET /login"
@@ -129,6 +130,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
   - "apps/sheet_vitrina_v1_seller_portal_recovery_http_smoke.py"
+  - "apps/sheet_vitrina_v1_seller_session_group_refresh_preflight_smoke.py"
   - "apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py"
   - "apps/factory_order_sales_history_smoke.py"
   - "apps/factory_order_sales_history_reconcile.py"
@@ -278,7 +280,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
     - `GET /v1/sheet-vitrina-v1/seller-portal-session/check` читает current seller storage state, запускает current session probe, проверяет canonical supplier/org и возвращает truthful short result (`session_valid_canonical / session_valid_wrong_org / session_invalid / session_missing / session_probe_error`) без запуска Xvfb/noVNC
     - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/start` стартует repo-owned recovery lifecycle поверх existing `apps/seller_portal_relogin_session.py`
     - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start` остаётся same recovery start seam для unified web-vitrina shell and async job-backed action; successful async job completion means "recovery run accepted/started", not "launcher is ready", and the UI must continue through the status route before enabling download
-    - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status` отдаёт cheap truthful per-run status surface; root `status` теперь = state конкретного recovery run (`idle / starting / awaiting_login / saving_session / validating_session / checking_canonical_supplier / triggering_refresh / completed / not_needed / stopped / timeout / error`), а session health остаётся отдельным `session_status`. The status payload includes `run_id`, `run_status`, `running`, `launcher_ready`, `can_download_launcher`, `can_open_login_window`, `launcher_url`/`launcher_download_path`, `reason`, `summary` and `final_marker`.
+    - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status` отдаёт cheap truthful per-run status surface; root `status` теперь = state конкретного recovery run (`idle / starting / awaiting_login / saving_session / validating_session / checking_canonical_supplier / triggering_refresh / completed / not_needed / stopped / timeout / error`), а session health остаётся отдельным `session_status`. The status payload includes `run_id`, `run_status`, `running`, `launcher_ready`, `can_download_launcher`, `can_open_login_window`, `launcher_url`/`launcher_download_path`, `reason`, `summary`, `storage_state_path` and `final_marker`. Default status reads may probe the current session; `probe=0` is the cheap run-state read for UI refreshes that must not synchronously probe Seller Portal.
     - if the EU host lacks `/opt/wb-web-bot/venv/bin/python`, session probe is surfaced as `session_probe_error` in this 200-shape status payload instead of public 500
     - hosted deploy now owns the dependency contour for that path: it verifies/installs `python3-pip`, `python3-venv`, `xvfb`, `x11vnc`, `novnc`, `websockify`, `openbox`, creates/repairs `/opt/wb-web-bot/venv`, installs `playwright==1.58.0` and `psycopg2-binary==2.9.11` into that venv and ensures Playwright Chromium can launch before runtime restart
     - `POST /v1/sheet-vitrina-v1/seller-portal-recovery/stop` cleanup-ит только temporary noVNC/Xvfb contour и возвращает page в нейтральный idle summary; сохранённый `storage_state.json` и steady seller session не удаляются
@@ -287,6 +289,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
     - operator block дополнительно показывает `Текущий запуск / Статус запуска / Финал запуска / Статус сессии / Старт / Завершение`, чтобы final конкретного recovery run не путался с общим session-check outcome
     - host-side VNC path is additionally hardened with `x11vnc -noxdamage`, because the real operator source-of-truth path is the SSH-tunneled noVNC canvas rather than a host-side screenshot
   - operator-facing recovery success не materialize-ится только из `session ok`: same lifecycle additionally confirms the canonical supplier/org and only after that keeps the saved session as a truthful success
+  - after a successful recovery save, the post-login refresh trigger calls the protected WebCore refresh route with an in-memory app-session cookie derived from the hosted env file; cookies, password hash and session secret are never printed. The recovery refresh poll accepts the entrypoint job terminal statuses `success/error` as well as legacy `completed/failed`, so an auth boundary or job-status mismatch cannot leave a valid Seller session reported as `refresh_failed` without a precise `HTTP <code>`/job reason.
   - chosen page route for web-vitrina = `GET /sheet-vitrina-v1/vitrina`
   - route chosen as sibling to `/sheet-vitrina-v1/operator`, not as `/sheet-vitrina-v1/operator/vitrina`, because future web-vitrina is a separate working surface and must not быть вложенной под orchestration-first operator shell
   - sibling read route = `GET /v1/sheet-vitrina-v1/web-vitrina`
@@ -318,6 +321,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
     - main table display headers are Russian and include `Обновлено`; this field is a per-row last successful update timestamp in the vitrina snapshot metadata, not the business data date
     - server-driven activity surface renders `Загрузка данных` as a grouped compact table over the same truthful source outcomes: groups `WB API`, `Seller Portal / бот`, `WB public card / бот`, `Прочие источники`, each with one compact date control, one `Обновить группу` action and group-level last update timestamp; rows keep server/business today/yesterday status columns, reason columns, Russian metric labels and secondary technical endpoint text. The group map covers every visible main-table metric exactly once; residual calculated/formula metrics, including proxy profit and proxy margin, belong to `Прочие источники`.
     - `POST /v1/sheet-vitrina-v1/web-vitrina/group-refresh` is the date-scoped web-vitrina group action seam; payload includes `{async: true, source_group_id, as_of_date}`. The client surfaces launch/loading/error state per group and writes a visible launch-failure line when the POST returns non-2xx before job creation; once the route reaches the app, it starts a job/log-backed partial refresh/load for one source group and one selected date, and must not clear, overwrite or timestamp unrelated groups or unrelated date cells. Group/global job results expose `updated_cells` metadata for transient UI highlighting: `updated` cells are green, `latest_confirmed`/fallback cells are yellow, and the styling is browser-session-only.
+    - for `source_group_id=seller_portal_bot`, the same group-refresh job runs a seller-session preflight before plan build/source fetch. Invalid/missing/wrong-supplier/probe-error session returns a structured action-required job result (`source_group_id`, source group label, `failed_stage=session_preflight`, `session_status`, reason and operator next step) and does not start the heavy bot fetch. Valid canonical session continues into normal source fetch and the final result records the preflight status/path without exposing storage contents.
     - successful group-refresh writes through the shared server-side accepted/runtime contour (`ЕБД` / `единая база данных`) and selected ready snapshot, not through Google Sheets/GAS, browser UI state or localStorage; web-vitrina and reports must consume that same server-side truth layer.
     - `Seller Portal / бот` group reuses the existing seller session/recovery mechanisms for `Проверить сессию`, `Восстановить сессию` and `Скачать лаунчер`; `Лог` renders below the loading table and keeps the existing job/log download contour; the former `Обновление данных` activity block is not an active page-composition surface
     - raw STATUS/job note, JSON fragments, traceback text, request ids and similar technical payload stay in existing log/download contour and must not leak into the main summary/status reason
@@ -341,10 +345,10 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - `newer_closed_day` читается как `yesterday_closed` из latest persisted ready snapshot `<= default_business_as_of_date(now)`
   - `older_closed_day` читается как `yesterday_closed` из second latest persisted ready snapshot `<= default_business_as_of_date(now)`
   - route не требует отдельный ready snapshot на текущую business date и не использует `today_current` как comparison baseline
-- Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
+  - Внутри existing `POST /v1/sheet-vitrina-v1/refresh` live contour теперь допускает bounded server-local sync для `seller_funnel_snapshot` и `web_source_snapshot`:
   - сначала refresh проверяет, materialized ли exact-date `today_current` snapshot в local `wb-ai` read-side;
   - перед запуском `/opt/wb-web-bot` runners contour делает explicit seller-portal session probe against current `storage_state.json`; если сохранённая browser session уже редиректит на `seller-auth`/даёт auth `401`, refresh падает быстро и truthfully с `seller_portal_session_invalid`, а не маскируется generic `Template request ... was not captured`;
-  - bounded recovery path для такого auth barrier теперь permanent operator-facing, но source-of-truth у него всё равно один: existing `apps/seller_portal_relogin_session.py` на текущем EU hosted runtime поднимает localhost-only `Xvfb + x11vnc + websockify/noVNC`, materialize-ит headed Chromium как реальное видимое окно, только потом переводит lifecycle в `awaiting_login`, ждёт owner login, подтверждает canonical supplier/org, при необходимости safe-switch'ит supplier внутри сохранённого browser state, только после этого сохраняет обновлённый `/opt/wb-web-bot/storage_state.json`, loopback-trigger'ит refresh и затем cleanup-ит temporary contour;
+  - bounded recovery path для такого auth barrier теперь permanent operator-facing, но source-of-truth у него всё равно один: existing `apps/seller_portal_relogin_session.py` на текущем EU hosted runtime поднимает localhost-only `Xvfb + x11vnc + websockify/noVNC`, materialize-ит headed Chromium как реальное видимое окно, только потом переводит lifecycle в `awaiting_login`, ждёт owner login, подтверждает canonical supplier/org, при необходимости safe-switch'ит supplier внутри сохранённого browser state, только после этого сохраняет обновлённый `/opt/wb-web-bot/storage_state.json`, loopback-trigger'ит refresh через защищённый WebCore route с app-session cookie из runtime env и затем cleanup-ит temporary contour;
   - если exact-date snapshot отсутствует, refresh может вызвать server-local owner path `/opt/wb-web-bot` (`bot.runner_day`, `bot.runner_sales_funnel_day`) и затем `/opt/wb-ai/run_web_source_handoff.py`;
   - после handoff read-side adapter должен читать `seller_funnel_snapshot` / `web_source_snapshot` из localhost-only owner API `http://127.0.0.1:8000`; `SHEET_VITRINA_WEBSOURCE_CURRENT_SYNC_API_BASE_URL`, `SHEET_VITRINA_WEB_SOURCE_SNAPSHOT_BASE_URL` и `SHEET_VITRINA_SELLER_FUNNEL_SNAPSHOT_BASE_URL` являются explicit override knobs, а не production default;
   - EU deploy owns deterministic dependency checks for this steady owner runtime: `postgresql`/`postgresql-client`, `/opt/wb-ai/venv` with pinned FastAPI/uvicorn/psycopg2/requests packages, repo-owned `wb-ai-api.service` binding only `127.0.0.1:8000`, and import checks for `/opt/wb-web-bot/bot` plus `/opt/wb-ai/run_web_source_handoff.py`; DB credentials and browser state remain host runtime files and are not printed.
@@ -737,6 +741,8 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - `apps/web_source_current_sync_closed_day_freshness_smoke.py`
   - `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`
   - `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`
+  - `apps/seller_portal_relogin_session_smoke.py`
+  - `apps/sheet_vitrina_v1_seller_session_group_refresh_preflight_smoke.py`
 
 # 6. Какой smoke подтверждён
 
@@ -747,6 +753,8 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
 - Подтверждён targeted closed-day source freshness smoke через `apps/web_source_current_sync_closed_day_freshness_smoke.py`.
 - Подтверждён targeted truthful temporal closure retry smoke через `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`.
 - Подтверждён integration smoke для strict web-source temporal refresh через `apps/sheet_vitrina_v1_web_source_temporal_refresh_smoke.py`.
+- Подтверждён seller recovery post-login refresh auth/status smoke через `apps/seller_portal_relogin_session_smoke.py`.
+- Подтверждён seller-session group-refresh preflight smoke через `apps/sheet_vitrina_v1_seller_session_group_refresh_preflight_smoke.py`.
 - Подтверждён live/public promo current invariant smoke через `apps/sheet_vitrina_v1_promo_current_live_invariant_smoke.py`; hosted/public checklist requires it after changes to promo materialization/artifact validation/collector diagnostics, refresh orchestration, promo source-status reduction or web-vitrina read paths that can affect current promo metric row visibility.
 - Smoke проверяет:
   - что HTTP entrypoint реально поднимается и принимает `POST`;

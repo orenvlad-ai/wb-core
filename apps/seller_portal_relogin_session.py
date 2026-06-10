@@ -6,6 +6,8 @@ import argparse
 import base64
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -56,6 +58,7 @@ DEFAULT_REFRESH_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/refresh"
 DEFAULT_JOB_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/job"
 DEFAULT_STATUS_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/status"
 DEFAULT_PAGE_URL = "http://127.0.0.1:8765/v1/sheet-vitrina-v1/web-vitrina?surface=page_composition"
+DEFAULT_WEB_AUTH_ENV_FILE = Path("/opt/wb-ai/.env")
 DEFAULT_SELLER_URL = "https://seller.wildberries.ru"
 DEFAULT_SSH_DESTINATION = "wb-core-eu-root"
 DEFAULT_NOVNC_WEB_DIR = Path("/usr/share/novnc")
@@ -103,6 +106,7 @@ class ReloginSessionConfig:
     job_url: str = DEFAULT_JOB_URL
     status_url: str = DEFAULT_STATUS_URL
     page_composition_url: str = DEFAULT_PAGE_URL
+    web_auth_env_file: Path = DEFAULT_WEB_AUTH_ENV_FILE
     seller_url: str = DEFAULT_SELLER_URL
     ssh_destination: str = DEFAULT_SSH_DESTINATION
     novnc_web_dir: Path = DEFAULT_NOVNC_WEB_DIR
@@ -781,6 +785,10 @@ def load_relogin_session_config_from_env() -> ReloginSessionConfig:
             str(os.environ.get("SELLER_PORTAL_RELOGIN_PAGE_COMPOSITION_URL", DEFAULT_PAGE_URL)).strip()
             or DEFAULT_PAGE_URL
         ),
+        web_auth_env_file=Path(
+            str(os.environ.get("SELLER_PORTAL_RELOGIN_WEB_AUTH_ENV_FILE", DEFAULT_WEB_AUTH_ENV_FILE)).strip()
+            or str(DEFAULT_WEB_AUTH_ENV_FILE)
+        ).expanduser(),
         seller_url=str(os.environ.get("SELLER_PORTAL_RELOGIN_SELLER_URL", DEFAULT_SELLER_URL)).strip() or DEFAULT_SELLER_URL,
         ssh_destination=(
             str(os.environ.get("SELLER_PORTAL_RELOGIN_SSH_DESTINATION", DEFAULT_SSH_DESTINATION)).strip()
@@ -910,10 +918,14 @@ def _display_has_visible_content(display: str) -> bool:
 
 
 def trigger_refresh_and_wait(config: ReloginSessionConfig) -> dict[str, Any]:
+    auth_cookie = _build_webcore_auth_cookie(config.web_auth_env_file)
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if auth_cookie:
+        headers["Cookie"] = auth_cookie
     refresh_request = urllib_request.Request(
         config.refresh_url,
         data=json.dumps({"async": True}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -922,7 +934,7 @@ def trigger_refresh_and_wait(config: ReloginSessionConfig) -> dict[str, Any]:
     except urllib_error.HTTPError as exc:
         return {
             "status": "error",
-            "message": f"refresh trigger failed: HTTP {exc.code}",
+            "message": f"refresh trigger failed: HTTP {exc.code}{_safe_http_error_suffix(exc)}",
         }
 
     job_id = str(refresh_payload.get("job_id") or "").strip()
@@ -936,10 +948,15 @@ def trigger_refresh_and_wait(config: ReloginSessionConfig) -> dict[str, Any]:
     deadline = time.monotonic() + config.refresh_timeout_sec
     last_job: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        with urllib_request.urlopen(f"{config.job_url}?{urllib_parse.urlencode({'job_id': job_id})}", timeout=30) as response:
+        job_request = urllib_request.Request(
+            f"{config.job_url}?{urllib_parse.urlencode({'job_id': job_id})}",
+            headers=_auth_headers(auth_cookie),
+            method="GET",
+        )
+        with urllib_request.urlopen(job_request, timeout=30) as response:
             last_job = json.load(response)
         job_status = str(last_job.get("status") or "").strip().lower()
-        if job_status in {"completed", "failed"}:
+        if job_status in {"success", "completed", "error", "failed"}:
             break
         time.sleep(2)
 
@@ -947,14 +964,15 @@ def trigger_refresh_and_wait(config: ReloginSessionConfig) -> dict[str, Any]:
     post_page: dict[str, Any] = {}
     for url, target in ((config.status_url, post_status), (config.page_composition_url, post_page)):
         try:
-            with urllib_request.urlopen(url, timeout=30) as response:
+            request = urllib_request.Request(url, headers=_auth_headers(auth_cookie), method="GET")
+            with urllib_request.urlopen(request, timeout=30) as response:
                 payload = json.load(response)
             target.update(payload)
         except Exception:
             continue
 
     job_status = str(last_job.get("status") or "").strip().lower()
-    if job_status != "completed":
+    if job_status not in {"success", "completed"}:
         return {
             "status": "error",
             "message": "seller session updated, but post-login refresh did not complete successfully",
@@ -969,6 +987,88 @@ def trigger_refresh_and_wait(config: ReloginSessionConfig) -> dict[str, Any]:
         "status_payload_excerpt": _compact_status_payload(post_status),
         "page_update_items_excerpt": _compact_page_payload(post_page),
     }
+
+
+def _auth_headers(auth_cookie: str) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if auth_cookie:
+        headers["Cookie"] = auth_cookie
+    return headers
+
+
+def _build_webcore_auth_cookie(env_file: Path) -> str:
+    env = _read_env_file(env_file)
+    username = str(env.get("WB_CORE_WEB_AUTH_USERNAME") or os.environ.get("WB_CORE_WEB_AUTH_USERNAME") or "").strip()
+    secret = str(
+        env.get("WB_CORE_WEB_AUTH_SESSION_SECRET")
+        or os.environ.get("WB_CORE_WEB_AUTH_SESSION_SECRET")
+        or ""
+    ).strip()
+    if not username or not secret:
+        return ""
+    max_age_raw = str(
+        env.get("WB_CORE_WEB_AUTH_SESSION_MAX_AGE_SECONDS")
+        or os.environ.get("WB_CORE_WEB_AUTH_SESSION_MAX_AGE_SECONDS")
+        or "3600"
+    ).strip()
+    try:
+        max_age = max(60, int(max_age_raw))
+    except ValueError:
+        max_age = 3600
+    payload = _base64url_encode(
+        json.dumps(
+            {"u": username, "r": "operator", "d": username, "exp": int(time.time()) + max_age},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    signature = _base64url_encode(
+        hmac.new(secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest()
+    )
+    return f"wb_core_web_session={payload}.{signature}"
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        try:
+            parsed = shlex.split(value, posix=True)
+        except ValueError:
+            parsed = []
+        if parsed:
+            values[key] = parsed[0]
+        elif len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            values[key] = value[1:-1]
+        else:
+            values[key] = value
+    return values
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _safe_http_error_suffix(exc: urllib_error.HTTPError) -> str:
+    try:
+        payload = json.loads(exc.read().decode("utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    reason = str(payload.get("error") or payload.get("reason") or "").strip()
+    return f": {reason}" if reason else ""
 
 
 def _config_from_args(args: argparse.Namespace) -> ReloginSessionConfig:
@@ -986,6 +1086,7 @@ def _config_from_args(args: argparse.Namespace) -> ReloginSessionConfig:
         job_url=str(args.job_url).strip(),
         status_url=str(args.status_url).strip(),
         page_composition_url=str(args.page_composition_url).strip(),
+        web_auth_env_file=Path(args.web_auth_env_file).expanduser(),
         seller_url=str(args.seller_url).strip(),
         ssh_destination=str(args.ssh_destination).strip(),
         novnc_web_dir=Path(args.novnc_web_dir).expanduser(),
@@ -1012,6 +1113,7 @@ def _add_common_args(
     parser.add_argument("--job-url", default=default_config.job_url)
     parser.add_argument("--status-url", default=default_config.status_url)
     parser.add_argument("--page-composition-url", default=default_config.page_composition_url)
+    parser.add_argument("--web-auth-env-file", default=str(default_config.web_auth_env_file))
     parser.add_argument("--seller-url", default=default_config.seller_url)
     parser.add_argument("--ssh-destination", default=default_config.ssh_destination)
     parser.add_argument("--novnc-web-dir", default=str(default_config.novnc_web_dir))
