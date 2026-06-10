@@ -1607,6 +1607,17 @@
       font-size: 11px;
     }
 
+    .seller-session-fallback-link {
+      color: var(--link);
+      font-size: 11px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .seller-session-fallback-link:hover {
+      text-decoration: underline;
+    }
+
     .activity-group-date-label {
       display: inline-flex;
       align-items: center;
@@ -1920,16 +1931,21 @@
     .seller-top-session {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      min-height: 24px;
-      padding: 3px 7px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: #ffffff;
+      gap: 5px;
+      min-height: 18px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
       color: var(--muted);
       font-size: 11px;
       font-weight: 700;
+      line-height: 1;
       white-space: nowrap;
+    }
+
+    .seller-top-session.is-actionable {
+      cursor: pointer;
     }
 
     .seller-top-session-dot {
@@ -1937,14 +1953,12 @@
       height: 7px;
       border-radius: 999px;
       background: var(--muted);
-      opacity: .75;
+      opacity: .95;
       flex: 0 0 auto;
     }
 
     .seller-top-session.tone-success {
-      border-color: rgba(20, 184, 122, .35);
-      color: var(--success-text);
-      background: var(--success-bg);
+      color: var(--muted);
     }
 
     .seller-top-session.tone-success .seller-top-session-dot {
@@ -1952,9 +1966,7 @@
     }
 
     .seller-top-session.tone-warning {
-      border-color: rgba(217, 119, 6, .35);
-      color: var(--warning-text);
-      background: var(--warning-bg);
+      color: var(--muted);
     }
 
     .seller-top-session.tone-warning .seller-top-session-dot {
@@ -1963,25 +1975,11 @@
     }
 
     .seller-top-session.tone-error {
-      border-color: rgba(220, 38, 38, .35);
-      color: var(--error-text);
-      background: var(--error-bg);
+      color: var(--muted);
     }
 
     .seller-top-session.tone-error .seller-top-session-dot {
       background: var(--danger);
-    }
-
-    .seller-top-session-action {
-      border: 0;
-      border-left: 1px solid rgba(0, 0, 0, .14);
-      margin-left: 2px;
-      padding: 0 0 0 6px;
-      background: transparent;
-      color: inherit;
-      font: inherit;
-      font-weight: 800;
-      cursor: pointer;
     }
 
     @keyframes table-snapshot-blink {
@@ -3955,9 +3953,9 @@
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
-              <span class="seller-top-session tone-neutral" data-seller-top-session title="Сессия Seller: неизвестно" aria-label="Сессия Seller: неизвестно">
+              <span class="seller-top-session tone-warning" data-seller-top-session title="сессия" aria-label="сессия">
                 <span class="seller-top-session-dot" aria-hidden="true"></span>
-                <span data-seller-top-session-label>Сессия Seller: неизвестно</span>
+                <span data-seller-top-session-label>сессия</span>
               </span>
               <p class="table-summary-line" data-table-summary-line hidden></p>
               <div class="table-header-controls" data-table-header-controls>
@@ -4876,13 +4874,13 @@
         }
       },
       sellerSession: {
-        status: "unknown",
-        statusLabel: "",
-        tone: "neutral",
+        status: "checking",
+        statusLabel: "проверка...",
+        tone: "warning",
         checkedAt: "",
         summary: "",
         instruction: "",
-        loading: false
+        loading: true
       },
       sellerRecovery: {
         launcherEnabled: false,
@@ -4899,7 +4897,10 @@
         summary: "",
         statusLabel: "",
         tone: "neutral",
-        checkedAt: ""
+        checkedAt: "",
+        autoDownloadRunId: "",
+        launcherFallbackVisible: false,
+        launcherFallbackReason: ""
       },
       groupActions: {},
       groupRefreshDates: {},
@@ -5334,7 +5335,7 @@
       const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
       if (recoveryStartButton) {
         event.preventDefault();
-        runSellerRecoveryStart();
+        runSellerRecoveryStart({openActivityPanel: true});
         return;
       }
       const launcherButton = event.target.closest("[data-session-launcher]");
@@ -5346,12 +5347,11 @@
 
     if (sellerTopSessionNode) {
       sellerTopSessionNode.addEventListener("click", function(event) {
-        const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
-        if (!recoveryStartButton) {
+        if (!sellerTopSessionCanStartRecovery()) {
           return;
         }
         event.preventDefault();
-        runSellerRecoveryStart();
+        runSellerRecoveryStart({openActivityPanel: false});
       });
     }
 
@@ -7975,12 +7975,14 @@
         return "";
       }
       const launcherPath = state.sellerRecovery.launcherPath || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "";
-      const launcherDisabled = (state.sellerRecovery.canDownloadLauncher || state.sellerRecovery.launcherReady || state.sellerRecovery.launcherEnabled) ? "" : " disabled";
+      const fallbackVisible = Boolean(state.sellerRecovery.launcherFallbackVisible && launcherPath);
+      const fallbackTitle = state.sellerRecovery.launcherFallbackReason || "Если браузер заблокировал автоскачивание, скачайте launcher вручную.";
       return [
         '<span class="seller-session-controls" data-seller-session-controls>',
-        '<button class="button secondary seller-session-button" type="button" data-session-check>Проверить сессию</button>',
         '<button class="button secondary seller-session-button" type="button" data-session-recovery-start>Восстановить сессию</button>',
-        '<button class="button secondary seller-session-button" type="button" data-session-launcher data-launcher-path="' + escapeHtml(launcherPath) + '"' + launcherDisabled + '>Скачать лаунчер</button>',
+        fallbackVisible
+          ? '<a class="seller-session-fallback-link" href="#" data-session-launcher data-launcher-path="' + escapeHtml(launcherPath) + '" title="' + escapeHtml(fallbackTitle) + '">скачать лаунчер</a>'
+          : "",
         '</span>'
       ].join("");
     }
@@ -13814,12 +13816,20 @@
       }
     }
 
-    async function runSellerRecoveryStart() {
+    async function runSellerRecoveryStart(options) {
+      const normalizedOptions = options || {};
       const actionId = state.actionSequence + 1;
       state.actionSequence = actionId;
-      if (activityPanelNode) {
+      if (activityPanelNode && normalizedOptions.openActivityPanel !== false) {
         activityPanelNode.open = true;
       }
+      state.sellerSession = Object.assign({}, state.sellerSession, {
+        status: "checking",
+        statusLabel: "проверка...",
+        tone: "warning",
+        loading: true
+      });
+      renderSellerSessionIndicator();
       setActionButtonsDisabled(true);
       setStatusBadge({label: "Запуск", tone: "warning", detail: "запрашиваем восстановление Seller Portal session"});
       try {
@@ -13848,15 +13858,16 @@
         }
         const recoveryPayload = (finalJob && finalJob.result) || payload || {};
         applySellerRecoveryPayload(recoveryPayload, {render: false});
+        maybeAutoDownloadSellerRecoveryLauncher(recoveryPayload);
         const runStatus = String(recoveryPayload.run_status || recoveryPayload.status || "");
         if (runStatus === "starting") {
           appendVisibleActionLogLine(
-            "Окно входа Seller Portal готовится. Launcher не скачивается до статуса «Нужно войти».",
+            "Окно входа Seller Portal готовится. Launcher скачается автоматически после готовности.",
             {statusLabel: "Готовим окно", tone: "warning", detail: String(recoveryPayload.summary || recoveryPayload.reason || "")}
           );
         } else if (Boolean(recoveryPayload.can_download_launcher || recoveryPayload.launcher_ready || recoveryPayload.launcher_enabled)) {
           appendVisibleActionLogLine(
-            "Окно входа Seller Portal готово. Launcher доступен.",
+            "Окно входа Seller Portal готово. Launcher скачивается автоматически.",
             {statusLabel: "Нужно войти", tone: "warning", detail: String(recoveryPayload.summary || recoveryPayload.reason || "")}
           );
         } else if (Boolean(recoveryPayload.run_is_final)) {
@@ -13893,7 +13904,7 @@
         statusLabel: mapped.label,
         tone: mapped.tone,
         checkedAt: checkedAt,
-        summary: String((result && (result.summary || result.reason || result.message)) || ""),
+        summary: String((result && (result.probe_reason || result.summary || result.reason || result.message)) || ""),
         instruction: String((result && result.instruction) || ""),
         loading: false
       };
@@ -13908,6 +13919,9 @@
       const normalized = payload || {};
       const runStatus = String(normalized.run_status || normalized.status || "");
       const canDownload = Boolean(normalized.can_download_launcher || normalized.launcher_ready || normalized.launcher_enabled);
+      const previousRecovery = state.sellerRecovery || {};
+      const runId = String(normalized.run_id || normalized.current_run_id || previousRecovery.runId || "");
+      const sameRun = Boolean(runId && previousRecovery.runId && runId === previousRecovery.runId);
       state.sellerRecovery = {
         launcherEnabled: canDownload,
         launcherReady: Boolean(normalized.launcher_ready || canDownload),
@@ -13915,15 +13929,18 @@
         canOpenLoginWindow: Boolean(normalized.can_open_login_window),
         launcherPath: String(normalized.launcher_download_path || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || ""),
         launcherUrl: String(normalized.launcher_url || ""),
-        runId: String(normalized.run_id || normalized.current_run_id || state.sellerRecovery.runId || ""),
+        runId: runId,
         runStatus: runStatus,
         running: Boolean(normalized.running),
         finalMarker: String(normalized.final_marker || normalized.run_final_status || ""),
-        reason: String(normalized.reason || ""),
+        reason: String(normalized.probe_reason || normalized.reason || ""),
         summary: String(normalized.summary || ""),
         statusLabel: String(normalized.run_status_label || normalized.status_label || normalized.status || ""),
         tone: normalizeTone(normalized.run_status_tone || normalized.status_tone || "neutral"),
-        checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString())
+        checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
+        autoDownloadRunId: String(previousRecovery.autoDownloadRunId || ""),
+        launcherFallbackVisible: sameRun ? Boolean(previousRecovery.launcherFallbackVisible) : false,
+        launcherFallbackReason: sameRun ? String(previousRecovery.launcherFallbackReason || "") : ""
       };
       if ((!options || options.updateSession !== false) && normalized.session_status) {
         const mapped = sellerSessionDisplay(String(normalized.session_status || ""), normalized);
@@ -13932,7 +13949,7 @@
           statusLabel: mapped.label,
           tone: mapped.tone,
           checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
-          summary: String(normalized.summary || normalized.reason || ""),
+          summary: String(normalized.probe_reason || normalized.summary || normalized.reason || ""),
           instruction: String(normalized.instruction || ""),
           loading: false
         });
@@ -13971,30 +13988,26 @@
       return {label: "неизвестно", tone: "neutral"};
     }
 
+    function sellerTopSessionCanStartRecovery() {
+      const session = state.sellerSession || {};
+      return ["session_invalid", "session_missing", "session_valid_wrong_org", "session_probe_error"].includes(String(session.status || ""));
+    }
+
     function renderSellerSessionIndicator() {
       if (!sellerTopSessionNode || !sellerTopSessionLabelNode) {
         return;
       }
       const session = state.sellerSession || {};
       const mapped = sellerSessionDisplay(session.loading ? "checking" : session.status, session);
-      const label = "Сессия Seller: " + mapped.label;
-      const titleParts = [label, session.summary || "", session.instruction || ""].filter(Boolean);
-      sellerTopSessionNode.className = "seller-top-session tone-" + normalizeTone(mapped.tone);
+      const label = "сессия";
+      const titleParts = [mapped.label ? ("сессия: " + mapped.label) : label, session.summary || "", session.instruction || ""].filter(Boolean);
+      const needsRecovery = sellerTopSessionCanStartRecovery();
+      sellerTopSessionNode.className = "seller-top-session tone-" + normalizeTone(mapped.tone) + (needsRecovery ? " is-actionable" : "");
       sellerTopSessionNode.title = titleParts.join(" · ");
       sellerTopSessionNode.setAttribute("aria-label", titleParts.join(" · ") || label);
-      const needsRecovery = ["session_invalid", "session_missing", "session_valid_wrong_org", "session_probe_error"].includes(String(session.status || ""));
       sellerTopSessionLabelNode.textContent = label;
       const existingAction = sellerTopSessionNode.querySelector("[data-session-recovery-start]");
-      if (needsRecovery) {
-        if (!existingAction) {
-          const action = document.createElement("button");
-          action.className = "seller-top-session-action";
-          action.type = "button";
-          action.setAttribute("data-session-recovery-start", "");
-          action.textContent = "Войти";
-          sellerTopSessionNode.appendChild(action);
-        }
-      } else if (existingAction) {
+      if (existingAction) {
         existingAction.remove();
       }
     }
@@ -14025,23 +14038,44 @@
 
     async function refreshSellerRecoveryStatus() {
       try {
-        await fetchSellerRecoveryStatus();
+        const payload = await fetchSellerRecoveryStatus();
+        maybeAutoDownloadSellerRecoveryLauncher(payload);
       } catch (error) {
         applySellerRecoveryPayload({launcher_enabled: false}, {render: true});
       }
     }
 
-    async function downloadSellerRecoveryLauncher() {
-      const actionId = state.actionSequence + 1;
-      state.actionSequence = actionId;
-      setActionButtonsDisabled(true);
-      setStatusBadge({label: "Launcher", tone: "warning", detail: "проверяем готовность recovery launcher"});
+    function sellerRecoveryLauncherReady(payload) {
+      return Boolean(payload && (payload.can_download_launcher || payload.launcher_ready || payload.launcher_enabled));
+    }
+
+    function maybeAutoDownloadSellerRecoveryLauncher(payload) {
+      if (!sellerRecoveryLauncherReady(payload)) {
+        return;
+      }
+      const runId = String((payload && (payload.run_id || payload.current_run_id)) || state.sellerRecovery.runId || "");
+      if (!runId || state.sellerRecovery.autoDownloadRunId === runId) {
+        return;
+      }
+      state.sellerRecovery.autoDownloadRunId = runId;
+      downloadSellerRecoveryLauncher({auto: true, statusPayload: payload});
+    }
+
+    async function downloadSellerRecoveryLauncher(options) {
+      const normalizedOptions = options || {};
+      const auto = Boolean(normalizedOptions.auto);
+      const actionId = auto ? state.actionSequence : state.actionSequence + 1;
+      if (!auto) {
+        state.actionSequence = actionId;
+        setActionButtonsDisabled(true);
+        setStatusBadge({label: "Launcher", tone: "warning", detail: "проверяем готовность recovery launcher"});
+      }
       try {
-        const statusPayload = await fetchSellerRecoveryStatus({render: false});
-        if (actionId !== state.actionSequence) {
+        const statusPayload = normalizedOptions.statusPayload || await fetchSellerRecoveryStatus({render: false});
+        if (!auto && actionId !== state.actionSequence) {
           return;
         }
-        if (!Boolean(statusPayload.can_download_launcher || statusPayload.launcher_ready || statusPayload.launcher_enabled)) {
+        if (!sellerRecoveryLauncherReady(statusPayload)) {
           const waitMessage = String(statusPayload.summary || statusPayload.reason || statusPayload.status_label || "Окно входа ещё готовится. Launcher станет доступен после статуса «Нужно войти».");
           appendVisibleActionLogLine(
             waitMessage,
@@ -14068,6 +14102,9 @@
                 waitMessage,
                 {statusLabel: "Готовим окно", tone: "warning", detail: waitMessage}
               );
+              if (auto) {
+                state.sellerRecovery.autoDownloadRunId = "";
+              }
               scheduleSellerRecoveryPoll(1200);
               return;
             }
@@ -14086,24 +14123,37 @@
         link.click();
         link.remove();
         URL.revokeObjectURL(objectUrl);
+        state.sellerRecovery.launcherFallbackVisible = auto;
+        state.sellerRecovery.launcherFallbackReason = auto ? "Если скачивание не началось автоматически, скачайте launcher вручную." : "";
         appendVisibleActionLogLine(
-          "Launcher для Seller Portal recovery скачан.",
+          auto ? "Launcher для Seller Portal recovery скачан автоматически." : "Launcher для Seller Portal recovery скачан.",
           {statusLabel: "Успешно", tone: "success", detail: "launcher downloaded"}
         );
-        setStatusBadge({label: "Launcher", tone: "success", detail: "скачан"});
+        if (!auto) {
+          setStatusBadge({label: "Launcher", tone: "success", detail: "скачан"});
+        }
       } catch (error) {
-        if (actionId !== state.actionSequence) {
+        if (!auto && actionId !== state.actionSequence) {
           return;
         }
         const message = String(error && error.message ? error.message : error);
+        if (auto) {
+          state.sellerRecovery.launcherFallbackVisible = true;
+          state.sellerRecovery.launcherFallbackReason = "Автоскачивание launcher не завершилось: " + message;
+          renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+        }
         appendVisibleActionLogLine(
           "Не удалось скачать launcher: " + message,
           {statusLabel: "Ошибка", tone: "error", detail: message}
         );
-        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+        if (!auto) {
+          setStatusBadge({label: "Ошибка", tone: "error", detail: message});
+        }
       } finally {
-        if (actionId === state.actionSequence) {
+        if (!auto && actionId === state.actionSequence) {
           setActionButtonsDisabled(false);
+          renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
+        } else if (auto) {
           renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
         }
       }

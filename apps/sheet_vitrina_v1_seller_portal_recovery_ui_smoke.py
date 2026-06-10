@@ -39,6 +39,7 @@ def main() -> None:
             try:
                 page = browser.new_page(viewport={"width": 1280, "height": 900})
                 page.goto(fixture.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+                page.locator("[data-activity-block] > summary").click()
                 page.wait_for_selector("[data-session-recovery-start]", timeout=10000)
 
                 with page.expect_response(f"**{DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH}") as start_response_info:
@@ -60,15 +61,11 @@ def main() -> None:
                 page.wait_for_function(
                     """() => {
                       const state = document.querySelector('[data-session-recovery-state]');
-                      const launcher = document.querySelector('[data-session-launcher]');
-                      return !!state && !!launcher
-                        && state.textContent.includes('Нужно войти')
-                        && !launcher.disabled;
+                      return !!state && state.textContent.includes('Нужно войти');
                     }""",
                     timeout=10000,
                 )
 
-                page.click("[data-session-launcher]")
                 page.wait_for_function(
                     """() => {
                       const log = (document.querySelector('[data-activity-log-body]') || {}).textContent || '';
@@ -79,16 +76,16 @@ def main() -> None:
                 log_after_409 = page.locator("[data-activity-log-body]").inner_text()
                 if "Не удалось скачать launcher" in log_after_409:
                     raise AssertionError(f"409/not-ready launcher response must be non-fatal UI state, got {log_after_409!r}")
-                if fixture.launcher_requests != 1:
-                    raise AssertionError(f"first launcher click must hit launcher route once, got {fixture.launcher_requests}")
+                if fixture.launcher_requests < 1:
+                    raise AssertionError(f"automatic launcher attempt must hit launcher route, got {fixture.launcher_requests}")
 
-                page.click("[data-session-launcher]")
                 page.wait_for_function(
-                    "() => (document.querySelector('[data-activity-log-body]') || {}).textContent.includes('Launcher для Seller Portal recovery скачан')",
+                    "() => (document.querySelector('[data-activity-log-body]') || {}).textContent.includes('Launcher для Seller Portal recovery скачан автоматически')",
                     timeout=10000,
                 )
+                page.wait_for_selector("[data-session-launcher]", timeout=5000)
                 if fixture.launcher_requests != 2:
-                    raise AssertionError(f"second launcher click must download zip, got {fixture.launcher_requests}")
+                    raise AssertionError(f"second automatic launcher attempt must download zip, got {fixture.launcher_requests}")
 
                 with page.expect_response(f"**{DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH}") as second_start_response_info:
                     page.click("[data-session-recovery-start]")
@@ -97,8 +94,8 @@ def main() -> None:
                 if fixture.start_payloads[-1] != {"replace": True, "async": True}:
                     raise AssertionError(f"repeated restore click must remain replace=true/idempotent, got {fixture.start_payloads}")
 
-                print("seller_recovery_ui_starting_no_autodownload: ok -> restore click does not fetch launcher")
-                print("seller_recovery_ui_awaiting_enables_launcher: ok -> awaiting_login enables launcher action")
+                print("seller_recovery_ui_starting_no_autodownload: ok -> restore click waits until launcher readiness")
+                print("seller_recovery_ui_awaiting_autodownload: ok -> awaiting_login triggers launcher download automatically")
                 print("seller_recovery_ui_launcher_409_nonfatal: ok -> not-ready launcher 409 is warning, not fatal copy")
                 print("seller_recovery_ui_repeated_restore_replace: ok -> repeated restore clicks keep replace=true")
                 print("smoke-check passed")
@@ -263,7 +260,7 @@ class RecoveryUiFixtureServer:
         summary = {
             "idle": "Новый запуск восстановления сейчас не выполняется.",
             "starting": "Запускаем текущее временное окно входа на host.",
-            "awaiting_login": "Временное окно входа готово. Откройте launcher и войдите в seller portal.",
+            "awaiting_login": "Временное окно входа готово. Откройте скачанный launcher и войдите в seller portal.",
         }[status]
         return {
             "status": status,

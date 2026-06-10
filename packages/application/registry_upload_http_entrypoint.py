@@ -3010,7 +3010,8 @@ def _build_seller_portal_recovery_payload(
     run_is_final = run_status in {"completed", "not_needed", "stopped", "timeout", "error"}
     can_download_launcher = bool(run_id) and run_status == "awaiting_login" and not requested_run_mismatch
     final_marker = _seller_portal_recovery_final_marker(run_status) if run_is_final else ""
-    reason = summary or str(raw.get("message") or "").strip()
+    probe_reason = _seller_portal_probe_reason(current_probe_payload)
+    reason = probe_reason or summary or str(raw.get("message") or "").strip()
     return {
         "status": run_status,
         "status_label": _seller_portal_recovery_status_label(run_status),
@@ -3020,6 +3021,7 @@ def _build_seller_portal_recovery_payload(
         "run_status_tone": _seller_portal_recovery_status_tone(run_status),
         "summary": summary,
         "instruction": instruction,
+        "probe_reason": probe_reason,
         "technical_line": _seller_portal_recovery_technical_line(
             expected_supplier_id=expected_supplier_id,
             expected_supplier_label=expected_supplier_label,
@@ -3103,13 +3105,15 @@ def _build_seller_portal_session_check_payload(
         status,
         canonical_configured=canonical_configured,
     )
-    reason = summary or str(raw.get("message") or "").strip()
+    probe_reason = _seller_portal_probe_reason(current_probe_payload)
+    reason = probe_reason or summary or str(raw.get("message") or "").strip()
     return {
         "status": status,
         "status_label": _seller_portal_session_check_status_label(status),
         "status_tone": _seller_portal_session_check_status_tone(status),
         "summary": summary,
         "instruction": instruction,
+        "probe_reason": probe_reason,
         "technical_line": _seller_portal_recovery_technical_line(
             expected_supplier_id=expected_supplier_id,
             expected_supplier_label=expected_supplier_label,
@@ -3199,7 +3203,8 @@ def _build_group_refresh_session_action_required_payload(
         "session_status_label": str(session_preflight.get("status_label") or ""),
         "session_status_tone": str(session_preflight.get("status_tone") or ""),
         "session_probe_reason": str(
-            session_preflight.get("summary")
+            session_preflight.get("probe_reason")
+            or session_preflight.get("summary")
             or session_preflight.get("reason")
             or session_preflight.get("message")
             or ""
@@ -3287,7 +3292,8 @@ def _build_group_refresh_error_payload(
 def _seller_session_action_required_reason(session_preflight: Mapping[str, Any]) -> str:
     status = str(session_preflight.get("status") or "").strip()
     summary = str(
-        session_preflight.get("summary")
+        session_preflight.get("probe_reason")
+        or session_preflight.get("summary")
         or session_preflight.get("reason")
         or session_preflight.get("message")
         or ""
@@ -3300,6 +3306,28 @@ def _seller_session_action_required_reason(session_preflight: Mapping[str, Any])
     elif status == "session_probe_error":
         prefix = "Ошибка проверки Seller Portal session"
     return f"{prefix}: {summary}" if summary else prefix
+
+
+def _seller_portal_probe_reason(current_probe: Mapping[str, Any] | None) -> str:
+    if not isinstance(current_probe, Mapping):
+        return ""
+    explicit_reason = str(current_probe.get("reason") or "").strip()
+    if explicit_reason:
+        return explicit_reason
+    if bool(current_probe.get("has_validate_401")):
+        return "validate_401"
+    final_url = str(current_probe.get("final_url") or "").lower()
+    if "seller-auth.wildberries.ru" in final_url:
+        return "login_redirect"
+    markers = current_probe.get("body_markers")
+    if isinstance(markers, Mapping):
+        if bool(markers.get("captcha_or_challenge")):
+            return "security_challenge"
+        if bool(markers.get("access_denied")):
+            return "access_denied"
+        if bool(markers.get("login_page")):
+            return "login_page"
+    return ""
 
 
 def _group_refresh_error_reason(error: str, *, failed_stage: str, session_status: str) -> str:
@@ -3545,12 +3573,12 @@ def _seller_portal_recovery_copy(
         if session_status == "session_invalid":
             return (
                 "Новый запуск восстановления сейчас не выполняется. Сохранённая seller-сессия больше не действует.",
-                "Нажмите «Восстановить сессию», затем скачайте launcher и выполните вход.",
+                "Нажмите «Восстановить сессию»: launcher скачается автоматически после готовности окна входа.",
             )
         if session_status == "session_missing":
             return (
                 "Новый запуск восстановления сейчас не выполняется. Сохранённая seller-сессия отсутствует.",
-                "Нажмите «Восстановить сессию», затем скачайте launcher и выполните вход.",
+                "Нажмите «Восстановить сессию»: launcher скачается автоматически после готовности окна входа.",
             )
         return (
             "Новый запуск восстановления сейчас не выполняется.",
@@ -3559,11 +3587,11 @@ def _seller_portal_recovery_copy(
     if status == "starting":
         return (
             "Запускаем текущее временное окно входа на host.",
-            "Когда статус сменится на «Нужно войти», скачайте launcher и откройте seller portal для этого запуска.",
+            "Когда статус сменится на «Нужно войти», launcher скачается автоматически.",
         )
     if status == "awaiting_login":
         return (
-            "Временное окно входа готово. Откройте launcher и войдите в seller portal.",
+            "Временное окно входа готово. Откройте скачанный launcher и войдите в seller portal.",
             "После входа система сама сохранит storage_state.json, проверит seller-сессию, подтвердит нужный кабинет и завершит текущий запуск.",
         )
     if status == "saving_session":
@@ -3629,7 +3657,7 @@ def _seller_portal_recovery_copy(
     if failure_code == "run_replaced":
         return (
             "Текущий launcher больше не смотрит на свой запуск: этот recovery run уже не является текущим.",
-            "Откройте operator page заново и при необходимости скачайте launcher для нового запуска.",
+            "Откройте operator page заново и при необходимости запустите восстановление для нового launcher.",
         )
     if failure_code == "unexpected_exit":
         return (

@@ -131,6 +131,7 @@ class _FakePlaywright:
 
 
 def main() -> None:
+    _assert_storage_state_rollback_on_post_save_probe_failure()
     with tempfile.TemporaryDirectory() as temp_dir_raw:
         temp_dir = Path(temp_dir_raw)
         config = MODULE.ReloginSessionConfig(
@@ -328,7 +329,67 @@ def main() -> None:
         print("seller_portal_relogin_session_launcher: ok -> archive contains reusable Mac launcher script")
         print("seller_portal_relogin_session_stop: ok -> operator stop reports stopped, not unexpected_exit")
         print("seller_portal_relogin_session_post_login_refresh_auth: ok -> WebCore auth cookie and success job status accepted")
+        print("seller_portal_relogin_session_safe_write_rollback: ok -> failed post-save probe restores backup")
         print("smoke-check passed")
+
+
+def _assert_storage_state_rollback_on_post_save_probe_failure() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir_raw:
+        temp_dir = Path(temp_dir_raw)
+        config = MODULE.ReloginSessionConfig(
+            state_dir=temp_dir,
+            storage_state_path=temp_dir / "storage_state.json",
+            wb_bot_python=Path(sys.executable),
+            timeout_sec=30,
+            poll_sec=0.0,
+            ssh_destination="wb-core-eu-root",
+            canonical_supplier_id="canonical-supplier-id",
+            canonical_supplier_label="ИП Сагитов В. Р.",
+        )
+        config.state_dir.mkdir(parents=True, exist_ok=True)
+        original_payload = {
+            "cookies": [
+                {
+                    "name": "original-session-cookie",
+                    "value": "seed",
+                    "domain": "seller.wildberries.ru",
+                    "path": "/",
+                }
+            ],
+            "origins": [],
+        }
+        config.storage_state_path.write_text(json.dumps(original_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        probe_calls: list[Path] = []
+
+        def fake_probe(path: Path) -> dict[str, object]:
+            probe_calls.append(path)
+            if path == config.storage_state_path and len(probe_calls) == 2:
+                return {"ok": False, "status": "seller_portal_session_invalid", "reason": "post_save_probe_failed"}
+            return {
+                "ok": True,
+                "status": "ok",
+                "supplier_context": MODULE.read_storage_state_supplier_context(path),
+            }
+
+        try:
+            MODULE.run_login_capture(
+                config,
+                probe_fn=fake_probe,
+                playwright_factory=lambda: _FakePlaywright(),
+                sleep_fn=lambda _seconds: None,
+                visual_ready_fn=lambda _display: True,
+            )
+        except RuntimeError as exc:
+            if "previous storage_state restored from backup" not in str(exc):
+                raise AssertionError(f"rollback error must be explicit, got {exc}") from exc
+        else:
+            raise AssertionError("run_login_capture must fail when post-save storage_state validation fails")
+
+        restored = json.loads(config.storage_state_path.read_text(encoding="utf-8"))
+        if restored != original_payload:
+            raise AssertionError(f"storage_state.json must be restored from backup, got {restored}")
+        if not list(config.state_dir.glob("storage_state.backup.*.json")):
+            raise AssertionError("safe-write path must leave a backup for failed post-save validation")
 
 
 def _start_refresh_server() -> tuple[ThreadingHTTPServer, dict[str, int]]:

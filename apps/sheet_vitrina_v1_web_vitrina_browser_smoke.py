@@ -3394,11 +3394,11 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
         raise AssertionError(f"each loading group must expose a default refresh date, got {payload}")
     seller_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "seller_portal_bot")
     if not (
-        seller_group["has_session_check"]
+        not seller_group["has_session_check"]
         and seller_group["has_session_recovery_start"]
-        and seller_group["has_session_launcher"]
+        and not seller_group["has_session_launcher"]
     ):
-        raise AssertionError(f"Seller Portal group must expose session controls, got {payload}")
+        raise AssertionError(f"Seller Portal group must expose one recovery action without mandatory check/launcher controls, got {payload}")
     if not seller_group["session_state_in_main"] or seller_group["session_state_in_controls"]:
         raise AssertionError(f"Seller Portal session state must be placed in the left group header, got {payload}")
     public_card_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "wb_public_card_bot")

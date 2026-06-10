@@ -3523,6 +3523,7 @@
       let sellerRecoveryPollHandle = 0;
       let sellerRecoveryCycleActive = false;
       let sellerRecoveryObservedRunId = "";
+      let sellerRecoveryAutoDownloadRunId = "";
       let recommendationDownloadPath = config.factory_order_recommendation_path || "";
       const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
@@ -5257,9 +5258,11 @@
       function updateSellerRecoveryButtons() {
         const payload = sellerRecoveryPayload || {};
         const busy = Boolean(sellerRecoveryAction);
+        const launcherReady = Boolean(payload.can_download_launcher || payload.launcher_ready || payload.launcher_enabled);
         sellerSessionCheckButton.disabled = busy || Boolean(payload.running);
         sellerRecoveryStartButton.disabled = busy || !payload.can_start;
-        sellerRecoveryLauncherButton.disabled = busy || !payload.launcher_enabled;
+        sellerRecoveryLauncherButton.hidden = !launcherReady;
+        sellerRecoveryLauncherButton.disabled = busy || !launcherReady;
         sellerRecoveryStopButton.disabled = busy || !payload.can_stop;
         sellerSessionCheckButton.textContent = sellerRecoveryAction === "check"
           ? "Проверяем..."
@@ -5323,6 +5326,7 @@
         ) {
           Promise.all([loadStatus(), loadDailyReport()]).catch(() => {});
         }
+        maybeAutoDownloadSellerRecoveryLauncher(normalized);
       }
 
       function renderSnapshotSummary(payload, intro) {
@@ -6682,7 +6686,7 @@
             recoveryStatus === "not_needed"
               ? "Повторный вход не потребовался: запуск завершён сразу."
               : (recoveryStatus === "awaiting_login"
-                ? "Временное окно входа готово. Скачайте launcher и войдите в seller portal."
+                ? "Временное окно входа готово. Launcher скачивается автоматически."
                 : "Запрос на восстановление обработан."),
             "success"
           );
@@ -6789,6 +6793,22 @@
         return match ? match[1] : "";
       }
 
+      function sellerRecoveryLauncherReady(payload) {
+        return Boolean(payload && (payload.can_download_launcher || payload.launcher_ready || payload.launcher_enabled));
+      }
+
+      function maybeAutoDownloadSellerRecoveryLauncher(payload) {
+        if (!sellerRecoveryLauncherReady(payload) || sellerRecoveryAction === "launcher") {
+          return;
+        }
+        const runId = String((payload && (payload.run_id || payload.current_run_id)) || sellerRecoveryObservedRunId || "");
+        if (!runId || sellerRecoveryAutoDownloadRunId === runId) {
+          return;
+        }
+        sellerRecoveryAutoDownloadRunId = runId;
+        downloadSellerRecoveryLauncher({ auto: true });
+      }
+
       async function downloadCurrentLog() {
         if (!completedJob || !completedJob.download_path) {
           return;
@@ -6820,13 +6840,16 @@
         }
       }
 
-      async function downloadSellerRecoveryLauncher() {
+      async function downloadSellerRecoveryLauncher(options) {
+        const auto = Boolean(options && options.auto);
         if (!sellerRecoveryPayload || !sellerRecoveryPayload.launcher_download_path) {
           return;
         }
-        sellerRecoveryAction = "launcher";
-        updateSellerRecoveryButtons();
-        setSellerRecoveryMessage("Готовим launcher для Mac...", "");
+        if (!auto) {
+          sellerRecoveryAction = "launcher";
+          updateSellerRecoveryButtons();
+          setSellerRecoveryMessage("Готовим launcher для Mac...", "");
+        }
         try {
           const recoveryStatusPath = sellerRecoveryObservedRunId
             ? config.seller_recovery_status_path + "?run_id=" + encodeURIComponent(sellerRecoveryObservedRunId)
@@ -6840,7 +6863,7 @@
             throw new Error(valueOrDash(statusPayload.error) + " (HTTP " + statusResponse.status + ")");
           }
           renderSellerRecovery(statusPayload);
-          if (!Boolean(statusPayload.can_download_launcher || statusPayload.launcher_ready || statusPayload.launcher_enabled)) {
+          if (!sellerRecoveryLauncherReady(statusPayload)) {
             setSellerRecoveryMessage(
               valueOrDash(statusPayload.summary || statusPayload.reason || "Окно входа ещё готовится. Launcher станет доступен после статуса «Нужно войти»."),
               "warning"
@@ -6855,10 +6878,17 @@
           if (!response.ok) {
             const payload = await readJson(response);
             if (response.status === 409) {
+              if (auto) {
+                sellerRecoveryAutoDownloadRunId = "";
+              }
               setSellerRecoveryMessage(
                 valueOrDash(payload.summary || payload.reason || payload.error || "Окно входа ещё готовится. Повторите скачивание после статуса «Нужно войти»."),
                 "warning"
               );
+              if (auto) {
+                scheduleSellerRecoveryPoll();
+                return;
+              }
               await loadSellerRecoveryStatus();
               return;
             }
@@ -6875,7 +6905,7 @@
           link.remove();
           URL.revokeObjectURL(objectUrl);
           setSellerRecoveryMessage(
-            "Launcher скачан. Оставьте окно Terminal открытым, пока система не подтвердит финальный статус.",
+            (auto ? "Launcher скачан автоматически. " : "Launcher скачан. ") + "Оставьте окно Terminal открытым, пока система не подтвердит финальный статус.",
             "success"
           );
         } catch (error) {
@@ -6884,8 +6914,10 @@
             "error"
           );
         } finally {
-          sellerRecoveryAction = null;
-          updateSellerRecoveryButtons();
+          if (!auto) {
+            sellerRecoveryAction = null;
+            updateSellerRecoveryButtons();
+          }
         }
       }
 
