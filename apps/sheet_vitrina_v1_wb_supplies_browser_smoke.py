@@ -94,7 +94,7 @@ def main() -> None:
                     "Коэф. приёмки",
                     "Стоимость",
                 ]
-                actual_columns = operator_frame.locator(".wb-supplies-table thead th").evaluate_all(
+                actual_columns = operator_frame.locator(".wb-supplies-table").first.locator("thead th").evaluate_all(
                     "(nodes) => nodes.map((node) => node.textContent.trim())"
                 )
                 if actual_columns != expected_columns:
@@ -114,6 +114,14 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("1002")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Скрыто размером: 2")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Unknown qty: 1")
+                operator_frame.locator("#wbSuppliesTableBody tr", has_text="39265492").click()
+                expect(operator_frame.locator("#wbSuppliesDetailPanel")).to_be_visible(timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesDetailTitle")).to_contain_text("39265492")
+                expect(operator_frame.locator("#wbSuppliesDetailSummary")).to_contain_text("Строк: 2")
+                expect(operator_frame.locator("#wbSuppliesDetailSummary")).to_contain_text("Принято: 7 483")
+                expect(operator_frame.locator("#wbSuppliesGoodsTableBody")).to_contain_text("2 500")
+                operator_frame.locator("#wbSuppliesDetailCloseButton").click()
+                expect(operator_frame.locator("#wbSuppliesDetailPanel")).to_be_hidden()
 
                 const_first_row_before = operator_frame.locator("#wbSuppliesTableBody tr").first
                 expect(const_first_row_before).to_contain_text("1003")

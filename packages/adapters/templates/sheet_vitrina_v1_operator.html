@@ -2302,6 +2302,34 @@
       background: rgba(31, 34, 42, 0.58);
     }
 
+    .wb-supplies-table tbody tr[data-wb-supply-id] {
+      cursor: pointer;
+    }
+
+    .wb-supplies-detail {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--border);
+    }
+
+    .wb-supplies-detail-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 12px;
+    }
+
+    .wb-supplies-detail-title {
+      margin: 0 0 4px;
+      font-size: 16px;
+      line-height: 1.25;
+    }
+
+    .wb-supplies-goods-table {
+      min-width: 960px;
+    }
+
     @media (max-width: 760px) {
       .page {
         padding: 28px 16px;
@@ -3220,6 +3248,39 @@
               </label>
               <div id="wbSuppliesPageButtons" class="wb-supplies-pages" aria-label="Страницы поставок"></div>
             </div>
+            <section id="wbSuppliesDetailPanel" class="wb-supplies-detail" hidden aria-live="polite">
+              <div class="wb-supplies-detail-header">
+                <div>
+                  <h3 id="wbSuppliesDetailTitle" class="wb-supplies-detail-title">Состав поставки</h3>
+                  <p id="wbSuppliesDetailSubtitle" class="wb-supplies-sub"></p>
+                </div>
+                <button id="wbSuppliesDetailCloseButton" class="action-button" type="button">Закрыть</button>
+              </div>
+              <div id="wbSuppliesDetailSummary" class="wb-supplies-summary"></div>
+              <p id="wbSuppliesDetailMessage" class="wb-supplies-message"></p>
+              <div class="wb-supplies-table-wrap">
+                <table class="wb-supplies-table wb-supplies-goods-table">
+                  <thead>
+                    <tr>
+                      <th>nmID</th>
+                      <th>Barcode</th>
+                      <th>VendorCode</th>
+                      <th>Размер</th>
+                      <th>Цвет</th>
+                      <th>Добавлено</th>
+                      <th>Принято</th>
+                      <th>Разгрузка</th>
+                      <th>К продаже</th>
+                    </tr>
+                  </thead>
+                  <tbody id="wbSuppliesGoodsTableBody">
+                    <tr>
+                      <td colspan="9" class="wb-supplies-empty">Выберите поставку.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </section>
         </section>
       </section>
@@ -3438,6 +3499,13 @@
       const wbSuppliesTableBody = document.getElementById("wbSuppliesTableBody");
       const wbSuppliesPageSizeSelect = document.getElementById("wbSuppliesPageSizeSelect");
       const wbSuppliesPageButtons = document.getElementById("wbSuppliesPageButtons");
+      const wbSuppliesDetailPanel = document.getElementById("wbSuppliesDetailPanel");
+      const wbSuppliesDetailTitle = document.getElementById("wbSuppliesDetailTitle");
+      const wbSuppliesDetailSubtitle = document.getElementById("wbSuppliesDetailSubtitle");
+      const wbSuppliesDetailCloseButton = document.getElementById("wbSuppliesDetailCloseButton");
+      const wbSuppliesDetailSummary = document.getElementById("wbSuppliesDetailSummary");
+      const wbSuppliesDetailMessage = document.getElementById("wbSuppliesDetailMessage");
+      const wbSuppliesGoodsTableBody = document.getElementById("wbSuppliesGoodsTableBody");
 
       const actionLabels = {
         refresh: {
@@ -3564,6 +3632,7 @@
       let wbSuppliesLoading = false;
       let wbSuppliesSyncing = false;
       let wbSuppliesBackfilling = false;
+      let wbSuppliesDetailLoading = false;
       let wbSuppliesBackfillPollHandle = 0;
       let wbSuppliesSearchTimer = 0;
       const wbSuppliesState = {
@@ -6366,6 +6435,8 @@
         }
         wbSuppliesTableBody.innerHTML = rows.map((row) => {
           const statusTone = row.status_tone ? " is-" + row.status_tone : "";
+          const detailId = String(row.wb_supply_id || row.supply_id || row.cache_key || row.visible_number || "").trim();
+          const cacheKey = String(row.cache_key || "").trim();
           const quantitySub = row.accepted_quantity !== null && row.accepted_quantity !== undefined
             ? "<span class=\"wb-supplies-sub\">Упаковано " + escapeHtml(formatWbNumber(row.packed_quantity)) + " → Принято " + escapeHtml(formatWbNumber(row.accepted_quantity)) + "</span>"
             : "";
@@ -6376,7 +6447,7 @@
             ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.warehouse_fact_line) + "</span>"
             : "";
           return [
-            "<tr>",
+            "<tr data-wb-supply-id=\"" + escapeHtml(detailId) + "\" data-wb-supply-cache-key=\"" + escapeHtml(cacheKey) + "\">",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(row.number_label || row.visible_number || "—") + "</span><span class=\"wb-supplies-sub\">" + escapeHtml(row.type_label || "—") + "</span></td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbDateRange(row)) + "</span></td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(row.warehouse_display || "—") + "</span>" + warehouseFact + "</td>",
@@ -6387,6 +6458,118 @@
             "</tr>"
           ].join("");
         }).join("");
+      }
+
+      async function openWbSupplyDetail(supplyId) {
+        if (!config.wb_supplies_path || !supplyId || wbSuppliesDetailLoading) {
+          return;
+        }
+        wbSuppliesDetailLoading = true;
+        if (wbSuppliesDetailPanel) {
+          wbSuppliesDetailPanel.hidden = false;
+        }
+        if (wbSuppliesDetailTitle) {
+          wbSuppliesDetailTitle.textContent = "Состав поставки " + supplyId;
+        }
+        if (wbSuppliesDetailSubtitle) {
+          wbSuppliesDetailSubtitle.textContent = "Загружаем данные WB API / cache...";
+        }
+        if (wbSuppliesDetailMessage) {
+          wbSuppliesDetailMessage.textContent = "";
+          wbSuppliesDetailMessage.className = "wb-supplies-message";
+        }
+        if (wbSuppliesGoodsTableBody) {
+          wbSuppliesGoodsTableBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">Загрузка состава...</td></tr>";
+        }
+        try {
+          const response = await fetch(config.wb_supplies_path.replace(/\/$/, "") + "/" + encodeURIComponent(supplyId), {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderWbSupplyDetail(payload);
+        } catch (error) {
+          if (wbSuppliesDetailMessage) {
+            wbSuppliesDetailMessage.textContent = "Состав не загружен: " + (error instanceof Error ? error.message : String(error));
+            wbSuppliesDetailMessage.className = "wb-supplies-message is-error";
+          }
+          if (wbSuppliesGoodsTableBody) {
+            wbSuppliesGoodsTableBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">Нет данных состава.</td></tr>";
+          }
+        } finally {
+          wbSuppliesDetailLoading = false;
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      function renderWbSupplyDetail(payload) {
+        const supply = payload && payload.supply ? payload.supply : {};
+        const goods = Array.isArray(payload && payload.goods) ? payload.goods : [];
+        const summary = payload && payload.goods_summary ? payload.goods_summary : {};
+        const status = String((payload && payload.composition_status) || "");
+        const compositionError = String((payload && payload.composition_error) || "");
+        if (wbSuppliesDetailPanel) {
+          wbSuppliesDetailPanel.hidden = false;
+        }
+        if (wbSuppliesDetailTitle) {
+          wbSuppliesDetailTitle.textContent = "Состав поставки " + valueOrDash(supply.number_label || supply.visible_number || supply.wb_supply_id || supply.supply_id);
+        }
+        if (wbSuppliesDetailSubtitle) {
+          wbSuppliesDetailSubtitle.textContent = [
+            supply.type_label || "—",
+            supply.status_label || "—",
+            supply.warehouse_display || "—"
+          ].join(" · ");
+        }
+        if (wbSuppliesDetailSummary) {
+          const items = [
+            "Строк: " + valueOrDash(summary.goods_row_count),
+            "SKU: " + valueOrDash(summary.unique_nm_id_count),
+            "Barcode: " + valueOrDash(summary.unique_barcode_count),
+            "Добавлено: " + formatWbNumber(summary.total_quantity),
+            "Принято: " + formatWbNumber(summary.total_accepted_quantity),
+            "К продаже: " + formatWbNumber(summary.total_ready_for_sale_quantity),
+            "Composition: " + valueOrDash(status)
+          ];
+          wbSuppliesDetailSummary.innerHTML = items.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
+        }
+        if (wbSuppliesDetailMessage) {
+          wbSuppliesDetailMessage.textContent = compositionError || (goods.length ? "Состав загружен из cache/WB API." : "Состав поставки отсутствует в cache.");
+          wbSuppliesDetailMessage.className = "wb-supplies-message" + (compositionError ? " is-warning" : "");
+        }
+        renderWbSupplyGoodsRows(goods);
+      }
+
+      function renderWbSupplyGoodsRows(goods) {
+        if (!wbSuppliesGoodsTableBody) {
+          return;
+        }
+        if (!goods.length) {
+          wbSuppliesGoodsTableBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">Состав поставки не найден.</td></tr>";
+          return;
+        }
+        wbSuppliesGoodsTableBody.innerHTML = goods.map((row) => [
+          "<tr>",
+          "<td>" + escapeHtml(valueOrDash(row.nm_id)) + "</td>",
+          "<td>" + escapeHtml(valueOrDash(row.barcode)) + "</td>",
+          "<td>" + escapeHtml(valueOrDash(row.vendor_code || row.supplier_article)) + "</td>",
+          "<td>" + escapeHtml(valueOrDash(row.tech_size)) + "</td>",
+          "<td>" + escapeHtml(valueOrDash(row.color)) + "</td>",
+          "<td>" + escapeHtml(formatWbNumber(row.quantity)) + "</td>",
+          "<td>" + escapeHtml(formatWbNumber(row.accepted_quantity)) + "</td>",
+          "<td>" + escapeHtml(formatWbNumber(row.unloading_quantity)) + "</td>",
+          "<td>" + escapeHtml(formatWbNumber(row.ready_for_sale_quantity)) + "</td>",
+          "</tr>"
+        ].join("")).join("");
+      }
+
+      function closeWbSupplyDetail() {
+        if (wbSuppliesDetailPanel) {
+          wbSuppliesDetailPanel.hidden = true;
+        }
       }
 
       function renderWbSuppliesPagination(payload) {
@@ -7466,6 +7649,19 @@
         }
         goToWbSuppliesOffset(button.getAttribute("data-wb-supplies-offset"));
       });
+      if (wbSuppliesTableBody) {
+        wbSuppliesTableBody.addEventListener("click", (event) => {
+          const row = event.target.closest("[data-wb-supply-id]");
+          if (!row) {
+            return;
+          }
+          const supplyId = row.getAttribute("data-wb-supply-id") || "";
+          openWbSupplyDetail(supplyId);
+        });
+      }
+      if (wbSuppliesDetailCloseButton) {
+        wbSuppliesDetailCloseButton.addEventListener("click", closeWbSupplyDetail);
+      }
       stockReportSelectAllButton.addEventListener("click", () => {
         setStockReportDraftSelection(allStockReportSkuIds);
         writePersistedOperatorUiState({

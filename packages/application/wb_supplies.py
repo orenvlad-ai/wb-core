@@ -53,6 +53,9 @@ OFFICIAL_STATUS_IDS = (1, 2, 3, 4, 5, 6)
 BOX_TYPE_LABELS_RU = {
     1: "Короб",
 }
+VIRTUAL_TYPE_LABELS_RU = {
+    5: "Допринято",
+}
 
 SCHEMA_COLUMNS = [
     {"key": "number_and_type", "label": "Номер и тип"},
@@ -417,15 +420,101 @@ class WbSuppliesBlock:
         normalized_id = str(supply_id or "").strip()
         if not normalized_id:
             raise WbSuppliesBlockError("supply_id is required", http_status=400)
-        detail = self.runtime.load_wb_supply(normalized_id)
-        if detail is None:
+        record = self.runtime.load_wb_supply_record(normalized_id)
+        if record is None:
             raise WbSuppliesBlockError(f"WB supply not found in cache: {normalized_id}", http_status=404)
+        record = self._ensure_supply_detail_record(record)
+        detail = _supply_detail_payload(record)
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "meta": {"source": WB_SUPPLIES_SOURCE_LABEL, "read_only": True},
-            "supply": detail,
+            **detail,
         }
+
+    def _ensure_supply_detail_record(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = dict(record.get("normalized") or {})
+        raw_list = record.get("raw_list") if isinstance(record.get("raw_list"), Mapping) else normalized.get("raw_list")
+        if not isinstance(raw_list, Mapping):
+            raw_list = {}
+        raw_detail = record.get("raw_detail") if isinstance(record.get("raw_detail"), Mapping) else None
+        raw_goods = record.get("raw_goods") if isinstance(record.get("raw_goods"), list) else None
+        raw_package = record.get("raw_package") if isinstance(record.get("raw_package"), list) else None
+        lookup_id, is_preorder_id = _resolve_upstream_lookup_id(raw_detail or raw_list or normalized)
+        warnings: list[str] = []
+        fetched_any = False
+        attempted = False
+        attempted_core_enrichment = False
+
+        if lookup_id and raw_detail is None:
+            attempted = True
+            attempted_core_enrichment = True
+            fetched_detail = self._fetch_detail(lookup_id, is_preorder_id=is_preorder_id, warnings=warnings)
+            if fetched_detail is not None:
+                raw_detail = fetched_detail
+                fetched_any = True
+        if lookup_id and raw_goods is None:
+            attempted = True
+            attempted_core_enrichment = True
+            fetched_goods = self._fetch_goods(lookup_id, is_preorder_id=is_preorder_id, warnings=warnings)
+            if fetched_goods is not None:
+                raw_goods = fetched_goods
+                fetched_any = True
+        if lookup_id and not is_preorder_id and raw_package is None:
+            attempted = True
+            fetched_package = self._fetch_package(lookup_id, warnings=warnings)
+            if fetched_package is not None:
+                raw_package = fetched_package
+                fetched_any = True
+
+        synced_at = self.timestamp_factory()
+        warehouse_by_id = _warehouse_map(self.runtime.list_wb_supplies_warehouses())
+        existing_warnings = list(normalized.get("warnings") or [])
+        row_warnings = warnings if attempted_core_enrichment or warnings else existing_warnings
+        next_normalized = _normalize_supply_row(
+            raw_list=raw_list,
+            raw_detail=raw_detail,
+            raw_goods=raw_goods,
+            raw_package=raw_package,
+            warehouse_by_id=warehouse_by_id,
+            synced_at=synced_at,
+            warnings=row_warnings,
+        )
+        cache_key = str(record.get("cache_key") or normalized.get("cache_key") or _stable_cache_key(raw_list) or "").strip()
+        next_normalized["cache_key"] = cache_key
+        next_normalized["raw_list_hash"] = _stable_payload_hash(raw_list) if raw_list else str(record.get("raw_list_hash") or "")
+        next_normalized["raw_detail_hash"] = _stable_payload_hash(raw_detail) if raw_detail is not None else str(record.get("raw_detail_hash") or "")
+        next_normalized["raw_goods_hash"] = _stable_payload_hash(raw_goods) if raw_goods is not None else str(record.get("raw_goods_hash") or "")
+        next_normalized["raw_package_hash"] = _stable_payload_hash(raw_package) if raw_package is not None else str(record.get("raw_package_hash") or "")
+        next_normalized["last_list_synced_at"] = str(normalized.get("last_list_synced_at") or "")
+        previous_enriched_at = str(record.get("last_enriched_at") or normalized.get("last_enriched_at") or "")
+        next_normalized["last_enriched_at"] = synced_at if attempted_core_enrichment and fetched_any and not warnings else previous_enriched_at
+        if attempted and warnings:
+            next_normalized["enrichment_status"] = "partial" if fetched_any else "failed"
+        elif attempted_core_enrichment:
+            next_normalized["enrichment_status"] = "ok"
+        else:
+            next_normalized["enrichment_status"] = str(record.get("enrichment_status") or normalized.get("enrichment_status") or "not_requested")
+        next_normalized["enrichment_error"] = "; ".join(row_warnings) if row_warnings else ""
+
+        next_record = {
+            **dict(record),
+            "normalized": next_normalized,
+            "raw_list": dict(raw_list) if raw_list else None,
+            "raw_detail": dict(raw_detail) if isinstance(raw_detail, Mapping) else None,
+            "raw_goods": [dict(item) for item in raw_goods] if isinstance(raw_goods, list) else None,
+            "raw_package": [dict(item) for item in raw_package] if isinstance(raw_package, list) else None,
+            "raw_list_hash": next_normalized["raw_list_hash"],
+            "raw_detail_hash": next_normalized["raw_detail_hash"],
+            "raw_goods_hash": next_normalized["raw_goods_hash"],
+            "raw_package_hash": next_normalized["raw_package_hash"],
+            "last_enriched_at": next_normalized["last_enriched_at"],
+            "enrichment_status": next_normalized["enrichment_status"],
+            "enrichment_error": next_normalized["enrichment_error"],
+        }
+        if fetched_any or _normalized_row_public_fingerprint(normalized) != _normalized_row_public_fingerprint(next_normalized):
+            self.runtime.save_wb_supply_rows(rows=[next_normalized], warehouses=[], synced_at=synced_at)
+        return next_record
 
     def _run_full_backfill_guarded(self, run_id: str, request: Mapping[str, Any]) -> None:
         try:
@@ -826,6 +915,9 @@ class WbSuppliesBlock:
         except WbSuppliesTransportError as exc:
             warnings.append(f"details fetch failed for {lookup_id}: {exc}")
             return None
+        except OfficialApiRuntimeError as exc:
+            warnings.append(f"details fetch failed for {lookup_id}: {exc}")
+            return None
 
     def _fetch_goods(
         self,
@@ -843,6 +935,24 @@ class WbSuppliesBlock:
             return None
         except WbSuppliesTransportError as exc:
             warnings.append(f"goods fetch failed for {lookup_id}: {exc}")
+            return None
+        except OfficialApiRuntimeError as exc:
+            warnings.append(f"goods fetch failed for {lookup_id}: {exc}")
+            return None
+
+    def _fetch_package(self, lookup_id: str, *, warnings: list[str]) -> list[Mapping[str, Any]] | None:
+        try:
+            return self.source.fetch_supply_package(lookup_id)
+        except WbSuppliesHttpStatusError as exc:
+            if exc.status_code in {401, 403}:
+                raise
+            warnings.append(f"package fetch failed for {lookup_id}: status {exc.status_code}")
+            return None
+        except WbSuppliesTransportError as exc:
+            warnings.append(f"package fetch failed for {lookup_id}: {exc}")
+            return None
+        except OfficialApiRuntimeError as exc:
+            warnings.append(f"package fetch failed for {lookup_id}: {exc}")
             return None
 
 
@@ -955,6 +1065,132 @@ def _coerce_list_result(value: Any) -> WbSuppliesListResult:
     raise WbSuppliesBlockError("WB supplies source returned invalid list result", http_status=502)
 
 
+def _supply_detail_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(record.get("normalized") or {})
+    raw = {
+        "list": record.get("raw_list"),
+        "detail": record.get("raw_detail"),
+        "goods": record.get("raw_goods"),
+        "package": record.get("raw_package"),
+    }
+    supply = dict(normalized)
+    supply["raw"] = raw
+    raw_goods = record.get("raw_goods") if isinstance(record.get("raw_goods"), list) else None
+    raw_package = record.get("raw_package") if isinstance(record.get("raw_package"), list) else None
+    goods = _normalize_goods_rows(raw_goods)
+    goods_summary = _goods_summary(goods)
+    package_summary = _package_summary(raw_package)
+    composition_error = str(normalized.get("enrichment_error") or record.get("enrichment_error") or "")
+    composition_status = "available" if goods else "missing"
+    if composition_error and not goods:
+        composition_status = "error"
+    elif composition_error:
+        composition_status = "partial"
+    return {
+        "supply": supply,
+        "goods": goods,
+        "goods_summary": goods_summary,
+        "package": {
+            "summary": package_summary,
+            "raw": [dict(item) for item in raw_package] if raw_package is not None else None,
+        },
+        "composition_status": composition_status,
+        "composition_last_enriched_at": str(normalized.get("last_enriched_at") or record.get("last_enriched_at") or ""),
+        "composition_error": composition_error,
+        "raw_diagnostics": {
+            "list_keys": sorted((record.get("raw_list") or {}).keys()) if isinstance(record.get("raw_list"), Mapping) else [],
+            "detail_keys": sorted((record.get("raw_detail") or {}).keys()) if isinstance(record.get("raw_detail"), Mapping) else [],
+            "goods_count": len(raw_goods) if raw_goods is not None else None,
+            "package_count": len(raw_package) if raw_package is not None else None,
+            "raw_hashes": {
+                "list": str(record.get("raw_list_hash") or normalized.get("raw_list_hash") or ""),
+                "detail": str(record.get("raw_detail_hash") or normalized.get("raw_detail_hash") or ""),
+                "goods": str(record.get("raw_goods_hash") or normalized.get("raw_goods_hash") or ""),
+                "package": str(record.get("raw_package_hash") or normalized.get("raw_package_hash") or ""),
+            },
+        },
+    }
+
+
+def _normalize_goods_rows(raw_goods: list[Mapping[str, Any]] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_goods or []):
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            {
+                "nm_id": _optional_int(_first_value(item, "nmID", "nmId", "nm_id")),
+                "barcode": _first_string(item, "barcode", "barCode", "barcodeID"),
+                "vendor_code": _first_string(item, "vendorCode", "vendor_code", "vendorCodeWB"),
+                "supplier_article": _first_string(item, "supplierArticle", "supplier_article", "article"),
+                "tech_size": _first_string(item, "techSize", "tech_size", "size"),
+                "color": _first_string(item, "color", "colour"),
+                "quantity": _optional_number(_first_value(item, "quantity", "qty")),
+                "accepted_quantity": _optional_number(_first_value(item, "acceptedQuantity", "accepted_quantity")),
+                "unloading_quantity": _optional_number(_first_value(item, "unloadingQuantity", "unloading_quantity")),
+                "ready_for_sale_quantity": _optional_number(
+                    _first_value(item, "readyForSaleQuantity", "ready_for_sale_quantity")
+                ),
+                "depersonalized_quantity": _optional_number(
+                    _first_value(item, "depersonalizedQuantity", "depersonalized_quantity")
+                ),
+                "package_code": _first_string(item, "packageCode", "package_code"),
+                "raw_index": index,
+                "evidence_source": "raw_goods",
+            }
+        )
+    return rows
+
+
+def _goods_summary(goods: list[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "total_quantity": _sum_normalized_goods_field(goods, "quantity"),
+        "total_accepted_quantity": _sum_normalized_goods_field(goods, "accepted_quantity"),
+        "total_unloading_quantity": _sum_normalized_goods_field(goods, "unloading_quantity"),
+        "total_ready_for_sale_quantity": _sum_normalized_goods_field(goods, "ready_for_sale_quantity"),
+        "total_depersonalized_quantity": _sum_normalized_goods_field(goods, "depersonalized_quantity"),
+        "goods_row_count": len(goods),
+        "unique_nm_id_count": len({str(item.get("nm_id")) for item in goods if item.get("nm_id") is not None}),
+        "unique_barcode_count": len({str(item.get("barcode")) for item in goods if str(item.get("barcode") or "").strip()}),
+    }
+
+
+def _sum_normalized_goods_field(goods: list[Mapping[str, Any]], key: str) -> float | None:
+    total = 0.0
+    seen = False
+    for item in goods:
+        value = _optional_number(item.get(key))
+        if value is None:
+            continue
+        total += value
+        seen = True
+    return total if seen else None
+
+
+def _package_summary(raw_package: list[Mapping[str, Any]] | None) -> dict[str, Any]:
+    return {
+        "package_count": len(raw_package) if raw_package is not None else None,
+        "quantity_total": _sum_package_quantity(raw_package) if raw_package is not None else None,
+        "barcode_quantity_total": _sum_package_barcode_quantity(raw_package) if raw_package is not None else None,
+    }
+
+
+def _normalized_row_public_fingerprint(row: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "warehouse_display",
+        "warehouse_fact_line",
+        "type_label",
+        "quantity_added",
+        "packed_quantity",
+        "accepted_quantity",
+        "acceptance_coefficient",
+        "cost_total",
+        "cost_evidence",
+        "has_transit_cost_marker",
+    )
+    return {key: row.get(key) for key in keys}
+
+
 def _normalize_supply_row(
     *,
     raw_list: Mapping[str, Any],
@@ -1003,6 +1239,9 @@ def _normalize_supply_row(
         transit_warehouse_name = warehouse_by_id.get(transit_warehouse_id, "")
         transit_warehouse_name_evidence = "warehouse_dict" if transit_warehouse_name else transit_warehouse_name_evidence
     box_type_id = _optional_int(_first_non_empty_from_sources(sources, "boxTypeID", "boxTypeId", "box_type_id")[0])
+    virtual_type_id = _optional_int(
+        _first_non_empty_from_sources(sources, "virtualTypeID", "virtualTypeId", "virtual_type_id")[0]
+    )
     planned_quantity, planned_quantity_evidence = _first_number_from_sources(
         sources, "quantity", "plannedQuantity", "planned_quantity", "addedQuantity", "added_quantity"
     )
@@ -1051,6 +1290,9 @@ def _normalize_supply_row(
         "transitCostTotal",
         "transit_cost_total",
     )
+    acceptance_coefficient = _first_number_from_sources(
+        sources, "paidAcceptanceCoefficient", "acceptanceCoefficient", "acceptance_coefficient"
+    )[0]
     cost_total, cost_evidence = _cost_total(
         sources=sources,
         acceptance_cost=acceptance_cost,
@@ -1058,10 +1300,9 @@ def _normalize_supply_row(
         transit_cost=transit_cost,
         transit_cost_evidence=transit_cost_evidence,
         is_transit=bool(transit_warehouse_id or transit_warehouse_name),
+        status_id=status_id,
+        acceptance_coefficient=acceptance_coefficient,
     )
-    acceptance_coefficient = _first_number_from_sources(
-        sources, "paidAcceptanceCoefficient", "acceptanceCoefficient", "acceptance_coefficient"
-    )[0]
     create_date = _first_string_from_sources(sources, "createDate", "createdAt", "created_at")[0]
     supply_date = _first_string_from_sources(sources, "supplyDate", "supply_date")[0]
     fact_date = _first_string_from_sources(sources, "factDate", "fact_date")[0]
@@ -1097,8 +1338,9 @@ def _normalize_supply_row(
         "status_label": _status_label(status_id),
         "status_tone": _status_tone(status_id),
         "box_type_id": box_type_id,
+        "virtual_type_id": virtual_type_id,
         "box_type_label": _box_type_label(box_type_id),
-        "type_label": _type_label(box_type_id=box_type_id, is_transit=is_transit),
+        "type_label": _type_label(box_type_id=box_type_id, virtual_type_id=virtual_type_id, is_transit=is_transit),
         "is_box_on_pallet": _optional_bool(_first_non_empty_from_sources(sources, "isBoxOnPallet", "is_box_on_pallet")[0]),
         "warehouse_id": warehouse_id,
         "warehouse_name": warehouse_name,
@@ -1264,6 +1506,8 @@ def _cost_total(
     transit_cost: float | None,
     transit_cost_evidence: str,
     is_transit: bool,
+    status_id: int | None,
+    acceptance_coefficient: float | None,
 ) -> tuple[float | None, str]:
     explicit, explicit_evidence = _first_number_from_sources(
         sources,
@@ -1288,6 +1532,8 @@ def _cost_total(
         return None, "transit_total_absent_in_official_supply_detail"
     if acceptance_cost is not None:
         return acceptance_cost, acceptance_cost_evidence
+    if not is_transit and status_id in {5, 6} and acceptance_coefficient == 0:
+        return 0, "paidAcceptanceCoefficient.free_accepted_non_transit"
     return None, "unknown"
 
 
@@ -1444,14 +1690,20 @@ def _status_tone(status_id: int | None) -> str:
 def _box_type_label(box_type_id: int | None) -> str:
     if box_type_id is None:
         return ""
+    if box_type_id == 0:
+        return ""
     return BOX_TYPE_LABELS_RU.get(box_type_id, f"Тип {box_type_id}")
 
 
-def _type_label(*, box_type_id: int | None, is_transit: bool) -> str:
+def _type_label(*, box_type_id: int | None, virtual_type_id: int | None = None, is_transit: bool) -> str:
     parts: list[str] = []
     box_label = _box_type_label(box_type_id)
     if box_label:
         parts.append(box_label)
+    elif box_type_id == 0:
+        virtual_label = VIRTUAL_TYPE_LABELS_RU.get(virtual_type_id or -1, "")
+        if virtual_label:
+            parts.append(virtual_label)
     if is_transit:
         parts.append("с транзитом")
     return " · ".join(parts)
@@ -1527,14 +1779,38 @@ def _cache_record_index(records: list[Mapping[str, Any]]) -> dict[str, Mapping[s
 
 
 def _row_needs_enrichment(row: Mapping[str, Any]) -> bool:
-    if str(row.get("enrichment_status") or "") == "failed":
-        return False
     if str(row.get("last_enriched_at") or "").strip():
-        return False
+        raw_diagnostics = row.get("raw_diagnostics") if isinstance(row.get("raw_diagnostics"), Mapping) else {}
+        has_goods = raw_diagnostics.get("goods_count") is not None
+        has_technical_type = str(row.get("type_label") or "").startswith("Тип ")
+        has_transit = bool(row.get("has_transit_cost_marker"))
+        non_transit_cost_missing = (
+            _optional_int(row.get("status_id")) in {5, 6}
+            and not has_transit
+            and row.get("cost_total") is None
+            and row.get("acceptance_coefficient") is None
+        )
+        return bool(has_technical_type or non_transit_cost_missing or not has_goods)
+    raw_diagnostics = row.get("raw_diagnostics") if isinstance(row.get("raw_diagnostics"), Mapping) else {}
+    has_goods = raw_diagnostics.get("goods_count") is not None
+    status_id = _optional_int(row.get("status_id"))
+    has_transit = bool(row.get("has_transit_cost_marker"))
+    has_technical_type = str(row.get("type_label") or "").startswith("Тип ")
+    non_transit_cost_missing = (
+        status_id in {5, 6}
+        and not has_transit
+        and row.get("cost_total") is None
+        and row.get("acceptance_coefficient") is None
+    )
     return (
         row.get("quantity_for_size_filter") is None
+        or row.get("quantity_added") is None
+        or row.get("accepted_quantity") is None
         or not str(row.get("warehouse_display") or "").strip()
-        or row.get("status_id") is None
+        or status_id is None
+        or has_technical_type
+        or non_transit_cost_missing
+        or not has_goods
     )
 
 
@@ -1683,6 +1959,24 @@ def _sum_package_quantity(rows: list[Mapping[str, Any]]) -> float | None:
             continue
         found = True
         total += value
+    return total if found else 0.0 if rows == [] else None
+
+
+def _sum_package_barcode_quantity(rows: list[Mapping[str, Any]]) -> float | None:
+    found = False
+    total = 0.0
+    for row in rows:
+        barcodes = row.get("barcodes") if isinstance(row, Mapping) else None
+        if not isinstance(barcodes, list):
+            continue
+        for barcode_row in barcodes:
+            if not isinstance(barcode_row, Mapping):
+                continue
+            value = _optional_number(_first_value(barcode_row, "quantity", "qty"))
+            if value is None:
+                continue
+            found = True
+            total += value
     return total if found else 0.0 if rows == [] else None
 
 
