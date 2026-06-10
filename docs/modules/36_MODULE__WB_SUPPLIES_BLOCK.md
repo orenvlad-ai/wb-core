@@ -27,13 +27,15 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}"
 related_runners:
   - "apps/wb_supplies_api_adapter_smoke.py"
+  - "apps/wb_supplies_live_diagnostics.py"
+  - "apps/wb_supplies_normalization_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Initial active module doc for read-only WB/FBW supplies registry. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry now has field-level route/warehouse/quantity/cost evidence normalization, 1000-row latest-window sync and sanitized live diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -60,6 +62,7 @@ update_note: "Initial active module doc for read-only WB/FBW supplies registry. 
   - `GET /api/v1/supplies/{ID}`;
   - `GET /api/v1/supplies/{ID}/goods`;
   - `GET /api/v1/supplies/{ID}/package` exists in adapter as optional evidence and is not fatal for MVP table;
+  - `GET /api/v1/transit-tariffs` exists in adapter/diagnostics as read-only tariff evidence; the UI does not calculate transit cabinet cost from it without a proven formula;
   - `GET /api/v1/warehouses`.
 - `POST /api/v1/acceptance/options`, transit create/update methods and all WB mutations stay outside scope.
 - Adapter errors are sanitized:
@@ -112,7 +115,7 @@ Response shape:
 Performs a bounded upstream fetch and DB upsert.
 
 Body:
-- `limit`, default `100`;
+- `limit`, default `1000`, max `1000`;
 - `offset`, default `0`;
 - `enrich_details`, default `true`.
 
@@ -120,7 +123,47 @@ Body:
 
 Returns cached normalized row plus raw list/detail/goods/package evidence for diagnostics.
 
-# 5. Quantity And Size Filter
+# 5. Field Normalization
+
+Normalization keeps separate evidence sources instead of flattening them with lossy overwrite:
+- detail fields may be primary for status/date fields;
+- warehouse, route, quantity and cost fields use first non-empty evidence from detail/list/goods/package/warehouse dictionary as appropriate;
+- `None` and empty strings from detail do not erase non-empty list or dictionary evidence;
+- normalized rows expose evidence markers: `warehouse_evidence`, `route_evidence`, `quantity_evidence`, `packed_quantity_evidence`, `cost_evidence`.
+
+Warehouse/route fields:
+- `warehouse_from_name`;
+- `warehouse_to_name`;
+- `warehouse_actual_name`;
+- `warehouse_display`;
+- `warehouse_fact_line`;
+- `route_evidence`.
+
+For transit supplies, official detail evidence observed in live diagnostics maps user-visible route as:
+- from = `warehouseName`;
+- to = `transitWarehouseName` or, if missing, `actualWarehouseName`.
+
+Therefore `warehouse_display` for a transit supply is `warehouseName → transitWarehouseName`. The UI does not show `Факт: ...` for ordinary transit rows where `actualWarehouseName` is the same destination as `transitWarehouseName`, because that duplicates and can invert the cabinet route.
+
+Quantity fields:
+- `quantity_added` priority: detail `quantity`, then `sum(goods.quantity)`, then `sum(package.quantity)`;
+- `packed_quantity` priority: explicit packed/package field if present, then `sum(goods.quantity)`, then `sum(goods.supplierBoxAmount)`, then `sum(package.quantity)`, then accepted-supply fallback to `quantity_added`;
+- `accepted_quantity` priority: detail `acceptedQuantity`, then `sum(goods.acceptedQuantity)`;
+- `quantity_for_size_filter` follows `quantity_added` before accepted/unloading fallbacks.
+
+Cost fields:
+- `acceptance_cost` preserves raw `acceptanceCost`;
+- `transit_cost` preserves explicit transit cost fields if the upstream ever returns them;
+- `cost_total` is the user-visible amount only when raw evidence provides a total, explicit transit cost, or a non-transit `acceptanceCost`;
+- for transit rows with `acceptanceCost = 0` and no explicit total/transit cost, `cost_total = null`, `cost_display = —`, and `has_transit_cost_marker = true`;
+- the UI must not render `0 ₽` for unknown transit cost.
+
+Type labels:
+- known `boxTypeID=1` renders as `Короб`;
+- technical `boxTypeID 1` is not user-facing when a mapping exists;
+- unknown box types render as bounded `Тип <id>` and keep raw diagnostics in detail payload.
+
+# 6. Quantity And Size Filter
 
 The default size filter is `Основные от 250 шт` (`main_250`).
 
@@ -142,8 +185,9 @@ Summary exposes:
 - `hidden_by_size_filter_count`;
 - `unknown_quantity_count`;
 - threshold `250`.
+- cache completeness label; if the last upstream page was full, the UI reports that history may still be incomplete.
 
-# 6. UI
+# 7. UI
 
 The table is compact and keeps the current dark/violet operator identity.
 
@@ -166,21 +210,28 @@ Filters:
 Known status labels:
 - `1` = `Не запланировано`;
 - `2` = `Запланировано`;
-- `3` = `Разгрузка разрешена`;
-- `4` = `Приёмка`;
+- `3` = `Отгрузка разрешена`;
+- `4` = `Идёт приёмка`;
 - `5` = `Принято`;
-- `6` = `Разгружено у ворот`;
+- `6` = `Отгружено на воротах`;
 - unknown status = `Статус <id>`.
+
+The status selector always exposes the official status set `1..6`, even before rows with every status are present in cache. `Виртуальная` is not shown unless upstream evidence adds a specific marker.
 
 First open behavior:
 - GET reads cache;
-- if cache is empty, the authenticated UI starts bounded `POST .../sync` with `limit=100`;
+- if cache is empty, the authenticated UI starts bounded `POST .../sync` with `limit=1000`;
 - if token/API is unavailable, the UI shows a controlled error instead of a silent empty table.
 
-# 7. Smokes
+# 8. Diagnostics And Smokes
+
+Live diagnostics:
+- `python3 apps/wb_supplies_live_diagnostics.py` uses `WB_API_TOKEN`, scans configured target supply IDs through `POST /api/v1/supplies`, fetches detail/goods/package where available, samples `transit-tariffs`, and prints sanitized keys, field evidence and normalized deltas without token, headers, cookies or raw phone values.
+- Target diagnostic IDs are the screenshot-backed supplies: `39265492`, `39265540`, `39265590`, `39265519`, `39265571`, `39238882`, `38535188`, `38350231`, `38978468`, `38978549`, `38978323`.
 
 Targeted smokes:
 - `python3 apps/wb_supplies_api_adapter_smoke.py`;
+- `python3 apps/wb_supplies_normalization_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_http_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py`.
 
@@ -192,7 +243,7 @@ Regression/protection smokes include:
 - `python3 apps/registry_upload_http_entrypoint_smoke.py`;
 - `git diff --check`.
 
-# 8. Explicit Non-Scope
+# 9. Explicit Non-Scope
 
 This module does not implement:
 - WB supply creation/edit/delete;
@@ -200,6 +251,7 @@ This module does not implement:
 - supply plan;
 - warehouse restrictions screen;
 - transit directions screen;
+- unproven reverse-engineering of WB cabinet transit cost formula;
 - FBS orders/supplies;
 - Seller Portal browser automation;
 - Google Sheets/GAS writes;
