@@ -13943,17 +13943,30 @@
         launcherFallbackReason: sameRun ? String(previousRecovery.launcherFallbackReason || "") : ""
       };
       if ((!options || options.updateSession !== false) && normalized.session_status) {
-        const mapped = sellerSessionDisplay(String(normalized.session_status || ""), normalized);
-        state.sellerSession = Object.assign({}, state.sellerSession, {
-          status: String(normalized.session_status || ""),
-          statusLabel: mapped.label,
-          tone: mapped.tone,
-          checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
-          summary: String(normalized.probe_reason || normalized.summary || normalized.reason || ""),
-          instruction: String(normalized.instruction || ""),
-          loading: false
-        });
-        renderSellerSessionIndicator();
+        if (sellerRecoveryIsActive(normalized)) {
+          state.sellerSession = Object.assign({}, state.sellerSession, {
+            status: "checking",
+            statusLabel: "проверка...",
+            tone: "warning",
+            checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
+            summary: String(normalized.summary || normalized.reason || ""),
+            instruction: String(normalized.instruction || ""),
+            loading: true
+          });
+          renderSellerSessionIndicator();
+        } else {
+          const mapped = sellerSessionDisplay(String(normalized.session_status || ""), normalized);
+          state.sellerSession = Object.assign({}, state.sellerSession, {
+            status: String(normalized.session_status || ""),
+            statusLabel: mapped.label,
+            tone: mapped.tone,
+            checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
+            summary: String(normalized.probe_reason || normalized.summary || normalized.reason || ""),
+            instruction: String(normalized.instruction || ""),
+            loading: false
+          });
+          renderSellerSessionIndicator();
+        }
       }
       if (sellerRecoveryIsActive(normalized)) {
         scheduleSellerRecoveryPoll(1500);
