@@ -84,6 +84,16 @@ def main() -> None:
                     timeout=10000,
                 )
                 page.wait_for_selector("[data-session-launcher]", timeout=5000)
+                page.wait_for_function(
+                    """() => {
+                      const node = document.querySelector('[data-seller-top-session]');
+                      return !!node
+                        && node.textContent.trim() === 'сессия'
+                        && node.classList.contains('tone-warning')
+                        && !node.classList.contains('is-actionable');
+                    }""",
+                    timeout=5000,
+                )
                 if fixture.launcher_requests != 2:
                     raise AssertionError(f"second automatic launcher attempt must download zip, got {fixture.launcher_requests}")
 
