@@ -877,7 +877,8 @@ def _check_stale_history_storage_ignored(page: object, base_url: str) -> dict[st
           dateFrom: (document.querySelector('[data-history-date-from]') || {}).value || '',
           dateTo: (document.querySelector('[data-history-date-to]') || {}).value || '',
           query: window.location.search,
-          freshnessClass: ((document.querySelector('[data-table-freshness-indicator]') || {}).getAttribute('class') || ''),
+          freshnessBadgeCount: document.querySelectorAll('[data-table-freshness-indicator]').length,
+          loadStatusCount: document.querySelectorAll('[data-table-load-status]').length,
           bodyText: document.body ? (document.body.innerText || '') : '',
           cachePresent: !!localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1'),
           legacyPeriodPresent: !!localStorage.getItem('wb-core:sheet-vitrina-v1:web-vitrina:legacy-period:v0'),
@@ -895,8 +896,8 @@ def _check_stale_history_storage_ignored(page: object, base_url: str) -> dict[st
         raise AssertionError(f"legacy April range leaked into rendered page, got {state}")
     if state["cachePresent"] or state["legacyPeriodPresent"] or state["legacyRangePresent"] or state["brokenPeriodPresent"]:
         raise AssertionError(f"obsolete persisted history state must be reset on no-query load, got {state}")
-    if "is-stale-loading" in state["freshnessClass"] or "is-stale-error" in state["freshnessClass"]:
-        raise AssertionError(f"no-query default must not show stale cache freshness indicator, got {state}")
+    if state["freshnessBadgeCount"] != 0 or state["loadStatusCount"] != 1:
+        raise AssertionError(f"freshness badge must be absent while load-status lamp remains, got {state}")
     return state
 
 
@@ -2075,12 +2076,10 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
         cache_page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
         cache_page.wait_for_function(
             """() => {
-              const indicator = document.querySelector('[data-table-freshness-indicator]');
               const label = (document.querySelector('[data-history-label]') || {}).textContent || '';
-              return !!indicator &&
-                indicator.classList.contains('is-fresh') &&
-                label.trim() === '15.04.2026 - 21.04.2026' &&
-                !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1');
+              return label.trim() === '15.04.2026 - 21.04.2026' &&
+                !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
+                document.querySelectorAll('[data-table-body] tr').length > 0;
             }""",
             timeout=20000,
         )
@@ -2128,23 +2127,21 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
         cache_page.reload(wait_until="domcontentloaded")
         cache_page.wait_for_function(
             """(marker) => {
-              const indicator = document.querySelector('[data-table-freshness-indicator]');
               const bodyText = document.body ? (document.body.innerText || '') : '';
-              return !!indicator &&
-                indicator.classList.contains('is-fresh') &&
-                !bodyText.includes(marker) &&
+              return !bodyText.includes(marker) &&
                 !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
-                document.querySelectorAll('[data-table-body] tr').length > 0;
+                document.querySelectorAll('[data-table-body] tr').length > 0 &&
+                document.querySelectorAll('[data-table-freshness-indicator]').length === 0 &&
+                document.querySelectorAll('[data-table-load-status]').length === 1;
             }""",
             arg=marker,
             timeout=20000,
         )
         reload_state = cache_page.evaluate(
             """(marker) => {
-              const indicator = document.querySelector('[data-table-freshness-indicator]');
               return {
-                indicator_class: indicator ? (indicator.getAttribute('class') || '') : '',
-                indicator_text: indicator ? ((indicator.textContent || '').trim()) : '',
+                freshnessBadgeCount: document.querySelectorAll('[data-table-freshness-indicator]').length,
+                loadStatusCount: document.querySelectorAll('[data-table-load-status]').length,
                 marker_visible: (document.body.innerText || '').includes(marker),
                 cache_present: !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1'),
                 row_count: document.querySelectorAll('[data-table-body] tr').length
@@ -2152,34 +2149,39 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
             }""",
             arg=marker,
         )
+        if reload_state["freshnessBadgeCount"] != 0 or reload_state["loadStatusCount"] != 1:
+            raise AssertionError(f"freshness badge must be absent while load-status lamp remains, got {reload_state}")
         cache_page.goto(page_url, wait_until="commit")
         cache_page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
         cache_page.wait_for_function(
             """() => {
-              const indicator = document.querySelector('[data-table-freshness-indicator]');
-              return !!indicator &&
-                indicator.classList.contains('is-fresh') &&
-                !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
-                !window.location.search;
+              return !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
+                !window.location.search &&
+                document.querySelectorAll('[data-table-body] tr').length > 0 &&
+                document.querySelectorAll('[data-table-freshness-indicator]').length === 0 &&
+                document.querySelectorAll('[data-table-load-status]').length === 1;
             }""",
             timeout=20000,
         )
         no_query_state = cache_page.evaluate(
             """() => {
-              const indicator = document.querySelector('[data-table-freshness-indicator]');
               return {
                 query: window.location.search,
                 cache_present: !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1'),
-                indicator_class: indicator ? (indicator.getAttribute('class') || '') : '',
+                freshnessBadgeCount: document.querySelectorAll('[data-table-freshness-indicator]').length,
+                loadStatusCount: document.querySelectorAll('[data-table-load-status]').length,
                 label: (document.querySelector('[data-history-label]') || {}).textContent || ''
               };
             }"""
         )
+        if no_query_state["freshnessBadgeCount"] != 0 or no_query_state["loadStatusCount"] != 1:
+            raise AssertionError(f"freshness badge must be absent while load-status lamp remains, got {no_query_state}")
         return {
             "cache_disabled_for_explicit_period": not initial_state["cache_present"],
             "seeded_cache_purged_on_reload": not reload_state["cache_present"],
             "stale_marker_visible": reload_state["marker_visible"],
-            "fresh_indicator": reload_state["indicator_text"],
+            "freshness_badge_count": reload_state["freshnessBadgeCount"],
+            "load_status_count": reload_state["loadStatusCount"],
             "no_query_cache_present": no_query_state["cache_present"],
             "no_query_label": no_query_state["label"],
         }
@@ -2195,9 +2197,8 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const tableMeta = header ? header.querySelector('[data-table-meta]') : null;
           const summary = header ? header.querySelector('[data-table-summary-line]') : null;
           const loadStatus = header ? header.querySelector('[data-table-load-status]') : null;
-          const freshnessBadge = header ? header.querySelector('[data-table-freshness-indicator]') : null;
-          const freshnessLabel = freshnessBadge ? freshnessBadge.querySelector('[data-table-freshness-label]') : null;
           const objectLabel = header ? header.querySelector('[data-table-object-label]') : null;
+          const sellerSession = header ? header.querySelector('[data-seller-top-session]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
           const loadButton = header ? header.querySelector('[data-load-refresh-button]') : null;
           const headerControls = header ? header.querySelector('[data-table-header-controls]') : null;
@@ -2285,9 +2286,9 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             object_label_text: objectLabel ? ((objectLabel.textContent || '').trim()) : '',
             object_label_hidden: objectLabel ? !!objectLabel.hidden : null,
             title_table_count: Array.from(document.querySelectorAll('h1,h2,h3')).filter((node) => (node.textContent || '').trim() === 'Таблица').length,
-            heading_line_order_ok: !!(objectLabel && freshnessBadge && summary &&
-              ((objectLabel.compareDocumentPosition(freshnessBadge) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) &&
-              ((freshnessBadge.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)),
+            heading_line_order_ok: !!(objectLabel && sellerSession && summary &&
+              ((objectLabel.compareDocumentPosition(sellerSession) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) &&
+              ((sellerSession.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)),
             visible_filter_labels: visibleFilterLabels,
             load_status_text: loadStatus ? (loadStatus.getAttribute('data-load-status-text') || '') : '',
             load_status_title: loadStatus ? (loadStatus.getAttribute('title') || '') : '',
@@ -2298,8 +2299,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             load_button_text: loadButton ? ((loadButton.textContent || '').trim()) : '',
             load_button_right_aligned: !!loadButton && buttonRect.left > headerRect.left + headerRect.width / 2,
             load_status_inline_left_of_button: !!loadStatus && !loadStatus.hidden && statusRect.right <= buttonRect.left + 2 && Math.abs(((statusRect.top + statusRect.bottom) / 2) - ((buttonRect.top + buttonRect.bottom) / 2)) <= 8,
-            freshness_label_text: freshnessLabel ? ((freshnessLabel.textContent || '').trim()) : '',
-            freshness_title: freshnessBadge ? (freshnessBadge.getAttribute('title') || '') : '',
+            freshness_badge_count: header ? header.querySelectorAll('[data-table-freshness-indicator]').length : 0,
             asia_yekaterinburg_in_summary: ((summary ? summary.textContent : '').match(/Asia\\/Yekaterinburg/g) || []).length,
             seconds_in_summary: /\\d{1,2}:\\d{2}:\\d{2}/.test(summary ? (summary.textContent || '') : ''),
             history_control: {
@@ -2313,7 +2313,6 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             section_control: selectState(sectionSelect),
             group_control: selectState(groupSelect),
             header_text: text,
-            has_freshness_badge: !!freshnessBadge && !freshnessBadge.hidden,
             forbidden_hits: forbidden.filter((item) => text.includes(item) || metaText.includes(item) || (tableMeta && tableMeta.textContent || '').includes(item))
           };
         }"""
@@ -2339,7 +2338,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         or not payload["load_button_right_aligned"]
         or not payload["load_status_inline_left_of_button"]
         or payload["load_status_hidden"]
-        or not payload["has_freshness_badge"]
+        or int(payload["freshness_badge_count"]) != 0
         or payload["object_label_hidden"]
         or payload["object_label_text"] != "Итого"
         or payload["title_table_count"] != 0
@@ -2354,8 +2353,6 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         raise AssertionError(f"table header summary must expose short ob/fresh timestamps, got {payload}")
     if int(payload["asia_yekaterinburg_in_summary"]) != 0 or payload["seconds_in_summary"]:
         raise AssertionError(f"compact header timestamps must omit visible timezone and seconds, got {payload}")
-    if payload["freshness_label_text"] != "акт" or "актуально" not in str(payload["freshness_title"]):
-        raise AssertionError(f"actuality badge must be visibly compact while preserving semantic title, got {payload}")
     if payload["load_status_visible_text"] or int(payload["load_status_dot_count"]) != 1 or int(payload["load_status_width"]) > 32:
         raise AssertionError(f"load status must render as compact icon/lamp without visible text, got {payload}")
     if not str(payload["load_status_title"]).startswith("Загрузка: "):

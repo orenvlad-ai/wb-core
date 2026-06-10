@@ -62,8 +62,10 @@ def run_browser_check(base_url: str) -> dict[str, object]:
                 raise AssertionError(f"no-query load must reset stale table cache, got {stale_april_reset}")
             if stale_april_reset["legacyPeriodPresent"] or stale_april_reset["legacyRangePresent"] or stale_april_reset["brokenPeriodPresent"]:
                 raise AssertionError(f"no-query load must reset obsolete period state, got {stale_april_reset}")
-            if "is-stale-loading" in stale_april_reset["freshnessClass"] or "is-stale-error" in stale_april_reset["freshnessClass"]:
-                raise AssertionError(f"no-query load must not be driven by stale cache freshness, got {stale_april_reset}")
+            if stale_april_reset["freshnessBadgeCount"] != 0 or stale_april_reset["loadStatusCount"] != 1:
+                raise AssertionError(
+                    f"freshness badge must be absent while load-status lamp remains, got {stale_april_reset}"
+                )
             old_query_ignored = _assert_old_query_ignored(page, page_url)
             operator_default = _open_and_assert_no_query_default(page, base_url + DEFAULT_SHEET_OPERATOR_UI_PATH)
             explicit_period = _assert_explicit_period(page, page_url)
@@ -86,12 +88,12 @@ def _open_and_assert_no_query_default(page: object, page_url: str) -> dict[str, 
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     page.wait_for_function(
         """() => {
-          const indicator = document.querySelector('[data-table-freshness-indicator]');
           const label = (document.querySelector('[data-history-label]') || {}).textContent || '';
-          return !!indicator &&
-            indicator.classList.contains('is-fresh') &&
-            label.trim() === '08.04.2026 - 21.04.2026' &&
-            !window.location.search;
+          return label.trim() === '08.04.2026 - 21.04.2026' &&
+            !window.location.search &&
+            document.querySelectorAll('[data-table-body] tr').length > 0 &&
+            document.querySelectorAll('[data-table-freshness-indicator]').length === 0 &&
+            document.querySelectorAll('[data-table-load-status]').length === 1;
         }""",
         timeout=20000,
     )
@@ -101,7 +103,8 @@ def _open_and_assert_no_query_default(page: object, page_url: str) -> dict[str, 
           dateFrom: (document.querySelector('[data-history-date-from]') || {}).value || '',
           dateTo: (document.querySelector('[data-history-date-to]') || {}).value || '',
           query: window.location.search,
-          freshnessClass: ((document.querySelector('[data-table-freshness-indicator]') || {}).getAttribute('class') || ''),
+          freshnessBadgeCount: document.querySelectorAll('[data-table-freshness-indicator]').length,
+          loadStatusCount: document.querySelectorAll('[data-table-load-status]').length,
           bodyText: document.body ? (document.body.innerText || '') : '',
           cachePresent: !!localStorage.getItem(tableCacheKey),
           legacyPeriodPresent: !!localStorage.getItem(legacyPeriodKey),
@@ -123,6 +126,8 @@ def _open_and_assert_no_query_default(page: object, page_url: str) -> dict[str, 
         raise AssertionError(f"no-query page must not persist table snapshot cache, got {state}")
     if "20.04.2026 - 24.04.2026" in state["bodyText"] or "2026-04-20..2026-04-24" in state["bodyText"]:
         raise AssertionError(f"stale April range must not be visible on no-query page, got {state}")
+    if state["freshnessBadgeCount"] != 0 or state["loadStatusCount"] != 1:
+        raise AssertionError(f"freshness badge must be absent while load-status lamp remains, got {state}")
     return state
 
 
@@ -162,15 +167,15 @@ def _assert_old_query_ignored(page: object, page_url: str) -> dict[str, object]:
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     page.wait_for_function(
         """() => {
-          const indicator = document.querySelector('[data-table-freshness-indicator]');
           const label = (document.querySelector('[data-history-label]') || {}).textContent || '';
           const params = new URL(window.location.href).searchParams;
-          return !!indicator &&
-            indicator.classList.contains('is-fresh') &&
-            label.trim() === '08.04.2026 - 21.04.2026' &&
+          return label.trim() === '08.04.2026 - 21.04.2026' &&
             !params.has('date_from') &&
             !params.has('date_to') &&
-            !params.has('history_mode');
+            !params.has('history_mode') &&
+            document.querySelectorAll('[data-table-body] tr').length > 0 &&
+            document.querySelectorAll('[data-table-freshness-indicator]').length === 0 &&
+            document.querySelectorAll('[data-table-load-status]').length === 1;
         }""",
         timeout=20000,
     )
@@ -193,12 +198,12 @@ def _assert_explicit_period(page: object, page_url: str) -> dict[str, object]:
     page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
     page.wait_for_function(
         """() => {
-          const indicator = document.querySelector('[data-table-freshness-indicator]');
           const label = (document.querySelector('[data-history-label]') || {}).textContent || '';
-          return !!indicator &&
-            indicator.classList.contains('is-fresh') &&
-            label.trim() === '15.04.2026 - 21.04.2026' &&
-            !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1');
+          return label.trim() === '15.04.2026 - 21.04.2026' &&
+            !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
+            document.querySelectorAll('[data-table-body] tr').length > 0 &&
+            document.querySelectorAll('[data-table-freshness-indicator]').length === 0 &&
+            document.querySelectorAll('[data-table-load-status]').length === 1;
         }""",
         timeout=20000,
     )
@@ -225,13 +230,12 @@ def _assert_explicit_period(page: object, page_url: str) -> dict[str, object]:
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function(
         """(marker) => {
-          const indicator = document.querySelector('[data-table-freshness-indicator]');
           const bodyText = document.body ? (document.body.innerText || '') : '';
-          return !!indicator &&
-            indicator.classList.contains('is-fresh') &&
-            !bodyText.includes(marker) &&
+          return !bodyText.includes(marker) &&
             !window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1') &&
-            document.querySelectorAll('[data-table-body] tr').length > 0;
+            document.querySelectorAll('[data-table-body] tr').length > 0 &&
+            document.querySelectorAll('[data-table-freshness-indicator]').length === 0 &&
+            document.querySelectorAll('[data-table-load-status]').length === 1;
         }""",
         arg=marker,
         timeout=20000,
@@ -239,7 +243,8 @@ def _assert_explicit_period(page: object, page_url: str) -> dict[str, object]:
     fresh_state = page.evaluate(
         """(marker) => ({
           marker_visible: (document.body.innerText || '').includes(marker),
-          freshnessClass: ((document.querySelector('[data-table-freshness-indicator]') || {}).getAttribute('class') || ''),
+          freshnessBadgeCount: document.querySelectorAll('[data-table-freshness-indicator]').length,
+          loadStatusCount: document.querySelectorAll('[data-table-load-status]').length,
           label: (document.querySelector('[data-history-label]') || {}).textContent || '',
           query: window.location.search,
           cachePresent: !!window.localStorage.getItem('wb_core_web_vitrina_table_snapshot_v1')
@@ -248,6 +253,8 @@ def _assert_explicit_period(page: object, page_url: str) -> dict[str, object]:
     )
     if fresh_state["marker_visible"]:
         raise AssertionError(f"explicit period cache marker must disappear after fresh payload, got {fresh_state}")
+    if fresh_state["freshnessBadgeCount"] != 0 or fresh_state["loadStatusCount"] != 1:
+        raise AssertionError(f"freshness badge must be absent while load-status lamp remains, got {fresh_state}")
     return {
         "cache_disabled": not fresh_state["cachePresent"],
         "fresh_state": fresh_state,

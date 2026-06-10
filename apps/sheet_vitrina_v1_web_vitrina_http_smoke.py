@@ -408,7 +408,7 @@ def main() -> None:
                 "web_vitrina_page_composition",
                 "data-table-header",
                 "Загрузить",
-                "data-table-freshness-indicator",
+                "data-table-load-status",
                 "data-table-header-controls",
                 "data-filter-controls",
                 "data-history-toggle",
