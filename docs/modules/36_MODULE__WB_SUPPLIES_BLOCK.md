@@ -147,7 +147,7 @@ Body:
 - `enrich`, default `true`;
 - optional `max_pages` for diagnostic bounded runs.
 
-Full backfill walks `POST /api/v1/supplies?limit=<limit>&offset=<offset>` until a short/empty upstream page proves the end of available API history. It saves progress after each page, uses idempotent upsert, never deletes old rows just because a page omits them, and can resume from `highest_synced_offset` after 429/timeout/non-JSON/upstream failures.
+Full backfill walks `POST /api/v1/supplies?limit=<limit>&offset=<offset>` until a short/empty upstream page proves the end of available API history. It saves list rows and offset progress before the optional detail/goods enrichment pass for that page, uses idempotent upsert, never deletes old rows just because a page omits them, and can resume from `highest_synced_offset` after 429/timeout/non-JSON/upstream failures.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status?run_id=...`
 
