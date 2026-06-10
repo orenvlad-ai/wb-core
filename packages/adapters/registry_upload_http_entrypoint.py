@@ -1017,6 +1017,30 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if _is_supplier_shipment_price_check_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_price_check_path(parsed.path)
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_supplier_shipments_price_check_request(
+                        shipment_id,
+                        payload,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment price check failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if parsed.path == DEFAULT_NOMENCLATURE_IMPORT_PATH:
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -1200,6 +1224,7 @@ def _build_handler(
                     _render_sheet_vitrina_supplier_ui(
                         can_delete_shipments=role == "operator",
                         can_edit_order_status=is_operator_embedded,
+                        can_recheck_prices=role == "operator",
                     ),
                 )
                 return
@@ -2769,6 +2794,14 @@ def _is_supplier_shipment_rematch_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "rematch"
 
 
+def _is_supplier_shipment_price_check_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "price-check"
+
+
 def _is_wb_supply_detail_path(path: str) -> bool:
     if not path.startswith(DEFAULT_WB_SUPPLIES_PATH + "/"):
         return False
@@ -2803,6 +2836,13 @@ def _resolve_supplier_shipment_id_from_invoice_path(path: str) -> str:
 def _resolve_supplier_shipment_id_from_rematch_path(path: str) -> str:
     if not _is_supplier_shipment_rematch_path(path):
         raise ValueError(f"unsupported supplier shipment rematch path: {path}")
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/", 1)[0]
+
+
+def _resolve_supplier_shipment_id_from_price_check_path(path: str) -> str:
+    if not _is_supplier_shipment_price_check_path(path):
+        raise ValueError(f"unsupported supplier shipment price check path: {path}")
     suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
     return suffix.split("/", 1)[0]
 
@@ -3739,6 +3779,7 @@ def _render_sheet_vitrina_supplier_ui(
     *,
     can_delete_shipments: bool = True,
     can_edit_order_status: bool = False,
+    can_recheck_prices: bool = True,
 ) -> str:
     config_payload = {
         "page_title": "Реестр заказов",
@@ -3748,6 +3789,7 @@ def _render_sheet_vitrina_supplier_ui(
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "can_delete_shipments": bool(can_delete_shipments),
         "can_edit_order_status": bool(can_edit_order_status),
+        "can_recheck_prices": bool(can_recheck_prices),
     }
     template = SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     return template.replace(

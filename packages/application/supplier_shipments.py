@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
 import json
@@ -31,6 +32,18 @@ from packages.contracts.supplier_shipments import (
     MATCH_STATUS_UNMATCHED,
     ORDER_STATUS_DEFAULT,
     ORDER_STATUSES,
+    PRICE_CONFORMITY_CHECK_MODE_INITIAL_PARSE,
+    PRICE_CONFORMITY_CHECK_MODE_MANUAL_RECHECK,
+    PRICE_CONFORMITY_CHECK_MODE_MIGRATION_BACKFILL,
+    PRICE_CONFORMITY_CHECK_MODE_NOT_CHECKED,
+    PRICE_CONFORMITY_CHECK_MODES,
+    PRICE_CONFORMITY_STATUS_INVOICE_PRICE_MISSING,
+    PRICE_CONFORMITY_STATUS_MATCHED,
+    PRICE_CONFORMITY_STATUS_MISMATCHED,
+    PRICE_CONFORMITY_STATUS_NOT_CHECKED,
+    PRICE_CONFORMITY_STATUS_REFERENCE_PRICE_MISSING,
+    PRICE_CONFORMITY_STATUS_SKU_NOT_FOUND,
+    PRICE_CONFORMITY_STATUSES,
     SHIPMENT_STATUS_ALL_MATCHED,
     SHIPMENT_STATUS_CHECKSUM_ERROR,
     SHIPMENT_STATUS_HAS_UNMATCHED,
@@ -66,6 +79,8 @@ NOMENCLATURE_PRODUCT_TYPE_BY_LABEL = {
     **{key: key for key in NOMENCLATURE_PRODUCT_TYPE_LABELS},
     **{value.casefold(): key for key, value in NOMENCLATURE_PRODUCT_TYPE_LABELS.items()},
 }
+PRICE_CONFORMITY_MONEY_QUANT = Decimal("0.01")
+PRICE_CONFORMITY_YUAN_CURRENCIES = {"CNY", "CNH", "RMB", "YUAN", "YUANS", "¥", "￥", "元"}
 
 
 class SupplierShipmentsBlock:
@@ -96,18 +111,26 @@ class SupplierShipmentsBlock:
         filename = _safe_filename(uploaded_filename or "supplier-invoice.xlsx")
         if not filename.lower().endswith(".xlsx"):
             raise ValueError("supplier invoice upload must be an .xlsx file")
+        created_at = self.timestamp_factory()
         parsed_payload = parse_supplier_invoice_xlsx(
             workbook_bytes,
             filename=filename,
             aliases=self._active_nomenclature_aliases(),
         )
         parsed_payload["metadata"] = _supplier_order_metadata(parsed_payload.get("metadata"))
+        nomenclature_items = self._active_nomenclature_items()
         parsed_payload["lines"] = _apply_nomenclature_matches(
             [dict(item) for item in parsed_payload.get("lines") or []],
-            self._active_nomenclature_items(),
+            nomenclature_items,
+        )
+        parsed_payload["lines"] = _apply_price_conformity_checks(
+            parsed_payload.get("lines") or [],
+            nomenclature_items,
+            checked_at=created_at,
+            mode=PRICE_CONFORMITY_CHECK_MODE_INITIAL_PARSE,
+            default_currency=str(parsed_payload.get("metadata", {}).get("currency") or ""),
         )
         upload_id = "upl_" + uuid4().hex
-        created_at = self.timestamp_factory()
         sha256 = hashlib.sha256(workbook_bytes).hexdigest()
         relative_path = self._write_runtime_file(
             root_kind="uploads",
@@ -153,11 +176,19 @@ class SupplierShipmentsBlock:
             shipment_date=shipment_date,
             force_manual_override=False,
         )
-        lines = _apply_nomenclature_matches(lines, self._active_nomenclature_items())
+        now = self.timestamp_factory()
+        nomenclature_items = self._active_nomenclature_items()
+        lines = _apply_nomenclature_matches(lines, nomenclature_items)
+        lines = _apply_price_conformity_checks(
+            lines,
+            nomenclature_items,
+            checked_at=now,
+            mode=PRICE_CONFORMITY_CHECK_MODE_INITIAL_PARSE,
+            default_currency=str(metadata.get("currency") or ""),
+        )
         summary = _recalculate_summary(lines, declared_total=_optional_number(metadata.get("declared_invoice_total")))
         match_status = _shipment_match_status(lines, checksum_error=summary["checksum_error"])
         shipment_id = "sup_" + uuid4().hex
-        now = self.timestamp_factory()
         source_filename = str(upload.get("source_filename") or "supplier-invoice.xlsx")
         source_path = self._copy_upload_to_shipment_file(
             upload_path=str(upload.get("source_file_path") or ""),
@@ -254,6 +285,86 @@ class SupplierShipmentsBlock:
         if not updated:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         return self.get_shipment(shipment_id)
+
+    def recheck_shipment_prices(self, shipment_id: str, *, actor: str = "", context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        now = self.timestamp_factory()
+        header = dict(existing["header"])
+        lines = _apply_price_conformity_checks(
+            [dict(item) for item in existing.get("lines") or []],
+            self._active_nomenclature_items(),
+            checked_at=now,
+            mode=PRICE_CONFORMITY_CHECK_MODE_MANUAL_RECHECK,
+            actor=actor,
+            context=context or {},
+            default_currency=str(header.get("currency") or ""),
+        )
+        header["updated_at"] = now
+        self.runtime.save_supplier_shipment(header=header, lines=lines)
+        return self.get_shipment(shipment_id)
+
+    def backfill_price_conformity_checks(self) -> dict[str, Any]:
+        shipments = self.runtime.list_supplier_shipments()
+        now = self.timestamp_factory()
+        nomenclature_items = self._active_nomenclature_items()
+        processed_shipments = 0
+        skipped_shipments = 0
+        matched = 0
+        mismatched = 0
+        missing = 0
+        updated_line_count = 0
+        for shipment in shipments:
+            shipment_id = str(shipment.get("shipment_id") or "")
+            if not shipment_id:
+                continue
+            detail = self.runtime.load_supplier_shipment(shipment_id)
+            if detail is None:
+                continue
+            original_lines = [dict(item) for item in detail.get("lines") or []]
+            next_lines = _apply_price_conformity_checks(
+                original_lines,
+                nomenclature_items,
+                checked_at=now,
+                mode=PRICE_CONFORMITY_CHECK_MODE_MIGRATION_BACKFILL,
+                only_missing=True,
+                default_currency=str((detail.get("header") or {}).get("currency") or ""),
+            )
+            changed = next_lines != original_lines
+            if not changed:
+                skipped_shipments += 1
+                continue
+            header = dict(detail["header"])
+            self.runtime.save_supplier_shipment(header=header, lines=next_lines)
+            processed_shipments += 1
+            for line in next_lines:
+                if not _line_was_backfilled(original_lines, line):
+                    continue
+                updated_line_count += 1
+                status = str(line.get("price_conformity_status") or "")
+                if status == PRICE_CONFORMITY_STATUS_MATCHED:
+                    matched += 1
+                elif status == PRICE_CONFORMITY_STATUS_MISMATCHED:
+                    mismatched += 1
+                elif status in {
+                    PRICE_CONFORMITY_STATUS_SKU_NOT_FOUND,
+                    PRICE_CONFORMITY_STATUS_REFERENCE_PRICE_MISSING,
+                    PRICE_CONFORMITY_STATUS_INVOICE_PRICE_MISSING,
+                }:
+                    missing += 1
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_price_conformity_backfill",
+            "status": "ok",
+            "checked_at": now,
+            "found_shipments": len(shipments),
+            "processed_shipments": processed_shipments,
+            "skipped_shipments": skipped_shipments,
+            "updated_line_count": updated_line_count,
+            "matched_count": matched,
+            "mismatched_count": mismatched,
+            "missing_count": missing,
+        }
 
     def delete_shipment(self, shipment_id: str) -> dict[str, Any]:
         detail = self.runtime.load_supplier_shipment(shipment_id)
@@ -746,6 +857,14 @@ def _normalize_line(
         "comment": str(raw.get("comment") or "").strip(),
         "match_status": match_status,
         "manual_override": bool(raw.get("manual_override")) or force_manual_override,
+        "invoice_price_yuan_snapshot": _optional_number(raw.get("invoice_price_yuan_snapshot")),
+        "reference_purchase_price_yuan_snapshot": _optional_number(raw.get("reference_purchase_price_yuan_snapshot")),
+        "price_conformity_status": _normalize_price_conformity_status(raw.get("price_conformity_status")),
+        "price_conformity_checked_at": _optional_timestamp(raw.get("price_conformity_checked_at")),
+        "price_conformity_check_mode": _normalize_price_conformity_check_mode(raw.get("price_conformity_check_mode")),
+        "price_conformity_reason": str(raw.get("price_conformity_reason") or "not_checked").strip() or "not_checked",
+        "price_conformity_actor": str(raw.get("price_conformity_actor") or "").strip(),
+        "price_conformity_context": _normalize_json_object(raw.get("price_conformity_context")),
         "raw": dict(raw_payload),
     }
 
@@ -940,6 +1059,206 @@ def _apply_match_resolution(line: dict[str, Any], resolution: Mapping[str, Any] 
     line["internal_name"] = str(resolution.get("internal_name") or resolution.get("nomenclature_name") or "")
     line["match_status"] = str(resolution.get("match_status") or MATCH_STATUS_MATCHED)
     line["manual_override"] = False
+
+
+def _apply_price_conformity_checks(
+    lines: list[Mapping[str, Any]],
+    nomenclature_items: list[Mapping[str, Any]],
+    *,
+    checked_at: str,
+    mode: str,
+    actor: str = "",
+    context: Mapping[str, Any] | None = None,
+    only_missing: bool = False,
+    default_currency: str = "",
+) -> list[dict[str, Any]]:
+    normalized_mode = _normalize_price_conformity_check_mode(mode)
+    reference_index = _build_price_reference_index(nomenclature_items)
+    checked_lines: list[dict[str, Any]] = []
+    for raw_line in lines:
+        line = dict(raw_line)
+        if only_missing and not _price_conformity_missing(line):
+            checked_lines.append(line)
+            continue
+        line.update(
+            _price_conformity_check_payload(
+                line,
+                reference_index=reference_index,
+                checked_at=checked_at,
+                mode=normalized_mode,
+                actor=actor,
+                context=context or {},
+                default_currency=default_currency,
+            )
+        )
+        checked_lines.append(line)
+    return checked_lines
+
+
+def _price_conformity_check_payload(
+    line: Mapping[str, Any],
+    *,
+    reference_index: Mapping[str, Any],
+    checked_at: str,
+    mode: str,
+    actor: str,
+    context: Mapping[str, Any],
+    default_currency: str,
+) -> dict[str, Any]:
+    invoice_price = _parse_money_decimal(line.get("unit_price"))
+    reference_item, reference_reason = _resolve_price_reference_item(line, reference_index)
+    reference_price = _parse_money_decimal(reference_item.get("purchase_price_yuan")) if reference_item else None
+    payload = {
+        "invoice_price_yuan_snapshot": _decimal_snapshot(invoice_price),
+        "reference_purchase_price_yuan_snapshot": _decimal_snapshot(reference_price),
+        "price_conformity_checked_at": checked_at,
+        "price_conformity_check_mode": mode,
+        "price_conformity_actor": str(actor or "").strip() if mode == PRICE_CONFORMITY_CHECK_MODE_MANUAL_RECHECK else "",
+        "price_conformity_context": dict(context or {}) if mode == PRICE_CONFORMITY_CHECK_MODE_MANUAL_RECHECK else {},
+    }
+    if line.get("line_type") != LINE_TYPE_PRODUCT:
+        return {
+            **payload,
+            "price_conformity_status": PRICE_CONFORMITY_STATUS_NOT_CHECKED,
+            "price_conformity_reason": "not_product_line",
+        }
+    if reference_item is None:
+        return {
+            **payload,
+            "price_conformity_status": PRICE_CONFORMITY_STATUS_SKU_NOT_FOUND,
+            "price_conformity_reason": reference_reason or "sku_not_found",
+        }
+    if reference_price is None:
+        return {
+            **payload,
+            "price_conformity_status": PRICE_CONFORMITY_STATUS_REFERENCE_PRICE_MISSING,
+            "price_conformity_reason": "reference_price_missing",
+        }
+    if invoice_price is None:
+        return {
+            **payload,
+            "price_conformity_status": PRICE_CONFORMITY_STATUS_INVOICE_PRICE_MISSING,
+            "price_conformity_reason": "invoice_price_missing",
+        }
+    currency_reason = _price_currency_blocker_reason(line.get("currency") or default_currency)
+    if currency_reason:
+        return {
+            **payload,
+            "price_conformity_status": PRICE_CONFORMITY_STATUS_NOT_CHECKED,
+            "price_conformity_reason": currency_reason,
+        }
+    if invoice_price == reference_price:
+        return {
+            **payload,
+            "price_conformity_status": PRICE_CONFORMITY_STATUS_MATCHED,
+            "price_conformity_reason": "price_matched",
+        }
+    return {
+        **payload,
+        "price_conformity_status": PRICE_CONFORMITY_STATUS_MISMATCHED,
+        "price_conformity_reason": "price_mismatch",
+    }
+
+
+def _build_price_reference_index(nomenclature_items: list[Mapping[str, Any]]) -> dict[str, Any]:
+    active_items = [dict(item) for item in nomenclature_items if bool(item.get("is_active"))]
+    by_item_id = {str(item.get("item_id") or ""): item for item in active_items if str(item.get("item_id") or "")}
+    by_nm_id: dict[int, list[dict[str, Any]]] = {}
+    for item in active_items:
+        nm_id = _optional_int(item.get("nm_id"))
+        if nm_id is not None:
+            by_nm_id.setdefault(nm_id, []).append(item)
+    return {
+        "by_item_id": by_item_id,
+        "by_nm_id": by_nm_id,
+        "match_index": _build_nomenclature_match_index(active_items),
+    }
+
+
+def _resolve_price_reference_item(
+    line: Mapping[str, Any],
+    reference_index: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    internal_nm_id = _optional_int(line.get("internal_nm_id"))
+    if internal_nm_id is not None:
+        candidates = list((reference_index.get("by_nm_id") or {}).get(internal_nm_id) or [])
+        if len(candidates) == 1:
+            return candidates[0], ""
+        if len(candidates) > 1:
+            return None, "reference_sku_ambiguous"
+    resolution = _resolve_nomenclature_match(line, reference_index.get("match_index") or {})
+    if not resolution:
+        return None, "sku_not_found"
+    if str(resolution.get("match_status") or "") == MATCH_STATUS_AMBIGUOUS:
+        return None, "reference_match_ambiguous"
+    item_id = str(resolution.get("item_id") or "")
+    item = (reference_index.get("by_item_id") or {}).get(item_id)
+    if item is not None:
+        return dict(item), ""
+    return dict(resolution), ""
+
+
+def _parse_money_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        numeric = value
+    elif isinstance(value, (int, float)):
+        numeric = Decimal(str(value))
+    else:
+        text = str(value).strip().replace("\u00a0", "").replace(" ", "").replace("−", "-")
+        if not text:
+            return None
+        text = re.sub(r"[^0-9,.\-]", "", text)
+        if not text or text in {"-", ".", ","}:
+            return None
+        if text.count("-") > 1 or ("-" in text and not text.startswith("-")):
+            return None
+        if "," in text and "." in text:
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        elif "," in text:
+            text = text.replace(",", ".")
+        try:
+            numeric = Decimal(text)
+        except (InvalidOperation, ValueError):
+            return None
+    try:
+        return numeric.quantize(PRICE_CONFORMITY_MONEY_QUANT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _decimal_snapshot(value: Decimal | None) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _price_currency_blocker_reason(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "currency_missing"
+    normalized = text.upper().replace("￥", "¥")
+    if any(token in normalized for token in ("USD", "EUR", "RUB", "₽", "$")):
+        return "currency_not_yuan"
+    if normalized in PRICE_CONFORMITY_YUAN_CURRENCIES:
+        return ""
+    if any(alias in normalized for alias in PRICE_CONFORMITY_YUAN_CURRENCIES):
+        return ""
+    return "currency_not_yuan"
+
+
+def _price_conformity_missing(line: Mapping[str, Any]) -> bool:
+    return not str(line.get("price_conformity_checked_at") or "").strip()
+
+
+def _line_was_backfilled(original_lines: list[Mapping[str, Any]], line: Mapping[str, Any]) -> bool:
+    line_id = str(line.get("line_id") or "")
+    original = next((item for item in original_lines if str(item.get("line_id") or "") == line_id), None)
+    return original is None or _price_conformity_missing(original)
 
 
 def _normalize_nomenclature_payload(
@@ -1371,6 +1690,7 @@ def _nomenclature_item_match_payload(item: Mapping[str, Any]) -> dict[str, Any]:
         "internal_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
         "nomenclature_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
         "match_key": str(item.get("match_key") or ""),
+        "purchase_price_yuan": item.get("purchase_price_yuan"),
         "compatible_model_keys": _infer_compatible_model_keys(item),
         "group": "nomenclature",
     }
@@ -1415,6 +1735,8 @@ def _nomenclature_item_aliases(item: Mapping[str, Any]) -> list[dict[str, Any]]:
         "internal_nm_id": _optional_int(item.get("nm_id")),
         "internal_name": str(item.get("nomenclature_name") or ""),
         "nomenclature_name": str(item.get("nomenclature_name") or ""),
+        "item_id": str(item.get("item_id") or ""),
+        "purchase_price_yuan": item.get("purchase_price_yuan"),
         "group": "nomenclature",
     }
     aliases: list[dict[str, Any]] = []
@@ -1502,6 +1824,32 @@ def _normalize_order_status(value: Any) -> str:
     if normalized not in ORDER_STATUSES:
         raise ValueError(f"unsupported supplier order_status: {normalized}")
     return normalized
+
+
+def _normalize_price_conformity_status(value: Any) -> str:
+    normalized = str(value or PRICE_CONFORMITY_STATUS_NOT_CHECKED).strip()
+    return normalized if normalized in PRICE_CONFORMITY_STATUSES else PRICE_CONFORMITY_STATUS_NOT_CHECKED
+
+
+def _normalize_price_conformity_check_mode(value: Any) -> str:
+    normalized = str(value or PRICE_CONFORMITY_CHECK_MODE_NOT_CHECKED).strip()
+    return normalized if normalized in PRICE_CONFORMITY_CHECK_MODES else PRICE_CONFORMITY_CHECK_MODE_NOT_CHECKED
+
+
+def _optional_timestamp(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
 
 
 def _optional_iso_date(value: Any) -> str:

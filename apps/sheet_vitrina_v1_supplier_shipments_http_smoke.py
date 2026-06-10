@@ -33,10 +33,161 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
+def _assert_price_conformity_application_smoke() -> None:
+    timestamp_counter = {"value": 0}
+
+    def next_timestamp() -> str:
+        timestamp_counter["value"] += 1
+        return f"2026-05-30T09:{timestamp_counter['value']:02d}:00Z"
+
+    with TemporaryDirectory(prefix="supplier-price-conformity-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        block = SupplierShipmentsBlock(runtime=runtime, timestamp_factory=next_timestamp)
+        first = block.create_nomenclature_item(
+            {
+                "is_active": True,
+                "nm_id": 501001,
+                "nomenclature_name": "Clear iPhone 14 Pro",
+                "product_type": "clear",
+                "match_key": "clear|iphone_14_pro",
+                "purchase_price_yuan": "1",
+            }
+        )["item"]
+        block.create_nomenclature_item(
+            {
+                "is_active": True,
+                "nm_id": 501002,
+                "nomenclature_name": "Anti-Spy iPhone 14",
+                "product_type": "anti_spy",
+                "match_key": "anti_spy|iphone_14",
+                "purchase_price_yuan": "3",
+            }
+        )
+        block.create_nomenclature_item(
+            {
+                "is_active": True,
+                "nm_id": 501003,
+                "nomenclature_name": "Clear iPhone 15",
+                "product_type": "clear",
+                "match_key": "clear|iphone_15",
+                "purchase_price_yuan": None,
+            }
+        )
+        block.create_nomenclature_item(
+            {
+                "is_active": True,
+                "nm_id": 501004,
+                "nomenclature_name": "Matte iPhone 16",
+                "product_type": "matte",
+                "match_key": "matte|iphone_16",
+                "purchase_price_yuan": "5",
+            }
+        )
+
+        parsed = block.parse_upload(_build_price_conformity_invoice_fixture(), uploaded_filename="price-check.xlsx")
+        statuses = [line.get("price_conformity_status") for line in parsed.get("lines", []) if line.get("line_type") == "product"]
+        expected = ["matched", "mismatched", "sku_not_found", "reference_price_missing", "invoice_price_missing"]
+        if statuses != expected:
+            raise AssertionError(f"price conformity parse statuses changed: {statuses}")
+        detail = block.create_shipment(
+            {
+                "upload_id": parsed["upload_id"],
+                "shipment_date": "2026-05-30",
+                "payload": parsed,
+            }
+        )
+        shipment_id = detail["shipment_id"]
+        if detail["product_lines"][0].get("price_conformity_check_mode") != "initial_parse":
+            raise AssertionError("initial create must persist initial_parse price check mode")
+        block.update_nomenclature_item(str(first["item_id"]), {**first, "purchase_price_yuan": "1.25"})
+        ordinary_open = block.get_shipment(shipment_id)
+        if (
+            ordinary_open["product_lines"][0].get("price_conformity_status") != "matched"
+            or ordinary_open["product_lines"][0].get("reference_purchase_price_yuan_snapshot") != 1.0
+        ):
+            raise AssertionError("ordinary detail open must not auto-recalculate price conformity")
+        rechecked = block.recheck_shipment_prices(
+            shipment_id,
+            actor="operator:smoke",
+            context={"source": "application_smoke"},
+        )
+        first_line = rechecked["product_lines"][0]
+        if (
+            first_line.get("price_conformity_status") != "mismatched"
+            or first_line.get("reference_purchase_price_yuan_snapshot") != 1.25
+            or first_line.get("price_conformity_check_mode") != "manual_recheck"
+            or first_line.get("price_conformity_actor") != "operator:smoke"
+            or first_line.get("price_conformity_context", {}).get("source") != "application_smoke"
+        ):
+            raise AssertionError(f"manual recheck must update persisted price metadata, got {first_line}")
+
+        runtime.save_supplier_shipment(
+            header={
+                "shipment_id": "sup_legacy_price_check",
+                "created_at": "2026-05-30T08:10:00Z",
+                "updated_at": "2026-05-30T08:10:00Z",
+                "shipment_date": "2026-05-16",
+                "invoice_no": "LEGACY-PRICE",
+                "invoice_date": "2026-05-15",
+                "contract_no": "",
+                "contract_date": "",
+                "supplier_name": "",
+                "customer_name": "",
+                "currency": "RMB",
+                "product_qty_total": 1,
+                "product_amount_total": 1,
+                "extras_amount_total": 0,
+                "invoice_amount_total": 1,
+                "declared_invoice_total": 1,
+                "match_status": "all_matched",
+                "source_filename": "legacy.xlsx",
+                "source_file_sha256": "",
+                "source_file_path": "",
+                "parser_version": "legacy",
+                "warnings": [],
+                "errors": [],
+            },
+            lines=[
+                {
+                    "line_id": "ln_legacy_price",
+                    "line_type": "product",
+                    "sort_order": 1,
+                    "product_type": "anti_spy",
+                    "model_raw": "iPhone 14",
+                    "model_normalized": "iphone_14",
+                    "match_key": "anti_spy|iphone_14",
+                    "internal_nm_id": 501002,
+                    "internal_name": "Anti-Spy iPhone 14",
+                    "qty": 1,
+                    "unit_price": 3,
+                    "amount": 3,
+                    "currency": "RMB",
+                    "match_status": "matched",
+                    "manual_override": False,
+                    "raw": {"preserve": True},
+                }
+            ],
+        )
+        backfill = block.backfill_price_conformity_checks()
+        if backfill.get("processed_shipments") != 1 or backfill.get("matched_count") != 1:
+            raise AssertionError(f"backfill must fill only missing legacy line, got {backfill}")
+        legacy = block.get_shipment("sup_legacy_price_check")
+        if (
+            legacy["product_lines"][0].get("price_conformity_check_mode") != "migration_backfill"
+            or legacy["product_lines"][0].get("raw", {}).get("preserve") is not True
+        ):
+            raise AssertionError(f"backfill must preserve unrelated line fields, got {legacy['product_lines'][0]}")
+        second_backfill = block.backfill_price_conformity_checks()
+        if second_backfill.get("processed_shipments") != 0 or second_backfill.get("updated_line_count") != 0:
+            raise AssertionError(f"backfill must be idempotent, got {second_backfill}")
+
+
 def main() -> None:
+    _assert_price_conformity_application_smoke()
     workbook_bytes = _build_invoice_fixture()
     workbook_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
     with TemporaryDirectory(prefix="supplier-shipments-http-") as tmp:
@@ -87,7 +238,7 @@ def main() -> None:
                     "nomenclature_name": "Clear iPhone 14 Pro",
                     "product_type": "clear",
                     "match_key": "clear|iphone_14_pro",
-                    "purchase_price_yuan": "12,5",
+                    "purchase_price_yuan": "1,0",
                     "aliases": ["iPhone 14 Pro"],
                     "compatible_models_text": "iPhone 14 Pro",
                     "comment": "smoke",
@@ -95,7 +246,7 @@ def main() -> None:
             )
             if create_nom_status != 200 or create_nom_payload.get("item", {}).get("nm_id") != 210183919:
                 raise AssertionError(f"nomenclature create must persist item, got {create_nom_status} {create_nom_payload}")
-            if create_nom_payload.get("item", {}).get("purchase_price_yuan") != 12.5:
+            if create_nom_payload.get("item", {}).get("purchase_price_yuan") != 1.0:
                 raise AssertionError("nomenclature create must normalize purchase_price_yuan decimal comma")
             if create_nom_payload.get("item", {}).get("compatible_model_keys") != ["iphone_14_pro"]:
                 raise AssertionError("nomenclature create must normalize compatible model keys")
@@ -119,6 +270,7 @@ def main() -> None:
                     "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
                     "product_type": "anti_spy",
                     "match_key": "anti_spy|iphone_14_13_13pro",
+                    "purchase_price_yuan": "3",
                     "compatible_models_text": "iPhone 14, iPhone 13, iPhone 13 Pro",
                     "comment": "compatibility smoke",
                 },
@@ -171,7 +323,7 @@ def main() -> None:
             after_dry_run_items = {item["item_id"]: item for item in after_dry_run_payload.get("items", [])}
             if (
                 after_dry_run_status != 200
-                or after_dry_run_items[str(create_nom_payload["item"]["item_id"])].get("purchase_price_yuan") != 12.5
+                or after_dry_run_items[str(create_nom_payload["item"]["item_id"])].get("purchase_price_yuan") != 1.0
                 or after_dry_run_items[str(compat_nom_payload["item"]["item_id"])].get("is_active") is not True
             ):
                 raise AssertionError("nomenclature import dry-run must not mutate runtime DB")
@@ -204,6 +356,15 @@ def main() -> None:
                 raise AssertionError(f"parse route must resolve compatible model overlap, got {product_lines[1]}")
             if product_lines[2].get("match_status") != "unmatched":
                 raise AssertionError("unknown product match_key must remain visible and unmatched")
+            price_statuses = [line.get("price_conformity_status") for line in product_lines]
+            if price_statuses != ["matched", "mismatched", "sku_not_found"]:
+                raise AssertionError(f"parse route must attach price conformity statuses, got {price_statuses}")
+            if (
+                product_lines[0].get("invoice_price_yuan_snapshot") != 1.0
+                or product_lines[0].get("reference_purchase_price_yuan_snapshot") != 1.0
+                or product_lines[0].get("price_conformity_check_mode") != "initial_parse"
+            ):
+                raise AssertionError(f"parse route must expose price snapshots/mode, got {product_lines[0]}")
 
             missing_date_status, missing_date_payload = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
@@ -237,12 +398,29 @@ def main() -> None:
                 raise AssertionError("detail must split product and extra lines")
             if detail["product_lines"][0].get("internal_name") != "Clear iPhone 14 Pro":
                 raise AssertionError("created shipment must persist nomenclature auto-match")
+            if detail["product_lines"][0].get("price_conformity_status") != "matched":
+                raise AssertionError("created shipment must persist price conformity status")
 
             detail_status, loaded_detail = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
             if detail_status != 200 or loaded_detail.get("shipment_id") != shipment_id:
                 raise AssertionError("detail route must return persisted card payload")
             if loaded_detail.get("order_status") != "production":
                 raise AssertionError("detail route must expose default order_status")
+            if loaded_detail.get("product_lines", [{}])[0].get("price_conformity_checked_at") != "2026-05-30T08:00:00Z":
+                raise AssertionError("detail route must expose persisted price conformity metadata without recalculation")
+            price_check_status, price_checked = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/price-check",
+                {"context": {"source": "http_smoke"}},
+            )
+            first_price_checked_line = price_checked.get("product_lines", [{}])[0]
+            if (
+                price_check_status != 200
+                or first_price_checked_line.get("price_conformity_check_mode") != "manual_recheck"
+                or not str(first_price_checked_line.get("price_conformity_actor") or "").startswith("webcore_user_")
+                or first_price_checked_line.get("price_conformity_context", {}).get("source") != "http_smoke"
+            ):
+                raise AssertionError(f"manual price-check route must persist actor/context/mode, got {price_check_status} {price_checked}")
+            loaded_detail = price_checked
 
             edited = json.loads(json.dumps(loaded_detail, ensure_ascii=False))
             edited["lines"][0]["internal_sku"] = "SKU-MANUAL"
@@ -477,13 +655,34 @@ def _build_invoice_fixture() -> bytes:
     sheet.append(["Invoice Date:", "14.5.2026"])
     sheet.append(["Contract No.", "CNT-2026-0513"])
     sheet.append(["Date of Contract", "2026.5.13"])
-    sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "USD"])
+    sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "RMB"])
     sheet.append(["Invoice Total:", 33])
     sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
     sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""])
     sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 17e / 16e /14 / 13 / 13Pro", 4, 2, 8, ""])
     sheet.append([3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
     sheet.append([4, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_price_conformity_invoice_fixture() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Invoice"
+    sheet.append(["Invoice No:", "PRICE-CHECK"])
+    sheet.append(["Invoice Date:", "30.5.2026"])
+    sheet.append(["Contract No.", "CNT-PRICE"])
+    sheet.append(["Date of Contract", "2026.5.30"])
+    sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "RMB"])
+    sheet.append(["Invoice Total:", 16])
+    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
+    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 1, 1, 1, "matched"])
+    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 14", 1, 2, 2, "mismatched"])
+    sheet.append([3, "高清膜 smk", "iPhone 99", 1, 4, 4, "sku missing"])
+    sheet.append([4, "高清膜 smk", "iPhone 15", 1, 4, 4, "reference price missing"])
+    sheet.append([5, "磨砂膜 Matte", "iPhone 16", 1, "", "", "invoice price missing"])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
