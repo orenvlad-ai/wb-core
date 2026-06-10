@@ -1941,6 +1941,40 @@ class RegistryUploadDbBackedRuntime:
                 result.append(_wb_supply_record_from_row(row))
             return result
 
+    def delete_wb_supply_records(self, keys: list[str]) -> int:
+        normalized_keys = sorted({str(key or "").strip() for key in keys if str(key or "").strip()})
+        if not normalized_keys:
+            return 0
+        expanded_keys = sorted(
+            {
+                value
+                for key in normalized_keys
+                for value in (
+                    key,
+                    key.removeprefix("supply:"),
+                    key.removeprefix("preorder:"),
+                    f"supply:{key}" if not key.startswith(("supply:", "preorder:")) else key,
+                    f"preorder:{key}" if not key.startswith(("supply:", "preorder:")) else key,
+                )
+                if value
+            }
+        )
+        placeholders = ",".join("?" for _ in expanded_keys)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM sheet_vitrina_v1_wb_supplies
+                WHERE supply_id IN ({placeholders})
+                   OR cache_key IN ({placeholders})
+                   OR wb_supply_id IN ({placeholders})
+                   OR preorder_id IN ({placeholders})
+                """,
+                tuple(expanded_keys) * 4,
+            )
+            return int(cursor.rowcount or 0)
+
     def create_wb_supplies_sync_run(
         self,
         *,

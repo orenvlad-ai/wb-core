@@ -324,8 +324,8 @@ def main() -> None:
                 raise AssertionError(f"sync latest 100 must upsert fake rows, got {sync_status} {sync_payload}")
             if not any(call["limit"] == 100 and call["offset"] == 0 and call["status_ids"] == [] for call in fake_source.list_calls):
                 raise AssertionError(f"sync must call upstream unfiltered latest window, got {fake_source.list_calls}")
-            if not any(call["status_ids"] == [2] for call in fake_source.list_calls):
-                raise AssertionError(f"sync must call targeted planned status refresh, got {fake_source.list_calls}")
+            if not any(call["status_ids"] == [1, 2, 3, 4] for call in fake_source.list_calls):
+                raise AssertionError(f"sync must call targeted active status refresh, got {fake_source.list_calls}")
 
             duplicate_status, duplicate_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
@@ -335,11 +335,12 @@ def main() -> None:
                 raise AssertionError(f"duplicate sync must not duplicate rows, got {duplicate_status} {duplicate_payload}")
             duplicate_sync = duplicate_payload.get("sync", {})
             if (
-                duplicate_sync.get("upserted_count") != 0
+                duplicate_sync.get("upserted_count") != 2
                 or duplicate_sync.get("unchanged_rows") != 7
-                or duplicate_sync.get("enriched") != 0
+                or duplicate_sync.get("enriched") != 2
+                or duplicate_sync.get("enriched_active_rows") != 2
             ):
-                raise AssertionError(f"second incremental sync must skip unchanged enrichment, got {duplicate_sync}")
+                raise AssertionError(f"second incremental sync must refresh unchanged active rows only, got {duplicate_sync}")
 
             fake_source.list_rows[4]["updatedDate"] = "2026-06-09T15:00:00+03:00"
             fake_source.goods_http_errors = {"1003": 429}
@@ -350,9 +351,10 @@ def main() -> None:
             rate_limited_sync = rate_limited_payload.get("sync", {})
             if (
                 rate_limited_status != 200
-                or rate_limited_sync.get("upserted_count") != 1
+                or rate_limited_sync.get("upserted_count") != 2
                 or rate_limited_sync.get("changed_rows") != 1
                 or rate_limited_sync.get("unchanged_rows") != 6
+                or rate_limited_sync.get("enriched_active_rows") != 1
                 or rate_limited_sync.get("failed_enrich") != 1
             ):
                 raise AssertionError(
@@ -367,14 +369,19 @@ def main() -> None:
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if restore_status != 200 or restore_payload.get("sync", {}).get("upserted_count") != 0:
+            restore_sync = restore_payload.get("sync", {})
+            if (
+                restore_status != 200
+                or restore_sync.get("upserted_count") != 2
+                or restore_sync.get("enriched_active_rows") != 2
+            ):
                 raise AssertionError(f"restore sync must keep fake cache usable, got {restore_status} {restore_payload}")
 
             main_status, main_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=main_250&limit=20")
             main_ids = {row["wb_supply_id"] for row in main_payload.get("rows", [])}
-            if main_status != 200 or main_ids != {"39265492", "39265540", "1001", "1002", "1003"}:
-                raise AssertionError(f"main_250 must keep planned rows visible plus >=250 rows, got {main_status} {main_ids} {main_payload}")
-            if main_payload.get("summary", {}).get("hidden_by_size_filter_count") != 2:
+            if main_status != 200 or main_ids != {"39265492", "39265540", "1001", "1003"}:
+                raise AssertionError(f"main_250 must return numeric >=250 rows only, got {main_status} {main_ids} {main_payload}")
+            if main_payload.get("summary", {}).get("hidden_by_size_filter_count") != 3:
                 raise AssertionError("summary must expose rows hidden by size filter")
             if main_payload.get("summary", {}).get("unknown_quantity_count") != 2:
                 raise AssertionError("summary must expose unknown quantity rows")

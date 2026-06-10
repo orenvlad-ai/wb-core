@@ -107,6 +107,51 @@ class TargetedPlannedSource(IncrementalSource):
         )
 
 
+class ActiveDeletionSource(IncrementalSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows = [
+            {
+                "supplyID": 8001,
+                "preorderID": 8601,
+                "supplyDate": "2026-06-20T00:00:00+03:00",
+                "updatedDate": "2026-06-10T12:00:00+03:00",
+                "statusID": 2,
+                "warehouseID": 777,
+                "warehouseName": "Электросталь",
+                "quantity": 120,
+            },
+            {
+                "supplyID": 8002,
+                "preorderID": 8602,
+                "supplyDate": "2026-05-20T00:00:00+03:00",
+                "factDate": "2026-05-20T12:00:00+03:00",
+                "updatedDate": "2026-05-20T12:00:00+03:00",
+                "statusID": 5,
+                "warehouseID": 507,
+                "warehouseName": "Коледино",
+                "quantity": 700,
+            },
+        ]
+
+
+class ActiveUpdateSource(IncrementalSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows = [
+            {
+                "supplyID": 9001,
+                "preorderID": 9601,
+                "supplyDate": "2026-06-20T00:00:00+03:00",
+                "updatedDate": "2026-06-10T12:00:00+03:00",
+                "statusID": 2,
+                "warehouseID": 777,
+                "warehouseName": "Электросталь",
+                "quantity": 1,
+            },
+        ]
+
+
 def main() -> None:
     with TemporaryDirectory(prefix="wb-supplies-incremental-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
@@ -133,12 +178,15 @@ def main() -> None:
             second_sync.get("new_rows") != 0
             or second_sync.get("changed_rows") != 0
             or second_sync.get("unchanged_rows") != 2
-            or second_sync.get("enriched") != 0
-            or second_sync.get("upserted_count") != 0
+            or second_sync.get("enriched") != 1
+            or second_sync.get("enriched_active_rows") != 1
+            or second_sync.get("upserted_count") != 1
         ):
-            raise AssertionError(f"second incremental must skip unchanged enrichment, got {second_sync}")
-        if source.detail_calls or source.goods_calls:
-            raise AssertionError(f"second incremental must not call detail/goods for unchanged rows, got {source.detail_calls} {source.goods_calls}")
+            raise AssertionError(f"second incremental must reconcile active planned rows only, got {second_sync}")
+        if source.detail_calls != ["7002"] or source.goods_calls != ["7002"]:
+            raise AssertionError(f"second incremental must refresh active planned detail/goods, got {source.detail_calls} {source.goods_calls}")
+        source.detail_calls.clear()
+        source.goods_calls.clear()
 
         source.rows[1]["updatedDate"] = "2026-06-10T13:00:00+03:00"
         source.rows[1]["statusID"] = 5
@@ -162,12 +210,67 @@ def main() -> None:
         planned_rows = block.list_supplies({"status_ids": "2", "size_filter": "all"}).get("rows", [])
         if (
             planned_sync.get("new_rows") != 2
-            or planned_sync.get("targeted_status_ids") != [2]
+            or planned_sync.get("targeted_status_ids") != [1, 2, 3, 4]
             or planned_sync.get("targeted_raw_fetched_count") != 1
             or [row.get("wb_supply_id") for row in planned_rows] != ["7002"]
-            or not any(call["status_ids"] == [2] for call in source.list_calls)
+            or not any(call["status_ids"] == [1, 2, 3, 4] for call in source.list_calls)
         ):
             raise AssertionError(f"targeted planned refresh must upsert planned rows, got {planned_sync} {planned_rows} {source.list_calls}")
+
+    with TemporaryDirectory(prefix="wb-supplies-active-delete-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        source = ActiveDeletionSource()
+        block = WbSuppliesBlock(runtime=runtime, source=source, timestamp_factory=_timestamp_factory())
+
+        initial = block.sync_supplies({"limit": 1000})
+        if initial.get("sync", {}).get("new_rows") != 2:
+            raise AssertionError(f"active deletion seed must load planned and accepted rows, got {initial.get('sync')}")
+        source.rows = []
+        deleted = block.sync_supplies({"limit": 1000})
+        deleted_sync = deleted.get("sync", {})
+        remaining_ids = [row.get("wb_supply_id") for row in block.list_supplies({"size_filter": "all"}).get("rows", [])]
+        deleted_record = runtime.load_wb_supply_record("8001")
+        accepted_record = runtime.load_wb_supply_record("8002")
+        if (
+            deleted_sync.get("deleted_active_rows") != 1
+            or remaining_ids != ["8002"]
+            or deleted_record is not None
+            or accepted_record is None
+            or accepted_record.get("raw_goods") is None
+            or deleted_sync.get("skipped_historical_absent") != 1
+        ):
+            raise AssertionError(f"active reconcile must delete absent active row and preserve historical row, got {deleted_sync} {remaining_ids}")
+
+    with TemporaryDirectory(prefix="wb-supplies-active-update-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        source = ActiveUpdateSource()
+        block = WbSuppliesBlock(runtime=runtime, source=source, timestamp_factory=_timestamp_factory())
+
+        first = block.sync_supplies({"limit": 1000})
+        first_rows = block.list_supplies({"status_ids": "2", "size_filter": "all"}).get("rows", [])
+        if first.get("sync", {}).get("new_rows") != 1 or first_rows[0].get("quantity_for_size_filter") != 1:
+            raise AssertionError(f"active update seed must load planned qty=1, got {first.get('sync')} {first_rows}")
+        source.detail_calls.clear()
+        source.goods_calls.clear()
+        source.rows[0]["quantity"] = 300
+        source.rows[0]["supplyDate"] = "2026-06-21T00:00:00+03:00"
+        updated = block.sync_supplies({"limit": 1000})
+        updated_sync = updated.get("sync", {})
+        updated_all = block.list_supplies({"status_ids": "2", "size_filter": "all"}).get("rows", [])
+        updated_main = block.list_supplies({"status_ids": "2", "size_filter": "main_250"}).get("rows", [])
+        updated_small = block.list_supplies({"status_ids": "2", "size_filter": "small_lt_250"}).get("rows", [])
+        goods = runtime.load_wb_supply_record("9001").get("raw_goods")
+        if (
+            updated_sync.get("changed_rows") != 1
+            or updated_sync.get("changed_active_rows") != 1
+            or updated_sync.get("enriched_active_rows") != 1
+            or updated_all[0].get("quantity_for_size_filter") != 300
+            or not str(updated_all[0].get("supply_date") or "").startswith("2026-06-21")
+            or [row.get("wb_supply_id") for row in updated_main] != ["9001"]
+            or updated_small
+            or goods != [{"quantity": 300, "acceptedQuantity": 295}]
+        ):
+            raise AssertionError(f"active reconcile must update date/quantity/goods and size filters, got {updated_sync} {updated_all} {goods}")
 
     with TemporaryDirectory(prefix="wb-supplies-incremental-missing-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
@@ -186,19 +289,23 @@ def main() -> None:
         latest_sync = latest.get("sync", {})
         if (
             latest_sync.get("new_rows") != 0
-            or latest_sync.get("changed_rows") != 0
-            or latest_sync.get("unchanged_rows") != 2
-            or latest_sync.get("enriched") != 0
-            or latest_sync.get("upserted_count") != 0
-            or source.detail_calls
-            or source.goods_calls
+            or latest_sync.get("changed_rows") != 1
+            or latest_sync.get("unchanged_rows") != 1
+            or latest_sync.get("changed_active_rows") != 1
+            or latest_sync.get("enriched_active_rows") != 1
+            or latest_sync.get("enriched") != 1
+            or latest_sync.get("upserted_count") != 1
+            or source.detail_calls != ["7002"]
+            or source.goods_calls != ["7002"]
         ):
-            raise AssertionError(f"default incremental must skip old missing-critical rows, got {latest_sync}")
+            raise AssertionError(f"default incremental must reconcile active missing-critical rows only, got {latest_sync}")
+        source.detail_calls.clear()
+        source.goods_calls.clear()
 
         explicit = block.sync_supplies({"limit": 1000, "enrich": "missing_critical"})
         explicit_sync = explicit.get("sync", {})
         if (
-            explicit_sync.get("changed_rows") != 2
+            explicit_sync.get("changed_rows") != 1
             or explicit_sync.get("enriched") != 2
             or source.detail_calls != ["7001", "7002"]
             or source.goods_calls != ["7001", "7002"]

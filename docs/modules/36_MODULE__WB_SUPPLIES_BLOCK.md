@@ -46,7 +46,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental latest-window refresh from resumable full history backfill, adds a targeted planned-supply status refresh for `statusIDs=[2]`, preserves enriched raw evidence across list-only sync, supports cache re-normalization/missing-critical enrichment, exposes normalized supply goods composition through the detail route/UI drawer, supports checkbox multi-status filters with persisted UI state, sorts by normalized supply date before pagination with empty-date rows at the bottom, formats non-current-year dates with the year, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental latest-window refresh from resumable full history backfill, reconciles active statuses `1..4` on ordinary refresh, hard-deletes confirmed removed active supplies from the working cache, preserves accepted/historical rows when absent from latest windows, refreshes active detail/goods evidence, preserves enriched raw evidence across list-only sync, supports cache re-normalization/missing-critical enrichment, exposes normalized supply goods composition through the detail route/UI drawer, supports checkbox multi-status filters with persisted UI state, sorts by normalized supply date before pagination with empty-date rows at the bottom, formats non-current-year dates with the year, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -142,11 +142,14 @@ Body:
 
 Algorithm:
 - fetch latest page/window from official WB API at `offset=0`;
-- if the caller did not request an explicit status-limited sync, also fetch a bounded latest page with `statusIDs=[2]` so newly planned supplies are discoverable even when the default latest page behaves differently;
+- if the caller did not request an explicit status-limited sync, also fetch a bounded active-status page with `statusIDs=[1,2,3,4]` so active supplies are discoverable and authoritative for current active state;
 - merge/dedupe default and targeted raw rows by stable supply/preorder key before upsert;
 - calculate stable `raw_list_hash`;
 - upsert and enrich only new rows and rows whose `updatedDate`/raw hash changed;
-- old unchanged rows with missing critical fields are not retried by ordinary refresh; request `enrich=missing_critical` to run that bounded enrichment lane explicitly;
+- refresh supply-backed active rows (`2/3/4`) through detail/goods on ordinary refresh so date/status/route/quantity/goods changes are reflected even when list evidence is otherwise unchanged;
+- when the active-status slice completes without upstream error and is not capped by `limit`, hard-delete local rows still in statuses `1..4` that are absent from both default latest and the active-status slice;
+- never hard-delete accepted/historical statuses `5/6` just because they are absent from a latest refresh window;
+- old unchanged historical rows with missing critical fields are not retried by ordinary refresh; request `enrich=missing_critical` to run that bounded enrichment lane explicitly;
 - unchanged historical rows are counted as `unchanged` and do not call detail/goods again.
 
 `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill`
@@ -237,9 +240,10 @@ Evidence priority:
 4. unknown remains `null` and is not invented.
 
 Filter semantics:
-- `main_250`: rows with numeric `quantity_for_size_filter >= 250`, plus status `2` planned rows because their quantity/date evidence can still be preliminary but the row must remain discoverable after refresh;
+- `main_250`: rows with numeric `quantity_for_size_filter >= 250`;
 - `small_lt_250`: rows with numeric `quantity_for_size_filter < 250`;
 - `all`: all cached rows, including unknown quantity.
+- status does not override the size filter; planned rows with quantity `1` are visible in `all` and `small_lt_250`, planned rows with quantity `300` are visible in `all` and `main_250`, and unknown quantity is visible only in `all`.
 
 Summary exposes:
 - `hidden_by_size_filter_count`;
