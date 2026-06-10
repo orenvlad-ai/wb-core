@@ -2821,6 +2821,12 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
             addCount: document.querySelectorAll('[data-vitrina-auto-add]').length,
             saveCount: document.querySelectorAll('[data-vitrina-auto-save]').length,
             reloadCount: document.querySelectorAll('[data-vitrina-auto-reload]').length,
+            modeButtons: Array.from(document.querySelectorAll('[data-vitrina-auto-mode]')).map(node => ({
+              mode: node.getAttribute('data-vitrina-auto-mode') || '',
+              text: (node.textContent || '').trim(),
+              active: node.classList.contains('is-active')
+            })),
+            intervalControlsHidden: !!(document.querySelector('[data-vitrina-auto-interval-controls]') || {}).hidden,
             rows
           };
         }"""
@@ -2840,6 +2846,8 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
         raise AssertionError(f"auto schedule block must read current runtime schedule, got {payload}")
     if payload["addCount"] != 1 or payload["saveCount"] != 1 or payload["reloadCount"] != 1:
         raise AssertionError(f"auto schedule block must expose add/save/reload controls, got {payload}")
+    if [item["text"] for item in payload["modeButtons"]] != ["Ручные триггеры", "Интервал"] or not payload["intervalControlsHidden"]:
+        raise AssertionError(f"auto schedule block must expose compact manual/interval selector, got {payload}")
     if not all(row["enabled"] for row in payload["rows"] if row.get("time")):
         raise AssertionError(f"current auto schedule rows must be enabled, got {payload}")
     if not all(not row["timeDisabled"] and not row["enabledDisabled"] and not row["deleteDisabled"] for row in payload["rows"] if row.get("time")):
@@ -2849,6 +2857,37 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     warning = payload.get("warning") or {}
     if not warning.get("hidden"):
         raise AssertionError(f"runtime schedule warning must stay hidden when schedule is editable, got {payload}")
+
+    page.locator('[data-vitrina-auto-mode="interval"]').click()
+    page.wait_for_function(
+        """() => {
+          const controls = document.querySelector('[data-vitrina-auto-interval-controls]');
+          const chips = Array.from(document.querySelectorAll('[data-vitrina-auto-preview] .auto-schedule-preview-chip')).map(node => (node.textContent || '').trim());
+          const times = Array.from(document.querySelectorAll('[data-vitrina-auto-field="local_time_hhmm"]')).map(node => node.value).filter(Boolean);
+          return !!controls && !controls.hidden && chips.join('/') === '10:00/14:00/18:00/22:00' && times.join('/') === '10:00/14:00/18:00/22:00';
+        }""",
+        timeout=5000,
+    )
+    interval_payload = page.evaluate(
+        """() => ({
+          selectValue: (document.querySelector('[data-vitrina-auto-interval]') || {}).value || '',
+          addHidden: !!(document.querySelector('[data-vitrina-auto-add]') || {}).hidden,
+          rowsReadOnly: Array.from(document.querySelectorAll('[data-vitrina-auto-schedules-body] tr')).every(row => {
+            const timeInput = row.querySelector('[data-vitrina-auto-field="local_time_hhmm"]');
+            const enabledInput = row.querySelector('[data-vitrina-auto-field="enabled"]');
+            const deleteButton = row.querySelector('[data-vitrina-auto-delete]');
+            const runNowButton = row.querySelector('[data-vitrina-auto-run-now]');
+            return (!timeInput || timeInput.disabled) && (!enabledInput || enabledInput.disabled) && (!deleteButton || deleteButton.disabled) && (!runNowButton || runNowButton.disabled);
+          })
+        })"""
+    )
+    if interval_payload["selectValue"] != "4" or not interval_payload["addHidden"] or not interval_payload["rowsReadOnly"]:
+        raise AssertionError(f"interval mode must show 4h preview and read-only draft controls before save, got {interval_payload}")
+    page.locator('[data-vitrina-auto-mode="manual"]').click()
+    page.wait_for_function(
+        "() => Array.from(document.querySelectorAll('[data-vitrina-auto-field=\"local_time_hhmm\"]')).map(node => node.value).filter(Boolean).sort().join('/') === '11:00/20:00'",
+        timeout=5000,
+    )
 
     page.locator("[data-vitrina-auto-add]").click()
     page.wait_for_function(

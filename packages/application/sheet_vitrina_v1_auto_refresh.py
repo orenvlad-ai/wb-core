@@ -22,6 +22,13 @@ DEFAULT_TRIGGER_NAME = "runtime_auto_refresh_schedule"
 DEFAULT_SCHEDULE_SOURCE = "runtime_json"
 DEFAULT_SCHEDULE_MODE = "runtime_managed_json_schedule"
 DEFAULT_SYSTEMD_ONCALENDAR = "*-*-* *:00,10,20,30,40,50:00"
+SCHEDULE_POLICY_MODE_MANUAL = "manual"
+SCHEDULE_POLICY_MODE_INTERVAL = "interval"
+DEFAULT_INTERVAL_HOURS = 4
+ALLOWED_INTERVAL_HOURS = (3, 4, 6)
+INTERVAL_WINDOW_START_HHMM = "10:00"
+INTERVAL_WINDOW_END_HHMM = "22:00"
+MAX_INTERVAL_RUNS_PER_DAY = 6
 SUCCESS_STATUSES = {"success"}
 WARNING_STATUSES = {"warning", "no_due", "skipped"}
 EDITABLE_SCHEDULE_FIELDS = {"enabled", "local_time_hhmm", "time", "timezone"}
@@ -45,15 +52,20 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
 
     def build_payload(self, *, auto_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = self._read()
+        schedule_policy = payload.get("schedule_policy") if isinstance(payload.get("schedule_policy"), Mapping) else _default_schedule_policy()
         schedules = payload.get("schedules") if isinstance(payload.get("schedules"), list) else []
         public_schedules = [_public_schedule(schedule, now=self.now_factory()) for schedule in schedules]
         summary = _summarize(public_schedules, auto_context=auto_context)
+        interval_hours = int(schedule_policy.get("interval_hours") or DEFAULT_INTERVAL_HOURS)
+        interval_preview_slots = _interval_preview_slots(interval_hours)
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "status": "ok",
             "schedule_mode": DEFAULT_SCHEDULE_MODE,
+            "schedule_mode_type": str(schedule_policy.get("mode") or SCHEDULE_POLICY_MODE_MANUAL),
             "schedule_source": DEFAULT_SCHEDULE_SOURCE,
+            "schedule_policy": dict(schedule_policy),
             "timezone": DEFAULT_TIMEZONE,
             "timezone_label": "Asia/Yekaterinburg",
             "can_edit_runtime": True,
@@ -62,15 +74,16 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
             "operator_approval_required": False,
             "systemd_timer_name": DEFAULT_TIMER_NAME,
             "systemd_oncalendar": DEFAULT_SYSTEMD_ONCALENDAR,
-            "message": "Расписание хранится в runtime JSON state; systemd timer только регулярно проверяет due schedules.",
+            "message": _operator_message(schedule_policy),
+            "interval_options": _interval_options(),
+            "interval_preview_slots": interval_preview_slots,
+            "effective_schedules": public_schedules,
             "schedules": public_schedules,
             **summary,
         }
 
     def save_schedules(self, payload: Mapping[str, Any], *, auto_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        raw_schedules = payload.get("schedules")
-        if not isinstance(raw_schedules, list):
-            raise ValueError("schedules must be a JSON array")
+        schedule_policy = _normalize_schedule_policy(payload.get("schedule_policy"), strict=True)
         now = _iso_now(self.now_factory)
         with self._lock:
             current = self._read_unlocked()
@@ -79,15 +92,27 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
                 for item in current.get("schedules", [])
                 if isinstance(item, Mapping) and str(item.get("id") or "")
             }
-            normalized = []
-            for index, raw in enumerate(raw_schedules, start=1):
-                if not isinstance(raw, Mapping):
-                    raise ValueError("each schedule must be an object")
-                schedule_id = _safe_text(raw.get("id"), 120) or f"custom_{uuid4().hex[:12]}"
-                existing = existing_by_id.get(schedule_id)
-                merged = _merge_editable_schedule(existing, raw, schedule_id=schedule_id)
-                normalized.append(_normalize_schedule(merged, index=index, now=now, now_factory=self.now_factory))
-            _validate_schedule_set(normalized)
+            if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
+                normalized = _materialize_interval_schedules(
+                    schedule_policy,
+                    existing_by_id=existing_by_id,
+                    now=now,
+                    now_factory=self.now_factory,
+                )
+            else:
+                raw_schedules = payload.get("schedules")
+                if not isinstance(raw_schedules, list):
+                    raise ValueError("schedules must be a JSON array")
+                normalized = []
+                for index, raw in enumerate(raw_schedules, start=1):
+                    if not isinstance(raw, Mapping):
+                        raise ValueError("each schedule must be an object")
+                    schedule_id = _safe_text(raw.get("id"), 120) or f"custom_{uuid4().hex[:12]}"
+                    existing = existing_by_id.get(schedule_id)
+                    merged = _merge_editable_schedule(existing, raw, schedule_id=schedule_id)
+                    normalized.append(_normalize_schedule(merged, index=index, now=now, now_factory=self.now_factory))
+                _validate_schedule_set(normalized)
+            current["schedule_policy"] = schedule_policy
             current["schedules"] = normalized
             self._write_unlocked(current)
         return self.build_payload(auto_context=auto_context)
@@ -212,6 +237,7 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
             return {
                 "contract_name": CONTRACT_NAME,
                 "contract_version": CONTRACT_VERSION,
+                "schedule_policy": _default_schedule_policy(),
                 "schedules": _default_schedules(_iso_now(self.now_factory), self.now_factory),
             }
         try:
@@ -221,30 +247,63 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
         if not isinstance(raw, Mapping):
             raise SheetVitrinaV1AutoRefreshSchedulesError("auto refresh schedules state has invalid shape")
         now = _iso_now(self.now_factory)
+        schedule_policy = _normalize_schedule_policy(raw.get("schedule_policy"), strict=False)
         schedules = raw.get("schedules") if isinstance(raw.get("schedules"), list) else []
+        normalized_schedules = [
+            _normalize_schedule(item, index=index, now=now, now_factory=self.now_factory)
+            for index, item in enumerate(schedules, start=1)
+            if isinstance(item, Mapping)
+        ]
+        if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
+            existing_by_id = {
+                str(item.get("id") or ""): item
+                for item in normalized_schedules
+                if isinstance(item, Mapping) and str(item.get("id") or "")
+            }
+            normalized_schedules = _materialize_interval_schedules(
+                schedule_policy,
+                existing_by_id=existing_by_id,
+                now=now,
+                now_factory=self.now_factory,
+            )
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "updated_at": _safe_text(raw.get("updated_at"), 80),
-            "schedules": [
-                _normalize_schedule(item, index=index, now=now, now_factory=self.now_factory)
-                for index, item in enumerate(schedules, start=1)
-                if isinstance(item, Mapping)
-            ],
+            "schedule_policy": schedule_policy,
+            "schedules": normalized_schedules,
         }
 
     def _write_unlocked(self, payload: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         now = _iso_now(self.now_factory)
-        schedules = [
-            _normalize_schedule(item, index=index, now=now, now_factory=self.now_factory)
-            for index, item in enumerate(payload.get("schedules", []), start=1)
+        schedule_policy = _normalize_schedule_policy(payload.get("schedule_policy"), strict=False)
+        raw_schedules = [
+            item for item in payload.get("schedules", [])
             if isinstance(item, Mapping)
         ]
+        if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
+            existing_by_id = {
+                str(item.get("id") or ""): item
+                for item in raw_schedules
+                if str(item.get("id") or "")
+            }
+            schedules = _materialize_interval_schedules(
+                schedule_policy,
+                existing_by_id=existing_by_id,
+                now=now,
+                now_factory=self.now_factory,
+            )
+        else:
+            schedules = [
+                _normalize_schedule(item, index=index, now=now, now_factory=self.now_factory)
+                for index, item in enumerate(raw_schedules, start=1)
+            ]
         normalized = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "updated_at": now,
+            "schedule_policy": schedule_policy,
             "schedules": schedules,
         }
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -271,6 +330,133 @@ def _default_schedules(now: str, now_factory: Callable[[], datetime]) -> list[di
     ]
 
 
+def _default_schedule_policy() -> dict[str, Any]:
+    return {
+        "mode": SCHEDULE_POLICY_MODE_MANUAL,
+        "interval_hours": None,
+        "window_start_hhmm": INTERVAL_WINDOW_START_HHMM,
+        "window_end_hhmm": INTERVAL_WINDOW_END_HHMM,
+        "timezone": DEFAULT_TIMEZONE,
+    }
+
+
+def _normalize_schedule_policy(raw: Any, *, strict: bool) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return _default_schedule_policy()
+    mode = str(raw.get("mode") or SCHEDULE_POLICY_MODE_MANUAL).strip().lower()
+    if mode not in {SCHEDULE_POLICY_MODE_MANUAL, SCHEDULE_POLICY_MODE_INTERVAL}:
+        if strict:
+            raise ValueError("schedule_policy.mode must be manual or interval")
+        mode = SCHEDULE_POLICY_MODE_MANUAL
+    if mode == SCHEDULE_POLICY_MODE_MANUAL:
+        return _default_schedule_policy()
+    interval_hours = _safe_int(raw.get("interval_hours"))
+    if interval_hours is None:
+        interval_hours = DEFAULT_INTERVAL_HOURS
+    if interval_hours < min(ALLOWED_INTERVAL_HOURS):
+        raise ValueError("schedule_policy.interval_hours must be at least 3")
+    if interval_hours not in ALLOWED_INTERVAL_HOURS:
+        raise ValueError("schedule_policy.interval_hours must be one of 3, 4, 6")
+    slots = _interval_preview_slots(interval_hours)
+    if len(slots) > MAX_INTERVAL_RUNS_PER_DAY:
+        raise ValueError("schedule_policy.interval_hours creates more than 6 runs per day")
+    return {
+        "mode": SCHEDULE_POLICY_MODE_INTERVAL,
+        "interval_hours": interval_hours,
+        "window_start_hhmm": INTERVAL_WINDOW_START_HHMM,
+        "window_end_hhmm": INTERVAL_WINDOW_END_HHMM,
+        "timezone": DEFAULT_TIMEZONE,
+    }
+
+
+def _interval_options() -> list[dict[str, Any]]:
+    return [
+        {
+            "interval_hours": hours,
+            "label": _interval_hours_label(hours),
+            "preview_slots": _interval_preview_slots(hours),
+        }
+        for hours in ALLOWED_INTERVAL_HOURS
+    ]
+
+
+def _interval_preview_slots(interval_hours: int) -> list[str]:
+    if interval_hours not in ALLOWED_INTERVAL_HOURS:
+        raise ValueError("schedule_policy.interval_hours must be one of 3, 4, 6")
+    start_hour, start_minute = _parse_hhmm(INTERVAL_WINDOW_START_HHMM)
+    end_hour, end_minute = _parse_hhmm(INTERVAL_WINDOW_END_HHMM)
+    start_minutes = start_hour * 60 + start_minute
+    end_minutes = end_hour * 60 + end_minute
+    if end_minutes < start_minutes:
+        raise ValueError("interval schedule window must not cross midnight")
+    slots: list[str] = []
+    current = start_minutes
+    step = interval_hours * 60
+    while current <= end_minutes:
+        hour = current // 60
+        minute = current % 60
+        if hour < 0 or hour > 23:
+            raise ValueError("interval schedule slot is outside one local day")
+        slots.append(f"{hour:02d}:{minute:02d}")
+        current += step
+    if len(slots) > MAX_INTERVAL_RUNS_PER_DAY:
+        raise ValueError("interval schedule creates more than 6 runs per day")
+    return slots
+
+
+def _materialize_interval_schedules(
+    policy: Mapping[str, Any],
+    *,
+    existing_by_id: Mapping[str, Mapping[str, Any]],
+    now: str,
+    now_factory: Callable[[], datetime],
+) -> list[dict[str, Any]]:
+    interval_hours = int(policy.get("interval_hours") or DEFAULT_INTERVAL_HOURS)
+    slots = _interval_preview_slots(interval_hours)
+    schedules: list[dict[str, Any]] = []
+    for index, local_time in enumerate(slots, start=1):
+        schedule_id = _interval_schedule_id(interval_hours, local_time)
+        existing = dict(existing_by_id.get(schedule_id) or {})
+        schedules.append(
+            _normalize_schedule(
+                {
+                    **existing,
+                    "id": schedule_id,
+                    "enabled": True,
+                    "editable": False,
+                    "local_time_hhmm": local_time,
+                    "timezone": DEFAULT_TIMEZONE,
+                    "schedule_type": SCHEDULE_POLICY_MODE_INTERVAL,
+                    "interval_hours": interval_hours,
+                    "created_at": existing.get("created_at") or now,
+                    "updated_at": now,
+                    "enabled_since_at": existing.get("enabled_since_at") or now,
+                },
+                index=index,
+                now=now,
+                now_factory=now_factory,
+            )
+        )
+    _validate_schedule_set(schedules)
+    return schedules
+
+
+def _interval_schedule_id(interval_hours: int, local_time_hhmm: str) -> str:
+    return f"interval_{interval_hours}h_{str(local_time_hhmm).replace(':', '_')}_ekt"
+
+
+def _operator_message(policy: Mapping[str, Any]) -> str:
+    if str(policy.get("mode") or "") == SCHEDULE_POLICY_MODE_INTERVAL:
+        interval_hours = int(policy.get("interval_hours") or DEFAULT_INTERVAL_HOURS)
+        slots = "/".join(_interval_preview_slots(interval_hours))
+        return f"Интервальный режим: каждые {_interval_hours_label(interval_hours)} в окне 10:00-22:00 Asia/Yekaterinburg ({slots})."
+    return "Ручные триггеры хранятся в runtime JSON state; systemd timer только регулярно проверяет due schedules."
+
+
+def _interval_hours_label(interval_hours: int) -> str:
+    return "6 часов" if int(interval_hours) == 6 else f"{int(interval_hours)} часа"
+
+
 def _normalize_schedule(
     raw: Mapping[str, Any],
     *,
@@ -285,6 +471,11 @@ def _normalize_schedule(
     _timezone(timezone_name)
     schedule_id = _safe_text(raw.get("id"), 120) or f"custom_{uuid4().hex[:12]}"
     enabled = bool(raw.get("enabled", True))
+    schedule_type = _safe_text(raw.get("schedule_type"), 40) or SCHEDULE_POLICY_MODE_MANUAL
+    if schedule_type not in {SCHEDULE_POLICY_MODE_MANUAL, SCHEDULE_POLICY_MODE_INTERVAL}:
+        schedule_type = SCHEDULE_POLICY_MODE_MANUAL
+    trigger_kind = "runtime_interval_schedule" if schedule_type == SCHEDULE_POLICY_MODE_INTERVAL else "runtime_json_schedule"
+    editable = bool(raw.get("editable", True))
     normalized = {
         "id": schedule_id,
         "enabled": enabled,
@@ -292,12 +483,18 @@ def _normalize_schedule(
         "timezone": timezone_name,
         "timezone_label": timezone_name,
         "trigger_name": DEFAULT_TRIGGER_NAME,
-        "trigger_kind": "runtime_json_schedule",
+        "trigger_kind": trigger_kind,
+        "schedule_type": schedule_type,
         "action": "canonical_full_refresh",
         "auto_refresh": True,
-        "editable": True,
+        "editable": editable,
         "status": "active" if enabled else "disabled",
-        "description": f"{local_time} {timezone_name}: canonical full refresh with auto_refresh=true",
+        "description": _schedule_description(
+            local_time=local_time,
+            timezone_name=timezone_name,
+            schedule_type=schedule_type,
+            interval_hours=_safe_int(raw.get("interval_hours")),
+        ),
         "created_at": _safe_text(raw.get("created_at"), 80) or now,
         "updated_at": _safe_text(raw.get("updated_at"), 80) or now,
         "enabled_since_at": _safe_text(raw.get("enabled_since_at"), 80) or (now if enabled else ""),
@@ -315,8 +512,23 @@ def _normalize_schedule(
         "last_run_id": _safe_text(raw.get("last_run_id"), 160),
         "last_trigger_source": _safe_text(raw.get("last_trigger_source"), 80),
     }
+    if schedule_type == SCHEDULE_POLICY_MODE_INTERVAL:
+        normalized["interval_hours"] = _safe_int(raw.get("interval_hours")) or DEFAULT_INTERVAL_HOURS
     normalized["next_run_at"] = _next_run_at(normalized, now_factory())
     return normalized
+
+
+def _schedule_description(
+    *,
+    local_time: str,
+    timezone_name: str,
+    schedule_type: str,
+    interval_hours: int | None,
+) -> str:
+    if schedule_type == SCHEDULE_POLICY_MODE_INTERVAL:
+        hours = interval_hours or DEFAULT_INTERVAL_HOURS
+        return f"Интервальный слот {local_time} {timezone_name}: canonical full refresh каждые {_interval_hours_label(hours)}."
+    return f"{local_time} {timezone_name}: canonical full refresh with auto_refresh=true"
 
 
 def _merge_editable_schedule(
@@ -331,7 +543,14 @@ def _merge_editable_schedule(
         for field in EDITABLE_SCHEDULE_FIELDS
         if field in raw
     }
-    return {**dict(existing or {}), **editable_patch, "id": schedule_id}
+    return {
+        **dict(existing or {}),
+        **editable_patch,
+        "id": schedule_id,
+        "schedule_type": SCHEDULE_POLICY_MODE_MANUAL,
+        "editable": True,
+        "interval_hours": None,
+    }
 
 
 def _validate_schedule_set(schedules: list[Mapping[str, Any]]) -> None:
@@ -571,6 +790,13 @@ def _iso_now(now_factory: Callable[[], datetime]) -> str:
 
 def _iso_datetime(value: datetime) -> str:
     return _aware_utc(value).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_text(value: Any, max_length: int) -> str:
