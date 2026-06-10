@@ -3791,10 +3791,18 @@ def _render_sheet_vitrina_supplier_ui(
         "can_edit_order_status": bool(can_edit_order_status),
         "can_recheck_prices": bool(can_recheck_prices),
     }
+    price_check_button_html = (
+        '<button id="priceCheckButton" type="button" hidden>Проверить цены</button>'
+        if can_recheck_prices
+        else ""
+    )
     template = SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return template.replace(
-        "__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__",
-        json.dumps(config_payload, ensure_ascii=False),
+    return (
+        template.replace(
+            "__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__",
+            json.dumps(config_payload, ensure_ascii=False),
+        )
+        .replace("__SHEET_VITRINA_V1_PRICE_CHECK_BUTTON_HTML__", price_check_button_html)
     )
 
 
