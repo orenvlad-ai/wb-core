@@ -84,7 +84,7 @@ Runtime truth is server-owned SQLite under `RegistryUploadDbBackedRuntime`.
 Tables:
 - `sheet_vitrina_v1_wb_supplies`: primary cached rows keyed by legacy-compatible normalized `supply_id`, plus explicit stable `cache_key` (`supply:<supplyID>` / `preorder:<preorderID>`), normalized row JSON, sanitized raw list/detail/goods/package evidence, `wb_supply_id`, `preorder_id`, `warehouse_id`, `status_id`, `quantity_for_size_filter`, source dates, raw evidence hashes, `last_list_synced_at`, `last_enriched_at`, `enrichment_status` and `enrichment_error`.
 - `sheet_vitrina_v1_wb_supplies_sync_state`: last sync fields plus `backfill_complete`, `backfill_started_at`, `backfill_completed_at`, `highest_synced_offset`, `last_successful_offset`, `last_mode`, latest-window counters, `may_have_more` and sanitized `last_error`.
-- `sheet_vitrina_v1_wb_supplies_sync_runs`: per-run progress for `incremental_refresh`, `full_backfill` and future `enrich_missing`: status/phase, offset/limit, pages/raw/upserted/new/changed/unchanged/enriched/failed counters, `may_have_more`, last error and compact sanitized logs.
+- `sheet_vitrina_v1_wb_supplies_sync_runs`: per-run progress for `incremental_refresh`, `full_backfill` and explicit missing-critical enrichment requests: status/phase, offset/limit, pages/raw/upserted/new/changed/unchanged/enriched/failed counters, `may_have_more`, last error and compact sanitized logs.
 - `sheet_vitrina_v1_wb_supplies_warehouses`: cached warehouse dictionary/options.
 
 The cache is an operator registry/cache only:
@@ -128,12 +128,13 @@ Performs ordinary incremental/latest-window refresh. It must not full-scan histo
 Body:
 - `mode`, default `incremental_refresh`;
 - `limit`, default `1000`, max `1000`;
-- `enrich`, default `changed_only`.
+- `enrich`, default `changed_only`; `missing_critical` explicitly retries unchanged rows with missing critical fields; `none` skips enrichment.
 
 Algorithm:
 - fetch latest page/window from official WB API at `offset=0`;
 - calculate stable `raw_list_hash`;
-- upsert and enrich only new rows, rows whose `updatedDate`/raw hash changed, or rows with missing critical fields that have not already had a failed/attempted enrichment;
+- upsert and enrich only new rows and rows whose `updatedDate`/raw hash changed;
+- old unchanged rows with missing critical fields are not retried by ordinary refresh; request `enrich=missing_critical` to run that bounded enrichment lane explicitly;
 - unchanged historical rows are counted as `unchanged` and do not call detail/goods again.
 
 `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill`
@@ -262,7 +263,7 @@ First open behavior:
 - if token/API is unavailable, the UI shows a controlled error instead of a silent empty table.
 
 Buttons:
-- `Обновить поставки` = incremental latest-window refresh only; it does not scan all offsets and does not re-enrich unchanged rows.
+- `Обновить поставки` = incremental latest-window refresh only; it does not scan all offsets and does not re-enrich unchanged rows or old unknown-quantity rows.
 - `Загрузить всю историю` = one-time full backfill job; UI polls `sync-status` and shows offset/pages/fetched/upserted/enriched counters and last error.
 
 Sorting:

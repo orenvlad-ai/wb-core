@@ -250,7 +250,8 @@ class WbSuppliesBlock:
                 warehouse_by_id=warehouse_by_id,
                 synced_at=synced_at,
                 enrich=request["enrich"] != "none",
-                changed_only=True,
+                changed_only=request["enrich"] != "all",
+                include_missing_enrichment=request["enrich"] == "missing_critical",
             )
             normalized_rows = sync_result["rows"]
             self.runtime.upsert_wb_supplies(
@@ -527,6 +528,7 @@ class WbSuppliesBlock:
                     synced_at=page_started_at,
                     enrich=False,
                     changed_only=True,
+                    include_missing_enrichment=False,
                 )
                 normalized_rows = sync_result["rows"]
                 for key in ("new_rows", "changed_rows", "unchanged_rows", "enriched", "failed_enrich"):
@@ -561,6 +563,7 @@ class WbSuppliesBlock:
                         enrich=True,
                         changed_only=True,
                         force_enrich_cache_keys=set(sync_result["touched_cache_keys"]),
+                        include_missing_enrichment=False,
                     )
                     enriched_rows = enrich_result["rows"]
                     counters["enriched"] += int(enrich_result["enriched"])
@@ -709,6 +712,7 @@ class WbSuppliesBlock:
         enrich: bool,
         changed_only: bool,
         force_enrich_cache_keys: set[str] | None = None,
+        include_missing_enrichment: bool = False,
     ) -> dict[str, Any]:
         records = self.runtime.list_wb_supplies_cache_records()
         existing_by_key = _cache_record_index(records)
@@ -735,7 +739,9 @@ class WbSuppliesBlock:
                 or existing_hash != raw_list_hash
                 or (raw_updated_date and raw_updated_date != existing_updated_date)
             )
-            needs_enrichment = bool(existing and _row_needs_enrichment(existing.get("normalized") or {}))
+            needs_enrichment = bool(
+                include_missing_enrichment and existing and _row_needs_enrichment(existing.get("normalized") or {})
+            )
             if is_new:
                 counters["new_rows"] += 1
             elif is_changed or needs_enrichment:
@@ -862,7 +868,9 @@ def _normalize_sync_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     enrich = str(payload.get("enrich") or "").strip()
     if not enrich:
         enrich = "changed_only" if payload.get("enrich_details") is not False else "none"
-    if enrich not in {"changed_only", "none", "true"}:
+    if enrich == "true":
+        enrich = "all"
+    if enrich not in {"changed_only", "none", "all", "missing_critical"}:
         enrich = "changed_only"
     return {
         "mode": mode,
