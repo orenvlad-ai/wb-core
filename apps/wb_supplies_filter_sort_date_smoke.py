@@ -15,6 +15,7 @@ from packages.application.wb_supplies import (  # noqa: E402
     _format_ru_supply_date,
     _format_ru_supply_date_range,
     _normalize_list_request,
+    _row_matches_size_filter,
     _sort_rows,
 )
 from packages.business_time import current_business_date_iso  # noqa: E402
@@ -75,6 +76,22 @@ def main() -> None:
     request = _normalize_list_request({"status_ids": "2,5", "status_id": "6"})
     if request["status_ids"] != [2, 5, 6]:
         raise AssertionError(f"status_ids parser must combine comma list and legacy status_id, got {request}")
+
+    planned_qty_1 = {"status_id": 2, "quantity_for_size_filter": 1}
+    planned_qty_300 = {"status_id": 2, "quantity_for_size_filter": 300}
+    planned_unknown = {"status_id": 2, "quantity_for_size_filter": None}
+    if not _row_matches_size_filter(planned_qty_1, "all"):
+        raise AssertionError("planned qty=1 must be visible in all")
+    if not _row_matches_size_filter(planned_qty_1, "small_lt_250"):
+        raise AssertionError("planned qty=1 must be visible in small_lt_250")
+    if _row_matches_size_filter(planned_qty_1, "main_250"):
+        raise AssertionError("planned qty=1 must be hidden from main_250")
+    if not _row_matches_size_filter(planned_qty_300, "main_250") or _row_matches_size_filter(planned_qty_300, "small_lt_250"):
+        raise AssertionError("planned qty=300 must be main only, not small")
+    if not _row_matches_size_filter(planned_unknown, "all"):
+        raise AssertionError("planned unknown quantity must be visible in all")
+    if _row_matches_size_filter(planned_unknown, "main_250") or _row_matches_size_filter(planned_unknown, "small_lt_250"):
+        raise AssertionError("planned unknown quantity must be hidden from numeric size filters")
 
     print("wb_supplies_filter_sort_date_smoke: OK")
 

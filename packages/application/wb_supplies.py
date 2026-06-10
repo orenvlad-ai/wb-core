@@ -52,6 +52,9 @@ STATUS_LABELS_RU = {
 
 OFFICIAL_STATUS_IDS = (1, 2, 3, 4, 5, 6)
 PLANNED_STATUS_ID = 2
+ACTIVE_RECONCILE_STATUS_IDS = (1, 2, 3, 4)
+ACTIVE_SUPPLY_BACKED_STATUS_IDS = (2, 3, 4)
+HISTORICAL_STATUS_IDS = (5, 6)
 BOX_TYPE_LABELS_RU = {
     1: "Короб",
 }
@@ -253,28 +256,37 @@ class WbSuppliesBlock:
             raw_rows = list(list_result.rows)
             targeted_status_ids: list[int] = []
             targeted_raw_count = 0
+            partial_status_slices = False
+            active_reconciliation_complete = False
+            active_authoritative_keys = _active_authoritative_keys_from_raw_rows(raw_rows)
             if not request["status_ids"]:
                 try:
-                    planned_result = _coerce_list_result(
+                    active_result = _coerce_list_result(
                         self.source.list_supplies(
                             limit=request["limit"],
                             offset=0,
-                            status_ids=[PLANNED_STATUS_ID],
+                            status_ids=list(ACTIVE_RECONCILE_STATUS_IDS),
                             dates=request["dates"],
                         )
                     )
-                    targeted_status_ids = [PLANNED_STATUS_ID]
-                    targeted_raw_count = planned_result.raw_count
-                    raw_rows = _merge_raw_supply_rows(raw_rows, planned_result.rows)
+                    targeted_status_ids = list(ACTIVE_RECONCILE_STATUS_IDS)
+                    targeted_raw_count = active_result.raw_count
+                    active_authoritative_keys.update(_active_authoritative_keys_from_raw_rows(active_result.rows))
+                    active_reconciliation_complete = active_result.raw_count < active_result.limit
+                    partial_status_slices = not active_reconciliation_complete
+                    raw_rows = _merge_raw_supply_rows(raw_rows, active_result.rows)
                 except (WbSuppliesHttpStatusError, WbSuppliesTransportError, OfficialApiRuntimeError) as exc:
-                    warnings.append(f"planned status refresh failed; primary latest window used: {_safe_error_message(exc)}")
+                    partial_status_slices = True
+                    warnings.append(f"active status refresh failed; primary latest window used: {_safe_error_message(exc)}")
             warehouse_by_id = _warehouse_map(warehouses)
+            active_force_enrich_keys = _active_force_enrich_keys(raw_rows, self.runtime.list_wb_supplies_cache_records())
             sync_result = self._prepare_list_rows_for_upsert(
                 raw_rows=raw_rows,
                 warehouse_by_id=warehouse_by_id,
                 synced_at=synced_at,
                 enrich=request["enrich"] != "none",
                 changed_only=request["enrich"] != "all",
+                force_enrich_cache_keys=active_force_enrich_keys,
                 include_missing_enrichment=request["enrich"] == "missing_critical",
             )
             normalized_rows = sync_result["rows"]
@@ -293,6 +305,20 @@ class WbSuppliesBlock:
                 latest_window_returned_count=len(raw_rows),
                 may_have_more=list_result.raw_count >= list_result.limit,
             )
+            deleted_active_keys: list[str] = []
+            skipped_historical_absent = 0
+            if active_reconciliation_complete:
+                deletion_result = self._delete_absent_active_supplies(
+                    active_authoritative_keys=active_authoritative_keys,
+                    merged_raw_rows=raw_rows,
+                )
+                deleted_active_keys = deletion_result["deleted_keys"]
+                skipped_historical_absent = deletion_result["skipped_historical_absent"]
+            else:
+                skipped_historical_absent = _count_historical_absent_from_rows(
+                    self.runtime.list_wb_supplies_cache_records(),
+                    raw_rows,
+                )
         except Exception as exc:
             block_error = _to_block_error(exc)
             self.runtime.save_wb_supplies_sync_state(
@@ -333,7 +359,13 @@ class WbSuppliesBlock:
             enriched=sync_result["enriched"],
             failed_enrich=sync_result["failed_enrich"],
             may_have_more=list_result.raw_count >= list_result.limit,
-            logs=[_run_log(completed_at, "latest-window sync completed")],
+            logs=[
+                _run_log(completed_at, "latest-window sync completed"),
+                *[
+                    _run_log(completed_at, f"deleted active supply {cache_key} absent from WB active status slice")
+                    for cache_key in deleted_active_keys[:50]
+                ],
+            ],
         )
         list_params = request.get("list_params") if isinstance(request.get("list_params"), Mapping) else {}
         response = self.list_supplies(list_params or {
@@ -351,6 +383,8 @@ class WbSuppliesBlock:
             "limit": list_result.limit,
             "offset": 0,
             "raw_fetched_count": list_result.raw_count,
+            "fetched_default": list_result.raw_count,
+            "fetched_active_statuses": targeted_raw_count,
             "raw_merged_count": len(raw_rows),
             "targeted_status_ids": targeted_status_ids,
             "targeted_raw_fetched_count": targeted_raw_count,
@@ -358,8 +392,15 @@ class WbSuppliesBlock:
             "new_rows": sync_result["new_rows"],
             "changed_rows": sync_result["changed_rows"],
             "unchanged_rows": sync_result["unchanged_rows"],
+            "changed_active_rows": sync_result["changed_active_rows"],
+            "enriched_active_rows": sync_result["enriched_active_rows"],
             "enriched": sync_result["enriched"],
             "failed_enrich": sync_result["failed_enrich"],
+            "deleted_active_rows": len(deleted_active_keys),
+            "deleted_active_keys": deleted_active_keys[:50],
+            "skipped_historical_absent": skipped_historical_absent,
+            "partial_status_slices": partial_status_slices,
+            "active_reconciliation_complete": active_reconciliation_complete,
             "may_have_more": list_result.raw_count >= list_result.limit,
             "latest_window_only": True,
             "enrich": request["enrich"],
@@ -815,6 +856,31 @@ class WbSuppliesBlock:
             raise last_error
         raise WbSuppliesBlockError("WB supplies list page fetch failed", http_status=502)
 
+    def _delete_absent_active_supplies(
+        self,
+        *,
+        active_authoritative_keys: set[str],
+        merged_raw_rows: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        raw_keys = _raw_identity_keys_from_rows(merged_raw_rows)
+        delete_keys: list[str] = []
+        skipped_historical_absent = 0
+        for record in self.runtime.list_wb_supplies_cache_records():
+            normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
+            status_id = _optional_int(normalized.get("status_id"))
+            record_keys = _record_identity_keys(record)
+            if status_id in ACTIVE_RECONCILE_STATUS_IDS:
+                if record_keys and not (record_keys & active_authoritative_keys) and not (record_keys & raw_keys):
+                    delete_keys.append(_record_primary_delete_key(record))
+            elif status_id in HISTORICAL_STATUS_IDS and record_keys and not (record_keys & raw_keys):
+                skipped_historical_absent += 1
+        deleted_count = self.runtime.delete_wb_supply_records(delete_keys)
+        return {
+            "deleted_count": deleted_count,
+            "deleted_keys": delete_keys[:deleted_count] if deleted_count < len(delete_keys) else delete_keys,
+            "skipped_historical_absent": skipped_historical_absent,
+        }
+
     def _prepare_list_rows_for_upsert(
         self,
         *,
@@ -833,6 +899,8 @@ class WbSuppliesBlock:
             "new_rows": 0,
             "changed_rows": 0,
             "unchanged_rows": 0,
+            "changed_active_rows": 0,
+            "enriched_active_rows": 0,
             "enriched": 0,
             "failed_enrich": 0,
         }
@@ -842,6 +910,7 @@ class WbSuppliesBlock:
             existing = existing_by_key.get(cache_key) or existing_by_key.get(lookup_id)
             raw_list_hash = _stable_payload_hash(raw_row)
             raw_updated_date = _first_string(raw_row, "updatedDate", "updated_at", "updated_date")
+            raw_status_id = _optional_int(_first_value(raw_row, "statusID", "status_id"))
             existing_hash = str((existing or {}).get("raw_list_hash") or "")
             existing_updated_date = str(((existing or {}).get("normalized") or {}).get("updated_date") or "")
             force_enrich = bool(force_enrich_cache_keys and cache_key in force_enrich_cache_keys)
@@ -856,8 +925,12 @@ class WbSuppliesBlock:
             )
             if is_new:
                 counters["new_rows"] += 1
+                if raw_status_id in ACTIVE_RECONCILE_STATUS_IDS:
+                    counters["changed_active_rows"] += 1
             elif is_changed or needs_enrichment:
                 counters["changed_rows"] += 1
+                if raw_status_id in ACTIVE_RECONCILE_STATUS_IDS:
+                    counters["changed_active_rows"] += 1
             else:
                 counters["unchanged_rows"] += 1
                 if changed_only and not force_enrich:
@@ -876,9 +949,22 @@ class WbSuppliesBlock:
                     raw_detail = fetched_detail
                 if fetched_goods is not None:
                     raw_goods = fetched_goods
+            if (
+                not is_new
+                and not is_changed
+                and not needs_enrichment
+                and attempted_enrichment
+                and _enriched_evidence_changed(existing or {}, raw_detail, raw_goods, raw_package)
+            ):
+                counters["unchanged_rows"] = max(0, counters["unchanged_rows"] - 1)
+                counters["changed_rows"] += 1
+                if raw_status_id in ACTIVE_RECONCILE_STATUS_IDS:
+                    counters["changed_active_rows"] += 1
             failed_enrich = bool(row_warnings and attempted_enrichment)
             if attempted_enrichment and not failed_enrich:
                 counters["enriched"] += 1
+                if raw_status_id in ACTIVE_RECONCILE_STATUS_IDS:
+                    counters["enriched_active_rows"] += 1
             if failed_enrich:
                 counters["failed_enrich"] += 1
             normalized = _normalize_supply_row(
@@ -1692,8 +1778,6 @@ def _row_matches_statuses(row: Mapping[str, Any], status_ids: list[int]) -> bool
 def _row_matches_size_filter(row: Mapping[str, Any], size_filter: str) -> bool:
     if size_filter == SIZE_FILTER_ALL:
         return True
-    if size_filter == SIZE_FILTER_MAIN_250 and _optional_int(row.get("status_id")) == PLANNED_STATUS_ID:
-        return True
     quantity = _optional_number(row.get("quantity_for_size_filter"))
     if quantity is None:
         return False
@@ -1832,6 +1916,124 @@ def _merge_raw_supply_rows(primary_rows: list[Mapping[str, Any]], extra_rows: li
         seen.add(cache_key)
         result.append(row)
     return result
+
+
+def _active_authoritative_keys_from_raw_rows(rows: list[Mapping[str, Any]]) -> set[str]:
+    result: set[str] = set()
+    for row in rows:
+        status_id = _optional_int(_first_value(row, "statusID", "status_id"))
+        if status_id in ACTIVE_RECONCILE_STATUS_IDS:
+            result.update(_raw_identity_keys(row))
+    return result
+
+
+def _active_force_enrich_keys(raw_rows: list[Mapping[str, Any]], existing_records: list[Mapping[str, Any]]) -> set[str]:
+    existing_by_key = _cache_record_index(existing_records)
+    result: set[str] = set()
+    for row in raw_rows:
+        status_id = _optional_int(_first_value(row, "statusID", "status_id"))
+        if status_id not in ACTIVE_SUPPLY_BACKED_STATUS_IDS:
+            continue
+        cache_key = _stable_cache_key(row)
+        lookup_id, _is_preorder_id = _resolve_upstream_lookup_id(row)
+        existing = existing_by_key.get(cache_key) or existing_by_key.get(lookup_id)
+        if existing is None:
+            continue
+        result.add(cache_key)
+    return result
+
+
+def _raw_identity_keys_from_rows(rows: list[Mapping[str, Any]]) -> set[str]:
+    result: set[str] = set()
+    for row in rows:
+        result.update(_raw_identity_keys(row))
+    return result
+
+
+def _raw_identity_keys(row: Mapping[str, Any]) -> set[str]:
+    keys = {_stable_cache_key(row)}
+    supply_id = _id_to_string(_first_value(row, "supplyID", "supply_id", "id"))
+    preorder_id = _id_to_string(_first_value(row, "preorderID", "preorder_id"))
+    keys.update(_identity_key_variants(supply_id, kind="supply"))
+    keys.update(_identity_key_variants(preorder_id, kind="preorder"))
+    return {key for key in keys if key}
+
+
+def _record_identity_keys(record: Mapping[str, Any]) -> set[str]:
+    normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
+    keys = {
+        str(record.get("cache_key") or "").strip(),
+        str(record.get("supply_id") or "").strip(),
+        str(record.get("wb_supply_id") or "").strip(),
+        str(record.get("preorder_id") or "").strip(),
+        str(normalized.get("cache_key") or "").strip(),
+        str(normalized.get("supply_id") or "").strip(),
+        str(normalized.get("wb_supply_id") or "").strip(),
+        str(normalized.get("preorder_id") or "").strip(),
+    }
+    expanded: set[str] = set()
+    for key in keys:
+        if not key:
+            continue
+        expanded.add(key)
+        if key.startswith("supply:"):
+            expanded.update(_identity_key_variants(key.removeprefix("supply:"), kind="supply"))
+        elif key.startswith("preorder:"):
+            expanded.update(_identity_key_variants(key.removeprefix("preorder:"), kind="preorder"))
+        else:
+            expanded.update(_identity_key_variants(key, kind="supply"))
+            expanded.update(_identity_key_variants(key, kind="preorder"))
+    return {key for key in expanded if key}
+
+
+def _identity_key_variants(value: str, *, kind: str) -> set[str]:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return set()
+    if normalized.startswith(("supply:", "preorder:")):
+        return {normalized, normalized.split(":", 1)[1]}
+    if kind == "preorder":
+        return {normalized, f"preorder:{normalized}"}
+    return {normalized, f"supply:{normalized}"}
+
+
+def _record_primary_delete_key(record: Mapping[str, Any]) -> str:
+    return (
+        str(record.get("cache_key") or "").strip()
+        or str(record.get("supply_id") or "").strip()
+        or str(record.get("wb_supply_id") or "").strip()
+        or str(record.get("preorder_id") or "").strip()
+    )
+
+
+def _count_historical_absent_from_rows(records: list[Mapping[str, Any]], raw_rows: list[Mapping[str, Any]]) -> int:
+    raw_keys = _raw_identity_keys_from_rows(raw_rows)
+    count = 0
+    for record in records:
+        normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
+        status_id = _optional_int(normalized.get("status_id"))
+        if status_id in HISTORICAL_STATUS_IDS and not (_record_identity_keys(record) & raw_keys):
+            count += 1
+    return count
+
+
+def _enriched_evidence_changed(
+    existing: Mapping[str, Any],
+    raw_detail: Mapping[str, Any] | None,
+    raw_goods: list[Mapping[str, Any]] | None,
+    raw_package: list[Mapping[str, Any]] | None,
+) -> bool:
+    checks = (
+        ("raw_detail_hash", raw_detail),
+        ("raw_goods_hash", raw_goods),
+        ("raw_package_hash", raw_package),
+    )
+    for key, payload in checks:
+        if payload is None:
+            continue
+        if str(existing.get(key) or "") != _stable_payload_hash(payload):
+            return True
+    return False
 
 
 def _stable_payload_hash(payload: Any) -> str:
