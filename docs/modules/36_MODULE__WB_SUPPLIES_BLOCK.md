@@ -32,16 +32,21 @@ related_runners:
   - "apps/wb_supplies_api_adapter_smoke.py"
   - "apps/wb_supplies_backfill_live.py"
   - "apps/wb_supplies_backfill_smoke.py"
+  - "apps/wb_supplies_accepted_parity_diagnostics.py"
+  - "apps/wb_supplies_first20_parity_smoke.py"
+  - "apps/wb_supplies_goods_composition_diagnostics.py"
+  - "apps/wb_supplies_goods_composition_smoke.py"
   - "apps/wb_supplies_incremental_sync_smoke.py"
   - "apps/wb_supplies_live_diagnostics.py"
   - "apps/wb_supplies_normalization_smoke.py"
+  - "apps/wb_supplies_renormalize_cache.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry now separates quick incremental latest-window refresh from resumable full history backfill, stores sync runs/progress and raw hashes, sorts by supply date before pagination, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental latest-window refresh from resumable full history backfill, preserves enriched raw evidence across list-only sync, supports cache re-normalization/missing-critical enrichment, exposes normalized supply goods composition through the detail route/UI drawer, sorts by supply date before pagination, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -92,6 +97,8 @@ The cache is an operator registry/cache only:
 - it is not written into `web-vitrina` ready snapshots;
 - old rows are not deleted just because they are absent from the latest fetch;
 - sync upserts rows and preserves cached data after failed upstream attempts.
+- list-only sync/backfill must not downgrade enriched rows: if new list evidence arrives but cached `raw_detail`, `raw_goods` or `raw_package` already exists, normalization is rebuilt from the new list plus existing enriched evidence.
+- lazy detail/goods enrichment uses row-only persistence and does not rewrite global sync-state.
 
 # 4. API Routes
 
@@ -156,7 +163,18 @@ Returns the requested run or active run plus sync state and cached row count.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 
-Returns cached normalized row plus raw list/detail/goods/package evidence for diagnostics.
+Returns cached normalized row plus raw list/detail/goods/package evidence for diagnostics and normalized goods composition for future/current supply detail UI.
+
+Response additions:
+- `goods`: normalized composition rows with `nm_id`, `barcode`, `vendor_code`, `supplier_article`, `tech_size`, `color`, `quantity`, `accepted_quantity`, `unloading_quantity`, `ready_for_sale_quantity`, `depersonalized_quantity`, `package_code`, `raw_index`, `evidence_source`;
+- `goods_summary`: total added/accepted/unloading/ready/depersonalized quantities, row count, unique `nm_id` count and unique barcode count;
+- `package.summary`: package count, package quantity total and barcode quantity total when package evidence is available;
+- `composition_status = available | partial | missing | error`;
+- `composition_last_enriched_at`;
+- `composition_error`;
+- `raw_diagnostics` with sanitized raw key lists and hashes.
+
+If cached goods/detail evidence is absent, the detail route performs bounded lazy fetch for that one supply only, stores the result via row-only upsert, and returns cached data plus a controlled warning when upstream returns 429/non-JSON/transport errors. Missing `WB_API_TOKEN` during lazy fetch is a warning when cached data can still be rendered.
 
 # 5. Field Normalization
 
@@ -192,9 +210,11 @@ Cost fields:
 - `cost_total` is the user-visible amount only when raw evidence provides a total, explicit transit cost, or a non-transit `acceptanceCost`;
 - for transit rows with `acceptanceCost = 0` and no explicit total/transit cost, `cost_total = null`, `cost_display = —`, and `has_transit_cost_marker = true`;
 - the UI must not render `0 ₽` for unknown transit cost.
+- for non-transit accepted rows where official detail has `paidAcceptanceCoefficient = 0` and no explicit `acceptanceCost`, `cost_total = 0` with evidence `paidAcceptanceCoefficient.free_accepted_non_transit`; the UI renders `0 ₽` and coefficient `Бесплатно`.
 
 Type labels:
 - known `boxTypeID=1` renders as `Короб`;
+- `boxTypeID=0` is never rendered as technical `Тип 0`; live evidence for accepted доприёмка rows has `virtualTypeID=5`, which maps to `Допринято`;
 - technical `boxTypeID 1` is not user-facing when a mapping exists;
 - unknown box types render as bounded `Тип <id>` and keep raw diagnostics in detail payload.
 
@@ -286,15 +306,32 @@ WB_API_TOKEN=... REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state \
 
 The runner prints compact progress/result JSON without secrets and exits non-zero if full history cannot be marked complete.
 
+Supply composition UI:
+- clicking a WB supply row opens a read-only composition panel;
+- the panel calls `GET .../wb-supplies/{supply_id}`;
+- it shows supply header, composition status, totals and a goods table with `nmID`, barcode, vendorCode, size/color, added/accepted/unloading/ready quantities;
+- no mutations or Seller Portal actions are available from this panel.
+
 # 8. Diagnostics And Smokes
 
 Live diagnostics:
 - `python3 apps/wb_supplies_live_diagnostics.py` uses `WB_API_TOKEN`, scans configured target supply IDs through `POST /api/v1/supplies`, fetches detail/goods/package where available, samples `transit-tariffs`, and prints sanitized keys, field evidence and normalized deltas without token, headers, cookies or raw phone values.
 - Target diagnostic IDs are the screenshot-backed supplies: `39265492`, `39265540`, `39265590`, `39265519`, `39265571`, `39238882`, `38535188`, `38350231`, `38978468`, `38978549`, `38978323`.
+- `python3 apps/wb_supplies_accepted_parity_diagnostics.py --output-json` reports first-20 accepted row parity against expected screenshot/cabinet fields, cached normalized rows, raw evidence availability and optional official API detail/goods evidence with `--live`.
+- `python3 apps/wb_supplies_renormalize_cache.py` safely rebuilds normalized rows from existing raw evidence without upstream calls by default. `--enrich-missing-critical` and `--enrich-missing-goods` use official API detail/goods/package for selected rows or missing-critical rows, preserve cached evidence on partial failures and print sanitized progress.
+- `python3 apps/wb_supplies_goods_composition_diagnostics.py --output-json` reports composition status/totals/top goods for target supplies; `--live-fetch` allows the detail route to perform one-supply lazy enrichment.
+
+Transit cost limitation as of this module revision:
+- official detail/goods/package evidence for target transit rows exposes route, quantities, `acceptanceCost=0`, `paidAcceptanceCoefficient=0`, `storageCoef` and `deliveryCoef`, but no ready cabinet transit total;
+- `/api/v1/transit-tariffs` exposes route tariffs (`boxTariff`, `palletTariff`, `activeFrom`), but tested formulas such as `boxTariff * quantity`, `boxTariff * acceptedQuantity`, pallet multiples and VAT/no-VAT variants did not stably match cabinet amounts for `39265519`, `39265492`, `39265590`, `39265571`;
+- production must keep transit amount as `—` with `с транзитом` until a ready source or proven formula is available;
+- read-only Seller Portal network diagnostics are allowed, but current live storage state may be expired; no cookies/tokens/storage-state content may be logged.
 
 Targeted smokes:
 - `python3 apps/wb_supplies_api_adapter_smoke.py`;
 - `python3 apps/wb_supplies_normalization_smoke.py`;
+- `python3 apps/wb_supplies_first20_parity_smoke.py`;
+- `python3 apps/wb_supplies_goods_composition_smoke.py`;
 - `python3 apps/wb_supplies_backfill_smoke.py`;
 - `python3 apps/wb_supplies_incremental_sync_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_http_smoke.py`;

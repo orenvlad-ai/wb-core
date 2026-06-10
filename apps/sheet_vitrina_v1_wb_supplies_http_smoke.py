@@ -409,6 +409,16 @@ def main() -> None:
             detail_status, detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/1001")
             if detail_status != 200 or detail_payload.get("supply", {}).get("raw", {}).get("detail", {}).get("quantity") != 500:
                 raise AssertionError(f"detail route must return cached raw evidence, got {detail_status} {detail_payload}")
+            detail_goods = detail_payload.get("goods", [])
+            detail_goods_summary = detail_payload.get("goods_summary", {})
+            if (
+                detail_payload.get("composition_status") != "available"
+                or not detail_goods
+                or detail_goods_summary.get("total_quantity") != 500
+                or "quantity" not in detail_goods[0]
+                or "accepted_quantity" not in detail_goods[0]
+            ):
+                raise AssertionError(f"detail route must return normalized goods composition, got {detail_payload}")
             transit_detail_status, transit_detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/39265492")
             transit_supply = transit_detail_payload.get("supply", {})
             if (

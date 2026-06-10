@@ -1610,6 +1610,102 @@ class RegistryUploadDbBackedRuntime:
             )
             conn.commit()
 
+    def save_wb_supply_rows(
+        self,
+        *,
+        rows: list[Mapping[str, Any]],
+        warehouses: list[Mapping[str, Any]],
+        synced_at: str,
+    ) -> None:
+        _validate_timestamp(str(synced_at or ""), field_name="synced_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supplies_warehouses(
+                    warehouse_id,
+                    warehouse_name,
+                    raw_json,
+                    synced_at
+                )
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(warehouse_id) DO UPDATE SET
+                    warehouse_name = excluded.warehouse_name,
+                    raw_json = excluded.raw_json,
+                    synced_at = excluded.synced_at
+                """,
+                [
+                    (
+                        str(_first_existing_value(item, "warehouse_id", "ID", "id") or "").strip(),
+                        str(_first_existing_value(item, "warehouse_name", "name", "warehouseName") or "").strip(),
+                        json.dumps(dict(item), ensure_ascii=False),
+                        synced_at,
+                    )
+                    for item in warehouses
+                    if str(_first_existing_value(item, "warehouse_id", "ID", "id") or "").strip()
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supplies(
+                    supply_id,
+                    cache_key,
+                    wb_supply_id,
+                    preorder_id,
+                    normalized_row_json,
+                    raw_list_json,
+                    raw_detail_json,
+                    raw_goods_json,
+                    raw_package_json,
+                    raw_list_hash,
+                    raw_detail_hash,
+                    raw_goods_hash,
+                    raw_package_hash,
+                    warehouse_id,
+                    status_id,
+                    quantity_for_size_filter,
+                    source_created_at,
+                    supply_date,
+                    fact_date,
+                    updated_date,
+                    synced_at,
+                    last_list_synced_at,
+                    last_enriched_at,
+                    enrichment_status,
+                    enrichment_error
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(supply_id) DO UPDATE SET
+                    cache_key = excluded.cache_key,
+                    wb_supply_id = excluded.wb_supply_id,
+                    preorder_id = excluded.preorder_id,
+                    normalized_row_json = excluded.normalized_row_json,
+                    raw_list_json = excluded.raw_list_json,
+                    raw_detail_json = COALESCE(excluded.raw_detail_json, raw_detail_json),
+                    raw_goods_json = COALESCE(excluded.raw_goods_json, raw_goods_json),
+                    raw_package_json = COALESCE(excluded.raw_package_json, raw_package_json),
+                    raw_list_hash = excluded.raw_list_hash,
+                    raw_detail_hash = COALESCE(excluded.raw_detail_hash, raw_detail_hash),
+                    raw_goods_hash = COALESCE(excluded.raw_goods_hash, raw_goods_hash),
+                    raw_package_hash = COALESCE(excluded.raw_package_hash, raw_package_hash),
+                    warehouse_id = excluded.warehouse_id,
+                    status_id = excluded.status_id,
+                    quantity_for_size_filter = excluded.quantity_for_size_filter,
+                    source_created_at = excluded.source_created_at,
+                    supply_date = excluded.supply_date,
+                    fact_date = excluded.fact_date,
+                    updated_date = excluded.updated_date,
+                    synced_at = excluded.synced_at,
+                    last_list_synced_at = excluded.last_list_synced_at,
+                    last_enriched_at = COALESCE(excluded.last_enriched_at, last_enriched_at),
+                    enrichment_status = excluded.enrichment_status,
+                    enrichment_error = excluded.enrichment_error
+                """,
+                [_wb_supply_row_values(row, synced_at) for row in rows],
+            )
+            conn.commit()
+
     def save_wb_supplies_sync_state(
         self,
         *,
@@ -1758,7 +1854,16 @@ class RegistryUploadDbBackedRuntime:
                 result.append(payload)
             return result
 
-    def load_wb_supply(self, supply_id: str) -> dict[str, Any] | None:
+    def load_wb_supply_record(self, supply_id: str) -> dict[str, Any] | None:
+        normalized_id = str(supply_id or "").strip()
+        if not normalized_id:
+            return None
+        lookup_values = {
+            normalized_id,
+            f"supply:{normalized_id}",
+            normalized_id.removeprefix("supply:"),
+            normalized_id.removeprefix("preorder:"),
+        }
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
@@ -1768,22 +1873,43 @@ class RegistryUploadDbBackedRuntime:
                        raw_list_json,
                        raw_detail_json,
                        raw_goods_json,
-                       raw_package_json
+                       raw_package_json,
+                       supply_id,
+                       cache_key,
+                       wb_supply_id,
+                       preorder_id,
+                       raw_list_hash,
+                       raw_detail_hash,
+                       raw_goods_hash,
+                       raw_package_hash,
+                       last_enriched_at,
+                       enrichment_status,
+                       enrichment_error
                 FROM sheet_vitrina_v1_wb_supplies
-                WHERE supply_id = ?
-                """,
-                (str(supply_id or "").strip(),),
+                WHERE supply_id IN ({placeholders})
+                   OR cache_key IN ({placeholders})
+                   OR wb_supply_id IN ({placeholders})
+                   OR preorder_id IN ({placeholders})
+                LIMIT 1
+                """.replace("{placeholders}", ",".join("?" for _ in lookup_values)),
+                tuple(lookup_values) * 4,
             ).fetchone()
             if row is None:
                 return None
-            payload = json.loads(row["normalized_row_json"])
-            payload["raw"] = {
-                "list": json.loads(row["raw_list_json"]) if row["raw_list_json"] else None,
-                "detail": json.loads(row["raw_detail_json"]) if row["raw_detail_json"] else None,
-                "goods": json.loads(row["raw_goods_json"]) if row["raw_goods_json"] else None,
-                "package": json.loads(row["raw_package_json"]) if row["raw_package_json"] else None,
-            }
-            return payload
+            return _wb_supply_record_from_row(row)
+
+    def load_wb_supply(self, supply_id: str) -> dict[str, Any] | None:
+        record = self.load_wb_supply_record(supply_id)
+        if record is None:
+            return None
+        payload = dict(record["normalized"])
+        payload["raw"] = {
+            "list": record.get("raw_list"),
+            "detail": record.get("raw_detail"),
+            "goods": record.get("raw_goods"),
+            "package": record.get("raw_package"),
+        }
+        return payload
 
     def list_wb_supplies_cache_records(self) -> list[dict[str, Any]]:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -1812,31 +1938,7 @@ class RegistryUploadDbBackedRuntime:
             ).fetchall()
             result: list[dict[str, Any]] = []
             for row in rows:
-                normalized = _loads_json_object(row["normalized_row_json"])
-                raw_list = _loads_json_object(row["raw_list_json"]) if row["raw_list_json"] else None
-                raw_detail = _loads_json_object(row["raw_detail_json"]) if row["raw_detail_json"] else None
-                raw_goods = _loads_json_list(row["raw_goods_json"]) if row["raw_goods_json"] else None
-                raw_package = _loads_json_list(row["raw_package_json"]) if row["raw_package_json"] else None
-                result.append(
-                    {
-                        "supply_id": row["supply_id"],
-                        "cache_key": row["cache_key"] or normalized.get("cache_key") or row["supply_id"],
-                        "wb_supply_id": row["wb_supply_id"] or normalized.get("wb_supply_id") or "",
-                        "preorder_id": row["preorder_id"] or normalized.get("preorder_id") or "",
-                        "normalized": normalized,
-                        "raw_list": raw_list,
-                        "raw_detail": raw_detail,
-                        "raw_goods": raw_goods,
-                        "raw_package": raw_package,
-                        "raw_list_hash": row["raw_list_hash"] or str(normalized.get("raw_list_hash") or ""),
-                        "raw_detail_hash": row["raw_detail_hash"] or str(normalized.get("raw_detail_hash") or ""),
-                        "raw_goods_hash": row["raw_goods_hash"] or str(normalized.get("raw_goods_hash") or ""),
-                        "raw_package_hash": row["raw_package_hash"] or str(normalized.get("raw_package_hash") or ""),
-                        "last_enriched_at": row["last_enriched_at"] or str(normalized.get("last_enriched_at") or ""),
-                        "enrichment_status": row["enrichment_status"] or str(normalized.get("enrichment_status") or ""),
-                        "enrichment_error": row["enrichment_error"] or str(normalized.get("enrichment_error") or ""),
-                    }
-                )
+                result.append(_wb_supply_record_from_row(row))
             return result
 
     def create_wb_supplies_sync_run(
@@ -3945,6 +4047,32 @@ def _loads_json_object(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _wb_supply_record_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    normalized = _loads_json_object(row["normalized_row_json"])
+    raw_list = _loads_json_object(row["raw_list_json"]) if row["raw_list_json"] else None
+    raw_detail = _loads_json_object(row["raw_detail_json"]) if row["raw_detail_json"] else None
+    raw_goods = _loads_json_list(row["raw_goods_json"]) if row["raw_goods_json"] else None
+    raw_package = _loads_json_list(row["raw_package_json"]) if row["raw_package_json"] else None
+    return {
+        "supply_id": row["supply_id"],
+        "cache_key": row["cache_key"] or normalized.get("cache_key") or row["supply_id"],
+        "wb_supply_id": row["wb_supply_id"] or normalized.get("wb_supply_id") or "",
+        "preorder_id": row["preorder_id"] or normalized.get("preorder_id") or "",
+        "normalized": normalized,
+        "raw_list": raw_list,
+        "raw_detail": raw_detail,
+        "raw_goods": raw_goods,
+        "raw_package": raw_package,
+        "raw_list_hash": row["raw_list_hash"] or str(normalized.get("raw_list_hash") or ""),
+        "raw_detail_hash": row["raw_detail_hash"] or str(normalized.get("raw_detail_hash") or ""),
+        "raw_goods_hash": row["raw_goods_hash"] or str(normalized.get("raw_goods_hash") or ""),
+        "raw_package_hash": row["raw_package_hash"] or str(normalized.get("raw_package_hash") or ""),
+        "last_enriched_at": row["last_enriched_at"] or str(normalized.get("last_enriched_at") or ""),
+        "enrichment_status": row["enrichment_status"] or str(normalized.get("enrichment_status") or ""),
+        "enrichment_error": row["enrichment_error"] or str(normalized.get("enrichment_error") or ""),
+    }
 
 
 def _sheet_vitrina_user_config_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

@@ -15,6 +15,7 @@ from packages.application.wb_supplies import _normalize_supply_row  # noqa: E402
 def main() -> None:
     _check_transit_route_cost_quantity_fixture()
     _check_non_transit_quantity_fixture()
+    _check_virtual_type_zero_cost_fixture()
     _check_empty_detail_does_not_overwrite_list_evidence()
     _check_unknown_transit_cost_is_not_zero()
     print("wb_supplies_normalization_smoke: OK")
@@ -99,6 +100,37 @@ def _check_non_transit_quantity_fixture() -> None:
     _assert(row["accepted_quantity"] == 9237, row)
     _assert(row["cost_total"] == 0, row)
     _assert(row["type_label"] == "Короб", row)
+
+
+def _check_virtual_type_zero_cost_fixture() -> None:
+    row = _normalize_supply_row(
+        raw_list={"supplyID": 39605280, "statusID": 5, "boxTypeID": 0},
+        raw_detail={
+            "supplyID": 39605280,
+            "statusID": 5,
+            "boxTypeID": 0,
+            "virtualTypeID": 5,
+            "warehouseID": 130744,
+            "warehouseName": "Краснодар (Тихорецкая)",
+            "quantity": 1,
+            "acceptedQuantity": 1,
+            "acceptanceCost": None,
+            "paidAcceptanceCoefficient": 0,
+        },
+        raw_goods=[{"quantity": 1, "acceptedQuantity": 1, "readyForSaleQuantity": 1}],
+        raw_package=[],
+        warehouse_by_id={},
+        synced_at="2026-06-10T00:00:00Z",
+        warnings=[],
+    )
+    _assert(row["warehouse_display"] == "Краснодар (Тихорецкая)", row)
+    _assert(row["quantity_added"] == 1, row)
+    _assert(row["accepted_quantity"] == 1, row)
+    _assert(row["type_label"] == "Допринято", row)
+    _assert("Тип 0" not in row["type_label"], row)
+    _assert(row["acceptance_coefficient"] == 0, row)
+    _assert(row["cost_total"] == 0, row)
+    _assert(row["cost_evidence"] == "paidAcceptanceCoefficient.free_accepted_non_transit", row)
 
 
 def _check_empty_detail_does_not_overwrite_list_evidence() -> None:
