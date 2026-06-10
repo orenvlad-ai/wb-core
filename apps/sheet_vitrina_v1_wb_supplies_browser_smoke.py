@@ -77,6 +77,8 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesSizeFilterSelect")).to_be_visible()
                 expect(operator_frame.locator("#wbSuppliesSizeFilterSelect")).to_have_value("main_250")
                 expect(operator_frame.locator("#wbSuppliesPageSizeSelect")).to_have_value("20")
+                expect(operator_frame.locator("#wbSuppliesBackfillButton")).to_be_visible()
+                expect(operator_frame.locator("#wbSuppliesSupplyDateSortButton")).to_be_visible()
                 page_size_options = operator_frame.locator("#wbSuppliesPageSizeSelect option").evaluate_all(
                     "(nodes) => nodes.map((node) => node.value)"
                 )
@@ -85,7 +87,7 @@ def main() -> None:
 
                 expected_columns = [
                     "Номер и тип",
-                    "Дата поставки",
+                    "Дата поставки ↓",
                     "Склад",
                     "Статус",
                     "Добавлено, шт / Упаковано → Принято",
@@ -112,6 +114,15 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("1002")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Скрыто размером: 2")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Unknown qty: 1")
+
+                const_first_row_before = operator_frame.locator("#wbSuppliesTableBody tr").first
+                expect(const_first_row_before).to_contain_text("1003")
+                operator_frame.locator("#wbSuppliesSupplyDateSortButton").click()
+                expect(operator_frame.locator("#wbSuppliesSupplyDateSortArrow")).to_contain_text("↑", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody tr").first).to_contain_text("39265492", timeout=10000)
+                operator_frame.locator("#wbSuppliesSupplyDateSortButton").click()
+                expect(operator_frame.locator("#wbSuppliesSupplyDateSortArrow")).to_contain_text("↓", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody tr").first).to_contain_text("1003", timeout=10000)
 
                 operator_frame.locator("#wbSuppliesSizeFilterSelect").select_option("all")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1002", timeout=10000)

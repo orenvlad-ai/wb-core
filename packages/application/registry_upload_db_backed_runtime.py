@@ -1490,6 +1490,16 @@ class RegistryUploadDbBackedRuntime:
         last_limit: int,
         last_offset: int,
         latest_synced_count: int,
+        last_mode: str | None = None,
+        latest_window_synced_at: str | None = None,
+        latest_window_limit: int | None = None,
+        latest_window_returned_count: int | None = None,
+        may_have_more: bool | None = None,
+        backfill_complete: bool | None = None,
+        backfill_started_at: str | None = None,
+        backfill_completed_at: str | None = None,
+        highest_synced_offset: int | None = None,
+        last_successful_offset: int | None = None,
     ) -> None:
         _validate_timestamp(str(synced_at or ""), field_name="synced_at")
         _validate_timestamp(str(last_successful_sync_at or ""), field_name="last_successful_sync_at")
@@ -1525,35 +1535,57 @@ class RegistryUploadDbBackedRuntime:
                 """
                 INSERT INTO sheet_vitrina_v1_wb_supplies(
                     supply_id,
+                    cache_key,
+                    wb_supply_id,
                     preorder_id,
                     normalized_row_json,
                     raw_list_json,
                     raw_detail_json,
                     raw_goods_json,
                     raw_package_json,
+                    raw_list_hash,
+                    raw_detail_hash,
+                    raw_goods_hash,
+                    raw_package_hash,
                     warehouse_id,
                     status_id,
                     quantity_for_size_filter,
                     source_created_at,
                     supply_date,
+                    fact_date,
                     updated_date,
-                    synced_at
+                    synced_at,
+                    last_list_synced_at,
+                    last_enriched_at,
+                    enrichment_status,
+                    enrichment_error
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(supply_id) DO UPDATE SET
+                    cache_key = excluded.cache_key,
+                    wb_supply_id = excluded.wb_supply_id,
                     preorder_id = excluded.preorder_id,
                     normalized_row_json = excluded.normalized_row_json,
                     raw_list_json = excluded.raw_list_json,
-                    raw_detail_json = excluded.raw_detail_json,
-                    raw_goods_json = excluded.raw_goods_json,
-                    raw_package_json = excluded.raw_package_json,
+                    raw_detail_json = COALESCE(excluded.raw_detail_json, raw_detail_json),
+                    raw_goods_json = COALESCE(excluded.raw_goods_json, raw_goods_json),
+                    raw_package_json = COALESCE(excluded.raw_package_json, raw_package_json),
+                    raw_list_hash = excluded.raw_list_hash,
+                    raw_detail_hash = COALESCE(excluded.raw_detail_hash, raw_detail_hash),
+                    raw_goods_hash = COALESCE(excluded.raw_goods_hash, raw_goods_hash),
+                    raw_package_hash = COALESCE(excluded.raw_package_hash, raw_package_hash),
                     warehouse_id = excluded.warehouse_id,
                     status_id = excluded.status_id,
                     quantity_for_size_filter = excluded.quantity_for_size_filter,
                     source_created_at = excluded.source_created_at,
                     supply_date = excluded.supply_date,
+                    fact_date = excluded.fact_date,
                     updated_date = excluded.updated_date,
-                    synced_at = excluded.synced_at
+                    synced_at = excluded.synced_at,
+                    last_list_synced_at = excluded.last_list_synced_at,
+                    last_enriched_at = COALESCE(excluded.last_enriched_at, last_enriched_at),
+                    enrichment_status = excluded.enrichment_status,
+                    enrichment_error = excluded.enrichment_error
                 """,
                 [_wb_supply_row_values(row, synced_at) for row in rows],
             )
@@ -1565,6 +1597,16 @@ class RegistryUploadDbBackedRuntime:
                 last_limit=last_limit,
                 last_offset=last_offset,
                 latest_synced_count=latest_synced_count,
+                last_mode=last_mode,
+                latest_window_synced_at=latest_window_synced_at,
+                latest_window_limit=latest_window_limit,
+                latest_window_returned_count=latest_window_returned_count,
+                may_have_more=may_have_more,
+                backfill_complete=backfill_complete,
+                backfill_started_at=backfill_started_at,
+                backfill_completed_at=backfill_completed_at,
+                highest_synced_offset=highest_synced_offset,
+                last_successful_offset=last_successful_offset,
             )
             conn.commit()
 
@@ -1577,6 +1619,16 @@ class RegistryUploadDbBackedRuntime:
         last_limit: int,
         last_offset: int,
         latest_synced_count: int,
+        last_mode: str | None = None,
+        latest_window_synced_at: str | None = None,
+        latest_window_limit: int | None = None,
+        latest_window_returned_count: int | None = None,
+        may_have_more: bool | None = None,
+        backfill_complete: bool | None = None,
+        backfill_started_at: str | None = None,
+        backfill_completed_at: str | None = None,
+        highest_synced_offset: int | None = None,
+        last_successful_offset: int | None = None,
     ) -> None:
         _validate_timestamp(str(last_synced_at or ""), field_name="last_synced_at")
         if last_successful_sync_at:
@@ -1592,6 +1644,16 @@ class RegistryUploadDbBackedRuntime:
                 last_limit=last_limit,
                 last_offset=last_offset,
                 latest_synced_count=latest_synced_count,
+                last_mode=last_mode,
+                latest_window_synced_at=latest_window_synced_at,
+                latest_window_limit=latest_window_limit,
+                latest_window_returned_count=latest_window_returned_count,
+                may_have_more=may_have_more,
+                backfill_complete=backfill_complete,
+                backfill_started_at=backfill_started_at,
+                backfill_completed_at=backfill_completed_at,
+                highest_synced_offset=highest_synced_offset,
+                last_successful_offset=last_successful_offset,
             )
             conn.commit()
 
@@ -1606,7 +1668,17 @@ class RegistryUploadDbBackedRuntime:
                        last_error,
                        last_limit,
                        last_offset,
-                       latest_synced_count
+                       latest_synced_count,
+                       backfill_complete,
+                       backfill_started_at,
+                       backfill_completed_at,
+                       highest_synced_offset,
+                       last_successful_offset,
+                       last_mode,
+                       latest_window_synced_at,
+                       latest_window_limit,
+                       latest_window_returned_count,
+                       may_have_more
                 FROM sheet_vitrina_v1_wb_supplies_sync_state
                 WHERE slot = 1
                 """
@@ -1619,6 +1691,16 @@ class RegistryUploadDbBackedRuntime:
                     "last_limit": None,
                     "last_offset": None,
                     "latest_synced_count": None,
+                    "backfill_complete": False,
+                    "backfill_started_at": "",
+                    "backfill_completed_at": "",
+                    "highest_synced_offset": 0,
+                    "last_successful_offset": None,
+                    "last_mode": "",
+                    "latest_window_synced_at": "",
+                    "latest_window_limit": None,
+                    "latest_window_returned_count": None,
+                    "may_have_more": False,
                 }
             return {
                 "last_synced_at": row["last_synced_at"] or "",
@@ -1627,6 +1709,16 @@ class RegistryUploadDbBackedRuntime:
                 "last_limit": row["last_limit"],
                 "last_offset": row["last_offset"],
                 "latest_synced_count": row["latest_synced_count"],
+                "backfill_complete": bool(row["backfill_complete"]),
+                "backfill_started_at": row["backfill_started_at"] or "",
+                "backfill_completed_at": row["backfill_completed_at"] or "",
+                "highest_synced_offset": row["highest_synced_offset"] or 0,
+                "last_successful_offset": row["last_successful_offset"],
+                "last_mode": row["last_mode"] or "",
+                "latest_window_synced_at": row["latest_window_synced_at"] or "",
+                "latest_window_limit": row["latest_window_limit"],
+                "latest_window_returned_count": row["latest_window_returned_count"],
+                "may_have_more": bool(row["may_have_more"]),
             }
 
     def list_wb_supplies(self) -> list[dict[str, Any]]:
@@ -1692,6 +1784,190 @@ class RegistryUploadDbBackedRuntime:
                 "package": json.loads(row["raw_package_json"]) if row["raw_package_json"] else None,
             }
             return payload
+
+    def list_wb_supplies_cache_records(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT supply_id,
+                       cache_key,
+                       wb_supply_id,
+                       preorder_id,
+                       normalized_row_json,
+                       raw_list_json,
+                       raw_detail_json,
+                       raw_goods_json,
+                       raw_package_json,
+                       raw_list_hash,
+                       raw_detail_hash,
+                       raw_goods_hash,
+                       raw_package_hash,
+                       last_enriched_at,
+                       enrichment_status,
+                       enrichment_error
+                FROM sheet_vitrina_v1_wb_supplies
+                """
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                normalized = _loads_json_object(row["normalized_row_json"])
+                raw_list = _loads_json_object(row["raw_list_json"]) if row["raw_list_json"] else None
+                raw_detail = _loads_json_object(row["raw_detail_json"]) if row["raw_detail_json"] else None
+                raw_goods = _loads_json_list(row["raw_goods_json"]) if row["raw_goods_json"] else None
+                raw_package = _loads_json_list(row["raw_package_json"]) if row["raw_package_json"] else None
+                result.append(
+                    {
+                        "supply_id": row["supply_id"],
+                        "cache_key": row["cache_key"] or normalized.get("cache_key") or row["supply_id"],
+                        "wb_supply_id": row["wb_supply_id"] or normalized.get("wb_supply_id") or "",
+                        "preorder_id": row["preorder_id"] or normalized.get("preorder_id") or "",
+                        "normalized": normalized,
+                        "raw_list": raw_list,
+                        "raw_detail": raw_detail,
+                        "raw_goods": raw_goods,
+                        "raw_package": raw_package,
+                        "raw_list_hash": row["raw_list_hash"] or str(normalized.get("raw_list_hash") or ""),
+                        "raw_detail_hash": row["raw_detail_hash"] or str(normalized.get("raw_detail_hash") or ""),
+                        "raw_goods_hash": row["raw_goods_hash"] or str(normalized.get("raw_goods_hash") or ""),
+                        "raw_package_hash": row["raw_package_hash"] or str(normalized.get("raw_package_hash") or ""),
+                        "last_enriched_at": row["last_enriched_at"] or str(normalized.get("last_enriched_at") or ""),
+                        "enrichment_status": row["enrichment_status"] or str(normalized.get("enrichment_status") or ""),
+                        "enrichment_error": row["enrichment_error"] or str(normalized.get("enrichment_error") or ""),
+                    }
+                )
+            return result
+
+    def create_wb_supplies_sync_run(
+        self,
+        *,
+        run_id: str,
+        mode: str,
+        status: str,
+        phase: str,
+        started_at: str,
+        limit: int,
+        offset: int,
+        logs: list[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supplies_sync_runs(
+                    run_id,
+                    mode,
+                    status,
+                    phase,
+                    started_at,
+                    updated_at,
+                    offset,
+                    run_limit,
+                    logs_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    mode,
+                    status,
+                    phase,
+                    started_at,
+                    started_at,
+                    int(offset or 0),
+                    int(limit or 0),
+                    json.dumps(list(logs or []), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        return self.load_wb_supplies_sync_run(run_id) or {}
+
+    def update_wb_supplies_sync_run(self, run_id: str, **fields: Any) -> dict[str, Any]:
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            raise ValueError("run_id is required")
+        allowed = {
+            "status",
+            "phase",
+            "updated_at",
+            "completed_at",
+            "offset",
+            "run_limit",
+            "pages_fetched",
+            "raw_fetched",
+            "upserted",
+            "new_rows",
+            "changed_rows",
+            "unchanged_rows",
+            "enriched",
+            "failed_enrich",
+            "may_have_more",
+            "last_error",
+            "logs_json",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, value in fields.items():
+            column = "logs_json" if key == "logs" else "run_limit" if key == "limit" else key
+            if column not in allowed:
+                continue
+            assignments.append(f"{column} = ?")
+            if column == "logs_json":
+                values.append(json.dumps(value, ensure_ascii=False))
+            elif column == "may_have_more":
+                values.append(1 if value else 0)
+            else:
+                values.append(value)
+        if not assignments:
+            return self.load_wb_supplies_sync_run(normalized_run_id) or {}
+        values.append(normalized_run_id)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                f"""
+                UPDATE sheet_vitrina_v1_wb_supplies_sync_runs
+                SET {', '.join(assignments)}
+                WHERE run_id = ?
+                """,
+                values,
+            )
+            conn.commit()
+        return self.load_wb_supplies_sync_run(normalized_run_id) or {}
+
+    def load_wb_supplies_sync_run(self, run_id: str) -> dict[str, Any] | None:
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return None
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supplies_sync_runs
+                WHERE run_id = ?
+                """,
+                (normalized_run_id,),
+            ).fetchone()
+            return _wb_supplies_sync_run_to_dict(row) if row else None
+
+    def load_active_wb_supplies_sync_run(self) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supplies_sync_runs
+                WHERE status IN ('queued', 'running')
+                ORDER BY started_at DESC, updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return _wb_supplies_sync_run_to_dict(row) if row else None
 
     def save_supplier_shipment_upload(
         self,
@@ -3501,19 +3777,30 @@ def _wb_supply_row_values(row: Mapping[str, Any], synced_at: str) -> tuple[Any, 
     raw_package = normalized_row.pop("raw_package", None)
     return (
         supply_id,
+        str(row.get("cache_key") or supply_id).strip(),
+        str(row.get("wb_supply_id") or "").strip(),
         str(row.get("preorder_id") or "").strip(),
         json.dumps(normalized_row, ensure_ascii=False),
         json.dumps(raw_list, ensure_ascii=False) if raw_list is not None else None,
         json.dumps(raw_detail, ensure_ascii=False) if raw_detail is not None else None,
         json.dumps(raw_goods, ensure_ascii=False) if raw_goods is not None else None,
         json.dumps(raw_package, ensure_ascii=False) if raw_package is not None else None,
+        str(row.get("raw_list_hash") or "").strip(),
+        str(row.get("raw_detail_hash") or "").strip() or None,
+        str(row.get("raw_goods_hash") or "").strip() or None,
+        str(row.get("raw_package_hash") or "").strip() or None,
         str(row.get("warehouse_id") or "").strip(),
         row.get("status_id"),
         row.get("quantity_for_size_filter"),
         str(row.get("source_created_at") or "").strip(),
         str(row.get("supply_date") or "").strip(),
+        str(row.get("fact_date") or "").strip(),
         str(row.get("updated_date") or "").strip(),
         synced_at,
+        str(row.get("last_list_synced_at") or synced_at).strip(),
+        str(row.get("last_enriched_at") or "").strip() or None,
+        str(row.get("enrichment_status") or "not_requested").strip(),
+        str(row.get("enrichment_error") or "").strip(),
     )
 
 
@@ -3526,6 +3813,16 @@ def _upsert_wb_supplies_sync_state(
     last_limit: int,
     last_offset: int,
     latest_synced_count: int,
+    last_mode: str | None = None,
+    latest_window_synced_at: str | None = None,
+    latest_window_limit: int | None = None,
+    latest_window_returned_count: int | None = None,
+    may_have_more: bool | None = None,
+    backfill_complete: bool | None = None,
+    backfill_started_at: str | None = None,
+    backfill_completed_at: str | None = None,
+    highest_synced_offset: int | None = None,
+    last_successful_offset: int | None = None,
 ) -> None:
     conn.execute(
         """
@@ -3536,16 +3833,36 @@ def _upsert_wb_supplies_sync_state(
             last_error,
             last_limit,
             last_offset,
-            latest_synced_count
+            latest_synced_count,
+            backfill_complete,
+            backfill_started_at,
+            backfill_completed_at,
+            highest_synced_offset,
+            last_successful_offset,
+            last_mode,
+            latest_window_synced_at,
+            latest_window_limit,
+            latest_window_returned_count,
+            may_have_more
         )
-        VALUES(1, ?, ?, ?, ?, ?, ?)
+        VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(slot) DO UPDATE SET
             last_synced_at = excluded.last_synced_at,
             last_successful_sync_at = COALESCE(excluded.last_successful_sync_at, last_successful_sync_at),
             last_error = excluded.last_error,
             last_limit = excluded.last_limit,
             last_offset = excluded.last_offset,
-            latest_synced_count = excluded.latest_synced_count
+            latest_synced_count = excluded.latest_synced_count,
+            backfill_complete = COALESCE(excluded.backfill_complete, backfill_complete),
+            backfill_started_at = COALESCE(excluded.backfill_started_at, backfill_started_at),
+            backfill_completed_at = COALESCE(excluded.backfill_completed_at, backfill_completed_at),
+            highest_synced_offset = COALESCE(excluded.highest_synced_offset, highest_synced_offset),
+            last_successful_offset = COALESCE(excluded.last_successful_offset, last_successful_offset),
+            last_mode = COALESCE(excluded.last_mode, last_mode),
+            latest_window_synced_at = COALESCE(excluded.latest_window_synced_at, latest_window_synced_at),
+            latest_window_limit = COALESCE(excluded.latest_window_limit, latest_window_limit),
+            latest_window_returned_count = COALESCE(excluded.latest_window_returned_count, latest_window_returned_count),
+            may_have_more = COALESCE(excluded.may_have_more, may_have_more)
         """,
         (
             last_synced_at,
@@ -3554,8 +3871,43 @@ def _upsert_wb_supplies_sync_state(
             int(last_limit or 0),
             int(last_offset or 0),
             int(latest_synced_count or 0),
+            None if backfill_complete is None else (1 if backfill_complete else 0),
+            backfill_started_at,
+            backfill_completed_at,
+            highest_synced_offset,
+            last_successful_offset,
+            last_mode,
+            latest_window_synced_at,
+            latest_window_limit,
+            latest_window_returned_count,
+            None if may_have_more is None else (1 if may_have_more else 0),
         ),
     )
+
+
+def _wb_supplies_sync_run_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "run_id": row["run_id"],
+        "mode": row["mode"],
+        "status": row["status"],
+        "phase": row["phase"] or "",
+        "started_at": row["started_at"] or "",
+        "updated_at": row["updated_at"] or "",
+        "completed_at": row["completed_at"] or "",
+        "offset": row["offset"],
+        "limit": row["run_limit"],
+        "pages_fetched": row["pages_fetched"],
+        "raw_fetched": row["raw_fetched"],
+        "upserted": row["upserted"],
+        "new_rows": row["new_rows"],
+        "changed_rows": row["changed_rows"],
+        "unchanged_rows": row["unchanged_rows"],
+        "enriched": row["enriched"],
+        "failed_enrich": row["failed_enrich"],
+        "may_have_more": bool(row["may_have_more"]),
+        "last_error": row["last_error"] or "",
+        "logs": _loads_json_list(row["logs_json"]),
+    }
 
 
 def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -3881,19 +4233,30 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies (
             supply_id TEXT PRIMARY KEY,
+            cache_key TEXT,
+            wb_supply_id TEXT,
             preorder_id TEXT,
             normalized_row_json TEXT NOT NULL,
             raw_list_json TEXT,
             raw_detail_json TEXT,
             raw_goods_json TEXT,
             raw_package_json TEXT,
+            raw_list_hash TEXT,
+            raw_detail_hash TEXT,
+            raw_goods_hash TEXT,
+            raw_package_hash TEXT,
             warehouse_id TEXT,
             status_id INTEGER,
             quantity_for_size_filter REAL,
             source_created_at TEXT,
             supply_date TEXT,
+            fact_date TEXT,
             updated_date TEXT,
-            synced_at TEXT NOT NULL
+            synced_at TEXT NOT NULL,
+            last_list_synced_at TEXT,
+            last_enriched_at TEXT,
+            enrichment_status TEXT,
+            enrichment_error TEXT
         );
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supplies_by_status
@@ -3912,7 +4275,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             last_error TEXT,
             last_limit INTEGER,
             last_offset INTEGER,
-            latest_synced_count INTEGER
+            latest_synced_count INTEGER,
+            backfill_complete INTEGER DEFAULT 0,
+            backfill_started_at TEXT,
+            backfill_completed_at TEXT,
+            highest_synced_offset INTEGER DEFAULT 0,
+            last_successful_offset INTEGER,
+            last_mode TEXT,
+            latest_window_synced_at TEXT,
+            latest_window_limit INTEGER,
+            latest_window_returned_count INTEGER,
+            may_have_more INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies_warehouses (
@@ -3920,6 +4293,29 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             warehouse_name TEXT NOT NULL,
             raw_json TEXT NOT NULL,
             synced_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies_sync_runs (
+            run_id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            phase TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            offset INTEGER DEFAULT 0,
+            run_limit INTEGER DEFAULT 0,
+            pages_fetched INTEGER DEFAULT 0,
+            raw_fetched INTEGER DEFAULT 0,
+            upserted INTEGER DEFAULT 0,
+            new_rows INTEGER DEFAULT 0,
+            changed_rows INTEGER DEFAULT 0,
+            unchanged_rows INTEGER DEFAULT 0,
+            enriched INTEGER DEFAULT 0,
+            failed_enrich INTEGER DEFAULT 0,
+            may_have_more INTEGER DEFAULT 0,
+            last_error TEXT,
+            logs_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_uploads (
@@ -4018,6 +4414,43 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON sheet_vitrina_v1_nomenclature_items(is_active, match_key);
         """
     )
+    for column_name, column_sql in (
+        ("cache_key", "TEXT"),
+        ("wb_supply_id", "TEXT"),
+        ("raw_list_hash", "TEXT"),
+        ("raw_detail_hash", "TEXT"),
+        ("raw_goods_hash", "TEXT"),
+        ("raw_package_hash", "TEXT"),
+        ("fact_date", "TEXT"),
+        ("last_list_synced_at", "TEXT"),
+        ("last_enriched_at", "TEXT"),
+        ("enrichment_status", "TEXT"),
+        ("enrichment_error", "TEXT"),
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_wb_supplies",
+            column_name=column_name,
+            column_sql=column_sql,
+        )
+    for column_name, column_sql in (
+        ("backfill_complete", "INTEGER DEFAULT 0"),
+        ("backfill_started_at", "TEXT"),
+        ("backfill_completed_at", "TEXT"),
+        ("highest_synced_offset", "INTEGER DEFAULT 0"),
+        ("last_successful_offset", "INTEGER"),
+        ("last_mode", "TEXT"),
+        ("latest_window_synced_at", "TEXT"),
+        ("latest_window_limit", "INTEGER"),
+        ("latest_window_returned_count", "INTEGER"),
+        ("may_have_more", "INTEGER DEFAULT 0"),
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_wb_supplies_sync_state",
+            column_name=column_name,
+            column_sql=column_sql,
+        )
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_nomenclature_items",

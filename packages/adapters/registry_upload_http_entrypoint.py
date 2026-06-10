@@ -147,6 +147,8 @@ DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-r
 DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
 DEFAULT_WB_SUPPLIES_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies"
 DEFAULT_WB_SUPPLIES_SYNC_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync"
+DEFAULT_WB_SUPPLIES_BACKFILL_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
+DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
@@ -1179,7 +1181,32 @@ def _build_handler(
                         {"error": f"WB supplies sync failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                response_status = HTTPStatus.ACCEPTED if result.get("accepted") else HTTPStatus.OK
+                _write_json_response(self, response_status, result)
+                return
+
+            if parsed.path == DEFAULT_WB_SUPPLIES_BACKFILL_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_wb_supplies_backfill_request(payload)
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB supplies backfill failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.ACCEPTED, result)
                 return
 
             _write_json_response(
@@ -1809,6 +1836,26 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"WB supplies list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_wb_supplies_sync_status_request(_flatten_query_params(parsed.query))
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB supplies sync status failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3767,6 +3814,8 @@ def _render_sheet_vitrina_operator_ui(
         "wb_regional_default_included_district_keys": list(DISTRICT_KEYS),
         "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
         "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
+        "wb_supplies_backfill_path": DEFAULT_WB_SUPPLIES_BACKFILL_PATH,
+        "wb_supplies_sync_status_path": DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,

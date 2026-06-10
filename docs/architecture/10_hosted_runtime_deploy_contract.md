@@ -63,6 +63,8 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip`
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies`
 - `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync`
+- `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill`
+- `GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status`
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 - `GET /sheet-vitrina-v1/supplier`
 - `GET /v1/sheet-vitrina-v1/supply/supplier-shipments`
@@ -429,6 +431,10 @@ Public probe validates:
 - when promo live wiring is active, `STATUS` / `plan` surfaces must disclose truthful `promo_by_price[*]` source facts, including `success/incomplete/missing`, collector trace note and accepted-current preservation instead of keeping promo rows as a permanent blocked gap
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/status` returns JSON with dataset states, active SKU count, recommendation path, selected `stock_ff_source` and 1C FF_STOCK summary
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns JSON with active SKU count, methodology note, shared dataset state and optional last result
+- `GET /v1/sheet-vitrina-v1/supply/wb-supplies` returns protected cached WB supplies JSON only, supports `sort_key=supply_date&sort_dir=asc|desc`, and sorts all filtered rows before pagination.
+- `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync` is the ordinary protected latest-window refresh: it fetches `offset=0`, compares raw hashes/`updatedDate`, upserts new/changed rows, enriches detail/goods only for changed/new/not-yet-attempted critical-missing rows and returns controlled JSON errors with sanitized upstream status/content-type/body prefix.
+- `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill` starts a protected background full-history backfill and returns `202` with `run_id`; the job walks WB list pagination by `limit/offset`, saves resumable progress after each page, keeps old rows, and records partial/blocker state on 429/timeout/non-JSON/upstream failures.
+- `GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status` returns protected JSON run progress and sync state for WB supplies incremental/backfill jobs.
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/template/*.xlsx` returns `200` + XLSX content type for all operator templates with Russian headers
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check` returns controlled JSON summary for the existing materialized 1C `FF_STOCK` source, including ready/partial/missing/error and coverage counts
 - `GET /v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec.xlsx` returns `200` + XLSX with the same headers as the manual `Остатки ФФ` template when 1C coverage is ready, or truthful `422 {"error": ...}` when it is not ready

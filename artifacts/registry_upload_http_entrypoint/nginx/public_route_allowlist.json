@@ -271,6 +271,18 @@
       "methods": ["POST"]
     },
     {
+      "name": "sheet_vitrina_supply_wb_supplies_backfill",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_supply_wb_supplies_sync_status",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_supply_wb_supplies_detail",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/supply/wb-supplies/",

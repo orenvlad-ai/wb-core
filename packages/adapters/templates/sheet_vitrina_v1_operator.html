@@ -2184,6 +2184,21 @@
       white-space: nowrap;
     }
 
+    .wb-supplies-sort-button {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .wb-supplies-sort-button:hover {
+      color: var(--text);
+    }
+
     .wb-supplies-table tbody tr:hover td {
       background: #181c23;
     }
@@ -3140,6 +3155,7 @@
               </div>
               <div class="block-actions">
                 <button id="wbSuppliesRefreshButton" class="action-button primary-button" type="button">Обновить поставки</button>
+                <button id="wbSuppliesBackfillButton" class="action-button" type="button" title="Одноразовая полная синхронизация всех доступных поставок WB. Может выполняться долго.">Загрузить всю историю</button>
               </div>
             </div>
 
@@ -3177,7 +3193,7 @@
                 <thead>
                   <tr>
                     <th>Номер и тип</th>
-                    <th>Дата поставки</th>
+                    <th><button id="wbSuppliesSupplyDateSortButton" class="wb-supplies-sort-button" type="button">Дата поставки <span id="wbSuppliesSupplyDateSortArrow">↓</span></button></th>
                     <th>Склад</th>
                     <th>Статус</th>
                     <th>Добавлено, шт / Упаковано → Принято</th>
@@ -3410,6 +3426,9 @@
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
       const wbSuppliesRefreshButton = document.getElementById("wbSuppliesRefreshButton");
+      const wbSuppliesBackfillButton = document.getElementById("wbSuppliesBackfillButton");
+      const wbSuppliesSupplyDateSortButton = document.getElementById("wbSuppliesSupplyDateSortButton");
+      const wbSuppliesSupplyDateSortArrow = document.getElementById("wbSuppliesSupplyDateSortArrow");
       const wbSuppliesSearchInput = document.getElementById("wbSuppliesSearchInput");
       const wbSuppliesWarehouseSelect = document.getElementById("wbSuppliesWarehouseSelect");
       const wbSuppliesStatusSelect = document.getElementById("wbSuppliesStatusSelect");
@@ -3544,6 +3563,8 @@
       let wbSuppliesInitialized = false;
       let wbSuppliesLoading = false;
       let wbSuppliesSyncing = false;
+      let wbSuppliesBackfilling = false;
+      let wbSuppliesBackfillPollHandle = 0;
       let wbSuppliesSearchTimer = 0;
       const wbSuppliesState = {
         search: "",
@@ -3551,7 +3572,9 @@
         status_id: "",
         size_filter: WB_SUPPLIES_DEFAULT_SIZE_FILTER,
         limit: WB_SUPPLIES_DEFAULT_LIMIT,
-        offset: 0
+        offset: 0,
+        sort_key: "supply_date",
+        sort_dir: "desc"
       };
 
       function readPersistedOperatorUiState() {
@@ -6035,8 +6058,12 @@
 
       function updateWbSuppliesBusyState() {
         if (wbSuppliesRefreshButton) {
-          wbSuppliesRefreshButton.disabled = wbSuppliesLoading || wbSuppliesSyncing;
+          wbSuppliesRefreshButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling;
           wbSuppliesRefreshButton.textContent = wbSuppliesSyncing ? "Обновляем..." : "Обновить поставки";
+        }
+        if (wbSuppliesBackfillButton) {
+          wbSuppliesBackfillButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling;
+          wbSuppliesBackfillButton.textContent = wbSuppliesBackfilling ? "Загружаем историю..." : "Загрузить всю историю";
         }
       }
 
@@ -6062,6 +6089,8 @@
         params.set("size_filter", wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER);
         params.set("limit", String(wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT));
         params.set("offset", String(wbSuppliesState.offset || 0));
+        params.set("sort_key", wbSuppliesState.sort_key || "supply_date");
+        params.set("sort_dir", wbSuppliesState.sort_dir || "desc");
         return params.toString();
       }
 
@@ -6105,14 +6134,14 @@
           return;
         }
         const request = {
+          mode: "incremental_refresh",
           limit: options && options.limit ? Number(options.limit) : 1000,
-          offset: options && options.offset ? Number(options.offset) : 0,
-          enrich_details: true
+          enrich: "changed_only"
         };
         wbSuppliesSyncing = true;
         updateWbSuppliesBusyState();
         setWbSuppliesMessage(
-          options && options.initial ? "Первичная загрузка последних 1000 поставок..." : "Обновляем поставки...",
+          options && options.initial ? "Первичная latest-window загрузка..." : "Обновляем latest window...",
           ""
         );
         try {
@@ -6133,7 +6162,13 @@
           wbSuppliesPayload = payload;
           renderWbSupplies(payload);
           const sync = payload.sync || {};
-          setWbSuppliesMessage("Sync завершён: " + valueOrDash(sync.upserted_count) + " rows.", "");
+          setWbSuppliesMessage(
+            "Incremental refresh завершён: new " + valueOrDash(sync.new_rows) +
+              ", changed " + valueOrDash(sync.changed_rows) +
+              ", unchanged " + valueOrDash(sync.unchanged_rows) +
+              ", enriched " + valueOrDash(sync.enriched) + ".",
+            sync.failed_enrich ? "warning" : ""
+          );
         } catch (error) {
           setWbSuppliesMessage(
             "WB supplies sync не выполнен: " + (error instanceof Error ? error.message : String(error)),
@@ -6149,12 +6184,94 @@
         }
       }
 
+      async function startWbSuppliesBackfill() {
+        if (!config.wb_supplies_backfill_path || wbSuppliesBackfilling) {
+          return;
+        }
+        wbSuppliesBackfilling = true;
+        updateWbSuppliesBusyState();
+        setWbSuppliesMessage("Запускаем полную загрузку истории WB...", "");
+        try {
+          const response = await fetch(config.wb_supplies_backfill_path, {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: "full_backfill", limit: 1000, resume: true, enrich: true })
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          const runId = payload.run_id || (payload.active_run && payload.active_run.run_id) || "";
+          if (!runId) {
+            throw new Error("backfill route did not return run_id");
+          }
+          pollWbSuppliesBackfill(runId);
+        } catch (error) {
+          wbSuppliesBackfilling = false;
+          updateWbSuppliesBusyState();
+          setWbSuppliesMessage(
+            "Full backfill не запущен: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        }
+      }
+
+      async function pollWbSuppliesBackfill(runId) {
+        if (!config.wb_supplies_sync_status_path || !runId) {
+          wbSuppliesBackfilling = false;
+          updateWbSuppliesBusyState();
+          return;
+        }
+        window.clearTimeout(wbSuppliesBackfillPollHandle);
+        try {
+          const query = new URLSearchParams({ run_id: runId }).toString();
+          const response = await fetch(config.wb_supplies_sync_status_path + "?" + query, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          const run = payload.run || {};
+          const state = payload.sync_state || {};
+          setWbSuppliesMessage(
+            "Full backfill " + valueOrDash(run.status) +
+              ": offset " + valueOrDash(run.offset) +
+              ", pages " + valueOrDash(run.pages_fetched) +
+              ", fetched " + valueOrDash(run.raw_fetched) +
+              ", upserted " + valueOrDash(run.upserted) +
+              ", enriched " + valueOrDash(run.enriched) +
+              (run.last_error ? ". Ошибка: " + run.last_error : ""),
+            run.status === "failed" || run.status === "partial" ? "warning" : ""
+          );
+          if (run.status === "queued" || run.status === "running") {
+            wbSuppliesBackfillPollHandle = window.setTimeout(() => pollWbSuppliesBackfill(runId), 2500);
+            return;
+          }
+          wbSuppliesBackfilling = false;
+          updateWbSuppliesBusyState();
+          await loadWbSupplies({ skipInitialSync: true });
+          if (state.cache_completeness_label) {
+            setWbSuppliesMessage("История: " + state.cache_completeness_label, run.status === "success" ? "" : "warning");
+          }
+        } catch (error) {
+          wbSuppliesBackfilling = false;
+          updateWbSuppliesBusyState();
+          setWbSuppliesMessage(
+            "Не удалось прочитать статус full backfill: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        }
+      }
+
       function renderWbSupplies(payload) {
         const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
         renderWbSuppliesOptions(payload);
         renderWbSuppliesSummary(payload);
         renderWbSuppliesRows(rows);
         renderWbSuppliesPagination(payload);
+        renderWbSuppliesSort(payload);
         const meta = payload && payload.meta ? payload.meta : {};
         if (meta.cache_warning) {
           setWbSuppliesMessage(meta.cache_warning, "warning");
@@ -6204,15 +6321,39 @@
         }
         const summary = payload && payload.summary ? payload.summary : {};
         const meta = payload && payload.meta ? payload.meta : {};
+        const state = payload && payload.sync_state ? payload.sync_state : {};
+        const activeRun = payload && payload.active_run ? payload.active_run : null;
         const items = [
           "В cache: " + valueOrDash(summary.cached_total_rows),
           "После фильтров: " + valueOrDash(summary.filtered_rows),
           "Скрыто размером: " + valueOrDash(summary.hidden_by_size_filter_count),
           "Unknown qty: " + valueOrDash(summary.unknown_quantity_count),
-          "История: " + valueOrDash(meta.cache_completeness_label || summary.cache_completeness),
-          "Last sync: " + valueOrDash(meta.last_successful_sync_at || meta.last_synced_at)
+          "История: " + valueOrDash(state.cache_completeness_label || meta.cache_completeness_label || summary.cache_completeness),
+          "Last sync: " + valueOrDash(state.latest_window_synced_at || meta.last_successful_sync_at || meta.last_synced_at)
         ];
+        if (activeRun) {
+          items.push(
+            "Run: " + valueOrDash(activeRun.mode) + " / " + valueOrDash(activeRun.status),
+            "Offset: " + valueOrDash(activeRun.offset),
+            "Fetched: " + valueOrDash(activeRun.raw_fetched),
+            "Upserted: " + valueOrDash(activeRun.upserted),
+            "Enriched: " + valueOrDash(activeRun.enriched)
+          );
+        }
         wbSuppliesSummary.innerHTML = items.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
+      }
+
+      function renderWbSuppliesSort(payload) {
+        const sort = payload && payload.sort ? payload.sort : {};
+        if (sort.key) {
+          wbSuppliesState.sort_key = String(sort.key || "supply_date");
+        }
+        if (sort.dir) {
+          wbSuppliesState.sort_dir = String(sort.dir || "desc");
+        }
+        if (wbSuppliesSupplyDateSortArrow) {
+          wbSuppliesSupplyDateSortArrow.textContent = wbSuppliesState.sort_dir === "asc" ? "↑" : "↓";
+        }
       }
 
       function renderWbSuppliesRows(rows) {
@@ -6378,7 +6519,14 @@
         try {
           return JSON.parse(raw);
         } catch (error) {
-          throw new Error("endpoint вернул ответ не в формате JSON");
+          const contentType = response.headers ? String(response.headers.get("content-type") || "") : "";
+          const prefix = raw.replace(/\s+/g, " ").trim().slice(0, 420);
+          const route = response.url || "";
+          const lowerPrefix = prefix.toLowerCase();
+          if (lowerPrefix.includes("<form") && lowerPrefix.includes("login")) {
+            throw new Error("Сессия истекла, обновите страницу/войдите заново. route=" + route + ", status=" + response.status + ", content-type=" + contentType + ", body_prefix=" + prefix);
+          }
+          throw new Error("endpoint вернул ответ не в формате JSON: route=" + route + ", status=" + response.status + ", content-type=" + contentType + ", body_prefix=" + prefix);
         }
       }
 
@@ -7275,6 +7423,13 @@
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
       wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 1000, offset: 0 }));
+      wbSuppliesBackfillButton.addEventListener("click", startWbSuppliesBackfill);
+      wbSuppliesSupplyDateSortButton.addEventListener("click", () => {
+        wbSuppliesState.sort_key = "supply_date";
+        wbSuppliesState.sort_dir = wbSuppliesState.sort_dir === "asc" ? "desc" : "asc";
+        wbSuppliesState.offset = 0;
+        loadWbSupplies({ skipInitialSync: true });
+      });
       wbSuppliesSearchInput.addEventListener("input", () => {
         window.clearTimeout(wbSuppliesSearchTimer);
         wbSuppliesSearchTimer = window.setTimeout(() => {

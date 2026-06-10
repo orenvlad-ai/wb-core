@@ -24,8 +24,10 @@ TOKEN_VALUE = "adapter-smoke-token"
 
 
 class FakeResponse:
-    def __init__(self, payload: bytes) -> None:
+    def __init__(self, payload: bytes, *, status: int = 200, headers: dict[str, str] | None = None) -> None:
         self.payload = payload
+        self.status = status
+        self.headers = headers or {}
 
     def __enter__(self) -> "FakeResponse":
         return self
@@ -41,13 +43,14 @@ class RecordingOpener:
     def __init__(self) -> None:
         self.requests = []
         self.next_payload = b"[]"
+        self.next_headers: dict[str, str] = {}
         self.next_error = None
 
     def __call__(self, req, timeout):
         self.requests.append((req, timeout))
         if self.next_error is not None:
             raise self.next_error
-        return FakeResponse(self.next_payload)
+        return FakeResponse(self.next_payload, headers=self.next_headers)
 
 
 def main() -> None:
@@ -125,15 +128,33 @@ def main() -> None:
             raise AssertionError("HTTP 401 must raise WbSuppliesHttpStatusError")
 
         opener.next_error = None
+        opener.next_headers = {"Content-Type": "text/html; charset=utf-8"}
         opener.next_payload = b"<html>not json</html>"
         try:
             source.fetch_warehouses()
         except WbSuppliesTransportError as exc:
-            if "non-JSON" not in str(exc):
+            if "non-JSON" not in str(exc) or "content-type=text/html" not in str(exc) or "body_prefix=<html>not json</html>" not in str(exc):
                 raise AssertionError(f"non-JSON error must be controlled, got {exc}")
         else:
             raise AssertionError("non-JSON upstream response must raise transport error")
 
+        opener.next_headers = {}
+        opener.next_error = urllib_error.HTTPError(
+            "https://supplies-api.example.test/api/v1/supplies",
+            504,
+            "Gateway Timeout",
+            hdrs={"Content-Type": "text/html"},
+            fp=BytesIO(b"<html>gateway timeout</html>"),
+        )
+        try:
+            source.list_supplies(limit=20, offset=0)
+        except WbSuppliesHttpStatusError as exc:
+            if exc.status_code != 504 or "text/html" not in exc.content_type or "gateway timeout" not in exc.body_prefix:
+                raise AssertionError(f"HTTP non-JSON body diagnostics must be preserved, got {exc}")
+        else:
+            raise AssertionError("HTTP 504 must raise WbSuppliesHttpStatusError")
+
+        opener.next_error = None
         opener.next_error = urllib_error.URLError("timeout")
         try:
             source.fetch_warehouses()

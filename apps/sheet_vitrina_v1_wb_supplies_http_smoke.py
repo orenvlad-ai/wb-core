@@ -34,6 +34,19 @@ class MissingTokenSource:
         raise RuntimeError("required env WB_API_TOKEN is not set")
 
 
+class NonJsonListSource:
+    def fetch_warehouses(self):
+        return []
+
+    def list_supplies(self, *, limit=100, offset=0, status_ids=None, dates=None):
+        raise WbSuppliesTransportError(
+            "WB supplies API returned non-JSON response",
+            status_code=504,
+            content_type="text/html",
+            body_prefix="<html>gateway timeout</html>",
+        )
+
+
 class FakeWbSuppliesSource:
     def __init__(self) -> None:
         self.list_calls: list[dict[str, object]] = []
@@ -269,6 +282,16 @@ def main() -> None:
             if token_status != 503 or "WB_API_TOKEN" not in str(token_payload.get("error", "")):
                 raise AssertionError(f"missing token must be controlled 503 JSON, got {token_status} {token_payload}")
 
+            entrypoint.wb_supplies_block.source = NonJsonListSource()
+            non_json_status, non_json_payload = _post_json(f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}", {"limit": 100})
+            if (
+                non_json_status != 502
+                or "non-JSON" not in str(non_json_payload.get("error", ""))
+                or "content-type=text/html" not in str(non_json_payload.get("error", ""))
+                or "body_prefix=<html>gateway timeout</html>" not in str(non_json_payload.get("error", ""))
+            ):
+                raise AssertionError(f"upstream non-JSON must return controlled JSON error, got {non_json_status} {non_json_payload}")
+
             fake_source = FakeWbSuppliesSource()
             entrypoint.wb_supplies_block.source = fake_source
             sync_status, sync_payload = _post_json(
@@ -286,28 +309,41 @@ def main() -> None:
             )
             if duplicate_status != 200 or duplicate_payload.get("meta", {}).get("cached_total_rows") != 6:
                 raise AssertionError(f"duplicate sync must not duplicate rows, got {duplicate_status} {duplicate_payload}")
+            duplicate_sync = duplicate_payload.get("sync", {})
+            if (
+                duplicate_sync.get("upserted_count") != 0
+                or duplicate_sync.get("unchanged_rows") != 6
+                or duplicate_sync.get("enriched") != 0
+            ):
+                raise AssertionError(f"second incremental sync must skip unchanged enrichment, got {duplicate_sync}")
 
-            fake_source.detail_http_errors = {"1002": 429}
+            fake_source.list_rows[4]["updatedDate"] = "2026-06-09T15:00:00+03:00"
             fake_source.goods_http_errors = {"1003": 429}
             rate_limited_status, rate_limited_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if rate_limited_status != 200 or rate_limited_payload.get("sync", {}).get("upserted_count") != 6:
+            rate_limited_sync = rate_limited_payload.get("sync", {})
+            if (
+                rate_limited_status != 200
+                or rate_limited_sync.get("upserted_count") != 1
+                or rate_limited_sync.get("changed_rows") != 1
+                or rate_limited_sync.get("unchanged_rows") != 5
+                or rate_limited_sync.get("failed_enrich") != 1
+            ):
                 raise AssertionError(
                     f"detail/goods 429 must not fail list sync, got {rate_limited_status} {rate_limited_payload}"
                 )
-            rate_limited_detail_status, rate_limited_detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/1002")
+            rate_limited_detail_status, rate_limited_detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/1003")
             rate_limited_warnings = rate_limited_detail_payload.get("supply", {}).get("warnings", [])
-            if rate_limited_detail_status != 200 or "details fetch failed for 1002: status 429" not in rate_limited_warnings:
-                raise AssertionError(f"detail 429 warning must be cached on the row, got {rate_limited_detail_payload}")
-            fake_source.detail_http_errors = {}
+            if rate_limited_detail_status != 200 or "goods fetch failed for 1003: status 429" not in rate_limited_warnings:
+                raise AssertionError(f"goods 429 warning must be cached on the row, got {rate_limited_detail_payload}")
             fake_source.goods_http_errors = {}
             restore_status, restore_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if restore_status != 200 or restore_payload.get("sync", {}).get("upserted_count") != 6:
+            if restore_status != 200 or restore_payload.get("sync", {}).get("upserted_count") != 0:
                 raise AssertionError(f"restore sync must keep fake cache usable, got {restore_status} {restore_payload}")
 
             main_status, main_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=main_250&limit=20")
@@ -330,6 +366,19 @@ def main() -> None:
             status_options = all_payload.get("filters", {}).get("options", {}).get("statuses", [])
             if [item.get("value") for item in status_options] != [1, 2, 3, 4, 5, 6]:
                 raise AssertionError(f"status selector must expose official statuses 1..6, got {status_options}")
+
+            sort_desc_status, sort_desc_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=100&sort_key=supply_date&sort_dir=desc"
+            )
+            sort_desc_ids = [row["wb_supply_id"] for row in sort_desc_payload.get("rows", [])[:4]]
+            if sort_desc_status != 200 or sort_desc_ids != ["1004", "1003", "1002", "1001"]:
+                raise AssertionError(f"supply_date desc sort must apply before pagination, got {sort_desc_ids}")
+            sort_asc_status, sort_asc_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=100&sort_key=supply_date&sort_dir=asc"
+            )
+            sort_asc_ids = [row["wb_supply_id"] for row in sort_asc_payload.get("rows", [])[:2]]
+            if sort_asc_status != 200 or sort_asc_ids != ["39265492", "39265540"]:
+                raise AssertionError(f"supply_date asc sort must be stable for same date, got {sort_asc_ids}")
 
             warehouse_status, warehouse_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?warehouse_id=507&size_filter=all"
@@ -396,7 +445,10 @@ def main() -> None:
                 "Размер поставки",
                 "Основные от 250 шт",
                 "Показать записей",
+                "Загрузить всю историю",
                 "wb_supplies_path",
+                "wb_supplies_backfill_path",
+                "wb_supplies_sync_status_path",
             ):
                 if operator_status != 200 or expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose WB supplies UI token {expected!r}")

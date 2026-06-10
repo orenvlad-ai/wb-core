@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 from typing import Any, Mapping
 from urllib import error, parse as urllib_parse, request as urllib_request
 
@@ -15,14 +16,39 @@ DEFAULT_WB_SUPPLIES_API_BASE_URL_ENV = "WB_SUPPLIES_API_BASE_URL"
 
 
 class WbSuppliesHttpStatusError(RuntimeError):
-    def __init__(self, status_code: int, body: str) -> None:
+    def __init__(self, status_code: int, body: str, *, content_type: str = "") -> None:
         self.status_code = int(status_code)
         self.body = body
-        super().__init__(f"WB supplies API returned status {status_code}")
+        self.content_type = content_type
+        self.body_prefix = _sanitize_body_prefix(body)
+        message = f"WB supplies API returned status {status_code}"
+        if content_type:
+            message += f"; content-type={content_type}"
+        if self.body_prefix:
+            message += f"; body_prefix={self.body_prefix}"
+        super().__init__(message)
 
 
 class WbSuppliesTransportError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        content_type: str = "",
+        body_prefix: str = "",
+    ) -> None:
+        self.status_code = status_code
+        self.content_type = content_type
+        self.body_prefix = body_prefix
+        details: list[str] = []
+        if status_code is not None:
+            details.append(f"status={status_code}")
+        if content_type:
+            details.append(f"content-type={content_type}")
+        if body_prefix:
+            details.append(f"body_prefix={body_prefix}")
+        super().__init__(message + (": " + "; ".join(details) if details else ""))
 
 
 @dataclass(frozen=True)
@@ -201,19 +227,42 @@ class HttpBackedWbSuppliesSource:
         req = urllib_request.Request(url=url, data=data, headers=headers, method=method)
         try:
             with self._opener(req, timeout=timeout_seconds) as response:
-                raw_body = response.read().decode("utf-8")
+                status_code = _response_status(response)
+                content_type = _response_content_type(response)
+                raw_body = response.read().decode("utf-8", errors="replace")
         except error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")
-            raise WbSuppliesHttpStatusError(exc.code, body_text) from exc
+            raise WbSuppliesHttpStatusError(exc.code, body_text, content_type=_headers_content_type(exc.headers)) from exc
         except error.URLError as exc:
             raise WbSuppliesTransportError(f"WB supplies API transport failed: {exc}") from exc
         except OSError as exc:
             raise WbSuppliesTransportError(f"WB supplies API transport failed: {exc}") from exc
 
+        body_prefix = _sanitize_body_prefix(raw_body)
+        if status_code is not None and (status_code < 200 or status_code >= 300):
+            raise WbSuppliesHttpStatusError(status_code, raw_body, content_type=content_type)
+        if not raw_body.strip():
+            raise WbSuppliesTransportError(
+                "WB supplies API returned empty response",
+                status_code=status_code,
+                content_type=content_type,
+            )
+        if content_type and "json" not in content_type.casefold() and raw_body.lstrip()[:1] not in {"{", "["}:
+            raise WbSuppliesTransportError(
+                "WB supplies API returned non-JSON response",
+                status_code=status_code,
+                content_type=content_type,
+                body_prefix=body_prefix,
+            )
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError as exc:
-            raise WbSuppliesTransportError("WB supplies API returned non-JSON response") from exc
+            raise WbSuppliesTransportError(
+                "WB supplies API returned non-JSON response",
+                status_code=status_code,
+                content_type=content_type,
+                body_prefix=body_prefix,
+            ) from exc
         if isinstance(payload, Mapping) and bool(payload.get("error")):
             detail = str(payload.get("errorText") or payload.get("message") or "unknown WB supplies API error")
             raise WbSuppliesTransportError(f"WB supplies API returned error payload: {detail}")
@@ -253,3 +302,43 @@ def _extract_list_rows(payload: Any, *, row_name: str) -> list[Mapping[str, Any]
                 if nested:
                     return nested
     raise WbSuppliesTransportError(f"WB supplies API returned invalid {row_name} shape")
+
+
+def _response_status(response: Any) -> int | None:
+    for attr_name in ("status", "code"):
+        value = getattr(response, attr_name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    getcode = getattr(response, "getcode", None)
+    if callable(getcode):
+        try:
+            return int(getcode())
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _response_content_type(response: Any) -> str:
+    headers = getattr(response, "headers", None) or getattr(response, "info", lambda: None)()
+    return _headers_content_type(headers)
+
+
+def _headers_content_type(headers: Any) -> str:
+    if headers is None:
+        return ""
+    get = getattr(headers, "get", None)
+    if callable(get):
+        return str(get("Content-Type") or get("content-type") or "").strip()
+    if isinstance(headers, Mapping):
+        return str(headers.get("Content-Type") or headers.get("content-type") or "").strip()
+    return ""
+
+
+def _sanitize_body_prefix(body: str, *, limit: int = 420) -> str:
+    text = str(body or "").replace("\x00", "")
+    text = re.sub(r"(?i)(authorization|token|cookie|password|secret)([\"'=:\s]+)([^\\s\"'<>;,]+)", r"\1\2<redacted>", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
