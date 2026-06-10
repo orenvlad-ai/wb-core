@@ -1917,64 +1917,6 @@
       white-space: nowrap;
     }
 
-    .table-freshness-indicator {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      min-height: 18px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 2px 7px;
-      background: var(--panel-subtle);
-      color: var(--muted);
-      font-size: 10px;
-      font-weight: 800;
-      line-height: 1;
-      white-space: nowrap;
-    }
-
-    .table-freshness-indicator[hidden] {
-      display: none;
-    }
-
-    .table-freshness-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 999px;
-      background: var(--muted);
-    }
-
-    .table-freshness-indicator.is-stale-loading {
-      border-color: rgba(245, 158, 11, 0.44);
-      background: var(--warning-bg);
-      color: var(--warning-text);
-    }
-
-    .table-freshness-indicator.is-stale-loading .table-freshness-dot {
-      background: #fbbf24;
-      animation: table-snapshot-blink 950ms ease-in-out infinite;
-    }
-
-    .table-freshness-indicator.is-fresh {
-      border-color: rgba(34, 197, 94, 0.38);
-      background: var(--success-bg);
-      color: var(--success-text);
-    }
-
-    .table-freshness-indicator.is-fresh .table-freshness-dot {
-      background: #22c55e;
-    }
-
-    .table-freshness-indicator.is-stale-error {
-      border-color: rgba(245, 158, 11, 0.44);
-      background: var(--warning-bg);
-      color: var(--warning-text);
-    }
-
-    .table-freshness-indicator.is-stale-error .table-freshness-dot {
-      background: #fbbf24;
-    }
-
     .seller-top-session {
       display: inline-flex;
       align-items: center;
@@ -4013,10 +3955,6 @@
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
-              <span class="table-freshness-indicator" data-table-freshness-indicator hidden>
-                <span class="table-freshness-dot" aria-hidden="true"></span>
-                <span data-table-freshness-label>акт</span>
-              </span>
               <span class="seller-top-session tone-neutral" data-seller-top-session title="Сессия Seller: неизвестно" aria-label="Сессия Seller: неизвестно">
                 <span class="seller-top-session-dot" aria-hidden="true"></span>
                 <span data-seller-top-session-label>Сессия Seller: неизвестно</span>
@@ -4655,8 +4593,6 @@
     const tableHeadNode = document.querySelector("[data-table-head]");
     const tableBodyNode = document.querySelector("[data-table-body]");
     const tableObjectLabelNode = document.querySelector("[data-table-object-label]");
-    const tableFreshnessIndicatorNode = document.querySelector("[data-table-freshness-indicator]");
-    const tableFreshnessLabelNode = document.querySelector("[data-table-freshness-label]");
     const sellerTopSessionNode = document.querySelector("[data-seller-top-session]");
     const sellerTopSessionLabelNode = document.querySelector("[data-seller-top-session-label]");
     const tableLoadStatusNode = document.querySelector("[data-table-load-status]");
@@ -5666,41 +5602,8 @@
     }
 
     function setTableFreshnessIndicator(mode, payload) {
-      if (!tableFreshnessIndicatorNode || !tableFreshnessLabelNode) {
-        return;
-      }
-      const normalizedMode = String(mode || "");
-      tableFreshnessIndicatorNode.hidden = normalizedMode === "" || normalizedMode === "hidden";
-      tableFreshnessIndicatorNode.classList.remove("is-stale-loading", "is-stale-error", "is-fresh");
-      if (tableFreshnessIndicatorNode.hidden) {
-        tableFreshnessLabelNode.textContent = "";
-        tableFreshnessIndicatorNode.removeAttribute("title");
-        tableFreshnessIndicatorNode.removeAttribute("aria-label");
-        return;
-      }
-      if (normalizedMode === "stale_loading") {
-        tableFreshnessIndicatorNode.classList.add("is-stale-loading");
-        tableFreshnessLabelNode.textContent = "стар";
-        const savedAt = state.tableSnapshot.displayedSavedAt ? formatTimestampDisplay(state.tableSnapshot.displayedSavedAt) : "";
-        const staleLoadingTitle = "Показан последний успешный снимок" + (savedAt ? " от " + savedAt : "") + "; свежая таблица загружается.";
-        tableFreshnessIndicatorNode.title = staleLoadingTitle;
-        tableFreshnessIndicatorNode.setAttribute("aria-label", staleLoadingTitle);
-        return;
-      }
-      if (normalizedMode === "stale_error") {
-        tableFreshnessIndicatorNode.classList.add("is-stale-error");
-        tableFreshnessLabelNode.textContent = "стар";
-        const staleErrorTitle = "Показан последний успешный снимок; свежую таблицу не удалось загрузить.";
-        tableFreshnessIndicatorNode.title = staleErrorTitle;
-        tableFreshnessIndicatorNode.setAttribute("aria-label", staleErrorTitle);
-        return;
-      }
-      tableFreshnessIndicatorNode.classList.add("is-fresh");
-      tableFreshnessLabelNode.textContent = "акт";
-      const meta = (payload && payload.meta) || {};
-      const freshTitle = "актуально" + (meta.snapshot_id ? ": " + meta.snapshot_id : "");
-      tableFreshnessIndicatorNode.title = freshTitle;
-      tableFreshnessIndicatorNode.setAttribute("aria-label", freshTitle);
+      void mode;
+      void payload;
     }
 
     function normalizeIsoDate(value) {
