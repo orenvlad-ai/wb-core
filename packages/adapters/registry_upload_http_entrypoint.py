@@ -1224,7 +1224,7 @@ def _build_handler(
                     _render_sheet_vitrina_supplier_ui(
                         can_delete_shipments=role == "operator",
                         can_edit_order_status=is_operator_embedded,
-                        can_recheck_prices=role == "operator",
+                        can_recheck_prices=is_operator_embedded,
                     ),
                 )
                 return

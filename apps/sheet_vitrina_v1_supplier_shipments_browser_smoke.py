@@ -268,6 +268,7 @@ def main() -> None:
                 expect(frame.locator("[data-delete-shipment]").first).to_have_text("Delete")
                 frame.locator("#shipmentRows tr[data-row]").first.click()
                 expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_be_visible()
+                expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_role("button", name="关闭 / Close / Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
@@ -276,6 +277,8 @@ def main() -> None:
                 supplier_page.goto(f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}", wait_until="domcontentloaded")
                 expect(supplier_page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
                 expect(supplier_page.get_by_role("link", name="Открыть отдельно")).to_have_count(0)
+                expect(supplier_page.locator("#priceCheckButton")).to_have_count(0)
+                expect(supplier_page.get_by_role("button", name="Проверить цены")).to_have_count(0)
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
                 expect(supplier_page.locator("[data-order-status-shipment]")).to_have_count(0)
                 frame.locator("[data-delete-shipment]").first.click()
@@ -358,10 +361,26 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             page.get_by_label("出货日期 / Shipment date / Дата отгрузки").fill("2026-05-14")
             page.get_by_role("button", name="保存 / Save / Сохранить").click()
             expect(page.get_by_text("订单已保存 / Order saved / Заказ сохранён.")).to_be_visible(timeout=5000)
+            expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
             shipment_id = page.locator("#shipmentRows tr[data-row]").first.get_attribute("data-row") or ""
             if not shipment_id:
                 raise AssertionError("supplier browser smoke must create a shipment row before price-check probe")
+            page.get_by_role("button", name="关闭 / Close / Закрыть").click()
+            expect(page.locator("#shipmentCard")).to_be_hidden()
+            page.locator("#shipmentRows tr[data-row]").first.click()
+            expect(page.locator("#shipmentCard")).to_be_visible()
+            expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
+            expect(page.locator("#priceCheckButton")).to_have_count(0)
+            expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+            page.reload(wait_until="domcontentloaded")
+            expect(page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
+            expect(page.locator("#shipmentRows tr[data-row]")).to_have_count(1)
+            page.locator("#shipmentRows tr[data-row]").first.click()
+            expect(page.locator("#shipmentCard")).to_be_visible()
+            expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
+            expect(page.locator("#priceCheckButton")).to_have_count(0)
+            expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
             price_check_probe = page.evaluate(
                 """async ({shipmentsPath, shipmentId}) => {
                     const response = await fetch(shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/price-check", {

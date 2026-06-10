@@ -93,6 +93,20 @@ def main() -> None:
                 operator_supplier_code, _, operator_supplier = _opener_text(operator, f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}")
                 if operator_supplier_code != 200 or "Реестр заказов" not in operator_supplier:
                     raise AssertionError("operator role must access supplier-only module page")
+                if '"can_recheck_prices": false' not in operator_supplier:
+                    raise AssertionError("standalone supplier route must not expose manual price recheck even to operator role")
+                if '<button id="priceCheckButton"' in operator_supplier or ">Проверить цены<" in operator_supplier:
+                    raise AssertionError("standalone supplier route must not render manual price recheck button")
+                operator_embedded_code, _, operator_embedded = _opener_text(
+                    operator,
+                    f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}?embedded=operator",
+                )
+                if (
+                    operator_embedded_code != 200
+                    or '"can_recheck_prices": true' not in operator_embedded
+                    or '<button id="priceCheckButton"' not in operator_embedded
+                ):
+                    raise AssertionError("operator embedded supplier module must keep manual price recheck button")
 
                 supplier = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(CookieJar()))
                 supplier_login_code, _, supplier_login_body = _login(
