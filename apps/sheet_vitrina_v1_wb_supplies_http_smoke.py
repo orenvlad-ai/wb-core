@@ -43,8 +43,30 @@ class FakeWbSuppliesSource:
             {"ID": 507, "name": "Коледино"},
             {"ID": 777, "name": "Электросталь"},
             {"ID": 888, "name": "Казань"},
+            {"ID": 218210, "name": "Обухово"},
+            {"ID": 50045246, "name": "Склад Шушары"},
         ]
         self.list_rows = [
+            {
+                "supplyID": 39265492,
+                "preorderID": 39260001,
+                "createDate": "2026-05-14T10:00:00+03:00",
+                "supplyDate": "2026-05-15T00:00:00+03:00",
+                "factDate": "2026-05-15T13:30:00+03:00",
+                "updatedDate": "2026-06-09T14:00:00+03:00",
+                "statusID": 5,
+                "boxTypeID": 1,
+            },
+            {
+                "supplyID": 39265540,
+                "preorderID": 39260002,
+                "createDate": "2026-05-14T10:00:00+03:00",
+                "supplyDate": "2026-05-15T00:00:00+03:00",
+                "factDate": "2026-05-15T13:30:00+03:00",
+                "updatedDate": "2026-06-09T13:00:00+03:00",
+                "statusID": 5,
+                "boxTypeID": 1,
+            },
             {
                 "supplyID": 1001,
                 "preorderID": 2001,
@@ -83,6 +105,35 @@ class FakeWbSuppliesSource:
             },
         ]
         self.details = {
+            "39265492": {
+                "supplyID": 39265492,
+                "statusID": 5,
+                "warehouseID": 50045246,
+                "warehouseName": "Склад Шушары",
+                "actualWarehouseID": 218210,
+                "actualWarehouseName": "Обухово",
+                "transitWarehouseID": 218210,
+                "transitWarehouseName": "Обухово",
+                "quantity": 7500,
+                "acceptedQuantity": 7483,
+                "acceptanceCost": 0,
+                "transitCost": 11543.52,
+                "paidAcceptanceCoefficient": 0,
+                "boxTypeID": 1,
+            },
+            "39265540": {
+                "supplyID": 39265540,
+                "statusID": 5,
+                "warehouseID": 777,
+                "warehouseName": "Электросталь",
+                "actualWarehouseID": 777,
+                "actualWarehouseName": "Электросталь",
+                "quantity": 9250,
+                "acceptedQuantity": 9237,
+                "acceptanceCost": 0,
+                "paidAcceptanceCoefficient": 0,
+                "boxTypeID": 1,
+            },
             "1001": {
                 "supplyID": 1001,
                 "statusID": 5,
@@ -131,6 +182,14 @@ class FakeWbSuppliesSource:
             },
         }
         self.goods = {
+            "39265492": [
+                {"quantity": 2500, "acceptedQuantity": 2490},
+                {"quantity": 5000, "acceptedQuantity": 4993},
+            ],
+            "39265540": [
+                {"quantity": 4250, "acceptedQuantity": 4239},
+                {"quantity": 5000, "acceptedQuantity": 4998},
+            ],
             "1001": [{"quantity": 500, "acceptedQuantity": 480}],
             "1002": [{"quantity": 100, "acceptedQuantity": 0}],
             "1003": [
@@ -216,7 +275,7 @@ def main() -> None:
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if sync_status != 200 or sync_payload.get("sync", {}).get("upserted_count") != 4:
+            if sync_status != 200 or sync_payload.get("sync", {}).get("upserted_count") != 6:
                 raise AssertionError(f"sync latest 100 must upsert fake rows, got {sync_status} {sync_payload}")
             if fake_source.list_calls[-1]["limit"] != 100 or fake_source.list_calls[-1]["offset"] != 0:
                 raise AssertionError(f"sync must call upstream with limit/offset, got {fake_source.list_calls[-1]}")
@@ -225,7 +284,7 @@ def main() -> None:
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if duplicate_status != 200 or duplicate_payload.get("meta", {}).get("cached_total_rows") != 4:
+            if duplicate_status != 200 or duplicate_payload.get("meta", {}).get("cached_total_rows") != 6:
                 raise AssertionError(f"duplicate sync must not duplicate rows, got {duplicate_status} {duplicate_payload}")
 
             fake_source.detail_http_errors = {"1002": 429}
@@ -234,7 +293,7 @@ def main() -> None:
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if rate_limited_status != 200 or rate_limited_payload.get("sync", {}).get("upserted_count") != 4:
+            if rate_limited_status != 200 or rate_limited_payload.get("sync", {}).get("upserted_count") != 6:
                 raise AssertionError(
                     f"detail/goods 429 must not fail list sync, got {rate_limited_status} {rate_limited_payload}"
                 )
@@ -248,12 +307,12 @@ def main() -> None:
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if restore_status != 200 or restore_payload.get("sync", {}).get("upserted_count") != 4:
+            if restore_status != 200 or restore_payload.get("sync", {}).get("upserted_count") != 6:
                 raise AssertionError(f"restore sync must keep fake cache usable, got {restore_status} {restore_payload}")
 
             main_status, main_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=main_250&limit=20")
             main_ids = {row["wb_supply_id"] for row in main_payload.get("rows", [])}
-            if main_status != 200 or main_ids != {"1001", "1003"}:
+            if main_status != 200 or main_ids != {"39265492", "39265540", "1001", "1003"}:
                 raise AssertionError(f"main_250 must return >=250 rows only, got {main_status} {main_ids} {main_payload}")
             if main_payload.get("summary", {}).get("hidden_by_size_filter_count") != 2:
                 raise AssertionError("summary must expose rows hidden by size filter")
@@ -266,8 +325,11 @@ def main() -> None:
 
             all_status, all_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=100")
             all_ids = {row["wb_supply_id"] for row in all_payload.get("rows", [])}
-            if all_status != 200 or all_ids != {"1001", "1002", "1003", "1004"}:
+            if all_status != 200 or all_ids != {"39265492", "39265540", "1001", "1002", "1003", "1004"}:
                 raise AssertionError(f"all size filter must include unknown quantity rows, got {all_status} {all_payload}")
+            status_options = all_payload.get("filters", {}).get("options", {}).get("statuses", [])
+            if [item.get("value") for item in status_options] != [1, 2, 3, 4, 5, 6]:
+                raise AssertionError(f"status selector must expose official statuses 1..6, got {status_options}")
 
             warehouse_status, warehouse_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?warehouse_id=507&size_filter=all"
@@ -278,7 +340,11 @@ def main() -> None:
             status_status, status_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?status_id=5&size_filter=all"
             )
-            if status_status != 200 or [row["wb_supply_id"] for row in status_payload.get("rows", [])] != ["1001"]:
+            if status_status != 200 or {row["wb_supply_id"] for row in status_payload.get("rows", [])} != {
+                "39265492",
+                "39265540",
+                "1001",
+            }:
                 raise AssertionError(f"status filter must work, got {status_status} {status_payload}")
 
             search_status, search_payload = _get_json(
@@ -288,12 +354,36 @@ def main() -> None:
                 raise AssertionError(f"search must match preorderID/visible number, got {search_status} {search_payload}")
 
             page_status, page_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=20&offset=20")
-            if page_status != 200 or page_payload.get("pagination", {}).get("offset") != 4:
+            if page_status != 200 or page_payload.get("pagination", {}).get("offset") != 6:
                 raise AssertionError(f"oversized offset must clamp to filtered count, got {page_status} {page_payload}")
 
             detail_status, detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/1001")
             if detail_status != 200 or detail_payload.get("supply", {}).get("raw", {}).get("detail", {}).get("quantity") != 500:
                 raise AssertionError(f"detail route must return cached raw evidence, got {detail_status} {detail_payload}")
+            transit_detail_status, transit_detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/39265492")
+            transit_supply = transit_detail_payload.get("supply", {})
+            if (
+                transit_detail_status != 200
+                or transit_supply.get("warehouse_display") != "Склад Шушары → Обухово"
+                or transit_supply.get("warehouse_fact_line") != ""
+                or transit_supply.get("quantity_added") != 7500
+                or transit_supply.get("packed_quantity") != 7500
+                or transit_supply.get("accepted_quantity") != 7483
+                or transit_supply.get("cost_total") != 11543.52
+                or "boxTypeID" in str(transit_supply.get("type_label") or "")
+            ):
+                raise AssertionError(f"39265492 fixture must normalize like WB cabinet, got {transit_supply}")
+            simple_detail_status, simple_detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/39265540")
+            simple_supply = simple_detail_payload.get("supply", {})
+            if (
+                simple_detail_status != 200
+                or simple_supply.get("warehouse_display") != "Электросталь"
+                or simple_supply.get("quantity_added") != 9250
+                or simple_supply.get("packed_quantity") != 9250
+                or simple_supply.get("accepted_quantity") != 9237
+                or simple_supply.get("cost_total") != 0
+            ):
+                raise AssertionError(f"39265540 fixture must keep warehouse/quantities/cost, got {simple_supply}")
 
             operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=factory-order")
             for expected in (

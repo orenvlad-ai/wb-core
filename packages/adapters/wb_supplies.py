@@ -154,6 +154,21 @@ class HttpBackedWbSuppliesSource:
         )
         return _extract_list_rows(payload, row_name="package")
 
+    def fetch_transit_tariffs(self) -> list[Mapping[str, Any]]:
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=self._default_base_url,
+            base_url_env_var=self._base_url_env_var,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        payload = self._request_json(
+            method="GET",
+            url=f"{runtime.base_url}/api/v1/transit-tariffs",
+            token=runtime.token,
+            timeout_seconds=runtime.timeout_seconds,
+        )
+        return _extract_list_rows(payload, row_name="transit_tariffs")
+
     def fetch_warehouses(self) -> list[Mapping[str, Any]]:
         runtime = load_runtime_config(
             token_env_var=self._token_env_var,

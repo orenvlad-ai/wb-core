@@ -6085,7 +6085,7 @@
           wbSuppliesPayload = payload;
           renderWbSupplies(payload);
           if (options && options.initial && payload.meta && payload.meta.cache_empty && !wbSuppliesSyncing) {
-            await syncWbSupplies({ initial: true, limit: 100, offset: 0 });
+            await syncWbSupplies({ initial: true, limit: 1000, offset: 0 });
           }
         } catch (error) {
           setWbSuppliesMessage(
@@ -6105,14 +6105,14 @@
           return;
         }
         const request = {
-          limit: options && options.limit ? Number(options.limit) : 100,
+          limit: options && options.limit ? Number(options.limit) : 1000,
           offset: options && options.offset ? Number(options.offset) : 0,
           enrich_details: true
         };
         wbSuppliesSyncing = true;
         updateWbSuppliesBusyState();
         setWbSuppliesMessage(
-          options && options.initial ? "Первичная загрузка последних 100 поставок..." : "Обновляем поставки...",
+          options && options.initial ? "Первичная загрузка последних 1000 поставок..." : "Обновляем поставки...",
           ""
         );
         try {
@@ -6209,6 +6209,7 @@
           "После фильтров: " + valueOrDash(summary.filtered_rows),
           "Скрыто размером: " + valueOrDash(summary.hidden_by_size_filter_count),
           "Unknown qty: " + valueOrDash(summary.unknown_quantity_count),
+          "История: " + valueOrDash(meta.cache_completeness_label || summary.cache_completeness),
           "Last sync: " + valueOrDash(meta.last_successful_sync_at || meta.last_synced_at)
         ];
         wbSuppliesSummary.innerHTML = items.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
@@ -6241,7 +6242,7 @@
             "<td><span class=\"wb-supplies-status-pill" + statusTone + "\">" + escapeHtml(row.status_label || "—") + "</span></td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbNumber(row.quantity_added)) + "</span>" + quantitySub + "</td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbCoefficient(row.acceptance_coefficient)) + "</span></td>",
-            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(row.acceptance_cost)) + "</span>" + costSub + "</td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(row.cost_total)) + "</span>" + costSub + "</td>",
             "</tr>"
           ].join("");
         }).join("");
@@ -6302,7 +6303,7 @@
         const cachedTotal = Number(pagination.cached_total_rows || 0);
         const hasNext = Boolean(pagination.has_next);
         if (!hasNext && normalizedOffset >= Number(pagination.total || 0) && canLoadMoreWbSupplies(wbSuppliesPayload)) {
-          await syncWbSupplies({ limit: 100, offset: cachedTotal, targetOffset: normalizedOffset });
+          await syncWbSupplies({ limit: 1000, offset: cachedTotal, targetOffset: normalizedOffset });
           return;
         }
         wbSuppliesState.offset = normalizedOffset;
@@ -7273,7 +7274,7 @@
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
-      wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 100, offset: 0 }));
+      wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 1000, offset: 0 }));
       wbSuppliesSearchInput.addEventListener("input", () => {
         window.clearTimeout(wbSuppliesSearchTimer);
         wbSuppliesSearchTimer = window.setTimeout(() => {

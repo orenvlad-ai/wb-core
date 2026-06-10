@@ -91,6 +91,22 @@ def main() -> None:
         if "/api/v1/supplies/101" not in detail_req.full_url or "isPreorderID=false" not in detail_req.full_url:
             raise AssertionError(f"details URL changed unexpectedly: {detail_req.full_url}")
 
+        opener.next_payload = json.dumps(
+            [
+                {
+                    "transitWarehouseName": "Обухово",
+                    "destinationWarehouseName": "Склад Шушары",
+                    "boxTariff": [{"from": 1500, "to": 0, "value": 3.5}],
+                }
+            ]
+        ).encode("utf-8")
+        transit_tariffs = source.fetch_transit_tariffs()
+        if transit_tariffs[0].get("transitWarehouseName") != "Обухово":
+            raise AssertionError(f"transit tariffs endpoint must parse rows, got {transit_tariffs}")
+        transit_req, _ = opener.requests[-1]
+        if transit_req.get_method() != "GET" or "/api/v1/transit-tariffs" not in transit_req.full_url:
+            raise AssertionError(f"transit tariffs URL changed unexpectedly: {transit_req.full_url}")
+
         opener.next_error = urllib_error.HTTPError(
             "https://supplies-api.example.test/api/v1/supplies",
             401,
