@@ -61,17 +61,29 @@ def main(argv: list[str] | None = None) -> int:
     refresh_path = args.refresh_path or os.environ.get("SHEET_VITRINA_REFRESH_HTTP_PATH") or DEFAULT_REFRESH_PATH
     job_path = args.job_path or os.environ.get("SHEET_VITRINA_JOB_HTTP_PATH") or DEFAULT_JOB_PATH
     block = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir)
-    due = block.due_schedules()
+    due = sorted(block.due_schedules(), key=lambda item: str(item[1] or ""))
+    missed_due, selected_due = _select_due_for_tick(due)
     if args.dry_run:
-        _print({"status": "dry_run", "due_count": len(due), "due_schedules": [_public_due(item) for item in due]})
+        _print(
+            {
+                "status": "dry_run",
+                "due_count": len(due),
+                "selected_due_count": len(selected_due),
+                "missed_due_count": len(missed_due),
+                "due_schedules": [_public_due(item) for item in due],
+                "selected_due_schedules": [_public_due(item) for item in selected_due],
+                "missed_due_schedules": [_public_due(item) for item in missed_due],
+            }
+        )
         return 0
     if not due:
         _print({"status": "no_due_schedules", "due_count": 0})
         return 0
+    _mark_missed_due_slots(block, missed_due)
     cookie = _build_web_auth_cookie(os.environ)
     results: list[dict[str, Any]] = []
     exit_code = 0
-    for schedule, due_at in due:
+    for schedule, due_at in selected_due:
         schedule_id = str(schedule.get("id") or "")
         started_at = _utc_now()
         block.mark_run_started(
@@ -132,8 +144,41 @@ def main(argv: list[str] | None = None) -> int:
                 error=str(exc),
             )
             results.append({"schedule_id": schedule_id, "due_at": due_at, "status": "error", "error": str(exc)})
-    _print({"status": "completed" if exit_code == 0 else "error", "due_count": len(due), "results": results})
+    _print(
+        {
+            "status": "completed" if exit_code == 0 else "error",
+            "due_count": len(due),
+            "selected_due_count": len(selected_due),
+            "missed_due_count": len(missed_due),
+            "results": results,
+        }
+    )
     return exit_code
+
+
+def _select_due_for_tick(
+    due: list[tuple[dict[str, Any], str]]
+) -> tuple[list[tuple[dict[str, Any], str]], list[tuple[dict[str, Any], str]]]:
+    if not due:
+        return [], []
+    ordered = sorted(due, key=lambda item: str(item[1] or ""))
+    return ordered[:-1], ordered[-1:]
+
+
+def _mark_missed_due_slots(
+    block: SheetVitrinaV1AutoRefreshSchedulesBlock,
+    missed_due: list[tuple[dict[str, Any], str]],
+) -> None:
+    for missed_schedule, missed_due_at in missed_due:
+        schedule_id = str(missed_schedule.get("id") or "")
+        if not schedule_id:
+            continue
+        block.mark_due_skipped(
+            schedule_id,
+            due_at=str(missed_due_at or ""),
+            reason="Слот расписания пропущен: выбран более поздний накопившийся due slot.",
+            trigger_source="auto_refresh_tick_missed_due",
+        )
 
 
 def _read_env_file(path: Path) -> dict[str, str]:

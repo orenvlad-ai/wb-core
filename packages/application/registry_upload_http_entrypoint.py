@@ -1110,6 +1110,15 @@ class RegistryUploadHttpEntrypoint:
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
         self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
+        if _is_scheduled_auto_refresh_trigger(trigger_source):
+            active_job = self.operator_jobs.active_job(operations=("auto_update",))
+            if active_job:
+                return self._skip_sheet_scheduled_auto_update_for_active_job(
+                    schedule_id=schedule_id,
+                    due_at=due_at,
+                    trigger_source=trigger_source,
+                    active_job=active_job,
+                )
         return self._run_sheet_scheduled_auto_update(
             schedule_id=schedule_id,
             due_at=due_at,
@@ -1174,6 +1183,15 @@ class RegistryUploadHttpEntrypoint:
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
         self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
+        if _is_scheduled_auto_refresh_trigger(trigger_source):
+            active_job = self.operator_jobs.active_job(operations=("auto_update",))
+            if active_job:
+                return self._skip_sheet_scheduled_auto_update_for_active_job(
+                    schedule_id=schedule_id,
+                    due_at=due_at,
+                    trigger_source=trigger_source,
+                    active_job=active_job,
+                )
         return self.operator_jobs.start(
             operation="auto_update",
             runner=lambda log: self._run_sheet_scheduled_auto_update(
@@ -1232,6 +1250,41 @@ class RegistryUploadHttpEntrypoint:
                     )
         schedule, resolved_due_at = due[-1]
         return str(schedule.get("id") or ""), str(resolved_due_at or "")
+
+    def _skip_sheet_scheduled_auto_update_for_active_job(
+        self,
+        *,
+        schedule_id: str,
+        due_at: str,
+        trigger_source: str,
+        active_job: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        active_job_id = str(active_job.get("job_id") or "")
+        reason = (
+            "Слот расписания пропущен: предыдущее автообновление"
+            + (f" job_id={active_job_id}" if active_job_id else "")
+            + " ещё выполняется."
+        )
+        if due_at:
+            self.sheet_auto_refresh_schedules_block.mark_due_skipped(
+                schedule_id,
+                due_at=due_at,
+                reason=reason,
+                trigger_source=trigger_source or "scheduled",
+            )
+        auto_schedule = self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
+        return {
+            "status": "skipped",
+            "operation": "auto_update",
+            "schedule_id": schedule_id,
+            "due_at": due_at,
+            "trigger_source": trigger_source or "scheduled",
+            "reason": reason,
+            "blocker": reason,
+            "already_running_job_id": active_job_id,
+            "active_job": dict(active_job),
+            "auto_schedule": auto_schedule,
+        }
 
     def start_sheet_load_job(self, as_of_date: str | None = None) -> dict[str, Any]:
         del as_of_date
@@ -2802,9 +2855,14 @@ class RegistryUploadHttpEntrypoint:
             ),
         }
         auto_schedules_payload = self.sheet_auto_refresh_schedules_block.build_payload(auto_context=auto_context)
+        auto_schedule_policy = (
+            dict(auto_schedules_payload.get("schedule_policy") or {})
+            if isinstance(auto_schedules_payload.get("schedule_policy"), Mapping)
+            else {}
+        )
         schedule_rows = [
             _sanitize_auto_schedule_row(dict(item))
-            for item in auto_schedules_payload.get("schedules", [])
+            for item in auto_schedules_payload.get("effective_schedules") or auto_schedules_payload.get("schedules", [])
             if isinstance(item, Mapping)
         ]
         enabled_times = [
@@ -2835,7 +2893,11 @@ class RegistryUploadHttpEntrypoint:
             "daily_auto_trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
             "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
             "daily_auto_schedule_mode": SHEET_AUTO_REFRESH_SCHEDULE_MODE,
+            "daily_auto_schedule_mode_type": str(auto_schedules_payload.get("schedule_mode_type") or auto_schedule_policy.get("mode") or "manual"),
             "daily_auto_schedule_source": SHEET_AUTO_REFRESH_SCHEDULE_SOURCE,
+            "daily_auto_schedule_policy": auto_schedule_policy,
+            "daily_auto_interval_options": auto_schedules_payload.get("interval_options") or [],
+            "daily_auto_interval_preview_slots": auto_schedules_payload.get("interval_preview_slots") or [],
             "daily_auto_schedules": schedule_rows,
             "daily_auto_schedule_editable": True,
             "daily_auto_schedule_blocker": "",
@@ -3980,6 +4042,10 @@ def _auto_update_status_label(value: str | None) -> str:
     return "ещё не выполнялся"
 
 
+def _is_scheduled_auto_refresh_trigger(value: str) -> bool:
+    return str(value or "scheduled").strip().lower() == "scheduled"
+
+
 @dataclass
 class SheetVitrinaV1OperatorJob:
     job_id: str
@@ -4095,6 +4161,27 @@ class SheetVitrinaV1OperatorJobStore:
             enumerate(candidates),
             key=lambda item: (
                 str(item[1].finished_at or ""),
+                str(item[1].started_at or ""),
+                item[0],
+            ),
+        )[1]
+        return selected.snapshot()
+
+    def active_job(self, *, operations: tuple[str, ...]) -> dict[str, Any] | None:
+        normalized_operations = {str(value).strip() for value in operations if str(value).strip()}
+        with self._lock:
+            jobs = list(self._jobs.values())
+        candidates = [
+            job
+            for job in jobs
+            if job.status == "running"
+            and (not normalized_operations or job.operation in normalized_operations)
+        ]
+        if not candidates:
+            return None
+        selected = max(
+            enumerate(candidates),
+            key=lambda item: (
                 str(item[1].started_at or ""),
                 item[0],
             ),

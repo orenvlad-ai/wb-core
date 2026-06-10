@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+import threading
 import time
 from types import MethodType
 
@@ -17,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1AutoRefreshSchedulesBlock
+from apps.sheet_vitrina_v1_auto_refresh_tick import _mark_missed_due_slots, _select_due_for_tick
 
 
 NOW = datetime(2026, 4, 20, 9, 0, tzinfo=timezone.utc)
@@ -37,6 +39,8 @@ def main() -> None:
         if initial["next_auto_run_at"] != "2026-04-20T15:00:00Z":
             raise AssertionError(f"next run must use nearest enabled runtime schedule, got {initial}")
         _assert_default_timezone_schedule(runtime_dir)
+        _assert_old_state_read_migrates(runtime_dir / "old-state")
+        _assert_interval_policy(runtime_dir / "interval-policy")
 
         saved = block.save_schedules(
             {
@@ -168,12 +172,168 @@ def main() -> None:
         server_schedule = entrypoint.sheet_auto_refresh_schedules_block.get_schedule("custom_evening")
         if server_schedule["last_run_id"] != str(job["job_id"]) or server_schedule["last_status"] != "success":
             raise AssertionError(f"server scheduled runner must persist row status/run id, got {server_schedule}")
+        _assert_scheduled_parallel_block(entrypoint)
 
         print("web_vitrina_auto_schedules: ok ->", json.dumps({
             "schedule_mode": failed["schedule_mode"],
             "times": [item["local_time_hhmm"] for item in failed["schedules"]],
             "last_auto_job_id": server_schedule["last_run_id"],
         }, ensure_ascii=False))
+
+
+def _assert_old_state_read_migrates(runtime_dir: Path) -> None:
+    block = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir,
+        now_factory=lambda: NOW,
+    )
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    block.path.write_text(
+        json.dumps(
+            {
+                "contract_name": "sheet_vitrina_v1_auto_refresh_schedules",
+                "contract_version": "v1",
+                "schedules": [
+                    {"id": "legacy_11", "enabled": True, "local_time_hhmm": "11:00", "timezone": "Asia/Yekaterinburg"},
+                    {"id": "legacy_20", "enabled": True, "local_time_hhmm": "20:00", "timezone": "Asia/Yekaterinburg"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    payload = block.build_payload()
+    policy = payload.get("schedule_policy") or {}
+    if policy.get("mode") != "manual" or payload.get("schedule_mode_type") != "manual":
+        raise AssertionError(f"old schedule state must read-migrate as manual policy, got {payload}")
+    if [item["local_time_hhmm"] for item in payload["schedules"]] != ["11:00", "20:00"]:
+        raise AssertionError(f"old schedule rows must be preserved, got {payload}")
+
+
+def _assert_interval_policy(runtime_dir: Path) -> None:
+    previews = {
+        3: ["10:00", "13:00", "16:00", "19:00", "22:00"],
+        4: ["10:00", "14:00", "18:00", "22:00"],
+        6: ["10:00", "16:00", "22:00"],
+    }
+    for hours, expected_slots in previews.items():
+        block = SheetVitrinaV1AutoRefreshSchedulesBlock(
+            runtime_dir=runtime_dir / f"{hours}h",
+            now_factory=lambda: datetime(2026, 5, 12, 14, 30, tzinfo=timezone.utc),
+        )
+        payload = block.save_schedules(
+            {
+                "schedule_policy": {"mode": "interval", "interval_hours": hours},
+                "schedules": [
+                    {
+                        "id": "browser_stale_lifecycle",
+                        "enabled": True,
+                        "local_time_hhmm": "03:00",
+                        "last_success_at": "2001-01-01T00:00:00Z",
+                    }
+                ],
+            }
+        )
+        if payload.get("schedule_mode_type") != "interval":
+            raise AssertionError(f"interval mode type mismatch: {payload}")
+        policy = payload.get("schedule_policy") or {}
+        if policy.get("interval_hours") != hours or policy.get("window_start_hhmm") != "10:00" or policy.get("window_end_hhmm") != "22:00":
+            raise AssertionError(f"canonical interval policy mismatch: {payload}")
+        if payload.get("interval_preview_slots") != expected_slots:
+            raise AssertionError(f"interval preview mismatch for {hours}h: {payload}")
+        materialized_times = [item["local_time_hhmm"] for item in payload["schedules"]]
+        if materialized_times != expected_slots:
+            raise AssertionError(f"interval schedules must be materialized from policy, got {payload}")
+        if any(item.get("editable") for item in payload["schedules"]):
+            raise AssertionError(f"interval materialized rows must be read-only, got {payload}")
+        if any(int(item["local_time_hhmm"].split(":", 1)[0]) < 10 or int(item["local_time_hhmm"].split(":", 1)[0]) > 22 for item in payload["schedules"]):
+            raise AssertionError(f"interval schedules must not include night slots, got {payload}")
+        if hours == 4:
+            manualized = block.save_schedules(
+                {
+                    "schedule_policy": {"mode": "manual"},
+                    "schedules": payload["schedules"],
+                }
+            )
+            if manualized.get("schedule_mode_type") != "manual" or any(item.get("schedule_type") != "manual" or item.get("editable") is not True for item in manualized["schedules"]):
+                raise AssertionError(f"switching interval rows back to manual must canonicalize editable manual rows, got {manualized}")
+    block = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir / "invalid",
+        now_factory=lambda: NOW,
+    )
+    try:
+        block.save_schedules({"schedule_policy": {"mode": "interval", "interval_hours": 2}, "schedules": []})
+    except ValueError as exc:
+        if "at least 3" not in str(exc):
+            raise AssertionError(f"invalid minimum interval reason mismatch: {exc}") from exc
+    else:
+        raise AssertionError("interval <3h must be rejected")
+    try:
+        block.save_schedules({"schedule_policy": {"mode": "interval", "interval_hours": 5}, "schedules": []})
+    except ValueError as exc:
+        if "one of 3, 4, 6" not in str(exc):
+            raise AssertionError(f"unsupported interval reason mismatch: {exc}") from exc
+    else:
+        raise AssertionError("unsupported interval must be rejected")
+    due_block = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir / "due",
+        now_factory=lambda: datetime(2026, 5, 12, 14, 30, tzinfo=timezone.utc),
+    )
+    due_block.save_schedules({"schedule_policy": {"mode": "interval", "interval_hours": 4}, "schedules": []})
+    due = due_block.due_schedules(now=datetime(2026, 5, 12, 14, 30, tzinfo=timezone.utc))
+    due_times = [item[0]["local_time_hhmm"] for item in due]
+    if due_times != ["10:00", "14:00", "18:00"]:
+        raise AssertionError(f"interval due slots before 22:00 mismatch: {due}")
+    missed_due, selected_due = _select_due_for_tick(due)
+    if [item[0]["local_time_hhmm"] for item in missed_due] != ["10:00", "14:00"] or [item[0]["local_time_hhmm"] for item in selected_due] != ["18:00"]:
+        raise AssertionError(f"tick must select only latest accumulated due slot, got missed={missed_due}, selected={selected_due}")
+    _mark_missed_due_slots(due_block, missed_due)
+    due_after_missed = due_block.due_schedules(now=datetime(2026, 5, 12, 14, 31, tzinfo=timezone.utc))
+    if [item[0]["local_time_hhmm"] for item in due_after_missed] != ["18:00"]:
+        raise AssertionError(f"missed interval slots must not stay due, got {due_after_missed}")
+    selected_schedule, selected_due_at = selected_due[0]
+    due_block.mark_run_started(
+        str(selected_schedule["id"]),
+        started_at="2026-05-12T14:31:00Z",
+        due_at=selected_due_at,
+        run_id="interval-job",
+        trigger_source="scheduled",
+    )
+    if due_block.due_schedules(now=datetime(2026, 5, 12, 14, 32, tzinfo=timezone.utc)):
+        raise AssertionError("started interval slot must not be launched twice")
+    due_block.mark_run_finished(
+        str(selected_schedule["id"]),
+        finished_at="2026-05-12T14:35:00Z",
+        result_payload={"semantic_status": "success", "semantic_reason": "ok"},
+    )
+    if due_block.due_schedules(now=datetime(2026, 5, 12, 14, 36, tzinfo=timezone.utc)):
+        raise AssertionError("finished interval slot must not be launched twice")
+
+
+def _assert_scheduled_parallel_block(entrypoint: RegistryUploadHttpEntrypoint) -> None:
+    release = threading.Event()
+
+    def hold_auto_update(log: object) -> dict[str, object]:
+        if callable(log):
+            log("fixture active auto update")
+        release.wait(2)
+        return {"status": "success", "semantic_status": "success"}
+
+    active = entrypoint.operator_jobs.start(operation="auto_update", runner=hold_auto_update)
+    try:
+        skipped = entrypoint.start_sheet_scheduled_auto_update_job(
+            schedule_id="custom_evening",
+            due_at="2026-04-20T18:30:00Z",
+            trigger_source="scheduled",
+        )
+        if skipped.get("status") != "skipped" or not skipped.get("already_running_job_id"):
+            raise AssertionError(f"scheduled slot must be blocked while prior auto update is running, got {skipped}")
+        schedule = entrypoint.sheet_auto_refresh_schedules_block.get_schedule("custom_evening")
+        if schedule.get("last_status") != "skipped" or "ещё выполняется" not in str(schedule.get("last_error_summary") or ""):
+            raise AssertionError(f"blocked scheduled slot must persist honest skipped reason, got {schedule}")
+    finally:
+        release.set()
+        _wait_for_job(entrypoint, str(active["job_id"]))
 
 
 def _assert_default_timezone_schedule(runtime_dir: Path) -> None:
