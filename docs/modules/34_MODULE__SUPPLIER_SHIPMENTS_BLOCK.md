@@ -3,8 +3,8 @@ title: "Модуль: supplier_shipments_block"
 doc_id: "WB-CORE-MODULE-34-SUPPLIER-SHIPMENTS-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для блока `Поставки -> От поставщика`: Реестр заказов, supplier invoice parser, server-side nomenclature matching, runtime storage, protected API and supplier-only UI."
-scope: "Server-owned invoice order registry under current WebCore runtime: XLSX parse with openpyxl, deterministic type/model matching through server-side nomenclature, editable shipment card, filesystem-backed original invoice storage under runtime dir, SQLite metadata/lines/nomenclature, operator embedded UI, settings surface and supplier-only role boundary."
+purpose: "Зафиксировать canonical contract для блока `Поставки -> От поставщика`: Реестр заказов, supplier invoice parser, server-side nomenclature matching, persisted invoice price conformity, runtime storage, protected API and supplier-only UI."
+scope: "Server-owned invoice order registry under current WebCore runtime: XLSX parse with openpyxl, deterministic type/model matching through server-side nomenclature, persisted per-line invoice price conformity against current purchase_price_yuan snapshots, editable shipment card, filesystem-backed original invoice storage under runtime dir, SQLite metadata/lines/nomenclature, operator embedded UI, settings surface and supplier-only role boundary."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
@@ -32,6 +32,7 @@ related_endpoints:
   - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
   - "DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/rematch"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/price-check"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
@@ -42,6 +43,7 @@ related_endpoints:
 related_runners:
   - "apps/supplier_invoice_parser_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
+  - "apps/sheet_vitrina_v1_supplier_price_conformity_backfill.py"
   - "apps/registry_upload_http_entrypoint_auth_smoke.py"
   - "apps/registry_upload_http_entrypoint_supplier_auth_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py"
@@ -51,7 +53,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, and preserves deterministic nomenclature matching. Operator nomenclature settings hide legacy SKU/alias/comment fields by default, add nullable purchase_price_yuan, and support operator-only XLSX export/import with dry-run validation; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, preserves deterministic nomenclature matching, and persists per-line invoice price conformity snapshots/statuses against current nomenclature purchase_price_yuan. Operator nomenclature settings hide legacy SKU/alias/comment fields by default, add nullable purchase_price_yuan, and support operator-only XLSX export/import with dry-run validation; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
 ---
 
 # 1. Contract
@@ -68,7 +70,7 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - Runtime truth is server-owned:
   - original XLSX files live under `<runtime_dir>/supplier_invoices/files/<shipment_id>/<safe_filename>`;
   - staged uploads live under `<runtime_dir>/supplier_invoices/uploads/<upload_id>/<safe_filename>`;
-  - SQLite stores upload metadata, shipment headers, editable line details and nomenclature rows.
+  - SQLite stores upload metadata, shipment headers, editable line details, persisted price conformity fields and nomenclature rows.
 - `shipment_date` is the only required manual field after parse. It is rendered as `出货日期 / Shipment date / Дата отгрузки`, is required on create/save, and is validated server-side even though the UI disables save until it is present.
 - Shipment headers persist `order_status` in `sheet_vitrina_v1_supplier_shipments` with non-destructive default `production`. Canonical values are `production` (`На производстве`), `in_transit` (`В пути`) and `accepted_ff` (`Принято на ФФ`). List and detail API responses expose `order_status`; legacy rows without the column/value fall back to `production`.
 - In the operator embedded registry table, `Currency / Валюта` is hidden from the list, `Статус заказа` is shown after `Invoice file` and before `Actions`, and status changes use a narrow status-only PATCH so shipment lines, invoice metadata, source file pointers and matching state are not rebuilt or erased. The status selector is not rendered in the standalone supplier-only view.
@@ -94,7 +96,7 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - Nomenclature rows include `item_id`, `is_active`, `our_sku`, `nm_id`, `nomenclature_name`, `product_type`, `match_key`, nullable `purchase_price_yuan`, `aliases`, `compatible_models_text`, normalized `compatible_model_keys`, `comment`, `created_at`, `updated_at`.
 - Default operator settings UI shows only `Вкл.`, `nmId`, `Номенклатура`, `Тип`, `Match key`, `Цена закупки, ¥`, `Совместимые модели`, `Обновлено` and compact row actions. Legacy backend fields `our_sku`, `aliases` and `comment` remain stored/API-compatible but are not shown in the default table/export.
 - `product_type` canonical values remain `clear`, `anti_spy`, `matte`, `extra`, `other`; the settings UI displays Russian labels and sends canonical values in JSON payloads.
-- `purchase_price_yuan` is an optional fixed factory purchase price in CNY for the nomenclature dictionary only. It accepts blank/null or a numeric value `>= 0` with decimal dot/comma normalization; it is not used by shipment totals, matching, factory-order calculations, reports or web-vitrina metrics.
+- `purchase_price_yuan` is an optional fixed factory purchase price in CNY for the nomenclature dictionary. It accepts blank/null or a numeric value `>= 0` with decimal dot/comma normalization; it is used only by supplier shipment price conformity checks and is not used by shipment totals, matching, factory-order calculations, reports or web-vitrina metrics.
 - `GET /v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx` returns the current dictionary as XLSX with Russian headers and without default legacy `Наш SKU`/`Aliases`/`Комментарий` columns. `POST /v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx` accepts `.xlsx`, supports `?dry_run=1`, returns row-level validation errors/counts, rejects invalid rows atomically with no partial mutation, preserves hidden legacy fields when columns are absent, and keeps DELETE/import disable semantics as soft-disable (`is_active = 0`).
 - If the nomenclature table is empty and current `registry config_v2` is available, active SKU rows seed deterministic entries from `display_name`/`group`/`nm_id`; no SKU is invented beyond current config truth.
 - Active duplicate `match_key` values are rejected. Active product rows require non-empty `match_key` and `nomenclature_name`.
@@ -104,17 +106,29 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - `Match status` in the order card is read-only UI state rendered under `匹配 / Matching / Матчинг`: `已匹配 / Matched / Сопоставлено`, `按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости`, `不明确 / Ambiguous / Неоднозначно`, `未匹配 / Unmatched / Не сопоставлено`, or `手动修改 / Manual override / Ручная правка`.
 - Empty or inactive nomenclature is valid; the UI/API must still preserve unmatched rows for manual operator correction.
 
-# 4. Auth Boundary
+# 4. Invoice Price Conformity
 
-- Operator role can access the full WebCore shell, `Настройки`, nomenclature CRUD/export/import API and supplier shipment APIs including delete/rematch and order-status update.
+- Initial invoice parse/create computes and persists per-line price conformity against the current active nomenclature `purchase_price_yuan`. Browser/localStorage is not a source of truth.
+- Saved line fields include `invoice_price_yuan_snapshot`, `reference_purchase_price_yuan_snapshot`, `price_conformity_status`, `price_conformity_checked_at`, `price_conformity_check_mode`, `price_conformity_reason`, `price_conformity_actor` and `price_conformity_context`.
+- Canonical statuses are `matched`, `mismatched`, `sku_not_found`, `reference_price_missing`, `invoice_price_missing` and `not_checked`. `not_checked` is used for non-product rows and conservative ambiguity such as missing/non-yuan invoice currency.
+- Money comparison is Decimal-based after normalization of strings, spaces, currency symbols and comma/dot decimals. Equality is not checked through float comparison.
+- A confirmed comparison is made only when the invoice currency is recognizably yuan (`RMB`, `CNY`, `CNH`, `YUAN`, `¥`, `元`). Other or missing currencies keep the row unconfirmed with machine-readable reason `currency_not_yuan` or `currency_missing`.
+- Opening an existing saved order through `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}` does not recalculate price conformity; it returns persisted snapshots/statuses.
+- Operator-only `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/price-check` manually rechecks all lines against current nomenclature, updates persisted price fields, writes `check_mode=manual_recheck` and stores the current web actor/context when available.
+- The order card product table includes `Соответствие цены`: `matched` renders a green check, every problem or unconfirmed status renders a red cross with a safe tooltip reason/snapshots.
+- One-time backfill for legacy saved orders is `apps/sheet_vitrina_v1_supplier_price_conformity_backfill.py --runtime-dir <runtime_dir> --apply`. It fills only lines without existing `price_conformity_checked_at`, uses `check_mode=migration_backfill`, is idempotent and preserves unrelated shipment/line fields.
+
+# 5. Auth Boundary
+
+- Operator role can access the full WebCore shell, `Настройки`, nomenclature CRUD/export/import API and supplier shipment APIs including delete/rematch, manual price check and order-status update.
 - Supplier role is optional and configured only through runtime env:
   - `WB_CORE_SUPPLIER_AUTH_USERNAME`
   - `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH`
   - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`
-- Supplier role can access only `/sheet-vitrina-v1/supplier`, read/create/edit supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature CRUD/export/import APIs, supplier delete/rematch, order-status mutation or unrelated `/v1/sheet-vitrina-v1/...` APIs.
+- Supplier role can access only `/sheet-vitrina-v1/supplier`, read/create/edit supplier shipment APIs, invoice downloads, login/logout and needed static/browser assets. It cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature CRUD/export/import APIs, supplier delete/rematch/manual price-check, order-status mutation or unrelated `/v1/sheet-vitrina-v1/...` APIs.
 - Supplier credentials are never committed as plaintext, hashes, cookies or tokens. A live supplier account may use machine-safe username `hanshang` and display label `HanShang Technology` / `Ханшанг`, but the password and PBKDF2-HMAC hash remain runtime-only values outside Git/log output.
 
-# 5. Factory-Order Inbound Source
+# 6. Factory-Order Inbound Source
 
 - The supplier shipment registry is an optional calculation input source for `Поставки -> Расчёты -> Заказ на фабрике`, not a new ЕБД/accepted truth replacement for supplier orders.
 - Manual Excel input for `Товары в пути от фабрики` remains available and is the default factory inbound source (`manual_excel`).

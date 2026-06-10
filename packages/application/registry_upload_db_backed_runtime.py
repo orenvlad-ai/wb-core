@@ -1892,9 +1892,17 @@ class RegistryUploadDbBackedRuntime:
                     comment,
                     match_status,
                     manual_override,
+                    invoice_price_yuan_snapshot,
+                    reference_purchase_price_yuan_snapshot,
+                    price_conformity_status,
+                    price_conformity_checked_at,
+                    price_conformity_check_mode,
+                    price_conformity_reason,
+                    price_conformity_actor,
+                    price_conformity_context_json,
                     raw_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1917,6 +1925,14 @@ class RegistryUploadDbBackedRuntime:
                         str(item.get("comment") or ""),
                         str(item.get("match_status") or ""),
                         1 if bool(item.get("manual_override")) else 0,
+                        item.get("invoice_price_yuan_snapshot"),
+                        item.get("reference_purchase_price_yuan_snapshot"),
+                        str(item.get("price_conformity_status") or "not_checked"),
+                        str(item.get("price_conformity_checked_at") or ""),
+                        str(item.get("price_conformity_check_mode") or "not_checked"),
+                        str(item.get("price_conformity_reason") or "not_checked"),
+                        str(item.get("price_conformity_actor") or ""),
+                        json.dumps(dict(item.get("price_conformity_context") or {}), ensure_ascii=False),
                         json.dumps(dict(item.get("raw") or {}), ensure_ascii=False),
                     )
                     for index, item in enumerate(lines, start=1)
@@ -3455,6 +3471,14 @@ def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "comment": row["comment"] or "",
         "match_status": row["match_status"] or "",
         "manual_override": bool(row["manual_override"]),
+        "invoice_price_yuan_snapshot": row["invoice_price_yuan_snapshot"],
+        "reference_purchase_price_yuan_snapshot": row["reference_purchase_price_yuan_snapshot"],
+        "price_conformity_status": row["price_conformity_status"] or "not_checked",
+        "price_conformity_checked_at": row["price_conformity_checked_at"] or "",
+        "price_conformity_check_mode": row["price_conformity_check_mode"] or "not_checked",
+        "price_conformity_reason": row["price_conformity_reason"] or "not_checked",
+        "price_conformity_actor": row["price_conformity_actor"] or "",
+        "price_conformity_context": _loads_json_object(row["price_conformity_context_json"]),
         "raw": _loads_json_object(row["raw_json"]),
     }
 
@@ -3959,6 +3983,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             comment TEXT,
             match_status TEXT,
             manual_override INTEGER NOT NULL,
+            invoice_price_yuan_snapshot REAL,
+            reference_purchase_price_yuan_snapshot REAL,
+            price_conformity_status TEXT NOT NULL DEFAULT 'not_checked',
+            price_conformity_checked_at TEXT,
+            price_conformity_check_mode TEXT NOT NULL DEFAULT 'not_checked',
+            price_conformity_reason TEXT NOT NULL DEFAULT 'not_checked',
+            price_conformity_actor TEXT,
+            price_conformity_context_json TEXT NOT NULL DEFAULT '{}',
             raw_json TEXT NOT NULL
         );
 
@@ -4027,6 +4059,54 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipments",
         column_name="order_status",
         column_sql="TEXT NOT NULL DEFAULT 'production'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="invoice_price_yuan_snapshot",
+        column_sql="REAL",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="reference_purchase_price_yuan_snapshot",
+        column_sql="REAL",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="price_conformity_status",
+        column_sql="TEXT NOT NULL DEFAULT 'not_checked'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="price_conformity_checked_at",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="price_conformity_check_mode",
+        column_sql="TEXT NOT NULL DEFAULT 'not_checked'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="price_conformity_reason",
+        column_sql="TEXT NOT NULL DEFAULT 'not_checked'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="price_conformity_actor",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="price_conformity_context_json",
+        column_sql="TEXT NOT NULL DEFAULT '{}'",
     )
     _ensure_column(
         conn,

@@ -68,6 +68,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
 - `DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
 - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/rematch`
+- `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/price-check`
 - `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice`
 - `GET /sheet-vitrina-v1/settings`
 - `GET /v1/sheet-vitrina-v1/settings/nomenclature`
