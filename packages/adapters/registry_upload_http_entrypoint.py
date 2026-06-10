@@ -2590,7 +2590,7 @@ def _flatten_query_params(query_string: str) -> dict[str, Any]:
     flattened: dict[str, Any] = {}
     for key, values in query.items():
         if values:
-            flattened[key] = values[-1]
+            flattened[key] = values if len(values) > 1 else values[-1]
     return flattened
 
 

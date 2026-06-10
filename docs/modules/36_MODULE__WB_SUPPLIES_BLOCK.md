@@ -46,7 +46,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental latest-window refresh from resumable full history backfill, preserves enriched raw evidence across list-only sync, supports cache re-normalization/missing-critical enrichment, exposes normalized supply goods composition through the detail route/UI drawer, sorts by supply date before pagination, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental latest-window refresh from resumable full history backfill, adds a targeted planned-supply status refresh for `statusIDs=[2]`, preserves enriched raw evidence across list-only sync, supports cache re-normalization/missing-critical enrichment, exposes normalized supply goods composition through the detail route/UI drawer, supports checkbox multi-status filters with persisted UI state, sorts by normalized supply date before pagination with empty-date rows at the bottom, formats non-current-year dates with the year, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -109,7 +109,8 @@ Returns cached rows only. It does not fetch upstream.
 Query params:
 - `search`;
 - `warehouse_id` or `warehouse`;
-- `status_id`;
+- `status_ids` as comma-separated list or repeated query params;
+- `status_id` as backward-compatible single status filter;
 - `size_filter = main_250 | all | small_lt_250`;
 - `limit = 20 | 50 | 100`;
 - `offset`;
@@ -136,9 +137,13 @@ Body:
 - `mode`, default `incremental_refresh`;
 - `limit`, default `1000`, max `1000`;
 - `enrich`, default `changed_only`; `missing_critical` explicitly retries unchanged rows with missing critical fields; `none` skips enrichment.
+- optional `status_ids` / legacy `status_id` when an explicit status-limited sync is requested;
+- optional `list_params` so the sync response can return the caller's current filtered/sorted list without resetting UI filters.
 
 Algorithm:
 - fetch latest page/window from official WB API at `offset=0`;
+- if the caller did not request an explicit status-limited sync, also fetch a bounded latest page with `statusIDs=[2]` so newly planned supplies are discoverable even when the default latest page behaves differently;
+- merge/dedupe default and targeted raw rows by stable supply/preorder key before upsert;
 - calculate stable `raw_list_hash`;
 - upsert and enrich only new rows and rows whose `updatedDate`/raw hash changed;
 - old unchanged rows with missing critical fields are not retried by ordinary refresh; request `enrich=missing_critical` to run that bounded enrichment lane explicitly;
@@ -232,7 +237,7 @@ Evidence priority:
 4. unknown remains `null` and is not invented.
 
 Filter semantics:
-- `main_250`: rows with numeric `quantity_for_size_filter >= 250`;
+- `main_250`: rows with numeric `quantity_for_size_filter >= 250`, plus status `2` planned rows because their quantity/date evidence can still be preliminary but the row must remain discoverable after refresh;
 - `small_lt_250`: rows with numeric `quantity_for_size_filter < 250`;
 - `all`: all cached rows, including unknown quantity.
 
@@ -262,7 +267,8 @@ Columns:
 Filters:
 - search placeholder `Номер поставки`;
 - warehouse select placeholder `Все склады`;
-- status select placeholder `Все статусы`;
+- status checkbox popup with summary `Статусы: все` or `Статусы: N`;
+- status quick actions `Все`, `Активные` and `Сброс`; `Активные` selects all official statuses except `Не запланировано`;
 - size select label `Размер поставки`;
 - page size select `20 / 50 / 100`.
 
@@ -277,6 +283,8 @@ Known status labels:
 
 The status selector always exposes the official status set `1..6`, even before rows with every status are present in cache. `Виртуальная` is not shown unless upstream evidence adds a specific marker.
 
+Filter state is browser-owned and persisted for search, warehouse, selected statuses, size filter, page size and date sort. `Обновить поставки` must preserve those filters, reapply them after the new payload arrives, and ignore stale in-flight responses if the operator changes filters while a request is running.
+
 First open behavior:
 - GET reads cache;
 - if cache is empty, the authenticated UI starts bounded incremental latest-window `POST .../sync` with `limit=1000`;
@@ -290,6 +298,8 @@ Sorting:
 - `Дата поставки` is clickable and toggles `asc/desc`.
 - Sort is server-side over all filtered rows before pagination.
 - Date sort key priority is `supply_date`, then `fact_date`, then `updated_date`, then `source_created_at`, then stable id.
+- Rows without `supply_date` and `fact_date` stay at the bottom for both `asc` and `desc`; no-date `Не запланировано` rows are last among no-date rows.
+- Date display is year-aware: current business-year dates render as `15 мая`; non-current-year single dates render as `15 мая 2025`; ranges include the year on every side that is not in the current year or when range years differ.
 
 Error diagnostics:
 - WB adapter checks status/content-type/body before JSON parsing.
@@ -324,6 +334,7 @@ Live diagnostics:
 Transit cost limitation as of this module revision:
 - official detail/goods/package evidence for target transit rows exposes route, quantities, `acceptanceCost=0`, `paidAcceptanceCoefficient=0`, `storageCoef` and `deliveryCoef`, but no ready cabinet transit total;
 - `/api/v1/transit-tariffs` exposes route tariffs (`boxTariff`, `palletTariff`, `activeFrom`), but tested formulas such as `boxTariff * quantity`, `boxTariff * acceptedQuantity`, pallet multiples and VAT/no-VAT variants did not stably match cabinet amounts for `39265519`, `39265492`, `39265590`, `39265571`;
+- official Reports / Acceptance Expenses was checked with Analytics/Reports permission through `GET /api/v1/acceptance_report`, task status polling and task download for bounded windows around the target rows; the task completed, but download returned zero rows and did not expose the target values `15523.72`, `11543.52`, `14062.54`, `10726.11` or a usable `incomeId`/supply join key;
 - production must keep transit amount as `—` with `с транзитом` until a ready source or proven formula is available;
 - read-only Seller Portal network diagnostics are allowed, but current live storage state may be expired; no cookies/tokens/storage-state content may be logged.
 
@@ -334,6 +345,8 @@ Targeted smokes:
 - `python3 apps/wb_supplies_goods_composition_smoke.py`;
 - `python3 apps/wb_supplies_backfill_smoke.py`;
 - `python3 apps/wb_supplies_incremental_sync_smoke.py`;
+- `python3 apps/wb_supplies_filter_sort_date_smoke.py`;
+- `python3 apps/wb_supplies_acceptance_expenses_report_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_http_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py`.
 

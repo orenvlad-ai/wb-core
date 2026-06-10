@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from math import ceil
@@ -20,6 +20,7 @@ from packages.adapters.wb_supplies import (
     WbSuppliesTransportError,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.business_time import current_business_date_iso
 
 
 CONTRACT_NAME = "sheet_vitrina_v1_wb_supplies"
@@ -50,6 +51,7 @@ STATUS_LABELS_RU = {
 }
 
 OFFICIAL_STATUS_IDS = (1, 2, 3, 4, 5, 6)
+PLANNED_STATUS_ID = 2
 BOX_TYPE_LABELS_RU = {
     1: "Короб",
 }
@@ -127,22 +129,22 @@ class WbSuppliesBlock:
         state = self.runtime.load_wb_supplies_sync_state()
         active_run = self.runtime.load_active_wb_supplies_sync_run()
         cache_completeness = _cache_completeness(state, rows)
-        sorted_rows = _sort_rows(rows, request["sort_key"], request["sort_dir"])
         after_non_size_filters = [
             row
-            for row in sorted_rows
+            for row in rows
             if _row_matches_search(row, request["search"])
             and _row_matches_warehouse(row, request["warehouse_id"], request["warehouse"])
-            and _row_matches_status(row, request["status_id"])
+            and _row_matches_statuses(row, request["status_ids"])
         ]
+        sorted_rows = _sort_rows(after_non_size_filters, request["sort_key"], request["sort_dir"])
         filtered_rows = [
             row
-            for row in after_non_size_filters
+            for row in sorted_rows
             if _row_matches_size_filter(row, request["size_filter"])
         ]
         offset = min(request["offset"], len(filtered_rows))
         limit = request["limit"]
-        page_rows = filtered_rows[offset : offset + limit]
+        page_rows = [_row_with_display_fields(row) for row in filtered_rows[offset : offset + limit]]
         page_count = ceil(len(filtered_rows) / limit) if filtered_rows else 0
         unknown_quantity_count = sum(1 for row in after_non_size_filters if row.get("quantity_for_size_filter") is None)
         hidden_by_size_filter_count = len(after_non_size_filters) - len(filtered_rows)
@@ -173,6 +175,7 @@ class WbSuppliesBlock:
                     "warehouse_id": request["warehouse_id"],
                     "warehouse": request["warehouse"],
                     "status_id": request["status_id"],
+                    "status_ids": request["status_ids"],
                     "size_filter": request["size_filter"],
                     "limit": limit,
                     "offset": offset,
@@ -247,9 +250,27 @@ class WbSuppliesBlock:
                     dates=request["dates"],
                 )
             )
+            raw_rows = list(list_result.rows)
+            targeted_status_ids: list[int] = []
+            targeted_raw_count = 0
+            if not request["status_ids"]:
+                try:
+                    planned_result = _coerce_list_result(
+                        self.source.list_supplies(
+                            limit=request["limit"],
+                            offset=0,
+                            status_ids=[PLANNED_STATUS_ID],
+                            dates=request["dates"],
+                        )
+                    )
+                    targeted_status_ids = [PLANNED_STATUS_ID]
+                    targeted_raw_count = planned_result.raw_count
+                    raw_rows = _merge_raw_supply_rows(raw_rows, planned_result.rows)
+                except (WbSuppliesHttpStatusError, WbSuppliesTransportError, OfficialApiRuntimeError) as exc:
+                    warnings.append(f"planned status refresh failed; primary latest window used: {_safe_error_message(exc)}")
             warehouse_by_id = _warehouse_map(warehouses)
             sync_result = self._prepare_list_rows_for_upsert(
-                raw_rows=list_result.rows,
+                raw_rows=raw_rows,
                 warehouse_by_id=warehouse_by_id,
                 synced_at=synced_at,
                 enrich=request["enrich"] != "none",
@@ -265,11 +286,11 @@ class WbSuppliesBlock:
                 last_error="",
                 last_limit=list_result.limit,
                 last_offset=0,
-                latest_synced_count=list_result.raw_count,
+                latest_synced_count=len(raw_rows),
                 last_mode=SYNC_MODE_INCREMENTAL_REFRESH,
                 latest_window_synced_at=synced_at,
                 latest_window_limit=list_result.limit,
-                latest_window_returned_count=list_result.raw_count,
+                latest_window_returned_count=len(raw_rows),
                 may_have_more=list_result.raw_count >= list_result.limit,
             )
         except Exception as exc:
@@ -304,7 +325,7 @@ class WbSuppliesBlock:
             offset=0,
             limit=list_result.limit,
             pages_fetched=1,
-            raw_fetched=list_result.raw_count,
+            raw_fetched=len(raw_rows),
             upserted=len(normalized_rows),
             new_rows=sync_result["new_rows"],
             changed_rows=sync_result["changed_rows"],
@@ -314,15 +335,14 @@ class WbSuppliesBlock:
             may_have_more=list_result.raw_count >= list_result.limit,
             logs=[_run_log(completed_at, "latest-window sync completed")],
         )
-        response = self.list_supplies(
-            {
-                "limit": DEFAULT_PAGE_LIMIT,
-                "offset": 0,
-                "size_filter": SIZE_FILTER_MAIN_250,
-                "sort_key": DEFAULT_SORT_KEY,
-                "sort_dir": DEFAULT_SORT_DIR,
-            }
-        )
+        list_params = request.get("list_params") if isinstance(request.get("list_params"), Mapping) else {}
+        response = self.list_supplies(list_params or {
+            "limit": DEFAULT_PAGE_LIMIT,
+            "offset": 0,
+            "size_filter": SIZE_FILTER_MAIN_250,
+            "sort_key": DEFAULT_SORT_KEY,
+            "sort_dir": DEFAULT_SORT_DIR,
+        })
         response["sync"] = {
             "status": "ok",
             "mode": SYNC_MODE_INCREMENTAL_REFRESH,
@@ -331,6 +351,9 @@ class WbSuppliesBlock:
             "limit": list_result.limit,
             "offset": 0,
             "raw_fetched_count": list_result.raw_count,
+            "raw_merged_count": len(raw_rows),
+            "targeted_status_ids": targeted_status_ids,
+            "targeted_raw_fetched_count": targeted_raw_count,
             "upserted_count": len(normalized_rows),
             "new_rows": sync_result["new_rows"],
             "changed_rows": sync_result["changed_rows"],
@@ -958,11 +981,16 @@ class WbSuppliesBlock:
 
 def _normalize_list_request(params: Mapping[str, Any]) -> dict[str, Any]:
     limit = _normalize_limit(params.get("limit"))
+    status_ids = _normalize_status_ids(params.get("status_ids") or params.get("statusIDs"))
+    legacy_status_id = _optional_int(params.get("status_id"))
+    if legacy_status_id is not None and legacy_status_id > 0 and legacy_status_id not in status_ids:
+        status_ids.append(legacy_status_id)
     return {
         "search": str(params.get("search") or "").strip(),
         "warehouse_id": str(params.get("warehouse_id") or "").strip(),
         "warehouse": str(params.get("warehouse") or "").strip(),
-        "status_id": _optional_int(params.get("status_id")),
+        "status_id": legacy_status_id,
+        "status_ids": status_ids,
         "size_filter": _normalize_size_filter(params.get("size_filter")),
         "limit": limit,
         "offset": max(0, _optional_int(params.get("offset")) or 0),
@@ -982,13 +1010,18 @@ def _normalize_sync_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         enrich = "all"
     if enrich not in {"changed_only", "none", "all", "missing_critical"}:
         enrich = "changed_only"
+    status_ids = _normalize_status_ids(payload.get("status_ids") or payload.get("statusIDs"))
+    legacy_status_id = _optional_int(payload.get("status_id"))
+    if legacy_status_id is not None and legacy_status_id > 0 and legacy_status_id not in status_ids:
+        status_ids.append(legacy_status_id)
     return {
         "mode": mode,
         "limit": min(max(_optional_int(payload.get("limit")) or DEFAULT_SYNC_LIMIT, 1), 1000),
         "offset": 0,
         "enrich": enrich,
-        "status_ids": _normalize_status_ids(payload.get("status_ids") or payload.get("statusIDs")),
+        "status_ids": status_ids,
         "dates": [dict(item) for item in payload.get("dates") or [] if isinstance(item, Mapping)],
+        "list_params": dict(payload.get("list_params") or {}) if isinstance(payload.get("list_params"), Mapping) else {},
     }
 
 
@@ -1029,10 +1062,21 @@ def _normalize_sort_dir(value: Any) -> str:
 
 
 def _normalize_status_ids(value: Any) -> list[int]:
-    if not isinstance(value, list):
+    if value is None:
         return []
+    if isinstance(value, str):
+        raw_values: list[Any] = [item.strip() for item in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = []
+        for item in value:
+            if isinstance(item, str) and "," in item:
+                raw_values.extend(part.strip() for part in item.split(","))
+            else:
+                raw_values.append(item)
+    else:
+        raw_values = [value]
     result: list[int] = []
-    for item in value:
+    for item in raw_values:
         status_id = _optional_int(item)
         if status_id is not None and status_id > 0 and status_id not in result:
             result.append(status_id)
@@ -1073,7 +1117,7 @@ def _supply_detail_payload(record: Mapping[str, Any]) -> dict[str, Any]:
         "goods": record.get("raw_goods"),
         "package": record.get("raw_package"),
     }
-    supply = dict(normalized)
+    supply = _row_with_display_fields(normalized)
     supply["raw"] = raw
     raw_goods = record.get("raw_goods") if isinstance(record.get("raw_goods"), list) else None
     raw_package = record.get("raw_package") if isinstance(record.get("raw_package"), list) else None
@@ -1639,12 +1683,16 @@ def _row_matches_warehouse(row: Mapping[str, Any], warehouse_id: str, warehouse:
     return True
 
 
-def _row_matches_status(row: Mapping[str, Any], status_id: int | None) -> bool:
-    return status_id is None or _optional_int(row.get("status_id")) == status_id
+def _row_matches_statuses(row: Mapping[str, Any], status_ids: list[int]) -> bool:
+    if not status_ids:
+        return True
+    return _optional_int(row.get("status_id")) in set(status_ids)
 
 
 def _row_matches_size_filter(row: Mapping[str, Any], size_filter: str) -> bool:
     if size_filter == SIZE_FILTER_ALL:
+        return True
+    if size_filter == SIZE_FILTER_MAIN_250 and _optional_int(row.get("status_id")) == PLANNED_STATUS_ID:
         return True
     quantity = _optional_number(row.get("quantity_for_size_filter"))
     if quantity is None:
@@ -1772,6 +1820,20 @@ def _stable_cache_key(row: Mapping[str, Any]) -> str:
     return _raw_row_cache_id(row)
 
 
+def _merge_raw_supply_rows(primary_rows: list[Mapping[str, Any]], extra_rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    result: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for row in [*primary_rows, *extra_rows]:
+        if not isinstance(row, Mapping):
+            continue
+        cache_key = _stable_cache_key(row)
+        if cache_key in seen:
+            continue
+        seen.add(cache_key)
+        result.append(row)
+    return result
+
+
 def _stable_payload_hash(payload: Any) -> str:
     if payload is None:
         return ""
@@ -1871,21 +1933,114 @@ def _cache_warning(state: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> s
 
 
 def _sort_rows(rows: list[Mapping[str, Any]], sort_key: str, sort_dir: str) -> list[Mapping[str, Any]]:
-    reverse = sort_dir == "desc"
+    if sort_key != "supply_date":
+        sort_key = DEFAULT_SORT_KEY
     if sort_key == "supply_date":
-        return sorted(rows, key=_supply_date_sort_key, reverse=reverse)
-    return sorted(rows, key=_supply_date_sort_key, reverse=True)
+        return sorted(rows, key=lambda row: _supply_date_sort_key(row, sort_dir=sort_dir))
+    return sorted(rows, key=lambda row: _supply_date_sort_key(row, sort_dir=DEFAULT_SORT_DIR))
 
 
-def _supply_date_sort_key(row: Mapping[str, Any]) -> tuple[str, str]:
-    date_value = (
-        str(row.get("supply_date") or "")
-        or str(row.get("fact_date") or "")
-        or str(row.get("updated_date") or "")
-        or str(row.get("source_created_at") or "")
-    )
+def _supply_date_sort_key(row: Mapping[str, Any], *, sort_dir: str) -> tuple[Any, ...]:
+    primary_date = _date_ordinal(row.get("supply_date")) or _date_ordinal(row.get("fact_date"))
+    fact_date = _date_ordinal(row.get("fact_date"))
+    updated_date = _date_ordinal(row.get("updated_date"))
+    created_date = _date_ordinal(row.get("source_created_at"))
     stable_id = str(row.get("visible_number") or row.get("wb_supply_id") or row.get("supply_id") or "")
-    return (date_value, stable_id)
+    empty_rank = 0 if primary_date is not None else 2 if _optional_int(row.get("status_id")) == 1 else 1
+    if sort_dir == "asc":
+        return (
+            empty_rank,
+            primary_date if primary_date is not None else 10**9,
+            fact_date if fact_date is not None else 10**9,
+            updated_date if updated_date is not None else 10**9,
+            created_date if created_date is not None else 10**9,
+            stable_id,
+        )
+    return (
+        empty_rank,
+        -(primary_date or 0),
+        -(fact_date or 0),
+        -(updated_date or 0),
+        -(created_date or 0),
+        _stable_id_desc_key(stable_id),
+    )
+
+
+def _stable_id_desc_key(value: str) -> tuple[int, int | str]:
+    try:
+        return (0, -int(value))
+    except (TypeError, ValueError):
+        return (1, str(value))
+
+
+def _date_ordinal(value: Any) -> int | None:
+    parsed = _parse_iso_date(value)
+    return parsed.toordinal() if parsed else None
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    date_part = str(value or "").strip()[:10]
+    if len(date_part) != 10:
+        return None
+    try:
+        return date.fromisoformat(date_part)
+    except ValueError:
+        return None
+
+
+def _row_with_display_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    supply_date = _parse_iso_date(row.get("supply_date"))
+    fact_date = _parse_iso_date(row.get("fact_date"))
+    interface_year = _current_business_year()
+    result["supply_date_display"] = _format_ru_supply_date(supply_date, interface_year=interface_year)
+    result["fact_date_display"] = _format_ru_supply_date(fact_date, interface_year=interface_year)
+    result["supply_date_range_display"] = _format_ru_supply_date_range(
+        supply_date,
+        fact_date,
+        interface_year=interface_year,
+    )
+    return result
+
+
+def _current_business_year() -> int:
+    try:
+        return int(current_business_date_iso()[:4])
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc).year
+
+
+def _format_ru_supply_date_range(start: date | None, end: date | None, *, interface_year: int) -> str:
+    if start and end and start != end:
+        include_year = not (start.year == end.year == interface_year)
+        return (
+            f"{_format_ru_supply_date(start, interface_year=interface_year, force_year=include_year)}"
+            f" → {_format_ru_supply_date(end, interface_year=interface_year, force_year=include_year)}"
+        )
+    return _format_ru_supply_date(start or end, interface_year=interface_year) or "—"
+
+
+def _format_ru_supply_date(value: date | None, *, interface_year: int, force_year: bool = False) -> str:
+    if value is None:
+        return ""
+    months = (
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    )
+    text = f"{value.day} {months[value.month - 1]}"
+    if force_year or value.year != interface_year:
+        text = f"{text} {value.year}"
+    return text
 
 
 def _public_sync_state(state: Mapping[str, Any], cache_completeness: Mapping[str, Any]) -> dict[str, Any]:
@@ -1930,6 +2085,10 @@ def _to_block_error(exc: Exception) -> WbSuppliesBlockError:
         status = 503 if "required env WB_API_TOKEN is not set" in message else 502
         return WbSuppliesBlockError(message, http_status=status)
     return WbSuppliesBlockError(f"WB supplies runtime failed: {exc}", http_status=500)
+
+
+def _safe_error_message(exc: Exception) -> str:
+    return str(exc or "").replace("\n", " ")[:500]
 
 
 def _friendly_http_error_message(status_code: int, *, content_type: str = "", body_prefix: str = "") -> str:

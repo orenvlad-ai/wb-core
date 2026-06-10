@@ -116,6 +116,14 @@ class FakeWbSuppliesSource:
                 "updatedDate": "2026-06-10T12:00:00+03:00",
                 "statusID": 6,
             },
+            {
+                "supplyID": 1005,
+                "preorderID": 2005,
+                "createDate": "2026-06-10T19:00:00+03:00",
+                "updatedDate": "2026-06-10T19:00:00+03:00",
+                "statusID": 1,
+                "boxTypeID": 2,
+            },
         ]
         self.details = {
             "39265492": {
@@ -193,6 +201,14 @@ class FakeWbSuppliesSource:
                 "actualWarehouseID": 888,
                 "actualWarehouseName": "Казань",
             },
+            "1005": {
+                "supplyID": 1005,
+                "statusID": 1,
+                "warehouseID": 888,
+                "warehouseName": "Казань",
+                "actualWarehouseID": 888,
+                "actualWarehouseName": "Казань",
+            },
         }
         self.goods = {
             "39265492": [
@@ -216,9 +232,13 @@ class FakeWbSuppliesSource:
 
     def list_supplies(self, *, limit=100, offset=0, status_ids=None, dates=None):
         self.list_calls.append({"limit": limit, "offset": offset, "status_ids": status_ids or [], "dates": dates or []})
+        rows = self.list_rows
+        if status_ids:
+            wanted = {int(item) for item in status_ids}
+            rows = [row for row in rows if int(row.get("statusID") or 0) in wanted]
         return WbSuppliesListResult(
-            rows=self.list_rows[offset : offset + limit],
-            raw_count=len(self.list_rows[offset : offset + limit]),
+            rows=rows[offset : offset + limit],
+            raw_count=len(rows[offset : offset + limit]),
             limit=limit,
             offset=offset,
             status_ids=list(status_ids or []),
@@ -236,6 +256,8 @@ class FakeWbSuppliesSource:
         if key in self.goods_http_errors:
             raise WbSuppliesHttpStatusError(self.goods_http_errors[key], "{}")
         if key == "1004":
+            raise WbSuppliesTransportError("goods unavailable in smoke")
+        if key == "1005":
             raise WbSuppliesTransportError("goods unavailable in smoke")
         return self.goods.get(key, [])[offset : offset + limit]
 
@@ -298,21 +320,23 @@ def main() -> None:
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if sync_status != 200 or sync_payload.get("sync", {}).get("upserted_count") != 6:
+            if sync_status != 200 or sync_payload.get("sync", {}).get("upserted_count") != 7:
                 raise AssertionError(f"sync latest 100 must upsert fake rows, got {sync_status} {sync_payload}")
-            if fake_source.list_calls[-1]["limit"] != 100 or fake_source.list_calls[-1]["offset"] != 0:
-                raise AssertionError(f"sync must call upstream with limit/offset, got {fake_source.list_calls[-1]}")
+            if not any(call["limit"] == 100 and call["offset"] == 0 and call["status_ids"] == [] for call in fake_source.list_calls):
+                raise AssertionError(f"sync must call upstream unfiltered latest window, got {fake_source.list_calls}")
+            if not any(call["status_ids"] == [2] for call in fake_source.list_calls):
+                raise AssertionError(f"sync must call targeted planned status refresh, got {fake_source.list_calls}")
 
             duplicate_status, duplicate_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
             )
-            if duplicate_status != 200 or duplicate_payload.get("meta", {}).get("cached_total_rows") != 6:
+            if duplicate_status != 200 or duplicate_payload.get("meta", {}).get("cached_total_rows") != 7:
                 raise AssertionError(f"duplicate sync must not duplicate rows, got {duplicate_status} {duplicate_payload}")
             duplicate_sync = duplicate_payload.get("sync", {})
             if (
                 duplicate_sync.get("upserted_count") != 0
-                or duplicate_sync.get("unchanged_rows") != 6
+                or duplicate_sync.get("unchanged_rows") != 7
                 or duplicate_sync.get("enriched") != 0
             ):
                 raise AssertionError(f"second incremental sync must skip unchanged enrichment, got {duplicate_sync}")
@@ -328,7 +352,7 @@ def main() -> None:
                 rate_limited_status != 200
                 or rate_limited_sync.get("upserted_count") != 1
                 or rate_limited_sync.get("changed_rows") != 1
-                or rate_limited_sync.get("unchanged_rows") != 5
+                or rate_limited_sync.get("unchanged_rows") != 6
                 or rate_limited_sync.get("failed_enrich") != 1
             ):
                 raise AssertionError(
@@ -348,11 +372,11 @@ def main() -> None:
 
             main_status, main_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=main_250&limit=20")
             main_ids = {row["wb_supply_id"] for row in main_payload.get("rows", [])}
-            if main_status != 200 or main_ids != {"39265492", "39265540", "1001", "1003"}:
-                raise AssertionError(f"main_250 must return >=250 rows only, got {main_status} {main_ids} {main_payload}")
+            if main_status != 200 or main_ids != {"39265492", "39265540", "1001", "1002", "1003"}:
+                raise AssertionError(f"main_250 must keep planned rows visible plus >=250 rows, got {main_status} {main_ids} {main_payload}")
             if main_payload.get("summary", {}).get("hidden_by_size_filter_count") != 2:
                 raise AssertionError("summary must expose rows hidden by size filter")
-            if main_payload.get("summary", {}).get("unknown_quantity_count") != 1:
+            if main_payload.get("summary", {}).get("unknown_quantity_count") != 2:
                 raise AssertionError("summary must expose unknown quantity rows")
 
             small_status, small_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=small_lt_250")
@@ -361,7 +385,7 @@ def main() -> None:
 
             all_status, all_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=100")
             all_ids = {row["wb_supply_id"] for row in all_payload.get("rows", [])}
-            if all_status != 200 or all_ids != {"39265492", "39265540", "1001", "1002", "1003", "1004"}:
+            if all_status != 200 or all_ids != {"39265492", "39265540", "1001", "1002", "1003", "1004", "1005"}:
                 raise AssertionError(f"all size filter must include unknown quantity rows, got {all_status} {all_payload}")
             status_options = all_payload.get("filters", {}).get("options", {}).get("statuses", [])
             if [item.get("value") for item in status_options] != [1, 2, 3, 4, 5, 6]:
@@ -373,12 +397,17 @@ def main() -> None:
             sort_desc_ids = [row["wb_supply_id"] for row in sort_desc_payload.get("rows", [])[:4]]
             if sort_desc_status != 200 or sort_desc_ids != ["1004", "1003", "1002", "1001"]:
                 raise AssertionError(f"supply_date desc sort must apply before pagination, got {sort_desc_ids}")
+            sort_desc_last_ids = [row["wb_supply_id"] for row in sort_desc_payload.get("rows", [])[-2:]]
+            if sort_desc_last_ids[-1:] != ["1005"]:
+                raise AssertionError(f"no-date rows must stay at bottom for desc sort, got {sort_desc_last_ids}")
             sort_asc_status, sort_asc_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=100&sort_key=supply_date&sort_dir=asc"
             )
             sort_asc_ids = [row["wb_supply_id"] for row in sort_asc_payload.get("rows", [])[:2]]
             if sort_asc_status != 200 or sort_asc_ids != ["39265492", "39265540"]:
                 raise AssertionError(f"supply_date asc sort must be stable for same date, got {sort_asc_ids}")
+            if [row["wb_supply_id"] for row in sort_asc_payload.get("rows", [])[-1:]] != ["1005"]:
+                raise AssertionError(f"no-date rows must stay at bottom for asc sort, got {sort_asc_payload}")
 
             warehouse_status, warehouse_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?warehouse_id=507&size_filter=all"
@@ -395,6 +424,26 @@ def main() -> None:
                 "1001",
             }:
                 raise AssertionError(f"status filter must work, got {status_status} {status_payload}")
+            multi_status, multi_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?status_ids=2,5&size_filter=all"
+            )
+            if multi_status != 200 or {row["wb_supply_id"] for row in multi_payload.get("rows", [])} != {
+                "39265492",
+                "39265540",
+                "1001",
+                "1002",
+            }:
+                raise AssertionError(f"multi-status filter must work, got {multi_status} {multi_payload}")
+            repeated_status, repeated_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?status_ids=2&status_ids=5&size_filter=all"
+            )
+            if repeated_status != 200 or {row["wb_supply_id"] for row in repeated_payload.get("rows", [])} != {
+                "39265492",
+                "39265540",
+                "1001",
+                "1002",
+            }:
+                raise AssertionError(f"repeated status_ids filter must work, got {repeated_status} {repeated_payload}")
 
             search_status, search_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search=2002&size_filter=all"
@@ -403,7 +452,7 @@ def main() -> None:
                 raise AssertionError(f"search must match preorderID/visible number, got {search_status} {search_payload}")
 
             page_status, page_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=20&offset=20")
-            if page_status != 200 or page_payload.get("pagination", {}).get("offset") != 6:
+            if page_status != 200 or page_payload.get("pagination", {}).get("offset") != 7:
                 raise AssertionError(f"oversized offset must clamp to filtered count, got {page_status} {page_payload}")
 
             detail_status, detail_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}/1001")
@@ -451,7 +500,8 @@ def main() -> None:
                 "Read-only список поставок WB API / FBW Supplies",
                 "Номер поставки",
                 "Все склады",
-                "Все статусы",
+                "Статусы: все",
+                "Активные",
                 "Размер поставки",
                 "Основные от 250 шт",
                 "Показать записей",

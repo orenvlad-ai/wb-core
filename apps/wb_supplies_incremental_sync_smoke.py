@@ -19,6 +19,7 @@ class IncrementalSource:
     def __init__(self) -> None:
         self.detail_calls: list[str] = []
         self.goods_calls: list[str] = []
+        self.list_calls: list[dict[str, object]] = []
         self.rows = [
             {
                 "supplyID": 7001,
@@ -46,7 +47,12 @@ class IncrementalSource:
         return [{"ID": 507, "name": "Коледино"}, {"ID": 777, "name": "Электросталь"}]
 
     def list_supplies(self, *, limit=100, offset=0, status_ids=None, dates=None):
-        page = self.rows[offset : offset + limit]
+        self.list_calls.append({"limit": limit, "offset": offset, "status_ids": list(status_ids or []), "dates": list(dates or [])})
+        rows = self.rows
+        if status_ids:
+            wanted = {int(item) for item in status_ids}
+            rows = [row for row in rows if int(row.get("statusID") or 0) in wanted]
+        page = rows[offset : offset + limit]
         return WbSuppliesListResult(
             rows=page,
             raw_count=len(page),
@@ -80,6 +86,25 @@ class IncrementalSource:
 
     def fetch_supply_package(self, supply_id):
         return []
+
+
+class TargetedPlannedSource(IncrementalSource):
+    def list_supplies(self, *, limit=100, offset=0, status_ids=None, dates=None):
+        self.list_calls.append({"limit": limit, "offset": offset, "status_ids": list(status_ids or []), "dates": list(dates or [])})
+        if status_ids:
+            wanted = {int(item) for item in status_ids}
+            rows = [row for row in self.rows if int(row.get("statusID") or 0) in wanted]
+        else:
+            rows = [row for row in self.rows if int(row.get("statusID") or 0) != 2]
+        page = rows[offset : offset + limit]
+        return WbSuppliesListResult(
+            rows=page,
+            raw_count=len(page),
+            limit=limit,
+            offset=offset,
+            status_ids=list(status_ids or []),
+            dates=list(dates or []),
+        )
 
 
 def main() -> None:
@@ -126,6 +151,23 @@ def main() -> None:
             or source.detail_calls != ["7002"]
         ):
             raise AssertionError(f"changed row must be upserted/enriched only once, got {changed_sync}")
+
+    with TemporaryDirectory(prefix="wb-supplies-incremental-planned-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        source = TargetedPlannedSource()
+        block = WbSuppliesBlock(runtime=runtime, source=source, timestamp_factory=_timestamp_factory())
+
+        planned = block.sync_supplies({"limit": 1000})
+        planned_sync = planned.get("sync", {})
+        planned_rows = block.list_supplies({"status_ids": "2", "size_filter": "all"}).get("rows", [])
+        if (
+            planned_sync.get("new_rows") != 2
+            or planned_sync.get("targeted_status_ids") != [2]
+            or planned_sync.get("targeted_raw_fetched_count") != 1
+            or [row.get("wb_supply_id") for row in planned_rows] != ["7002"]
+            or not any(call["status_ids"] == [2] for call in source.list_calls)
+        ):
+            raise AssertionError(f"targeted planned refresh must upsert planned rows, got {planned_sync} {planned_rows} {source.list_calls}")
 
     with TemporaryDirectory(prefix="wb-supplies-incremental-missing-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
