@@ -440,7 +440,7 @@ class WbSuppliesBlock:
         raw_detail = record.get("raw_detail") if isinstance(record.get("raw_detail"), Mapping) else None
         raw_goods = record.get("raw_goods") if isinstance(record.get("raw_goods"), list) else None
         raw_package = record.get("raw_package") if isinstance(record.get("raw_package"), list) else None
-        lookup_id, is_preorder_id = _resolve_upstream_lookup_id(raw_detail or raw_list or normalized)
+        lookup_id, is_preorder_id = _resolve_upstream_lookup_id_from_sources(raw_detail, raw_list, normalized)
         warnings: list[str] = []
         fetched_any = False
         attempted = False
@@ -1408,10 +1408,31 @@ def _normalize_supply_row(
 def _resolve_upstream_lookup_id(row: Mapping[str, Any]) -> tuple[str, bool]:
     supply_id = _id_to_string(_first_value(row, "supplyID", "supplyId", "supply_id", "ID", "id"))
     if supply_id:
+        if supply_id.startswith("supply:"):
+            return supply_id.removeprefix("supply:"), False
+        if supply_id.startswith("preorder:"):
+            return supply_id.removeprefix("preorder:"), True
         return supply_id, False
     preorder_id = _id_to_string(_first_value(row, "preorderID", "preorderId", "preorder_id", "orderID", "orderId"))
     if preorder_id:
+        if preorder_id.startswith("preorder:"):
+            return preorder_id.removeprefix("preorder:"), True
         return preorder_id, True
+    return "", False
+
+
+def _resolve_upstream_lookup_id_from_sources(*rows: Mapping[str, Any] | None) -> tuple[str, bool]:
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        lookup_id, is_preorder_id = _resolve_upstream_lookup_id(row)
+        if lookup_id:
+            return lookup_id, is_preorder_id
+        cache_key = _id_to_string(row.get("cache_key"))
+        if cache_key.startswith("supply:"):
+            return cache_key.removeprefix("supply:"), False
+        if cache_key.startswith("preorder:"):
+            return cache_key.removeprefix("preorder:"), True
     return "", False
 
 

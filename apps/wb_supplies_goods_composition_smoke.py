@@ -42,7 +42,6 @@ class LazyGoodsSource:
     def fetch_supply_details(self, supply_id, *, is_preorder_id=False):
         self.detail_calls.append(str(supply_id))
         return {
-            "supplyID": 39265492,
             "statusID": 5,
             "boxTypeID": 1,
             "warehouseID": 50045246,
