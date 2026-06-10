@@ -59,6 +59,7 @@ class IncrementalSource:
     def fetch_supply_details(self, supply_id, *, is_preorder_id=False):
         self.detail_calls.append(str(supply_id))
         row = next(item for item in self.rows if str(item["supplyID"]) == str(supply_id))
+        quantity = row.get("quantity", 0)
         return {
             "supplyID": row["supplyID"],
             "statusID": row["statusID"],
@@ -66,15 +67,16 @@ class IncrementalSource:
             "warehouseName": row["warehouseName"],
             "actualWarehouseID": row["warehouseID"],
             "actualWarehouseName": row["warehouseName"],
-            "quantity": row["quantity"],
-            "acceptedQuantity": row["quantity"] - 5,
+            "quantity": quantity,
+            "acceptedQuantity": max(0, quantity - 5),
             "acceptanceCost": 0,
         }
 
     def fetch_supply_goods(self, supply_id, *, limit=1000, offset=0, is_preorder_id=False):
         self.goods_calls.append(str(supply_id))
         row = next(item for item in self.rows if str(item["supplyID"]) == str(supply_id))
-        return [{"quantity": row["quantity"], "acceptedQuantity": row["quantity"] - 5}]
+        quantity = row.get("quantity", 0)
+        return [{"quantity": quantity, "acceptedQuantity": max(0, quantity - 5)}]
 
     def fetch_supply_package(self, supply_id):
         return []
@@ -124,6 +126,42 @@ def main() -> None:
             or source.detail_calls != ["7002"]
         ):
             raise AssertionError(f"changed row must be upserted/enriched only once, got {changed_sync}")
+
+    with TemporaryDirectory(prefix="wb-supplies-incremental-missing-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        source = IncrementalSource()
+        for row in source.rows:
+            row.pop("quantity", None)
+        block = WbSuppliesBlock(runtime=runtime, source=source, timestamp_factory=_timestamp_factory())
+
+        backfill_run = block.run_full_backfill({"limit": 1000, "enrich": False, "run_id": "missing-critical-backfill"})
+        if backfill_run.get("status") != "success" or backfill_run.get("enriched") != 0:
+            raise AssertionError(f"list-only backfill must not enrich missing rows, got {backfill_run}")
+        source.detail_calls.clear()
+        source.goods_calls.clear()
+
+        latest = block.sync_supplies({"limit": 1000})
+        latest_sync = latest.get("sync", {})
+        if (
+            latest_sync.get("new_rows") != 0
+            or latest_sync.get("changed_rows") != 0
+            or latest_sync.get("unchanged_rows") != 2
+            or latest_sync.get("enriched") != 0
+            or latest_sync.get("upserted_count") != 0
+            or source.detail_calls
+            or source.goods_calls
+        ):
+            raise AssertionError(f"default incremental must skip old missing-critical rows, got {latest_sync}")
+
+        explicit = block.sync_supplies({"limit": 1000, "enrich": "missing_critical"})
+        explicit_sync = explicit.get("sync", {})
+        if (
+            explicit_sync.get("changed_rows") != 2
+            or explicit_sync.get("enriched") != 2
+            or source.detail_calls != ["7001", "7002"]
+            or source.goods_calls != ["7001", "7002"]
+        ):
+            raise AssertionError(f"explicit missing-critical enrichment must enrich missing rows, got {explicit_sync}")
 
     print("wb_supplies_incremental_sync_smoke: OK")
 
