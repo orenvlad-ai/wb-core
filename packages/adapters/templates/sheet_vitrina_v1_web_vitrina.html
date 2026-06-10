@@ -1136,9 +1136,9 @@
 
     .auto-schedule-policy {
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+      align-items: flex-end;
+      justify-content: flex-start;
+      gap: 10px;
       flex-wrap: wrap;
       min-width: 0;
       padding: 8px;
@@ -1147,81 +1147,32 @@
       background: var(--panel-subtle);
     }
 
-    .auto-schedule-mode-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 2px;
-      padding: 2px;
-      border: 1px solid rgba(139, 92, 246, 0.34);
-      border-radius: 6px;
-      background: rgba(17, 24, 39, 0.38);
-    }
-
-    .auto-schedule-mode-button {
-      min-height: 28px;
-      padding: 5px 8px;
-      border: 0;
-      border-radius: 4px;
-      background: transparent;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 800;
-      line-height: 1.2;
-      cursor: pointer;
-    }
-
-    .auto-schedule-mode-button.is-active {
-      background: rgba(139, 92, 246, 0.22);
-      color: var(--text);
-      box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.28);
-    }
-
-    .auto-schedule-interval-controls {
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 8px;
-      flex-wrap: wrap;
-      min-width: 0;
-    }
-
-    .auto-schedule-interval-controls[hidden] {
-      display: none;
-    }
-
-    .auto-schedule-interval-label {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 700;
-    }
-
-    .auto-schedule-interval-label select {
-      min-width: 92px;
-    }
-
-    .auto-schedule-preview {
-      display: flex;
-      align-items: center;
+    .auto-schedule-policy-field {
+      display: grid;
       gap: 4px;
-      flex-wrap: wrap;
-      min-width: 0;
+      min-width: min(100%, 220px);
+      max-width: 320px;
     }
 
-    .auto-schedule-preview-chip {
-      display: inline-flex;
-      align-items: center;
-      min-height: 22px;
-      padding: 3px 6px;
-      border: 1px solid rgba(167, 139, 250, 0.28);
-      border-radius: 5px;
-      color: var(--text);
-      background: rgba(139, 92, 246, 0.14);
+    .auto-schedule-policy-label {
+      color: var(--muted);
       font-size: 11px;
       font-weight: 800;
-      line-height: 1.1;
+    }
+
+    .auto-schedule-policy-select {
+      min-width: 200px;
+    }
+
+    .auto-schedule-window-hint {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .auto-schedule-window-hint[hidden] {
+      display: none;
     }
 
     .auto-schedule-title {
@@ -4184,26 +4135,20 @@
       </summary>
       <div class="auto-schedule-body">
         <div class="auto-schedule-policy" data-vitrina-auto-policy>
-          <div class="auto-schedule-mode-toggle" role="group" aria-label="Режим расписания автообновлений">
-            <button class="auto-schedule-mode-button" type="button" data-vitrina-auto-mode="manual">Ручные триггеры</button>
-            <button class="auto-schedule-mode-button" type="button" data-vitrina-auto-mode="interval">Интервал</button>
-          </div>
-          <div class="auto-schedule-interval-controls" data-vitrina-auto-interval-controls hidden>
-            <label class="auto-schedule-interval-label">
-              <span>Каждые</span>
-              <select class="input" data-vitrina-auto-interval>
-                <option value="3">3 часа</option>
-                <option value="4">4 часа</option>
-                <option value="6">6 часов</option>
-              </select>
-            </label>
-            <div class="auto-schedule-preview" data-vitrina-auto-preview aria-label="Слоты интервала"></div>
-          </div>
+          <label class="auto-schedule-policy-field">
+            <span class="auto-schedule-policy-label">Настройка расписания</span>
+            <select class="input auto-schedule-policy-select" data-vitrina-auto-policy-select>
+              <option value="manual">Ручные настройки</option>
+              <option value="interval:3">Каждые 3 часа</option>
+              <option value="interval:4">Каждые 4 часа</option>
+              <option value="interval:6">Каждые 6 часов</option>
+            </select>
+          </label>
+          <p class="auto-schedule-window-hint" data-vitrina-auto-window-hint hidden>Окно автообновлений: 10:00–22:00, Asia/Yekaterinburg.</p>
         </div>
         <div class="auto-schedule-actions">
           <button class="button secondary" type="button" data-vitrina-auto-add>Добавить строку</button>
           <button class="button secondary" type="button" data-vitrina-auto-save>Сохранить</button>
-          <button class="button secondary" type="button" data-vitrina-auto-reload>Обновить</button>
         </div>
         <div class="auto-schedule-table-wrap">
           <table class="auto-schedule-table">
@@ -4790,7 +4735,6 @@
     const feedbacksAutoLogBodyNode = document.querySelector("[data-feedbacks-auto-log-body]");
     const vitrinaAutoAddButton = document.querySelector("[data-vitrina-auto-add]");
     const vitrinaAutoSaveButton = document.querySelector("[data-vitrina-auto-save]");
-    const vitrinaAutoReloadButton = document.querySelector("[data-vitrina-auto-reload]");
     const vitrinaAutoMetaNode = document.querySelector("[data-vitrina-auto-schedule-meta]");
     const vitrinaAutoStatusNode = document.querySelector("[data-vitrina-auto-status]");
     const vitrinaAutoErrorNode = document.querySelector("[data-vitrina-auto-error]");
@@ -4798,10 +4742,8 @@
     const vitrinaAutoWarningTextNode = document.querySelector("[data-vitrina-auto-warning-text]");
     const vitrinaAutoSchedulesBodyNode = document.querySelector("[data-vitrina-auto-schedules-body]");
     const vitrinaAutoPanelNode = document.querySelector("[data-vitrina-auto-schedule]");
-    const vitrinaAutoModeButtons = Array.from(document.querySelectorAll("[data-vitrina-auto-mode]"));
-    const vitrinaAutoIntervalControlsNode = document.querySelector("[data-vitrina-auto-interval-controls]");
-    const vitrinaAutoIntervalSelectNode = document.querySelector("[data-vitrina-auto-interval]");
-    const vitrinaAutoPreviewNode = document.querySelector("[data-vitrina-auto-preview]");
+    const vitrinaAutoPolicySelectNode = document.querySelector("[data-vitrina-auto-policy-select]");
+    const vitrinaAutoWindowHintNode = document.querySelector("[data-vitrina-auto-window-hint]");
 
     const ALL_VALUE = "__all__";
     const METRIC_DISPLAY_STATUSES = new Set(["shown", "collapsed", "hidden"]);
@@ -5321,34 +5263,20 @@
     if (feedbacksAutoRunNowButton) {
       feedbacksAutoRunNowButton.addEventListener("click", runFeedbacksAutomationNow);
     }
-    if (vitrinaAutoReloadButton) {
-      vitrinaAutoReloadButton.addEventListener("click", loadVitrinaAutoSchedules);
-    }
     if (vitrinaAutoAddButton) {
       vitrinaAutoAddButton.addEventListener("click", addVitrinaAutoSchedule);
     }
     if (vitrinaAutoSaveButton) {
       vitrinaAutoSaveButton.addEventListener("click", saveVitrinaAutoSchedules);
     }
-    if (vitrinaAutoModeButtons.length) {
-      vitrinaAutoModeButtons.forEach(function(button) {
-        button.addEventListener("click", function() {
-          const mode = normalizeVitrinaAutoScheduleMode(button.getAttribute("data-vitrina-auto-mode"));
-          state.vitrinaAuto.scheduleModeType = mode;
-          state.vitrinaAuto.schedulePolicy = normalizeVitrinaAutoSchedulePolicy(Object.assign({}, state.vitrinaAuto.schedulePolicy || {}, {mode: mode}));
-          renderVitrinaAutoSchedules();
-        });
-      });
-    }
-    if (vitrinaAutoIntervalSelectNode) {
-      vitrinaAutoIntervalSelectNode.addEventListener("change", function() {
-        const intervalHours = normalizeVitrinaAutoIntervalHours(vitrinaAutoIntervalSelectNode.value);
-        state.vitrinaAuto.scheduleModeType = "interval";
-        state.vitrinaAuto.schedulePolicy = normalizeVitrinaAutoSchedulePolicy(Object.assign({}, state.vitrinaAuto.schedulePolicy || {}, {
-          mode: "interval",
-          interval_hours: intervalHours
-        }));
-        state.vitrinaAuto.intervalPreviewSlots = vitrinaAutoPreviewSlotsForInterval(intervalHours, state.vitrinaAuto.intervalOptions || []);
+    if (vitrinaAutoPolicySelectNode) {
+      vitrinaAutoPolicySelectNode.addEventListener("change", function() {
+        const selectedPolicy = vitrinaAutoSchedulePolicyFromSelector(vitrinaAutoPolicySelectNode.value);
+        state.vitrinaAuto.scheduleModeType = selectedPolicy.mode;
+        state.vitrinaAuto.schedulePolicy = normalizeVitrinaAutoSchedulePolicy(Object.assign({}, state.vitrinaAuto.schedulePolicy || {}, selectedPolicy));
+        if (selectedPolicy.mode === "interval") {
+          state.vitrinaAuto.intervalPreviewSlots = vitrinaAutoPreviewSlotsForInterval(selectedPolicy.interval_hours || 4, state.vitrinaAuto.intervalOptions || []);
+        }
         renderVitrinaAutoSchedules();
       });
     }
@@ -11104,6 +11032,30 @@
       };
     }
 
+    function vitrinaAutoIntervalSelectorLabel(intervalHours) {
+      const hours = normalizeVitrinaAutoIntervalHours(intervalHours);
+      return "Каждые " + hours + (hours === 6 ? " часов" : " часа");
+    }
+
+    function vitrinaAutoSelectorValue(schedulePolicy, modeType) {
+      const mode = normalizeVitrinaAutoScheduleMode(modeType || (schedulePolicy && schedulePolicy.mode));
+      if (mode !== "interval") {
+        return "manual";
+      }
+      return "interval:" + normalizeVitrinaAutoIntervalHours(schedulePolicy && schedulePolicy.interval_hours);
+    }
+
+    function vitrinaAutoSchedulePolicyFromSelector(value) {
+      const normalizedValue = String(value || "manual");
+      if (normalizedValue.indexOf("interval:") === 0) {
+        return {
+          mode: "interval",
+          interval_hours: normalizeVitrinaAutoIntervalHours(normalizedValue.split(":", 2)[1])
+        };
+      }
+      return {mode: "manual", interval_hours: null};
+    }
+
     function vitrinaAutoPreviewSlotsForInterval(intervalHours, options) {
       const normalized = normalizeVitrinaAutoIntervalHours(intervalHours);
       const matched = (Array.isArray(options) ? options : []).find(function(option) {
@@ -11330,23 +11282,12 @@
       if (vitrinaAutoMetaNode) {
         const parts = [
           "Часовой пояс: " + scheduleTimezone,
-          "Режим: " + (modeType === "interval" ? "интервал" : "ручные триггеры"),
+          "Режим: " + (modeType === "interval" ? vitrinaAutoIntervalSelectorLabel(intervalHours).toLowerCase() : "ручные настройки"),
           model.nextAutoRunAt ? ("Следующий запуск: " + formatTimestampDisplay(model.nextAutoRunAt, {timezone: scheduleTimezone, suppressTimezone: true, noSeconds: true})) : ""
         ];
         vitrinaAutoMetaNode.textContent = model.loading ? "Расписание загружается…" : parts.filter(Boolean).join(" · ");
       }
-      if (vitrinaAutoModeButtons.length) {
-        vitrinaAutoModeButtons.forEach(function(button) {
-          const buttonMode = normalizeVitrinaAutoScheduleMode(button.getAttribute("data-vitrina-auto-mode"));
-          button.classList.toggle("is-active", buttonMode === modeType);
-          button.setAttribute("aria-pressed", buttonMode === modeType ? "true" : "false");
-          button.disabled = !!model.loading || !!model.saving || !model.canEditRuntime;
-        });
-      }
-      if (vitrinaAutoIntervalControlsNode) {
-        vitrinaAutoIntervalControlsNode.hidden = modeType !== "interval";
-      }
-      if (vitrinaAutoIntervalSelectNode) {
+      if (vitrinaAutoPolicySelectNode) {
         const options = Array.isArray(model.intervalOptions) && model.intervalOptions.length
           ? model.intervalOptions
           : [
@@ -11354,18 +11295,17 @@
               {interval_hours: 4, label: "4 часа"},
               {interval_hours: 6, label: "6 часов"}
             ];
-        vitrinaAutoIntervalSelectNode.innerHTML = options.map(function(option) {
+        const intervalOptions = options.map(function(option) {
           const hours = normalizeVitrinaAutoIntervalHours(option && option.interval_hours);
-          const label = String((option && option.label) || (hours === 6 ? "6 часов" : (hours + " часа")));
-          return '<option value="' + escapeHtml(String(hours)) + '">' + escapeHtml(label) + "</option>";
+          return '<option value="interval:' + escapeHtml(String(hours)) + '">' + escapeHtml(vitrinaAutoIntervalSelectorLabel(hours)) + "</option>";
         }).join("");
-        vitrinaAutoIntervalSelectNode.value = String(intervalHours);
-        vitrinaAutoIntervalSelectNode.disabled = !!model.loading || !!model.saving || !model.canEditRuntime || modeType !== "interval";
+        vitrinaAutoPolicySelectNode.innerHTML = '<option value="manual">Ручные настройки</option>' + intervalOptions;
+        vitrinaAutoPolicySelectNode.value = vitrinaAutoSelectorValue(schedulePolicy, modeType);
+        vitrinaAutoPolicySelectNode.disabled = !!model.loading || !!model.saving || !model.canEditRuntime;
       }
-      if (vitrinaAutoPreviewNode) {
-        vitrinaAutoPreviewNode.innerHTML = intervalPreviewSlots.map(function(slot) {
-          return '<span class="auto-schedule-preview-chip">' + escapeHtml(slot) + "</span>";
-        }).join("");
+      if (vitrinaAutoWindowHintNode) {
+        vitrinaAutoWindowHintNode.hidden = modeType !== "interval";
+        vitrinaAutoWindowHintNode.textContent = "Окно автообновлений: 10:00–22:00, Asia/Yekaterinburg.";
       }
       if (vitrinaAutoStatusNode) {
         const statusParts = [
@@ -11401,9 +11341,6 @@
       if (vitrinaAutoSaveButton) {
         vitrinaAutoSaveButton.disabled = !!model.loading || !!model.saving || !model.canEditRuntime;
         vitrinaAutoSaveButton.textContent = model.saving ? "Сохранение…" : "Сохранить";
-      }
-      if (vitrinaAutoReloadButton) {
-        vitrinaAutoReloadButton.disabled = !!model.loading || !!model.saving;
       }
       if (!vitrinaAutoSchedulesBodyNode) {
         return;

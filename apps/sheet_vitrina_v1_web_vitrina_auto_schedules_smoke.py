@@ -44,9 +44,11 @@ def main() -> None:
 
         saved = block.save_schedules(
             {
+                "schedule_policy": {"mode": "manual"},
                 "schedules": [
                     {**schedules[0], "local_time_hhmm": "12:30"},
                     {**schedules[1], "enabled": False},
+                    {"id": "custom_night", "enabled": True, "local_time_hhmm": "02:15"},
                     {"id": "custom_evening", "enabled": True, "local_time_hhmm": "21:15"},
                 ]
             }
@@ -59,6 +61,8 @@ def main() -> None:
             raise AssertionError(f"schedule disable was not persisted: {saved}")
         if "custom_evening" not in saved_by_id:
             raise AssertionError(f"schedule add was not persisted: {saved}")
+        if saved_by_id["custom_night"]["local_time_hhmm"] != "02:15" or saved.get("schedule_mode_type") != "manual":
+            raise AssertionError(f"manual mode must persist arbitrary times outside interval window, got {saved}")
 
         try:
             block.save_schedules(
