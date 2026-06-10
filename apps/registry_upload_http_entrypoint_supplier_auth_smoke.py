@@ -107,8 +107,16 @@ def main() -> None:
                 supplier_page_code, _, supplier_page = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}")
                 if supplier_page_code != 200 or "Реестр заказов" not in supplier_page:
                         raise AssertionError("supplier role must access supplier page")
-                if '"can_delete_shipments": false' not in supplier_page or '"can_edit_order_status": false' not in supplier_page:
+                if (
+                    '"can_delete_shipments": false' not in supplier_page
+                    or '"can_edit_order_status": false' not in supplier_page
+                    or '"can_recheck_prices": false' not in supplier_page
+                ):
                         raise AssertionError("supplier page must not render operator-only shipment controls for supplier role")
+                if '<button id="priceCheckButton"' in supplier_page or ">Проверить цены<" in supplier_page:
+                        raise AssertionError("supplier page must not include manual price recheck button markup")
+                if "价格匹配 / Price check / Соответствие цены" not in supplier_page:
+                        raise AssertionError("supplier page must expose multilingual price conformity column header")
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
                         raise AssertionError("supplier role must access supplier shipment APIs")
@@ -138,6 +146,26 @@ def main() -> None:
                 detail_code, detail_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
                 if detail_code != 200 or detail_payload.get("shipment_id") != shipment_id:
                         raise AssertionError("supplier role must read supplier shipment detail")
+                supplier_price_check_code, supplier_price_check_payload = _opener_post_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/price-check",
+                        {"context": {"source": "supplier_auth_smoke"}},
+                    )
+                if supplier_price_check_code != 403 or supplier_price_check_payload.get("error") != "forbidden":
+                        raise AssertionError("supplier role must not manually recheck supplier shipment prices")
+                operator_price_check_code, operator_price_check_payload = _opener_post_json(
+                        operator,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/price-check",
+                        {"context": {"source": "supplier_auth_smoke"}},
+                    )
+                operator_price_checked_line = operator_price_check_payload.get("product_lines", [{}])[0]
+                if (
+                    operator_price_check_code != 200
+                    or operator_price_checked_line.get("price_conformity_check_mode") != "manual_recheck"
+                    or operator_price_checked_line.get("price_conformity_context", {}).get("source") != "supplier_auth_smoke"
+                ):
+                        raise AssertionError(f"operator role must manually recheck supplier shipment prices, got {operator_price_check_code} {operator_price_check_payload}")
+                detail_payload = operator_price_check_payload
                 patched_payload = json.loads(json.dumps(detail_payload, ensure_ascii=False))
                 patch_code, patch_payload = _opener_patch_json(
                         supplier,

@@ -237,7 +237,7 @@
           <div class="toolbar">
             <span id="matchStatusBadge" class="badge">-</span>
             <a id="invoiceDownloadLink" class="button-link" href="#" hidden>下载发票 / Download invoice / Скачать invoice</a>
-            <button id="priceCheckButton" type="button" hidden>Проверить цены</button>
+            __SHEET_VITRINA_V1_PRICE_CHECK_BUTTON_HTML__
             <button id="saveShipmentButton" class="primary" type="button" disabled>保存 / Save / Сохранить</button>
             <button id="closeShipmentButton" type="button">关闭 / Close / Закрыть</button>
           </div>
@@ -297,7 +297,7 @@
                 <th>我方品名 / Our item name / Номенклатура</th>
                 <th>数量 / Qty / Количество</th>
                 <th>单价 / Unit price / Цена</th>
-                <th>Соответствие цены</th>
+                <th>价格匹配 / Price check / Соответствие цены</th>
                 <th>金额 / Amount / Сумма</th>
                 <th>备注 / Comment / Комментарий</th>
                 <th>匹配 / Matching / Матчинг</th>
@@ -362,7 +362,7 @@
           const defaultSupplierName = "HanShang Technology";
           const canDeleteShipments = config.can_delete_shipments !== false;
           const canEditOrderStatus = Boolean(config.can_edit_order_status);
-          const canRecheckPrices = config.can_recheck_prices !== false;
+          const canRecheckPrices = config.can_recheck_prices === true && Boolean(priceCheckButton);
 
       let currentShipment = null;
       let currentUploadId = "";
@@ -737,8 +737,10 @@
         uploadPanel.hidden = !isNewShipment;
         invoiceDownloadLink.hidden = !shipment.invoice_download_path;
         invoiceDownloadLink.href = shipment.invoice_download_path || "#";
-        priceCheckButton.hidden = !shipment.shipment_id || !canRecheckPrices;
-        priceCheckButton.disabled = !shipment.shipment_id || cardDirty || !canRecheckPrices;
+        if (priceCheckButton) {
+          priceCheckButton.hidden = !shipment.shipment_id || !canRecheckPrices;
+          priceCheckButton.disabled = !shipment.shipment_id || cardDirty || !canRecheckPrices;
+        }
         renderLineTables(shipment.lines || []);
         updateTotalsAndState();
       }
@@ -883,7 +885,9 @@
         const hasDate = Boolean(shipmentDateInput.value);
         shipmentDateField.classList.toggle("required-missing", !hasDate);
         saveShipmentButton.disabled = !hasDate || (isNewShipment && !currentUploadId);
-        priceCheckButton.disabled = !currentShipment || !currentShipment.shipment_id || cardDirty || !canRecheckPrices;
+        if (priceCheckButton) {
+          priceCheckButton.disabled = !currentShipment || !currentShipment.shipment_id || cardDirty || !canRecheckPrices;
+        }
         const status = resolveStatus(lines, currentShipment && currentShipment.match_status);
         matchStatusBadge.textContent = statusLabels[status] || status;
         matchStatusBadge.className = "badge " + (status === "all_matched" ? "success" : status === "checksum_error" ? "error" : "warning");
@@ -944,6 +948,9 @@
       }
 
       async function recheckCurrentShipmentPrices() {
+        if (!canRecheckPrices || !priceCheckButton) {
+          return;
+        }
         if (!currentShipment || !currentShipment.shipment_id || cardDirty) {
           setMessage(cardMessage, "Сначала сохраните изменения.", "error");
           return;
@@ -1005,7 +1012,9 @@
 
       addShipmentButton.addEventListener("click", openNewShipment);
       saveShipmentButton.addEventListener("click", saveCurrentShipment);
-      priceCheckButton.addEventListener("click", recheckCurrentShipmentPrices);
+      if (priceCheckButton) {
+        priceCheckButton.addEventListener("click", recheckCurrentShipmentPrices);
+      }
       closeShipmentButton.addEventListener("click", closeCard);
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;

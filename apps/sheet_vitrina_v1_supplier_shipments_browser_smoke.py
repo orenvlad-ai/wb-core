@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+from contextlib import contextmanager
+import hashlib
 from io import BytesIO
+import os
 from pathlib import Path
 import socket
 import sys
@@ -24,6 +28,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+    DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -125,11 +130,12 @@ def main() -> None:
                 expect(operator_frame.get_by_role("button", name="Расчёты")).to_be_visible()
                 expect(operator_frame.get_by_role("button", name="От поставщика")).to_be_visible()
                 operator_frame.get_by_role("button", name="От поставщика").click()
+                expect(operator_frame.locator("iframe[title='От поставщика']")).to_be_visible(timeout=10000)
                 expect(operator_frame.locator("#supplier-shipments-title")).to_have_count(0)
                 expect(operator_frame.locator(".supplier-embed-block")).to_have_count(0)
                 expect(operator_frame.get_by_text("Реестр заказов", exact=True)).to_have_count(0)
                 frame = operator_frame.frame_locator("iframe[title='От поставщика']")
-                expect(frame.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
+                expect(frame.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible(timeout=10000)
                 expect(frame.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_have_count(1)
                 expect(frame.locator("h2", has_text="Реестр заказов")).to_have_count(0)
                 expect(frame.get_by_text("Invoice-заказы поставщиков, сохранённые в WebCore")).to_have_count(0)
@@ -208,7 +214,7 @@ def main() -> None:
                 expect(frame.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
                 expect(frame.get_by_text("平台ID / nmId / nmId")).to_be_visible()
                 expect(frame.get_by_text("我方品名 / Our item name / Номенклатура")).to_be_visible()
-                expect(frame.get_by_text("Соответствие цены")).to_be_visible()
+                expect(frame.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
                 expect(frame.locator("#productLines input[data-line-field='internal_sku']")).to_have_count(0)
                 expect(frame.locator("#productLines input[data-line-field='internal_nm_id']").first).to_have_value("210183919")
                 expect(frame.locator("#productLines .price-conformity")).to_have_count(3)
@@ -285,12 +291,143 @@ def main() -> None:
                 frame.locator("[data-delete-confirm]").click()
                 expect(frame.locator("#registryMessage")).to_contain_text("订单已删除 / Order deleted / Заказ удалён.", timeout=5000)
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN390")
+                _assert_supplier_role_browser_ui(browser, tmp_path, invoice_path)
                 browser.close()
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
     print("sheet_vitrina_v1_supplier_shipments_browser_smoke: OK")
+
+
+def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path) -> None:
+    owner_password = "owner-password-not-secret"
+    supplier_password = "supplier-password-not-secret"
+    runtime_dir = tmp_path / "supplier-role-runtime"
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+    _seed_supplier_role_nomenclature(runtime)
+    config = RegistryUploadHttpEntrypointConfig(
+        host="127.0.0.1",
+        port=_reserve_free_port(),
+        upload_path=DEFAULT_UPLOAD_PATH,
+        sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+        sheet_refresh_path="/v1/sheet-vitrina-v1/refresh",
+        sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+        sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
+        runtime_dir=runtime_dir,
+    )
+    with _patched_env(
+        {
+            "WB_CORE_WEB_AUTH_REQUIRED": "1",
+            "WB_CORE_WEB_AUTH_USERNAME": "owner",
+            "WB_CORE_WEB_AUTH_PASSWORD_HASH": _password_hash(owner_password),
+            "WB_CORE_WEB_AUTH_SESSION_SECRET": "supplier-browser-smoke-session-secret",
+            "WB_CORE_SUPPLIER_AUTH_USERNAME": "supplier",
+            "WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH": _password_hash(supplier_password),
+            "WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME": "Supplier",
+        }
+    ):
+        entrypoint = RegistryUploadHttpEntrypoint(
+            runtime_dir=runtime_dir,
+            runtime=runtime,
+            activated_at_factory=lambda: "2026-05-30T08:00:00Z",
+        )
+        server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        context = None
+        try:
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            base_url = f"http://127.0.0.1:{config.port}"
+            page = context.new_page()
+            page.goto(f"{base_url}/login?next={DEFAULT_SHEET_SUPPLIER_UI_PATH}", wait_until="domcontentloaded")
+            page.locator("#username").fill("supplier")
+            page.locator("#password").fill(supplier_password)
+            page.get_by_role("button", name="Войти").click()
+            expect(page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
+            expect(page.locator("#priceCheckButton")).to_have_count(0)
+            expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+
+            page.get_by_role("button", name="新增订单 / Add order / Добавить заказ").click()
+            expect(page.get_by_label("出货日期 / Shipment date / Дата отгрузки")).to_be_visible()
+            expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
+            page.locator("#invoiceFileInput").set_input_files(str(invoice_path))
+            expect(page.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
+            expect(page.locator("#productLines .price-conformity")).to_have_count(3)
+            expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+            page.get_by_label("出货日期 / Shipment date / Дата отгрузки").fill("2026-05-14")
+            page.get_by_role("button", name="保存 / Save / Сохранить").click()
+            expect(page.get_by_text("订单已保存 / Order saved / Заказ сохранён.")).to_be_visible(timeout=5000)
+            expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+            shipment_id = page.locator("#shipmentRows tr[data-row]").first.get_attribute("data-row") or ""
+            if not shipment_id:
+                raise AssertionError("supplier browser smoke must create a shipment row before price-check probe")
+            price_check_probe = page.evaluate(
+                """async ({shipmentsPath, shipmentId}) => {
+                    const response = await fetch(shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/price-check", {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json", "Accept": "application/json"},
+                        body: JSON.stringify({context: {source: "supplier_browser_smoke"}})
+                    });
+                    let payload = {};
+                    try { payload = await response.json(); } catch (error) { payload = {error: String(error)}; }
+                    return {status: response.status, payload};
+                }""",
+                {"shipmentsPath": DEFAULT_SUPPLIER_SHIPMENTS_PATH, "shipmentId": shipment_id},
+            )
+            if price_check_probe.get("status") != 403 or price_check_probe.get("payload", {}).get("error") != "forbidden":
+                raise AssertionError(f"supplier must not call manual price-check route, got {price_check_probe}")
+        finally:
+            if context is not None:
+                context.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
+def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> None:
+    runtime.save_nomenclature_item(
+        {
+            "item_id": "supplier_browser_clear_14_pro",
+            "is_active": True,
+            "our_sku": "",
+            "nm_id": 210183919,
+            "nomenclature_name": "Clear iPhone 14 Pro",
+            "product_type": "clear",
+            "match_key": "clear|iphone_14_pro",
+            "purchase_price_yuan": 1.0,
+            "aliases": [],
+            "compatible_models_text": "",
+            "compatible_model_keys": [],
+            "comment": "",
+            "created_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+        }
+    )
+
+
+def _password_hash(password: str) -> str:
+    salt = b"supplier-browser-smoke-salt"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 260_000)
+    return "pbkdf2_sha256$260000$" + _b64(salt) + "$" + _b64(digest)
+
+
+def _b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+@contextmanager
+def _patched_env(values: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _build_invoice_fixture() -> bytes:
