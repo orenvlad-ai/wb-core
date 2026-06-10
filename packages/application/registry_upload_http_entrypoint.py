@@ -1661,6 +1661,23 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_shipments_rematch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.supplier_shipments_block.rematch_shipment(shipment_id, payload)
 
+    def handle_supplier_shipments_price_check_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        context = payload.get("context") if isinstance(payload, Mapping) else {}
+        return self.supplier_shipments_block.recheck_shipment_prices(
+            shipment_id,
+            actor=actor,
+            context=context if isinstance(context, Mapping) else {},
+        )
+
+    def handle_supplier_shipments_price_backfill_request(self) -> dict[str, Any]:
+        return self.supplier_shipments_block.backfill_price_conformity_checks()
+
     def handle_supplier_shipments_invoice_request(self, shipment_id: str) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.download_invoice(shipment_id)
 

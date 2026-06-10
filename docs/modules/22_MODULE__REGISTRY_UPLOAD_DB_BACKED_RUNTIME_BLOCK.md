@@ -109,7 +109,7 @@ update_note: "Обновлён под current temporal closure seam, plan-report
   - supplier invoice registry state:
     - staged upload metadata in `sheet_vitrina_v1_supplier_shipment_uploads`;
     - shipment headers/totals/status/file references in `sheet_vitrina_v1_supplier_shipments`;
-    - editable product/extra line details in `sheet_vitrina_v1_supplier_shipment_lines`.
+    - editable product/extra line details and persisted invoice price conformity snapshots/statuses in `sheet_vitrina_v1_supplier_shipment_lines`.
 - Для current factory-order seam `temporal_source_snapshots[source_key=sales_funnel_history]` является authoritative server-side storage contract для persisted `orderCount` history:
   - bounded historical window может truthfully replace-иться целиком;
   - future exact-date snapshots продолжают дописываться existing live flow без возврата truth logic в sheet.

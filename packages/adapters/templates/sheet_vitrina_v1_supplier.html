@@ -164,6 +164,9 @@
     .badge.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
     .badge.warning { background: rgba(251, 191, 36, 0.14); color: var(--warning); }
     .badge.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
+    .price-conformity { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; font-size: 18px; font-weight: 900; }
+    .price-conformity.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
+    .price-conformity.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
     .totals { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
     .total { background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 10px; }
     .total span { display: block; color: var(--muted); font-size: 12px; }
@@ -234,6 +237,7 @@
           <div class="toolbar">
             <span id="matchStatusBadge" class="badge">-</span>
             <a id="invoiceDownloadLink" class="button-link" href="#" hidden>下载发票 / Download invoice / Скачать invoice</a>
+            <button id="priceCheckButton" type="button" hidden>Проверить цены</button>
             <button id="saveShipmentButton" class="primary" type="button" disabled>保存 / Save / Сохранить</button>
             <button id="closeShipmentButton" type="button">关闭 / Close / Закрыть</button>
           </div>
@@ -293,6 +297,7 @@
                 <th>我方品名 / Our item name / Номенклатура</th>
                 <th>数量 / Qty / Количество</th>
                 <th>单价 / Unit price / Цена</th>
+                <th>Соответствие цены</th>
                 <th>金额 / Amount / Сумма</th>
                 <th>备注 / Comment / Комментарий</th>
                 <th>匹配 / Matching / Матчинг</th>
@@ -343,6 +348,7 @@
       const cardMessage = document.getElementById("cardMessage");
       const matchStatusBadge = document.getElementById("matchStatusBadge");
       const invoiceDownloadLink = document.getElementById("invoiceDownloadLink");
+      const priceCheckButton = document.getElementById("priceCheckButton");
       const productLines = document.getElementById("productLines");
       const extraLines = document.getElementById("extraLines");
       const totalQty = document.getElementById("totalQty");
@@ -356,6 +362,7 @@
           const defaultSupplierName = "HanShang Technology";
           const canDeleteShipments = config.can_delete_shipments !== false;
           const canEditOrderStatus = Boolean(config.can_edit_order_status);
+          const canRecheckPrices = config.can_recheck_prices !== false;
 
       let currentShipment = null;
       let currentUploadId = "";
@@ -381,6 +388,19 @@
             production: "На производстве",
             in_transit: "В пути",
             accepted_ff: "Принято на ФФ"
+          };
+          const priceConformityReasonLabels = {
+            price_matched: "Цена совпадает",
+            price_mismatch: "Цена отличается от справочника",
+            sku_not_found: "SKU не найден в текущем справочнике",
+            reference_sku_ambiguous: "SKU неоднозначен в текущем справочнике",
+            reference_match_ambiguous: "Match key неоднозначен в текущем справочнике",
+            reference_price_missing: "В справочнике не указана закупочная цена",
+            invoice_price_missing: "В invoice не указана цена",
+            currency_missing: "В invoice не указана валюта",
+            currency_not_yuan: "Валюта invoice не CNY/RMB/Yuan",
+            not_product_line: "Не товарная строка",
+            not_checked: "Проверка не выполнена"
           };
 
       function escapeHtml(value) {
@@ -717,6 +737,8 @@
         uploadPanel.hidden = !isNewShipment;
         invoiceDownloadLink.hidden = !shipment.invoice_download_path;
         invoiceDownloadLink.href = shipment.invoice_download_path || "#";
+        priceCheckButton.hidden = !shipment.shipment_id || !canRecheckPrices;
+        priceCheckButton.disabled = !shipment.shipment_id || cardDirty || !canRecheckPrices;
         renderLineTables(shipment.lines || []);
         updateTotalsAndState();
       }
@@ -724,7 +746,7 @@
       function renderLineTables(lines) {
         const products = lines.filter((line) => line.line_type !== "extra");
         const extras = lines.filter((line) => line.line_type === "extra");
-        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="11">未识别商品明细 / No product lines recognized / Товарные строки не распознаны.</td></tr>';
+        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="12">未识别商品明细 / No product lines recognized / Товарные строки не распознаны.</td></tr>';
         extraLines.innerHTML = extras.length ? extras.map(renderExtraLine).join("") : '<tr><td colspan="6">未识别其他项目 / No extras recognized / Прочие позиции не распознаны.</td></tr>';
         Array.from(shipmentCard.querySelectorAll("[data-line-field]")).forEach((input) => {
           input.addEventListener("input", () => {
@@ -750,11 +772,29 @@
           '<td><input class="line-input wide" data-line-field="internal_name" value="' + escapeHtml(line.internal_name || "") + '"></td>',
           '<td><input class="line-input small" data-line-field="qty" value="' + escapeHtml(line.qty ?? "") + '"></td>',
           '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
+          '<td>' + renderPriceConformity(line) + '</td>',
           '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
           '<td><span class="badge ' + (line.manual_override ? "warning" : (line.match_status === "matched" || line.match_status === "matched_by_compatibility") ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? lineStatusLabels.manual_override : (lineStatusLabels[line.match_status] || line.match_status || lineStatusLabels.unmatched)) + '</span></td>',
           '</tr>'
         ].join("");
+      }
+
+      function renderPriceConformity(line) {
+        const status = String(line.price_conformity_status || "not_checked");
+        const matched = status === "matched";
+        const title = priceConformityTitle(line);
+        return '<span class="price-conformity ' + (matched ? "success" : "error") + '" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">' + (matched ? "✓" : "✕") + '</span>';
+      }
+
+      function priceConformityTitle(line) {
+        const status = String(line.price_conformity_status || "not_checked");
+        const reason = String(line.price_conformity_reason || "not_checked");
+        const label = priceConformityReasonLabels[reason] || reason;
+        const invoice = line.invoice_price_yuan_snapshot ?? "-";
+        const reference = line.reference_purchase_price_yuan_snapshot ?? "-";
+        const checkedAt = line.price_conformity_checked_at || "-";
+        return "Статус: " + status + ". " + label + ". Invoice: " + invoice + "; справочник: " + reference + "; проверено: " + checkedAt;
       }
 
       function renderExtraLine(line, index) {
@@ -843,6 +883,7 @@
         const hasDate = Boolean(shipmentDateInput.value);
         shipmentDateField.classList.toggle("required-missing", !hasDate);
         saveShipmentButton.disabled = !hasDate || (isNewShipment && !currentUploadId);
+        priceCheckButton.disabled = !currentShipment || !currentShipment.shipment_id || cardDirty || !canRecheckPrices;
         const status = resolveStatus(lines, currentShipment && currentShipment.match_status);
         matchStatusBadge.textContent = statusLabels[status] || status;
         matchStatusBadge.className = "badge " + (status === "all_matched" ? "success" : status === "checksum_error" ? "error" : "warning");
@@ -892,10 +933,32 @@
               body: JSON.stringify({ shipment_date: payload.shipment_date, payload })
             });
           }
-          renderCard();
           cardDirty = false;
+          renderCard();
           await loadRegistry();
           setMessage(cardMessage, "订单已保存 / Order saved / Заказ сохранён.", "success");
+        } catch (error) {
+          setMessage(cardMessage, error.message, "error");
+          updateTotalsAndState();
+        }
+      }
+
+      async function recheckCurrentShipmentPrices() {
+        if (!currentShipment || !currentShipment.shipment_id || cardDirty) {
+          setMessage(cardMessage, "Сначала сохраните изменения.", "error");
+          return;
+        }
+        priceCheckButton.disabled = true;
+        setMessage(cardMessage, "Проверяем цены...", "");
+        try {
+          currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id) + "/price-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ context: { source: "supplier_ui" } })
+          });
+          renderCard();
+          await loadRegistry();
+          setMessage(cardMessage, "Проверка цен обновлена.", "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
           updateTotalsAndState();
@@ -942,6 +1005,7 @@
 
       addShipmentButton.addEventListener("click", openNewShipment);
       saveShipmentButton.addEventListener("click", saveCurrentShipment);
+      priceCheckButton.addEventListener("click", recheckCurrentShipmentPrices);
       closeShipmentButton.addEventListener("click", closeCard);
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;
