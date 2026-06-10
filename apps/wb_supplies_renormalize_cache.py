@@ -19,7 +19,7 @@ from packages.adapters.wb_supplies import HttpBackedWbSuppliesSource, WbSupplies
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.wb_supplies import (  # noqa: E402
     _normalize_supply_row,
-    _resolve_upstream_lookup_id,
+    _resolve_upstream_lookup_id_from_sources,
     _row_needs_enrichment,
     _stable_cache_key,
     _stable_payload_hash,
@@ -66,7 +66,7 @@ def main() -> int:
         row_warnings: list[str] = []
         needs = _row_needs_enrichment(record.get("normalized") or {})
         should_enrich = source is not None and (bool(target_ids) or needs)
-        lookup_id, is_preorder_id = _resolve_upstream_lookup_id(raw_detail or raw_list)
+        lookup_id, is_preorder_id = _resolve_upstream_lookup_id_from_sources(raw_detail, raw_list, record)
         if should_enrich and lookup_id:
             if raw_detail is None or args.enrich_missing_critical:
                 detail = _safe_call(lambda: source.fetch_supply_details(lookup_id, is_preorder_id=is_preorder_id))
