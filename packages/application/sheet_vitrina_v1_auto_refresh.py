@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, time, timedelta, timezone
+import os
 import json
 from pathlib import Path
 import threading
@@ -11,6 +13,11 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from packages.business_time import CANONICAL_BUSINESS_TIMEZONE_NAME, DAILY_REFRESH_BUSINESS_HOURS
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback for local development only.
+    fcntl = None  # type: ignore[assignment]
 
 
 CONTRACT_NAME = "sheet_vitrina_v1_auto_refresh_schedules"
@@ -86,31 +93,32 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
         schedule_policy = _normalize_schedule_policy(payload.get("schedule_policy"), strict=True)
         now = _iso_now(self.now_factory)
         with self._lock:
-            current = self._read_unlocked()
-            existing_by_id = _schedule_lifecycle_lookup(current.get("schedules", []))
-            if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
-                normalized = _materialize_interval_schedules(
-                    schedule_policy,
-                    existing_by_id=existing_by_id,
-                    now=now,
-                    now_factory=self.now_factory,
-                )
-            else:
-                raw_schedules = payload.get("schedules")
-                if not isinstance(raw_schedules, list):
-                    raise ValueError("schedules must be a JSON array")
-                normalized = []
-                for index, raw in enumerate(raw_schedules, start=1):
-                    if not isinstance(raw, Mapping):
-                        raise ValueError("each schedule must be an object")
-                    schedule_id = _safe_text(raw.get("id"), 120) or f"custom_{uuid4().hex[:12]}"
-                    existing = existing_by_id.get(schedule_id)
-                    merged = _merge_editable_schedule(existing, raw, schedule_id=schedule_id)
-                    normalized.append(_normalize_schedule(merged, index=index, now=now, now_factory=self.now_factory))
-                _validate_schedule_set(normalized)
-            current["schedule_policy"] = schedule_policy
-            current["schedules"] = normalized
-            self._write_unlocked(current)
+            with self._file_lock_unlocked():
+                current = self._read_unlocked()
+                existing_by_id = _schedule_lifecycle_lookup(current.get("schedules", []))
+                if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
+                    normalized = _materialize_interval_schedules(
+                        schedule_policy,
+                        existing_by_id=existing_by_id,
+                        now=now,
+                        now_factory=self.now_factory,
+                    )
+                else:
+                    raw_schedules = payload.get("schedules")
+                    if not isinstance(raw_schedules, list):
+                        raise ValueError("schedules must be a JSON array")
+                    normalized = []
+                    for index, raw in enumerate(raw_schedules, start=1):
+                        if not isinstance(raw, Mapping):
+                            raise ValueError("each schedule must be an object")
+                        schedule_id = _safe_text(raw.get("id"), 120) or f"custom_{uuid4().hex[:12]}"
+                        existing = existing_by_id.get(schedule_id)
+                        merged = _merge_editable_schedule(existing, raw, schedule_id=schedule_id)
+                        normalized.append(_normalize_schedule(merged, index=index, now=now, now_factory=self.now_factory))
+                    _validate_schedule_set(normalized)
+                current["schedule_policy"] = schedule_policy
+                current["schedules"] = normalized
+                self._write_unlocked(current)
         return self.build_payload(auto_context=auto_context)
 
     def due_schedules(self, *, now: datetime | None = None) -> list[tuple[dict[str, Any], str]]:
@@ -210,19 +218,20 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
         normalized_id = str(schedule_id or "").strip()
         now = _iso_now(self.now_factory)
         with self._lock:
-            payload = self._read_unlocked()
-            schedules = payload.setdefault("schedules", [])
-            for index, raw in enumerate(schedules):
-                if not isinstance(raw, Mapping) or str(raw.get("id") or "") != normalized_id:
-                    continue
-                schedules[index] = _normalize_schedule(
-                    {**dict(raw), **dict(patch), "updated_at": now},
-                    now=now,
-                    now_factory=self.now_factory,
-                )
-                self._write_unlocked(payload)
-                return
-            raise ValueError(f"auto refresh schedule not found: {normalized_id}")
+            with self._file_lock_unlocked():
+                payload = self._read_unlocked()
+                schedules = payload.setdefault("schedules", [])
+                for index, raw in enumerate(schedules):
+                    if not isinstance(raw, Mapping) or str(raw.get("id") or "") != normalized_id:
+                        continue
+                    schedules[index] = _normalize_schedule(
+                        {**dict(raw), **dict(patch), "updated_at": now},
+                        now=now,
+                        now_factory=self.now_factory,
+                    )
+                    self._write_unlocked(payload)
+                    return
+                raise ValueError(f"auto refresh schedule not found: {normalized_id}")
 
     def _read(self) -> dict[str, Any]:
         with self._lock:
@@ -294,9 +303,32 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
             "schedule_policy": schedule_policy,
             "schedules": schedules,
         }
-        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temp_path.replace(self.path)
+        temp_path = self.path.with_name(
+            f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.tmp"
+        )
+        try:
+            temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temp_path.replace(self.path)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+
+    @contextmanager
+    def _file_lock_unlocked(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if fcntl is None:
+            yield
+            return
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _default_schedules(now: str, now_factory: Callable[[], datetime]) -> list[dict[str, Any]]:

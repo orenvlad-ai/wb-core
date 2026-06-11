@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -41,6 +42,7 @@ def main() -> None:
         _assert_default_timezone_schedule(runtime_dir)
         _assert_old_state_read_migrates(runtime_dir / "old-state")
         _assert_interval_policy(runtime_dir / "interval-policy")
+        _assert_cross_process_schedule_writes(runtime_dir / "cross-process")
 
         saved = block.save_schedules(
             {
@@ -369,6 +371,72 @@ def _assert_scheduled_parallel_block(entrypoint: RegistryUploadHttpEntrypoint) -
     finally:
         release.set()
         _wait_for_job(entrypoint, str(active["job_id"]))
+
+
+def _assert_cross_process_schedule_writes(runtime_dir: Path) -> None:
+    block = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir,
+        now_factory=lambda: datetime(2026, 5, 12, 14, 30, tzinfo=timezone.utc),
+    )
+    block.save_schedules({"schedule_policy": {"mode": "interval", "interval_hours": 4}, "schedules": []})
+    worker = """
+import sys
+from pathlib import Path
+from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1AutoRefreshSchedulesBlock
+
+runtime_dir = Path(sys.argv[1])
+schedule_id = sys.argv[2]
+started_at = sys.argv[3]
+finished_at = sys.argv[4]
+due_at = sys.argv[5]
+block = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir)
+block.mark_run_started(schedule_id, started_at=started_at, due_at=due_at, run_id=schedule_id + "-job", trigger_source="scheduled")
+block.mark_run_finished(schedule_id, finished_at=finished_at, result_payload={"semantic_status": "success", "semantic_reason": "ok"})
+"""
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                worker,
+                str(runtime_dir),
+                "interval_4h_10_00_ekt",
+                "2026-05-12T05:01:00Z",
+                "2026-05-12T05:05:00Z",
+                "2026-05-12T05:00:00Z",
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ),
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                worker,
+                str(runtime_dir),
+                "interval_4h_14_00_ekt",
+                "2026-05-12T09:01:00Z",
+                "2026-05-12T09:05:00Z",
+                "2026-05-12T09:00:00Z",
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ),
+    ]
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=10)
+        if process.returncode != 0:
+            raise AssertionError(f"cross-process schedule writer failed: stdout={stdout} stderr={stderr}")
+    payload = block.build_payload()
+    by_id = {item["id"]: item for item in payload["schedules"]}
+    if by_id["interval_4h_10_00_ekt"]["last_success_at"] != "2026-05-12T05:05:00Z":
+        raise AssertionError(f"first cross-process schedule write was lost: {payload}")
+    if by_id["interval_4h_14_00_ekt"]["last_success_at"] != "2026-05-12T09:05:00Z":
+        raise AssertionError(f"second cross-process schedule write was lost: {payload}")
 
 
 def _assert_default_timezone_schedule(runtime_dir: Path) -> None:
