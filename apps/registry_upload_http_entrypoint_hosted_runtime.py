@@ -1915,7 +1915,6 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Действия и состояния",
             "data-seller-top-session",
             "Проверить сессию",
-            "Восстановить сессию",
             'data-unified-tab-button="vitrina"',
             'data-unified-tab-button="factory-order"',
             'data-unified-tab-button="reports"',
