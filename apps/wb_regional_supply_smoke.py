@@ -21,6 +21,7 @@ from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.factory_order_sales_history import persist_sales_history_result_exact_dates
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
+from packages.application.wb_supply_overlay import build_warehouse_district_mapping
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.contracts.factory_order_supply import DATASET_STOCK_FF
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
@@ -219,6 +220,39 @@ def main() -> None:
             raise AssertionError("other districts must not receive selected central WB qty")
         if overlay_central_row.projected_stock_on_eta <= central_main_row.projected_stock_on_eta:
             raise AssertionError("selected WB supply must improve projected stock only in the mapped district")
+
+        _seed_wb_regional_overlay_fixture(
+            runtime,
+            supply_id="wb-regional-provider-mapped",
+            nm_id=MAIN_NM_ID,
+            quantity=25.0,
+            supply_date="2026-04-20",
+            warehouse_name="Электросталь",
+            district_key="unmapped",
+        )
+        regional_block.wb_supply_district_mapping_provider = lambda: build_warehouse_district_mapping(
+            warehouse_rows=runtime.list_wb_supplies_warehouses(),
+            supply_rows=runtime.list_wb_supplies(),
+            office_rows=[{"name": "Электросталь", "federalDistrict": "Центральный федеральный округ"}],
+        )
+        provider_overlay_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "selected_wb_supply_ids": ["wb-regional-provider-mapped"],
+            }
+        )
+        provider_overlay = provider_overlay_result.wb_supply_overlay or {}
+        provider_regional = provider_overlay.get("wb_regional", {})
+        provider_added_by_district = provider_regional.get("added_qty_by_district", {})
+        if provider_added_by_district.get(DISTRICT_CENTRAL) != 25.0:
+            raise AssertionError(f"provider mapping must map stale-unmapped warehouse to central, got {provider_regional}")
+        if any(float(qty or 0) for key, qty in provider_added_by_district.items() if key != DISTRICT_CENTRAL):
+            raise AssertionError(f"provider-mapped central supply must not affect other districts, got {provider_added_by_district}")
 
         _seed_wb_regional_overlay_fixture(
             runtime,

@@ -102,6 +102,7 @@ class WbRegionalSupplyBlock:
         sales_funnel_history_block: SalesFunnelHistoryBlock | None = None,
         now_factory: callable | None = None,
         timestamp_factory: callable | None = None,
+        wb_supply_district_mapping_provider: callable | None = None,
     ) -> None:
         self.runtime = runtime
         self.stocks_block = stocks_block or StocksBlock(HttpBackedStocksSource())
@@ -110,6 +111,7 @@ class WbRegionalSupplyBlock:
         )
         self.now_factory = now_factory or _default_now_factory
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
+        self.wb_supply_district_mapping_provider = wb_supply_district_mapping_provider
         self.sales_history = FactoryOrderAuthoritativeSalesHistory(
             runtime=self.runtime,
             sales_funnel_history_block=self.sales_funnel_history_block,
@@ -185,6 +187,7 @@ class WbRegionalSupplyBlock:
             runtime=self.runtime,
             selected_supply_ids=selected_wb_supply_ids,
             active_skus=active_skus,
+            warehouse_district_mapping=self._wb_supply_district_mapping(),
         )
         (
             effective_stock_ff_rows,
@@ -546,6 +549,12 @@ class WbRegionalSupplyBlock:
             key=lambda item: item.display_order,
         )
         return [(int(item.nm_id), str(item.display_name)) for item in enabled]
+
+    def _wb_supply_district_mapping(self) -> Mapping[str, Any] | None:
+        provider = self.wb_supply_district_mapping_provider
+        if not callable(provider):
+            return None
+        return provider()
 
     def _load_active_sku_metadata(self) -> dict[int, dict[str, Any]]:
         current_state = self.runtime.load_current_state()

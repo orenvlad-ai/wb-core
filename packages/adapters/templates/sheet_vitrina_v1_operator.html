@@ -2183,7 +2183,7 @@
 
     .wb-supplies-filters {
       display: grid;
-      grid-template-columns: minmax(180px, 1.1fr) minmax(150px, 0.9fr) minmax(210px, 1fr) minmax(150px, 0.9fr) minmax(170px, 0.9fr);
+      grid-template-columns: minmax(180px, 1.1fr) minmax(210px, 1fr) minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(170px, 0.9fr);
       gap: 10px;
       margin-top: 18px;
       align-items: end;
@@ -2287,6 +2287,27 @@
       gap: 6px;
     }
 
+    .wb-supplies-warehouse-section {
+      display: grid;
+      gap: 6px;
+      padding: 8px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .wb-supplies-warehouse-section:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .wb-supplies-warehouse-title {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
     .wb-supplies-status-option {
       display: flex;
       align-items: center;
@@ -2303,6 +2324,29 @@
       height: 16px;
       flex: 0 0 auto;
       accent-color: #8b5cf6;
+    }
+
+    .wb-supply-overlay-warning-details {
+      margin: 6px 0 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(245, 158, 11, 0.08);
+      color: var(--muted-strong);
+      padding: 7px 9px;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .wb-supply-overlay-warning-details summary {
+      cursor: pointer;
+      font-weight: 800;
+    }
+
+    .wb-supply-overlay-warning-details ul {
+      margin: 7px 0 0;
+      padding-left: 18px;
+      max-height: 180px;
+      overflow: auto;
     }
 
     .wb-supplies-message {
@@ -3034,6 +3078,10 @@
                   <p class="wb-supplies-empty">Список WB-поставок ещё не загружен.</p>
                 </div>
                 <p id="wbSupplyOverlayMessage" class="section-message"></p>
+                <details id="wbSupplyOverlayWarningDetails" class="wb-supply-overlay-warning-details" hidden>
+                  <summary id="wbSupplyOverlayWarningSummary">Показать детали warnings</summary>
+                  <ul id="wbSupplyOverlayWarningList"></ul>
+                </details>
               </div>
               <p id="sharedStockMessage" class="section-message"></p>
             </article>
@@ -3401,14 +3449,23 @@
                 <input id="wbSuppliesSearchInput" type="search" placeholder="Номер поставки" autocomplete="off">
               </div>
               <div class="field">
-                <label for="wbSuppliesWarehouseSelect">Склад</label>
-                <select id="wbSuppliesWarehouseSelect">
-                  <option value="">Все склады</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>ФО</label>
-                <div id="wbSuppliesDistrictPresetList" class="wb-supplies-district-presets" aria-label="Фильтр складов по федеральным округам"></div>
+                <label for="wbSuppliesWarehouseMenuButton">Склад</label>
+                <div class="wb-supplies-status-filter" id="wbSuppliesWarehouseFilter">
+                  <button id="wbSuppliesWarehouseMenuButton" class="wb-supplies-status-filter-button" type="button" aria-haspopup="true" aria-expanded="false">Склады: все</button>
+                  <div id="wbSuppliesWarehouseMenu" class="wb-supplies-status-menu" hidden>
+                    <div class="wb-supplies-status-actions" aria-label="Быстрый выбор складов">
+                      <button type="button" data-wb-supplies-warehouse-action="all">Все</button>
+                    </div>
+                    <div class="wb-supplies-warehouse-section">
+                      <p class="wb-supplies-warehouse-title">Федеральные округа</p>
+                      <div id="wbSuppliesDistrictPresetList" class="wb-supplies-status-options" aria-label="Фильтр складов по федеральным округам"></div>
+                    </div>
+                    <div class="wb-supplies-warehouse-section">
+                      <p class="wb-supplies-warehouse-title">Склады</p>
+                      <div id="wbSuppliesWarehouseOptions" class="wb-supplies-status-options"></div>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="field">
                 <label for="wbSuppliesStatusMenuButton">Статус</label>
@@ -3678,6 +3735,9 @@
       const wbSupplyOverlaySummary = document.getElementById("wbSupplyOverlaySummary");
       const wbSupplyOverlayOptions = document.getElementById("wbSupplyOverlayOptions");
       const wbSupplyOverlayMessage = document.getElementById("wbSupplyOverlayMessage");
+      const wbSupplyOverlayWarningDetails = document.getElementById("wbSupplyOverlayWarningDetails");
+      const wbSupplyOverlayWarningSummary = document.getElementById("wbSupplyOverlayWarningSummary");
+      const wbSupplyOverlayWarningList = document.getElementById("wbSupplyOverlayWarningList");
       const downloadStockFfTemplateButton = document.getElementById("downloadStockFfTemplateButton");
       const downloadInboundFactoryTemplateButton = document.getElementById("downloadInboundFactoryTemplateButton");
       const downloadInboundFfToWbTemplateButton = document.getElementById("downloadInboundFfToWbTemplateButton");
@@ -3719,7 +3779,10 @@
       const wbSuppliesSupplyDateSortButton = document.getElementById("wbSuppliesSupplyDateSortButton");
       const wbSuppliesSupplyDateSortArrow = document.getElementById("wbSuppliesSupplyDateSortArrow");
       const wbSuppliesSearchInput = document.getElementById("wbSuppliesSearchInput");
-      const wbSuppliesWarehouseSelect = document.getElementById("wbSuppliesWarehouseSelect");
+      const wbSuppliesWarehouseFilter = document.getElementById("wbSuppliesWarehouseFilter");
+      const wbSuppliesWarehouseMenuButton = document.getElementById("wbSuppliesWarehouseMenuButton");
+      const wbSuppliesWarehouseMenu = document.getElementById("wbSuppliesWarehouseMenu");
+      const wbSuppliesWarehouseOptions = document.getElementById("wbSuppliesWarehouseOptions");
       const wbSuppliesDistrictPresetList = document.getElementById("wbSuppliesDistrictPresetList");
       const wbSuppliesStatusFilter = document.getElementById("wbSuppliesStatusFilter");
       const wbSuppliesStatusMenuButton = document.getElementById("wbSuppliesStatusMenuButton");
@@ -6033,6 +6096,29 @@
         wbSupplyOverlayMessage.className = "section-message" + (stateClass ? " is-" + stateClass : "");
       }
 
+      function renderWbSupplyOverlayWarnings(payload) {
+        if (!wbSupplyOverlayWarningDetails || !wbSupplyOverlayWarningSummary || !wbSupplyOverlayWarningList) {
+          return;
+        }
+        const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings.filter(Boolean) : [];
+        if (!warnings.length) {
+          wbSupplyOverlayWarningDetails.hidden = true;
+          wbSupplyOverlayWarningDetails.open = false;
+          wbSupplyOverlayWarningList.innerHTML = "";
+          return;
+        }
+        const details = payload && payload.warning_details && typeof payload.warning_details === "object"
+          ? payload.warning_details
+          : {};
+        const unmappedCount = Number(details.unmapped_warehouse_count || 0);
+        wbSupplyOverlayWarningSummary.textContent = "Показать детали warnings" + (
+          unmappedCount > 0 ? " (" + unmappedCount + " складов без ФО)" : " (" + warnings.length + ")"
+        );
+        wbSupplyOverlayWarningList.innerHTML = warnings.map((item) => "<li>" + escapeHtml(item) + "</li>").join("");
+        wbSupplyOverlayWarningDetails.hidden = false;
+        wbSupplyOverlayWarningDetails.open = false;
+      }
+
       function updateWbSupplyOverlayButtons() {
         if (wbSupplyOverlayRefreshButton) {
           wbSupplyOverlayRefreshButton.disabled = wbSupplyOverlayLoading;
@@ -6088,15 +6174,19 @@
           renderWbSupplyOverlayOptions(payload);
           const summary = payload.summary || {};
           const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
+          const warningDetails = payload.warning_details && typeof payload.warning_details === "object" ? payload.warning_details : {};
+          const unmappedCount = Number(warningDetails.unmapped_warehouse_count || summary.unmapped_warehouse_count || 0);
+          renderWbSupplyOverlayWarnings(payload);
           setWbSupplyOverlayMessage(
             "Доступно к расчёту: " + valueOrDash(summary.eligible) +
               " / всего " + valueOrDash(summary.total) +
-              (warnings.length ? ". Есть warnings: " + warnings.join(" ") : "."),
+              (warnings.length ? ". Есть warnings: " + (unmappedCount > 0 ? unmappedCount + " складов без ФО" : warnings.length) + "." : "."),
             warnings.length ? "warning" : ""
           );
         } catch (error) {
           wbSupplyOverlayOptionsPayload = null;
           renderWbSupplyOverlayOptions(null);
+          renderWbSupplyOverlayWarnings(null);
           setWbSupplyOverlayMessage(
             "Не удалось прочитать WB-поставки для расчёта: " + (error instanceof Error ? error.message : String(error)),
             "error"
@@ -6945,12 +7035,7 @@
       function renderWbSuppliesOptions(payload) {
         const filters = payload && payload.filters ? payload.filters : {};
         const options = filters.options || {};
-        renderSelectOptions(
-          wbSuppliesWarehouseSelect,
-          [{ value: "", label: "Все склады" }].concat(options.warehouses || []),
-          wbSuppliesState.warehouse_id
-        );
-        renderWbSuppliesDistrictPresets(options.districts || []);
+        renderWbSuppliesWarehouseOptions(options.warehouses || [], options.districts || []);
         renderWbSuppliesStatusOptions(options.statuses || []);
         if (wbSuppliesSizeFilterSelect) {
           wbSuppliesSizeFilterSelect.value = wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER;
@@ -6960,20 +7045,53 @@
         }
       }
 
-      function renderSelectOptions(select, options, selectedValue) {
-        if (!select) {
-          return;
-        }
-        const selected = String(selectedValue || "");
-        select.innerHTML = options.map((item) => {
-          const value = String(item.value || "");
-          const label = String(item.label || value || "");
-          return "<option value=\"" + escapeHtml(value) + "\"" + (value === selected ? " selected" : "") + ">" + escapeHtml(label) + "</option>";
-        }).join("");
-      }
-
       function districtShortLabel(key) {
         return WB_DISTRICT_SHORT_LABELS[String(key || "")] || regionalDistrictLabel(key);
+      }
+
+      function wbSuppliesWarehouseSummary(warehouseOptions) {
+        const warehouseId = String(wbSuppliesState.warehouse_id || "").trim();
+        if (warehouseId) {
+          const match = (warehouseOptions || []).find((item) => String(item.value || "") === warehouseId);
+          return "Склад: " + (match ? String(match.label || warehouseId) : warehouseId);
+        }
+        if (wbSuppliesState.district_keys.length) {
+          return "ФО: " + wbSuppliesState.district_keys.map(districtShortLabel).join(", ");
+        }
+        return "Склады: все";
+      }
+
+      function setWbSuppliesWarehouseMenuOpen(isOpen) {
+        if (!wbSuppliesWarehouseMenu || !wbSuppliesWarehouseMenuButton) {
+          return;
+        }
+        wbSuppliesWarehouseMenu.hidden = !isOpen;
+        wbSuppliesWarehouseMenuButton.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      }
+
+      function renderWbSuppliesWarehouseOptions(rawWarehouseOptions, rawDistrictOptions) {
+        const warehouseOptions = Array.isArray(rawWarehouseOptions) ? rawWarehouseOptions : [];
+        if (wbSuppliesWarehouseMenuButton) {
+          wbSuppliesWarehouseMenuButton.textContent = wbSuppliesWarehouseSummary(warehouseOptions);
+        }
+        renderWbSuppliesDistrictPresets(rawDistrictOptions);
+        if (!wbSuppliesWarehouseOptions) {
+          return;
+        }
+        const selectedWarehouseId = String(wbSuppliesState.warehouse_id || "").trim();
+        const rows = [
+          { value: "", label: "Все склады" },
+          ...warehouseOptions.map((item) => ({
+            value: String(item.value || ""),
+            label: String(item.label || item.value || "")
+          })),
+        ];
+        wbSuppliesWarehouseOptions.innerHTML = rows.map((item) => [
+          "<label class=\"wb-supplies-status-option\">",
+          "<input type=\"radio\" name=\"wbSuppliesWarehouse\" value=\"" + escapeHtml(item.value) + "\" data-wb-supplies-warehouse-radio" + (item.value === selectedWarehouseId ? " checked" : "") + ">",
+          "<span>" + escapeHtml(item.label || "—") + "</span>",
+          "</label>"
+        ].join("")).join("");
       }
 
       function renderWbSuppliesDistrictPresets(rawOptions) {
@@ -6996,7 +7114,7 @@
         });
         const selected = new Set(wbSuppliesState.district_keys);
         wbSuppliesDistrictPresetList.innerHTML = options.map((item) => [
-          "<label class=\"wb-supplies-district-preset\" title=\"" + escapeHtml(regionalDistrictLabel(item.district_key)) + "\">",
+          "<label class=\"wb-supplies-status-option\" title=\"" + escapeHtml(regionalDistrictLabel(item.district_key)) + "\">",
           "<input type=\"checkbox\" value=\"" + escapeHtml(item.district_key) + "\" data-wb-supplies-district-preset" + (selected.has(item.district_key) ? " checked" : "") + ">",
           "<span>" + escapeHtml(item.label) + "</span>",
           "</label>"
@@ -7005,11 +7123,20 @@
 
       function setWbSuppliesDistrictKeys(value, options) {
         wbSuppliesState.district_keys = sanitizeRegionalDistrictKeys(value, { fallbackToAll: false });
+        wbSuppliesState.warehouse_id = "";
         if (wbSuppliesDistrictPresetList) {
           const selected = new Set(wbSuppliesState.district_keys);
           Array.from(wbSuppliesDistrictPresetList.querySelectorAll("[data-wb-supplies-district-preset]")).forEach((input) => {
             input.checked = selected.has(input.value);
           });
+        }
+        if (wbSuppliesWarehouseOptions) {
+          Array.from(wbSuppliesWarehouseOptions.querySelectorAll("[data-wb-supplies-warehouse-radio]")).forEach((input) => {
+            input.checked = !input.value;
+          });
+        }
+        if (wbSuppliesWarehouseMenuButton) {
+          wbSuppliesWarehouseMenuButton.textContent = wbSuppliesWarehouseSummary((((wbSuppliesPayload || {}).filters || {}).options || {}).warehouses || []);
         }
         wbSuppliesState.offset = 0;
         persistWbSuppliesState();
@@ -8342,12 +8469,45 @@
           loadWbSupplies({ skipInitialSync: true });
         }, 250);
       });
-      wbSuppliesWarehouseSelect.addEventListener("change", () => {
-        wbSuppliesState.warehouse_id = String(wbSuppliesWarehouseSelect.value || "").trim();
-        wbSuppliesState.offset = 0;
-        persistWbSuppliesState();
-        loadWbSupplies({ skipInitialSync: true });
-      });
+      if (wbSuppliesWarehouseMenuButton) {
+        wbSuppliesWarehouseMenuButton.addEventListener("click", () => {
+          setWbSuppliesWarehouseMenuOpen(wbSuppliesWarehouseMenu ? wbSuppliesWarehouseMenu.hidden : true);
+        });
+      }
+      if (wbSuppliesWarehouseOptions) {
+        wbSuppliesWarehouseOptions.addEventListener("change", (event) => {
+          const radio = event.target.closest("[data-wb-supplies-warehouse-radio]");
+          if (!radio) {
+            return;
+          }
+          wbSuppliesState.warehouse_id = String(radio.value || "").trim();
+          wbSuppliesState.district_keys = [];
+          wbSuppliesState.offset = 0;
+          persistWbSuppliesState();
+          renderWbSuppliesWarehouseOptions(
+            (((wbSuppliesPayload || {}).filters || {}).options || {}).warehouses || [],
+            (((wbSuppliesPayload || {}).filters || {}).options || {}).districts || []
+          );
+          loadWbSupplies({ skipInitialSync: true });
+        });
+      }
+      if (wbSuppliesWarehouseFilter) {
+        wbSuppliesWarehouseFilter.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-wb-supplies-warehouse-action]");
+          if (!action) {
+            return;
+          }
+          wbSuppliesState.warehouse_id = "";
+          wbSuppliesState.district_keys = [];
+          wbSuppliesState.offset = 0;
+          persistWbSuppliesState();
+          renderWbSuppliesWarehouseOptions(
+            (((wbSuppliesPayload || {}).filters || {}).options || {}).warehouses || [],
+            (((wbSuppliesPayload || {}).filters || {}).options || {}).districts || []
+          );
+          loadWbSupplies({ skipInitialSync: true });
+        });
+      }
       if (wbSuppliesDistrictPresetList) {
         wbSuppliesDistrictPresetList.addEventListener("change", (event) => {
           const checkbox = event.target.closest("[data-wb-supplies-district-preset]");
@@ -8416,6 +8576,14 @@
         }
         if (!wbSuppliesStatusFilter.contains(event.target)) {
           setWbSuppliesStatusMenuOpen(false);
+        }
+      });
+      document.addEventListener("click", (event) => {
+        if (!wbSuppliesWarehouseFilter || !wbSuppliesWarehouseMenu || wbSuppliesWarehouseMenu.hidden) {
+          return;
+        }
+        if (!wbSuppliesWarehouseFilter.contains(event.target)) {
+          setWbSuppliesWarehouseMenuOpen(false);
         }
       });
       wbSuppliesPageButtons.addEventListener("click", (event) => {

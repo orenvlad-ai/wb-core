@@ -48,7 +48,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps WB warehouse names to the six repo-owned calculation districts through Marketplace offices primary evidence and tariffs/box fallback, exposes district presets in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps WB warehouse names to the six repo-owned calculation districts through Marketplace offices primary evidence and tariffs/box fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -197,7 +197,8 @@ Returns cached WB supplies as read-only selector options for `Поставки -
 
 Contract:
 - `eligible_status_ids = [2, 3, 4, 6]`;
-- statuses `1` (`Не запланировано`) and `5` (`Принято`) are disabled for calculation;
+- statuses `1` (`Не запланировано`) and `5` (`Принято`) are excluded from selector options and are not rendered even as disabled rows;
+- calculate routes still revalidate posted `selected_wb_supply_ids`, so manually posted status `1`/`5` supplies are skipped with diagnostics and never counted;
 - a future unknown-id status may be eligible only when it clearly means shipped and not accepted;
 - option is disabled when no operational supply date exists, goods composition is absent, or usable active SKU quantity is zero;
 - quantity source is only goods composition `nmId -> quantity`; accepted/ready/partial reception fields are not used for overlay quantity;
@@ -217,6 +218,8 @@ The calculation districts are exactly the six keys from `wb_regional_supply`, no
 Raw district names collapse into these six keys: Central -> `central`, Northwestern -> `northwest`, Volga -> `volga`, Ural -> `ural`, Southern + North Caucasus -> `south_caucasus`, Siberian + Far Eastern -> `far_siberia`.
 
 Unmatched warehouse names remain `unmapped` and emit warnings. They remain visible in the WB supplies list, are not selected by district presets, and are not added to regional overlay quantities.
+
+Operator UI must not render the full unmapped warehouse warning list inline in the calculation block. The default view shows a compact count/summary; full warehouse warning details are available only under a collapsed details/spoiler control.
 
 # 5. Field Normalization
 
@@ -304,8 +307,9 @@ Columns:
 
 Filters:
 - search placeholder `Номер поставки`;
-- warehouse select placeholder `Все склады`;
-- federal district presets `ЦФО · СЗФО · ПФО · УрФО · Юг+СК · Сиб+ДВ`, one or many, filtering by mapped warehouse district while unmapped warehouses remain outside presets;
+- warehouse dropdown summary `Склады: все` / `ФО: ...` / `Склад: ...`;
+- federal district presets `Все · ЦФО · СЗФО · ПФО · УрФО · Юг+СК · Сиб+ДВ` live inside the `Склад` dropdown; one or many district checkboxes filter by mapped warehouse district while unmapped warehouses remain available only through the concrete warehouse list;
+- choosing a district preset clears a concrete warehouse filter, choosing a concrete warehouse clears district presets, and `Все` clears both to avoid stale false-empty combinations;
 - status checkbox popup with summary `Статусы: все` or `Статусы: N`;
 - status quick actions `Все`, `Активные` and `Сброс`; `Активные` selects all official statuses except `Не запланировано`;
 - size select label `Размер поставки`;
