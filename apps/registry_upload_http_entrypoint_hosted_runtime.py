@@ -1914,6 +1914,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Загрузка данных",
             "Действия и состояния",
             "data-seller-top-session",
+            "Проверить сессию",
             "Восстановить сессию",
             'data-unified-tab-button="vitrina"',
             'data-unified-tab-button="factory-order"',
@@ -2044,7 +2045,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Загрузка данных",
             "Обновить группу",
             "data-seller-top-session",
-            "Восстановить сессию",
+            "Проверить сессию",
+            "Установить сессию",
             "Отзывы",
             "Загрузить отзывы",
             "AI-промпт разбора",
@@ -2058,7 +2060,15 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         missing_tokens = [token for token in tokens if token not in body]
         removed_tokens = [
             token
-            for token in ("data-update-summary", "data-retry-button", "data-status-badge", "JSON Connect", "Обновление данных")
+            for token in (
+                "data-update-summary",
+                "data-retry-button",
+                "data-status-badge",
+                "data-session-recovery-start",
+                "data-session-launcher",
+                "JSON Connect",
+                "Обновление данных",
+            )
             if token in body
         ]
         evaluation["ok"] = (

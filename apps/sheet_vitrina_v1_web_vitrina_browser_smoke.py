@@ -3388,12 +3388,13 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
               group_id: node.getAttribute('data-loading-group') || '',
               text: (node.textContent || '').trim(),
               has_refresh_button: node.querySelectorAll('[data-refresh-source-group]').length === 1,
-              date_value: (node.querySelector('[data-refresh-source-group-date]') || {}).value || '',
-              date_min: (node.querySelector('[data-refresh-source-group-date]') || {}).min || '',
-              date_max: (node.querySelector('[data-refresh-source-group-date]') || {}).max || '',
-              has_session_check: node.querySelectorAll('[data-session-check]').length === 1,
-              has_session_recovery_start: node.querySelectorAll('[data-session-recovery-start]').length === 1,
-              has_session_launcher: node.querySelectorAll('[data-session-launcher]').length === 1,
+	              date_value: (node.querySelector('[data-refresh-source-group-date]') || {}).value || '',
+	              date_min: (node.querySelector('[data-refresh-source-group-date]') || {}).min || '',
+	              date_max: (node.querySelector('[data-refresh-source-group-date]') || {}).max || '',
+	              has_session_check: node.querySelectorAll('[data-session-check]').length === 1,
+	              has_session_install: node.querySelectorAll('[data-session-install]').length === 1,
+	              has_session_recovery_start: node.querySelectorAll('[data-session-recovery-start]').length === 1,
+	              has_session_launcher: node.querySelectorAll('[data-session-launcher]').length === 1,
               session_state_in_main: !!node.querySelector('.activity-group-main [data-session-state]'),
               session_state_in_controls: !!node.querySelector('.activity-group-actions [data-session-state]')
             }));
@@ -3440,16 +3441,18 @@ def _read_activity_surface(page: object, *, allow_empty_log: bool = False) -> di
         raise AssertionError(f"each loading group must expose a default refresh date, got {payload}")
     seller_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "seller_portal_bot")
     if not (
-        not seller_group["has_session_check"]
-        and seller_group["has_session_recovery_start"]
+        seller_group["has_session_check"]
+        and seller_group["has_session_install"]
+        and not seller_group["has_session_recovery_start"]
         and not seller_group["has_session_launcher"]
     ):
-        raise AssertionError(f"Seller Portal group must expose one recovery action without mandatory check/launcher controls, got {payload}")
+        raise AssertionError(f"Seller Portal group must expose only check/install session actions, got {payload}")
     if not seller_group["session_state_in_main"] or seller_group["session_state_in_controls"]:
         raise AssertionError(f"Seller Portal session state must be placed in the left group header, got {payload}")
     public_card_group = next(item for item in payload["loading"]["groups"] if item["group_id"] == "wb_public_card_bot")
     if (
         public_card_group["has_session_check"]
+        or public_card_group["has_session_install"]
         or public_card_group["has_session_recovery_start"]
         or public_card_group["has_session_launcher"]
         or public_card_group["session_state_in_main"]
