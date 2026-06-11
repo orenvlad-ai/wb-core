@@ -54,6 +54,7 @@ from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1TemporalSlot,
     SheetVitrinaWriteTarget,
 )
+from packages.contracts.supplier_shipments import ORDER_STATUS_ACCEPTED_FF, ORDER_STATUS_IN_TRANSIT
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -645,6 +646,17 @@ def main() -> None:
                 raise AssertionError("supplier registry source must use matched supplier quantity in factory inbound coverage")
             if supplier_diagnostics.get("usable_line_count") != 2 or supplier_diagnostics.get("unmatched_line_count") != 1 or supplier_diagnostics.get("ambiguous_line_count") != 1:
                 raise AssertionError(f"supplier registry diagnostics must expose usable/unmatched/ambiguous counts, got {supplier_diagnostics}")
+            if (
+                supplier_diagnostics.get("excluded_accepted_ff_shipment_count") != 1
+                or supplier_diagnostics.get("excluded_accepted_ff_line_count") != 1
+                or supplier_diagnostics.get("excluded_accepted_ff_quantity") != 44.0
+            ):
+                raise AssertionError(f"supplier registry diagnostics must expose accepted_ff exclusions, got {supplier_diagnostics}")
+            supplier_summaries = supplier_source_payload.get("supplier_registry_inbound_summary", {}).get("shipment_summary", [])
+            if any(item.get("shipment_id") == "sup_factory_inbound_accepted_ff" for item in supplier_summaries):
+                raise AssertionError("accepted_ff supplier shipments must be excluded from factory inbound shipment summary")
+            if not any("accepted_ff" in item for item in supplier_source_payload.get("warnings", [])):
+                raise AssertionError("supplier registry source must warn when accepted_ff shipments are excluded")
             effective_supplier_rows = [
                 (item.get("shipment_name"), item.get("planned_arrival_date"), item.get("effective_arrival_date"), item.get("quantity"))
                 for item in supplier_source_payload.get("effective_inbound_factory_to_ff", [])
@@ -1087,6 +1099,7 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
             "created_at": "2026-04-18T09:05:00Z",
             "updated_at": "2026-04-18T09:05:00Z",
             "shipment_date": "2026-05-10",
+            "order_status": ORDER_STATUS_IN_TRANSIT,
             "invoice_no": "LATE-1",
             "invoice_date": "2026-05-09",
             "contract_no": "",
@@ -1109,6 +1122,37 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
         },
         lines=[
             line("ln_late_1", sort_order=1, nm_id=210183919, qty=100, match_status="matched", name="Clear iPhone 14 Pro"),
+        ],
+    )
+    runtime.save_supplier_shipment(
+        header={
+            "shipment_id": "sup_factory_inbound_accepted_ff",
+            "created_at": "2026-04-18T09:10:00Z",
+            "updated_at": "2026-04-18T09:10:00Z",
+            "shipment_date": "2026-04-20",
+            "order_status": ORDER_STATUS_ACCEPTED_FF,
+            "invoice_no": "ACCEPTED-FF",
+            "invoice_date": "2026-04-19",
+            "contract_no": "",
+            "contract_date": "",
+            "supplier_name": "HanShang Technology",
+            "customer_name": "",
+            "currency": "RMB",
+            "product_qty_total": 44,
+            "product_amount_total": 44,
+            "extras_amount_total": 0,
+            "invoice_amount_total": 44,
+            "declared_invoice_total": 44,
+            "match_status": "all_matched",
+            "source_filename": "accepted.xlsx",
+            "source_file_sha256": "",
+            "source_file_path": "",
+            "parser_version": "smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        lines=[
+            line("ln_accepted_1", sort_order=1, nm_id=210183919, qty=44, match_status="matched", name="Clear iPhone 14 Pro"),
         ],
     )
 

@@ -73,6 +73,7 @@ class FactoryOrderSupplierRegistryShipmentSummary:
     ambiguous_line_count: int
     missing_shipment_date_line_count: int
     usable_quantity: float
+    order_status: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,9 @@ class FactoryOrderSupplierRegistryDiagnostics:
     invalid_quantity_line_count: int
     usable_line_count: int
     usable_quantity: float
+    excluded_accepted_ff_shipment_count: int = 0
+    excluded_accepted_ff_line_count: int = 0
+    excluded_accepted_ff_quantity: float = 0.0
 
 
 @dataclass(frozen=True)
