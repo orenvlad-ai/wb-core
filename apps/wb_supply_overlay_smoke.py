@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from packages.application.wb_supplies import _normalize_list_request, _row_matches_districts  # noqa: E402
 from packages.application.wb_supply_overlay import (  # noqa: E402
     apply_stock_ff_overlay,
+    augment_supply_row_with_district,
     build_selected_wb_supply_overlay,
     build_warehouse_district_mapping,
     build_wb_supply_overlay_options,
@@ -152,7 +153,12 @@ def _assert_district_mapping() -> None:
             {"warehouse_id": "3", "warehouse_name": "Новосибирск"},
             {"warehouse_id": "4", "warehouse_name": "Склад без ФО"},
         ],
-        supply_rows=[],
+        supply_rows=[
+            {"warehouse_id": "1", "warehouse_name": "Коледино"},
+            {"warehouse_id": "2", "warehouse_name": "Казань"},
+            {"warehouse_id": "3", "warehouse_name": "Новосибирск"},
+            {"warehouse_id": "4", "warehouse_name": "Склад без ФО"},
+        ],
         office_rows=[{"name": "Коледино", "federalDistrict": "Центральный федеральный округ"}],
         tariff_rows=[
             {"warehouseName": "Коледино", "geoName": "Приволжский федеральный округ"},
@@ -172,6 +178,34 @@ def _assert_district_mapping() -> None:
     if mapping.get("unmapped_warehouse_count") != 1 or mapping.get("unmapped_warehouses") != ["Склад без ФО"]:
         raise AssertionError(f"unmapped warehouse summary must stay compact/countable, got {mapping}")
 
+    catalog_only = build_warehouse_district_mapping(
+        warehouse_rows=[{"warehouse_id": "5", "warehouse_name": "Глобальный склад без поставок"}],
+        supply_rows=[],
+    )
+    if catalog_only.get("unmapped_warehouse_count") != 0 or catalog_only.get("warnings"):
+        raise AssertionError(f"global warehouse catalog alone must not emit overlay warnings, got {catalog_only}")
+
+    manual = build_warehouse_district_mapping(
+        warehouse_rows=[],
+        supply_rows=[
+            {
+                "warehouse_id": "130744",
+                "warehouse_name": "Краснодар (Тихорецкая)",
+                "actual_warehouse_id": "218210",
+                "actual_warehouse_name": "Обухово",
+                "transit_warehouse_id": "218210",
+                "transit_warehouse_name": "Обухово",
+                "warehouse_from_name": "Краснодар (Тихорецкая)",
+                "warehouse_to_name": "Обухово",
+                "warehouse_display": "Краснодар (Тихорецкая) → Обухово",
+            }
+        ],
+        tariff_rows=[{"warehouseName": "Обухово", "geoName": "Центральный федеральный округ"}],
+    )
+    routed = manual["by_normalized_name"].get("краснодар тихорецкая")
+    if not routed or routed.get("district_key") != "south_caucasus" or routed.get("source") != "manual_known_wb_warehouse":
+        raise AssertionError(f"planned Краснодар warehouse must map to south_caucasus, not transit Обухово, got {manual}")
+
 
 def _assert_list_filter_contract() -> None:
     request = _normalize_list_request({"district_keys": "central,volga,unknown"})
@@ -181,6 +215,44 @@ def _assert_list_filter_contract() -> None:
         raise AssertionError("district filter must match mapped rows")
     if _row_matches_districts({"district_key": "unmapped"}, request["district_keys"]):
         raise AssertionError("unmapped rows must not enter district presets")
+
+    mapping = build_warehouse_district_mapping(
+        supply_rows=[
+            {
+                "warehouse_id": "130744",
+                "warehouse_name": "Краснодар (Тихорецкая)",
+                "actual_warehouse_id": "218210",
+                "actual_warehouse_name": "Обухово",
+                "transit_warehouse_id": "218210",
+                "transit_warehouse_name": "Обухово",
+                "warehouse_from_name": "Краснодар (Тихорецкая)",
+                "warehouse_to_name": "Обухово",
+                "warehouse_display": "Краснодар (Тихорецкая) → Обухово",
+            }
+        ],
+        tariff_rows=[{"warehouseName": "Обухово", "geoName": "Центральный федеральный округ"}],
+    )
+    routed = augment_supply_row_with_district(
+        {
+            "warehouse_id": "130744",
+            "warehouse_name": "Краснодар (Тихорецкая)",
+            "actual_warehouse_id": "218210",
+            "actual_warehouse_name": "Обухово",
+            "transit_warehouse_id": "218210",
+            "transit_warehouse_name": "Обухово",
+            "warehouse_from_name": "Краснодар (Тихорецкая)",
+            "warehouse_to_name": "Обухово",
+            "warehouse_display": "Краснодар (Тихорецкая) → Обухово",
+            "district_key": "central",
+        },
+        mapping,
+    )
+    if routed.get("district_key") != "south_caucasus":
+        raise AssertionError(f"Краснодар -> Обухово must map by planned warehouse to south_caucasus, got {routed}")
+    if not _row_matches_districts(routed, ["south_caucasus"]):
+        raise AssertionError("south_caucasus filter must include planned Краснодар transit route")
+    if _row_matches_districts(routed, ["central"]):
+        raise AssertionError("central filter must not include planned Краснодар route just because actual warehouse is Обухово")
 
 
 def _assert_overlay_selector_and_math() -> None:

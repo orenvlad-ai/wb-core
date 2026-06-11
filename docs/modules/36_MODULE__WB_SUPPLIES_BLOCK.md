@@ -48,7 +48,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps WB warehouse names to the six repo-owned calculation districts through Marketplace offices primary evidence and tariffs/box fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -78,8 +78,11 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - `GET /api/v1/transit-tariffs` exists in adapter/diagnostics as read-only tariff evidence; the UI does not calculate transit cabinet cost from it without a proven formula;
   - `GET /api/v1/warehouses`.
 - Additional read-only district mapping evidence:
-  - Marketplace `GET /api/v3/offices` (`WB_MARKETPLACE_API_BASE_URL` override) is the primary source; match is by normalized warehouse/offices name and raw `federalDistrict`;
-  - tariffs `GET /api/v1/tariffs/box` (`WB_TARIFFS_API_BASE_URL` override) is fallback; match is by normalized `warehouseName` and raw `geoName`;
+  - district source is the planned/target supply warehouse (`warehouseName`, exposed as `planned_warehouse_name` / `target_warehouse_name` / `district_source_warehouse_name`);
+  - `actualWarehouseName` and `transitWarehouseName` remain route/display/evidence only and must not decide the calculation district;
+  - Marketplace `GET /api/v3/offices` (`WB_MARKETPLACE_API_BASE_URL` override) is the primary source; match is by normalized planned/target warehouse/offices name and raw `federalDistrict`;
+  - tariffs `GET /api/v1/tariffs/box` (`WB_TARIFFS_API_BASE_URL` override) is fallback; match is by normalized planned/target `warehouseName` and raw `geoName`;
+  - bounded manual known-warehouse fallback covers live/cache warehouses missing from external references and publishes `source/confidence/evidence` as `manual_known_wb_warehouse`;
   - Supplies `warehouse_id` is not treated as Marketplace office id.
 - `POST /api/v1/acceptance/options`, transit create/update methods and all WB mutations stay outside scope.
 - Adapter errors are sanitized:
@@ -217,7 +220,7 @@ The calculation districts are exactly the six keys from `wb_regional_supply`, no
 
 Raw district names collapse into these six keys: Central -> `central`, Northwestern -> `northwest`, Volga -> `volga`, Ural -> `ural`, Southern + North Caucasus -> `south_caucasus`, Siberian + Far Eastern -> `far_siberia`.
 
-Unmatched warehouse names remain `unmapped` and emit warnings. They remain visible in the WB supplies list, are not selected by district presets, and are not added to regional overlay quantities.
+Unmatched planned/target warehouse names remain `unmapped` and emit warnings. They remain visible in the WB supplies list, are not selected by district presets, and are not added to regional overlay quantities. The global `/api/v1/warehouses` catalog is used as name evidence/options but is not itself a warning target; warning counts are based on warehouses that occur in supply rows/options being mapped.
 
 Operator UI must not render the full unmapped warehouse warning list inline in the calculation block. The default view shows a compact count/summary; full warehouse warning details are available only under a collapsed details/spoiler control.
 
@@ -226,6 +229,8 @@ Operator UI must not render the full unmapped warehouse warning list inline in t
 Normalization keeps separate evidence sources instead of flattening them with lossy overwrite:
 - detail fields may be primary for status/date fields;
 - warehouse, route, quantity and cost fields use first non-empty evidence from detail/list/goods/package/warehouse dictionary as appropriate;
+- `planned_warehouse_name` / `target_warehouse_name` / `district_source_warehouse_name` identify the warehouse used for district mapping;
+- `actual_warehouse_name` / `transit_warehouse_name` / `warehouse_to_name` identify fact/transit route evidence and can appear in `warehouse_display`;
 - `None` and empty strings from detail do not erase non-empty list or dictionary evidence;
 - normalized rows expose evidence markers: `warehouse_evidence`, `route_evidence`, `quantity_evidence`, `packed_quantity_evidence`, `cost_evidence`.
 

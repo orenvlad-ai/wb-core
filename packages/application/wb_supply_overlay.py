@@ -28,6 +28,40 @@ DISTRICT_SHORT_LABELS_RU = {
     "far_siberia": "Сиб+ДВ",
 }
 
+_MANUAL_WAREHOUSE_DISTRICT_FALLBACKS: dict[str, tuple[str, str]] = {
+    "Коледино": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Электросталь": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Обухово": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Домодедово-2": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Домодедово 2: Питание": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Домодедово: Шины": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Склад Истра": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Истра": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Климовск СГТ": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Подольск": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Подольск 3": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Подольск 4": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Чашниково": ("central", "manual_known_wb_warehouse: Moscow region"),
+    "Тула": ("central", "manual_known_wb_warehouse: Tula Oblast"),
+    "Краснодар (Тихорецкая)": ("south_caucasus", "manual_known_wb_warehouse: Krasnodar Krai"),
+    "Невинномысск": ("south_caucasus", "manual_known_wb_warehouse: Stavropol Krai"),
+    "Склад Шушары": ("northwest", "manual_known_wb_warehouse: Saint Petersburg"),
+    "Санкт-Петербург (Уткина Заводь)": ("northwest", "manual_known_wb_warehouse: Saint Petersburg"),
+    "Казань": ("volga", "manual_known_wb_warehouse: Tatarstan"),
+    "Новосемейкино": ("volga", "manual_known_wb_warehouse: Samara Oblast"),
+    "СЦ Саратов Зоринский": ("volga", "manual_known_wb_warehouse: Saratov Oblast"),
+    "СЦ Самара": ("volga", "manual_known_wb_warehouse: Samara Oblast"),
+    "Пенза СГТ": ("volga", "manual_known_wb_warehouse: Penza Oblast"),
+    "Пермь: Горючее": ("volga", "manual_known_wb_warehouse: Perm Krai"),
+    "Екатеринбург - Перспективная 14": ("ural", "manual_known_wb_warehouse: Sverdlovsk Oblast"),
+    "Екатеринбург - Испытателей 14г": ("ural", "manual_known_wb_warehouse: Sverdlovsk Oblast"),
+    "Нижний Тагил: Индустриальная СГТ": ("ural", "manual_known_wb_warehouse: Sverdlovsk Oblast"),
+    "Новосибирск": ("far_siberia", "manual_known_wb_warehouse: Novosibirsk Oblast"),
+    "СЦ Барнаул": ("far_siberia", "manual_known_wb_warehouse: Altai Krai"),
+    "СЦ Новокузнецк": ("far_siberia", "manual_known_wb_warehouse: Kemerovo Oblast"),
+    "Склад Владивосток": ("far_siberia", "manual_known_wb_warehouse: Primorsky Krai"),
+}
+
 _DATE_FIELD_CANDIDATES = (
     "supply_date",
     "supplyDate",
@@ -144,7 +178,7 @@ def build_warehouse_district_mapping(
     office_rows: list[Mapping[str, Any]] | None = None,
     tariff_rows: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    target_names = _collect_target_warehouse_names(warehouse_rows or [], supply_rows or [])
+    target_names = _collect_target_warehouse_names(supply_rows or [])
     offices_by_name = _build_reference_index(
         office_rows or [],
         source="marketplace_offices",
@@ -157,17 +191,18 @@ def build_warehouse_district_mapping(
         name_keys=("warehouseName", "warehouse_name", "name"),
         district_keys=("geoName", "geo_name", "federalDistrict", "federal_district"),
     )
-    cache_by_name = _build_reference_index(
-        [*list(warehouse_rows or []), *list(supply_rows or [])],
-        source="cache_raw",
-        name_keys=("warehouse_name", "warehouseName", "name", "actual_warehouse_name", "transit_warehouse_name"),
-        district_keys=("district_key", "federalDistrict", "federal_district", "geoName", "geo_name"),
-    )
+    manual_by_name = _build_manual_fallback_index()
+    trusted_cached_by_name = _build_trusted_cached_source_index(supply_rows or [])
     by_name: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     unmapped_warehouses: list[str] = []
     for normalized_name, display_name in sorted(target_names.items()):
-        mapping = offices_by_name.get(normalized_name) or tariffs_by_name.get(normalized_name) or cache_by_name.get(normalized_name)
+        mapping = (
+            offices_by_name.get(normalized_name)
+            or tariffs_by_name.get(normalized_name)
+            or manual_by_name.get(normalized_name)
+            or trusted_cached_by_name.get(normalized_name)
+        )
         if mapping:
             by_name[normalized_name] = mapping
         else:
@@ -178,23 +213,18 @@ def build_warehouse_district_mapping(
         "warnings": warnings,
         "unmapped_warehouses": unmapped_warehouses,
         "unmapped_warehouse_count": len(unmapped_warehouses),
+        "source_warehouse_count": len(target_names),
         "district_options": district_filter_options(),
     }
 
 
 def augment_supply_row_with_district(row: Mapping[str, Any], mapping: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(row)
-    existing_key = str(result.get("district_key") or "").strip()
-    if existing_key in DISTRICT_KEYS:
-        result.setdefault("warehouse_district_key", existing_key)
-        result.setdefault("district_label_ru", DISTRICT_LABELS_RU[existing_key])
-        result.setdefault("district_short_label_ru", DISTRICT_SHORT_LABELS_RU[existing_key])
-        result.setdefault("district_mapping_status", "mapped")
-        result.setdefault("district_mapping_source", result.get("district_mapping_source") or "cached_row")
-        result.setdefault("district_mapping_confidence", result.get("district_mapping_confidence") or "cached")
-        return result
-
-    target = target_warehouse_for_supply(result)
+    target = district_source_warehouse_for_supply(result)
+    result["district_source_warehouse_id"] = target["warehouse_id"]
+    result["district_source_warehouse_name"] = target["warehouse_name"]
+    result["district_source_warehouse_role"] = target["warehouse_role"]
+    result["district_source_warehouse_evidence"] = target["warehouse_evidence"]
     normalized_name = _normalize_warehouse_name(target["warehouse_name"])
     by_name = mapping.get("by_normalized_name") if isinstance(mapping, Mapping) else {}
     mapped = by_name.get(normalized_name) if isinstance(by_name, Mapping) and normalized_name else None
@@ -210,6 +240,8 @@ def augment_supply_row_with_district(row: Mapping[str, Any], mapping: Mapping[st
         result["district_mapping_confidence"] = str(mapped.get("confidence") or "name_exact")
         result["district_warehouse_id"] = target["warehouse_id"]
         result["district_warehouse_name"] = target["warehouse_name"]
+        result["district_source_warehouse_id"] = target["warehouse_id"]
+        result["district_source_warehouse_name"] = target["warehouse_name"]
         return result
 
     result["district_key"] = DISTRICT_UNMAPPED
@@ -230,34 +262,91 @@ def augment_supply_row_with_district(row: Mapping[str, Any], mapping: Mapping[st
 
 
 def target_warehouse_for_supply(row: Mapping[str, Any]) -> dict[str, str]:
+    return district_source_warehouse_for_supply(row)
+
+
+def district_source_warehouse_for_supply(row: Mapping[str, Any]) -> dict[str, str]:
+    source_id = str(row.get("district_source_warehouse_id") or "").strip()
+    source_name = str(row.get("district_source_warehouse_name") or "").strip()
+    if source_name:
+        return {
+            "warehouse_id": source_id,
+            "warehouse_name": source_name,
+            "warehouse_role": str(row.get("district_source_warehouse_role") or "planned"),
+            "warehouse_evidence": str(row.get("district_source_warehouse_evidence") or "cached.district_source_warehouse_name"),
+        }
+    target_id = str(row.get("target_warehouse_id") or "").strip()
+    target_name = str(row.get("target_warehouse_name") or "").strip()
+    if target_name:
+        return {
+            "warehouse_id": target_id,
+            "warehouse_name": target_name,
+            "warehouse_role": "target",
+            "warehouse_evidence": "normalized.target_warehouse_name",
+        }
+    planned_id = str(row.get("planned_warehouse_id") or "").strip()
+    planned_name = str(row.get("planned_warehouse_name") or "").strip()
+    if planned_name:
+        return {
+            "warehouse_id": planned_id,
+            "warehouse_name": planned_name,
+            "warehouse_role": "planned",
+            "warehouse_evidence": "normalized.planned_warehouse_name",
+        }
+    warehouse_name = str(row.get("warehouse_name") or "").strip()
+    if warehouse_name:
+        return {
+            "warehouse_id": str(row.get("warehouse_id") or "").strip(),
+            "warehouse_name": warehouse_name,
+            "warehouse_role": "planned",
+            "warehouse_evidence": "normalized.warehouse_name",
+        }
+    warehouse_from_name = str(row.get("warehouse_from_name") or "").strip()
+    if warehouse_from_name:
+        return {
+            "warehouse_id": str(row.get("warehouse_id") or "").strip(),
+            "warehouse_name": warehouse_from_name,
+            "warehouse_role": "planned",
+            "warehouse_evidence": "normalized.warehouse_from_name",
+        }
+    warehouse_display = str(row.get("warehouse_display") or "").strip()
+    if "→" in warehouse_display:
+        return {
+            "warehouse_id": str(row.get("warehouse_id") or "").strip(),
+            "warehouse_name": warehouse_display.split("→", 1)[0].strip(),
+            "warehouse_role": "planned",
+            "warehouse_evidence": "normalized.warehouse_display.from",
+        }
     warehouse_to_name = str(row.get("warehouse_to_name") or "").strip()
     transit_warehouse_name = str(row.get("transit_warehouse_name") or "").strip()
     actual_warehouse_name = str(row.get("actual_warehouse_name") or row.get("warehouse_actual_name") or "").strip()
-    warehouse_name = str(row.get("warehouse_name") or "").strip()
-    warehouse_display = str(row.get("warehouse_display") or "").strip()
     if warehouse_to_name:
         return {
             "warehouse_id": str(row.get("transit_warehouse_id") or row.get("actual_warehouse_id") or "").strip(),
             "warehouse_name": warehouse_to_name,
+            "warehouse_role": "transit_fallback",
+            "warehouse_evidence": "normalized.warehouse_to_name",
         }
     if transit_warehouse_name:
         return {
             "warehouse_id": str(row.get("transit_warehouse_id") or "").strip(),
             "warehouse_name": transit_warehouse_name,
-        }
-    if warehouse_name:
-        return {
-            "warehouse_id": str(row.get("warehouse_id") or "").strip(),
-            "warehouse_name": warehouse_name,
+            "warehouse_role": "transit_fallback",
+            "warehouse_evidence": "normalized.transit_warehouse_name",
         }
     if actual_warehouse_name:
         return {
             "warehouse_id": str(row.get("actual_warehouse_id") or "").strip(),
             "warehouse_name": actual_warehouse_name,
+            "warehouse_role": "actual_fallback",
+            "warehouse_evidence": "normalized.actual_warehouse_name",
         }
-    if "→" in warehouse_display:
-        return {"warehouse_id": "", "warehouse_name": warehouse_display.rsplit("→", 1)[1].strip()}
-    return {"warehouse_id": "", "warehouse_name": warehouse_display}
+    return {
+        "warehouse_id": "",
+        "warehouse_name": warehouse_display,
+        "warehouse_role": "display_fallback",
+        "warehouse_evidence": "normalized.warehouse_display",
+    }
 
 
 def build_wb_supply_overlay_options(
@@ -395,6 +484,10 @@ def build_selected_wb_supply_overlay(
                     "warehouse_id": str(candidate.get("warehouse_id") or ""),
                     "warehouse_name": str(candidate.get("warehouse_name") or ""),
                     "warehouse_display": str(candidate.get("warehouse_display") or ""),
+                    "district_source_warehouse_id": str(candidate.get("district_source_warehouse_id") or ""),
+                    "district_source_warehouse_name": str(candidate.get("district_source_warehouse_name") or ""),
+                    "district_source_warehouse_role": str(candidate.get("district_source_warehouse_role") or ""),
+                    "district_source_warehouse_evidence": str(candidate.get("district_source_warehouse_evidence") or ""),
                     "district_key": str(candidate.get("district_key") or DISTRICT_UNMAPPED),
                     "district_label_ru": str(candidate.get("district_label_ru") or ""),
                     "district_mapping_source": str(candidate.get("district_mapping_source") or ""),
@@ -646,6 +739,12 @@ def _candidate_from_record(
         "warehouse_id": target_warehouse["warehouse_id"],
         "warehouse_name": target_warehouse["warehouse_name"],
         "warehouse_display": str(normalized.get("warehouse_display") or target_warehouse["warehouse_name"]),
+        "district_source_warehouse_id": str(normalized.get("district_source_warehouse_id") or target_warehouse["warehouse_id"]),
+        "district_source_warehouse_name": str(normalized.get("district_source_warehouse_name") or target_warehouse["warehouse_name"]),
+        "district_source_warehouse_role": str(normalized.get("district_source_warehouse_role") or target_warehouse.get("warehouse_role") or ""),
+        "district_source_warehouse_evidence": str(
+            normalized.get("district_source_warehouse_evidence") or target_warehouse.get("warehouse_evidence") or ""
+        ),
         "district_key": str(normalized.get("district_key") or DISTRICT_UNMAPPED),
         "district_label_ru": str(normalized.get("district_label_ru") or ""),
         "district_short_label_ru": str(normalized.get("district_short_label_ru") or ""),
@@ -787,30 +886,78 @@ def _build_reference_index(
     return result
 
 
+def _build_manual_fallback_index() -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for name, (district_key, evidence) in _MANUAL_WAREHOUSE_DISTRICT_FALLBACKS.items():
+        normalized_name = _normalize_warehouse_name(name)
+        if not normalized_name or district_key not in DISTRICT_KEYS:
+            continue
+        result.setdefault(
+            normalized_name,
+            {
+                "warehouse_name": name,
+                "district_key": district_key,
+                "district_label_ru": DISTRICT_LABELS_RU[district_key],
+                "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[district_key],
+                "source": "manual_known_wb_warehouse",
+                "evidence": f"manual_known_wb_warehouse.name={name}; {evidence}",
+                "confidence": "manual_known_name",
+            },
+        )
+    return result
+
+
+def _build_trusted_cached_source_index(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        district_key = str(row.get("district_key") or row.get("warehouse_district_key") or "").strip()
+        if district_key not in DISTRICT_KEYS:
+            continue
+        source_name = str(row.get("district_source_warehouse_name") or "").strip()
+        if not source_name:
+            continue
+        source = str(row.get("district_mapping_source") or "").strip()
+        if source in {"", "unmapped"}:
+            continue
+        normalized_name = _normalize_warehouse_name(source_name)
+        if not normalized_name:
+            continue
+        result.setdefault(
+            normalized_name,
+            {
+                "warehouse_name": source_name,
+                "district_key": district_key,
+                "district_label_ru": DISTRICT_LABELS_RU[district_key],
+                "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[district_key],
+                "source": "cached_verified_source_warehouse",
+                "evidence": (
+                    "cached_verified_source_warehouse.name="
+                    + source_name
+                    + "; source="
+                    + source
+                    + "; evidence="
+                    + str(row.get("district_mapping_evidence") or "")
+                ),
+                "confidence": "cached_verified_source",
+            },
+        )
+    return result
+
+
 def _collect_target_warehouse_names(
-    warehouse_rows: list[Mapping[str, Any]],
     supply_rows: list[Mapping[str, Any]],
 ) -> dict[str, str]:
     result: dict[str, str] = {}
-    for item in warehouse_rows:
-        name = _first_string(item, "warehouse_name", "warehouseName", "name")
-        normalized = _normalize_warehouse_name(name)
-        if normalized:
-            result.setdefault(normalized, name)
     for row in supply_rows:
         if not isinstance(row, Mapping):
             continue
-        for candidate in (
-            target_warehouse_for_supply(row).get("warehouse_name"),
-            row.get("warehouse_name"),
-            row.get("actual_warehouse_name"),
-            row.get("transit_warehouse_name"),
-            row.get("warehouse_to_name"),
-        ):
-            name = str(candidate or "").strip()
-            normalized = _normalize_warehouse_name(name)
-            if normalized:
-                result.setdefault(normalized, name)
+        target = district_source_warehouse_for_supply(row)
+        name = str(target.get("warehouse_name") or "").strip()
+        normalized = _normalize_warehouse_name(name)
+        if normalized:
+            result.setdefault(normalized, name)
     return result
 
 

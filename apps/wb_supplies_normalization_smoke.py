@@ -183,6 +183,10 @@ def _check_unknown_transit_cost_is_not_zero() -> None:
         warnings=[],
     )
     _assert(row["warehouse_display"] == "Краснодар (Тихорецкая) → Обухово", row)
+    _assert(row["planned_warehouse_name"] == "Краснодар (Тихорецкая)", row)
+    _assert(row["target_warehouse_name"] == "Краснодар (Тихорецкая)", row)
+    _assert(row["district_source_warehouse_name"] == "Краснодар (Тихорецкая)", row)
+    _assert(row["district_source_warehouse_role"] == "planned", row)
     _assert(row["cost_total"] is None, row)
     _assert(row["acceptance_cost"] == 0, row)
     _assert(row["cost_evidence"] == "transit_total_absent_in_official_supply_detail", row)
