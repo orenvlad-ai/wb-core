@@ -1968,10 +1968,6 @@
       white-space: nowrap;
     }
 
-    .seller-top-session.is-actionable {
-      cursor: pointer;
-    }
-
     .seller-top-session-dot {
       width: 7px;
       height: 7px;
@@ -3977,9 +3973,9 @@
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
-              <span class="seller-top-session tone-warning" data-seller-top-session title="сессия" aria-label="сессия">
+              <span class="seller-top-session tone-neutral" data-seller-top-session title="Сессия" aria-label="Сессия">
                 <span class="seller-top-session-dot" aria-hidden="true"></span>
-                <span data-seller-top-session-label>сессия</span>
+                <span data-seller-top-session-label>Сессия</span>
               </span>
               <p class="table-summary-line" data-table-summary-line hidden></p>
               <div class="table-header-controls" data-table-header-controls>
@@ -4828,6 +4824,31 @@
       "checking_canonical_supplier",
       "triggering_refresh"
     ]);
+    const SELLER_BOT_SOURCE_GROUP_ID = "seller_portal_bot";
+    const SELLER_BOT_SOURCE_KEYS = new Set([
+      "seller_funnel_snapshot",
+      "web_source_snapshot",
+      "promo_by_price"
+    ]);
+    const SELLER_SESSION_EXPIRED_MARKERS = [
+      "session_invalid",
+      "session_missing",
+      "session_valid_wrong_org",
+      "session expired",
+      "login required",
+      "login_required",
+      "login_redirect",
+      "login_page",
+      "seller_portal_session_invalid",
+      "seller_portal_session_missing",
+      "seller_portal_wrong_supplier",
+      "manual_relogin_required=login_and_save_state",
+      "требуется вход",
+      "нужен вход",
+      "нужна авторизация",
+      "сессия seller portal недействительна",
+      "сессия seller portal отсутствует"
+    ];
     const formattersById = new Map();
     const renderersById = new Map();
     const sortOptionsByValue = new Map();
@@ -4901,13 +4922,14 @@
         }
       },
       sellerSession: {
-        status: "checking",
-        statusLabel: "проверка...",
-        tone: "warning",
+        status: "runtime_unknown",
+        statusLabel: "нет данных последнего запуска",
+        tone: "neutral",
         checkedAt: "",
         summary: "",
         instruction: "",
-        loading: true
+        loading: false,
+        source: "runtime"
       },
       sellerRecovery: {
         launcherEnabled: false,
@@ -5087,8 +5109,6 @@
       sessionHighlights: {}
     };
     let sellerRecoveryPollHandle = null;
-    let sellerSessionIndicatorStarted = false;
-    let sellerSessionIndicatorInFlight = false;
     let metricPresentationDragState = null;
 
     purgeObsoleteHistoryStorage();
@@ -5359,28 +5379,13 @@
         runSellerSessionCheck();
         return;
       }
-      const recoveryStartButton = event.target.closest("[data-session-recovery-start]");
-      if (recoveryStartButton) {
+      const sessionInstallButton = event.target.closest("[data-session-install]");
+      if (sessionInstallButton) {
         event.preventDefault();
         runSellerRecoveryStart({openActivityPanel: true});
         return;
       }
-      const launcherButton = event.target.closest("[data-session-launcher]");
-      if (launcherButton) {
-        event.preventDefault();
-        downloadSellerRecoveryLauncher();
-      }
     });
-
-    if (sellerTopSessionNode) {
-      sellerTopSessionNode.addEventListener("click", function(event) {
-        if (!sellerTopSessionCanStartRecovery()) {
-          return;
-        }
-        event.preventDefault();
-        runSellerRecoveryStart({openActivityPanel: false});
-      });
-    }
 
     loadingTableBodyNode.addEventListener("change", function(event) {
       const dateInput = event.target.closest("[data-refresh-source-group-date]");
@@ -6047,15 +6052,7 @@
       loadRefreshButton.disabled = !!disabled;
       sourceStatusLoadButton.disabled = !!disabled;
       loadingTableBodyNode.querySelectorAll("button").forEach(function(button) {
-        if (disabled) {
-          button.disabled = true;
-          return;
-        }
-        if (button.matches("[data-session-launcher]")) {
-          button.disabled = !Boolean(state.sellerRecovery.canDownloadLauncher || state.sellerRecovery.launcherReady || state.sellerRecovery.launcherEnabled);
-          return;
-        }
-        button.disabled = false;
+        button.disabled = !!disabled;
       });
     }
 
@@ -7975,7 +7972,7 @@
         return "";
       }
       const status = state.sellerSession.statusLabel
-        ? ("Сессия: " + state.sellerSession.statusLabel + " · проверено " + formatTimestampDisplay(state.sellerSession.checkedAt))
+        ? ("Сессия: " + state.sellerSession.statusLabel + (state.sellerSession.checkedAt ? " · проверено " + formatTimestampDisplay(state.sellerSession.checkedAt) : ""))
         : "Сессия: не проверялась";
       const tone = normalizeTone(state.sellerSession.tone || "neutral");
       return '<span class="seller-session-state tone-' + escapeHtml(tone) + '" data-session-state>' + escapeHtml(status) + '</span>';
@@ -8001,15 +7998,10 @@
       if (!group.session_controls) {
         return "";
       }
-      const launcherPath = state.sellerRecovery.launcherPath || WEB_VITRINA_CONFIG.seller_recovery_launcher_path || "";
-      const fallbackVisible = Boolean(state.sellerRecovery.launcherFallbackVisible && launcherPath);
-      const fallbackTitle = state.sellerRecovery.launcherFallbackReason || "Если браузер заблокировал автоскачивание, скачайте launcher вручную.";
       return [
         '<span class="seller-session-controls" data-seller-session-controls>',
-        '<button class="button secondary seller-session-button" type="button" data-session-recovery-start>Восстановить сессию</button>',
-        fallbackVisible
-          ? '<a class="seller-session-fallback-link" href="#" data-session-launcher data-launcher-path="' + escapeHtml(launcherPath) + '" title="' + escapeHtml(fallbackTitle) + '">скачать лаунчер</a>'
-          : "",
+        '<button class="button secondary seller-session-button" type="button" data-session-check>Проверить сессию</button>',
+        '<button class="button secondary seller-session-button" type="button" data-session-install>Установить сессию</button>',
         '</span>'
       ].join("");
     }
@@ -8917,6 +8909,7 @@
       registerTableSurfaceAssets(payload);
       setStatusBadge(payload);
       renderSummaryCards(payload.summary_cards || []);
+      applySellerSessionFromRuntimePayload(payload);
       renderActivitySurface(payload.activity_surface || {});
       renderHistoricalAccess(payload);
       initializeMetricSelection(payload);
@@ -11151,6 +11144,7 @@
           return;
         }
         if (!finalJob || finalJob.status !== "success") {
+          applySellerSessionFromJobPayload(finalJob);
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "auto refresh job failed");
         }
         setSessionHighlightsFromJob(finalJob);
@@ -13439,6 +13433,80 @@
         highlights[rowId + "|" + asOfDate] = status;
       });
       state.sessionHighlights = highlights;
+      applySellerSessionFromJobPayload(jobPayload);
+    }
+
+    function applySellerSessionFromJobPayload(jobPayload) {
+      const result = (jobPayload && jobPayload.result) || {};
+      const operation = String(result.operation || (jobPayload && jobPayload.operation) || "").trim();
+      const sourceGroupId = String(result.source_group_id || "").trim();
+      const sessionPreflight = result.session_preflight || {};
+      const sessionStatus = String(result.session_status || sessionPreflight.status || "").trim();
+      const checkedAt = String(result.finished_at || (jobPayload && (jobPayload.finished_at || jobPayload.started_at)) || new Date().toISOString());
+      const parts = [];
+      pushSessionRuntimeText(parts, result);
+      pushSessionRuntimeText(parts, sessionPreflight);
+      pushSessionRuntimeText(parts, (jobPayload && jobPayload.log_lines) || []);
+      const combinedText = parts.join(" \n ");
+      if (textHasSellerSessionExpiredMarker(sessionStatus) || textHasSellerSessionExpiredMarker(combinedText)) {
+        state.sellerSession = {
+          status: "runtime_session_expired",
+          statusLabel: "протухла в последнем запуске",
+          tone: "error",
+          checkedAt: checkedAt,
+          summary: "Последний run упёрся в session expired / login required.",
+          instruction: "",
+          loading: false,
+          source: "runtime"
+        };
+        renderSellerSessionIndicator();
+        rerenderLoadingTable();
+        return;
+      }
+      if (sessionStatus === "session_valid_canonical") {
+        state.sellerSession = {
+          status: "runtime_session_active",
+          statusLabel: "активна в последнем запуске",
+          tone: "success",
+          checkedAt: checkedAt,
+          summary: "Последний seller-bot run прошёл с валидной session preflight.",
+          instruction: "",
+          loading: false,
+          source: "runtime"
+        };
+        renderSellerSessionIndicator();
+        rerenderLoadingTable();
+        return;
+      }
+      if (operation === "refresh" || operation === "auto_update") {
+        state.sellerSession = {
+          status: "runtime_session_active",
+          statusLabel: "активна в последнем запуске",
+          tone: "success",
+          checkedAt: checkedAt,
+          summary: "Последний full refresh не упёрся в session expired / login required.",
+          instruction: "",
+          loading: false,
+          source: "runtime"
+        };
+        renderSellerSessionIndicator();
+        rerenderLoadingTable();
+        return;
+      }
+      if (operation === "refresh_group" && sourceGroupId === SELLER_BOT_SOURCE_GROUP_ID && !sessionStatus) {
+        state.sellerSession = {
+          status: "runtime_session_active",
+          statusLabel: "активна в последнем запуске",
+          tone: "success",
+          checkedAt: checkedAt,
+          summary: "Последний seller-bot group refresh не вернул session-expired blocker.",
+          instruction: "",
+          loading: false,
+          source: "runtime"
+        };
+        renderSellerSessionIndicator();
+        rerenderLoadingTable();
+      }
     }
 
     function normalizeHighlightStatus(value) {
@@ -13577,6 +13645,7 @@
           return;
         }
         if (!finalJob || finalJob.status !== "success") {
+          applySellerSessionFromJobPayload(finalJob);
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "sheet refresh job failed");
         }
         setSessionHighlightsFromJob(finalJob);
@@ -13686,6 +13755,7 @@
           return;
         }
         if (!finalJob || finalJob.status !== "success") {
+          applySellerSessionFromJobPayload(finalJob);
           throw new Error(groupRefreshFailureMessage(finalJob, groupLabel, selectedDate));
         }
         setSessionHighlightsFromJob(finalJob);
@@ -13765,7 +13835,7 @@
           tone: state.sellerSession.tone,
           detail: "Seller Portal session check завершён"
         });
-        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
+        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -13779,7 +13849,8 @@
           checkedAt: checkedAt,
           summary: message,
           instruction: "",
-          loading: false
+          loading: false,
+          source: "manual_check"
         };
         renderSellerSessionIndicator();
         renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
@@ -13791,58 +13862,6 @@
       }
     }
 
-    async function startSellerSessionIndicatorCheck() {
-      if (sellerSessionIndicatorStarted || sellerSessionIndicatorInFlight) {
-        return;
-      }
-      sellerSessionIndicatorStarted = true;
-      sellerSessionIndicatorInFlight = true;
-      state.sellerSession = Object.assign({}, state.sellerSession, {
-        status: "checking",
-        statusLabel: "проверка...",
-        tone: "warning",
-        loading: true
-      });
-      renderSellerSessionIndicator();
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.seller_session_check_path, {
-          method: "POST",
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json; charset=utf-8"
-          },
-          body: JSON.stringify({async: true})
-        });
-        const payload = await readJsonResponse(response, "non-json response from seller session check route");
-        if (!response.ok) {
-          throw new Error((payload && payload.error) ? payload.error : "seller session check route returned " + response.status);
-        }
-        const resolvedJobPath = String(
-          (payload && payload.job_path) ||
-          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
-        );
-        const finalJob = await pollSheetJob(resolvedJobPath, null);
-        if (!finalJob || finalJob.status !== "success") {
-          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller session check job failed");
-        }
-        applySellerSessionResult(finalJob.result || {}, {renderLoadingTable: false});
-      } catch (error) {
-        const message = String(error && error.message ? error.message : error);
-        state.sellerSession = {
-          status: "session_probe_error",
-          statusLabel: "ошибка проверки",
-          tone: "error",
-          checkedAt: new Date().toISOString(),
-          summary: message,
-          instruction: "Повторите проверку или запустите восстановление Seller Portal.",
-          loading: false
-        };
-        renderSellerSessionIndicator();
-      } finally {
-        sellerSessionIndicatorInFlight = false;
-      }
-    }
-
     async function runSellerRecoveryStart(options) {
       const normalizedOptions = options || {};
       const actionId = state.actionSequence + 1;
@@ -13850,15 +13869,8 @@
       if (activityPanelNode && normalizedOptions.openActivityPanel !== false) {
         activityPanelNode.open = true;
       }
-      state.sellerSession = Object.assign({}, state.sellerSession, {
-        status: "checking",
-        statusLabel: "проверка...",
-        tone: "warning",
-        loading: true
-      });
-      renderSellerSessionIndicator();
       setActionButtonsDisabled(true);
-      setStatusBadge({label: "Запуск", tone: "warning", detail: "запрашиваем восстановление Seller Portal session"});
+      setStatusBadge({label: "Установка", tone: "warning", detail: "готовим launcher для ручной установки Seller Portal session"});
       try {
         const response = await fetch(WEB_VITRINA_CONFIG.seller_recovery_start_path, {
           method: "POST",
@@ -13884,7 +13896,7 @@
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller recovery start job failed");
         }
         const recoveryPayload = (finalJob && finalJob.result) || payload || {};
-        applySellerRecoveryPayload(recoveryPayload, {render: false});
+        applySellerRecoveryPayload(recoveryPayload, {render: false, updateSession: false});
         maybeAutoDownloadSellerRecoveryLauncher(recoveryPayload);
         const runStatus = String(recoveryPayload.run_status || recoveryPayload.status || "");
         if (runStatus === "starting") {
@@ -13906,8 +13918,8 @@
         if (sellerRecoveryIsActive(recoveryPayload)) {
           scheduleSellerRecoveryPoll(1200);
         }
-        setStatusBadge({label: "Запущено", tone: "warning", detail: "recovery flow requested"});
-        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
+        setStatusBadge({label: "Установка", tone: "warning", detail: "launcher запрошен"});
+        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -13933,13 +13945,169 @@
         checkedAt: checkedAt,
         summary: String((result && (result.probe_reason || result.summary || result.reason || result.message)) || ""),
         instruction: String((result && result.instruction) || ""),
-        loading: false
+        loading: false,
+        source: "manual_check"
       };
       applySellerRecoveryPayload(result || {}, {render: false});
       renderSellerSessionIndicator();
       if (!options || options.renderLoadingTable !== false) {
         renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
       }
+    }
+
+    function textHasSellerSessionExpiredMarker(value) {
+      const normalized = String(value || "").toLowerCase();
+      if (!normalized) {
+        return false;
+      }
+      return SELLER_SESSION_EXPIRED_MARKERS.some(function(marker) {
+        return normalized.indexOf(marker) !== -1;
+      });
+    }
+
+    function pushSessionRuntimeText(parts, value) {
+      if (value === null || typeof value === "undefined") {
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach(function(item) {
+          pushSessionRuntimeText(parts, item);
+        });
+        return;
+      }
+      if (typeof value === "object") {
+        [
+          "status",
+          "tone",
+          "label",
+          "value",
+          "detail",
+          "reason",
+          "summary",
+          "message",
+          "refresh_status",
+          "refresh_status_label",
+          "refresh_status_tone",
+          "refresh_status_reason",
+          "semantic_status",
+          "semantic_label",
+          "semantic_tone",
+          "semantic_reason",
+          "session_status",
+          "session_status_label",
+          "session_probe_reason",
+          "failed_stage",
+          "operator_next_step",
+          "note",
+          "today_reason",
+          "yesterday_reason"
+        ].forEach(function(key) {
+          if (Object.prototype.hasOwnProperty.call(value, key)) {
+            pushSessionRuntimeText(parts, value[key]);
+          }
+        });
+        return;
+      }
+      const text = String(value || "").trim();
+      if (text) {
+        parts.push(text);
+      }
+    }
+
+    function sellerBotSourceRowsFromPayload(payload) {
+      const activitySurface = (payload && payload.activity_surface) || {};
+      const loadingTable = activitySurface.loading_table || {};
+      const rows = Array.isArray(loadingTable.rows) ? loadingTable.rows : [];
+      return rows.filter(function(row) {
+        const groupId = String((row && row.source_group_id) || "");
+        const sourceKey = String((row && row.source_key) || "");
+        return groupId === SELLER_BOT_SOURCE_GROUP_ID || SELLER_BOT_SOURCE_KEYS.has(sourceKey);
+      });
+    }
+
+    function collectSellerSessionRuntimeText(payload) {
+      const parts = [];
+      if (!payload) {
+        return parts;
+      }
+      pushSessionRuntimeText(parts, payload.status_badge || {});
+      pushSessionRuntimeText(parts, payload.status_summary || {});
+      const loadWindow = payload.status_summary && payload.status_summary.load_window_status;
+      pushSessionRuntimeText(parts, loadWindow || {});
+      const activitySurface = payload.activity_surface || {};
+      pushSessionRuntimeText(parts, activitySurface.log_block || {});
+      pushSessionRuntimeText(parts, (activitySurface.log_block || {}).preview_lines || []);
+      sellerBotSourceRowsFromPayload(payload).forEach(function(row) {
+        pushSessionRuntimeText(parts, row);
+        pushSessionRuntimeText(parts, row.today || {});
+        pushSessionRuntimeText(parts, row.yesterday || {});
+      });
+      return parts;
+    }
+
+    function payloadHasRuntimeSessionSignal(payload) {
+      if (!payload) {
+        return false;
+      }
+      if (sellerBotSourceRowsFromPayload(payload).length) {
+        return true;
+      }
+      const meta = payload.meta || {};
+      const statusSummary = payload.status_summary || {};
+      const snapshotId = String(meta.snapshot_id || "");
+      const refreshStatus = String(statusSummary.refresh_status || "").trim().toLowerCase();
+      const lastAutoStatus = String(statusSummary.last_auto_run_status || "").trim().toLowerCase();
+      if (snapshotId && refreshStatus && refreshStatus !== "unavailable" && refreshStatus !== "never") {
+        return true;
+      }
+      return snapshotId && lastAutoStatus && lastAutoStatus !== "never";
+    }
+
+    function applySellerSessionFromRuntimePayload(payload) {
+      const textParts = collectSellerSessionRuntimeText(payload);
+      const combinedText = textParts.join(" \n ");
+      const statusSummary = (payload && payload.status_summary) || {};
+      const meta = (payload && payload.meta) || {};
+      const checkedAt = String(statusSummary.refreshed_at || meta.refreshed_at || meta.generated_at || "");
+      if (textHasSellerSessionExpiredMarker(combinedText)) {
+        state.sellerSession = {
+          status: "runtime_session_expired",
+          statusLabel: "протухла в последнем запуске",
+          tone: "error",
+          checkedAt: checkedAt,
+          summary: "Последняя загрузка упёрлась в session expired / login required.",
+          instruction: "",
+          loading: false,
+          source: "runtime"
+        };
+        renderSellerSessionIndicator();
+        return;
+      }
+      if (payloadHasRuntimeSessionSignal(payload)) {
+        state.sellerSession = {
+          status: "runtime_session_active",
+          statusLabel: "активна в последнем запуске",
+          tone: "success",
+          checkedAt: checkedAt,
+          summary: "Последняя загрузка не упёрлась в session expired / login required.",
+          instruction: "",
+          loading: false,
+          source: "runtime"
+        };
+        renderSellerSessionIndicator();
+        return;
+      }
+      state.sellerSession = {
+        status: "runtime_unknown",
+        statusLabel: "нет данных последнего запуска",
+        tone: "neutral",
+        checkedAt: checkedAt,
+        summary: "Runtime/result payload не содержит результата bot-загрузки для session indicator.",
+        instruction: "",
+        loading: false,
+        source: "runtime"
+      };
+      renderSellerSessionIndicator();
     }
 
     function applySellerRecoveryPayload(payload, options) {
@@ -13978,7 +14146,8 @@
             checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
             summary: String(normalized.summary || normalized.reason || ""),
             instruction: String(normalized.instruction || ""),
-            loading: true
+            loading: true,
+            source: "recovery"
           });
           renderSellerSessionIndicator();
         } else {
@@ -13990,7 +14159,8 @@
             checkedAt: String(normalized.updated_at || normalized.checked_at || new Date().toISOString()),
             summary: String(normalized.probe_reason || normalized.summary || normalized.reason || ""),
             instruction: String(normalized.instruction || ""),
-            loading: false
+            loading: false,
+            source: "recovery"
           });
           renderSellerSessionIndicator();
         }
@@ -14011,13 +14181,19 @@
         return {label: "проверка...", tone: "warning"};
       }
       if (normalized === "session_valid_canonical") {
-        return {label: "актуальна", tone: "success"};
+        return {label: "активна", tone: "success"};
+      }
+      if (normalized === "runtime_session_active") {
+        return {label: "активна в последнем запуске", tone: "success"};
+      }
+      if (normalized === "runtime_session_expired") {
+        return {label: "протухла в последнем запуске", tone: "error"};
       }
       if (normalized === "session_valid_wrong_org") {
-        return {label: "требуется вход", tone: "error"};
+        return {label: "протухла", tone: "error"};
       }
       if (normalized === "session_invalid" || normalized === "session_missing") {
-        return {label: "требуется вход", tone: "error"};
+        return {label: "протухла", tone: "error"};
       }
       if (normalized === "session_probe_error") {
         return {label: "ошибка проверки", tone: "error"};
@@ -14028,28 +14204,18 @@
       return {label: "неизвестно", tone: "neutral"};
     }
 
-    function sellerTopSessionCanStartRecovery() {
-      const session = state.sellerSession || {};
-      return ["session_invalid", "session_missing", "session_valid_wrong_org", "session_probe_error"].includes(String(session.status || ""));
-    }
-
     function renderSellerSessionIndicator() {
       if (!sellerTopSessionNode || !sellerTopSessionLabelNode) {
         return;
       }
       const session = state.sellerSession || {};
       const mapped = sellerSessionDisplay(session.loading ? "checking" : session.status, session);
-      const label = "сессия";
+      const label = "Сессия";
       const titleParts = [mapped.label ? ("сессия: " + mapped.label) : label, session.summary || "", session.instruction || ""].filter(Boolean);
-      const needsRecovery = sellerTopSessionCanStartRecovery();
-      sellerTopSessionNode.className = "seller-top-session tone-" + normalizeTone(mapped.tone) + (needsRecovery ? " is-actionable" : "");
+      sellerTopSessionNode.className = "seller-top-session tone-" + normalizeTone(mapped.tone);
       sellerTopSessionNode.title = titleParts.join(" · ");
       sellerTopSessionNode.setAttribute("aria-label", titleParts.join(" · ") || label);
       sellerTopSessionLabelNode.textContent = label;
-      const existingAction = sellerTopSessionNode.querySelector("[data-session-recovery-start]");
-      if (existingAction) {
-        existingAction.remove();
-      }
     }
 
     async function fetchSellerRecoveryStatus(options) {
@@ -14076,12 +14242,12 @@
       return payload;
     }
 
-    async function refreshSellerRecoveryStatus() {
+    async function refreshSellerRecoveryStatus(options) {
       try {
-        const payload = await fetchSellerRecoveryStatus();
+        const payload = await fetchSellerRecoveryStatus(Object.assign({updateSession: false}, options || {}));
         maybeAutoDownloadSellerRecoveryLauncher(payload);
       } catch (error) {
-        applySellerRecoveryPayload({launcher_enabled: false}, {render: true});
+        applySellerRecoveryPayload({launcher_enabled: false}, {render: true, updateSession: false});
       }
     }
 
@@ -14318,9 +14484,6 @@
           renderPage(payload, {tableFreshness: "fresh"});
           markFreshTableDisplayed(payload);
         }
-        renderSellerSessionIndicator();
-        fetchSellerRecoveryStatus({probe: false, render: true, updateSession: false}).catch(function() {});
-        startSellerSessionIndicatorCheck();
       } catch (error) {
         if (requestId !== state.requestSequence) {
           return;

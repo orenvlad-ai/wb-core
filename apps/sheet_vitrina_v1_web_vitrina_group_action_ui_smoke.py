@@ -20,7 +20,7 @@ from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_WEB_
 
 def main() -> None:
     _assert_group_controls_survive_empty_loading_rows()
-    _assert_seller_session_invalid_top_action()
+    _assert_seller_session_indicator_readonly_and_manual_actions()
     _assert_group_action_launch_error()
 
 
@@ -40,6 +40,17 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 )
 
             context.route("**/v1/sheet-vitrina-v1/refresh", fail_hidden_refresh)
+            session_check_hits = {"count": 0}
+
+            def fail_auto_session_check(route: object) -> None:
+                session_check_hits["count"] += 1
+                route.fulfill(
+                    status=500,
+                    content_type="application/json",
+                    body=json.dumps({"error": "session-check must not run on page open"}),
+                )
+
+            context.route("**/v1/sheet-vitrina-v1/seller-portal-session/check", fail_auto_session_check)
 
             def empty_loading_rows(route: object) -> None:
                 response = route.fetch()
@@ -79,7 +90,7 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
                   return !!node
-                    && node.textContent.trim() === 'сессия'
+                    && node.textContent.trim() === 'Сессия'
                     && node.classList.contains('tone-success')
                     && !node.querySelector('[data-session-recovery-start]');
                 }""",
@@ -87,9 +98,11 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
             )
             initial_payload = page.evaluate(
                 """() => ({
-                  seller_top_text: document.querySelector('[data-seller-top-session]').textContent.trim(),
-                  seller_top_class: document.querySelector('[data-seller-top-session]').className,
-                  seller_top_recovery_buttons: document.querySelectorAll('[data-seller-top-session] [data-session-recovery-start]').length,
+	                  seller_top_text: document.querySelector('[data-seller-top-session]').textContent.trim(),
+	                  seller_top_class: document.querySelector('[data-seller-top-session]').className,
+	                  seller_top_tag: document.querySelector('[data-seller-top-session]').tagName,
+	                  seller_top_role: document.querySelector('[data-seller-top-session]').getAttribute('role') || '',
+	                  seller_top_recovery_buttons: document.querySelectorAll('[data-seller-top-session] [data-session-recovery-start]').length,
                   shell_hidden: document.querySelector('[data-loading-table-shell]').classList.contains('is-hidden'),
                   empty_hidden: document.querySelector('[data-loading-table-empty]').classList.contains('is-hidden'),
                   empty_text: document.querySelector('[data-loading-table-empty]').textContent.trim(),
@@ -109,13 +122,18 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 or initial_payload["source_row_count"] != 0
                 or initial_payload["empty_source_rows"] != 0
                 or "не OK" in initial_payload["empty_text"]
-                or initial_payload["seller_top_text"] != "сессия"
+                or initial_payload["seller_top_text"] != "Сессия"
+                or initial_payload["seller_top_tag"] != "SPAN"
+                or initial_payload["seller_top_role"]
+                or "is-actionable" in initial_payload["seller_top_class"]
                 or "tone-success" not in initial_payload["seller_top_class"]
                 or initial_payload["seller_top_recovery_buttons"] != 0
             ):
                 raise AssertionError(f"initial source status surface must be lazy/neutral, got {initial_payload}")
             if refresh_hits["count"] != 0:
                 raise AssertionError(f"page open/session indicator must not trigger hidden heavy refresh, got {refresh_hits}")
+            if session_check_hits["count"] != 0:
+                raise AssertionError(f"page open must not trigger session-check for indicator, got {session_check_hits}")
             page.locator("[data-activity-block] > summary").click()
             page.wait_for_function(
                 """() => {
@@ -198,15 +216,21 @@ def _assert_group_action_launch_error() -> None:
                 """() => ({
                   group_text: document.querySelector('[data-loading-group="wb_api"]').textContent.trim(),
                   log_text: document.querySelector('[data-activity-log-body]').textContent.trim(),
-                  top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
-                  request_date: document.querySelector('[data-refresh-source-group-date="wb_api"]').value,
-                  session_check_controls: document.querySelectorAll('[data-session-check]').length,
-                  session_recovery_controls: document.querySelectorAll('[data-session-recovery-start]').length,
-                  session_launcher_controls: document.querySelectorAll('[data-session-launcher]').length
-                })"""
+	                  top_status_badge_count: document.querySelectorAll('[data-status-badge]').length,
+	                  request_date: document.querySelector('[data-refresh-source-group-date="wb_api"]').value,
+	                  session_check_controls: document.querySelectorAll('[data-session-check]').length,
+	                  session_install_controls: document.querySelectorAll('[data-session-install]').length,
+	                  session_recovery_controls: document.querySelectorAll('[data-session-recovery-start]').length,
+	                  session_launcher_controls: document.querySelectorAll('[data-session-launcher]').length
+	                })"""
             )
-            if payload["session_check_controls"] != 0 or payload["session_recovery_controls"] != 1 or payload["session_launcher_controls"] != 0:
-                raise AssertionError(f"seller session controls must render one recovery action and no mandatory launcher/check action, got {payload}")
+            if (
+                payload["session_check_controls"] != 1
+                or payload["session_install_controls"] != 1
+                or payload["session_recovery_controls"] != 0
+                or payload["session_launcher_controls"] != 0
+            ):
+                raise AssertionError(f"seller session controls must render only check/install actions, got {payload}")
             if payload["top_status_badge_count"] != 0:
                 raise AssertionError(f"top status badge must not be rendered, got {payload}")
 
@@ -238,14 +262,38 @@ def _assert_group_action_launch_error() -> None:
             browser.close()
 
 
-def _assert_seller_session_invalid_top_action() -> None:
+def _assert_seller_session_indicator_readonly_and_manual_actions() -> None:
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as base_url:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             context = browser.new_context(viewport={"width": 1100, "height": 900})
+            session_check_hits = {"count": 0}
             recovery_hits = {"count": 0}
+            launcher_hits = {"count": 0}
+
+            def runtime_session_expired(route: object) -> None:
+                if "/web-vitrina/seller-portal-recovery/start" in route.request.url:
+                    route.fallback()
+                    return
+                response = route.fetch()
+                payload = response.json()
+                payload["status_badge"] = {
+                    "label": "Ошибка",
+                    "tone": "error",
+                    "detail": "seller_portal_session_invalid: login_required",
+                }
+                status_summary = payload.setdefault("status_summary", {})
+                status_summary["refresh_status"] = "error"
+                status_summary["refresh_status_tone"] = "error"
+                status_summary["refresh_status_reason"] = "seller_portal_session_invalid: login_redirect"
+                route.fulfill(
+                    status=response.status,
+                    content_type="application/json",
+                    body=json.dumps(payload, ensure_ascii=False),
+                )
 
             def fake_session_check(route: object) -> None:
+                session_check_hits["count"] += 1
                 route.fulfill(
                     status=202,
                     content_type="application/json",
@@ -267,21 +315,21 @@ def _assert_seller_session_invalid_top_action() -> None:
                         body=json.dumps(
                             {
                                 "job_id": "session-invalid-job",
-                                "operation": "session_check",
-                                "status": "success",
-                                "result": {
-                                    "operation": "session_check",
-                                    "status": "failed",
-                                    "session_status": "session_invalid",
-                                    "session_ok": False,
-                                    "status_label": "Нужен вход",
-                                    "status_tone": "error",
-                                    "summary": "Сохранённая seller-сессия больше не действует.",
-                                    "instruction": "Нажмите «Восстановить сессию».",
-                                    "semantic_status": "error",
-                                    "semantic_tone": "error",
-                                },
-                            },
+	                                "operation": "session_check",
+	                                "status": "success",
+	                                "result": {
+	                                    "operation": "session_check",
+	                                    "status": "success",
+	                                    "session_status": "session_valid_canonical",
+	                                    "session_ok": True,
+	                                    "status_label": "Сессия активна",
+	                                    "status_tone": "success",
+	                                    "summary": "Сохранённая seller-сессия активна.",
+	                                    "instruction": "",
+	                                    "semantic_status": "success",
+	                                    "semantic_tone": "success",
+	                                },
+	                            },
                             ensure_ascii=False,
                         ),
                     )
@@ -293,18 +341,23 @@ def _assert_seller_session_invalid_top_action() -> None:
                         body=json.dumps(
                             {
                                 "job_id": "recovery-start-job",
-                                "operation": "session_recovery_start",
-                                "status": "success",
-                                "result": {
-                                    "operation": "session_recovery_start",
-                                    "status": "starting",
-                                    "run_status": "starting",
-                                    "status_label": "Запускаем",
-                                    "status_tone": "warning",
-                                    "summary": "Окно входа Seller Portal готовится.",
-                                    "running": True,
-                                },
-                            },
+	                                "operation": "session_recovery_start",
+	                                "status": "success",
+	                                "result": {
+	                                    "operation": "session_recovery_start",
+	                                    "status": "awaiting_login",
+	                                    "run_status": "awaiting_login",
+	                                    "status_label": "Нужно войти",
+	                                    "status_tone": "warning",
+	                                    "summary": "Окно входа Seller Portal готово.",
+	                                    "running": True,
+	                                    "run_id": "recovery-start-job",
+	                                    "launcher_ready": True,
+	                                    "can_download_launcher": True,
+	                                    "launcher_enabled": True,
+	                                    "launcher_download_path": "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip",
+	                                },
+	                            },
                             ensure_ascii=False,
                         ),
                     )
@@ -322,41 +375,103 @@ def _assert_seller_session_invalid_top_action() -> None:
                             "job_path": "/v1/sheet-vitrina-v1/job?job_id=recovery-start-job",
                         },
                         ensure_ascii=False,
-                    ),
+	                    ),
+	                )
+
+            def fake_launcher(route: object) -> None:
+                launcher_hits["count"] += 1
+                route.fulfill(
+                    status=200,
+                    content_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="seller-portal-relogin-macos.zip"'},
+                    body=b"PK\x05\x06" + b"\x00" * 18,
                 )
 
+            context.route("**/v1/sheet-vitrina-v1/web-vitrina*", runtime_session_expired)
             context.route("**/v1/sheet-vitrina-v1/seller-portal-session/check", fake_session_check)
             context.route("**/v1/sheet-vitrina-v1/job?*", fake_job)
             context.route("**/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start", fake_recovery_start)
+            context.route("**/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip", fake_launcher)
             page = context.new_page()
             page.goto(base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
             page.wait_for_function(
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
                   return !!node
-                    && node.textContent.trim() === 'сессия'
+                    && node.textContent.trim() === 'Сессия'
                     && node.classList.contains('tone-error')
-                    && node.classList.contains('is-actionable')
+                    && !node.classList.contains('is-actionable')
                     && !node.querySelector('[data-session-recovery-start]');
                 }""",
                 timeout=10000,
             )
-            with page.expect_response("**/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start") as response_info:
-                page.locator("[data-seller-top-session]").click()
-            response = response_info.value
-            if response.status != 202 or recovery_hits["count"] != 1:
-                raise AssertionError(f"invalid seller session action must call existing recovery start route, got {response.status} / {recovery_hits}")
+            page.locator("[data-seller-top-session]").click()
+            page.wait_for_timeout(300)
+            if session_check_hits["count"] != 0 or recovery_hits["count"] != 0:
+                raise AssertionError(
+                    "read-only top indicator must not call session/recovery routes, "
+                    f"got session={session_check_hits} recovery={recovery_hits}"
+                )
+            page.locator("[data-activity-block] > summary").click()
+            page.wait_for_selector("[data-session-check]", timeout=10000)
+            controls_payload = page.evaluate(
+                """() => ({
+                  check: document.querySelectorAll('[data-session-check]').length,
+                  install: document.querySelectorAll('[data-session-install]').length,
+                  recovery: document.querySelectorAll('[data-session-recovery-start]').length,
+                  launcher: document.querySelectorAll('[data-session-launcher]').length,
+                  refresh_group: document.querySelectorAll('[data-refresh-source-group]').length
+                })"""
+            )
+            if (
+                controls_payload["check"] != 1
+                or controls_payload["install"] != 1
+                or controls_payload["recovery"] != 0
+                or controls_payload["launcher"] != 0
+            ):
+                raise AssertionError(f"session action block must expose only check/install, got {controls_payload}")
+            if controls_payload["refresh_group"] < 1:
+                raise AssertionError(f"group refresh actions must remain available, got {controls_payload}")
+
+            with page.expect_response("**/v1/sheet-vitrina-v1/seller-portal-session/check") as check_response_info:
+                page.locator("[data-session-check]").click()
+            check_response = check_response_info.value
+            if check_response.status != 202 or session_check_hits["count"] != 1:
+                raise AssertionError(f"manual check must call session-check once, got {check_response.status} / {session_check_hits}")
             page.wait_for_function(
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
                   return !!node
-                    && node.textContent.trim() === 'сессия'
-                    && node.classList.contains('tone-warning')
+                    && node.textContent.trim() === 'Сессия'
+                    && node.classList.contains('tone-success')
                     && !node.classList.contains('is-actionable');
                 }""",
                 timeout=5000,
             )
-            print("web_vitrina_seller_session_invalid_action: ok -> compact top indicator starts one-click recovery")
+            with page.expect_response("**/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start") as recovery_response_info:
+                page.locator("[data-session-install]").click()
+            recovery_response = recovery_response_info.value
+            if recovery_response.status != 202 or recovery_hits["count"] != 1:
+                raise AssertionError(f"install action must start recovery once, got {recovery_response.status} / {recovery_hits}")
+            page.wait_for_function(
+                """() => document.querySelector('[data-activity-log-body]').textContent.includes('Launcher для Seller Portal recovery скачан')""",
+                timeout=5000,
+            )
+            if launcher_hits["count"] != 1:
+                raise AssertionError(f"install action must download launcher once, got {launcher_hits}")
+            post_install_controls = page.evaluate(
+                """() => ({
+                  check: document.querySelectorAll('[data-session-check]').length,
+                  install: document.querySelectorAll('[data-session-install]').length,
+                  recovery: document.querySelectorAll('[data-session-recovery-start]').length,
+                  launcher: document.querySelectorAll('[data-session-launcher]').length
+                })"""
+            )
+            if post_install_controls != {"check": 1, "install": 1, "recovery": 0, "launcher": 0}:
+                raise AssertionError(f"install must not render extra session buttons, got {post_install_controls}")
+            print("web_vitrina_seller_session_indicator_readonly: ok -> runtime red without auto-check/click action")
+            print("web_vitrina_seller_session_manual_check: ok -> manual check updates indicator")
+            print("web_vitrina_seller_session_install_download: ok -> install downloads launcher without extra buttons")
             browser.close()
 
 

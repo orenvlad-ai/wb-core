@@ -431,12 +431,15 @@ def main() -> None:
                 "Загрузка данных",
                 "Обновить группу",
                 "data-seller-top-session",
-                "Восстановить сессию",
+                "Проверить сессию",
+                "Установить сессию",
                 "seller_recovery_status_path",
                 "Лог",
             ):
                 if expected not in page_html:
                     raise AssertionError(f"web-vitrina page shell must expose {expected!r}")
+            if "Восстановить сессию" in page_html or "data-session-recovery-start" in page_html or "data-session-launcher" in page_html:
+                raise AssertionError("web-vitrina page must not render legacy recovery/launcher session controls")
             if "data-retry-button" in page_html:
                 raise AssertionError("web-vitrina page must not render the removed refresh button")
             if "Фильтры и настройки" in page_html or "Search/select/sort и выбор видимых столбцов" in page_html or "Сбросить фильтры" in page_html:

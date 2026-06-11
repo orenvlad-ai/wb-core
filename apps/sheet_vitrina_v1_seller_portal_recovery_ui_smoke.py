@@ -40,12 +40,22 @@ def main() -> None:
                 page = browser.new_page(viewport={"width": 1280, "height": 900})
                 page.goto(fixture.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
                 page.locator("[data-activity-block] > summary").click()
-                page.wait_for_selector("[data-session-recovery-start]", timeout=10000)
+                page.wait_for_selector("[data-session-install]", timeout=10000)
+                controls_payload = page.evaluate(
+                    """() => ({
+                      check: document.querySelectorAll('[data-session-check]').length,
+                      install: document.querySelectorAll('[data-session-install]').length,
+                      recovery: document.querySelectorAll('[data-session-recovery-start]').length,
+                      launcher: document.querySelectorAll('[data-session-launcher]').length
+                    })"""
+                )
+                if controls_payload != {"check": 1, "install": 1, "recovery": 0, "launcher": 0}:
+                    raise AssertionError(f"web-vitrina must expose only check/install session controls, got {controls_payload}")
 
                 with page.expect_response(f"**{DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH}") as start_response_info:
-                    page.click("[data-session-recovery-start]")
+                    page.click("[data-session-install]")
                 if start_response_info.value.status != HTTPStatus.ACCEPTED.value:
-                    raise AssertionError(f"recovery start route must return 202 job payload, got {start_response_info.value.status}")
+                    raise AssertionError(f"install start route must return 202 job payload, got {start_response_info.value.status}")
                 page.wait_for_function(
                     "() => (document.querySelector('[data-session-recovery-state]') || {}).textContent.includes('Запускаем')",
                     timeout=10000,
@@ -83,13 +93,22 @@ def main() -> None:
                     "() => (document.querySelector('[data-activity-log-body]') || {}).textContent.includes('Launcher для Seller Portal recovery скачан автоматически')",
                     timeout=10000,
                 )
-                page.wait_for_selector("[data-session-launcher]", timeout=5000)
+                post_download_controls = page.evaluate(
+                    """() => ({
+                      check: document.querySelectorAll('[data-session-check]').length,
+                      install: document.querySelectorAll('[data-session-install]').length,
+                      recovery: document.querySelectorAll('[data-session-recovery-start]').length,
+                      launcher: document.querySelectorAll('[data-session-launcher]').length
+                    })"""
+                )
+                if post_download_controls != {"check": 1, "install": 1, "recovery": 0, "launcher": 0}:
+                    raise AssertionError(f"launcher download must not render extra session controls, got {post_download_controls}")
                 page.wait_for_function(
                     """() => {
                       const node = document.querySelector('[data-seller-top-session]');
                       return !!node
-                        && node.textContent.trim() === 'сессия'
-                        && node.classList.contains('tone-warning')
+                        && node.textContent.trim() === 'Сессия'
+                        && !node.classList.contains('tone-warning')
                         && !node.classList.contains('is-actionable');
                     }""",
                     timeout=5000,
@@ -98,16 +117,18 @@ def main() -> None:
                     raise AssertionError(f"second automatic launcher attempt must download zip, got {fixture.launcher_requests}")
 
                 with page.expect_response(f"**{DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH}") as second_start_response_info:
-                    page.click("[data-session-recovery-start]")
+                    page.click("[data-session-install]")
                 if second_start_response_info.value.status != HTTPStatus.ACCEPTED.value:
-                    raise AssertionError(f"second recovery start route must return 202, got {second_start_response_info.value.status}")
+                    raise AssertionError(f"second install start route must return 202, got {second_start_response_info.value.status}")
                 if fixture.start_payloads[-1] != {"replace": True, "async": True}:
-                    raise AssertionError(f"repeated restore click must remain replace=true/idempotent, got {fixture.start_payloads}")
+                    raise AssertionError(f"repeated install click must remain replace=true/idempotent, got {fixture.start_payloads}")
 
-                print("seller_recovery_ui_starting_no_autodownload: ok -> restore click waits until launcher readiness")
+                print("seller_recovery_ui_controls: ok -> only check/install session controls")
+                print("seller_recovery_ui_starting_no_autodownload: ok -> install waits until launcher readiness")
                 print("seller_recovery_ui_awaiting_autodownload: ok -> awaiting_login triggers launcher download automatically")
                 print("seller_recovery_ui_launcher_409_nonfatal: ok -> not-ready launcher 409 is warning, not fatal copy")
-                print("seller_recovery_ui_repeated_restore_replace: ok -> repeated restore clicks keep replace=true")
+                print("seller_recovery_ui_no_extra_buttons: ok -> launcher fallback controls are not rendered")
+                print("seller_recovery_ui_repeated_install_replace: ok -> repeated install clicks keep replace=true")
                 print("smoke-check passed")
             finally:
                 browser.close()
