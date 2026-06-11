@@ -26,7 +26,9 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (  # noqa: E402
 )
 
 
-DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
+HOSTED_RUNTIME_APP_DIR = Path("/opt/wb-core-runtime/app")
+HOSTED_RUNTIME_STATE_DIR = Path("/opt/wb-core-runtime/state")
+DEFAULT_RUNTIME_DIR = HOSTED_RUNTIME_STATE_DIR if ROOT == HOSTED_RUNTIME_APP_DIR else ROOT / ".runtime" / "registry_upload"
 DEFAULT_ENV_FILE = Path("/opt/wb-ai/.env")
 DEFAULT_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_JOB_PATH = "/v1/sheet-vitrina-v1/job"
@@ -67,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         _print(
             {
                 "status": "dry_run",
+                "runtime_dir": str(runtime_dir),
+                "base_url": base_url,
                 "due_count": len(due),
                 "selected_due_count": len(selected_due),
                 "missed_due_count": len(missed_due),
@@ -77,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if not due:
-        _print({"status": "no_due_schedules", "due_count": 0})
+        _print({"status": "no_due_schedules", "runtime_dir": str(runtime_dir), "base_url": base_url, "due_count": 0})
         return 0
     _mark_missed_due_slots(block, missed_due)
     cookie = _build_web_auth_cookie(os.environ)
@@ -147,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     _print(
         {
             "status": "completed" if exit_code == 0 else "error",
+            "runtime_dir": str(runtime_dir),
+            "base_url": base_url,
             "due_count": len(due),
             "selected_due_count": len(selected_due),
             "missed_due_count": len(missed_due),

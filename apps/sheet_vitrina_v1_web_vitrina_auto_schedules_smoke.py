@@ -253,6 +253,37 @@ def _assert_interval_policy(runtime_dir: Path) -> None:
         if any(int(item["local_time_hhmm"].split(":", 1)[0]) < 10 or int(item["local_time_hhmm"].split(":", 1)[0]) > 22 for item in payload["schedules"]):
             raise AssertionError(f"interval schedules must not include night slots, got {payload}")
         if hours == 4:
+            block.mark_run_started(
+                "interval_4h_10_00_ekt",
+                started_at="2026-05-12T05:01:00Z",
+                due_at="2026-05-12T05:00:00Z",
+                run_id="interval-10-job",
+                trigger_source="scheduled",
+            )
+            block.mark_run_finished(
+                "interval_4h_10_00_ekt",
+                finished_at="2026-05-12T05:05:00Z",
+                result_payload={"semantic_status": "success", "semantic_reason": "ok"},
+            )
+            raw = json.loads(block.path.read_text(encoding="utf-8"))
+            raw["schedules"][0]["id"] = "legacy_interval_slot_10_00_ekt"
+            block.path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            rematerialized = block.save_schedules(
+                {"schedule_policy": {"mode": "interval", "interval_hours": 4}, "schedules": []}
+            )
+            rematerialized_by_time = {item["local_time_hhmm"]: item for item in rematerialized["schedules"]}
+            ten_slot = rematerialized_by_time["10:00"]
+            if ten_slot["id"] != "interval_4h_10_00_ekt" or ten_slot["last_run_at"] != "2026-05-12T05:01:00Z" or ten_slot["last_success_at"] != "2026-05-12T05:05:00Z":
+                raise AssertionError(f"interval materialization must preserve lifecycle across id drift, got {ten_slot}")
+            cadence_changed = block.save_schedules(
+                {"schedule_policy": {"mode": "interval", "interval_hours": 3}, "schedules": []}
+            )
+            cadence_by_time = {item["local_time_hhmm"]: item for item in cadence_changed["schedules"]}
+            if cadence_by_time["10:00"]["last_success_at"] != "2026-05-12T05:05:00Z":
+                raise AssertionError(f"interval cadence switch must preserve matching slot lifecycle, got {cadence_changed}")
+            payload = block.save_schedules(
+                {"schedule_policy": {"mode": "interval", "interval_hours": 4}, "schedules": []}
+            )
             manualized = block.save_schedules(
                 {
                     "schedule_policy": {"mode": "manual"},
