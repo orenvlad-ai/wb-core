@@ -39,6 +39,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_REFRESH_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
+    DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     build_registry_upload_http_server,
 )
 from packages.application.factory_order_sales_history import persist_sales_history_result_exact_dates
@@ -191,6 +192,8 @@ def main() -> None:
                 "Проверить данные 1С",
                 "Скачать Excel для проверки",
                 "Товары в пути из реестра поставщика",
+                "refreshSupplierRegistryInboundButton",
+                "Обновить",
                 "Реестр поставщика",
             ):
                 if expected not in operator_html:
@@ -665,6 +668,51 @@ def main() -> None:
             if effective_supplier_rows != [("26GN390", "2026-05-20", "2026-05-22", 33.0)]:
                 raise AssertionError(f"supplier registry source must expose effective rows used, got {effective_supplier_rows}")
 
+            patch_status, patch_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window",
+                {"order_status": ORDER_STATUS_ACCEPTED_FF},
+            )
+            if patch_status != 200 or patch_payload.get("order_status") != ORDER_STATUS_ACCEPTED_FF:
+                raise AssertionError(f"status-only PATCH must persist accepted_ff, got {patch_status} {patch_payload}")
+
+            patched_status_code, patched_status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
+            if patched_status_code != 200:
+                raise AssertionError(f"factory status after accepted_ff PATCH must return 200, got {patched_status_code}")
+            patched_supplier_summary = patched_status_payload.get("supplier_registry_inbound_summary", {})
+            patched_supplier_shipments = patched_supplier_summary.get("shipment_summary", [])
+            if any(item.get("shipment_id") == "sup_factory_inbound_inside_window" for item in patched_supplier_shipments):
+                raise AssertionError(f"accepted_ff shipment must disappear from status supplier summary, got {patched_supplier_shipments}")
+            patched_diagnostics = patched_supplier_summary.get("diagnostics", {})
+            if (
+                patched_diagnostics.get("excluded_accepted_ff_shipment_count") != 2
+                or patched_diagnostics.get("excluded_accepted_ff_line_count") != 4
+                or patched_diagnostics.get("excluded_accepted_ff_quantity") != 89.0
+            ):
+                raise AssertionError(f"status after accepted_ff PATCH must expose excluded counters, got {patched_diagnostics}")
+
+            patched_supplier_status, patched_supplier_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 14,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                    "factory_inbound_source": "supplier_registry",
+                },
+            )
+            if patched_supplier_status != 200:
+                raise AssertionError(f"supplier registry calc after accepted_ff PATCH must succeed, got {patched_supplier_status} {patched_supplier_payload}")
+            patched_supplier_sku = next(item for item in patched_supplier_payload.get("rows", []) if item.get("nm_id") == 210183919)
+            if patched_supplier_sku.get("inbound_factory_to_ff") != 0.0:
+                raise AssertionError(f"accepted_ff shipment must not count in supplier registry inbound after PATCH, got {patched_supplier_sku}")
+            if any(item.get("shipment_name") == "26GN390" for item in patched_supplier_payload.get("effective_inbound_factory_to_ff", [])):
+                raise AssertionError("accepted_ff shipment must not leak into effective inbound rows after PATCH")
+
             for period_days in (10, 14):
                 covered_status, covered_payload = _post_json(
                     f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
@@ -830,6 +878,20 @@ def _post_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, obj
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=10) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _patch_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+    req = urllib_request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="PATCH",
     )
     try:
         with urllib_request.urlopen(req, timeout=10) as response:

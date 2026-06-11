@@ -708,6 +708,37 @@ def main() -> None:
         if effective_supplier_rows != [("26GN390", "2026-05-20", "2026-05-22", 33.0)]:
             raise AssertionError(f"supplier registry inbound must use shipment_date + 30 days and then ff_to_wb lead time, got {effective_supplier_rows}")
 
+        runtime.update_supplier_shipment_order_status(
+            shipment_id="sup_factory_inbound_inside_window",
+            order_status=ORDER_STATUS_ACCEPTED_FF,
+            updated_at=ACTIVATED_AT,
+        )
+        patched_status = block.build_status()
+        patched_supplier_summary = patched_status.supplier_registry_inbound_summary
+        if any(item.shipment_id == "sup_factory_inbound_inside_window" for item in patched_supplier_summary.shipment_summary):
+            raise AssertionError("status after accepted_ff PATCH must exclude the shipment from supplier registry inbound summary")
+        if patched_supplier_summary.diagnostics.excluded_accepted_ff_shipment_count != 2:
+            raise AssertionError("status after accepted_ff PATCH must count both accepted supplier shipments as excluded")
+        patched_supplier_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "factory_inbound_source": "supplier_registry",
+            }
+        )
+        patched_supplier_sku = {item.nm_id: item for item in patched_supplier_result.rows}[210183919]
+        if round(patched_supplier_sku.inbound_factory_to_ff, 2) != 0.0:
+            raise AssertionError("calculate after accepted_ff PATCH must not include the accepted shipment in inbound_factory_to_ff")
+        if any(item.shipment_name == "26GN390" for item in patched_supplier_result.effective_inbound_factory_to_ff):
+            raise AssertionError("accepted_ff shipment must not leak into effective supplier registry inbound rows")
+
         # Scenario 6: a different report date and box multiple must change the recommendation math.
         shifted_result = block.calculate(
             {

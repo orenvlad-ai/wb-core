@@ -1222,6 +1222,14 @@
       font-weight: 650;
     }
 
+    .dataset-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
     .dataset-actions {
       display: flex;
       gap: 10px;
@@ -3262,7 +3270,10 @@
               </article>
 
               <article class="dataset-card">
-                <h3>Товары в пути из реестра поставщика</h3>
+                <div class="dataset-card-header">
+                  <h3>Товары в пути из реестра поставщика</h3>
+                  <button id="refreshSupplierRegistryInboundButton" class="action-button secondary-button" type="button">Обновить</button>
+                </div>
                 <p class="dataset-status" id="supplierRegistryInboundSummaryState">Читаем состояние...</p>
                 <p class="dataset-upload-hint">Read-only source из сохранённых supplier shipment cards. Текущий bounded default: дата приёмки = дата отгрузки + 30 дней.</p>
                 <div class="shipment-summary-table-wrap" id="supplierRegistryInboundSummaryTableWrap" hidden>
@@ -3713,6 +3724,7 @@
       const supplierRegistryInboundSummaryTableWrap = document.getElementById("supplierRegistryInboundSummaryTableWrap");
       const supplierRegistryInboundSummaryBody = document.getElementById("supplierRegistryInboundSummaryBody");
       const supplierRegistryInboundDiagnostics = document.getElementById("supplierRegistryInboundDiagnostics");
+      const refreshSupplierRegistryInboundButton = document.getElementById("refreshSupplierRegistryInboundButton");
       const stockFfFileInput = document.getElementById("stockFfFileInput");
       const inboundFactoryFileInput = document.getElementById("inboundFactoryFileInput");
       const inboundFfToWbFileInput = document.getElementById("inboundFfToWbFileInput");
@@ -4461,6 +4473,9 @@
           supplierUrl.searchParams.set("embedded", "operator");
           supplierShipmentsFrame.src = supplierUrl.pathname + supplierUrl.search;
         }
+        if (activeModeName === "calculations") {
+          loadFactoryStatus();
+        }
         if (activeModeName === "wildberries") {
           ensureWbSuppliesLoaded();
         }
@@ -4540,6 +4555,10 @@
           const payload = event.data || {};
           if (payload && payload.type === "sheet_vitrina_v1_close_popovers") {
             closeOperatorFloatingControls();
+            return;
+          }
+          if (payload && payload.type === "sheet_vitrina_v1_supplier_shipments_changed") {
+            loadFactoryStatus();
           }
         });
       }
@@ -5990,15 +6009,25 @@
         const items = Array.isArray(summaryState.shipment_summary) ? summaryState.shipment_summary : [];
         const usableQuantity = Number(diagnostics.usable_quantity || 0);
         const usableLines = Number(diagnostics.usable_line_count || 0);
+        const shipmentCount = Number(diagnostics.shipment_count || summaryState.shipment_count || items.length || 0);
+        const excludedAcceptedFfShipments = Number(diagnostics.excluded_accepted_ff_shipment_count || 0);
+        const excludedAcceptedFfLines = Number(diagnostics.excluded_accepted_ff_line_count || 0);
+        const excludedAcceptedFfQuantity = Number(diagnostics.excluded_accepted_ff_quantity || 0);
         const warnings = Array.isArray(summaryState.warnings) ? summaryState.warnings : [];
 
         if (!items.length) {
-          supplierRegistryInboundSummaryState.textContent = "В реестре поставщика пока нет сохранённых заказов.";
+          supplierRegistryInboundSummaryState.textContent = shipmentCount > 0
+            ? "Доступных к factory inbound заказов: 0 / всего: " + valueOrDash(shipmentCount) +
+              (excludedAcceptedFfShipments > 0 ? ". Исключено accepted_ff: " + valueOrDash(excludedAcceptedFfShipments) + "." : ".")
+            : "В реестре поставщика пока нет сохранённых заказов.";
           supplierRegistryInboundSummaryState.className = "dataset-status";
           supplierRegistryInboundSummaryTableWrap.hidden = true;
           supplierRegistryInboundSummaryBody.innerHTML = "";
         } else {
-          supplierRegistryInboundSummaryState.textContent = "Сохранённых заказов: " + items.length + ". Usable matched quantity: " + formatNumber(usableQuantity) + ".";
+          supplierRegistryInboundSummaryState.textContent = "Доступных к factory inbound заказов: " + items.length +
+            " / всего: " + valueOrDash(shipmentCount) +
+            ". Usable matched quantity: " + formatNumber(usableQuantity) +
+            (excludedAcceptedFfShipments > 0 ? ". Исключено accepted_ff: " + valueOrDash(excludedAcceptedFfShipments) + "." : ".");
           supplierRegistryInboundSummaryState.className = "dataset-status";
           supplierRegistryInboundSummaryBody.innerHTML = items.map((item) => [
             "<tr>",
@@ -6024,7 +6053,10 @@
           "ambiguous: " + valueOrDash(diagnostics.ambiguous_line_count),
           "missing shipment date: " + valueOrDash(diagnostics.missing_shipment_date_line_count),
           "usable lines: " + valueOrDash(usableLines),
-          "usable qty: " + formatNumber(usableQuantity)
+          "usable qty: " + formatNumber(usableQuantity),
+          "excluded accepted_ff shipments: " + valueOrDash(excludedAcceptedFfShipments),
+          "excluded accepted_ff lines: " + valueOrDash(excludedAcceptedFfLines),
+          "excluded accepted_ff qty: " + formatNumber(excludedAcceptedFfQuantity)
         ].join(" · ");
         supplierRegistryInboundDiagnostics.textContent = warnings.length
           ? diagnosticLine + " · warnings: " + warnings.join(" ")
@@ -7621,22 +7653,62 @@
         }
       }
 
+      async function fetchFactoryStatusPayload(options) {
+        const headers = { "Accept": "application/json" };
+        if (options && options.refreshReason) {
+          headers["X-WB-Core-Refresh"] = options.refreshReason;
+        }
+        const response = await fetch(config.factory_order_status_path, {
+          method: "GET",
+          headers,
+          cache: options && options.noStore ? "no-store" : "default"
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+          throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+        }
+        return payload;
+      }
+
       async function loadFactoryStatus() {
         try {
-          const response = await fetch(config.factory_order_status_path, {
-            method: "GET",
-            headers: { "Accept": "application/json" }
-          });
-          const payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          }
+          const payload = await fetchFactoryStatusPayload();
           renderFactoryStatus(payload);
         } catch (error) {
           setFactoryMessage(
             "Не удалось прочитать состояние расчёта поставок: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
+        }
+      }
+
+      async function refreshSupplierRegistryInboundSummary() {
+        if (!refreshSupplierRegistryInboundButton) {
+          await loadFactoryStatus();
+          return;
+        }
+        const idleLabel = "Обновить";
+        refreshSupplierRegistryInboundButton.disabled = true;
+        refreshSupplierRegistryInboundButton.textContent = "Обновляем...";
+        supplierRegistryInboundSummaryState.textContent = "Обновляем состояние реестра поставщика...";
+        supplierRegistryInboundSummaryState.className = "dataset-status";
+        try {
+          const payload = await fetchFactoryStatusPayload({
+            refreshReason: "supplier-registry-inbound",
+            noStore: true
+          });
+          renderFactoryStatus(payload);
+          setFactoryMessage("Сводка реестра поставщика обновлена.", "success");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          supplierRegistryInboundSummaryState.textContent = "Не удалось обновить реестр поставщика.";
+          supplierRegistryInboundDiagnostics.textContent = message;
+          supplierRegistryInboundDiagnostics.className = "shipment-summary-state is-error";
+          setFactoryMessage("Не удалось обновить реестр поставщика: " + message, "error");
+        } finally {
+          refreshSupplierRegistryInboundButton.disabled = false;
+          refreshSupplierRegistryInboundButton.textContent = idleLabel;
+          scheduleEmbeddedHeightPost();
         }
       }
 
@@ -8422,6 +8494,9 @@
       regionalDistrictExcludeFarSiberiaButton.addEventListener("click", () => {
         setRegionalIncludedDistrictKeys(WB_REGIONAL_DISTRICT_KEYS.filter((key) => key !== "far_siberia"));
       });
+      if (refreshSupplierRegistryInboundButton) {
+        refreshSupplierRegistryInboundButton.addEventListener("click", refreshSupplierRegistryInboundSummary);
+      }
       checkStockFfOnecButton.addEventListener("click", loadStockFfOnecCheck);
       downloadStockFfOnecButton.addEventListener("click", () => downloadBinary(
         config.factory_order_stock_ff_onec_xlsx_path,
