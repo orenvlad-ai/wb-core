@@ -18,6 +18,72 @@ from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import (  # noqa: E402
 from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_WEB_VITRINA_UI_PATH  # noqa: E402
 
 
+def _read_top_session_indicator_style(page: object) -> dict[str, object]:
+    return page.evaluate(
+        """() => {
+          const node = document.querySelector('[data-seller-top-session]');
+          const word = node ? node.querySelector('[data-seller-top-session-label]') : null;
+          const separator = node ? node.querySelector('[data-seller-top-session-separator]') : null;
+          const dot = node ? node.querySelector('.seller-top-session-dot') : null;
+          const resolveColor = (value) => {
+            const probe = document.createElement('span');
+            probe.style.position = 'fixed';
+            probe.style.left = '-9999px';
+            probe.style.color = value;
+            document.body.appendChild(probe);
+            const color = getComputedStyle(probe).color;
+            probe.remove();
+            return color;
+          };
+          const nodeStyle = node ? getComputedStyle(node) : null;
+          const wordStyle = word ? getComputedStyle(word) : null;
+          const separatorStyle = separator ? getComputedStyle(separator) : null;
+          const dotStyle = dot ? getComputedStyle(dot) : null;
+          return {
+            exists: !!node,
+            tag: node ? node.tagName : '',
+            role: node ? (node.getAttribute('role') || '') : '',
+            full_text: node ? (node.textContent || '').trim().replace(/\\s+/g, ' ') : '',
+            word_text: word ? (word.textContent || '').trim() : '',
+            separator_text: separator ? (separator.textContent || '').trim() : '',
+            class_name: node ? node.className : '',
+            cursor: nodeStyle ? nodeStyle.cursor : '',
+            container_color: nodeStyle ? nodeStyle.color : '',
+            word_color: wordStyle ? wordStyle.color : '',
+            separator_color: separatorStyle ? separatorStyle.color : '',
+            dot_background: dotStyle ? dotStyle.backgroundColor : '',
+            muted_color: resolveColor('var(--muted)'),
+            success_color: resolveColor('var(--success-text)'),
+            error_color: resolveColor('var(--error-text)'),
+            recovery_controls_inside: node ? node.querySelectorAll('[data-session-recovery-start], [data-session-launcher], button, a').length : 0
+          };
+        }"""
+    )
+
+
+def _assert_top_session_indicator_style(page: object, expected_tone: str) -> dict[str, object]:
+    payload = _read_top_session_indicator_style(page)
+    expected_word_color = payload["success_color"] if expected_tone == "success" else payload["error_color"]
+    if (
+        not payload["exists"]
+        or payload["tag"] != "SPAN"
+        or payload["role"]
+        or payload["word_text"] != "сессия"
+        or payload["separator_text"] != "|"
+        or payload["full_text"] != "сессия |"
+        or f"tone-{expected_tone}" not in str(payload["class_name"])
+        or "is-actionable" in str(payload["class_name"])
+        or payload["cursor"] == "pointer"
+        or payload["word_color"] != expected_word_color
+        or payload["separator_color"] != payload["muted_color"]
+        or payload["container_color"] != payload["muted_color"]
+        or payload["dot_background"] != payload["muted_color"]
+        or payload["recovery_controls_inside"] != 0
+    ):
+        raise AssertionError(f"top session indicator style mismatch for {expected_tone}, got {payload}")
+    return payload
+
+
 def main() -> None:
     _assert_group_controls_survive_empty_loading_rows()
     _assert_seller_session_indicator_readonly_and_manual_actions()
@@ -89,16 +155,22 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
             page.wait_for_function(
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
+                  const word = node ? node.querySelector('[data-seller-top-session-label]') : null;
+                  const separator = node ? node.querySelector('[data-seller-top-session-separator]') : null;
                   return !!node
-                    && node.textContent.trim() === 'Сессия'
+                    && !!word
+                    && !!separator
+                    && word.textContent.trim() === 'сессия'
+                    && separator.textContent.trim() === '|'
                     && node.classList.contains('tone-success')
                     && !node.querySelector('[data-session-recovery-start]');
                 }""",
                 timeout=10000,
             )
+            initial_indicator = _assert_top_session_indicator_style(page, "success")
             initial_payload = page.evaluate(
                 """() => ({
-	                  seller_top_text: document.querySelector('[data-seller-top-session]').textContent.trim(),
+	                  seller_top_text: document.querySelector('[data-seller-top-session]').textContent.trim().replace(/\\s+/g, ' '),
 	                  seller_top_class: document.querySelector('[data-seller-top-session]').className,
 	                  seller_top_tag: document.querySelector('[data-seller-top-session]').tagName,
 	                  seller_top_role: document.querySelector('[data-seller-top-session]').getAttribute('role') || '',
@@ -122,7 +194,7 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 or initial_payload["source_row_count"] != 0
                 or initial_payload["empty_source_rows"] != 0
                 or "не OK" in initial_payload["empty_text"]
-                or initial_payload["seller_top_text"] != "Сессия"
+                or initial_payload["seller_top_text"] != "сессия |"
                 or initial_payload["seller_top_tag"] != "SPAN"
                 or initial_payload["seller_top_role"]
                 or "is-actionable" in initial_payload["seller_top_class"]
@@ -134,6 +206,7 @@ def _assert_group_controls_survive_empty_loading_rows() -> None:
                 raise AssertionError(f"page open/session indicator must not trigger hidden heavy refresh, got {refresh_hits}")
             if session_check_hits["count"] != 0:
                 raise AssertionError(f"page open must not trigger session-check for indicator, got {session_check_hits}")
+            print(f"web_vitrina_seller_session_indicator_active_style: ok -> {initial_indicator}")
             page.locator("[data-activity-block] > summary").click()
             page.wait_for_function(
                 """() => {
@@ -397,14 +470,20 @@ def _assert_seller_session_indicator_readonly_and_manual_actions() -> None:
             page.wait_for_function(
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
+                  const word = node ? node.querySelector('[data-seller-top-session-label]') : null;
+                  const separator = node ? node.querySelector('[data-seller-top-session-separator]') : null;
                   return !!node
-                    && node.textContent.trim() === 'Сессия'
+                    && !!word
+                    && !!separator
+                    && word.textContent.trim() === 'сессия'
+                    && separator.textContent.trim() === '|'
                     && node.classList.contains('tone-error')
                     && !node.classList.contains('is-actionable')
                     && !node.querySelector('[data-session-recovery-start]');
                 }""",
                 timeout=10000,
             )
+            expired_indicator = _assert_top_session_indicator_style(page, "error")
             page.locator("[data-seller-top-session]").click()
             page.wait_for_timeout(300)
             if session_check_hits["count"] != 0 or recovery_hits["count"] != 0:
@@ -412,6 +491,7 @@ def _assert_seller_session_indicator_readonly_and_manual_actions() -> None:
                     "read-only top indicator must not call session/recovery routes, "
                     f"got session={session_check_hits} recovery={recovery_hits}"
                 )
+            print(f"web_vitrina_seller_session_indicator_expired_style: ok -> {expired_indicator}")
             page.locator("[data-activity-block] > summary").click()
             page.wait_for_selector("[data-session-check]", timeout=10000)
             controls_payload = page.evaluate(
@@ -441,13 +521,19 @@ def _assert_seller_session_indicator_readonly_and_manual_actions() -> None:
             page.wait_for_function(
                 """() => {
                   const node = document.querySelector('[data-seller-top-session]');
+                  const word = node ? node.querySelector('[data-seller-top-session-label]') : null;
+                  const separator = node ? node.querySelector('[data-seller-top-session-separator]') : null;
                   return !!node
-                    && node.textContent.trim() === 'Сессия'
+                    && !!word
+                    && !!separator
+                    && word.textContent.trim() === 'сессия'
+                    && separator.textContent.trim() === '|'
                     && node.classList.contains('tone-success')
                     && !node.classList.contains('is-actionable');
                 }""",
                 timeout=5000,
             )
+            _assert_top_session_indicator_style(page, "success")
             with page.expect_response("**/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start") as recovery_response_info:
                 page.locator("[data-session-install]").click()
             recovery_response = recovery_response_info.value
