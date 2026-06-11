@@ -141,7 +141,7 @@ class WbSuppliesBlock:
         request = _normalize_list_request(params or {})
         rows = self.runtime.list_wb_supplies()
         warehouses = self.runtime.list_wb_supplies_warehouses()
-        district_mapping = self._cached_warehouse_district_mapping(rows=rows, warehouses=warehouses)
+        district_mapping = self.current_warehouse_district_mapping(rows=rows, warehouses=warehouses)
         rows = [augment_supply_row_with_district(row, district_mapping) for row in rows]
         state = self.runtime.load_wb_supplies_sync_state()
         active_run = self.runtime.load_active_wb_supplies_sync_run()
@@ -247,6 +247,22 @@ class WbSuppliesBlock:
         return build_wb_supply_overlay_options(
             runtime=self.runtime,
             active_skus=self._load_active_skus(),
+            warehouse_district_mapping=self.current_warehouse_district_mapping(),
+        )
+
+    def current_warehouse_district_mapping(
+        self,
+        *,
+        rows: list[Mapping[str, Any]] | None = None,
+        warehouses: list[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        cached_rows = rows if rows is not None else self.runtime.list_wb_supplies()
+        cached_warehouses = warehouses if warehouses is not None else self.runtime.list_wb_supplies_warehouses()
+        warnings: list[str] = []
+        return self._fetch_warehouse_district_mapping(
+            warehouses=cached_warehouses,
+            raw_rows=cached_rows,
+            warnings=warnings,
         )
 
     def _load_active_skus(self) -> list[tuple[int, str]]:

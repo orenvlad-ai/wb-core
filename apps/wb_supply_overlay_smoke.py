@@ -169,6 +169,8 @@ def _assert_district_mapping() -> None:
         raise AssertionError("Siberia/Far East raw names must collapse into far_siberia")
     if not any("Склад без ФО" in item for item in mapping["warnings"]):
         raise AssertionError(f"unmapped warehouses must emit warning, got {mapping['warnings']}")
+    if mapping.get("unmapped_warehouse_count") != 1 or mapping.get("unmapped_warehouses") != ["Склад без ФО"]:
+        raise AssertionError(f"unmapped warehouse summary must stay compact/countable, got {mapping}")
 
 
 def _assert_list_filter_contract() -> None:
@@ -188,10 +190,10 @@ def _assert_overlay_selector_and_math() -> None:
     eligible = {item["supply_id"] for item in payload["options"] if item["eligible_for_overlay"]}
     if eligible != {"s2", "s3", "s6-unmapped"}:
         raise AssertionError(f"eligible statuses/composition/date set mismatch: {eligible}")
-    if "статус «Не запланировано» не учитывается" not in options["s1"]["disabled_reasons"]:
-        raise AssertionError("status 1 must be disabled for calculations")
-    if "статус «Принято» не учитывается" not in options["s5"]["disabled_reasons"]:
-        raise AssertionError("status 5 must be disabled for calculations")
+    if "s1" in options or "s5" in options:
+        raise AssertionError(f"status 1/5 must not be returned to the calculation selector, got {options.keys()}")
+    if payload.get("summary", {}).get("excluded_by_status") != 2:
+        raise AssertionError(f"selector must count status-excluded rows, got {payload.get('summary')}")
     if "нет расчётной даты поставки" not in options["s4-no-date"]["disabled_reasons"]:
         raise AssertionError("no-date supplies must be disabled")
     if "нет состава поставки" not in options["s-no-goods"]["disabled_reasons"]:

@@ -165,15 +165,19 @@ def build_warehouse_district_mapping(
     )
     by_name: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
+    unmapped_warehouses: list[str] = []
     for normalized_name, display_name in sorted(target_names.items()):
         mapping = offices_by_name.get(normalized_name) or tariffs_by_name.get(normalized_name) or cache_by_name.get(normalized_name)
         if mapping:
             by_name[normalized_name] = mapping
         else:
+            unmapped_warehouses.append(display_name)
             warnings.append(f"Склад WB не сопоставлен с расчётным округом: {display_name}")
     return {
         "by_normalized_name": by_name,
         "warnings": warnings,
+        "unmapped_warehouses": unmapped_warehouses,
+        "unmapped_warehouse_count": len(unmapped_warehouses),
         "district_options": district_filter_options(),
     }
 
@@ -260,18 +264,25 @@ def build_wb_supply_overlay_options(
     *,
     runtime: Any,
     active_skus: list[tuple[int, str]],
+    warehouse_district_mapping: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     records = runtime.list_wb_supplies_cache_records()
     rows = [dict(record.get("normalized") or {}) for record in records]
-    mapping = build_warehouse_district_mapping(
+    mapping = warehouse_district_mapping or build_warehouse_district_mapping(
         warehouse_rows=runtime.list_wb_supplies_warehouses(),
         supply_rows=rows,
     )
     active_sku_map = {int(nm_id): str(label) for nm_id, label in active_skus}
-    options = [
-        _candidate_from_record(record, active_sku_map=active_sku_map, mapping=mapping)
-        for record in records
-    ]
+    excluded_status_count = 0
+    options: list[dict[str, Any]] = []
+    for record in records:
+        normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
+        status_id = _optional_int(normalized.get("status_id"))
+        status_label = str(normalized.get("status_label") or _status_label(status_id))
+        if not _status_is_eligible(status_id, status_label):
+            excluded_status_count += 1
+            continue
+        options.append(_candidate_from_record(record, active_sku_map=active_sku_map, mapping=mapping))
     options.sort(key=_overlay_option_sort_key)
     return {
         "status": "ready",
@@ -285,9 +296,15 @@ def build_wb_supply_overlay_options(
             "total": len(options),
             "eligible": sum(1 for item in options if item.get("eligible_for_overlay")),
             "disabled": sum(1 for item in options if item.get("disabled")),
+            "excluded_by_status": excluded_status_count,
             "unmapped": sum(1 for item in options if item.get("district_key") == DISTRICT_UNMAPPED),
+            "unmapped_warehouse_count": int(mapping.get("unmapped_warehouse_count") or 0),
         },
         "warnings": mapping.get("warnings", []),
+        "warning_details": {
+            "unmapped_warehouse_count": int(mapping.get("unmapped_warehouse_count") or 0),
+            "unmapped_warehouses": list(mapping.get("unmapped_warehouses") or []),
+        },
     }
 
 
@@ -296,6 +313,7 @@ def build_selected_wb_supply_overlay(
     runtime: Any,
     selected_supply_ids: tuple[str, ...],
     active_skus: list[tuple[int, str]],
+    warehouse_district_mapping: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not selected_supply_ids:
         return {
@@ -315,7 +333,7 @@ def build_selected_wb_supply_overlay(
     active_sku_map = {int(nm_id): str(label) for nm_id, label in active_skus}
     all_records = runtime.list_wb_supplies_cache_records()
     rows = [dict(record.get("normalized") or {}) for record in all_records]
-    mapping = build_warehouse_district_mapping(
+    mapping = warehouse_district_mapping or build_warehouse_district_mapping(
         warehouse_rows=runtime.list_wb_supplies_warehouses(),
         supply_rows=rows,
     )

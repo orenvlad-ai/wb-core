@@ -442,10 +442,10 @@ def main() -> None:
             overlay_options = {item.get("supply_id"): item for item in overlay_payload.get("options", [])}
             if not overlay_options.get("1002", {}).get("eligible_for_overlay"):
                 raise AssertionError(f"planned supply with date/composition/active SKU must be selectable, got {overlay_options.get('1002')}")
-            if "статус «Принято» не учитывается" not in overlay_options.get("1001", {}).get("disabled_reasons", []):
-                raise AssertionError(f"accepted supplies must be disabled in overlay selector, got {overlay_options.get('1001')}")
-            if "статус «Не запланировано» не учитывается" not in overlay_options.get("1005", {}).get("disabled_reasons", []):
-                raise AssertionError(f"unplanned supplies must be disabled in overlay selector, got {overlay_options.get('1005')}")
+            if "1001" in overlay_options or "1005" in overlay_options:
+                raise AssertionError(f"status 1/5 supplies must not be returned to overlay selector, got {overlay_options.keys()}")
+            if overlay_payload.get("summary", {}).get("excluded_by_status") != 4:
+                raise AssertionError(f"overlay selector must count status-excluded rows, got {overlay_payload.get('summary')}")
 
             sort_desc_status, sort_desc_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=100&sort_key=supply_date&sort_dir=desc"

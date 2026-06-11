@@ -638,6 +638,12 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
+        self.factory_order_supply_block.wb_supply_district_mapping_provider = (
+            self.wb_supplies_block.current_warehouse_district_mapping
+        )
+        self.wb_regional_supply_block.wb_supply_district_mapping_provider = (
+            self.wb_supplies_block.current_warehouse_district_mapping
+        )
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
