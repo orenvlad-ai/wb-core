@@ -106,8 +106,13 @@ def main() -> None:
                 page.wait_for_function(
                     """() => {
                       const node = document.querySelector('[data-seller-top-session]');
+                      const word = node ? node.querySelector('[data-seller-top-session-label]') : null;
+                      const separator = node ? node.querySelector('[data-seller-top-session-separator]') : null;
                       return !!node
-                        && node.textContent.trim() === 'Сессия'
+                        && !!word
+                        && !!separator
+                        && word.textContent.trim() === 'сессия'
+                        && separator.textContent.trim() === '|'
                         && !node.classList.contains('tone-warning')
                         && !node.classList.contains('is-actionable');
                     }""",

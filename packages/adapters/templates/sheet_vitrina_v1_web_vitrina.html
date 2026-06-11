@@ -1977,20 +1977,26 @@
       flex: 0 0 auto;
     }
 
-    .seller-top-session.tone-success {
+    .seller-top-session-label,
+    .seller-top-session-separator {
       color: var(--muted);
     }
 
-    .seller-top-session.tone-success .seller-top-session-dot {
-      background: var(--success);
+    .seller-top-session-separator {
+      opacity: .72;
+      font-weight: 700;
+    }
+
+    .seller-top-session.tone-success .seller-top-session-label {
+      color: var(--success-text);
     }
 
     .seller-top-session.tone-warning {
       color: var(--muted);
     }
 
-    .seller-top-session.tone-warning .seller-top-session-dot {
-      background: var(--warning);
+    .seller-top-session.tone-warning .seller-top-session-label {
+      color: var(--warning-text);
       animation: table-snapshot-blink 950ms ease-in-out infinite;
     }
 
@@ -1998,8 +2004,8 @@
       color: var(--muted);
     }
 
-    .seller-top-session.tone-error .seller-top-session-dot {
-      background: var(--danger);
+    .seller-top-session.tone-error .seller-top-session-label {
+      color: var(--error-text);
     }
 
     @keyframes table-snapshot-blink {
@@ -3973,9 +3979,10 @@
               <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
-              <span class="seller-top-session tone-neutral" data-seller-top-session title="Сессия" aria-label="Сессия">
+              <span class="seller-top-session tone-neutral" data-seller-top-session title="сессия" aria-label="сессия">
                 <span class="seller-top-session-dot" aria-hidden="true"></span>
-                <span data-seller-top-session-label>Сессия</span>
+                <span class="seller-top-session-label" data-seller-top-session-label>сессия</span>
+                <span class="seller-top-session-separator" data-seller-top-session-separator aria-hidden="true">|</span>
               </span>
               <p class="table-summary-line" data-table-summary-line hidden></p>
               <div class="table-header-controls" data-table-header-controls>
@@ -14210,7 +14217,7 @@
       }
       const session = state.sellerSession || {};
       const mapped = sellerSessionDisplay(session.loading ? "checking" : session.status, session);
-      const label = "Сессия";
+      const label = "сессия";
       const titleParts = [mapped.label ? ("сессия: " + mapped.label) : label, session.summary || "", session.instruction || ""].filter(Boolean);
       sellerTopSessionNode.className = "seller-top-session tone-" + normalizeTone(mapped.tone);
       sellerTopSessionNode.title = titleParts.join(" · ");
