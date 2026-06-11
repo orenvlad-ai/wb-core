@@ -491,7 +491,7 @@ def _map_column_kind(kind: str) -> str:
 
 
 def _column_align(value_type: str, *, column_id: str) -> str:
-    if column_id in {"scope_kind", "section"}:
+    if column_id == "scope_kind":
         return "center"
     if value_type.startswith("integer") or value_type.startswith("number") or value_type == "decimal":
         return "end"
@@ -517,8 +517,10 @@ def _column_width_hint(column_id: str) -> int | None:
         return 88
     if column_id in {"scope_key", "metric_key"}:
         return 140
-    if column_id in {"scope_kind", "section"}:
+    if column_id == "scope_kind":
         return 92
+    if column_id == "section":
+        return 112
     if column_id in {"group", "nm_id"}:
         return 112
     return 160

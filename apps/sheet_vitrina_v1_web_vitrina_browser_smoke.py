@@ -2042,6 +2042,7 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
             missingMetricKeyToggle: document.querySelectorAll('[data-column-visibility-id="metric_key"]').length === 0,
             missingScopeKindToggle: document.querySelectorAll('[data-column-visibility-id="scope_kind"]').length === 0,
             missingSectionToggle: document.querySelectorAll('[data-column-visibility-id="section"]').length === 0,
+            missingUpdatedToggle: document.querySelectorAll('[data-column-visibility-id="row_last_updated_at"]').length === 0,
             dateToggleCount: document.querySelectorAll('[data-column-visibility-id^="date:"]').length
           };
         }"""
@@ -2056,6 +2057,7 @@ def _check_column_visibility_controls(page: object) -> dict[str, object]:
         or not visual_state["missingMetricKeyToggle"]
         or not visual_state["missingScopeKindToggle"]
         or not visual_state["missingSectionToggle"]
+        or not visual_state["missingUpdatedToggle"]
         or visual_state["dateToggleCount"] != 0
     ):
         raise AssertionError(f"old visible column manager must be removed while forced-hidden columns stay non-restorable, got {visual_state}")
@@ -2419,7 +2421,9 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             '[data-feedbacks-prompt-save]',
             '[data-feedbacks-auto-save]',
           ].join(',')));
-          const headers = Array.from(document.querySelectorAll('[data-table-head] th')).map(node => (node.textContent || '').trim());
+          const headNodes = Array.from(document.querySelectorAll('[data-table-head] th'));
+          const headers = headNodes.map(node => (node.textContent || '').trim());
+          const headerIds = headNodes.map(node => node.getAttribute('data-col-id') || '');
           return {
             unified_tabs: Array.from(document.querySelectorAll('[data-unified-tab-button]')).map(node => (node.textContent || '').trim()),
             active_unified_tab: ((document.querySelector('[data-unified-tab-button].is-active') || {}).textContent || '').trim(),
@@ -2441,6 +2445,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
             load_button_has_accent_border: loadButtonStyles ? hasAccentBorder(loadButtonStyles.borderTopColor) : false,
             save_button_classes: saveButtons.map(node => node.getAttribute('class') || ''),
             headers,
+            headerIds,
             order: {
               summary: nodeIndex('[data-summary-grid]'),
               auto: nodeIndex('[data-vitrina-auto-schedule]'),
@@ -2482,9 +2487,13 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
     for forbidden in ("Metric Label", "Sections", "Score Label"):
         if forbidden in payload["headers"]:
             raise AssertionError(f"main table headers must be Russian-only, got {payload['headers']}")
-    for expected in ("Раздел", "Метрика", "Обновлено"):
+    for expected in ("Раздел", "Метрика"):
         if expected not in payload["headers"]:
             raise AssertionError(f"main table must expose header {expected!r}, got {payload['headers']}")
+    if "Обновлено" in payload["headers"] or "row_last_updated_at" in payload["headerIds"]:
+        raise AssertionError(f"main table must not expose the row update timestamp column, got {payload}")
+    if payload["headerIds"][:2] != ["metric_label", "section"] or not all(str(column_id).startswith("date:") or column_id == "" for column_id in payload["headerIds"][2:]):
+        raise AssertionError(f"main table columns must render metric, section, then dates after removing updated column, got {payload}")
     order_values = payload["order"]
     expected_order = [order_values[key] for key in ("table", "auto", "metrics", "actions")]
     if any(value < 0 for value in expected_order) or expected_order != sorted(expected_order):
@@ -3515,9 +3524,9 @@ def _measure_compact_widths(page: object, *, strict: bool) -> dict[str, int]:
     )
     required = {
         "metric_label": 156,
-        "section": 98,
+        "section": 118,
     }
-    for hidden_id in ("row_order", "scope_kind", "scope_key", "scope_label", "group", "nm_id", "metric_key"):
+    for hidden_id in ("row_order", "scope_kind", "scope_key", "scope_label", "group", "nm_id", "metric_key", "row_last_updated_at"):
         if hidden_id in widths:
             raise AssertionError(f"{hidden_id} must be hidden from main table render, got {widths}")
     for column_id, max_width in required.items():
@@ -3563,6 +3572,8 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
 	          const metricRect = metricCell ? metricCell.getBoundingClientRect() : {left: 0, right: 0, width: 0};
 	          const sectionRect = sectionCell ? sectionCell.getBoundingClientRect() : {left: 0, right: 0, width: 0};
 	          const sectionCellStyle = sectionCell ? getComputedStyle(sectionCell) : null;
+	          const sectionBadge = sectionCell ? sectionCell.querySelector('.cell-badge') : null;
+	          const sectionBadgeRect = sectionBadge ? sectionBadge.getBoundingClientRect() : {left: 0};
           const dateHeader = document.querySelector('[data-table-head] th[data-col-id^="date:"]');
           const dateHeaderStyle = dateHeader ? getComputedStyle(dateHeader) : null;
           return {
@@ -3574,9 +3585,11 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
 	              left: sectionCellStyle ? Math.round(parseFloat(sectionCellStyle.left || '0')) : -1,
 	              zIndex: sectionCellStyle ? Number(sectionCellStyle.zIndex || 0) : 0,
 	              background: sectionCellStyle ? sectionCellStyle.backgroundColor : '',
+	              textAlign: sectionCellStyle ? sectionCellStyle.textAlign : '',
 	              rectLeft: Math.round(sectionRect.left),
 	              rectRight: Math.round(sectionRect.right),
-	              rectWidth: Math.round(sectionRect.width)
+	              rectWidth: Math.round(sectionRect.width),
+	              badgeOffsetLeft: Math.round(sectionBadgeRect.left - sectionRect.left)
 	            },
 	            metricCell: {
 	              exists: !!metricCell,
@@ -3605,8 +3618,10 @@ def _check_sticky_section_offsets(page: object) -> dict[str, object]:
         raise AssertionError(f"metric body cells must be visible for sticky overlap check, got {payload}")
     if int(payload["sectionCell"]["rectLeft"]) < int(payload["metricCell"]["rectRight"]) - 1:
         raise AssertionError(f"section sticky column overlaps metric column after horizontal scroll, got {payload}")
-    if abs(int(payload["sectionCell"]["rectWidth"]) - 76) > 24 or int(payload["metricCell"]["rectWidth"]) < 120:
+    if abs(int(payload["sectionCell"]["rectWidth"]) - 96) > 22 or int(payload["metricCell"]["rectWidth"]) < 120:
         raise AssertionError(f"sticky body column widths must stay stable, got {payload}")
+    if payload["sectionCell"]["textAlign"] != "left" or int(payload["sectionCell"]["badgeOffsetLeft"]) > 14:
+        raise AssertionError(f"section cell content must be left-aligned, got {payload}")
     if payload["sectionCell"]["background"] == "rgba(0, 0, 0, 0)":
         raise AssertionError(f"section sticky cell must have opaque background, got {payload}")
     return payload

@@ -76,8 +76,11 @@ def main() -> None:
             raise AssertionError(f"source contract identity mismatch, got {view_model.meta}")
         if view_model.meta.snapshot_id != "web-vitrina-view-model-integration" or view_model.meta.row_count != 4:
             raise AssertionError(f"view_model meta mismatch, got {view_model.meta}")
-        if len(view_model.columns) != 12 or len(view_model.groups) != 2 or len(view_model.sections) != 2:
+        if len(view_model.columns) != 11 or len(view_model.groups) != 2 or len(view_model.sections) != 2:
             raise AssertionError(f"view_model schema counts mismatch, got {view_model}")
+        column_ids = [column.id for column in view_model.columns]
+        if "row_last_updated_at" in column_ids:
+            raise AssertionError(f"view_model must not expose row update timestamp as a visible table column, got {column_ids}")
 
         rows = {row.row_id: row for row in view_model.rows}
         money_row = rows[f"SKU:{enabled[0].nm_id}|avg_price_seller_discounted"]
