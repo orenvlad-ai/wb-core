@@ -363,6 +363,7 @@
           const canDeleteShipments = config.can_delete_shipments !== false;
           const canEditOrderStatus = Boolean(config.can_edit_order_status);
           const canRecheckPrices = config.can_recheck_prices === true && Boolean(priceCheckButton);
+          const isEmbeddedOperator = config.embedded === "operator" || window.self !== window.top;
 
       let currentShipment = null;
       let currentUploadId = "";
@@ -631,6 +632,11 @@
               const savedStatus = orderStatusLabels[payload.order_status] ? payload.order_status : select.value;
               select.value = savedStatus;
               select.dataset.previousStatus = savedStatus;
+              notifyOperatorSupplierShipmentsChanged({
+                shipment_id: shipmentId,
+                changed_field: "order_status",
+                order_status: savedStatus
+              });
               setMessage(registryMessage, "Статус заказа сохранён.", "success");
             } catch (error) {
               select.value = previousStatus;
@@ -638,6 +644,16 @@
             } finally {
               select.disabled = false;
             }
+          }
+
+          function notifyOperatorSupplierShipmentsChanged(detail) {
+            if (!isEmbeddedOperator || !window.parent || window.parent === window) {
+              return;
+            }
+            window.parent.postMessage({
+              type: "sheet_vitrina_v1_supplier_shipments_changed",
+              detail: detail || {}
+            }, window.location.origin);
           }
 
           function blankShipment() {

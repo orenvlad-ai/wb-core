@@ -225,51 +225,7 @@ class LocalOperatorFixtureServer:
             ),
             DEFAULT_FACTORY_ORDER_STATUS_PATH: (
                 "application/json; charset=utf-8",
-                json.dumps(
-                    {
-                        "active_sku_count": len(ACTIVE_SKUS),
-                        "coverage_contract_note": "-",
-                        "datasets": {},
-                        "factory_inbound_source": "manual_excel",
-                        "stock_ff_source": "manual_excel",
-                        "manual_stock_ff_dataset": {},
-                        "onec_stock_ff_summary": {
-                            "status": "ready",
-                            "source": "onec_ff_stock",
-                            "source_label_ru": "1С / Фулфилмент",
-                            "snapshot_date": "2026-04-20",
-                            "active_sku_count": len(ACTIVE_SKUS),
-                            "covered_sku_count": len(ACTIVE_SKUS),
-                            "positive_stock_sku_count": 2,
-                            "zero_stock_sku_count": 1,
-                            "missing_sku_count": 0,
-                            "total_stock_ff": 125.0,
-                            "warnings": [],
-                            "errors": [],
-                            "sample_rows": [],
-                        },
-                        "manual_factory_inbound_dataset": {},
-                        "supplier_registry_inbound_summary": {
-                            "acceptance_days": 30,
-                            "shipment_count": 0,
-                            "shipments": [],
-                            "diagnostics": {
-                                "shipment_count": 0,
-                                "line_count": 0,
-                                "product_line_count": 0,
-                                "usable_line_count": 0,
-                                "matched_line_count": 0,
-                                "unmatched_line_count": 0,
-                                "ambiguous_line_count": 0,
-                                "missing_shipment_date_count": 0,
-                                "usable_quantity": 0.0,
-                            },
-                            "warnings": [],
-                        },
-                        "last_result": None,
-                    },
-                    ensure_ascii=False,
-                ).encode("utf-8"),
+                json.dumps(_factory_status_payload(refreshed=False), ensure_ascii=False).encode("utf-8"),
                 HTTPStatus.OK,
             ),
             DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH: (
@@ -374,7 +330,10 @@ class LocalOperatorFixtureServer:
             ),
         }
 
-        handler_cls = _build_handler(payloads)
+        handler_cls = _build_handler(
+            payloads,
+            factory_status_refresh_payload=_factory_status_payload(refreshed=True),
+        )
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
@@ -388,10 +347,26 @@ class LocalOperatorFixtureServer:
             self.thread.join(timeout=5)
 
 
-def _build_handler(payloads: dict[str, tuple[str, bytes, HTTPStatus]]):
+def _build_handler(
+    payloads: dict[str, tuple[str, bytes, HTTPStatus]],
+    *,
+    factory_status_refresh_payload: dict[str, object] | None = None,
+):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed_path = urllib_parse.urlparse(self.path).path
+            if (
+                parsed_path == DEFAULT_FACTORY_ORDER_STATUS_PATH
+                and self.headers.get("X-WB-Core-Refresh") == "supplier-registry-inbound"
+                and factory_status_refresh_payload is not None
+            ):
+                body = json.dumps(factory_status_refresh_payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             payload = payloads.get(parsed_path)
             if payload is None:
                 self.send_response(HTTPStatus.NOT_FOUND)
@@ -410,6 +385,96 @@ def _build_handler(payloads: dict[str, tuple[str, bytes, HTTPStatus]]):
             return
 
     return Handler
+
+
+def _factory_status_payload(*, refreshed: bool) -> dict[str, object]:
+    supplier_summary = (
+        {
+            "source": "supplier_registry",
+            "status": "empty",
+            "acceptance_days": 30,
+            "shipment_summary": [],
+            "diagnostics": {
+                "shipment_count": 1,
+                "product_line_count": 0,
+                "matched_line_count": 0,
+                "unmatched_line_count": 0,
+                "ambiguous_line_count": 0,
+                "missing_shipment_date_line_count": 0,
+                "invalid_quantity_line_count": 0,
+                "usable_line_count": 0,
+                "usable_quantity": 0.0,
+                "excluded_accepted_ff_shipment_count": 1,
+                "excluded_accepted_ff_line_count": 1,
+                "excluded_accepted_ff_quantity": 33.0,
+            },
+            "warnings": ["Источник supplier registry: accepted_ff excluded in fixture."],
+        }
+        if refreshed
+        else {
+            "source": "supplier_registry",
+            "status": "ready",
+            "acceptance_days": 30,
+            "shipment_summary": [
+                {
+                    "shipment_id": "supplier_refresh_probe",
+                    "shipment_label": "PATCH-TARGET",
+                    "invoice_no": "PATCH-TARGET",
+                    "invoice_date": "2026-04-19",
+                    "total_product_quantity": 33.0,
+                    "shipment_date": "2026-04-20",
+                    "calculated_acceptance_date": "2026-05-20",
+                    "matched_line_count": 1,
+                    "unmatched_line_count": 0,
+                    "ambiguous_line_count": 0,
+                    "missing_shipment_date_line_count": 0,
+                    "usable_quantity": 33.0,
+                    "order_status": "production",
+                }
+            ],
+            "diagnostics": {
+                "shipment_count": 1,
+                "product_line_count": 1,
+                "matched_line_count": 1,
+                "unmatched_line_count": 0,
+                "ambiguous_line_count": 0,
+                "missing_shipment_date_line_count": 0,
+                "invalid_quantity_line_count": 0,
+                "usable_line_count": 1,
+                "usable_quantity": 33.0,
+                "excluded_accepted_ff_shipment_count": 0,
+                "excluded_accepted_ff_line_count": 0,
+                "excluded_accepted_ff_quantity": 0.0,
+            },
+            "warnings": [],
+        }
+    )
+    return {
+        "active_sku_count": len(ACTIVE_SKUS),
+        "coverage_contract_note": "-",
+        "datasets": {},
+        "factory_inbound_source": "manual_excel",
+        "stock_ff_source": "manual_excel",
+        "manual_stock_ff_dataset": {},
+        "onec_stock_ff_summary": {
+            "status": "ready",
+            "source": "onec_ff_stock",
+            "source_label_ru": "1С / Фулфилмент",
+            "snapshot_date": "2026-04-20",
+            "active_sku_count": len(ACTIVE_SKUS),
+            "covered_sku_count": len(ACTIVE_SKUS),
+            "positive_stock_sku_count": 2,
+            "zero_stock_sku_count": 1,
+            "missing_sku_count": 0,
+            "total_stock_ff": 125.0,
+            "warnings": [],
+            "errors": [],
+            "sample_rows": [],
+        },
+        "manual_factory_inbound_dataset": {},
+        "supplier_registry_inbound_summary": supplier_summary,
+        "last_result": None,
+    }
 
 
 def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
@@ -432,6 +497,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "default_state": persistence_result["default_state"],
         "top_tab_persistence": persistence_result["top_tab_persistence"],
         "subsection_persistence": persistence_result["subsection_persistence"],
+        "supplier_registry_refresh": persistence_result["supplier_registry_refresh"],
         "factory_source_persistence": persistence_result["factory_source_persistence"],
         "sku_persistence": persistence_result["sku_persistence"],
         "plan_input_persistence": persistence_result["plan_input_persistence"],
@@ -483,6 +549,32 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("session-check action must refresh the seller recovery summary without starting recovery")
 
     page.click('[data-tab-button="factory-order"]')
+    page.wait_for_function(
+        "() => document.getElementById('supplierRegistryInboundSummaryState') && document.getElementById('supplierRegistryInboundSummaryState').textContent.includes('Доступных к factory inbound заказов: 1')"
+    )
+    if page.locator("#refreshSupplierRegistryInboundButton").count() != 1:
+        raise AssertionError("factory-order supplier registry block must expose the manual refresh button")
+    initial_supplier_table = page.locator("#supplierRegistryInboundSummaryTableWrap").inner_text()
+    if "PATCH-TARGET" not in initial_supplier_table:
+        raise AssertionError(f"supplier registry fixture row must be visible before refresh, got {initial_supplier_table!r}")
+    page.click("#refreshSupplierRegistryInboundButton")
+    page.wait_for_function(
+        "() => document.getElementById('supplierRegistryInboundSummaryState') && document.getElementById('supplierRegistryInboundSummaryState').textContent.includes('Исключено accepted_ff: 1')"
+    )
+    supplier_refresh_state = {
+        "summary": page.locator("#supplierRegistryInboundSummaryState").inner_text(),
+        "diagnostics": page.locator("#supplierRegistryInboundDiagnostics").inner_text(),
+        "table_hidden": page.locator("#supplierRegistryInboundSummaryTableWrap").is_hidden(),
+        "message": page.locator("#factoryMessage").inner_text(),
+    }
+    if "PATCH-TARGET" in (page.locator("#supplierRegistryInboundSummaryBody").text_content() or ""):
+        raise AssertionError("accepted_ff supplier row must disappear from the supplier registry inbound table after refresh")
+    if not supplier_refresh_state["table_hidden"]:
+        raise AssertionError(f"supplier registry table must collapse when only accepted_ff rows remain, got {supplier_refresh_state}")
+    if "excluded accepted_ff shipments: 1" not in supplier_refresh_state["diagnostics"]:
+        raise AssertionError(f"supplier registry diagnostics must expose accepted_ff exclusion counters, got {supplier_refresh_state}")
+    if "обновлена" not in supplier_refresh_state["message"].lower():
+        raise AssertionError(f"manual supplier registry refresh must show a success message, got {supplier_refresh_state}")
     if not page.locator('input[name="factoryInboundSource"][value="manual_excel"]').is_checked():
         raise AssertionError("factory-order UI must default factory inbound source to manual_excel")
     if not page.locator('input[name="stockFfSource"][value="manual_excel"]').is_checked():
@@ -946,6 +1038,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "default_state": default_state,
         "top_tab_persistence": factory_state,
         "subsection_persistence": reports_state,
+        "supplier_registry_refresh": supplier_refresh_state,
         "factory_source_persistence": factory_source_state,
         "sku_persistence": {
             "kept_label": kept_label,
@@ -1158,6 +1251,7 @@ def _print_summary(result: dict[str, object]) -> None:
         result["top_tab_persistence"],
         result["subsection_persistence"],
     )
+    print("operator_ui_supplier_registry_refresh: ok ->", result["supplier_registry_refresh"])
     print("operator_ui_sku_restore: ok ->", result["sku_persistence"])
     print("operator_ui_factory_source_restore: ok ->", result["factory_source_persistence"])
     print("operator_ui_plan_input_restore: ok ->", result["plan_input_persistence"])
