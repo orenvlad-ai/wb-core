@@ -24,7 +24,6 @@ def _read_top_session_indicator_style(page: object) -> dict[str, object]:
           const node = document.querySelector('[data-seller-top-session]');
           const word = node ? node.querySelector('[data-seller-top-session-label]') : null;
           const separator = node ? node.querySelector('[data-seller-top-session-separator]') : null;
-          const dot = node ? node.querySelector('.seller-top-session-dot') : null;
           const resolveColor = (value) => {
             const probe = document.createElement('span');
             probe.style.position = 'fixed';
@@ -38,7 +37,6 @@ def _read_top_session_indicator_style(page: object) -> dict[str, object]:
           const nodeStyle = node ? getComputedStyle(node) : null;
           const wordStyle = word ? getComputedStyle(word) : null;
           const separatorStyle = separator ? getComputedStyle(separator) : null;
-          const dotStyle = dot ? getComputedStyle(dot) : null;
           return {
             exists: !!node,
             tag: node ? node.tagName : '',
@@ -51,7 +49,7 @@ def _read_top_session_indicator_style(page: object) -> dict[str, object]:
             container_color: nodeStyle ? nodeStyle.color : '',
             word_color: wordStyle ? wordStyle.color : '',
             separator_color: separatorStyle ? separatorStyle.color : '',
-            dot_background: dotStyle ? dotStyle.backgroundColor : '',
+            dot_count: node ? node.querySelectorAll('.seller-top-session-dot').length : 0,
             muted_color: resolveColor('var(--muted)'),
             success_color: resolveColor('var(--success-text)'),
             error_color: resolveColor('var(--error-text)'),
@@ -77,7 +75,7 @@ def _assert_top_session_indicator_style(page: object, expected_tone: str) -> dic
         or payload["word_color"] != expected_word_color
         or payload["separator_color"] != payload["muted_color"]
         or payload["container_color"] != payload["muted_color"]
-        or payload["dot_background"] != payload["muted_color"]
+        or payload["dot_count"] != 0
         or payload["recovery_controls_inside"] != 0
     ):
         raise AssertionError(f"top session indicator style mismatch for {expected_tone}, got {payload}")
