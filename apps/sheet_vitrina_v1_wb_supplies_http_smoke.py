@@ -14,11 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+INPUT_BUNDLE_FIXTURE = (
+    ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
+)
+
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
+    DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
     DEFAULT_WB_SUPPLIES_SYNC_PATH,
     build_registry_upload_http_server,
@@ -212,23 +217,35 @@ class FakeWbSuppliesSource:
         }
         self.goods = {
             "39265492": [
-                {"quantity": 2500, "acceptedQuantity": 2490},
-                {"quantity": 5000, "acceptedQuantity": 4993},
+                {"nmID": 210183919, "quantity": 2500, "acceptedQuantity": 2490},
+                {"nmID": 210184534, "quantity": 5000, "acceptedQuantity": 4993},
             ],
             "39265540": [
-                {"quantity": 4250, "acceptedQuantity": 4239},
-                {"quantity": 5000, "acceptedQuantity": 4998},
+                {"nmID": 210183919, "quantity": 4250, "acceptedQuantity": 4239},
+                {"nmID": 210184534, "quantity": 5000, "acceptedQuantity": 4998},
             ],
-            "1001": [{"quantity": 500, "acceptedQuantity": 480}],
-            "1002": [{"quantity": 100, "acceptedQuantity": 0}],
+            "1001": [{"nmID": 210183919, "quantity": 500, "acceptedQuantity": 480}],
+            "1002": [{"nmID": 210183919, "quantity": 100, "acceptedQuantity": 0}],
             "1003": [
-                {"quantity": 150, "acceptedQuantity": 20},
-                {"quantity": 150, "acceptedQuantity": 10},
+                {"nmID": 210183919, "quantity": 150, "acceptedQuantity": 20},
+                {"nmID": 210184534, "quantity": 150, "acceptedQuantity": 10},
             ],
         }
 
     def fetch_warehouses(self):
         return self.warehouse_rows
+
+    def fetch_marketplace_offices(self):
+        return [
+            {"name": "Коледино", "federalDistrict": "Центральный федеральный округ"},
+            {"name": "Электросталь", "federalDistrict": "Центральный федеральный округ"},
+        ]
+
+    def fetch_box_tariffs(self, *, tariff_date=None):
+        return [
+            {"warehouseName": "Казань", "geoName": "Приволжский федеральный округ"},
+            {"warehouseName": "Обухово", "geoName": "Северо-Западный федеральный округ"},
+        ]
 
     def list_supplies(self, *, limit=100, offset=0, status_ids=None, dates=None):
         self.list_calls.append({"limit": limit, "offset": offset, "status_ids": status_ids or [], "dates": dates or []})
@@ -269,6 +286,7 @@ def main() -> None:
     with TemporaryDirectory(prefix="wb-supplies-http-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        runtime.ingest_bundle(json.loads(INPUT_BUNDLE_FIXTURE.read_text(encoding="utf-8")), activated_at="2026-06-08T08:00:00Z")
         port = _reserve_free_port()
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
@@ -397,6 +415,37 @@ def main() -> None:
             status_options = all_payload.get("filters", {}).get("options", {}).get("statuses", [])
             if [item.get("value") for item in status_options] != [1, 2, 3, 4, 5, 6]:
                 raise AssertionError(f"status selector must expose official statuses 1..6, got {status_options}")
+            district_options = all_payload.get("filters", {}).get("options", {}).get("districts", [])
+            if [item.get("label") for item in district_options] != ["ЦФО", "СЗФО", "ПФО", "УрФО", "Юг+СК", "Сиб+ДВ"]:
+                raise AssertionError(f"district presets must expose six WB regional districts, got {district_options}")
+
+            central_status, central_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?district_keys=central&size_filter=all"
+            )
+            if central_status != 200 or {row["wb_supply_id"] for row in central_payload.get("rows", [])} != {
+                "39265540",
+                "1001",
+                "1002",
+            }:
+                raise AssertionError(f"central district preset filter must work with size_filter=all, got {central_payload}")
+            volga_status, volga_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?district_keys=volga&size_filter=all"
+            )
+            if volga_status != 200 or {row["wb_supply_id"] for row in volga_payload.get("rows", [])} != {"1003", "1004", "1005"}:
+                raise AssertionError(f"volga district preset filter must use tariffs fallback mapping, got {volga_payload}")
+
+            overlay_status, overlay_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH}")
+            if overlay_status != 200 or overlay_payload.get("eligible_status_ids") != [2, 3, 4, 6]:
+                raise AssertionError(f"overlay options route must expose eligible status contract, got {overlay_status} {overlay_payload}")
+            if [item.get("label") for item in overlay_payload.get("district_options", [])] != ["ЦФО", "СЗФО", "ПФО", "УрФО", "Юг+СК", "Сиб+ДВ"]:
+                raise AssertionError(f"overlay options route must expose six district presets, got {overlay_payload}")
+            overlay_options = {item.get("supply_id"): item for item in overlay_payload.get("options", [])}
+            if not overlay_options.get("1002", {}).get("eligible_for_overlay"):
+                raise AssertionError(f"planned supply with date/composition/active SKU must be selectable, got {overlay_options.get('1002')}")
+            if "статус «Принято» не учитывается" not in overlay_options.get("1001", {}).get("disabled_reasons", []):
+                raise AssertionError(f"accepted supplies must be disabled in overlay selector, got {overlay_options.get('1001')}")
+            if "статус «Не запланировано» не учитывается" not in overlay_options.get("1005", {}).get("disabled_reasons", []):
+                raise AssertionError(f"unplanned supplies must be disabled in overlay selector, got {overlay_options.get('1005')}")
 
             sort_desc_status, sort_desc_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=100&sort_key=supply_date&sort_dir=desc"
@@ -513,7 +562,13 @@ def main() -> None:
                 "Основные от 250 шт",
                 "Показать записей",
                 "Загрузить всю историю",
+                "Учесть WB-поставки",
+                "Выбрать eligible",
+                "ФО",
+                "ЦФО",
+                "Сиб+ДВ",
                 "wb_supplies_path",
+                "wb_supplies_overlay_options_path",
                 "wb_supplies_backfill_path",
                 "wb_supplies_sync_status_path",
             ):

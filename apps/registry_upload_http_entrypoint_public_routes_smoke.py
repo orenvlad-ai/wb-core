@@ -65,6 +65,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/supply/factory-order/",
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
         "/v1/sheet-vitrina-v1/supply/wb-supplies",
+        "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/sync",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
@@ -110,6 +111,8 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include factory-order prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies {") != 1:
         raise AssertionError("rendered nginx block must include WB supplies list exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options {") != 1:
+        raise AssertionError("rendered nginx block must include WB supplies overlay options exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/sync {") != 1:
         raise AssertionError("rendered nginx block must include WB supplies sync exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies/backfill {") != 1:

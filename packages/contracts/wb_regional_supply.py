@@ -48,6 +48,7 @@ class WbRegionalSupplySettings:
     report_date_override: str | None
     stock_ff_source: str = STOCK_FF_SOURCE_MANUAL_EXCEL
     included_district_keys: tuple[str, ...] = DISTRICT_KEYS
+    selected_wb_supply_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class WbRegionalSupplyCalculationResult:
     summary: WbRegionalSupplySummary
     districts: list[WbRegionalSupplyDistrictResult]
     diagnostics: dict[str, Any] | None = None
+    wb_supply_overlay: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
 
 
@@ -125,3 +127,4 @@ class WbRegionalSupplyStatus:
     manual_stock_ff_dataset: FactoryOrderDatasetState
     onec_stock_ff_summary: FactoryOrderStockFfOnecState
     last_result: WbRegionalSupplyCalculationResult | None
+    wb_supply_overlay_options: dict[str, Any] | None = None

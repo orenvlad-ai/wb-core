@@ -20,6 +20,12 @@ from packages.adapters.wb_supplies import (
     WbSuppliesTransportError,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.wb_supply_overlay import (
+    augment_supply_row_with_district,
+    build_warehouse_district_mapping,
+    build_wb_supply_overlay_options,
+    district_filter_options,
+)
 from packages.business_time import current_business_date_iso
 
 
@@ -103,6 +109,12 @@ class WbSuppliesSource(Protocol):
     def fetch_warehouses(self) -> list[Mapping[str, Any]]:
         raise NotImplementedError
 
+    def fetch_marketplace_offices(self) -> list[Mapping[str, Any]]:
+        raise NotImplementedError
+
+    def fetch_box_tariffs(self, *, tariff_date: str | None = None) -> list[Mapping[str, Any]]:
+        raise NotImplementedError
+
 
 class WbSuppliesBlockError(RuntimeError):
     def __init__(self, message: str, *, http_status: int = 502) -> None:
@@ -129,6 +141,8 @@ class WbSuppliesBlock:
         request = _normalize_list_request(params or {})
         rows = self.runtime.list_wb_supplies()
         warehouses = self.runtime.list_wb_supplies_warehouses()
+        district_mapping = self._cached_warehouse_district_mapping(rows=rows, warehouses=warehouses)
+        rows = [augment_supply_row_with_district(row, district_mapping) for row in rows]
         state = self.runtime.load_wb_supplies_sync_state()
         active_run = self.runtime.load_active_wb_supplies_sync_run()
         cache_completeness = _cache_completeness(state, rows)
@@ -137,6 +151,7 @@ class WbSuppliesBlock:
             for row in rows
             if _row_matches_search(row, request["search"])
             and _row_matches_warehouse(row, request["warehouse_id"], request["warehouse"])
+            and _row_matches_districts(row, request["district_keys"])
             and _row_matches_statuses(row, request["status_ids"])
         ]
         sorted_rows = _sort_rows(after_non_size_filters, request["sort_key"], request["sort_dir"])
@@ -177,6 +192,7 @@ class WbSuppliesBlock:
                     "search": request["search"],
                     "warehouse_id": request["warehouse_id"],
                     "warehouse": request["warehouse"],
+                    "district_keys": request["district_keys"],
                     "status_id": request["status_id"],
                     "status_ids": request["status_ids"],
                     "size_filter": request["size_filter"],
@@ -187,6 +203,7 @@ class WbSuppliesBlock:
                 },
                 "options": {
                     "warehouses": _warehouse_options(rows, warehouses),
+                    "districts": district_filter_options(),
                     "statuses": _status_options(rows),
                     "size_filters": [
                         {"value": SIZE_FILTER_MAIN_250, "label": "Основные от 250 шт", "default": True},
@@ -225,6 +242,20 @@ class WbSuppliesBlock:
             "sync_state": _public_sync_state(state, cache_completeness),
             "active_run": active_run if active_run and active_run.get("status") in RUN_ACTIVE_STATUSES else None,
         }
+
+    def build_overlay_options(self) -> dict[str, Any]:
+        return build_wb_supply_overlay_options(
+            runtime=self.runtime,
+            active_skus=self._load_active_skus(),
+        )
+
+    def _load_active_skus(self) -> list[tuple[int, str]]:
+        current_state = self.runtime.load_current_state()
+        enabled = sorted(
+            [item for item in current_state.config_v2 if item.enabled],
+            key=lambda item: item.display_order,
+        )
+        return [(int(item.nm_id), str(item.display_name)) for item in enabled]
 
     def sync_supplies(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_sync_request(payload or {})
@@ -279,10 +310,16 @@ class WbSuppliesBlock:
                     partial_status_slices = True
                     warnings.append(f"active status refresh failed; primary latest window used: {_safe_error_message(exc)}")
             warehouse_by_id = _warehouse_map(warehouses)
+            warehouse_district_mapping = self._fetch_warehouse_district_mapping(
+                warehouses=warehouses,
+                raw_rows=raw_rows,
+                warnings=warnings,
+            )
             active_force_enrich_keys = _active_force_enrich_keys(raw_rows, self.runtime.list_wb_supplies_cache_records())
             sync_result = self._prepare_list_rows_for_upsert(
                 raw_rows=raw_rows,
                 warehouse_by_id=warehouse_by_id,
+                warehouse_district_mapping=warehouse_district_mapping,
                 synced_at=synced_at,
                 enrich=request["enrich"] != "none",
                 changed_only=request["enrich"] != "all",
@@ -532,7 +569,12 @@ class WbSuppliesBlock:
                 fetched_any = True
 
         synced_at = self.timestamp_factory()
-        warehouse_by_id = _warehouse_map(self.runtime.list_wb_supplies_warehouses())
+        warehouse_rows = self.runtime.list_wb_supplies_warehouses()
+        warehouse_by_id = _warehouse_map(warehouse_rows)
+        warehouse_district_mapping = self._cached_warehouse_district_mapping(
+            rows=[normalized],
+            warehouses=warehouse_rows,
+        )
         existing_warnings = list(normalized.get("warnings") or [])
         row_warnings = warnings if attempted_core_enrichment or warnings else existing_warnings
         next_normalized = _normalize_supply_row(
@@ -544,6 +586,7 @@ class WbSuppliesBlock:
             synced_at=synced_at,
             warnings=row_warnings,
         )
+        next_normalized = augment_supply_row_with_district(next_normalized, warehouse_district_mapping)
         cache_key = str(record.get("cache_key") or normalized.get("cache_key") or _stable_cache_key(raw_list) or "").strip()
         next_normalized["cache_key"] = cache_key
         next_normalized["raw_list_hash"] = _stable_payload_hash(raw_list) if raw_list else str(record.get("raw_list_hash") or "")
@@ -642,6 +685,11 @@ class WbSuppliesBlock:
         try:
             warehouses = self._fetch_warehouses(warnings)
             warehouse_by_id = _warehouse_map(warehouses)
+            warehouse_district_mapping = self._fetch_warehouse_district_mapping(
+                warehouses=warehouses,
+                raw_rows=[],
+                warnings=warnings,
+            )
             backfill_complete = False
             may_have_more = True
             while True:
@@ -678,6 +726,7 @@ class WbSuppliesBlock:
                 sync_result = self._prepare_list_rows_for_upsert(
                     raw_rows=rows,
                     warehouse_by_id=warehouse_by_id,
+                    warehouse_district_mapping=warehouse_district_mapping,
                     synced_at=page_started_at,
                     enrich=False,
                     changed_only=True,
@@ -712,6 +761,7 @@ class WbSuppliesBlock:
                     enrich_result = self._prepare_list_rows_for_upsert(
                         raw_rows=rows,
                         warehouse_by_id=warehouse_by_id,
+                        warehouse_district_mapping=warehouse_district_mapping,
                         synced_at=enrich_started_at,
                         enrich=True,
                         changed_only=True,
@@ -886,6 +936,7 @@ class WbSuppliesBlock:
         *,
         raw_rows: list[Mapping[str, Any]],
         warehouse_by_id: Mapping[str, str],
+        warehouse_district_mapping: Mapping[str, Any],
         synced_at: str,
         enrich: bool,
         changed_only: bool,
@@ -976,6 +1027,7 @@ class WbSuppliesBlock:
                 synced_at=synced_at,
                 warnings=row_warnings,
             )
+            normalized = augment_supply_row_with_district(normalized, warehouse_district_mapping)
             normalized["cache_key"] = cache_key
             normalized["raw_list_hash"] = raw_list_hash
             normalized["raw_detail_hash"] = _stable_payload_hash(raw_detail) if raw_detail is not None else ""
@@ -1006,6 +1058,57 @@ class WbSuppliesBlock:
                 raise
             warnings.append(str(exc))
             return []
+
+    def _fetch_warehouse_district_mapping(
+        self,
+        *,
+        warehouses: list[Mapping[str, Any]],
+        raw_rows: list[Mapping[str, Any]],
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        offices: list[Mapping[str, Any]] = []
+        tariffs: list[Mapping[str, Any]] = []
+        offices_fetcher = getattr(self.source, "fetch_marketplace_offices", None)
+        if callable(offices_fetcher):
+            try:
+                offices = list(offices_fetcher())
+            except WbSuppliesHttpStatusError as exc:
+                warnings.append(
+                    "warehouse district offices mapping failed with status "
+                    + str(exc.status_code)
+                    + "; trying tariffs fallback"
+                )
+            except (WbSuppliesTransportError, OfficialApiRuntimeError, RuntimeError) as exc:
+                warnings.append(f"warehouse district offices mapping failed: {exc}; trying tariffs fallback")
+        tariffs_fetcher = getattr(self.source, "fetch_box_tariffs", None)
+        if callable(tariffs_fetcher):
+            try:
+                tariffs = list(tariffs_fetcher(tariff_date=current_business_date_iso()))
+            except WbSuppliesHttpStatusError as exc:
+                warnings.append(
+                    "warehouse district tariffs mapping failed with status "
+                    + str(exc.status_code)
+                    + "; unmapped warehouses will stay unmapped"
+                )
+            except (WbSuppliesTransportError, OfficialApiRuntimeError, RuntimeError) as exc:
+                warnings.append(f"warehouse district tariffs mapping failed: {exc}; unmapped warehouses will stay unmapped")
+        return build_warehouse_district_mapping(
+            warehouse_rows=warehouses,
+            supply_rows=raw_rows,
+            office_rows=offices,
+            tariff_rows=tariffs,
+        )
+
+    def _cached_warehouse_district_mapping(
+        self,
+        *,
+        rows: list[Mapping[str, Any]],
+        warehouses: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        return build_warehouse_district_mapping(
+            warehouse_rows=warehouses,
+            supply_rows=rows,
+        )
 
     def _fetch_detail(
         self,
@@ -1075,6 +1178,7 @@ def _normalize_list_request(params: Mapping[str, Any]) -> dict[str, Any]:
         "search": str(params.get("search") or "").strip(),
         "warehouse_id": str(params.get("warehouse_id") or "").strip(),
         "warehouse": str(params.get("warehouse") or "").strip(),
+        "district_keys": _normalize_district_keys(params.get("district_keys") or params.get("district_key")),
         "status_id": legacy_status_id,
         "status_ids": status_ids,
         "size_filter": _normalize_size_filter(params.get("size_filter")),
@@ -1109,6 +1213,29 @@ def _normalize_sync_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         "dates": [dict(item) for item in payload.get("dates") or [] if isinstance(item, Mapping)],
         "list_params": dict(payload.get("list_params") or {}) if isinstance(payload.get("list_params"), Mapping) else {},
     }
+
+
+def _normalize_district_keys(value: Any) -> list[str]:
+    allowed = {str(item["district_key"]) for item in district_filter_options()}
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_values: list[Any] = [item.strip() for item in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = []
+        for item in value:
+            if isinstance(item, str) and "," in item:
+                raw_values.extend(part.strip() for part in item.split(","))
+            else:
+                raw_values.append(item)
+    else:
+        raw_values = [value]
+    result: list[str] = []
+    for item in raw_values:
+        key = str(item or "").strip().lower()
+        if key in allowed and key not in result:
+            result.append(key)
+    return result
 
 
 def _normalize_backfill_request(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1775,6 +1902,12 @@ def _row_matches_statuses(row: Mapping[str, Any], status_ids: list[int]) -> bool
     return _optional_int(row.get("status_id")) in set(status_ids)
 
 
+def _row_matches_districts(row: Mapping[str, Any], district_keys: list[str]) -> bool:
+    if not district_keys:
+        return True
+    return str(row.get("district_key") or "").strip() in set(district_keys)
+
+
 def _row_matches_size_filter(row: Mapping[str, Any], size_filter: str) -> bool:
     if size_filter == SIZE_FILTER_ALL:
         return True
@@ -1802,7 +1935,11 @@ def _warehouse_options(rows: list[Mapping[str, Any]], warehouse_rows: list[Mappi
             warehouse_id = str(row.get(id_key) or "").strip()
             name = str(row.get(name_key) or "").strip()
             if warehouse_id or name:
-                options.setdefault(warehouse_id or name, {"value": warehouse_id, "label": name or warehouse_id})
+                option = options.setdefault(warehouse_id or name, {"value": warehouse_id, "label": name or warehouse_id})
+                district_key = str(row.get("district_key") or "").strip()
+                if district_key and district_key != "unmapped":
+                    option.setdefault("district_key", district_key)
+                    option.setdefault("district_label_ru", str(row.get("district_label_ru") or ""))
     return sorted(options.values(), key=lambda item: str(item.get("label") or "").casefold())
 
 

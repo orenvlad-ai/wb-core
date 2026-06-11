@@ -104,6 +104,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments"
@@ -135,6 +136,7 @@ related_runners:
   - "apps/factory_order_sales_history_smoke.py"
   - "apps/factory_order_sales_history_reconcile.py"
   - "apps/factory_order_supply_smoke.py"
+  - "apps/wb_supply_overlay_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/wb_regional_supply_smoke.py"
   - "apps/sheet_vitrina_v1_wb_regional_supply_http_smoke.py"
@@ -340,6 +342,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate` = server-side district allocation calculation
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` = отдельный operator-facing XLSX download по федеральному округу
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` = ZIP download всех included district XLSX recommendations из последнего расчёта
+  - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options` = read-only selector options for calculation-only WB supplies overlay; it reads server cache, validates eligible status/date/composition/active SKU evidence and performs no WB mutation
 - Для compact daily-report compare basis current live rule остаётся fully server-side:
   - `current_business_date` = now in `Asia/Yekaterinburg`
   - `newer_closed_day` читается как `yesterday_closed` из latest persisted ready snapshot `<= default_business_as_of_date(now)`
@@ -413,9 +416,13 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - restored stock-report selection is revalidated against current active `config_v2`, so removed `nmId` values are silently dropped and new active SKU default to selected only when no valid stored subset remains.
 - Во второй tab `Расчёт поставок` current bounded scope materialize-ит два sibling block внутри одного narrow operator page:
   - shared block `Остатки ФФ` остаётся один для обоих расчётов: manual Excel хранится в одном server-owned dataset state, while optional `1С / Фулфилмент` reads current materialized 1C `FF_STOCK` rows without writing them into the manual upload state;
+  - same shared block now exposes `Учесть WB-поставки`: selected ids are browser-owned UI state but sent explicitly as `selected_wb_supply_ids` to both `factory-order/calculate` and `wb-regional/calculate`; backend revalidates from server WB supplies cache and returns `wb_supply_overlay` diagnostics in the calculate result;
+  - WB supplies overlay is calculation-only: it never replaces manual/1C `stock_ff`, never writes ready/web-vitrina metrics, never mutates WB API and never becomes ЕБД truth;
+  - common FF overlay: `effective_stock_ff = max(base_stock_ff - selected_wb_supply_qty, 0)` and `over_reserved_qty = max(selected_wb_supply_qty - base_stock_ff, 0)`; over-reserved rows warn but do not fail calculation;
   - block `Заказ на фабрике` сохраняет existing behavior, но vocabulary/settings now include explicit `cycle_order_days` (`Цикл заказов`) as an additive day tail in `target_qty`;
   - sibling selector/button label для второго блока сокращён до `Поставка на Wildberries`, while the block itself still publishes district-level outputs;
   - block `Поставка на Wildberries` использует тот же shared `stock_ff` source selector, свои settings (`sales_avg_period_days`, `cycle_supply_days`, `lead_time_to_region_days`, `safety_days`, `order_batch_qty`, `report_date_override`, `included_district_keys`) и отдельный result/download surface;
+  - selected WB supplies affect regional allocation by reducing available FF pool and adding each mapped event only to its warehouse destination calculation district (`central`, `northwest`, `volga`, `ural`, `south_caucasus`, `far_siberia`); unmapped warehouses warn and do not add district quantity;
   - WB regional district demand primary methodology no longer uses current stock share. Total SKU demand remains authoritative `orderCount`, while district proportions are restored by a bounded quality ladder over runtime `temporal_source_snapshots[source_key=stocks]`: `full_clean_days -> partial_district_observations -> sku_group_prior -> global_prior -> seed_floor`;
   - для WB regional `sales_avg_period_days` означает requested quality count. Backend still prefers full clean days inside `max_lookup_days = min(365, max(120, N * 8))`, but if there are not enough full clean days it does not fall straight to seed/current stock. It collects valid `SKU + district + day` cells independently, so a dirty district/day does not discard another district's clean observation on the same date;
   - full clean day requires paired `D-1`/`D` stock snapshots, full SKU/district coverage across selected districts, numeric non-negative stocks, no selected-district restock/upward correction, no selected-district out-of-stock risk on positive SKU order signal, positive selected-district depletion signal and an `orderCount` sample above the same low-signal tolerance idea as factory demand (`median_positive_orderCount * 0.45`, floor `1`);
@@ -428,6 +435,7 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - limited `stock_ff` box allocation now chooses the next demand-based box by `marginal_saved_units = min(order_batch_qty, remaining_raw_shortage_units_for_district)` before coverage-days, district-demand and stable-order tie-breaks. Full demand recommendation, truthful deficit and box multiple semantics stay unchanged;
   - exploratory seed allocation is separate from demand allocation and is last-resort only: a selected SKU/district may receive one `order_batch_qty` box only when own observations, SKU group prior and global prior cannot recover a usable share, current district stock is zero/no usable stock (`current_stock < order_batch_qty`), total SKU demand is positive and remaining `stock_ff` allows. The seed consumes `stock_ff`, is exposed as `seed_qty`/`demand_qty` diagnostics, can be unfulfilled when FF stock is insufficient, and is explicitly labeled as a test shipment for future signal, not proven demand;
   - regional block не materialize-ит upload contract `Товары в пути от ФФ на Wildberries`: этот input остаётся вне текущего bounded scope;
+  - factory-order treats selected WB supplies as automatic overlay over existing `Товары в пути ФФ -> Wildberries`: selected quantities reduce free `stock_ff` and add to `inbound_ff_to_wb` only when their selected operational date is inside the existing inbound window; out-of-window events are diagnosed and do not add current-window coverage;
   - settings fields остаются server-owned и валидируются на backend;
   - operator-facing vocabulary around supply inputs is unified as `Период усреднения продаж` / lead times / safety / `Кратность штук в коробке` / `Цикл`;
   - current operator defaults on page load:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -12,6 +13,10 @@ from playwright.sync_api import expect, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+INPUT_BUNDLE_FIXTURE = (
+    ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
+)
 
 from apps.sheet_vitrina_v1_wb_supplies_http_smoke import (  # noqa: E402
     FakeWbSuppliesSource,
@@ -35,6 +40,7 @@ def main() -> None:
     with TemporaryDirectory(prefix="wb-supplies-browser-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        runtime.ingest_bundle(json.loads(INPUT_BUNDLE_FIXTURE.read_text(encoding="utf-8")), activated_at="2026-06-08T08:00:00Z")
         port = _reserve_free_port()
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
@@ -73,6 +79,8 @@ def main() -> None:
                 expect(operator_frame.get_by_text("WB API / FBW Supplies · read-only")).to_be_visible()
                 expect(operator_frame.locator("#wbSuppliesSearchInput")).to_have_attribute("placeholder", "Номер поставки")
                 expect(operator_frame.locator("#wbSuppliesWarehouseSelect")).to_be_visible()
+                expect(operator_frame.locator("#wbSuppliesDistrictPresetList")).to_contain_text("ЦФО")
+                expect(operator_frame.locator("#wbSuppliesDistrictPresetList")).to_contain_text("Сиб+ДВ")
                 expect(operator_frame.locator("#wbSuppliesStatusMenuButton")).to_contain_text("Статусы: все")
                 expect(operator_frame.locator("#wbSuppliesSizeFilterSelect")).to_be_visible()
                 expect(operator_frame.locator("#wbSuppliesSizeFilterSelect")).to_have_value("main_250")
@@ -139,6 +147,13 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("1001")
                 operator_frame.locator("#wbSuppliesSearchInput").fill("")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("39265540", timeout=10000)
+                operator_frame.locator("[data-wb-supplies-district-preset][value='volga']").check()
+                expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("ФО: ПФО", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("39265540")
+                operator_frame.locator("[data-wb-supplies-district-preset][value='volga']").uncheck()
+                expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("ФО: все", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("39265540", timeout=10000)
                 operator_frame.locator("#wbSuppliesWarehouseSelect").select_option("777")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("39265540", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("Электросталь")
@@ -160,6 +175,15 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesStatusMenuButton")).to_contain_text("Статусы: 2", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1002", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("39265540", timeout=10000)
+                operator_frame.get_by_role("button", name="Расчёты").click()
+                expect(operator_frame.locator("#wbSupplyOverlayTitle")).to_contain_text("Учесть WB-поставки")
+                expect(operator_frame.locator("#wbSupplyOverlayOptions")).to_contain_text("1002", timeout=10000)
+                expect(operator_frame.locator("#wbSupplyOverlayOptions")).to_contain_text("статус «Принято» не учитывается")
+                operator_frame.locator("#wbSupplyOverlaySelectEligibleButton").click()
+                expect(operator_frame.locator("#wbSupplyOverlaySummary")).to_contain_text("Выбрано WB-поставок", timeout=10000)
+                checked_overlay_count = operator_frame.locator("[data-wb-supply-overlay-checkbox]:checked").count()
+                if checked_overlay_count < 1:
+                    raise AssertionError("overlay selector must check at least one eligible WB supply")
                 browser.close()
         finally:
             server.shutdown()

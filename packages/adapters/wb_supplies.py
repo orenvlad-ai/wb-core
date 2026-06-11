@@ -13,6 +13,10 @@ from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, loa
 
 DEFAULT_WB_SUPPLIES_API_BASE_URL = "https://supplies-api.wildberries.ru"
 DEFAULT_WB_SUPPLIES_API_BASE_URL_ENV = "WB_SUPPLIES_API_BASE_URL"
+DEFAULT_WB_MARKETPLACE_API_BASE_URL = "https://marketplace-api.wildberries.ru"
+DEFAULT_WB_MARKETPLACE_API_BASE_URL_ENV = "WB_MARKETPLACE_API_BASE_URL"
+DEFAULT_WB_TARIFFS_API_BASE_URL = "https://common-api.wildberries.ru"
+DEFAULT_WB_TARIFFS_API_BASE_URL_ENV = "WB_TARIFFS_API_BASE_URL"
 
 
 class WbSuppliesHttpStatusError(RuntimeError):
@@ -210,6 +214,38 @@ class HttpBackedWbSuppliesSource:
         )
         return _extract_list_rows(payload, row_name="warehouses")
 
+    def fetch_marketplace_offices(self) -> list[Mapping[str, Any]]:
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=DEFAULT_WB_MARKETPLACE_API_BASE_URL,
+            base_url_env_var=DEFAULT_WB_MARKETPLACE_API_BASE_URL_ENV,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        payload = self._request_json(
+            method="GET",
+            url=f"{runtime.base_url}/api/v3/offices",
+            token=runtime.token,
+            timeout_seconds=runtime.timeout_seconds,
+        )
+        return _extract_list_rows(payload, row_name="offices")
+
+    def fetch_box_tariffs(self, *, tariff_date: str | None = None) -> list[Mapping[str, Any]]:
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=DEFAULT_WB_TARIFFS_API_BASE_URL,
+            base_url_env_var=DEFAULT_WB_TARIFFS_API_BASE_URL_ENV,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        query = urllib_parse.urlencode({"date": str(tariff_date or "")}) if tariff_date else ""
+        suffix = f"?{query}" if query else ""
+        payload = self._request_json(
+            method="GET",
+            url=f"{runtime.base_url}/api/v1/tariffs/box{suffix}",
+            token=runtime.token,
+            timeout_seconds=runtime.timeout_seconds,
+        )
+        return _extract_list_rows(payload, row_name="warehouseList")
+
     def _request_json(
         self,
         *,
@@ -293,7 +329,7 @@ def _extract_list_rows(payload: Any, *, row_name: str) -> list[Mapping[str, Any]
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, Mapping)]
     if isinstance(payload, Mapping):
-        for key in (row_name, "data", "items", "rows", "result"):
+        for key in (row_name, "data", "items", "rows", "result", "response"):
             value = payload.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, Mapping)]

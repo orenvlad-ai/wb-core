@@ -18,6 +18,13 @@ from packages.application.sales_funnel_history_block import SalesFunnelHistoryBl
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
 from packages.application.stocks_block import StocksBlock
 from packages.application.stock_ff_onec_source import build_onec_stock_ff_state, resolve_onec_stock_ff_rows
+from packages.application.wb_supply_overlay import (
+    apply_stock_ff_overlay,
+    build_selected_wb_supply_overlay,
+    overlay_to_public_payload,
+    parse_selected_wb_supply_ids,
+    regional_overlay_quantities,
+)
 from packages.application.wb_regional_demand import (
     build_result_diagnostics as _build_regional_demand_result_diagnostics,
     estimate_wb_regional_demand as _estimate_wb_regional_demand,
@@ -173,7 +180,27 @@ class WbRegionalSupplyBlock:
                 f"{report_date}: " + ", ".join(str(item) for item in missing)
             )
 
-        stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in stock_ff_rows}
+        selected_wb_supply_ids = settings.selected_wb_supply_ids
+        wb_supply_overlay = build_selected_wb_supply_overlay(
+            runtime=self.runtime,
+            selected_supply_ids=selected_wb_supply_ids,
+            active_skus=active_skus,
+        )
+        (
+            effective_stock_ff_rows,
+            wb_stock_ff_diagnostics,
+            wb_stock_ff_warnings,
+        ) = apply_stock_ff_overlay(
+            stock_ff_rows=stock_ff_rows,
+            active_skus=active_skus,
+            overlay=wb_supply_overlay,
+        )
+        (
+            wb_regional_qty_by_nm_district,
+            wb_regional_overlay_diagnostics,
+            wb_regional_overlay_warnings,
+        ) = regional_overlay_quantities(overlay=wb_supply_overlay)
+        stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in effective_stock_ff_rows}
         current_stock_by_nm = {
             nm_id: {
                 district_key: float(getattr(stock_items[nm_id], _DISTRICT_FIELD_BY_KEY[district_key], 0.0) or 0.0)
@@ -213,8 +240,13 @@ class WbRegionalSupplyBlock:
             for district_key in DISTRICT_KEYS:
                 current_stock = district_stock_by_key[district_key]
                 district_daily_demand = district_daily_demand_by_key[district_key]
+                selected_wb_supply_qty = float(
+                    wb_regional_qty_by_nm_district.get(nm_id, {}).get(district_key, 0.0)
+                )
                 projected_stock_on_eta = max(
-                    current_stock - (district_daily_demand * settings.lead_time_to_region_days),
+                    current_stock
+                    + selected_wb_supply_qty
+                    - (district_daily_demand * settings.lead_time_to_region_days),
                     0.0,
                 )
                 target_stock_after_arrival = district_daily_demand * (
@@ -238,6 +270,7 @@ class WbRegionalSupplyBlock:
                     "daily_demand_total": daily_demand_total,
                     "district_daily_demand": district_daily_demand,
                     "full_recommendation_qty": full_recommendation_qty,
+                    "selected_wb_supply_qty": selected_wb_supply_qty,
                 }
 
             demand_allocated_by_key = _allocate_boxes(
@@ -351,6 +384,9 @@ class WbRegionalSupplyBlock:
                 row_diagnostics["share_confidence"] = share_confidence
                 row_diagnostics["demand_recommendation_qty"] = demand_recommendation_qty
                 row_diagnostics["seed_qty"] = seed_qty
+                row_diagnostics["selected_wb_supply_qty"] = float(
+                    row_payloads_by_key[district_key].get("selected_wb_supply_qty", 0.0)
+                )
                 allocation_reason = "demand_based"
                 if seed_qty > 0:
                     allocation_reason = "demand_based_plus_seed_floor" if demand_allocated_qty > 0 else "seed_floor"
@@ -403,9 +439,12 @@ class WbRegionalSupplyBlock:
                 "seed_allocated_qty_total": int(seed_allocated_qty_total),
                 "seed_unfulfilled_qty_total": int(seed_unfulfilled_qty_total),
                 "seed_by_nm_id": seed_by_nm_id,
+                "wb_supply_overlay": wb_regional_overlay_diagnostics,
             }
         )
         warnings = [str(item) for item in result_diagnostics.get("warnings", []) if item]
+        warnings.extend(str(item) for item in wb_stock_ff_warnings if item)
+        warnings.extend(str(item) for item in wb_regional_overlay_warnings if item)
         if seed_unfulfilled_qty_total > 0:
             warnings.append(
                 "Не хватило stock_ff для всех тестовых коробок seed floor: "
@@ -413,6 +452,12 @@ class WbRegionalSupplyBlock:
             )
         result_diagnostics["warnings"] = warnings
         result_warnings = tuple(warnings)
+        wb_supply_overlay_payload = overlay_to_public_payload(
+            overlay=wb_supply_overlay,
+            stock_ff_diagnostics=wb_stock_ff_diagnostics,
+            wb_regional_diagnostics=wb_regional_overlay_diagnostics,
+            extra_warnings=tuple(wb_stock_ff_warnings) + tuple(wb_regional_overlay_warnings),
+        )
 
         districts = [
             WbRegionalSupplyDistrictResult(
@@ -446,6 +491,7 @@ class WbRegionalSupplyBlock:
             ),
             districts=districts,
             diagnostics=result_diagnostics,
+            wb_supply_overlay=wb_supply_overlay_payload,
             warnings=result_warnings,
         )
         self._validate_result_consistency(result)
@@ -624,6 +670,7 @@ class WbRegionalSupplyBlock:
                 ),
                 stock_ff_source=stock_ff_source,
                 included_district_keys=_parse_included_district_keys(settings_payload.get("included_district_keys")),
+                selected_wb_supply_ids=_parse_selected_wb_supply_ids_from_settings(settings_payload),
             ),
             stock_ff_source=stock_ff_source,
             shared_datasets=shared_datasets,
@@ -684,6 +731,11 @@ class WbRegionalSupplyBlock:
                 if isinstance(item, Mapping)
             ],
             diagnostics=dict(diagnostics_payload) if diagnostics_payload is not None else None,
+            wb_supply_overlay=(
+                dict(payload.get("wb_supply_overlay"))
+                if isinstance(payload.get("wb_supply_overlay"), Mapping)
+                else None
+            ),
             warnings=tuple(str(item) for item in warnings_payload if item),
         )
 
@@ -758,6 +810,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
         ),
         stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
         included_district_keys=_parse_included_district_keys(payload.get("included_district_keys")),
+        selected_wb_supply_ids=parse_selected_wb_supply_ids(payload),
     )
 
 
@@ -773,6 +826,12 @@ def _normalize_stock_ff_source(value: Any) -> str:
         return _parse_stock_ff_source(value)
     except ValueError:
         return STOCK_FF_SOURCE_MANUAL_EXCEL
+
+
+def _parse_selected_wb_supply_ids_from_settings(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    if not isinstance(payload, Mapping):
+        return ()
+    return parse_selected_wb_supply_ids(payload)
 
 
 def _parse_included_district_keys(value: Any) -> tuple[str, ...]:
