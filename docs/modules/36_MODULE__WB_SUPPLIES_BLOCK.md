@@ -24,11 +24,13 @@ related_tables:
   - "sheet_vitrina_v1_wb_supplies_warehouses"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}"
 related_runners:
+  - "apps/wb_supply_overlay_smoke.py"
   - "apps/wb_supplies_api_adapter_smoke.py"
   - "apps/wb_supplies_backfill_live.py"
   - "apps/wb_supplies_backfill_smoke.py"
@@ -46,7 +48,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental latest-window refresh from resumable full history backfill, reconciles active statuses `1..4` on ordinary refresh, hard-deletes confirmed removed active supplies from the working cache, preserves accepted/historical rows when absent from latest windows, refreshes active detail/goods evidence, preserves enriched raw evidence across list-only sync, supports cache re-normalization/missing-critical enrichment, exposes normalized supply goods composition through the detail route/UI drawer, supports checkbox multi-status filters with persisted UI state, sorts by normalized supply date before pagination with empty-date rows at the bottom, formats non-current-year dates with the year, and returns actionable non-JSON diagnostics. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps WB warehouse names to the six repo-owned calculation districts through Marketplace offices primary evidence and tariffs/box fallback, exposes district presets in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -75,6 +77,10 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental lat
   - `GET /api/v1/supplies/{ID}/package` exists in adapter as optional evidence and is not fatal for MVP table;
   - `GET /api/v1/transit-tariffs` exists in adapter/diagnostics as read-only tariff evidence; the UI does not calculate transit cabinet cost from it without a proven formula;
   - `GET /api/v1/warehouses`.
+- Additional read-only district mapping evidence:
+  - Marketplace `GET /api/v3/offices` (`WB_MARKETPLACE_API_BASE_URL` override) is the primary source; match is by normalized warehouse/offices name and raw `federalDistrict`;
+  - tariffs `GET /api/v1/tariffs/box` (`WB_TARIFFS_API_BASE_URL` override) is fallback; match is by normalized `warehouseName` and raw `geoName`;
+  - Supplies `warehouse_id` is not treated as Marketplace office id.
 - `POST /api/v1/acceptance/options`, transit create/update methods and all WB mutations stay outside scope.
 - Adapter errors are sanitized:
   - missing `WB_API_TOKEN` returns controlled app-level error;
@@ -109,6 +115,7 @@ Returns cached rows only. It does not fetch upstream.
 Query params:
 - `search`;
 - `warehouse_id` or `warehouse`;
+- `district_keys` / `district_key` as comma-separated or repeated six-key calculation district filter;
 - `status_ids` as comma-separated list or repeated query params;
 - `status_id` as backward-compatible single status filter;
 - `size_filter = main_250 | all | small_lt_250`;
@@ -183,6 +190,33 @@ Response additions:
 - `raw_diagnostics` with sanitized raw key lists and hashes.
 
 If cached goods/detail evidence is absent, the detail route performs bounded lazy fetch for that one supply only, stores the result via row-only upsert, and returns cached data plus a controlled warning when upstream returns 429/non-JSON/transport errors. Missing `WB_API_TOKEN` during lazy fetch is a warning when cached data can still be rendered.
+
+`GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options`
+
+Returns cached WB supplies as read-only selector options for `Поставки -> Расчёты -> Учесть WB-поставки`. It does not fetch upstream, mutate WB, write Google Sheets, or write ready/web-vitrina metrics.
+
+Contract:
+- `eligible_status_ids = [2, 3, 4, 6]`;
+- statuses `1` (`Не запланировано`) and `5` (`Принято`) are disabled for calculation;
+- a future unknown-id status may be eligible only when it clearly means shipped and not accepted;
+- option is disabled when no operational supply date exists, goods composition is absent, or usable active SKU quantity is zero;
+- quantity source is only goods composition `nmId -> quantity`; accepted/ready/partial reception fields are not used for overlay quantity;
+- unknown active SKU, missing `nmId`, missing/non-positive quantity and non-active `nmId` goods rows are skipped with diagnostics;
+- response exposes status/date evidence, date source field, warehouse/district mapping evidence, usable SKU count/quantity, skipped goods and disabled reasons.
+
+# 4.1 Warehouse District Mapping
+
+The calculation districts are exactly the six keys from `wb_regional_supply`, not the ordinary eight Russian federal districts:
+- `central`;
+- `northwest`;
+- `volga`;
+- `ural`;
+- `south_caucasus`;
+- `far_siberia`.
+
+Raw district names collapse into these six keys: Central -> `central`, Northwestern -> `northwest`, Volga -> `volga`, Ural -> `ural`, Southern + North Caucasus -> `south_caucasus`, Siberian + Far Eastern -> `far_siberia`.
+
+Unmatched warehouse names remain `unmapped` and emit warnings. They remain visible in the WB supplies list, are not selected by district presets, and are not added to regional overlay quantities.
 
 # 5. Field Normalization
 
@@ -271,6 +305,7 @@ Columns:
 Filters:
 - search placeholder `Номер поставки`;
 - warehouse select placeholder `Все склады`;
+- federal district presets `ЦФО · СЗФО · ПФО · УрФО · Юг+СК · Сиб+ДВ`, one or many, filtering by mapped warehouse district while unmapped warehouses remain outside presets;
 - status checkbox popup with summary `Статусы: все` or `Статусы: N`;
 - status quick actions `Все`, `Активные` and `Сброс`; `Активные` selects all official statuses except `Не запланировано`;
 - size select label `Размер поставки`;
@@ -287,7 +322,7 @@ Known status labels:
 
 The status selector always exposes the official status set `1..6`, even before rows with every status are present in cache. `Виртуальная` is not shown unless upstream evidence adds a specific marker.
 
-Filter state is browser-owned and persisted for search, warehouse, selected statuses, size filter, page size and date sort. `Обновить поставки` must preserve those filters, reapply them after the new payload arrives, and ignore stale in-flight responses if the operator changes filters while a request is running.
+Filter state is browser-owned and persisted for search, warehouse, selected district presets, selected statuses, size filter, page size and date sort. `Обновить поставки` must preserve those filters, reapply them after the new payload arrives, and ignore stale in-flight responses if the operator changes filters while a request is running.
 
 First open behavior:
 - GET reads cache;
@@ -343,6 +378,7 @@ Transit cost limitation as of this module revision:
 - read-only Seller Portal network diagnostics are allowed, but current live storage state may be expired; no cookies/tokens/storage-state content may be logged.
 
 Targeted smokes:
+- `python3 apps/wb_supply_overlay_smoke.py`;
 - `python3 apps/wb_supplies_api_adapter_smoke.py`;
 - `python3 apps/wb_supplies_normalization_smoke.py`;
 - `python3 apps/wb_supplies_first20_parity_smoke.py`;

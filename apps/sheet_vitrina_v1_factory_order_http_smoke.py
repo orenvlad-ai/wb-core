@@ -327,6 +327,39 @@ def main() -> None:
             if calc_without_inbound_payload.get("target_window_days") != 36 or calc_without_inbound_payload.get("inbound_window_end") != "2026-05-24":
                 raise AssertionError("HTTP calc must expose the full inbound target window")
 
+            _seed_wb_supply_overlay_fixture(
+                runtime,
+                supply_id="wb-http-overlay",
+                nm_id=210183919,
+                quantity=20.0,
+                supply_date="2026-04-20",
+            )
+            overlay_status, overlay_payload = _post_json(
+                f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 14,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                    "selected_wb_supply_ids": ["wb-http-overlay"],
+                },
+            )
+            if overlay_status != 200:
+                raise AssertionError(f"factory selected WB supply calc must succeed over HTTP, got {overlay_status} {overlay_payload}")
+            overlay_sku = next(item for item in overlay_payload.get("rows", []) if item.get("nm_id") == 210183919)
+            if overlay_sku.get("stock_ff") != 10.0 or overlay_sku.get("inbound_ff_to_wb") != 20.0:
+                raise AssertionError(f"HTTP selected WB supply must move qty from FF to FF->WB, got {overlay_sku}")
+            if round(float(overlay_sku.get("coverage_qty", 0.0)), 2) != round(float(first_sku.get("coverage_qty", 0.0)), 2):
+                raise AssertionError("HTTP selected WB supply inside inbound window should keep ideal coverage unchanged")
+            overlay_diag = overlay_payload.get("wb_supply_overlay") or {}
+            if overlay_diag.get("factory_order", {}).get("added_inbound_ff_to_wb_qty_total") != 20.0:
+                raise AssertionError(f"HTTP factory result must expose WB overlay diagnostics, got {overlay_diag}")
+
             inbound_factory_zero_rows = read_first_sheet_rows(inbound_factory_bytes)
             inbound_factory_zero_rows = [
                 inbound_factory_zero_rows[0],
@@ -945,6 +978,42 @@ def _seed_onec_ff_stock_ready_snapshot(
         current_state=current_state,
         refreshed_at=ACTIVATED_AT,
         plan=plan,
+    )
+
+
+def _seed_wb_supply_overlay_fixture(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str,
+    nm_id: int,
+    quantity: float,
+    supply_date: str,
+) -> None:
+    runtime.save_wb_supply_rows(
+        rows=[
+            {
+                "supply_id": supply_id,
+                "cache_key": supply_id,
+                "wb_supply_id": supply_id,
+                "preorder_id": "pre-" + supply_id,
+                "number_label": supply_id,
+                "status_id": 2,
+                "status_label": "Запланировано",
+                "warehouse_id": "507",
+                "warehouse_name": "Коледино",
+                "warehouse_display": "Коледино",
+                "supply_date": supply_date,
+                "district_key": "central",
+                "district_label_ru": "Центральный федеральный округ",
+                "quantity_for_size_filter": quantity,
+                "raw_list": {"supplyID": supply_id, "statusID": 2, "supplyDate": supply_date},
+                "raw_detail": {"warehouseID": 507, "warehouseName": "Коледино"},
+                "raw_goods": [{"nmID": int(nm_id), "quantity": float(quantity)}],
+                "raw_package": [],
+            }
+        ],
+        warehouses=[{"warehouse_id": "507", "warehouse_name": "Коледино"}],
+        synced_at=ACTIVATED_AT,
     )
 
 

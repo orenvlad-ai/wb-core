@@ -30,6 +30,7 @@ class FactoryOrderSettings:
     sales_avg_period_days: int
     factory_inbound_source: str = FACTORY_INBOUND_SOURCE_MANUAL_EXCEL
     stock_ff_source: str = STOCK_FF_SOURCE_MANUAL_EXCEL
+    selected_wb_supply_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,7 @@ class FactoryOrderCalculationResult:
     effective_inbound_factory_to_ff: list[FactoryOrderEffectiveInboundRow]
     summary: FactoryOrderSummary
     rows: list[FactoryOrderRecommendationRow]
+    wb_supply_overlay: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
 
 
@@ -228,3 +230,4 @@ class FactoryOrderStatus:
     onec_stock_ff_summary: FactoryOrderStockFfOnecState
     supplier_registry_inbound_summary: FactoryOrderSupplierRegistryInboundState
     last_result: FactoryOrderCalculationResult | None
+    wb_supply_overlay_options: dict[str, Any] | None = None

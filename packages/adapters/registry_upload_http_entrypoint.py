@@ -149,6 +149,7 @@ DEFAULT_WB_SUPPLIES_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies"
 DEFAULT_WB_SUPPLIES_SYNC_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync"
 DEFAULT_WB_SUPPLIES_BACKFILL_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
 DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
+DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
@@ -1856,6 +1857,26 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"WB supplies sync status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH:
+                try:
+                    payload = entrypoint.handle_wb_supplies_overlay_options_request()
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB supplies overlay options failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3816,6 +3837,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
         "wb_supplies_backfill_path": DEFAULT_WB_SUPPLIES_BACKFILL_PATH,
         "wb_supplies_sync_status_path": DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH,
+        "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,

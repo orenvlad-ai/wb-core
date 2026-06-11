@@ -85,6 +85,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 related_runners:
   - "apps/seller_portal_relogin_session.py"
   - "apps/seller_portal_relogin_session_smoke.py"
@@ -101,6 +102,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_seller_portal_recovery_ui_smoke.py"
   - "apps/sheet_vitrina_v1_seller_portal_recovery_live_smoke.py"
   - "apps/factory_order_supply_smoke.py"
+  - "apps/wb_supply_overlay_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/wb_regional_supply_smoke.py"
   - "apps/sheet_vitrina_v1_wb_regional_supply_http_smoke.py"
@@ -284,12 +286,16 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - generated XLSX files must stay readable without repair prompt in standard XLSX readers/Excel
   - `Остатки ФФ` manual Excel source requires one row per active SKU and rejects duplicate `nmId`
   - the same shared `Остатки ФФ` source selector is reused by factory-order and regional blocks; manual uploaded dataset/state remains one entity, while `1С / Фулфилмент` reads existing materialized 1C `FF_STOCK` metric `onec_FF_STOCK_qty` and does not create a second `stock_ff` upload contract/entity
+  - the shared `Остатки ФФ` block also exposes calculation-only selector `Учесть WB-поставки` backed by `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options`; selected ids are sent explicitly as `selected_wb_supply_ids` in both factory-order and WB regional calculate requests, while backend always revalidates status/date/composition/active SKU/mapping from server runtime cache
+  - selected WB supplies are overlay evidence only: they do not replace manual Excel / 1C as the `stock_ff` source, do not become ЕБД metric truth, do not write ready/web-vitrina snapshots and do not mutate WB Supplies API
+  - common FF overlay formula is `effective_stock_ff = max(base_stock_ff - selected_wb_supply_qty, 0)` plus `over_reserved_qty = max(selected_wb_supply_qty - base_stock_ff, 0)`; over-reserved rows warn but do not fail the calculation
   - inbound templates allow duplicate `nmId`; one row = one separate planned delivery
   - inbound datasets are optional for calculation; when a file is absent or deleted, its coverage term is treated as `0`
   - each upload block exposes the current uploaded file as a downloadable link and a bounded delete action for the stored dataset
-  - factory-order coverage includes `stock_total`, selected `stock_ff` source (manual Excel or 1C FF_STOCK), inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`
+  - factory-order coverage includes `stock_total`, selected `stock_ff` source (manual Excel or 1C FF_STOCK), inbound from factory to FF inside horizon and the parity-critical uploaded inbound `ФФ -> Wildberries`; selected WB supplies subtract from free `stock_ff` and add the same quantity to automatic `inbound_ff_to_wb` rows when their selected operational date is inside the existing inbound window, otherwise they stay subtracted from free FF and are diagnosed as out-of-window
   - result surface gives both downloadable XLSX recommendation and the same `Общее количество` / `Расчётный вес` / `Расчётный объём` summary directly in UI
-  - regional block does not materialize inbound `ФФ -> Wildberries`; this input stays outside the current bounded scope
+  - regional block does not materialize an upload contract for `Товары в пути от ФФ на Wildberries`; selected WB supplies are the bounded calculation overlay for this flow: mapped supply events add quantity only to their destination calculation district, unmapped warehouse events do not add regional quantity and warn
+  - factory-order and WB regional results expose `wb_supply_overlay` diagnostics: selected supplies, selected date/evidence, warehouse/district mapping evidence, accounted/skipped SKU quantities and reasons, `base_stock_ff`, `selected_wb_supply_qty`, `effective_stock_ff`, `over_reserved_qty`, factory added `inbound_ff_to_wb` and regional added quantities by district
   - regional result surface gives server-driven summary and a compact district table immediately under the result totals: `Федеральный округ / Рекомендовано / к поставке / Дефицит / Скачать XLSX`. It shows only included districts from the latest methodology settings; excluded districts stay out of summary/download rows. Each included row links to the district XLSX route, so a duplicated lower `Excel/XLSX по округам` list is not rendered.
   - district XLSX files are keyed by the canonical federal district keys but use stable ASCII translit filenames (`wb_regional_central_fo.xlsx`, `wb_regional_northwest_fo.xlsx`, `wb_regional_volga_fo.xlsx`, `wb_regional_ural_fo.xlsx`, `wb_regional_south_caucasus_fo.xlsx`, `wb_regional_far_siberia_fo.xlsx`) and include Russian headers `nmId / SKU / Количество к поставке / Дефицит`; the `Дефицит` value comes from the already calculated backend row-level deficit, not from browser/UI recomputation
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` and button `Скачать все рекомендации` download one district XLSX per included district from the latest result. ZIP filename is `wb_regional_recommendations_<report_date>.zip`; ZIP member filenames use the same ASCII translit names and excluded districts are not included.

@@ -56,9 +56,13 @@ class RecordingOpener:
 def main() -> None:
     original_token = os.environ.get("WB_API_TOKEN")
     original_base = os.environ.get("WB_SUPPLIES_API_BASE_URL")
+    original_marketplace_base = os.environ.get("WB_MARKETPLACE_API_BASE_URL")
+    original_tariffs_base = os.environ.get("WB_TARIFFS_API_BASE_URL")
     try:
         os.environ["WB_API_TOKEN"] = TOKEN_VALUE
         os.environ["WB_SUPPLIES_API_BASE_URL"] = "https://supplies-api.example.test"
+        os.environ["WB_MARKETPLACE_API_BASE_URL"] = "https://marketplace-api.example.test"
+        os.environ["WB_TARIFFS_API_BASE_URL"] = "https://common-api.example.test"
 
         opener = RecordingOpener()
         opener.next_payload = json.dumps(
@@ -109,6 +113,26 @@ def main() -> None:
         transit_req, _ = opener.requests[-1]
         if transit_req.get_method() != "GET" or "/api/v1/transit-tariffs" not in transit_req.full_url:
             raise AssertionError(f"transit tariffs URL changed unexpectedly: {transit_req.full_url}")
+
+        opener.next_payload = json.dumps(
+            {"offices": [{"name": "Коледино", "federalDistrict": "Центральный федеральный округ"}]}
+        ).encode("utf-8")
+        offices = source.fetch_marketplace_offices()
+        if offices[0].get("federalDistrict") != "Центральный федеральный округ":
+            raise AssertionError(f"marketplace offices endpoint must parse rows, got {offices}")
+        offices_req, _ = opener.requests[-1]
+        if offices_req.get_method() != "GET" or offices_req.full_url != "https://marketplace-api.example.test/api/v3/offices":
+            raise AssertionError(f"marketplace offices URL changed unexpectedly: {offices_req.full_url}")
+
+        opener.next_payload = json.dumps(
+            {"response": {"data": {"warehouseList": [{"warehouseName": "Казань", "geoName": "Приволжский федеральный округ"}]}}}
+        ).encode("utf-8")
+        box_tariffs = source.fetch_box_tariffs(tariff_date="2026-06-11")
+        if box_tariffs[0].get("geoName") != "Приволжский федеральный округ":
+            raise AssertionError(f"box tariffs endpoint must parse warehouseList rows, got {box_tariffs}")
+        box_req, _ = opener.requests[-1]
+        if box_req.get_method() != "GET" or box_req.full_url != "https://common-api.example.test/api/v1/tariffs/box?date=2026-06-11":
+            raise AssertionError(f"box tariffs URL changed unexpectedly: {box_req.full_url}")
 
         opener.next_error = urllib_error.HTTPError(
             "https://supplies-api.example.test/api/v1/supplies",
@@ -166,6 +190,8 @@ def main() -> None:
     finally:
         _restore_env("WB_API_TOKEN", original_token)
         _restore_env("WB_SUPPLIES_API_BASE_URL", original_base)
+        _restore_env("WB_MARKETPLACE_API_BASE_URL", original_marketplace_base)
+        _restore_env("WB_TARIFFS_API_BASE_URL", original_tariffs_base)
 
     print("wb_supplies_api_adapter_smoke: OK")
 

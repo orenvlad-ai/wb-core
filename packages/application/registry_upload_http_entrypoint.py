@@ -1760,6 +1760,9 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_supplies_detail_request(self, supply_id: str) -> dict[str, Any]:
         return self.wb_supplies_block.get_supply(supply_id)
 
+    def handle_wb_supplies_overlay_options_request(self) -> dict[str, Any]:
+        return self.wb_supplies_block.build_overlay_options()
+
     def handle_nomenclature_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_nomenclature()
 

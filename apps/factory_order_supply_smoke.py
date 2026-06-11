@@ -236,6 +236,31 @@ def main() -> None:
                 raise AssertionError("1C source must treat explicit zero FF_STOCK as valid stock_ff=0")
             if onec_result.manual_stock_ff_dataset.status != "missing":
                 raise AssertionError("1C source must not require or write a manual stock_ff upload")
+            _seed_wb_supply_overlay_fixture(
+                onec_runtime,
+                active_nm_ids=onec_active_nm_ids,
+                supply_id="wb-overlay-onec",
+                supply_date="2026-04-20",
+                qty_by_nm={onec_active_nm_ids[0]: 12.0},
+            )
+            onec_overlay_result = onec_block.calculate(
+                {
+                    "prod_lead_time_days": 10,
+                    "lead_time_factory_to_ff_days": 5,
+                    "lead_time_ff_to_wb_days": 2,
+                    "safety_days_mp": 3,
+                    "safety_days_ff": 2,
+                    "cycle_order_days": 14,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "sales_avg_period_days": 3,
+                    "stock_ff_source": STOCK_FF_SOURCE_ONEC_FF_STOCK,
+                    "selected_wb_supply_ids": ["wb-overlay-onec"],
+                }
+            )
+            onec_overlay_row = {item.nm_id: item for item in onec_overlay_result.rows}[onec_active_nm_ids[0]]
+            if onec_overlay_row.stock_ff != 5.0 or onec_overlay_row.inbound_ff_to_wb != 12.0:
+                raise AssertionError("selected WB supply overlay must apply to 1C stock_ff source")
 
             partial_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(onec_tmp) / "partial-runtime")
             partial_runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
@@ -326,6 +351,93 @@ def main() -> None:
             order_batch_qty=50,
         ):
             raise AssertionError("recommended qty without inbound files must still round by box multiple after cycle extension")
+
+        _seed_wb_supply_overlay_fixture(
+            runtime,
+            active_nm_ids=active_nm_ids,
+            supply_id="wb-overlay-inside",
+            supply_date="2026-04-20",
+            qty_by_nm={210183919: 20.0},
+        )
+        overlay_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "selected_wb_supply_ids": ["wb-overlay-inside"],
+            }
+        )
+        overlay_sku = {item.nm_id: item for item in overlay_result.rows}[210183919]
+        overlay_payload = overlay_result.wb_supply_overlay or {}
+        if overlay_sku.stock_ff != 10.0 or overlay_sku.inbound_ff_to_wb != 20.0:
+            raise AssertionError(f"selected WB supply must move qty from free FF to FF->WB, got {overlay_sku}")
+        if round(overlay_sku.coverage_qty, 2) != round(sku_one.coverage_qty, 2):
+            raise AssertionError("in-window selected WB supply should keep ideal coverage unchanged")
+        if overlay_payload.get("stock_ff", {}).get("by_nm_id", {}).get("210183919", {}).get("base_stock_ff") != 30.0:
+            raise AssertionError(f"overlay diagnostics must expose base/effective FF, got {overlay_payload}")
+        if overlay_payload.get("factory_order", {}).get("added_inbound_ff_to_wb_qty_total") != 20.0:
+            raise AssertionError(f"factory overlay diagnostics must expose added inbound qty, got {overlay_payload}")
+
+        _seed_wb_supply_overlay_fixture(
+            runtime,
+            active_nm_ids=active_nm_ids,
+            supply_id="wb-overlay-outside",
+            supply_date="2026-06-30",
+            qty_by_nm={210183919: 5.0},
+        )
+        outside_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "selected_wb_supply_ids": ["wb-overlay-inside", "wb-overlay-outside"],
+            }
+        )
+        outside_payload = outside_result.wb_supply_overlay or {}
+        outside_events = outside_payload.get("factory_order", {}).get("outside_inbound_window_events") or []
+        if outside_payload.get("factory_order", {}).get("added_inbound_ff_to_wb_qty_total") != 20.0 or len(outside_events) != 1:
+            raise AssertionError(f"out-of-window WB supplies must not enter current coverage and must be diagnosed, got {outside_payload}")
+        if not any("inbound window" in warning for warning in outside_result.warnings):
+            raise AssertionError(f"out-of-window WB supply must emit warning, got {outside_result.warnings}")
+
+        _seed_wb_supply_overlay_fixture(
+            runtime,
+            active_nm_ids=active_nm_ids,
+            supply_id="wb-overlay-over",
+            supply_date="2026-04-20",
+            qty_by_nm={210184534: 15.0},
+        )
+        over_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "selected_wb_supply_ids": ["wb-overlay-over"],
+            }
+        )
+        over_sku = {item.nm_id: item for item in over_result.rows}[210184534]
+        if over_sku.stock_ff != 0.0 or over_sku.inbound_ff_to_wb != 15.0:
+            raise AssertionError(f"over-reserved selected WB supply must floor FF and still add inbound, got {over_sku}")
+        if not any("превышают текущий остаток ФФ" in warning for warning in over_result.warnings):
+            raise AssertionError(f"over-reserved WB supply must warn, got {over_result.warnings}")
 
         # Scenario 2: zero-only inbound files are accepted as an empty dataset.
         inbound_factory_zero_upload = block.upload_dataset(
@@ -814,6 +926,49 @@ def main() -> None:
         print(f"scenario_cycle_order_days: ok -> {cycle_short_result.summary.total_qty} -> {cycle_long_result.summary.total_qty}")
         print("scenario_insufficient_history: ok -> clamped covered lookup with row-level demand warning")
         print("scenario_recent_authoritative_fill: ok -> fetched missing recent date 2026-04-17")
+
+
+def _seed_wb_supply_overlay_fixture(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    active_nm_ids: list[int],
+    supply_id: str,
+    supply_date: str,
+    qty_by_nm: dict[int, float],
+) -> None:
+    active_set = {int(item) for item in active_nm_ids}
+    raw_goods = [
+        {"nmID": int(nm_id), "quantity": float(qty)}
+        for nm_id, qty in sorted(qty_by_nm.items())
+        if int(nm_id) in active_set and float(qty) > 0
+    ]
+    runtime.save_wb_supply_rows(
+        rows=[
+            {
+                "supply_id": supply_id,
+                "cache_key": supply_id,
+                "wb_supply_id": supply_id,
+                "preorder_id": "pre-" + supply_id,
+                "number_label": supply_id,
+                "status_id": 2,
+                "status_label": "Запланировано",
+                "warehouse_id": "507",
+                "warehouse_name": "Коледино",
+                "warehouse_display": "Коледино",
+                "supply_date": supply_date,
+                "district_key": "central",
+                "district_label_ru": "Центральный федеральный округ",
+                "quantity_for_size_filter": sum(float(item["quantity"]) for item in raw_goods),
+                "raw_list": {"supplyID": supply_id, "statusID": 2, "supplyDate": supply_date},
+                "raw_detail": {"warehouseID": 507, "warehouseName": "Коледино"},
+                "raw_goods": raw_goods,
+                "raw_package": [],
+            }
+        ],
+        warehouses=[{"warehouse_id": "507", "warehouse_name": "Коледино"}],
+        synced_at=ACTIVATED_AT,
+    )
+
 
 def _seed_runtime_sales_history(
     runtime: RegistryUploadDbBackedRuntime,

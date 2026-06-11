@@ -233,6 +233,44 @@ def main() -> None:
             if abs(float(central_main_row.get("daily_demand_total", 0.0)) - 60.0) > 1e-9:
                 raise AssertionError("main SKU total daily demand must remain based on orderCount")
 
+            _seed_wb_regional_overlay_fixture(
+                runtime,
+                supply_id="wb-http-regional-central",
+                nm_id=MAIN_NM_ID,
+                quantity=50.0,
+                supply_date="2026-04-20",
+                warehouse_name="Коледино",
+                district_key=DISTRICT_CENTRAL,
+            )
+            overlay_status, overlay_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days": 2,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "selected_wb_supply_ids": ["wb-http-regional-central"],
+                },
+            )
+            if overlay_status != 200:
+                raise AssertionError(f"regional selected WB supply HTTP calc must succeed, got {overlay_status} {overlay_payload}")
+            overlay_diag = overlay_payload.get("wb_supply_overlay") or {}
+            overlay_stock = overlay_diag.get("stock_ff", {})
+            overlay_regional = overlay_diag.get("wb_regional", {})
+            if overlay_stock.get("by_nm_id", {}).get(str(MAIN_NM_ID), {}).get("effective_stock_ff") != 70.0:
+                raise AssertionError(f"regional HTTP overlay must reduce FF pool, got {overlay_stock}")
+            added_by_district = overlay_regional.get("added_qty_by_district", {})
+            if added_by_district.get(DISTRICT_CENTRAL) != 50.0:
+                raise AssertionError(f"regional HTTP overlay must add qty to mapped district only, got {overlay_regional}")
+            if any(float(qty or 0) for key, qty in added_by_district.items() if key != DISTRICT_CENTRAL):
+                raise AssertionError(f"regional HTTP overlay must not spread selected qty to other districts, got {added_by_district}")
+            overlay_districts = {item["district_key"]: item for item in overlay_payload.get("districts", [])}
+            overlay_central_row = next(row for row in overlay_districts[DISTRICT_CENTRAL]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
+            if overlay_central_row.get("demand_diagnostics", {}).get("selected_wb_supply_qty") != 50.0:
+                raise AssertionError("regional HTTP row diagnostics must expose selected WB supply qty")
+
             selected_status, selected_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
                 {
@@ -499,6 +537,44 @@ def _seed_runtime_stock_history(
                 )
             ),
         )
+
+
+def _seed_wb_regional_overlay_fixture(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str,
+    nm_id: int,
+    quantity: float,
+    supply_date: str,
+    warehouse_name: str,
+    district_key: str,
+) -> None:
+    runtime.save_wb_supply_rows(
+        rows=[
+            {
+                "supply_id": supply_id,
+                "cache_key": supply_id,
+                "wb_supply_id": supply_id,
+                "preorder_id": "pre-" + supply_id,
+                "number_label": supply_id,
+                "status_id": 2,
+                "status_label": "Запланировано",
+                "warehouse_id": supply_id,
+                "warehouse_name": warehouse_name,
+                "warehouse_display": warehouse_name,
+                "supply_date": supply_date,
+                "district_key": district_key,
+                "district_label_ru": "",
+                "quantity_for_size_filter": quantity,
+                "raw_list": {"supplyID": supply_id, "statusID": 2, "supplyDate": supply_date},
+                "raw_detail": {"warehouseName": warehouse_name},
+                "raw_goods": [{"nmID": int(nm_id), "quantity": float(quantity)}],
+                "raw_package": [],
+            }
+        ],
+        warehouses=[{"warehouse_id": supply_id, "warehouse_name": warehouse_name}],
+        synced_at=ACTIVATED_AT,
+    )
 
 
 def _reserve_free_port() -> int:

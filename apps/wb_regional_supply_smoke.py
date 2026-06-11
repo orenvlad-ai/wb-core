@@ -180,6 +180,73 @@ def main() -> None:
         if abs(central_main_row.daily_demand_total - 60.0) > 1e-9:
             raise AssertionError("total demand must remain based on orderCount, not absolute depletion")
 
+        _seed_wb_regional_overlay_fixture(
+            runtime,
+            supply_id="wb-regional-central",
+            nm_id=MAIN_NM_ID,
+            quantity=50.0,
+            supply_date="2026-04-20",
+            warehouse_name="Коледино",
+            district_key=DISTRICT_CENTRAL,
+        )
+        regional_overlay_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "selected_wb_supply_ids": ["wb-regional-central"],
+            }
+        )
+        overlay_diagnostics = regional_overlay_result.wb_supply_overlay or {}
+        overlay_stock = overlay_diagnostics.get("stock_ff", {})
+        overlay_regional = overlay_diagnostics.get("wb_regional", {})
+        if overlay_stock.get("by_nm_id", {}).get(str(MAIN_NM_ID), {}).get("effective_stock_ff") != 70.0:
+            raise AssertionError(f"regional selected supply must reduce available FF pool, got {overlay_stock}")
+        added_by_district = overlay_regional.get("added_qty_by_district", {})
+        if added_by_district.get(DISTRICT_CENTRAL) != 50.0:
+            raise AssertionError(f"regional selected supply must add qty to mapped district, got {overlay_regional}")
+        if any(float(qty or 0) for key, qty in added_by_district.items() if key != DISTRICT_CENTRAL):
+            raise AssertionError(f"selected central supply must not be spread to other districts, got {added_by_district}")
+        overlay_districts = {item.district_key: item for item in regional_overlay_result.districts}
+        overlay_central_row = next(row for row in overlay_districts[DISTRICT_CENTRAL].rows if row.nm_id == MAIN_NM_ID)
+        overlay_northwest_row = next(row for row in overlay_districts[DISTRICT_NORTHWEST].rows if row.nm_id == MAIN_NM_ID)
+        if overlay_central_row.demand_diagnostics.get("selected_wb_supply_qty") != 50.0:
+            raise AssertionError("central row diagnostics must expose selected WB qty")
+        if overlay_northwest_row.demand_diagnostics.get("selected_wb_supply_qty") != 0.0:
+            raise AssertionError("other districts must not receive selected central WB qty")
+        if overlay_central_row.projected_stock_on_eta <= central_main_row.projected_stock_on_eta:
+            raise AssertionError("selected WB supply must improve projected stock only in the mapped district")
+
+        _seed_wb_regional_overlay_fixture(
+            runtime,
+            supply_id="wb-regional-unmapped",
+            nm_id=MAIN_NM_ID,
+            quantity=10.0,
+            supply_date="2026-04-20",
+            warehouse_name="Склад без ФО",
+            district_key="unmapped",
+        )
+        unmapped_overlay_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "selected_wb_supply_ids": ["wb-regional-unmapped"],
+            }
+        )
+        unmapped_overlay = unmapped_overlay_result.wb_supply_overlay or {}
+        unmapped_regional = unmapped_overlay.get("wb_regional", {})
+        if unmapped_regional.get("added_qty_total") != 0.0 or not unmapped_regional.get("unmapped_events"):
+            raise AssertionError(f"unmapped warehouse must not add regional qty and must be diagnosed, got {unmapped_regional}")
+        if not any("склад не сопоставлен" in warning for warning in unmapped_overlay_result.warnings):
+            raise AssertionError(f"unmapped warehouse must emit regional warning, got {unmapped_overlay_result.warnings}")
+
         selected_result = regional_block.calculate(
             {
                 "sales_avg_period_days": 14,
@@ -317,6 +384,44 @@ def main() -> None:
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
         print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
         print(f"recommendations_zip: ok -> {archive_names}")
+
+
+def _seed_wb_regional_overlay_fixture(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str,
+    nm_id: int,
+    quantity: float,
+    supply_date: str,
+    warehouse_name: str,
+    district_key: str,
+) -> None:
+    runtime.save_wb_supply_rows(
+        rows=[
+            {
+                "supply_id": supply_id,
+                "cache_key": supply_id,
+                "wb_supply_id": supply_id,
+                "preorder_id": "pre-" + supply_id,
+                "number_label": supply_id,
+                "status_id": 2,
+                "status_label": "Запланировано",
+                "warehouse_id": supply_id,
+                "warehouse_name": warehouse_name,
+                "warehouse_display": warehouse_name,
+                "supply_date": supply_date,
+                "district_key": district_key,
+                "district_label_ru": "",
+                "quantity_for_size_filter": quantity,
+                "raw_list": {"supplyID": supply_id, "statusID": 2, "supplyDate": supply_date},
+                "raw_detail": {"warehouseName": warehouse_name},
+                "raw_goods": [{"nmID": int(nm_id), "quantity": float(quantity)}],
+                "raw_package": [],
+            }
+        ],
+        warehouses=[{"warehouse_id": supply_id, "warehouse_name": warehouse_name}],
+        synced_at=ACTIVATED_AT,
+    )
 
 
 def _is_ascii(value: str) -> bool:

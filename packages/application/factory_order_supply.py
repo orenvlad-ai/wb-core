@@ -28,6 +28,13 @@ from packages.application.stock_ff_onec_source import (
     build_onec_stock_ff_state,
     resolve_onec_stock_ff_rows,
 )
+from packages.application.wb_supply_overlay import (
+    apply_stock_ff_overlay,
+    build_selected_wb_supply_overlay,
+    factory_inbound_overlay_rows,
+    overlay_to_public_payload,
+    parse_selected_wb_supply_ids,
+)
 from packages.business_time import current_business_date_iso
 from packages.contracts.factory_order_supply import (
     DATASET_INBOUND_FACTORY_TO_FF,
@@ -409,7 +416,31 @@ class FactoryOrderSupplyBlock:
             clamp_to_coverage=True,
         )
 
-        stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in stock_ff_rows}
+        selected_wb_supply_ids = settings.selected_wb_supply_ids
+        wb_supply_overlay = build_selected_wb_supply_overlay(
+            runtime=self.runtime,
+            selected_supply_ids=selected_wb_supply_ids,
+            active_skus=active_skus,
+        )
+        (
+            effective_stock_ff_rows,
+            wb_stock_ff_diagnostics,
+            wb_stock_ff_warnings,
+        ) = apply_stock_ff_overlay(
+            stock_ff_rows=stock_ff_rows,
+            active_skus=active_skus,
+            overlay=wb_supply_overlay,
+        )
+        (
+            wb_inbound_ff_to_wb_rows,
+            wb_factory_overlay_diagnostics,
+            wb_factory_overlay_warnings,
+        ) = factory_inbound_overlay_rows(
+            overlay=wb_supply_overlay,
+            report_date=report_date_obj,
+            inbound_window_end=inbound_window_end,
+        )
+        stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in effective_stock_ff_rows}
         effective_inbound_factory_rows = _effective_inbound_rows_within_window(
             inbound_factory_rows,
             report_date_obj,
@@ -420,7 +451,7 @@ class FactoryOrderSupplyBlock:
         inbound_factory_by_nm = _sum_effective_inbound_rows(effective_inbound_factory_rows)
         inbound_ff_to_wb_by_nm = _sum_effective_inbound_rows(
             _effective_inbound_rows_within_window(
-                inbound_ff_to_wb_rows,
+                [*inbound_ff_to_wb_rows, *wb_inbound_ff_to_wb_rows],
                 report_date_obj,
                 inbound_window_end,
                 source=DATASET_INBOUND_FF_TO_WB,
@@ -434,6 +465,13 @@ class FactoryOrderSupplyBlock:
             result_warnings = result_warnings + (
                 "Источник supplier registry выбран, но usable matched supplier rows внутри расчётного окна = 0.",
             )
+        result_warnings = result_warnings + tuple(wb_stock_ff_warnings) + tuple(wb_factory_overlay_warnings)
+        wb_supply_overlay_payload = overlay_to_public_payload(
+            overlay=wb_supply_overlay,
+            stock_ff_diagnostics=wb_stock_ff_diagnostics,
+            factory_order_diagnostics=wb_factory_overlay_diagnostics,
+            extra_warnings=tuple(wb_stock_ff_warnings) + tuple(wb_factory_overlay_warnings),
+        )
 
         result_rows: list[FactoryOrderRecommendationRow] = []
         for nm_id, sku_comment in active_skus:
@@ -516,6 +554,7 @@ class FactoryOrderSupplyBlock:
             effective_inbound_factory_to_ff=effective_inbound_factory_rows,
             summary=summary,
             rows=result_rows,
+            wb_supply_overlay=wb_supply_overlay_payload,
             warnings=result_warnings,
         )
         self.runtime.save_factory_order_result_state(
@@ -818,6 +857,7 @@ class FactoryOrderSupplyBlock:
                     settings_payload.get("factory_inbound_source", payload.get("factory_inbound_source"))
                 ),
                 stock_ff_source=stock_ff_source,
+                selected_wb_supply_ids=_parse_selected_wb_supply_ids_from_settings(settings_payload),
             ),
             factory_inbound_source=_normalize_factory_inbound_source(payload.get("factory_inbound_source")),
             stock_ff_source=stock_ff_source,
@@ -864,6 +904,11 @@ class FactoryOrderSupplyBlock:
                 for item in rows_payload
                 if isinstance(item, Mapping)
             ],
+            wb_supply_overlay=(
+                dict(payload.get("wb_supply_overlay"))
+                if isinstance(payload.get("wb_supply_overlay"), Mapping)
+                else None
+            ),
             warnings=tuple(str(item) for item in payload.get("warnings", []) if str(item or "").strip()),
         )
 
@@ -1008,6 +1053,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> FactoryOrderSettings:
         sales_avg_period_days=_parse_sales_avg_period_days(payload.get("sales_avg_period_days")),
         factory_inbound_source=_parse_factory_inbound_source(payload.get("factory_inbound_source")),
         stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
+        selected_wb_supply_ids=parse_selected_wb_supply_ids(payload),
     )
 
 
@@ -1041,6 +1087,12 @@ def _normalize_stock_ff_source(value: Any) -> str:
         return _parse_stock_ff_source(value)
     except ValueError:
         return STOCK_FF_SOURCE_MANUAL_EXCEL
+
+
+def _parse_selected_wb_supply_ids_from_settings(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    if not isinstance(payload, Mapping):
+        return ()
+    return parse_selected_wb_supply_ids(payload)
 
 
 def _parse_cycle_order_days(value: Any) -> int:
