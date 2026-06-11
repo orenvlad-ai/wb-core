@@ -244,10 +244,17 @@ class WbSuppliesBlock:
         }
 
     def build_overlay_options(self) -> dict[str, Any]:
+        records = self.runtime.list_wb_supplies_cache_records()
+        eligible_rows = []
+        for record in records:
+            normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
+            status_id = _optional_int(normalized.get("status_id"))
+            if status_id in {2, 3, 4, 6}:
+                eligible_rows.append(dict(normalized))
         return build_wb_supply_overlay_options(
             runtime=self.runtime,
             active_skus=self._load_active_skus(),
-            warehouse_district_mapping=self.current_warehouse_district_mapping(),
+            warehouse_district_mapping=self.current_warehouse_district_mapping(rows=eligible_rows),
         )
 
     def current_warehouse_district_mapping(
@@ -1617,6 +1624,10 @@ def _normalize_supply_row(
         "is_box_on_pallet": _optional_bool(_first_non_empty_from_sources(sources, "isBoxOnPallet", "is_box_on_pallet")[0]),
         "warehouse_id": warehouse_id,
         "warehouse_name": warehouse_name,
+        "planned_warehouse_id": warehouse_id,
+        "planned_warehouse_name": warehouse_name,
+        "target_warehouse_id": warehouse_id,
+        "target_warehouse_name": warehouse_name,
         "actual_warehouse_id": actual_warehouse_id,
         "actual_warehouse_name": actual_warehouse_name,
         "transit_warehouse_id": transit_warehouse_id,
@@ -1625,6 +1636,10 @@ def _normalize_supply_row(
         "warehouse_to_name": warehouse_to_name,
         "warehouse_actual_name": actual_warehouse_name,
         "warehouse_display": warehouse_display,
+        "district_source_warehouse_id": warehouse_id,
+        "district_source_warehouse_name": warehouse_name,
+        "district_source_warehouse_role": "planned",
+        "district_source_warehouse_evidence": warehouse_name_evidence,
         "warehouse_fact_line": _warehouse_fact_line(
             is_transit=is_transit,
             warehouse_name=warehouse_name,
@@ -1952,8 +1967,15 @@ def _warehouse_options(rows: list[Mapping[str, Any]], warehouse_rows: list[Mappi
             name = str(row.get(name_key) or "").strip()
             if warehouse_id or name:
                 option = options.setdefault(warehouse_id or name, {"value": warehouse_id, "label": name or warehouse_id})
+                source_name = str(row.get("district_source_warehouse_name") or row.get("warehouse_name") or "").strip()
+                source_id = str(row.get("district_source_warehouse_id") or row.get("warehouse_id") or "").strip()
+                is_district_source_option = (
+                    id_key == "warehouse_id"
+                    or (warehouse_id and source_id and warehouse_id == source_id)
+                    or (name and source_name and name == source_name)
+                )
                 district_key = str(row.get("district_key") or "").strip()
-                if district_key and district_key != "unmapped":
+                if is_district_source_option and district_key and district_key != "unmapped":
                     option.setdefault("district_key", district_key)
                     option.setdefault("district_label_ru", str(row.get("district_label_ru") or ""))
     return sorted(options.values(), key=lambda item: str(item.get("label") or "").casefold())

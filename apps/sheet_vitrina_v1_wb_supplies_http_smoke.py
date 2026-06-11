@@ -426,13 +426,29 @@ def main() -> None:
                 "39265540",
                 "1001",
                 "1002",
+                "1003",
             }:
                 raise AssertionError(f"central district preset filter must work with size_filter=all, got {central_payload}")
+            central_1003 = next(row for row in central_payload.get("rows", []) if row.get("wb_supply_id") == "1003")
+            if (
+                central_1003.get("warehouse_display") != "Коледино → Казань"
+                or central_1003.get("district_source_warehouse_name") != "Коледино"
+                or central_1003.get("district_warehouse_name") != "Коледино"
+                or central_1003.get("district_key") != "central"
+            ):
+                raise AssertionError(f"transit route must map by planned warehouse, got {central_1003}")
+            northwest_status, northwest_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?district_keys=northwest&size_filter=all"
+            )
+            if northwest_status != 200 or {row["wb_supply_id"] for row in northwest_payload.get("rows", [])} != {
+                "39265492",
+            }:
+                raise AssertionError(f"northwest district preset must use planned Shushary, not transit Obukhovo, got {northwest_payload}")
             volga_status, volga_payload = _get_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?district_keys=volga&size_filter=all"
             )
-            if volga_status != 200 or {row["wb_supply_id"] for row in volga_payload.get("rows", [])} != {"1003", "1004", "1005"}:
-                raise AssertionError(f"volga district preset filter must use tariffs fallback mapping, got {volga_payload}")
+            if volga_status != 200 or {row["wb_supply_id"] for row in volga_payload.get("rows", [])} != {"1004", "1005"}:
+                raise AssertionError(f"volga district preset filter must not use transit Казань for Коледино rows, got {volga_payload}")
 
             overlay_status, overlay_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH}")
             if overlay_status != 200 or overlay_payload.get("eligible_status_ids") != [2, 3, 4, 6]:
@@ -442,6 +458,8 @@ def main() -> None:
             overlay_options = {item.get("supply_id"): item for item in overlay_payload.get("options", [])}
             if not overlay_options.get("1002", {}).get("eligible_for_overlay"):
                 raise AssertionError(f"planned supply with date/composition/active SKU must be selectable, got {overlay_options.get('1002')}")
+            if overlay_options.get("1003", {}).get("district_key") != "central":
+                raise AssertionError(f"transit overlay option must use planned warehouse district, got {overlay_options.get('1003')}")
             if "1001" in overlay_options or "1005" in overlay_options:
                 raise AssertionError(f"status 1/5 supplies must not be returned to overlay selector, got {overlay_options.keys()}")
             if overlay_payload.get("summary", {}).get("excluded_by_status") != 4:

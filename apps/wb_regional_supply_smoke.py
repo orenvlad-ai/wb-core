@@ -30,6 +30,7 @@ from packages.contracts.wb_regional_supply import (
     DISTRICT_CENTRAL,
     DISTRICT_FAR_SIBERIA,
     DISTRICT_NORTHWEST,
+    DISTRICT_SOUTH_CAUCASUS,
 )
 
 INPUT_BUNDLE_FIXTURE = (
@@ -256,6 +257,48 @@ def main() -> None:
 
         _seed_wb_regional_overlay_fixture(
             runtime,
+            supply_id="wb-regional-krasnodar-transit",
+            nm_id=MAIN_NM_ID,
+            quantity=30.0,
+            supply_date="2026-04-20",
+            warehouse_name="Краснодар (Тихорецкая)",
+            district_key=DISTRICT_CENTRAL,
+            actual_warehouse_name="Обухово",
+            transit_warehouse_name="Обухово",
+        )
+        regional_block.wb_supply_district_mapping_provider = lambda: build_warehouse_district_mapping(
+            warehouse_rows=runtime.list_wb_supplies_warehouses(),
+            supply_rows=runtime.list_wb_supplies(),
+            tariff_rows=[{"warehouseName": "Обухово", "geoName": "Центральный федеральный округ"}],
+        )
+        routed_overlay_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "selected_wb_supply_ids": ["wb-regional-krasnodar-transit"],
+            }
+        )
+        routed_overlay = routed_overlay_result.wb_supply_overlay or {}
+        routed_regional = routed_overlay.get("wb_regional", {})
+        routed_added_by_district = routed_regional.get("added_qty_by_district", {})
+        if routed_added_by_district.get(DISTRICT_SOUTH_CAUCASUS) != 30.0:
+            raise AssertionError(f"planned Краснодар warehouse must add qty to south_caucasus, got {routed_regional}")
+        if routed_added_by_district.get(DISTRICT_CENTRAL) != 0.0:
+            raise AssertionError(f"actual/transit Обухово must not leak qty into central, got {routed_regional}")
+        routed_selected = (routed_overlay.get("selected_supplies") or [{}])[0]
+        if (
+            routed_selected.get("district_source_warehouse_name") != "Краснодар (Тихорецкая)"
+            or routed_selected.get("warehouse_display") != "Краснодар (Тихорецкая) → Обухово"
+            or routed_selected.get("district_key") != DISTRICT_SOUTH_CAUCASUS
+        ):
+            raise AssertionError(f"regional overlay diagnostics must expose planned district source, got {routed_selected}")
+
+        _seed_wb_regional_overlay_fixture(
+            runtime,
             supply_id="wb-regional-unmapped",
             nm_id=MAIN_NM_ID,
             quantity=10.0,
@@ -429,7 +472,14 @@ def _seed_wb_regional_overlay_fixture(
     supply_date: str,
     warehouse_name: str,
     district_key: str,
+    actual_warehouse_name: str = "",
+    transit_warehouse_name: str = "",
 ) -> None:
+    warehouse_display = (
+        f"{warehouse_name} → {transit_warehouse_name}"
+        if transit_warehouse_name and transit_warehouse_name != warehouse_name
+        else warehouse_name
+    )
     runtime.save_wb_supply_rows(
         rows=[
             {
@@ -442,13 +492,32 @@ def _seed_wb_regional_overlay_fixture(
                 "status_label": "Запланировано",
                 "warehouse_id": supply_id,
                 "warehouse_name": warehouse_name,
-                "warehouse_display": warehouse_name,
+                "planned_warehouse_id": supply_id,
+                "planned_warehouse_name": warehouse_name,
+                "target_warehouse_id": supply_id,
+                "target_warehouse_name": warehouse_name,
+                "actual_warehouse_id": ("actual-" + supply_id) if actual_warehouse_name else "",
+                "actual_warehouse_name": actual_warehouse_name,
+                "transit_warehouse_id": ("transit-" + supply_id) if transit_warehouse_name else "",
+                "transit_warehouse_name": transit_warehouse_name,
+                "warehouse_from_name": warehouse_name,
+                "warehouse_to_name": transit_warehouse_name,
+                "warehouse_actual_name": actual_warehouse_name,
+                "warehouse_display": warehouse_display,
+                "district_source_warehouse_id": supply_id,
+                "district_source_warehouse_name": warehouse_name,
+                "district_source_warehouse_role": "planned",
+                "district_source_warehouse_evidence": "fixture.warehouse_name",
                 "supply_date": supply_date,
                 "district_key": district_key,
                 "district_label_ru": "",
                 "quantity_for_size_filter": quantity,
                 "raw_list": {"supplyID": supply_id, "statusID": 2, "supplyDate": supply_date},
-                "raw_detail": {"warehouseName": warehouse_name},
+                "raw_detail": {
+                    "warehouseName": warehouse_name,
+                    "actualWarehouseName": actual_warehouse_name,
+                    "transitWarehouseName": transit_warehouse_name,
+                },
                 "raw_goods": [{"nmID": int(nm_id), "quantity": float(quantity)}],
                 "raw_package": [],
             }
