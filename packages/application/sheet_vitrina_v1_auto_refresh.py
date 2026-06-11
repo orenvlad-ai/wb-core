@@ -87,11 +87,7 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
         now = _iso_now(self.now_factory)
         with self._lock:
             current = self._read_unlocked()
-            existing_by_id = {
-                str(item.get("id") or ""): item
-                for item in current.get("schedules", [])
-                if isinstance(item, Mapping) and str(item.get("id") or "")
-            }
+            existing_by_id = _schedule_lifecycle_lookup(current.get("schedules", []))
             if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
                 normalized = _materialize_interval_schedules(
                     schedule_policy,
@@ -255,11 +251,7 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
             if isinstance(item, Mapping)
         ]
         if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
-            existing_by_id = {
-                str(item.get("id") or ""): item
-                for item in normalized_schedules
-                if isinstance(item, Mapping) and str(item.get("id") or "")
-            }
+            existing_by_id = _schedule_lifecycle_lookup(normalized_schedules)
             normalized_schedules = _materialize_interval_schedules(
                 schedule_policy,
                 existing_by_id=existing_by_id,
@@ -283,11 +275,7 @@ class SheetVitrinaV1AutoRefreshSchedulesBlock:
             if isinstance(item, Mapping)
         ]
         if schedule_policy["mode"] == SCHEDULE_POLICY_MODE_INTERVAL:
-            existing_by_id = {
-                str(item.get("id") or ""): item
-                for item in raw_schedules
-                if str(item.get("id") or "")
-            }
+            existing_by_id = _schedule_lifecycle_lookup(raw_schedules)
             schedules = _materialize_interval_schedules(
                 schedule_policy,
                 existing_by_id=existing_by_id,
@@ -416,7 +404,12 @@ def _materialize_interval_schedules(
     schedules: list[dict[str, Any]] = []
     for index, local_time in enumerate(slots, start=1):
         schedule_id = _interval_schedule_id(interval_hours, local_time)
-        existing = dict(existing_by_id.get(schedule_id) or {})
+        existing = dict(
+            existing_by_id.get(schedule_id)
+            or existing_by_id.get(_interval_schedule_identity_key(interval_hours, local_time, DEFAULT_TIMEZONE))
+            or existing_by_id.get(_interval_schedule_slot_key(local_time, DEFAULT_TIMEZONE))
+            or {}
+        )
         schedules.append(
             _normalize_schedule(
                 {
@@ -443,6 +436,38 @@ def _materialize_interval_schedules(
 
 def _interval_schedule_id(interval_hours: int, local_time_hhmm: str) -> str:
     return f"interval_{interval_hours}h_{str(local_time_hhmm).replace(':', '_')}_ekt"
+
+
+def _schedule_lifecycle_lookup(raw_schedules: Any) -> dict[str, Mapping[str, Any]]:
+    lookup: dict[str, Mapping[str, Any]] = {}
+    if not isinstance(raw_schedules, list):
+        return lookup
+    for raw in raw_schedules:
+        if not isinstance(raw, Mapping):
+            continue
+        schedule_id = str(raw.get("id") or "").strip()
+        if schedule_id:
+            lookup.setdefault(schedule_id, raw)
+        local_time = str(raw.get("local_time_hhmm") or raw.get("time") or "").strip()
+        timezone_name = str(raw.get("timezone") or DEFAULT_TIMEZONE).strip() or DEFAULT_TIMEZONE
+        if not _is_hhmm(local_time):
+            continue
+        interval_hours = _safe_int(raw.get("interval_hours"))
+        if interval_hours in ALLOWED_INTERVAL_HOURS:
+            lookup.setdefault(_interval_schedule_identity_key(interval_hours, local_time, timezone_name), raw)
+        schedule_type = str(raw.get("schedule_type") or "").strip().lower()
+        trigger_kind = str(raw.get("trigger_kind") or "").strip().lower()
+        if schedule_type == SCHEDULE_POLICY_MODE_INTERVAL or "interval" in trigger_kind or schedule_id.startswith("interval_"):
+            lookup.setdefault(_interval_schedule_slot_key(local_time, timezone_name), raw)
+    return lookup
+
+
+def _interval_schedule_identity_key(interval_hours: int, local_time_hhmm: str, timezone_name: str) -> str:
+    return f"interval:{int(interval_hours)}:{timezone_name}:{local_time_hhmm}"
+
+
+def _interval_schedule_slot_key(local_time_hhmm: str, timezone_name: str) -> str:
+    return f"interval-slot:{timezone_name}:{local_time_hhmm}"
 
 
 def _operator_message(policy: Mapping[str, Any]) -> str:

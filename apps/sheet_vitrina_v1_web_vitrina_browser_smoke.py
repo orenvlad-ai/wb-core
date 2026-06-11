@@ -2813,6 +2813,12 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
           const policyLabel = document.querySelector('.auto-schedule-policy-label');
           const windowHint = document.querySelector('[data-vitrina-auto-window-hint]');
           const autoPanel = document.querySelector('[data-vitrina-auto-schedule]');
+          const policyBar = document.querySelector('[data-vitrina-auto-policy]');
+          const actions = document.querySelector('.auto-schedule-actions');
+          const tableWrap = document.querySelector('.auto-schedule-table-wrap');
+          const policyRect = policyBar ? policyBar.getBoundingClientRect() : null;
+          const tableRect = tableWrap ? tableWrap.getBoundingClientRect() : null;
+          const selectStyle = policySelector ? window.getComputedStyle(policySelector) : null;
           return {
             title: (document.querySelector('[data-vitrina-auto-schedule] .auto-schedule-title') || {}).textContent || '',
             meta: (document.querySelector('[data-vitrina-auto-schedule-meta]') || {}).textContent || '',
@@ -2835,11 +2841,15 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
             legacyIntervalCount: document.querySelectorAll('[data-vitrina-auto-interval], [data-vitrina-auto-interval-controls]').length,
             previewChipCount: document.querySelectorAll('[data-vitrina-auto-preview] .auto-schedule-preview-chip, .auto-schedule-preview-chip').length,
             autoPanelButtons: Array.from(autoPanel ? autoPanel.querySelectorAll('button') : []).map(node => (node.textContent || '').trim()).filter(Boolean),
+            actionsInsidePolicy: !!(policyBar && actions && policyBar.contains(actions)),
+            directBodyActionRows: document.querySelectorAll('.auto-schedule-body > .auto-schedule-actions').length,
+            policyToTableGap: policyRect && tableRect ? Math.round(tableRect.top - policyRect.bottom) : null,
             policySelector: policySelector ? {
               label: policyLabel ? (policyLabel.textContent || '').trim() : '',
               value: policySelector.value || '',
               disabled: !!policySelector.disabled,
-              options: Array.from(policySelector.options || []).map(option => (option.textContent || '').trim())
+              options: Array.from(policySelector.options || []).map(option => (option.textContent || '').trim()),
+              paddingRight: selectStyle ? Number.parseFloat(selectStyle.paddingRight || '0') : 0
             } : null,
             windowHint: windowHint ? {
               hidden: !!windowHint.hidden,
@@ -2864,14 +2874,17 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
         raise AssertionError(f"auto schedule block must read current runtime schedule, got {payload}")
     if payload["addCount"] != 1 or payload["saveCount"] != 1 or payload["reloadCount"] != 0 or "Обновить" in payload["autoPanelButtons"]:
         raise AssertionError(f"auto schedule block must expose add/save only and no reload control, got {payload}")
+    if not payload["actionsInsidePolicy"] or payload["directBodyActionRows"] != 0 or payload["policyToTableGap"] is None or payload["policyToTableGap"] > 12:
+        raise AssertionError(f"auto schedule actions must live in a compact control bar above the table, got {payload}")
     selector = payload.get("policySelector") or {}
     if (
         selector.get("label") != "Настройка расписания"
         or selector.get("value") != "manual"
         or selector.get("options") != ["Ручные настройки", "Каждые 3 часа", "Каждые 4 часа", "Каждые 6 часов"]
         or selector.get("disabled")
+        or selector.get("paddingRight", 0) < 30
     ):
-        raise AssertionError(f"auto schedule block must expose one schedule selector, got {payload}")
+        raise AssertionError(f"auto schedule block must expose one padded schedule selector, got {payload}")
     if payload["legacyModeCount"] != 0 or payload["legacyIntervalCount"] != 0 or payload["previewChipCount"] != 0:
         raise AssertionError(f"auto schedule block must not render legacy toggle, interval subcontrol or preview chips, got {payload}")
     if not (payload.get("windowHint") or {}).get("hidden"):
@@ -2902,6 +2915,24 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
         """() => ({
           selectValue: (document.querySelector('[data-vitrina-auto-policy-select]') || {}).value || '',
           hintHidden: !!(document.querySelector('[data-vitrina-auto-window-hint]') || {}).hidden,
+          hintCenterDelta: (() => {
+            const selector = document.querySelector('[data-vitrina-auto-policy-select]');
+            const hint = document.querySelector('[data-vitrina-auto-window-hint]');
+            if (!selector || !hint || hint.hidden) return null;
+            const selectorRect = selector.getBoundingClientRect();
+            const hintRect = hint.getBoundingClientRect();
+            return Math.round(Math.abs((selectorRect.top + selectorRect.height / 2) - (hintRect.top + hintRect.height / 2)));
+          })(),
+          policyToTableGap: (() => {
+            const policy = document.querySelector('[data-vitrina-auto-policy]');
+            const table = document.querySelector('.auto-schedule-table-wrap');
+            if (!policy || !table) return null;
+            const policyRect = policy.getBoundingClientRect();
+            const tableRect = table.getBoundingClientRect();
+            return Math.round(tableRect.top - policyRect.bottom);
+          })(),
+          actionsInsidePolicy: !!(document.querySelector('[data-vitrina-auto-policy]') && document.querySelector('.auto-schedule-actions') && document.querySelector('[data-vitrina-auto-policy]').contains(document.querySelector('.auto-schedule-actions'))),
+          directBodyActionRows: document.querySelectorAll('.auto-schedule-body > .auto-schedule-actions').length,
           addHidden: !!(document.querySelector('[data-vitrina-auto-add]') || {}).hidden,
           reloadCount: document.querySelectorAll('[data-vitrina-auto-reload]').length,
           previewChipCount: document.querySelectorAll('[data-vitrina-auto-preview] .auto-schedule-preview-chip, .auto-schedule-preview-chip').length,
@@ -2916,6 +2947,12 @@ def _check_auto_schedule_block(page: object) -> dict[str, object]:
     if (
         interval_payload["selectValue"] != "interval:4"
         or interval_payload["hintHidden"]
+        or interval_payload["hintCenterDelta"] is None
+        or interval_payload["hintCenterDelta"] > 6
+        or interval_payload["policyToTableGap"] is None
+        or interval_payload["policyToTableGap"] > 12
+        or not interval_payload["actionsInsidePolicy"]
+        or interval_payload["directBodyActionRows"] != 0
         or not interval_payload["addHidden"]
         or interval_payload["reloadCount"] != 0
         or interval_payload["previewChipCount"] != 0

@@ -1120,7 +1120,7 @@
 
     .auto-schedule-body {
       display: grid;
-      gap: 8px;
+      gap: 6px;
       padding: 10px;
       border-top: 1px solid var(--border);
     }
@@ -1132,43 +1132,67 @@
       gap: 8px;
       flex-wrap: wrap;
       min-width: 0;
+      margin-left: auto;
     }
 
     .auto-schedule-policy {
       display: flex;
-      align-items: flex-end;
-      justify-content: flex-start;
+      align-items: center;
+      justify-content: space-between;
       gap: 10px;
       flex-wrap: wrap;
       min-width: 0;
-      padding: 8px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--panel-subtle);
+      padding: 2px 0 4px;
+      border: 0;
+      background: transparent;
+    }
+
+    .auto-schedule-policy-controls {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex: 1 1 420px;
+      flex-wrap: wrap;
+      min-width: 0;
     }
 
     .auto-schedule-policy-field {
-      display: grid;
-      gap: 4px;
-      min-width: min(100%, 220px);
-      max-width: 320px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .auto-schedule-policy-label {
+      flex: 0 0 auto;
       color: var(--muted);
       font-size: 11px;
       font-weight: 800;
     }
 
-    .auto-schedule-policy-select {
-      min-width: 200px;
+    .input.auto-schedule-policy-select {
+      width: auto;
+      min-width: 196px;
+      max-width: 100%;
+      padding-right: 34px;
+      appearance: none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, currentColor 50%),
+        linear-gradient(135deg, currentColor 50%, transparent 50%);
+      background-position:
+        calc(100% - 18px) 50%,
+        calc(100% - 13px) 50%;
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
     }
 
     .auto-schedule-window-hint {
       margin: 0;
       color: var(--muted);
       font-size: 12px;
-      line-height: 1.35;
+      line-height: 1.25;
+      align-self: center;
     }
 
     .auto-schedule-window-hint[hidden] {
@@ -4071,20 +4095,22 @@
       </summary>
       <div class="auto-schedule-body">
         <div class="auto-schedule-policy" data-vitrina-auto-policy>
-          <label class="auto-schedule-policy-field">
-            <span class="auto-schedule-policy-label">Настройка расписания</span>
-            <select class="input auto-schedule-policy-select" data-vitrina-auto-policy-select>
-              <option value="manual">Ручные настройки</option>
-              <option value="interval:3">Каждые 3 часа</option>
-              <option value="interval:4">Каждые 4 часа</option>
-              <option value="interval:6">Каждые 6 часов</option>
-            </select>
-          </label>
-          <p class="auto-schedule-window-hint" data-vitrina-auto-window-hint hidden>Окно автообновлений: 10:00–22:00, Asia/Yekaterinburg.</p>
-        </div>
-        <div class="auto-schedule-actions">
-          <button class="button secondary" type="button" data-vitrina-auto-add>Добавить строку</button>
-          <button class="button secondary" type="button" data-vitrina-auto-save>Сохранить</button>
+          <div class="auto-schedule-policy-controls">
+            <label class="auto-schedule-policy-field">
+              <span class="auto-schedule-policy-label">Настройка расписания</span>
+              <select class="input auto-schedule-policy-select" data-vitrina-auto-policy-select>
+                <option value="manual">Ручные настройки</option>
+                <option value="interval:3">Каждые 3 часа</option>
+                <option value="interval:4">Каждые 4 часа</option>
+                <option value="interval:6">Каждые 6 часов</option>
+              </select>
+            </label>
+            <p class="auto-schedule-window-hint" data-vitrina-auto-window-hint hidden>Окно автообновлений: 10:00–22:00, Asia/Yekaterinburg.</p>
+          </div>
+          <div class="auto-schedule-actions">
+            <button class="button secondary" type="button" data-vitrina-auto-add>Добавить строку</button>
+            <button class="button secondary" type="button" data-vitrina-auto-save>Сохранить</button>
+          </div>
         </div>
         <div class="auto-schedule-table-wrap">
           <table class="auto-schedule-table">

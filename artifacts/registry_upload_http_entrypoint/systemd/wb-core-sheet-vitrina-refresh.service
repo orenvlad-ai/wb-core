@@ -6,5 +6,5 @@ Wants=network.target wb-core-registry-http.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/wb-core-runtime/app
-ExecStart=/usr/bin/python3 apps/sheet_vitrina_v1_auto_refresh_tick.py --env-file /opt/wb-ai/.env
+ExecStart=/usr/bin/python3 apps/sheet_vitrina_v1_auto_refresh_tick.py --env-file /opt/wb-ai/.env --runtime-dir /opt/wb-core-runtime/state
 TimeoutStartSec=1800

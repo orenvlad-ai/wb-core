@@ -248,6 +248,15 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose systemd enable command")
             if "restart" not in " ".join(deploy_dry_run["commands"]["systemd_restart"]):
                 raise AssertionError("deploy --dry-run must expose systemd restart command")
+            refresh_unit = (
+                ROOT
+                / "artifacts"
+                / "registry_upload_http_entrypoint"
+                / "systemd"
+                / "wb-core-sheet-vitrina-refresh.service"
+            ).read_text(encoding="utf-8")
+            if "--runtime-dir /opt/wb-core-runtime/state" not in refresh_unit:
+                raise AssertionError("refresh tick systemd unit must pin production runtime state dir")
             if "apply-nginx-routes" not in " ".join(deploy_dry_run["commands"]["nginx_public_routes_update"]):
                 raise AssertionError("deploy --dry-run must expose nginx public route update command")
 
