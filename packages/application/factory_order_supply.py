@@ -68,6 +68,10 @@ from packages.contracts.supplier_shipments import (
     MATCH_STATUS_MATCHED,
     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
     MATCH_STATUS_UNMATCHED,
+    ORDER_STATUS_ACCEPTED_FF,
+    ORDER_STATUS_DEFAULT,
+    ORDER_STATUS_LABELS_RU,
+    ORDER_STATUSES,
 )
 from packages.contracts.stocks_block import StocksRequest
 
@@ -126,7 +130,8 @@ _COVERAGE_CONTRACT_NOTE = (
     "Для «Остатки ФФ» оператор может выбрать manual Excel или read-only 1C source "
     f"по materialized metric {ONEC_FF_STOCK_QTY_METRIC_KEY}; общий onec_total_qty не используется. "
     "Для «Товары в пути от фабрики» оператор может выбрать manual Excel или read-only source из supplier registry; "
-    "supplier registry uses shipment_date + 30 days as current bounded factory-to-FF acceptance default. "
+    "supplier registry uses only production/in_transit orders, excludes accepted_ff orders, "
+    "and applies shipment_date + 30 days as current bounded factory-to-FF acceptance default. "
     "Средний спрос считается availability-adjusted: sales_avg_period_days означает число валидных торговых дней, "
     "а lookup depth ограничен min(120, period * 4)."
 )
@@ -149,6 +154,7 @@ class _SupplierRegistryShipmentFactorySummary:
     invalid_quantity_line_count: int
     usable_line_count: int
     usable_quantity: float
+    order_status: str
 
 
 class FactoryOrderSupplyBlock:
@@ -689,6 +695,9 @@ class FactoryOrderSupplyBlock:
             "invalid_quantity_line_count": 0,
             "usable_line_count": 0,
             "usable_quantity": 0.0,
+            "excluded_accepted_ff_shipment_count": 0,
+            "excluded_accepted_ff_line_count": 0,
+            "excluded_accepted_ff_quantity": 0.0,
         }
         warnings: list[str] = []
         for shipment in self.runtime.list_supplier_shipments():
@@ -706,6 +715,17 @@ class FactoryOrderSupplyBlock:
                 continue
             header = dict(detail.get("header") or {})
             lines = [dict(item) for item in detail.get("lines") or []]
+            order_status = _supplier_order_status_for_factory_inbound(header)
+            if order_status == ORDER_STATUS_ACCEPTED_FF:
+                product_lines = [item for item in lines if item.get("line_type") == LINE_TYPE_PRODUCT]
+                excluded_quantity = sum(
+                    _optional_positive_line_quantity(item.get("qty")) or 0.0
+                    for item in product_lines
+                )
+                diagnostics["excluded_accepted_ff_shipment_count"] += 1
+                diagnostics["excluded_accepted_ff_line_count"] += len(product_lines)
+                diagnostics["excluded_accepted_ff_quantity"] += excluded_quantity
+                continue
             shipment_date = str(header.get("shipment_date") or "").strip()
             calculated_acceptance_date = (
                 (date.fromisoformat(shipment_date) + timedelta(days=SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS)).isoformat()
@@ -755,7 +775,17 @@ class FactoryOrderSupplyBlock:
                     ambiguous_line_count=shipment_summary.ambiguous_line_count,
                     missing_shipment_date_line_count=shipment_summary.missing_shipment_date_line_count,
                     usable_quantity=shipment_summary.usable_quantity,
+                    order_status=shipment_summary.order_status,
                 )
+            )
+        if diagnostics["excluded_accepted_ff_shipment_count"]:
+            warnings.append(
+                "Источник supplier registry: заказы в статусе "
+                f"{ORDER_STATUS_ACCEPTED_FF} / «{ORDER_STATUS_LABELS_RU[ORDER_STATUS_ACCEPTED_FF]}» "
+                "исключены из «Товары в пути от фабрики», чтобы не дублировать остатки ФФ: "
+                f"shipments={int(diagnostics['excluded_accepted_ff_shipment_count'])}, "
+                f"product_lines={int(diagnostics['excluded_accepted_ff_line_count'])}, "
+                f"qty={round(float(diagnostics['excluded_accepted_ff_quantity']), 2)}."
             )
         diagnostics_payload = FactoryOrderSupplierRegistryDiagnostics(
             shipment_count=int(diagnostics["shipment_count"]),
@@ -767,6 +797,9 @@ class FactoryOrderSupplyBlock:
             invalid_quantity_line_count=int(diagnostics["invalid_quantity_line_count"]),
             usable_line_count=int(diagnostics["usable_line_count"]),
             usable_quantity=round(float(diagnostics["usable_quantity"]), 2),
+            excluded_accepted_ff_shipment_count=int(diagnostics["excluded_accepted_ff_shipment_count"]),
+            excluded_accepted_ff_line_count=int(diagnostics["excluded_accepted_ff_line_count"]),
+            excluded_accepted_ff_quantity=round(float(diagnostics["excluded_accepted_ff_quantity"]), 2),
         )
         status = "ready" if diagnostics_payload.usable_line_count > 0 else "empty"
         return FactoryOrderSupplierRegistryInboundState(
@@ -791,6 +824,8 @@ class FactoryOrderSupplyBlock:
             if not detail:
                 continue
             header = dict(detail.get("header") or {})
+            if _supplier_order_status_for_factory_inbound(header) == ORDER_STATUS_ACCEPTED_FF:
+                continue
             shipment_label = _supplier_shipment_label(header)
             for line in detail.get("lines") or []:
                 if not _supplier_line_is_usable_factory_inbound(line, has_valid_shipment_date=True):
@@ -1314,6 +1349,7 @@ def _parse_supplier_registry_inbound_state(value: Any) -> FactoryOrderSupplierRe
                 ambiguous_line_count=int(item.get("ambiguous_line_count", 0)),
                 missing_shipment_date_line_count=int(item.get("missing_shipment_date_line_count", 0)),
                 usable_quantity=float(item.get("usable_quantity", 0.0)),
+                order_status=str(item.get("order_status", "") or ""),
             )
         )
     diagnostics = FactoryOrderSupplierRegistryDiagnostics(
@@ -1326,6 +1362,9 @@ def _parse_supplier_registry_inbound_state(value: Any) -> FactoryOrderSupplierRe
         invalid_quantity_line_count=int(diagnostics_payload.get("invalid_quantity_line_count", 0)),
         usable_line_count=int(diagnostics_payload.get("usable_line_count", 0)),
         usable_quantity=float(diagnostics_payload.get("usable_quantity", 0.0)),
+        excluded_accepted_ff_shipment_count=int(diagnostics_payload.get("excluded_accepted_ff_shipment_count", 0)),
+        excluded_accepted_ff_line_count=int(diagnostics_payload.get("excluded_accepted_ff_line_count", 0)),
+        excluded_accepted_ff_quantity=float(diagnostics_payload.get("excluded_accepted_ff_quantity", 0.0)),
     )
     return FactoryOrderSupplierRegistryInboundState(
         source=FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY,
@@ -1392,6 +1431,9 @@ def _empty_supplier_registry_inbound_state() -> FactoryOrderSupplierRegistryInbo
             invalid_quantity_line_count=0,
             usable_line_count=0,
             usable_quantity=0.0,
+            excluded_accepted_ff_shipment_count=0,
+            excluded_accepted_ff_line_count=0,
+            excluded_accepted_ff_quantity=0.0,
         ),
         warnings=(),
     )
@@ -1461,6 +1503,7 @@ def _summarize_supplier_shipment_for_factory_inbound(
     calculated_acceptance_date: str,
 ) -> _SupplierRegistryShipmentFactorySummary:
     shipment_id = str(header.get("shipment_id") or "").strip()
+    order_status = _supplier_order_status_for_factory_inbound(header)
     shipment_date = str(header.get("shipment_date") or "").strip()
     has_valid_shipment_date = bool(calculated_acceptance_date)
     product_lines = [item for item in lines if item.get("line_type") == LINE_TYPE_PRODUCT]
@@ -1511,7 +1554,15 @@ def _summarize_supplier_shipment_for_factory_inbound(
         invalid_quantity_line_count=invalid_quantity_line_count,
         usable_line_count=usable_line_count,
         usable_quantity=round(usable_quantity, 2),
+        order_status=order_status,
     )
+
+
+def _supplier_order_status_for_factory_inbound(header: Mapping[str, Any]) -> str:
+    order_status = str(header.get("order_status") or ORDER_STATUS_DEFAULT).strip()
+    if order_status not in ORDER_STATUSES:
+        return ORDER_STATUS_DEFAULT
+    return order_status
 
 
 def _supplier_line_is_usable_factory_inbound(line: Mapping[str, Any], *, has_valid_shipment_date: bool) -> bool:
