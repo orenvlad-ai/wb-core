@@ -1050,14 +1050,6 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
             filterable=True,
         ),
         WebVitrinaContractSchemaColumn(
-            column_id="row_last_updated_at",
-            label="Обновлено",
-            kind="dimension",
-            value_type="string",
-            sortable=True,
-            filterable=False,
-        ),
-        WebVitrinaContractSchemaColumn(
             column_id="section",
             label="Раздел",
             kind="dimension",
@@ -1131,12 +1123,6 @@ def _build_schema(snapshot: SheetVitrinaV1Envelope) -> WebVitrinaContractSchema:
             sort_id="metric_label",
             field="metric_label",
             label="Метрика",
-            directions=["asc", "desc"],
-        ),
-        WebVitrinaContractSchemaSort(
-            sort_id="row_last_updated_at",
-            field="row_last_updated_at",
-            label="Обновлено",
             directions=["asc", "desc"],
         ),
     ]

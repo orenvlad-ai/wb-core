@@ -219,15 +219,25 @@ def main() -> None:
             raise AssertionError(f"default sort mismatch, got {composition['filter_surface']}")
         if not composition["table_surface"]["columns"] or not composition["table_surface"]["rows"]:
             raise AssertionError(f"table surface is empty, got {composition['table_surface']}")
-        table_headers = [item["header"] for item in composition["table_surface"]["columns"]]
-        for expected_header in ("Раздел", "Метрика", "Обновлено"):
+        table_columns = composition["table_surface"]["columns"]
+        table_headers = [item["header"] for item in table_columns]
+        table_column_ids = [item["id"] for item in table_columns]
+        for expected_header in ("Раздел", "Метрика"):
             if expected_header not in table_headers:
                 raise AssertionError(f"main table must expose Russian header {expected_header!r}, got {table_headers}")
+        if "Обновлено" in table_headers or "row_last_updated_at" in table_column_ids:
+            raise AssertionError(f"main table must not expose row update timestamp column, got {table_column_ids} / {table_headers}")
+        if table_column_ids.index("section") >= table_column_ids.index("date:2026-04-20"):
+            raise AssertionError(f"section column must stay before date columns after removing updated column, got {table_column_ids}")
+        if any(item.get("column_id") == "row_last_updated_at" for item in composition["table_surface"]["sorts"]):
+            raise AssertionError(f"main table sort surface must not expose row update timestamp, got {composition['table_surface']['sorts']}")
         for forbidden_header in ("Metric Label", "Sections", "Score Label"):
             if forbidden_header in table_headers:
                 raise AssertionError(f"main table must not expose English header {forbidden_header!r}, got {table_headers}")
-        if not all("row_last_updated_at" in row["values"] for row in composition["table_surface"]["rows"]):
-            raise AssertionError(f"main table rows must expose row update timestamps, got {composition['table_surface']['rows']}")
+        if any("row_last_updated_at" in row["values"] for row in composition["table_surface"]["rows"]):
+            raise AssertionError(f"main table rows must not expose row update timestamp cells, got {composition['table_surface']['rows']}")
+        if not all("date:2026-04-20" in row["values"] for row in composition["table_surface"]["rows"]):
+            raise AssertionError(f"main table rows must keep date cells after removing updated column, got {composition['table_surface']['rows']}")
         if composition["status_badge"]["tone"] != "success":
             raise AssertionError(f"status badge mismatch, got {composition['status_badge']}")
         if composition["status_badge"]["label"] != "Успешно":

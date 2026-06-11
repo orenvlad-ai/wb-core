@@ -27,8 +27,8 @@ def main() -> None:
     columns = {column.id: column for column in view_model.columns}
     if columns["scope_label"].sticky != "left" or columns["scope_label"].width_hint != 208:
         raise AssertionError(f"scope_label column intent mismatch, got {columns['scope_label']}")
-    if columns["section"].sticky != "left" or columns["section"].width_hint != 92:
-        raise AssertionError(f"section column must be sticky with compact width, got {columns['section']}")
+    if columns["section"].sticky != "left" or columns["section"].align != "start" or columns["section"].width_hint != 112:
+        raise AssertionError(f"section column must be sticky, left-aligned and moderately wider, got {columns['section']}")
     if columns["row_order"].width_hint != 52 or columns["date:2026-04-20"].width_hint != 88:
         raise AssertionError(f"compact width hints mismatch, got {columns['row_order']} / {columns['date:2026-04-20']}")
     if columns["date:2026-04-20"].kind != "temporal_measure" or columns["date:2026-04-20"].align != "end":

@@ -382,8 +382,10 @@ def _column_floor_width(column_id: str) -> int:
         return 40
     if column_id.startswith("date:"):
         return 84
-    if column_id in {"scope_kind", "section"}:
+    if column_id == "scope_kind":
         return 76
+    if column_id == "section":
+        return 96
     if column_id == "group":
         return 72
     if column_id == "nm_id":
