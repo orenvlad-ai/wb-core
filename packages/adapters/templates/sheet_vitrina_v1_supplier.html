@@ -95,6 +95,31 @@
         .message { min-height: 20px; margin: 0; font-size: 13px; }
     .message.error { color: var(--danger); }
     .message.success { color: var(--success); }
+    .finance-upload-progress {
+      display: grid;
+      gap: 5px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .finance-upload-progress[hidden] { display: none; }
+    .finance-upload-progress li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      max-width: 720px;
+      border: 1px solid rgba(177, 139, 255, 0.18);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: rgba(16, 19, 27, 0.36);
+    }
+    .finance-upload-progress strong { color: var(--text); white-space: nowrap; }
+    .finance-upload-progress .error { color: var(--danger); }
+    .finance-upload-progress .success { color: var(--success); }
+    .finance-upload-progress .warning { color: var(--warning); }
     .registry-wrap, .line-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     .registry-wrap, .line-wrap { background: rgba(16, 19, 27, 0.48); }
     table { width: 100%; border-collapse: collapse; min-width: 980px; }
@@ -440,8 +465,9 @@
         <div id="financialDocumentsPanel" role="tabpanel" data-card-panel="financial" hidden>
           <div class="finance-toolbar">
             <button id="addFinancialDocumentButton" class="primary compact" type="button">Добавить документ</button>
-            <input id="financialDocumentFileInput" type="file" accept=".pdf" hidden>
+            <input id="financialDocumentFileInput" type="file" accept=".pdf" multiple hidden>
             <p id="financialDocumentsMessage" class="message"></p>
+            <ul id="financialUploadProgress" class="finance-upload-progress" hidden></ul>
           </div>
 
           <div class="finance-summary-grid" aria-label="Финансовая сводка">
@@ -557,6 +583,7 @@
       const addFinancialDocumentButton = document.getElementById("addFinancialDocumentButton");
       const financialDocumentFileInput = document.getElementById("financialDocumentFileInput");
       const financialDocumentsMessage = document.getElementById("financialDocumentsMessage");
+      const financialUploadProgress = document.getElementById("financialUploadProgress");
       const financialDocumentsRows = document.getElementById("financialDocumentsRows");
       const financialRecognizedFields = document.getElementById("financialRecognizedFields");
       const financialExpenseRows = document.getElementById("financialExpenseRows");
@@ -1389,33 +1416,76 @@
         return String(min != null ? min : max) + (suffix ? " " + suffix : "");
       }
 
-      async function uploadFinancialDocument(file) {
+      function renderFinancialUploadProgress(items) {
+        const rows = Array.isArray(items) ? items : [];
+        financialUploadProgress.hidden = !rows.length;
+        financialUploadProgress.innerHTML = rows.map((item) => {
+          const tone = item.tone ? ' class="' + escapeHtml(item.tone) + '"' : "";
+          return [
+            '<li>',
+            '<span>' + escapeHtml(item.name || "document.pdf") + '</span>',
+            '<strong' + tone + '>' + escapeHtml(item.status || "") + '</strong>',
+            '</li>'
+          ].join("");
+        }).join("");
+      }
+
+      async function uploadFinancialDocuments(fileList) {
         if (!canManageFinancialDocuments || !currentShipment || !currentShipment.shipment_id) {
           setMessage(financialDocumentsMessage, "Сначала сохраните заказ.", "error");
           return;
         }
-        if (!file) {
+        const files = Array.from(fileList || []);
+        if (!files.length) {
           return;
         }
-        if (!file.name.toLowerCase().endsWith(".pdf")) {
-          setMessage(financialDocumentsMessage, "Загрузите PDF документ.", "error");
-          financialDocumentFileInput.value = "";
-          return;
-        }
-        const formData = new FormData();
-        formData.append("file", file, file.name);
+        const progress = files.map((file) => ({ name: file.name, status: "В очереди", tone: "" }));
+        renderFinancialUploadProgress(progress);
         addFinancialDocumentButton.disabled = true;
-        setMessage(financialDocumentsMessage, "Загружаем и распознаём документ...", "");
+        let uploadedCount = 0;
+        let errorCount = 0;
+        let lastDocumentId = "";
+        setMessage(financialDocumentsMessage, "Загружаем документы...", "");
         try {
-          const payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
-            method: "POST",
-            body: formData,
-            headers: { Accept: "application/json" }
-          });
-          await loadFinancialDocuments({ selectedDocumentId: payload.document_id });
-          setMessage(financialDocumentsMessage, "Документ загружен.", payload.parse_status === "parse_error" ? "error" : "success");
-        } catch (error) {
-          setMessage(financialDocumentsMessage, error.message, "error");
+          for (let index = 0; index < files.length; index += 1) {
+            const file = files[index];
+            if (!file.name.toLowerCase().endsWith(".pdf")) {
+              progress[index] = { name: file.name, status: "Не PDF", tone: "error" };
+              errorCount += 1;
+              renderFinancialUploadProgress(progress);
+              continue;
+            }
+            progress[index] = { name: file.name, status: "Загрузка " + String(index + 1) + "/" + String(files.length), tone: "warning" };
+            renderFinancialUploadProgress(progress);
+            setMessage(financialDocumentsMessage, "Загружаем " + String(index + 1) + "/" + String(files.length) + ": " + file.name, "");
+            const formData = new FormData();
+            formData.append("file", file, file.name);
+            try {
+              const payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
+                method: "POST",
+                body: formData,
+                headers: { Accept: "application/json" }
+              });
+              uploadedCount += 1;
+              lastDocumentId = payload.document_id || lastDocumentId;
+              const statusLabel = financialStatusLabels[payload.parse_status] || payload.parse_status || "Загружен";
+              progress[index] = {
+                name: file.name,
+                status: statusLabel,
+                tone: payload.parse_status === "parse_error" ? "error" : (payload.parse_status === "needs_review" ? "warning" : "success")
+              };
+            } catch (error) {
+              errorCount += 1;
+              progress[index] = { name: file.name, status: error.message || "Ошибка", tone: "error" };
+            }
+            renderFinancialUploadProgress(progress);
+          }
+          await loadFinancialDocuments(lastDocumentId ? { selectedDocumentId: lastDocumentId } : undefined);
+          if (errorCount) {
+            setMessage(financialDocumentsMessage, "Загрузка завершена: " + String(uploadedCount) + " успешно, " + String(errorCount) + " с ошибкой.", "error");
+          } else {
+            setMessage(financialDocumentsMessage, "Загрузка завершена: " + String(uploadedCount) + " документ(ов).", "success");
+          }
         } finally {
           addFinancialDocumentButton.disabled = false;
           financialDocumentFileInput.value = "";
@@ -1787,7 +1857,7 @@
       uploadContractButton.addEventListener("click", () => contractFileInput.click());
       contractFileInput.addEventListener("change", () => uploadContractFile(contractFileInput.files && contractFileInput.files[0]));
       addFinancialDocumentButton.addEventListener("click", () => financialDocumentFileInput.click());
-      financialDocumentFileInput.addEventListener("change", () => uploadFinancialDocument(financialDocumentFileInput.files && financialDocumentFileInput.files[0]));
+      financialDocumentFileInput.addEventListener("change", () => uploadFinancialDocuments(financialDocumentFileInput.files));
       closeShipmentButton.addEventListener("click", closeCard);
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;

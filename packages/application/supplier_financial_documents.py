@@ -80,6 +80,16 @@ QUOTE_AMOUNT_CATEGORY_BY_ROW = {
     5: EXPENSE_CATEGORY_COMPANY_COMMISSION,
     6: EXPENSE_CATEGORY_INSURANCE,
 }
+QUOTE_AMOUNT_LABELS = (
+    (EXPENSE_CATEGORY_DELIVERY, ("Стоимость доставки",)),
+    (EXPENSE_CATEGORY_CUSTOMS_PAYMENTS, ("Таможенные платежи и сборы",)),
+    (EXPENSE_CATEGORY_ECOLOGICAL_FEE, ("Экологический сбор",)),
+    (EXPENSE_CATEGORY_BROKERAGE, ("Брокерские услуги",)),
+    (EXPENSE_CATEGORY_COMPANY_COMMISSION, ("Комиссия компании",)),
+    (EXPENSE_CATEGORY_INSURANCE, ("Страховая ставка", "Страхование")),
+    (EXPENSE_CATEGORY_PERMISSION_DOCS, ("Оформление разрешительной документации",)),
+    (EXPENSE_CATEGORY_PACKAGING, ("Стоимость дополнительной упаковки",)),
+)
 PCT_QUANT = Decimal("0.0001")
 
 
@@ -933,13 +943,21 @@ def _extract_quote_amounts(text: str) -> dict[str, Decimal | str | None]:
         match = _first_match(text, pattern, flags=re.I)
         if match:
             values[key] = _parse_decimal(match)
+    labeled = _extract_quote_labeled_cost_rows(text)
+    for key, labeled_value in labeled.items():
+        current_value = _parse_decimal(values.get(key))
+        if labeled_value is not None and current_value is None:
+            values[key] = labeled_value
     total = _extract_quote_total_usd(text)
     numbered = _extract_quote_numbered_cost_column(text, total)
+    numbered_is_usable = _quote_numbered_amounts_are_usable(numbered, total)
     for number, key in QUOTE_AMOUNT_CATEGORY_BY_ROW.items():
         numbered_value = numbered.get(number)
         current_value = _parse_decimal(values.get(key))
         should_replace = current_value is None
         if key in QUOTE_REQUIRED_AMOUNT_CATEGORIES and total is not None and total > 0 and current_value == 0:
+            should_replace = True
+        if key in QUOTE_CORE_AMOUNT_CATEGORIES and numbered_is_usable and numbered_value is not None and current_value != numbered_value:
             should_replace = True
         if numbered_value is not None and should_replace:
             values[key] = numbered_value
@@ -949,9 +967,7 @@ def _extract_quote_amounts(text: str) -> dict[str, Decimal | str | None]:
             _first_match(text, r"Оформление разрешительной документации\s+([\d .,]+)")
         )
     values[EXPENSE_CATEGORY_PACKAGING] = _parse_decimal(_first_match(text, r"Стоимость дополнительной упаковки\s+([\d .,]+)\s*USD"))
-    range_match = re.search(r"Стоимость оформления экспортных документов\s+([\d .,]+)\s*[-–]\s*([\d .,]+)\s*USD", text, flags=re.I)
-    if range_match:
-        values[EXPENSE_CATEGORY_EXPORT_DOCS] = f"{_decimal_to_display(_parse_decimal(range_match.group(1)))}-{_decimal_to_display(_parse_decimal(range_match.group(2)))}"
+    values[EXPENSE_CATEGORY_EXPORT_DOCS] = _extract_quote_export_docs_range(text)
     if total is not None:
         values["total_quote_usd"] = total
     return values
@@ -1025,6 +1041,16 @@ def _extract_numbered_amount_pairs(text: str) -> dict[int, Decimal]:
             if amount is not None:
                 values[int(match.group(1))] = amount
                 continue
+        table_row = re.match(
+            r"^([1-6])\s+(?=.*[A-Za-zА-Яа-я]).+?\s+([0-9][\d .,\u00a0\u202f]*)(?:\s*USD)?$",
+            line,
+            flags=re.I,
+        )
+        if table_row:
+            amount = _parse_decimal(table_row.group(2))
+            if amount is not None:
+                values[int(table_row.group(1))] = amount
+                continue
         number_only = re.match(r"^([1-6])$", line)
         if not number_only or index + 1 >= len(lines):
             continue
@@ -1068,6 +1094,49 @@ def _quote_numbered_amounts_are_usable(values: Mapping[int, Decimal], total_quot
         return True
     amount_sum = sum((values.get(number) or Decimal("0")) for number in range(1, 7))
     return abs(amount_sum - total_quote_usd) <= Decimal("0.01")
+
+
+def _extract_quote_labeled_cost_rows(text: str) -> dict[str, Decimal]:
+    values: dict[str, Decimal] = {}
+    for line in _text_to_lines(text):
+        for category, labels in QUOTE_AMOUNT_LABELS:
+            if category in values:
+                continue
+            amount = _extract_amount_after_any_label(line, labels)
+            if amount is not None:
+                values[category] = amount
+                break
+    return values
+
+
+def _extract_amount_after_any_label(line: str, labels: tuple[str, ...]) -> Decimal | None:
+    cleaned = _clean_value(line)
+    for label in labels:
+        match = re.search(re.escape(label), cleaned, flags=re.I)
+        if not match:
+            continue
+        tail = cleaned[match.end() :]
+        numbers = re.findall(r"\d[\d \u00a0\u202f]*(?:[,.]\d+)?", tail)
+        if not numbers:
+            return None
+        return _parse_decimal(numbers[-1])
+    return None
+
+
+def _extract_quote_export_docs_range(text: str) -> str | None:
+    patterns = (
+        r"Стоимость оформления экспортных документов\s+([\d .,]+)\s*[-–]\s*([\d .,]+)\s*USD",
+        r"([\d .,]+)\s*[-–]\s*([\d .,]+)\s*USD[^\n\r]{0,220}\n\s*(?:\d+\s+)?Стоимость оформления экспортных документов",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if not match:
+            continue
+        left = _parse_decimal(match.group(1))
+        right = _parse_decimal(match.group(2))
+        if left is not None and right is not None:
+            return f"{_decimal_to_display(left)}-{_decimal_to_display(right)}"
+    return None
 
 
 def _missing_required_quote_amounts(

@@ -96,9 +96,12 @@ def main() -> None:
                     expect(page.locator("#financialDocumentsPanel")).to_be_visible()
                     expect(page.locator("#financialDocumentsRows")).to_contain_text("Финансовые документы не загружены.", timeout=5000)
 
-                    for key in ("quote", "invoice_103", "invoice_113", "customs"):
-                        page.locator("#financialDocumentFileInput").set_input_files(str(pdfs[key]))
-                        expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ загружен.", timeout=15000)
+                    page.locator("#financialDocumentFileInput").set_input_files(
+                        [str(pdfs[key]) for key in ("quote", "invoice_103", "invoice_113", "customs")]
+                    )
+                    expect(page.locator("#financialDocumentsMessage")).to_contain_text("Загрузка завершена: 4", timeout=30000)
+                    expect(page.locator("#financialUploadProgress li")).to_have_count(4, timeout=5000)
+                    expect(page.locator("#financialUploadProgress")).to_contain_text("Распознан", timeout=5000)
 
                     expect(page.locator("#financialDocumentsRows tr[data-financial-document-row]")).to_have_count(4, timeout=10000)
                     expect(page.locator("#financialDocumentsRows")).to_contain_text("КП логиста", timeout=5000)
@@ -141,7 +144,7 @@ def main() -> None:
                     expect(page.locator("#financeInvoiceRub")).to_contain_text("1 215 975", timeout=5000)
 
                     page.locator("#financialDocumentFileInput").set_input_files(str(pdfs["quote"]))
-                    expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ загружен.", timeout=15000)
+                    expect(page.locator("#financialDocumentsMessage")).to_contain_text("Загрузка завершена: 1", timeout=15000)
                     expect(page.locator("#financialDocumentsRows tr[data-financial-document-row]")).to_have_count(4, timeout=10000)
                     expect(page.locator("#financeQuoteLogisticsUsd")).to_contain_text("16 151", timeout=5000)
                     expect(page.locator("#financeImpliedRate")).not_to_contain_text("3 799", timeout=5000)
