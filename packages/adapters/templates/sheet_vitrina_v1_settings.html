@@ -75,9 +75,29 @@
     .icon-button.save { border-color: rgba(52, 211, 153, .55); color: #03130d; background: var(--success); }
     .icon-button.disable { border-color: rgba(250, 204, 21, .58); color: #211600; background: var(--warning); }
     .file-input { display: none; }
+    .settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .document-toolbar { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; align-items: end; }
+    .document-toolbar .toolbar { grid-column: span 2; }
+    .document-table { min-width: 1260px; }
+    .document-table th.col-doc-type { width: 110px; }
+    .document-table th.col-doc-number { width: 150px; }
+    .document-table th.col-doc-date { width: 128px; }
+    .document-table th.col-doc-supplier { width: 190px; }
+    .document-table th.col-doc-link { width: 210px; }
+    .document-table th.col-doc-source { width: 160px; }
+    .document-table th.col-doc-file { width: 200px; }
+    .document-table th.col-doc-updated { width: 164px; }
+    .document-table th.col-doc-actions { width: 220px; }
+    .link-select { min-width: 180px; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 900; background: rgba(167, 139, 250, .12); color: var(--accent); }
+    .pill.warning { background: rgba(250, 204, 21, .12); color: var(--warning); }
+    .pill.success { background: rgba(52, 211, 153, .12); color: var(--success); }
+    .compact-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     @media (max-width: 760px) {
       main { padding: 16px; }
       button, .button-link { width: 100%; }
+      .document-toolbar { grid-template-columns: 1fr; }
+      .document-toolbar .toolbar { grid-column: auto; }
     }
   </style>
 </head>
@@ -131,6 +151,71 @@
           </table>
         </div>
       </section>
+
+      <section class="block" aria-labelledby="documentsTitle">
+        <div class="toolbar" style="justify-content: space-between;">
+          <div>
+            <h2 id="documentsTitle">Справочник договоров и инвойсов</h2>
+            <p>Server-owned файлы контрактов и invoice без Google Sheets/localStorage.</p>
+          </div>
+          <div class="toolbar">
+            <button id="addContractButton" class="primary" type="button">Добавить контракт</button>
+            <button id="addInvoiceButton" class="primary" type="button">Добавить invoice</button>
+            <input id="documentFileInput" class="file-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.xlsx">
+          </div>
+        </div>
+        <div class="document-toolbar" style="margin-top: 12px;">
+          <div class="field">
+            <label for="documentNumberInput">Номер</label>
+            <input id="documentNumberInput" placeholder="№ документа">
+          </div>
+          <div class="field">
+            <label for="documentDateInput">Дата</label>
+            <input id="documentDateInput" type="date">
+          </div>
+          <div class="field">
+            <label for="documentSupplierInput">Поставщик</label>
+            <input id="documentSupplierInput" placeholder="Поставщик">
+          </div>
+          <div class="field">
+            <label for="documentSearchInput">Поиск</label>
+            <input id="documentSearchInput" placeholder="Номер, дата, поставщик, файл">
+          </div>
+          <div class="field">
+            <label for="documentTypeFilter">Фильтр</label>
+            <select id="documentTypeFilter">
+              <option value="all">Все</option>
+              <option value="contract">Контракты</option>
+              <option value="invoice">Invoice</option>
+              <option value="invoice_missing_contract">Invoice без контракта</option>
+            </select>
+          </div>
+          <div class="toolbar">
+            <button id="reloadDocumentsButton" type="button">Обновить</button>
+          </div>
+        </div>
+        <p id="documentsMessage" class="message">Читаем документы...</p>
+        <div class="table-wrap">
+          <table class="document-table">
+            <thead>
+              <tr>
+                <th class="col-doc-type">Тип</th>
+                <th class="col-doc-number">Номер</th>
+                <th class="col-doc-date">Дата</th>
+                <th class="col-doc-supplier">Поставщик</th>
+                <th class="col-doc-link">Связь</th>
+                <th class="col-doc-source">Источник</th>
+                <th class="col-doc-file">Файл</th>
+                <th class="col-doc-updated">Обновлено</th>
+                <th class="col-doc-actions">Действия</th>
+              </tr>
+            </thead>
+            <tbody id="documentRows">
+              <tr><td colspan="9">Документов пока нет.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </main>
 
@@ -141,6 +226,7 @@
       const nomenclaturePath = config.nomenclature_path;
       const nomenclatureExportPath = config.nomenclature_export_path;
       const nomenclatureImportPath = config.nomenclature_import_path;
+      const tradeDocumentsPath = config.trade_documents_path;
       const rowsBody = document.getElementById("nomenclatureRows");
       const message = document.getElementById("nomenclatureMessage");
       const filterInput = document.getElementById("nomenclatureFilter");
@@ -150,6 +236,17 @@
       const importFileInput = document.getElementById("importNomenclatureFile");
       const logoutLink = document.getElementById("logoutLink");
       const vitrinaLink = document.getElementById("vitrinaLink");
+      const addContractButton = document.getElementById("addContractButton");
+      const addInvoiceButton = document.getElementById("addInvoiceButton");
+      const documentFileInput = document.getElementById("documentFileInput");
+      const documentRows = document.getElementById("documentRows");
+      const documentsMessage = document.getElementById("documentsMessage");
+      const documentNumberInput = document.getElementById("documentNumberInput");
+      const documentDateInput = document.getElementById("documentDateInput");
+      const documentSupplierInput = document.getElementById("documentSupplierInput");
+      const documentSearchInput = document.getElementById("documentSearchInput");
+      const documentTypeFilter = document.getElementById("documentTypeFilter");
+      const reloadDocumentsButton = document.getElementById("reloadDocumentsButton");
 
       const productTypeLabels = {
         clear: "Прозрачное",
@@ -159,6 +256,8 @@
         other: "Другое"
       };
       let items = [];
+      let documents = [];
+      let pendingDocumentType = "";
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -169,6 +268,11 @@
       function setMessage(text, tone) {
         message.textContent = text || "";
         message.className = "message" + (tone ? " " + tone : "");
+      }
+
+      function setDocumentsMessage(text, tone) {
+        documentsMessage.textContent = text || "";
+        documentsMessage.className = "message" + (tone ? " " + tone : "");
       }
 
       async function fetchJson(url, options) {
@@ -374,6 +478,190 @@
         }
       }
 
+      async function loadDocuments() {
+        if (!tradeDocumentsPath) {
+          return;
+        }
+        setDocumentsMessage("Читаем документы...", "");
+        try {
+          const payload = await fetchJson(tradeDocumentsPath, { headers: { Accept: "application/json" } });
+          documents = Array.isArray(payload.documents) ? payload.documents : [];
+          renderDocuments();
+          setDocumentsMessage("", "");
+        } catch (error) {
+          setDocumentsMessage(error.message, "error");
+        }
+      }
+
+      function renderDocuments() {
+        const query = documentSearchInput.value.trim().toLowerCase();
+        const filter = documentTypeFilter.value;
+        const visible = documents.filter((document) => {
+          if (filter === "contract" && document.document_type !== "contract") {
+            return false;
+          }
+          if (filter === "invoice" && document.document_type !== "invoice") {
+            return false;
+          }
+          if (filter === "invoice_missing_contract" && (document.document_type !== "invoice" || document.linked_contract_document_id)) {
+            return false;
+          }
+          return !query || documentText(document).includes(query);
+        });
+        if (!visible.length) {
+          documentRows.innerHTML = '<tr><td colspan="9">Документов пока нет.</td></tr>';
+          return;
+        }
+        documentRows.innerHTML = visible.map(renderDocumentRow).join("");
+        Array.from(documentRows.querySelectorAll("[data-document-download]")).forEach((link) => {
+          link.addEventListener("click", (event) => event.stopPropagation());
+        });
+        Array.from(documentRows.querySelectorAll("[data-document-archive]")).forEach((button) => {
+          button.addEventListener("click", () => archiveDocument(button.dataset.documentArchive || ""));
+        });
+        Array.from(documentRows.querySelectorAll("[data-document-link]")).forEach((button) => {
+          button.addEventListener("click", () => {
+            const row = button.closest("tr[data-document-id]");
+            const select = row && row.querySelector("[data-contract-select]");
+            linkInvoiceContract(button.dataset.documentLink || "", select ? select.value : "");
+          });
+        });
+      }
+
+      function documentText(document) {
+        return [
+          document.document_type,
+          document.number,
+          document.document_date,
+          document.supplier_name,
+          document.file_original_name,
+          document.source,
+          document.linked_contract_number,
+          document.linked_contract_date
+        ].join(" ").toLowerCase();
+      }
+
+      function renderDocumentRow(document) {
+        const isInvoice = document.document_type === "invoice";
+        const isContract = document.document_type === "contract";
+        const linkCell = isInvoice ? renderInvoiceContractCell(document) : renderContractLinkCount(document);
+        const actions = [
+          '<a class="button-link compact" data-document-download href="' + escapeHtml(document.download_path || "#") + '">Скачать</a>',
+          '<button class="danger compact" type="button" data-document-archive="' + escapeHtml(document.document_id || "") + '">Archive</button>'
+        ];
+        return [
+          '<tr data-document-id="' + escapeHtml(document.document_id || "") + '">',
+          '<td>' + escapeHtml(isContract ? "Контракт" : "Invoice") + '</td>',
+          '<td>' + escapeHtml(document.number || "-") + '</td>',
+          '<td>' + escapeHtml(document.document_date || "-") + '</td>',
+          '<td>' + escapeHtml(document.supplier_name || "-") + '</td>',
+          '<td>' + linkCell + '</td>',
+          '<td>' + escapeHtml(sourceLabel(document.source)) + '</td>',
+          '<td>' + escapeHtml(document.file_original_name || "-") + '</td>',
+          '<td>' + escapeHtml(document.updated_at || "-") + '</td>',
+          '<td><div class="compact-actions">' + actions.join("") + '</div></td>',
+          '</tr>'
+        ].join("");
+      }
+
+      function renderInvoiceContractCell(document) {
+        if (document.linked_contract_document_id) {
+          return '<span class="pill success">Контракт №' + escapeHtml(document.linked_contract_number || document.linked_contract_document_id) + '</span>';
+        }
+        const contracts = documents.filter((item) => item.document_type === "contract" && item.status === "active");
+        const options = ['<option value="">Выбрать контракт</option>'].concat(contracts.map((contract) => (
+          '<option value="' + escapeHtml(contract.document_id || "") + '">' + escapeHtml(contractLabel(contract)) + '</option>'
+        ))).join("");
+        return [
+          '<span class="pill warning">Без контракта</span>',
+          '<div class="compact-actions" style="margin-top: 6px;">',
+          '<select class="link-select" data-contract-select>' + options + '</select>',
+          '<button class="compact" type="button" data-document-link="' + escapeHtml(document.document_id || "") + '">Связать</button>',
+          '</div>'
+        ].join("");
+      }
+
+      function renderContractLinkCount(document) {
+        const count = Number(document.linked_invoice_count || 0);
+        return '<span class="pill">' + escapeHtml(String(count)) + ' invoice</span>';
+      }
+
+      function contractLabel(contract) {
+        const number = contract.number || contract.file_original_name || contract.document_id;
+        const date = contract.document_date ? (" от " + contract.document_date) : "";
+        return "№" + number + date;
+      }
+
+      function sourceLabel(source) {
+        return {
+          settings_upload: "Settings upload",
+          supplier_shipment_parse: "Supplier shipment",
+          migration_existing_supplier_invoice: "Migration"
+        }[source] || source || "-";
+      }
+
+      function startDocumentUpload(documentType) {
+        pendingDocumentType = documentType;
+        documentFileInput.value = "";
+        documentFileInput.click();
+      }
+
+      async function uploadDocument(file) {
+        if (!file || !pendingDocumentType) {
+          return;
+        }
+        const formData = new FormData();
+        formData.append("document_type", pendingDocumentType);
+        formData.append("number", documentNumberInput.value.trim());
+        formData.append("document_date", documentDateInput.value.trim());
+        formData.append("supplier_name", documentSupplierInput.value.trim());
+        formData.append("file", file, file.name || (pendingDocumentType + ".xlsx"));
+        setDocumentsMessage("Загружаем документ...", "");
+        try {
+          const payload = await fetchJson(tradeDocumentsPath, { method: "POST", body: formData, headers: { Accept: "application/json" } });
+          await loadDocuments();
+          setDocumentsMessage(payload.status === "duplicate_existing" ? "Документ уже был в справочнике." : "Документ сохранён.", "success");
+        } catch (error) {
+          setDocumentsMessage(error.message, "error");
+        } finally {
+          pendingDocumentType = "";
+          documentFileInput.value = "";
+        }
+      }
+
+      async function linkInvoiceContract(invoiceDocumentId, contractDocumentId) {
+        if (!invoiceDocumentId || !contractDocumentId) {
+          setDocumentsMessage("Выберите контракт для связи.", "error");
+          return;
+        }
+        setDocumentsMessage("Связываем invoice с контрактом...", "");
+        try {
+          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ contract_document_id: contractDocumentId })
+          });
+          await loadDocuments();
+          setDocumentsMessage("Связь сохранена.", "success");
+        } catch (error) {
+          setDocumentsMessage(error.message, "error");
+        }
+      }
+
+      async function archiveDocument(documentId) {
+        if (!documentId || !confirm("Архивировать документ?")) {
+          return;
+        }
+        setDocumentsMessage("Архивируем документ...", "");
+        try {
+          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(documentId), { method: "DELETE", headers: { Accept: "application/json" } });
+          await loadDocuments();
+          setDocumentsMessage("Документ архивирован.", "success");
+        } catch (error) {
+          setDocumentsMessage(error.message, "error");
+        }
+      }
+
       addItemButton.addEventListener("click", () => {
         const draft = {
           item_id: "",
@@ -397,6 +685,12 @@
       importButton.addEventListener("click", () => importFileInput.click());
       importFileInput.addEventListener("change", () => uploadNomenclature(importFileInput.files && importFileInput.files[0]));
       filterInput.addEventListener("input", renderRows);
+      addContractButton.addEventListener("click", () => startDocumentUpload("contract"));
+      addInvoiceButton.addEventListener("click", () => startDocumentUpload("invoice"));
+      documentFileInput.addEventListener("change", () => uploadDocument(documentFileInput.files && documentFileInput.files[0]));
+      documentSearchInput.addEventListener("input", renderDocuments);
+      documentTypeFilter.addEventListener("change", renderDocuments);
+      reloadDocumentsButton.addEventListener("click", loadDocuments);
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
       }
@@ -404,6 +698,7 @@
         vitrinaLink.href = config.vitrina_path;
       }
       loadItems();
+      loadDocuments();
     })();
   </script>
 </body>

@@ -171,6 +171,21 @@
     .total { background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 10px; }
     .total span { display: block; color: var(--muted); font-size: 12px; }
     .total strong { font-size: 18px; }
+    .documents-panel {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+      padding: 12px;
+      border: 1px solid rgba(177, 139, 255, 0.18);
+      border-radius: 8px;
+      background: rgba(16, 19, 27, 0.42);
+    }
+    .document-slot { display: grid; gap: 8px; align-content: start; }
+    .document-slot strong { font-size: 13px; }
+    .document-slot span { color: var(--muted); }
+    .document-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .contract-select { min-width: 210px; max-width: 320px; }
     .line-input { min-width: 100px; }
     .line-input.small { min-width: 72px; }
     .line-input.wide { min-width: 180px; }
@@ -178,6 +193,7 @@
     @media (max-width: 760px) {
       main { padding: 16px; }
       .grid, .totals { grid-template-columns: 1fr; }
+      .documents-panel { grid-template-columns: 1fr; }
       .topbar { align-items: stretch; }
       button, .button-link { width: 100%; }
     }
@@ -216,7 +232,7 @@
                     <th data-currency-column>币种 / Currency / Валюта</th>
                     <th>匹配 / Matching / Матчинг</th>
                     <th>上传时间 / Uploaded / Дата загрузки</th>
-                    <th>发票 / Invoice / Файл invoice</th>
+                    <th>Документы</th>
                     <th data-order-status-column hidden>Статус заказа</th>
                     <th>操作 / Actions / Действия</th>
               </tr>
@@ -277,6 +293,27 @@
           </div>
         </div>
 
+        <div class="documents-panel" aria-label="Документы">
+          <div class="document-slot">
+            <strong>Invoice</strong>
+            <div class="document-actions">
+              <a id="documentInvoiceDownloadLink" class="button-link compact" href="#" hidden>Скачать invoice</a>
+              <span id="invoiceDocumentLabel">Invoice не сохранён</span>
+            </div>
+          </div>
+          <div class="document-slot">
+            <strong>Contract</strong>
+            <span id="contractDocumentLabel">Контракт: выбрать</span>
+            <div id="contractManageControls" class="document-actions" hidden>
+              <select id="contractCandidateSelect" class="contract-select"></select>
+              <button id="linkContractButton" class="compact" type="button">Выбрать контракт</button>
+              <button id="uploadContractButton" class="compact" type="button">Загрузить новый контракт</button>
+              <input id="contractFileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.xlsx" hidden>
+            </div>
+            <a id="contractDownloadLink" class="button-link compact" href="#" hidden>Скачать контракт</a>
+          </div>
+        </div>
+
         <div class="totals" style="margin-top: 16px;">
           <div class="total"><span>商品数量 / Product qty / Кол-во товаров</span><strong id="totalQty">0</strong></div>
           <div class="total"><span>商品金额 / Product amount / Сумма товаров</span><strong id="totalProducts">0</strong></div>
@@ -333,6 +370,7 @@
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-supplier-config").textContent);
       const shipmentsPath = config.supplier_shipments_path;
       const parsePath = config.supplier_shipments_parse_path;
+      const tradeDocumentsPath = config.trade_documents_path;
       const addShipmentButton = document.getElementById("addShipmentButton");
       const registryMessage = document.getElementById("registryMessage");
       const shipmentRows = document.getElementById("shipmentRows");
@@ -357,12 +395,22 @@
       const totalInvoice = document.getElementById("totalInvoice");
       const logoutLink = document.getElementById("logoutLink");
       const openStandaloneLink = document.getElementById("openStandaloneLink");
+      const documentInvoiceDownloadLink = document.getElementById("documentInvoiceDownloadLink");
+      const invoiceDocumentLabel = document.getElementById("invoiceDocumentLabel");
+      const contractDocumentLabel = document.getElementById("contractDocumentLabel");
+      const contractManageControls = document.getElementById("contractManageControls");
+      const contractCandidateSelect = document.getElementById("contractCandidateSelect");
+      const linkContractButton = document.getElementById("linkContractButton");
+      const uploadContractButton = document.getElementById("uploadContractButton");
+      const contractFileInput = document.getElementById("contractFileInput");
+      const contractDownloadLink = document.getElementById("contractDownloadLink");
       const metaInputs = Array.from(document.querySelectorAll("[data-meta-field]"));
           const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
           const defaultSupplierName = "HanShang Technology";
           const canDeleteShipments = config.can_delete_shipments !== false;
           const canEditOrderStatus = Boolean(config.can_edit_order_status);
           const canRecheckPrices = config.can_recheck_prices === true && Boolean(priceCheckButton);
+          const canManageDocuments = Boolean(config.can_manage_documents);
           const isEmbeddedOperator = config.embedded === "operator" || window.self !== window.top;
 
       let currentShipment = null;
@@ -370,6 +418,7 @@
       let isNewShipment = false;
       let cardDirty = false;
       let registryLoadState = "loading";
+      let activeContracts = [];
 
       const statusLabels = {
         all_matched: "OK",
@@ -512,7 +561,7 @@
               cells.push(
                 '<td>' + escapeHtml(status) + '</td>',
                 '<td>' + escapeHtml(row.created_at || "-") + '</td>',
-                '<td><a class="button-link compact" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download aria-label="Download invoice ' + escapeHtml(row.invoice_no || row.shipment_id || "") + '" title="Download invoice">Download</a></td>'
+                '<td>' + renderRegistryDocumentCell(row) + '</td>'
               );
               if (canEditOrderStatus) {
                 cells.push(renderOrderStatusCell(row));
@@ -535,6 +584,14 @@
             });
             bindOrderStatusControls();
             bindDeleteButtons();
+          }
+
+          function renderRegistryDocumentCell(row) {
+            const invoiceLink = '<a class="button-link compact" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download aria-label="Download invoice ' + escapeHtml(row.invoice_no || row.shipment_id || "") + '" title="Download invoice">Invoice</a>';
+            const contractPart = row.contract_download_path
+              ? '<a class="button-link compact" href="' + escapeHtml(row.contract_download_path || "#") + '" data-download aria-label="Download contract">Contract</a>'
+              : '<span class="muted-dash">Контракт: выбрать</span>';
+            return '<div class="row-actions">' + invoiceLink + contractPart + '</div>';
           }
 
           function renderOrderStatusCell(row) {
@@ -753,12 +810,62 @@
         uploadPanel.hidden = !isNewShipment;
         invoiceDownloadLink.hidden = !shipment.invoice_download_path;
         invoiceDownloadLink.href = shipment.invoice_download_path || "#";
+        renderDocumentPanel(shipment);
         if (priceCheckButton) {
           priceCheckButton.hidden = !shipment.shipment_id || !canRecheckPrices;
           priceCheckButton.disabled = !shipment.shipment_id || cardDirty || !canRecheckPrices;
         }
         renderLineTables(shipment.lines || []);
         updateTotalsAndState();
+      }
+
+      function renderDocumentPanel(shipment) {
+        const invoicePath = shipment.invoice_download_path || "";
+        documentInvoiceDownloadLink.hidden = !invoicePath;
+        documentInvoiceDownloadLink.href = invoicePath || "#";
+        invoiceDocumentLabel.textContent = shipment.invoice_document_id ? ("Document ID: " + shipment.invoice_document_id) : (shipment.shipment_id ? "Legacy invoice file" : "Invoice не сохранён");
+        const contractPath = shipment.contract_download_path || "";
+        contractDownloadLink.hidden = !contractPath;
+        contractDownloadLink.href = contractPath || "#";
+        if (shipment.contract_document_id) {
+          const contractNo = shipment.contract_no ? ("№" + shipment.contract_no) : shipment.contract_document_id;
+          const contractDate = shipment.contract_date ? (" от " + shipment.contract_date) : "";
+          contractDocumentLabel.textContent = contractNo + contractDate;
+        } else {
+          contractDocumentLabel.textContent = "Контракт: выбрать";
+        }
+        const candidates = Array.isArray(shipment.contract_candidates) ? shipment.contract_candidates : [];
+        contractManageControls.hidden = !canManageDocuments || !shipment.shipment_id || !shipment.invoice_document_id;
+        if (!contractManageControls.hidden) {
+          const contracts = activeContracts.length ? activeContracts : candidates;
+          const candidateIds = new Set(candidates.map((candidate) => candidate.document_id).filter(Boolean));
+          const options = ['<option value="">Выбрать контракт</option>'].concat(contracts.map((contract) => (
+            '<option value="' + escapeHtml(contract.document_id || "") + '">' + escapeHtml(contractOptionLabel(contract) + (candidateIds.has(contract.document_id) ? " · match" : "")) + '</option>'
+          ))).join("");
+          contractCandidateSelect.innerHTML = options;
+          linkContractButton.disabled = !contracts.length;
+        }
+      }
+
+      async function loadActiveContracts() {
+        if (!canManageDocuments || !tradeDocumentsPath) {
+          return;
+        }
+        try {
+          const payload = await fetchJson(tradeDocumentsPath, { headers: { Accept: "application/json" } });
+          activeContracts = (Array.isArray(payload.documents) ? payload.documents : []).filter((document) => document.document_type === "contract" && document.status === "active");
+          if (currentShipment) {
+            renderDocumentPanel(currentShipment);
+          }
+        } catch (error) {
+          activeContracts = [];
+        }
+      }
+
+      function contractOptionLabel(candidate) {
+        const number = candidate.number || candidate.file_original_name || candidate.document_id || "contract";
+        const date = candidate.document_date ? (" от " + candidate.document_date) : "";
+        return "№" + number + date;
       }
 
       function renderLineTables(lines) {
@@ -988,6 +1095,60 @@
         }
       }
 
+      async function linkSelectedContract() {
+        if (!canManageDocuments || !currentShipment || !currentShipment.shipment_id) {
+          return;
+        }
+        const contractDocumentId = contractCandidateSelect.value || "";
+        if (!contractDocumentId) {
+          setMessage(cardMessage, "Выберите контракт.", "error");
+          return;
+        }
+        setMessage(cardMessage, "Связываем контракт...", "");
+        try {
+          const payload = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id) + "/contract", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ contract_document_id: contractDocumentId })
+          });
+          currentShipment = payload.shipment || (await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), { headers: { Accept: "application/json" } }));
+          renderCard();
+          await loadRegistry();
+          setMessage(cardMessage, "Контракт связан.", "success");
+        } catch (error) {
+          setMessage(cardMessage, error.message, "error");
+        }
+      }
+
+      async function uploadContractFile(file) {
+        if (!canManageDocuments || !file || !currentShipment || !currentShipment.shipment_id) {
+          return;
+        }
+        const formData = new FormData();
+        const metadata = currentShipment.metadata || {};
+        formData.append("number", metadata.contract_no || currentShipment.contract_no || "");
+        formData.append("document_date", metadata.contract_date || currentShipment.contract_date || "");
+        formData.append("supplier_name", currentShipment.supplier_name || defaultSupplierName);
+        formData.append("file", file, file.name || "contract.pdf");
+        setMessage(cardMessage, "Загружаем контракт...", "");
+        try {
+          const payload = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id) + "/contract", {
+            method: "POST",
+            body: formData,
+            headers: { Accept: "application/json" }
+          });
+          currentShipment = payload.shipment || (await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), { headers: { Accept: "application/json" } }));
+          await loadActiveContracts();
+          renderCard();
+          await loadRegistry();
+          setMessage(cardMessage, "Контракт загружен и связан.", "success");
+        } catch (error) {
+          setMessage(cardMessage, error.message, "error");
+        } finally {
+          contractFileInput.value = "";
+        }
+      }
+
       function closeCard() {
         if ((cardDirty || (isNewShipment && currentUploadId)) && !confirm("关闭且不保存修改？ / Close without saving changes? / Закрыть карточку без сохранения изменений?")) {
           return;
@@ -1031,6 +1192,9 @@
       if (priceCheckButton) {
         priceCheckButton.addEventListener("click", recheckCurrentShipmentPrices);
       }
+      linkContractButton.addEventListener("click", linkSelectedContract);
+      uploadContractButton.addEventListener("click", () => contractFileInput.click());
+      contractFileInput.addEventListener("change", () => uploadContractFile(contractFileInput.files && contractFileInput.files[0]));
       closeShipmentButton.addEventListener("click", closeCard);
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;
@@ -1060,6 +1224,7 @@
           }
 
           configureRegistryColumns();
+          loadActiveContracts();
           loadRegistry();
     })();
   </script>

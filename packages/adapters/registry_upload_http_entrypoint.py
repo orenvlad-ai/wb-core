@@ -156,6 +156,7 @@ DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
 DEFAULT_NOMENCLATURE_IMPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
+DEFAULT_TRADE_DOCUMENTS_PATH = "/v1/sheet-vitrina-v1/settings/documents"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
@@ -983,6 +984,33 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_supplier_shipment_contract_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
+                    upload_payload = _load_uploaded_file_payload(self)
+                    payload = entrypoint.handle_supplier_shipments_contract_upload_request(
+                        shipment_id,
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        fields=upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {},
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment contract upload failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
                 try:
                     payload = _load_request_payload(self)
@@ -995,6 +1023,30 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"supplier shipment create failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_TRADE_DOCUMENTS_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    result = entrypoint.handle_trade_documents_create_request(
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        fields=upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {},
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"trade document upload failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -1253,6 +1305,7 @@ def _build_handler(
                         can_delete_shipments=role == "operator",
                         can_edit_order_status=is_operator_embedded,
                         can_recheck_prices=is_operator_embedded,
+                        can_manage_documents=is_operator_embedded,
                     ),
                 )
                 return
@@ -1940,6 +1993,47 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_TRADE_DOCUMENTS_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_trade_documents_list_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"trade documents list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_trade_document_file_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    document_id = _resolve_trade_document_id(parsed.path)
+                    file_bytes, filename, content_type = entrypoint.handle_trade_documents_file_request(document_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"trade document download failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    file_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
             if _is_supplier_shipment_invoice_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_invoice_path(parsed.path)
@@ -1960,6 +2054,30 @@ def _build_handler(
                     self,
                     HTTPStatus.OK,
                     workbook_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if _is_supplier_shipment_contract_path(parsed.path):
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
+                    file_bytes, filename, content_type = entrypoint.handle_supplier_shipments_contract_request(shipment_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier contract download failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    file_bytes,
                     content_type=content_type,
                     filename=filename,
                     as_attachment=True,
@@ -2301,10 +2419,80 @@ def _build_handler(
             parsed = urllib_parse.urlparse(self.path)
             if not _ensure_web_auth(self, parsed):
                 return
+            if _is_supplier_shipment_contract_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_supplier_shipments_contract_patch_request(
+                        shipment_id,
+                        payload,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment contract patch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if _is_trade_document_contract_link_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    invoice_document_id = _resolve_trade_document_id(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_trade_documents_contract_patch_request(
+                        invoice_document_id,
+                        payload,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"trade document contract link failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if _is_trade_document_item_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    document_id = _resolve_trade_document_id(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_trade_documents_patch_request(document_id, payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"trade document patch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if _is_supplier_shipment_detail_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
                     payload = _load_request_payload(self)
+                    if "contract_document_id" in payload and not _ensure_operator_role(self, parsed.path):
+                        return
                     if "order_status" in payload:
                         if not _ensure_operator_role(self, parsed.path):
                             return
@@ -2393,6 +2581,25 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"supplier shipment delete failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_trade_document_item_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    document_id = _resolve_trade_document_id(parsed.path)
+                    payload = entrypoint.handle_trade_documents_archive_request(document_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"trade document archive failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -2512,10 +2719,17 @@ def _load_uploaded_file_payload(handler: BaseHTTPRequestHandler) -> dict[str, An
     workbook_bytes = b""
     filename = ""
     part_content_type = ""
+    fields: dict[str, str] = {}
     for part in message.iter_parts():
         if part.get_content_disposition() != "form-data":
             continue
-        if part.get_param("name", header="Content-Disposition") != "file":
+        part_name = str(part.get_param("name", header="Content-Disposition") or "").strip()
+        if part_name != "file":
+            if part_name:
+                payload = part.get_payload(decode=True)
+                if payload is not None:
+                    charset = part.get_content_charset() or "utf-8"
+                    fields[part_name] = payload.decode(charset, errors="replace").strip()
             continue
         payload = part.get_payload(decode=True)
         if payload:
@@ -2529,6 +2743,7 @@ def _load_uploaded_file_payload(handler: BaseHTTPRequestHandler) -> dict[str, An
         "workbook_bytes": workbook_bytes,
         "filename": filename,
         "content_type": part_content_type,
+        "fields": fields,
     }
 
 
@@ -2867,6 +3082,14 @@ def _is_supplier_shipment_invoice_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "invoice"
 
 
+def _is_supplier_shipment_contract_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "contract"
+
+
 def _is_supplier_shipment_rematch_path(path: str) -> bool:
     if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
         return False
@@ -2897,6 +3120,29 @@ def _is_nomenclature_item_path(path: str) -> bool:
     return bool(suffix) and "/" not in suffix
 
 
+def _is_trade_document_item_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_TRADE_DOCUMENTS_PATH) + 1 :]
+    return bool(suffix) and "/" not in suffix
+
+
+def _is_trade_document_file_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_TRADE_DOCUMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "file"
+
+
+def _is_trade_document_contract_link_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_TRADE_DOCUMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "contract"
+
+
 def _is_supplier_order_status_only_payload(payload: Mapping[str, Any]) -> bool:
     return set(payload.keys()) == {"order_status"}
 
@@ -2910,6 +3156,13 @@ def _resolve_supplier_shipment_id_from_detail_path(path: str) -> str:
 def _resolve_supplier_shipment_id_from_invoice_path(path: str) -> str:
     if not _is_supplier_shipment_invoice_path(path):
         raise ValueError(f"unsupported supplier shipment invoice path: {path}")
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/", 1)[0]
+
+
+def _resolve_supplier_shipment_id_from_contract_path(path: str) -> str:
+    if not _is_supplier_shipment_contract_path(path):
+        raise ValueError(f"unsupported supplier shipment contract path: {path}")
     suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
     return suffix.split("/", 1)[0]
 
@@ -2938,6 +3191,15 @@ def _resolve_nomenclature_item_id(path: str) -> str:
     if not _is_nomenclature_item_path(path):
         raise ValueError(f"unsupported nomenclature item path: {path}")
     return path[len(DEFAULT_NOMENCLATURE_PATH) + 1 :]
+
+
+def _resolve_trade_document_id(path: str) -> str:
+    if _is_trade_document_file_path(path) or _is_trade_document_contract_link_path(path):
+        suffix = path[len(DEFAULT_TRADE_DOCUMENTS_PATH) + 1 :]
+        return suffix.split("/", 1)[0]
+    if _is_trade_document_item_path(path):
+        return path[len(DEFAULT_TRADE_DOCUMENTS_PATH) + 1 :]
+    raise ValueError(f"unsupported trade document path: {path}")
 
 
 def _resolve_wb_regional_district_from_download_path(path: str) -> str:
@@ -3840,6 +4102,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+        "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "stock_report_active_skus": list(operator_ui_context.get("stock_report_active_skus") or []),
         "stock_report_active_sku_count": int(operator_ui_context.get("stock_report_active_sku_count") or 0),
@@ -3864,16 +4127,19 @@ def _render_sheet_vitrina_supplier_ui(
     can_delete_shipments: bool = True,
     can_edit_order_status: bool = False,
     can_recheck_prices: bool = True,
+    can_manage_documents: bool = False,
 ) -> str:
     config_payload = {
         "page_title": "Реестр заказов",
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+        "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "can_delete_shipments": bool(can_delete_shipments),
         "can_edit_order_status": bool(can_edit_order_status),
         "can_recheck_prices": bool(can_recheck_prices),
+        "can_manage_documents": bool(can_manage_documents),
     }
     price_check_button_html = (
         '<button id="priceCheckButton" type="button" hidden>Проверить цены</button>'
@@ -3896,6 +4162,7 @@ def _render_sheet_vitrina_settings_ui() -> str:
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
         "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
+        "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
     }
