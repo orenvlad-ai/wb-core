@@ -76,6 +76,50 @@ Transitplus International Ltd
 Предложение действительно в течение 5 календарных дней
 """
 
+QUOTE_PDFTOTEXT_TEXT = """
+Коммерческое предложение
+на транспортно-экспедиционные услуги
+по тарифу «Авто стандарт 25-30 дней»
+
+г. Москва                                                                                                       02.06.2026
+Наименование груза:                                           СТЕКЛА ДЛЯ СМАРТФОНА
+Условия поставки:                                             EXW
+Город отправки:                                               Guangzhou (Гуанчжоу)
+Пункт назначения:                                             Москва
+Сроки доставки:                                               25-30 дней
+Вес брутто, кг.                                               9644,6
+Вес нетто, кг:                                                9644,6
+Объем, м3                                                     45,32
+Оценочная стоимость груза, долл.                              112155,36 USD или 785087,50 юаней
+
+1. Предварительный расчет стоимости:(окончательный будет предоставлен по факту получения и взвешивания груза на складе
+Transitplus в Китае или после предоставления окончательного упаковочного листа от поставщика)
+
+    №                           Перечень услуг                       Стоимость за кг / Ставка / Тип           Общая стоимость
+    1      Стоимость доставки                                                                                           14360
+     2     Таможенные платежи и сборы                                                                                   40985
+     3     Экологический сбор                                                                                               0
+     4     Брокерские услуги                                                                                              320 USD
+     5     Комиссия компании                                                                                              350
+     6     Страховая ставка, %                                                     1,0%                                  1121
+     7     Стоимость дополнительной упаковки
+ИТОГО:                                                                                                                  57136 USD
+
+    №                         Дополнительные услуги                                             Общая стоимость
+     1     Оформление разрешительной документации                                                        0 USD
+     2     Тип разрешительной документации                                                             0
+
+                                                                            80 - 150 USD (стандартно оплачивается поставщиком
+     3     Стоимость оформления экспортных документов
+                                                                            китайскому брокеру напрямую. В случае отказа поставщика
+                                                                            оплачивать, расход выставляется на Клиента)
+ ИТОГО:                                                                                                                     0 USD
+
+2. Оплата за доставку производится: по курсу Банка ВТБ (на дату выставления счета), без оплаты груз Клиенту не выдается.
+6. Предложение действительно в течение 5 календарных дней (после этого срока требуется актуализация ставки).
+Transitplus International Ltd
+"""
+
 BROKEN_QUOTE_TEXT = """
 Коммерческое предложение на транспортно-экспедиционные услуги по тарифу «Авто стандарт 25-30 дней»
 Transitplus International Ltd
@@ -152,31 +196,10 @@ def main() -> None:
 
 def _assert_parser_smoke() -> None:
     quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
-    quote = quote_payload["normalized_parse"]
-    if (
-        quote.get("document_type") != "logistics_quote"
-        or quote.get("quote_date") != "2026-06-02"
-        or quote.get("gross_weight_kg") != 9644.6
-        or quote.get("total_amount") != 57136.0
-        or quote.get("quote_logistics_component_usd") != 16151.0
-        or quote.get("quote_customs_component_usd") != 40985.0
-        or quote.get("quote_required_amounts_complete") is not True
-    ):
-        raise AssertionError(f"quote parser fields mismatch: {quote}")
-    quote_lines = {line.get("category"): line for line in quote_payload.get("expense_lines", [])}
-    expected_quote_amounts = {
-        "delivery_cost": 14360.0,
-        "customs_payments_and_fees": 40985.0,
-        "brokerage_services": 320.0,
-        "company_commission": 350.0,
-        "insurance": 1121.0,
-    }
-    for category, expected in expected_quote_amounts.items():
-        actual = quote_lines.get(category, {}).get("amount")
-        if actual != expected:
-            raise AssertionError(f"quote line {category} mismatch: expected {expected}, got {actual}")
-    if any("required amount" in warning for warning in quote_payload.get("warnings", [])):
-        raise AssertionError(f"quote parser must not report missing required amounts: {quote_payload.get('warnings')}")
+    _assert_transitplus_quote_payload(quote_payload)
+
+    pdftotext_quote_payload = parse_financial_document_text(QUOTE_PDFTOTEXT_TEXT, filename="quote-pdftotext.txt")
+    _assert_transitplus_quote_payload(pdftotext_quote_payload)
 
     invoice_103 = parse_financial_document_text(INVOICE_103_TEXT, filename="invoice-103.txt")["normalized_parse"]
     if (
@@ -205,6 +228,34 @@ def _assert_parser_smoke() -> None:
     ):
         raise AssertionError(f"customs parser fields mismatch: {customs}")
     _assert_incomplete_quote_summary_smoke()
+
+
+def _assert_transitplus_quote_payload(quote_payload: dict[str, Any]) -> None:
+    quote = quote_payload["normalized_parse"]
+    if (
+        quote.get("document_type") != "logistics_quote"
+        or quote.get("quote_date") != "2026-06-02"
+        or quote.get("gross_weight_kg") != 9644.6
+        or quote.get("total_amount") != 57136.0
+        or quote.get("quote_logistics_component_usd") != 16151.0
+        or quote.get("quote_customs_component_usd") != 40985.0
+        or quote.get("quote_required_amounts_complete") is not True
+    ):
+        raise AssertionError(f"quote parser fields mismatch: {quote}")
+    quote_lines = {line.get("category"): line for line in quote_payload.get("expense_lines", [])}
+    expected_quote_amounts = {
+        "delivery_cost": 14360.0,
+        "customs_payments_and_fees": 40985.0,
+        "brokerage_services": 320.0,
+        "company_commission": 350.0,
+        "insurance": 1121.0,
+    }
+    for category, expected in expected_quote_amounts.items():
+        actual = quote_lines.get(category, {}).get("amount")
+        if actual != expected:
+            raise AssertionError(f"quote line {category} mismatch: expected {expected}, got {actual}")
+    if any("required amount" in warning for warning in quote_payload.get("warnings", [])):
+        raise AssertionError(f"quote parser must not report missing required amounts: {quote_payload.get('warnings')}")
 
 
 def _assert_incomplete_quote_summary_smoke() -> None:
