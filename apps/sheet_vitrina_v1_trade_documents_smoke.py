@@ -165,11 +165,44 @@ def main() -> None:
                         "updated_at": clock.next(),
                     }
                 )
+                filled_warning_contract_bytes = _build_contract_xlsx_fixture("FILLED-WARN-0804", "2026-08-04")
+                filled_warning_contract_path = _write_runtime_contract_file(
+                    runtime_dir,
+                    document_id="tdoc_backfill_filled_warning_contract",
+                    filename="backfill-filled-warning-contract.xlsx",
+                    body=filled_warning_contract_bytes,
+                )
+                runtime.save_trade_document(
+                    {
+                        "document_id": "tdoc_backfill_filled_warning_contract",
+                        "document_type": TRADE_DOCUMENT_TYPE_CONTRACT,
+                        "number": "FILLED-WARN-0804",
+                        "document_date": "2026-08-04",
+                        "supplier_name": DEFAULT_SUPPLIER_NAME,
+                        "currency": "",
+                        "amount_total": None,
+                        "source": TRADE_DOCUMENT_SOURCE_SETTINGS_UPLOAD,
+                        "source_shipment_id": "",
+                        "source_upload_id": "",
+                        "file_original_name": "backfill-filled-warning-contract.xlsx",
+                        "file_content_type": SUPPLIER_INVOICE_CONTENT_TYPE,
+                        "file_sha256": hashlib.sha256(filled_warning_contract_bytes).hexdigest(),
+                        "file_path": filled_warning_contract_path,
+                        "parser_version": TRADE_DOCUMENT_CONTRACT_PARSER_VERSION,
+                        "parsed_metadata": {},
+                        "warnings": ["contract parser skipped OCR: OCR tools missing (pdftoppm/tesseract)"],
+                        "errors": [],
+                        "status": TRADE_DOCUMENT_STATUS_ACTIVE,
+                        "created_at": clock.next(),
+                        "updated_at": clock.next(),
+                    }
+                )
                 backfill_result = backfill_block.backfill_trade_document_metadata()
                 empty_backfilled = runtime.load_trade_document("tdoc_backfill_empty_contract") or {}
                 manual_backfilled = runtime.load_trade_document("tdoc_backfill_manual_contract") or {}
+                filled_warning_backfilled = runtime.load_trade_document("tdoc_backfill_filled_warning_contract") or {}
                 if (
-                    backfill_result.get("updated_documents") != 2
+                    backfill_result.get("updated_documents") != 3
                     or empty_backfilled.get("number") != "BACKFILL-2026-0801"
                     or empty_backfilled.get("document_date") != "2026-08-01"
                     or empty_backfilled.get("supplier_name") != DEFAULT_SUPPLIER_NAME
@@ -178,8 +211,12 @@ def main() -> None:
                     or manual_backfilled.get("number") != "MANUAL-KEEP-0802"
                     or manual_backfilled.get("document_date") != "2026-08-03"
                     or manual_backfilled.get("supplier_name") != DEFAULT_SUPPLIER_NAME
+                    or filled_warning_backfilled.get("warnings") != []
                 ):
-                    raise AssertionError(f"trade document metadata backfill failed: {backfill_result} {empty_backfilled} {manual_backfilled}")
+                    raise AssertionError(
+                        "trade document metadata backfill failed: "
+                        f"{backfill_result} {empty_backfilled} {manual_backfilled} {filled_warning_backfilled}"
+                    )
                 second_backfill_result = backfill_block.backfill_trade_document_metadata()
                 if second_backfill_result.get("updated_documents") != 0:
                     raise AssertionError(f"trade document metadata backfill must be idempotent, got {second_backfill_result}")
