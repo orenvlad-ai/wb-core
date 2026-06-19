@@ -186,15 +186,84 @@
     .document-slot span { color: var(--muted); }
     .document-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .contract-select { min-width: 210px; max-width: 320px; }
+    .card-tabs {
+      display: inline-flex;
+      gap: 6px;
+      margin-top: 16px;
+      border: 1px solid rgba(177, 139, 255, 0.22);
+      border-radius: 8px;
+      padding: 4px;
+      background: rgba(16, 19, 27, 0.42);
+    }
+    .card-tab-button {
+      min-height: 32px;
+      border-radius: 6px;
+      padding: 6px 10px;
+      background: transparent;
+      border-color: transparent;
+      font-size: 13px;
+    }
+    .card-tab-button[aria-selected="true"] {
+      background: rgba(167, 139, 250, 0.18);
+      border-color: rgba(167, 139, 250, 0.42);
+      color: #ede9fe;
+    }
+    .finance-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    .finance-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(135px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .finance-fields {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(170px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .finance-field {
+      border: 1px solid rgba(177, 139, 255, 0.18);
+      border-radius: 6px;
+      padding: 9px;
+      background: rgba(16, 19, 27, 0.42);
+      min-width: 0;
+    }
+    .finance-field span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+      overflow-wrap: anywhere;
+    }
+    .finance-field strong {
+      display: block;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+    .warning-list {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: var(--warning);
+      font-size: 13px;
+    }
+    .finance-row-selected td { background: rgba(56, 189, 248, 0.09); }
     .line-input { min-width: 100px; }
     .line-input.small { min-width: 72px; }
     .line-input.wide { min-width: 180px; }
     [hidden] { display: none !important; }
     @media (max-width: 760px) {
       main { padding: 16px; }
-      .grid, .totals { grid-template-columns: 1fr; }
+      .grid, .totals, .finance-summary-grid, .finance-fields { grid-template-columns: 1fr; }
       .documents-panel { grid-template-columns: 1fr; }
       .topbar { align-items: stretch; }
+      .card-tabs { display: grid; width: 100%; }
       button, .button-link { width: 100%; }
     }
   </style>
@@ -259,6 +328,12 @@
           </div>
         </div>
 
+        <div class="card-tabs" role="tablist" aria-label="Раздел заказа">
+          <button id="supplyCompositionTabButton" class="card-tab-button" type="button" role="tab" aria-selected="true" data-card-tab="supply">Состав поставки</button>
+          <button id="financialDocumentsTabButton" class="card-tab-button" type="button" role="tab" aria-selected="false" data-card-tab="financial" hidden>Финансовые документы</button>
+        </div>
+
+        <div id="supplyCompositionPanel" role="tabpanel" data-card-panel="supply">
         <div id="uploadPanel" class="dropzone">
           <strong>拖拽XLSX发票到此处 / Drag XLSX invoice here / Перетащите XLSX invoice сюда</strong>
           <span>选择文件 / Choose file / Выбрать файл</span>
@@ -360,6 +435,76 @@
             <tbody id="extraLines"></tbody>
           </table>
         </div>
+        </div>
+
+        <div id="financialDocumentsPanel" role="tabpanel" data-card-panel="financial" hidden>
+          <div class="finance-toolbar">
+            <button id="addFinancialDocumentButton" class="primary compact" type="button">Добавить документ</button>
+            <input id="financialDocumentFileInput" type="file" accept=".pdf" hidden>
+            <p id="financialDocumentsMessage" class="message"></p>
+          </div>
+
+          <div class="finance-summary-grid" aria-label="Финансовая сводка">
+            <div class="total"><span>КП логиста, USD</span><strong id="financeQuoteTotalUsd">-</strong></div>
+            <div class="total"><span>Логистика по КП, USD</span><strong id="financeQuoteLogisticsUsd">-</strong></div>
+            <div class="total"><span>КП таможня, USD</span><strong id="financeQuoteCustomsUsd">-</strong></div>
+            <div class="total"><span>Счета логиста, ₽</span><strong id="financeInvoiceRub">-</strong></div>
+            <div class="total"><span>Счета НДС, ₽</span><strong id="financeInvoiceVatRub">-</strong></div>
+            <div class="total"><span>ДТ сбор, ₽</span><strong id="financeCustomsFeeRub">-</strong></div>
+            <div class="total"><span>ДТ пошлина, ₽</span><strong id="financeImportDutyRub">-</strong></div>
+            <div class="total"><span>ДТ НДС, ₽</span><strong id="financeImportVatRub">-</strong></div>
+            <div class="total"><span>ДТ всего, ₽</span><strong id="financeCustomsRub">-</strong></div>
+            <div class="total"><span>Логистика ₽/кг</span><strong id="financeRubPerKg">-</strong></div>
+            <div class="total"><span>Расчётный курс</span><strong id="financeImpliedRate">-</strong></div>
+            <div class="total"><span>Дельта к ЦБ</span><strong id="financeRateSpread">-</strong></div>
+            <div class="total"><span>КП vs счета, ₽</span><strong id="financeQuoteInvoiceDelta">-</strong></div>
+          </div>
+          <ul id="financialWarnings" class="warning-list" hidden></ul>
+
+          <h3 style="margin-top: 18px;">Финансовые документы</h3>
+          <div class="line-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Дата</th>
+                  <th>Тип</th>
+                  <th>Номер</th>
+                  <th>Контрагент</th>
+                  <th>Сумма</th>
+                  <th>НДС</th>
+                  <th>Курс ЦБ USD/RUB</th>
+                  <th>Статус</th>
+                  <th>Файл</th>
+                  <th>Комментарий</th>
+                </tr>
+              </thead>
+              <tbody id="financialDocumentsRows"></tbody>
+            </table>
+          </div>
+
+          <h3 style="margin-top: 18px;">Распознанные поля</h3>
+          <div id="financialRecognizedFields" class="finance-fields"></div>
+
+          <h3 style="margin-top: 18px;">Расходные строки</h3>
+          <div class="line-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Статья</th>
+                  <th>Этап</th>
+                  <th>Описание</th>
+                  <th>Сумма</th>
+                  <th>Валюта</th>
+                  <th>Сумма ₽</th>
+                  <th>НДС</th>
+                  <th>Флаги</th>
+                  <th>Статус</th>
+                </tr>
+              </thead>
+              <tbody id="financialExpenseRows"></tbody>
+            </table>
+          </div>
+        </div>
       </section>
     </div>
   </main>
@@ -404,13 +549,39 @@
       const uploadContractButton = document.getElementById("uploadContractButton");
       const contractFileInput = document.getElementById("contractFileInput");
       const contractDownloadLink = document.getElementById("contractDownloadLink");
+      const supplyCompositionTabButton = document.getElementById("supplyCompositionTabButton");
+      const financialDocumentsTabButton = document.getElementById("financialDocumentsTabButton");
+      const supplyCompositionPanel = document.getElementById("supplyCompositionPanel");
+      const financialDocumentsPanel = document.getElementById("financialDocumentsPanel");
+      const addFinancialDocumentButton = document.getElementById("addFinancialDocumentButton");
+      const financialDocumentFileInput = document.getElementById("financialDocumentFileInput");
+      const financialDocumentsMessage = document.getElementById("financialDocumentsMessage");
+      const financialDocumentsRows = document.getElementById("financialDocumentsRows");
+      const financialRecognizedFields = document.getElementById("financialRecognizedFields");
+      const financialExpenseRows = document.getElementById("financialExpenseRows");
+      const financialWarnings = document.getElementById("financialWarnings");
+      const financeQuoteTotalUsd = document.getElementById("financeQuoteTotalUsd");
+      const financeQuoteLogisticsUsd = document.getElementById("financeQuoteLogisticsUsd");
+      const financeQuoteCustomsUsd = document.getElementById("financeQuoteCustomsUsd");
+      const financeInvoiceRub = document.getElementById("financeInvoiceRub");
+      const financeInvoiceVatRub = document.getElementById("financeInvoiceVatRub");
+      const financeCustomsFeeRub = document.getElementById("financeCustomsFeeRub");
+      const financeImportDutyRub = document.getElementById("financeImportDutyRub");
+      const financeImportVatRub = document.getElementById("financeImportVatRub");
+      const financeCustomsRub = document.getElementById("financeCustomsRub");
+      const financeRubPerKg = document.getElementById("financeRubPerKg");
+      const financeImpliedRate = document.getElementById("financeImpliedRate");
+      const financeRateSpread = document.getElementById("financeRateSpread");
+      const financeQuoteInvoiceDelta = document.getElementById("financeQuoteInvoiceDelta");
       const metaInputs = Array.from(document.querySelectorAll("[data-meta-field]"));
           const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
+          const moneyFormatter = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           const defaultSupplierName = "HanShang Technology";
           const canDeleteShipments = config.can_delete_shipments !== false;
           const canEditOrderStatus = Boolean(config.can_edit_order_status);
           const canRecheckPrices = config.can_recheck_prices === true && Boolean(priceCheckButton);
           const canManageDocuments = Boolean(config.can_manage_documents);
+          const canManageFinancialDocuments = Boolean(config.can_manage_financial_documents);
           const isEmbeddedOperator = config.embedded === "operator" || window.self !== window.top;
 
       let currentShipment = null;
@@ -419,6 +590,11 @@
       let cardDirty = false;
       let registryLoadState = "loading";
       let activeContracts = [];
+      let activeCardTab = "supply";
+      let financialDocuments = [];
+      let financialExpenseLines = [];
+      let financialSummary = null;
+      let selectedFinancialDocumentId = "";
 
       const statusLabels = {
         all_matched: "OK",
@@ -438,6 +614,34 @@
             production: "На производстве",
             in_transit: "В пути",
             accepted_ff: "Принято на ФФ"
+          };
+          const financialDocumentTypeLabels = {
+            logistics_quote: "КП логиста",
+            logistics_invoice: "Счёт логиста",
+            customs_declaration: "ДТ"
+          };
+          const financialStatusLabels = {
+            parsed: "Распознан",
+            needs_review: "Проверить",
+            confirmed: "Подтверждён",
+            excluded: "Исключён",
+            parse_error: "Ошибка"
+          };
+          const financialCategoryLabels = {
+            delivery_cost: "Доставка",
+            customs_payments_and_fees: "Таможенные платежи",
+            ecological_fee: "Экологический сбор",
+            brokerage_services: "Брокерские услуги",
+            company_commission: "Комиссия",
+            insurance: "Страхование",
+            packaging: "Упаковка",
+            additional_permission_docs: "Разрешительная документация",
+            export_docs_possible: "Экспортные документы",
+            border_expedition: "Пограничное экспедирование",
+            domestic_transport: "Доставка по РФ",
+            customs_fee_1010: "Таможенный сбор",
+            import_duty_2010: "Пошлина",
+            import_vat_5010: "Импортный НДС"
           };
           const priceConformityReasonLabels = {
             price_matched: "Цена совпадает",
@@ -462,6 +666,21 @@
       function formatNumber(value) {
         const number = Number(value);
         return Number.isFinite(number) ? numberFormatter.format(number) : "-";
+      }
+
+      function formatMoney(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? moneyFormatter.format(number) : "-";
+      }
+
+      function formatAmount(value, currency) {
+        const formatted = formatMoney(value);
+        return formatted === "-" ? "-" : (formatted + (currency ? " " + currency : ""));
+      }
+
+      function formatPercent(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? numberFormatter.format(number * 100) + "%" : "-";
       }
 
           function setMessage(element, text, tone) {
@@ -737,6 +956,8 @@
         currentUploadId = "";
         isNewShipment = true;
         cardDirty = false;
+        activeCardTab = "supply";
+        resetFinancialState();
         renderCard();
         updateSelectedFileLabel(null);
         shipmentCard.hidden = false;
@@ -754,6 +975,9 @@
           renderCard();
           shipmentCard.hidden = false;
           shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
+          if (canManageFinancialDocuments) {
+            loadFinancialDocuments();
+          }
         } catch (error) {
           setMessage(registryMessage, error.message, "error");
         }
@@ -810,6 +1034,7 @@
         uploadPanel.hidden = !isNewShipment;
         invoiceDownloadLink.hidden = !shipment.invoice_download_path;
         invoiceDownloadLink.href = shipment.invoice_download_path || "#";
+        renderCardTabs(shipment);
         renderDocumentPanel(shipment);
         if (priceCheckButton) {
           priceCheckButton.hidden = !shipment.shipment_id || !canRecheckPrices;
@@ -847,6 +1072,47 @@
         }
       }
 
+      function renderCardTabs(shipment) {
+        const canShowFinance = canManageFinancialDocuments;
+        financialDocumentsTabButton.hidden = !canShowFinance;
+        financialDocumentsTabButton.disabled = !canShowFinance || !shipment.shipment_id;
+        if (!canShowFinance || !shipment.shipment_id) {
+          activeCardTab = "supply";
+        }
+        supplyCompositionTabButton.setAttribute("aria-selected", activeCardTab === "supply" ? "true" : "false");
+        financialDocumentsTabButton.setAttribute("aria-selected", activeCardTab === "financial" ? "true" : "false");
+        supplyCompositionPanel.hidden = activeCardTab !== "supply";
+        financialDocumentsPanel.hidden = activeCardTab !== "financial";
+      }
+
+      function switchCardTab(tab) {
+        if (tab === "financial" && (!canManageFinancialDocuments || !currentShipment || !currentShipment.shipment_id)) {
+          setMessage(cardMessage, "Сначала сохраните заказ.", "error");
+          return;
+        }
+        activeCardTab = tab === "financial" ? "financial" : "supply";
+        renderCardTabs(currentShipment || blankShipment());
+        if (activeCardTab === "financial") {
+          loadFinancialDocuments();
+        }
+      }
+
+      function financialDocumentsPath(shipmentId) {
+        return shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/financial-documents";
+      }
+
+      function financialDocumentPath(shipmentId, documentId) {
+        return financialDocumentsPath(shipmentId) + "/" + encodeURIComponent(documentId);
+      }
+
+      function resetFinancialState() {
+        financialDocuments = [];
+        financialExpenseLines = [];
+        financialSummary = null;
+        selectedFinancialDocumentId = "";
+        renderFinancialDocuments();
+      }
+
       async function loadActiveContracts() {
         if (!canManageDocuments || !tradeDocumentsPath) {
           return;
@@ -866,6 +1132,273 @@
         const number = candidate.number || candidate.file_original_name || candidate.document_id || "contract";
         const date = candidate.document_date ? (" от " + candidate.document_date) : "";
         return "№" + number + date;
+      }
+
+      async function loadFinancialDocuments(options) {
+        if (!canManageFinancialDocuments || !currentShipment || !currentShipment.shipment_id) {
+          resetFinancialState();
+          return;
+        }
+        setMessage(financialDocumentsMessage, "Загружаем финансовые документы...", "");
+        try {
+          const payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
+            headers: { Accept: "application/json" }
+          });
+          financialDocuments = Array.isArray(payload.documents) ? payload.documents : [];
+          financialExpenseLines = Array.isArray(payload.expense_lines) ? payload.expense_lines : [];
+          financialSummary = payload.summary || null;
+          if (options && options.selectedDocumentId) {
+            selectedFinancialDocumentId = options.selectedDocumentId;
+          }
+          if (!selectedFinancialDocumentId || !financialDocuments.some((document) => document.document_id === selectedFinancialDocumentId)) {
+            selectedFinancialDocumentId = financialDocuments.length ? financialDocuments[0].document_id : "";
+          }
+          renderFinancialDocuments();
+          setMessage(financialDocumentsMessage, "", "");
+        } catch (error) {
+          resetFinancialState();
+          setMessage(financialDocumentsMessage, error.message, "error");
+        }
+      }
+
+      function renderFinancialDocuments() {
+        renderFinancialSummary();
+        renderFinancialWarnings();
+        renderFinancialDocumentRows();
+        renderFinancialSelectedDocument();
+      }
+
+      function renderFinancialSummary() {
+        const summary = financialSummary || {};
+        const quote = summary.quote || {};
+        const invoices = summary.invoices || {};
+        const customs = summary.customs_declaration || {};
+        const efficiency = summary.logistics_efficiency || {};
+        const match = summary.quote_invoice_match || {};
+        financeQuoteTotalUsd.textContent = formatAmount(quote.total_usd, "USD");
+        financeQuoteLogisticsUsd.textContent = formatAmount(quote.logistics_usd, "USD");
+        financeQuoteCustomsUsd.textContent = formatAmount(quote.customs_payments_usd, "USD");
+        financeInvoiceRub.textContent = formatAmount(invoices.fact_rub, "₽");
+        financeInvoiceVatRub.textContent = formatAmount(invoices.vat_rub, "₽");
+        financeCustomsFeeRub.textContent = formatAmount(customs.customs_fee_1010_rub, "₽");
+        financeImportDutyRub.textContent = formatAmount(customs.import_duty_2010_rub, "₽");
+        financeImportVatRub.textContent = formatAmount(customs.import_vat_5010_rub, "₽");
+        financeCustomsRub.textContent = formatAmount(customs.total_customs_payments_rub, "₽");
+        financeRubPerKg.textContent = formatAmount(efficiency.rub_per_kg, "₽");
+        financeImpliedRate.textContent = match.implied_rate ? formatNumber(match.implied_rate) : "-";
+        financeRateSpread.textContent = match.relative_spread_pct != null ? formatPercent(match.relative_spread_pct) : "-";
+        financeQuoteInvoiceDelta.textContent = formatAmount(match.delta_rub, "₽");
+      }
+
+      function renderFinancialWarnings() {
+        const selected = selectedFinancialDocument();
+        const warnings = []
+          .concat((financialSummary && Array.isArray(financialSummary.warnings)) ? financialSummary.warnings : [])
+          .concat(selected && Array.isArray(selected.warnings) ? selected.warnings : []);
+        const unique = [];
+        warnings.forEach((warning) => {
+          const text = String(warning || "").trim();
+          if (text && unique.indexOf(text) === -1) {
+            unique.push(text);
+          }
+        });
+        financialWarnings.hidden = !unique.length;
+        financialWarnings.innerHTML = unique.map((warning) => '<li>' + escapeHtml(warning) + '</li>').join("");
+      }
+
+      function renderFinancialDocumentRows() {
+        if (!financialDocuments.length) {
+          financialDocumentsRows.innerHTML = '<tr><td colspan="10">Финансовые документы не загружены.</td></tr>';
+          return;
+        }
+        financialDocumentsRows.innerHTML = financialDocuments.map((document) => {
+          const selected = document.document_id === selectedFinancialDocumentId;
+          const amount = document.total_amount_rub != null ? formatAmount(document.total_amount_rub, "₽") : formatAmount(document.total_amount, document.currency);
+          const vat = document.vat_amount_rub != null ? formatAmount(document.vat_amount_rub, "₽") : "-";
+          const rate = document.cbr_usd_rate_value != null
+            ? formatNumber(document.cbr_usd_rate_value) + (document.cbr_usd_rate_effective_date ? " · " + escapeHtml(document.cbr_usd_rate_effective_date) : "")
+            : escapeHtml(document.rate_source_status || "-");
+          const file = document.download_path
+            ? '<a class="button-link compact" href="' + escapeHtml(document.download_path) + '" data-download>PDF</a>'
+            : '<span class="muted-dash">-</span>';
+          const warning = (Array.isArray(document.warnings) && document.warnings.length) ? document.warnings[0] : "";
+          return [
+            '<tr data-financial-document-row="' + escapeHtml(document.document_id || "") + '"' + (selected ? ' class="finance-row-selected"' : "") + '>',
+            '<td>' + escapeHtml(document.document_date || "-") + '</td>',
+            '<td>' + escapeHtml(financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '</td>',
+            '<td>' + escapeHtml(document.document_number || "-") + '</td>',
+            '<td>' + escapeHtml(document.vendor || "-") + '</td>',
+            '<td>' + escapeHtml(amount) + '</td>',
+            '<td>' + escapeHtml(vat) + '</td>',
+            '<td>' + rate + '</td>',
+            '<td><span class="badge ' + financialStatusTone(document.parse_status) + '">' + escapeHtml(financialStatusLabels[document.parse_status] || document.parse_status || "-") + '</span></td>',
+            '<td>' + file + '</td>',
+            '<td>' + escapeHtml(warning || "-") + '</td>',
+            '</tr>'
+          ].join("");
+        }).join("");
+        Array.from(financialDocumentsRows.querySelectorAll("[data-financial-document-row]")).forEach((row) => {
+          row.addEventListener("click", (event) => {
+            if (event.target && event.target.closest("[data-download]")) {
+              event.stopPropagation();
+              return;
+            }
+            selectedFinancialDocumentId = row.dataset.financialDocumentRow || "";
+            renderFinancialDocuments();
+          });
+        });
+      }
+
+      function financialStatusTone(status) {
+        if (status === "parsed" || status === "confirmed") {
+          return "success";
+        }
+        if (status === "parse_error") {
+          return "error";
+        }
+        return "warning";
+      }
+
+      function selectedFinancialDocument() {
+        return financialDocuments.find((document) => document.document_id === selectedFinancialDocumentId) || null;
+      }
+
+      function selectedFinancialLines() {
+        return financialExpenseLines.filter((line) => line.financial_document_id === selectedFinancialDocumentId);
+      }
+
+      function renderFinancialSelectedDocument() {
+        const document = selectedFinancialDocument();
+        if (!document) {
+          financialRecognizedFields.innerHTML = '<div class="finance-field"><span>Статус</span><strong>Документ не выбран</strong></div>';
+          financialExpenseRows.innerHTML = '<tr><td colspan="9">Расходные строки не загружены.</td></tr>';
+          return;
+        }
+        renderFinancialFields(document);
+        renderFinancialExpenseRows(selectedFinancialLines());
+      }
+
+      function renderFinancialFields(document) {
+        const normalized = document.normalized_parse || {};
+        const fields = financialFieldsForDocument(document.document_type, normalized, document);
+        financialRecognizedFields.innerHTML = fields.map((item) => (
+          '<div class="finance-field"><span>' + escapeHtml(item.label) + '</span><strong>' + escapeHtml(item.value || "-") + '</strong></div>'
+        )).join("");
+      }
+
+      function financialFieldsForDocument(type, normalized, document) {
+        if (type === "logistics_quote") {
+          return [
+            { label: "Дата КП", value: normalized.quote_date || document.document_date },
+            { label: "Поставщик", value: normalized.vendor || document.vendor },
+            { label: "Груз", value: normalized.cargo_name },
+            { label: "Тариф", value: normalized.tariff },
+            { label: "Маршрут", value: [normalized.origin, normalized.destination].filter(Boolean).join(" -> ") },
+            { label: "Срок", value: formatRange(normalized.delivery_days_min, normalized.delivery_days_max, "дн.") },
+            { label: "Вес брутто", value: formatAmount(normalized.gross_weight_kg, "кг") },
+            { label: "Объем", value: formatAmount(normalized.volume_m3, "м³") },
+            { label: "Стоимость груза", value: formatAmount(normalized.estimated_cargo_value_usd, "USD") },
+            { label: "Оплата", value: normalized.payment_rate_policy ? "расчётный курс по правилу КП" : "" }
+          ];
+        }
+        if (type === "logistics_invoice") {
+          return [
+            { label: "Номер", value: normalized.invoice_number || document.document_number },
+            { label: "Дата", value: normalized.invoice_date || document.document_date },
+            { label: "Поставщик", value: normalized.vendor || document.vendor },
+            { label: "Договор", value: normalized.contract || document.contract_ref },
+            { label: "Маршрут", value: normalized.route || document.route },
+            { label: "CMR", value: normalized.CMR },
+            { label: "Сумма", value: formatAmount(normalized.amount_rub || document.total_amount_rub, "₽") },
+            { label: "НДС", value: formatAmount(normalized.vat_amount_rub || document.vat_amount_rub, "₽") },
+            { label: "Оплатить до", value: normalized.due_date || document.due_date },
+            { label: "Категория", value: financialCategoryLabels[normalized.category_suggestion] || normalized.category_suggestion }
+          ];
+        }
+        if (type === "customs_declaration") {
+          return [
+            { label: "Номер ДТ", value: normalized.declaration_number || document.document_number },
+            { label: "Дата", value: normalized.declaration_date || document.document_date },
+            { label: "Товаров", value: normalized.total_goods_count },
+            { label: "Мест", value: normalized.total_places },
+            { label: "Инвойс", value: formatAmount(normalized.invoice_amount_cny, normalized.invoice_currency || "CNY") },
+            { label: "Курс CNY", value: formatNumber(normalized.customs_currency_rate_cny) },
+            { label: "Таможенная стоимость", value: formatAmount(normalized.total_customs_value_rub, "₽") },
+            { label: "Всего платежей", value: formatAmount(normalized.total_customs_payments_rub, "₽") },
+            { label: "Статус выпуска", value: normalized.release_status }
+          ];
+        }
+        return [{ label: "Тип", value: type || "-" }];
+      }
+
+      function renderFinancialExpenseRows(lines) {
+        if (!lines.length) {
+          financialExpenseRows.innerHTML = '<tr><td colspan="9">Расходные строки не распознаны.</td></tr>';
+          return;
+        }
+        financialExpenseRows.innerHTML = lines.map((line) => {
+          const flags = [
+            line.included_in_logistics_efficiency ? "logistics" : "",
+            line.included_in_customs_total ? "customs" : ""
+          ].filter(Boolean).join(", ");
+          const vat = line.vat_amount_rub != null ? formatAmount(line.vat_amount_rub, "₽") : "-";
+          return [
+            '<tr>',
+            '<td>' + escapeHtml(financialCategoryLabels[line.category] || line.category || "-") + '</td>',
+            '<td>' + escapeHtml(line.stage || "-") + '</td>',
+            '<td>' + escapeHtml(line.description || "-") + '</td>',
+            '<td>' + escapeHtml(formatAmount(line.amount, line.currency)) + '</td>',
+            '<td>' + escapeHtml(line.currency || "-") + '</td>',
+            '<td>' + escapeHtml(formatAmount(line.amount_rub, "₽")) + '</td>',
+            '<td>' + escapeHtml(vat) + '</td>',
+            '<td>' + escapeHtml(flags || "-") + '</td>',
+            '<td>' + escapeHtml(line.status || "-") + '</td>',
+            '</tr>'
+          ].join("");
+        }).join("");
+      }
+
+      function formatRange(min, max, suffix) {
+        if (min == null && max == null) {
+          return "";
+        }
+        if (min != null && max != null) {
+          return String(min) + "-" + String(max) + (suffix ? " " + suffix : "");
+        }
+        return String(min != null ? min : max) + (suffix ? " " + suffix : "");
+      }
+
+      async function uploadFinancialDocument(file) {
+        if (!canManageFinancialDocuments || !currentShipment || !currentShipment.shipment_id) {
+          setMessage(financialDocumentsMessage, "Сначала сохраните заказ.", "error");
+          return;
+        }
+        if (!file) {
+          return;
+        }
+        if (!file.name.toLowerCase().endsWith(".pdf")) {
+          setMessage(financialDocumentsMessage, "Загрузите PDF документ.", "error");
+          financialDocumentFileInput.value = "";
+          return;
+        }
+        const formData = new FormData();
+        formData.append("file", file, file.name);
+        addFinancialDocumentButton.disabled = true;
+        setMessage(financialDocumentsMessage, "Загружаем и распознаём документ...", "");
+        try {
+          const payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
+            method: "POST",
+            body: formData,
+            headers: { Accept: "application/json" }
+          });
+          await loadFinancialDocuments({ selectedDocumentId: payload.document_id });
+          setMessage(financialDocumentsMessage, "Документ загружен.", payload.parse_status === "parse_error" ? "error" : "success");
+        } catch (error) {
+          setMessage(financialDocumentsMessage, error.message, "error");
+        } finally {
+          addFinancialDocumentButton.disabled = false;
+          financialDocumentFileInput.value = "";
+        }
       }
 
       function renderLineTables(lines) {
@@ -1063,6 +1596,13 @@
           cardDirty = false;
           renderCard();
           await loadRegistry();
+          if (canManageFinancialDocuments && currentShipment && currentShipment.shipment_id) {
+            if (activeCardTab === "financial") {
+              await loadFinancialDocuments();
+            } else {
+              renderCardTabs(currentShipment);
+            }
+          }
           setMessage(cardMessage, "订单已保存 / Order saved / Заказ сохранён.", "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
@@ -1158,6 +1698,8 @@
         currentUploadId = "";
         isNewShipment = false;
         cardDirty = false;
+        activeCardTab = "supply";
+        resetFinancialState();
         setMessage(cardMessage, "", "");
       }
 
@@ -1184,10 +1726,14 @@
         currentUploadId = "";
         isNewShipment = false;
         cardDirty = false;
+        activeCardTab = "supply";
+        resetFinancialState();
         setMessage(cardMessage, "", "");
       }
 
       addShipmentButton.addEventListener("click", openNewShipment);
+      supplyCompositionTabButton.addEventListener("click", () => switchCardTab("supply"));
+      financialDocumentsTabButton.addEventListener("click", () => switchCardTab("financial"));
       saveShipmentButton.addEventListener("click", saveCurrentShipment);
       if (priceCheckButton) {
         priceCheckButton.addEventListener("click", recheckCurrentShipmentPrices);
@@ -1195,6 +1741,8 @@
       linkContractButton.addEventListener("click", linkSelectedContract);
       uploadContractButton.addEventListener("click", () => contractFileInput.click());
       contractFileInput.addEventListener("change", () => uploadContractFile(contractFileInput.files && contractFileInput.files[0]));
+      addFinancialDocumentButton.addEventListener("click", () => financialDocumentFileInput.click());
+      financialDocumentFileInput.addEventListener("change", () => uploadFinancialDocument(financialDocumentFileInput.files && financialDocumentFileInput.files[0]));
       closeShipmentButton.addEventListener("click", closeCard);
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;

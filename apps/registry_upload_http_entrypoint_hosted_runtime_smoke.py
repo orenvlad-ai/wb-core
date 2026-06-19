@@ -216,8 +216,10 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for openpyxl")
             if "playwright==1.58.0" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for playwright")
-            if "import openpyxl, playwright" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
-                raise AssertionError("deploy --dry-run must guard on both openpyxl and playwright imports")
+            if "pypdf==6.4.1" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
+                raise AssertionError("deploy --dry-run must expose runtime pip install command for pypdf")
+            if "import openpyxl, playwright, pypdf" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
+                raise AssertionError("deploy --dry-run must guard on openpyxl, playwright and pypdf imports")
             seller_venv_command = " ".join(deploy_dry_run["commands"]["seller_portal_recovery_venv"])
             if "python3 -m venv /opt/wb-web-bot/venv" not in seller_venv_command:
                 raise AssertionError("deploy --dry-run must create or repair /opt/wb-web-bot/venv")

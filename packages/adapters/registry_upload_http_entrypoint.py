@@ -152,6 +152,7 @@ DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
+DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT = "financial-documents"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
@@ -1011,6 +1012,31 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_supplier_financial_documents_collection_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_financial_shipment_id(parsed.path)
+                    upload_payload = _load_uploaded_file_payload(self)
+                    payload = entrypoint.handle_supplier_financial_documents_upload_request(
+                        shipment_id,
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier financial document upload failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
                 try:
                     payload = _load_request_payload(self)
@@ -1306,6 +1332,7 @@ def _build_handler(
                         can_edit_order_status=is_operator_embedded,
                         can_recheck_prices=is_operator_embedded,
                         can_manage_documents=is_operator_embedded,
+                        can_manage_financial_documents=is_operator_embedded,
                     ),
                 )
                 return
@@ -2008,6 +2035,73 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_supplier_financial_documents_collection_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_financial_shipment_id(parsed.path)
+                    payload = entrypoint.handle_supplier_financial_documents_list_request(shipment_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier financial documents list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_supplier_financial_document_file_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    file_bytes, filename, content_type = entrypoint.handle_supplier_financial_document_file_request(
+                        shipment_id,
+                        document_id,
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier financial document download failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    file_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if _is_supplier_financial_document_detail_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    payload = entrypoint.handle_supplier_financial_document_detail_request(shipment_id, document_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier financial document detail failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_trade_document_file_path(parsed.path):
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -2482,6 +2576,30 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"trade document patch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if _is_supplier_financial_document_detail_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_supplier_financial_document_patch_request(
+                        shipment_id,
+                        document_id,
+                        payload,
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier financial document patch failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -3125,6 +3243,39 @@ def _is_supplier_shipment_price_check_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "price-check"
 
 
+def _supplier_financial_path_parts(path: str) -> list[str]:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return []
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/") if suffix else []
+
+
+def _is_supplier_financial_documents_collection_path(path: str) -> bool:
+    parts = _supplier_financial_path_parts(path)
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT
+
+
+def _is_supplier_financial_document_detail_path(path: str) -> bool:
+    parts = _supplier_financial_path_parts(path)
+    return (
+        len(parts) == 3
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT
+        and bool(parts[2])
+    )
+
+
+def _is_supplier_financial_document_file_path(path: str) -> bool:
+    parts = _supplier_financial_path_parts(path)
+    return (
+        len(parts) == 4
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT
+        and bool(parts[2])
+        and parts[3] == "file"
+    )
+
+
 def _is_wb_supply_detail_path(path: str) -> bool:
     if not path.startswith(DEFAULT_WB_SUPPLIES_PATH + "/"):
         return False
@@ -3198,6 +3349,19 @@ def _resolve_supplier_shipment_id_from_price_check_path(path: str) -> str:
         raise ValueError(f"unsupported supplier shipment price check path: {path}")
     suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
     return suffix.split("/", 1)[0]
+
+
+def _resolve_supplier_financial_shipment_id(path: str) -> str:
+    if not _is_supplier_financial_documents_collection_path(path):
+        raise ValueError(f"unsupported supplier financial documents path: {path}")
+    return _supplier_financial_path_parts(path)[0]
+
+
+def _resolve_supplier_financial_document_ids(path: str) -> tuple[str, str]:
+    if not (_is_supplier_financial_document_detail_path(path) or _is_supplier_financial_document_file_path(path)):
+        raise ValueError(f"unsupported supplier financial document path: {path}")
+    parts = _supplier_financial_path_parts(path)
+    return parts[0], parts[2]
 
 
 def _resolve_wb_supply_id_from_detail_path(path: str) -> str:
@@ -4147,6 +4311,7 @@ def _render_sheet_vitrina_supplier_ui(
     can_edit_order_status: bool = False,
     can_recheck_prices: bool = True,
     can_manage_documents: bool = False,
+    can_manage_financial_documents: bool = False,
 ) -> str:
     config_payload = {
         "page_title": "Реестр заказов",
@@ -4159,6 +4324,7 @@ def _render_sheet_vitrina_supplier_ui(
         "can_edit_order_status": bool(can_edit_order_status),
         "can_recheck_prices": bool(can_recheck_prices),
         "can_manage_documents": bool(can_manage_documents),
+        "can_manage_financial_documents": bool(can_manage_financial_documents),
     }
     price_check_button_html = (
         '<button id="priceCheckButton" type="button" hidden>Проверить цены</button>'

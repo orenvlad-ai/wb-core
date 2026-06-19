@@ -41,6 +41,7 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.supplier_shipments import SupplierShipmentsBlock
+from packages.application.supplier_financial_documents import SupplierFinancialDocumentsBlock
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
@@ -631,6 +632,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.supplier_shipments_block = SupplierShipmentsBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.supplier_financial_documents_block = SupplierFinancialDocumentsBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -1753,6 +1758,42 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_supplier_shipments_contract_request(self, shipment_id: str) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.download_shipment_contract(shipment_id)
+
+    def handle_supplier_financial_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
+        return self.supplier_financial_documents_block.list_documents(shipment_id)
+
+    def handle_supplier_financial_documents_upload_request(
+        self,
+        shipment_id: str,
+        file_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return self.supplier_financial_documents_block.upload_document(
+            shipment_id,
+            file_bytes=file_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+        )
+
+    def handle_supplier_financial_document_detail_request(self, shipment_id: str, document_id: str) -> dict[str, Any]:
+        return self.supplier_financial_documents_block.get_document(shipment_id, document_id)
+
+    def handle_supplier_financial_document_patch_request(
+        self,
+        shipment_id: str,
+        document_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.supplier_financial_documents_block.update_document_status(
+            shipment_id,
+            document_id,
+            str(payload.get("parse_status") or ""),
+        )
+
+    def handle_supplier_financial_document_file_request(self, shipment_id: str, document_id: str) -> tuple[bytes, str, str]:
+        return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
 
     def handle_supplier_shipments_contract_patch_request(
         self,
