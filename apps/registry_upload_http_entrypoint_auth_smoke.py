@@ -144,8 +144,10 @@ def main() -> None:
                         response.status != 200
                         or "Справочник номенклатуры" not in body
                         or "Справочник договоров и инвойсов" not in body
+                        or ">Номенклатура<" not in body
+                        or ">Договоры и инвойсы<" not in body
                     ):
-                        raise AssertionError("authenticated operator settings page must render nomenclature and trade documents sections")
+                        raise AssertionError("authenticated operator settings page must render settings tabs and registry sections")
                 user_config_get = urllib_request.Request(
                     f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
                     headers={"Accept": "application/json"},
