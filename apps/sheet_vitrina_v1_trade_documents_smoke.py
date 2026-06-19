@@ -35,6 +35,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application import supplier_shipments as supplier_shipments_module  # noqa: E402
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
 from packages.contracts.supplier_shipments import (  # noqa: E402
     DEFAULT_SUPPLIER_NAME,
@@ -48,6 +49,9 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 def main() -> None:
+    _assert_contract_parser_rules()
+    _assert_contract_ocr_parser_with_fake_tools()
+    _assert_contract_ocr_missing_tools_warning()
     owner_password = "owner-password-not-secret"
     supplier_password = "supplier-password-not-secret"
     invoice_bytes = _build_invoice_fixture()
@@ -515,6 +519,107 @@ def _build_contract_pdf_fixture(number: str, date_line: str) -> bytes:
         b"endobj\n"
         b"%%EOF\n"
     )
+
+
+def _assert_contract_parser_rules() -> None:
+    number_cases = {
+        "Contract No. CNT-2026-0513": "CNT-2026-0513",
+        "合同编号：CN-2026-0910": "CN-2026-0910",
+        "№ 223/26": "223/26",
+        "KOHTPAKT Nb 223/26 CONTRACT J 223/26": "223/26",
+    }
+    for line, expected in number_cases.items():
+        got = supplier_shipments_module._extract_contract_number(line, [line])
+        if got != expected:
+            raise AssertionError(f"contract number rule failed for {line!r}: {got!r} != {expected!r}")
+    date_cases = {
+        "Contract Date 2026-05-13": "2026-05-13",
+        "合同日期 2026年5月13日": "2026-05-13",
+        "Date: 2026/05/13": "2026-05-13",
+        "Date: May 13, 2026": "2026-05-13",
+        "Date: 13 May 2026": "2026-05-13",
+    }
+    for text, expected in date_cases.items():
+        got = supplier_shipments_module._extract_contract_document_date(text)
+        if got != expected:
+            raise AssertionError(f"contract date rule failed for {text!r}: {got!r} != {expected!r}")
+
+
+def _assert_contract_ocr_parser_with_fake_tools() -> None:
+    with TemporaryDirectory(prefix="trade-documents-fake-ocr-") as tmp:
+        tmp_path = Path(tmp)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_executable(
+            bin_dir / "pdfinfo",
+            "#!/usr/bin/env python3\n"
+            "print('Pages: 1')\n"
+            "print('Page size: 1526 x 2190 pts')\n",
+        )
+        _write_executable(
+            bin_dir / "pdftoppm",
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "pathlib.Path(sys.argv[-1] + '.png').write_bytes(b'fake-image')\n",
+        )
+        _write_executable(
+            bin_dir / "tesseract",
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "if '--list-langs' in sys.argv:\n"
+            "    print('List of available languages in fake tessdata (3):')\n"
+            "    print('eng')\n"
+            "    print('chi_sim')\n"
+            "    print('rus')\n"
+            "    raise SystemExit(0)\n"
+            "psm = sys.argv[sys.argv.index('--psm') + 1] if '--psm' in sys.argv else ''\n"
+            "if psm == '6':\n"
+            "    raise SystemExit(0)\n"
+            "print('KOHTPAKT Nb 223/26 CONTRACT J 223/26')\n"
+            "print('Date: May 13, 2026')\n",
+        )
+        supplier_shipments_module._TESSERACT_LANGUAGES_CACHE = None
+        with _patched_env({"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}):
+            block = SupplierShipmentsBlock(runtime=RegistryUploadDbBackedRuntime(runtime_dir=tmp_path / "runtime"))
+            metadata, warnings, errors, version = block._parse_contract_document_metadata(
+                b"%PDF-1.3\n% fake scanned contract\n",
+                filename="scan-contract.pdf",
+            )
+        supplier_shipments_module._TESSERACT_LANGUAGES_CACHE = None
+        diagnostics = metadata.get("diagnostics") if isinstance(metadata.get("diagnostics"), dict) else {}
+        if (
+            metadata.get("parsed_number") != "223/26"
+            or metadata.get("parsed_document_date") != "2026-05-13"
+            or diagnostics.get("ocr_available") is not True
+            or diagnostics.get("ocr_languages") != ["eng", "chi_sim", "rus"]
+            or "psm11" not in str(diagnostics.get("ocr_strategy_used") or "")
+            or warnings
+            or errors
+            or version != TRADE_DOCUMENT_CONTRACT_PARSER_VERSION
+        ):
+            raise AssertionError(f"fake OCR contract parser failed: {metadata} {warnings} {errors} {version}")
+
+
+def _assert_contract_ocr_missing_tools_warning() -> None:
+    with TemporaryDirectory(prefix="trade-documents-no-ocr-") as tmp:
+        tmp_path = Path(tmp)
+        supplier_shipments_module._TESSERACT_LANGUAGES_CACHE = None
+        with _patched_env({"PATH": str(tmp_path)}):
+            block = SupplierShipmentsBlock(runtime=RegistryUploadDbBackedRuntime(runtime_dir=tmp_path / "runtime"))
+            metadata, warnings, errors, _ = block._parse_contract_document_metadata(
+                b"%PDF-1.3\n% fake scanned contract\n",
+                filename="scan-contract.pdf",
+            )
+        supplier_shipments_module._TESSERACT_LANGUAGES_CACHE = None
+        warning_text = " ".join(warnings)
+        diagnostics = metadata.get("diagnostics") if isinstance(metadata.get("diagnostics"), dict) else {}
+        if diagnostics.get("ocr_available") is not False or "OCR tools missing" not in warning_text or errors:
+            raise AssertionError(f"missing OCR tools must produce controlled warning, got {metadata} {warnings} {errors}")
+
+
+def _write_executable(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
 
 
 def _login(opener: urllib_request.OpenerDirector, base_url: str, username: str, password: str) -> None:

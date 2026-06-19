@@ -98,6 +98,21 @@ NOMENCLATURE_PRODUCT_TYPE_BY_LABEL = {
 }
 PRICE_CONFORMITY_MONEY_QUANT = Decimal("0.01")
 PRICE_CONFORMITY_YUAN_CURRENCIES = {"CNY", "CNH", "RMB", "YUAN", "YUANS", "¥", "￥", "元"}
+CONTRACT_OCR_PREFERRED_LANGUAGES = ("eng", "chi_sim", "rus")
+CONTRACT_OCR_PSMS = ("6", "11", "4", "3")
+CONTRACT_PDF_OCR_STRATEGIES: tuple[dict[str, Any], ...] = (
+    {"id": "pdf_120dpi_full", "dpi": 120, "gray": False, "crop": None, "render_timeout": 60, "ocr_timeout": 60},
+    {"id": "pdf_120dpi_gray", "dpi": 120, "gray": True, "crop": None, "render_timeout": 60, "ocr_timeout": 60},
+    {"id": "pdf_150dpi_full", "dpi": 150, "gray": False, "crop": None, "render_timeout": 75, "ocr_timeout": 60},
+    {"id": "pdf_150dpi_gray", "dpi": 150, "gray": True, "crop": None, "render_timeout": 75, "ocr_timeout": 60},
+    {"id": "pdf_200dpi_full", "dpi": 200, "gray": False, "crop": None, "render_timeout": 90, "ocr_timeout": 75},
+    {"id": "pdf_300dpi_full", "dpi": 300, "gray": False, "crop": None, "render_timeout": 120, "ocr_timeout": 90},
+    {"id": "pdf_300dpi_gray", "dpi": 300, "gray": True, "crop": None, "render_timeout": 120, "ocr_timeout": 90},
+    {"id": "pdf_300dpi_top", "dpi": 300, "gray": False, "crop": "top", "render_timeout": 120, "ocr_timeout": 90},
+    {"id": "pdf_400dpi_top", "dpi": 400, "gray": False, "crop": "top", "render_timeout": 150, "ocr_timeout": 90},
+    {"id": "pdf_600dpi_top", "dpi": 600, "gray": True, "crop": "top", "render_timeout": 180, "ocr_timeout": 120},
+)
+_TESSERACT_LANGUAGES_CACHE: list[str] | None = None
 
 
 class SupplierShipmentsBlock:
@@ -1266,15 +1281,16 @@ class SupplierShipmentsBlock:
         errors: list[str] = []
         lines: list[str] = []
         extraction_method = ""
+        extraction_diagnostics: dict[str, Any] = {}
         try:
             if extension == ".xlsx":
                 lines = _extract_contract_xlsx_lines(file_bytes)
                 extraction_method = "xlsx_first_rows"
             elif extension == ".pdf":
-                lines, extract_warnings, extraction_method = _extract_contract_pdf_lines(file_bytes)
+                lines, extract_warnings, extraction_method, extraction_diagnostics = _extract_contract_pdf_lines(file_bytes)
                 warnings.extend(extract_warnings)
             elif extension in {".jpg", ".jpeg", ".png"}:
-                lines, extract_warnings, extraction_method = _extract_contract_image_lines(
+                lines, extract_warnings, extraction_method, extraction_diagnostics = _extract_contract_image_lines(
                     file_bytes,
                     suffix=extension,
                 )
@@ -1297,17 +1313,20 @@ class SupplierShipmentsBlock:
         parsed_document_date = _extract_contract_document_date(top_text)
         if not lines and extension in {".pdf", ".jpg", ".jpeg", ".png"} and not warnings:
             warnings.append("contract parser found no readable text")
+        extraction_diagnostics["number_found"] = bool(parsed_number)
+        extraction_diagnostics["date_found"] = bool(parsed_document_date)
         metadata = {
             "parsed_number": parsed_number,
             "parsed_document_date": parsed_document_date,
             "first_non_empty_line": first_line,
             "extraction_method": extraction_method or "unknown",
             "text_line_count": len(lines),
+            "diagnostics": extraction_diagnostics,
         }
         if not parsed_number and first_line:
-            warnings.append("contract parser could not extract number from the first non-empty line")
+            warnings.append("contract parser OCR/text exists but number pattern was not found")
         if not parsed_document_date and top_text:
-            warnings.append("contract parser could not extract document date from the bounded header text")
+            warnings.append("contract parser OCR/text exists but document date pattern was not found")
         return metadata, warnings, errors, TRADE_DOCUMENT_CONTRACT_PARSER_VERSION
 
     def _create_or_load_supplier_invoice_document(
@@ -2619,25 +2638,30 @@ def _extract_contract_xlsx_lines(file_bytes: bytes) -> list[str]:
         workbook.close()
 
 
-def _extract_contract_pdf_lines(file_bytes: bytes) -> tuple[list[str], list[str], str]:
+def _extract_contract_pdf_lines(file_bytes: bytes) -> tuple[list[str], list[str], str, dict[str, Any]]:
     warnings: list[str] = []
+    diagnostics: dict[str, Any] = {}
     if shutil.which("pdftotext"):
         text = _extract_pdf_text_with_pdftotext(file_bytes)
         lines = _text_to_lines(text)
         if lines:
-            return lines, warnings, "pdf_pdftotext"
-        warnings.append("contract parser found no text through pdftotext")
+            diagnostics["text_layer_extraction"] = "pdftotext"
+            return lines, warnings, "pdf_pdftotext", diagnostics
+        diagnostics["pdftotext_text_nonempty"] = False
 
     text = _extract_pdf_text_layer(file_bytes)
     lines = _text_to_lines(text)
     if lines:
-        return lines, warnings, "pdf_text_layer"
+        diagnostics["text_layer_extraction"] = "embedded_pdf_streams"
+        return lines, warnings, "pdf_text_layer", diagnostics
 
-    ocr_lines, ocr_warning = _extract_contract_pdf_ocr_lines(file_bytes)
+    ocr_lines, ocr_warning, ocr_diagnostics = _extract_contract_pdf_ocr_lines(file_bytes)
+    diagnostics.update(ocr_diagnostics)
     if ocr_lines:
-        return ocr_lines, warnings, "pdf_ocr_first_page"
-    warnings.append(ocr_warning)
-    return [], warnings, "pdf_no_readable_text"
+        return ocr_lines, warnings, "pdf_ocr_first_page", diagnostics
+    if ocr_warning:
+        warnings.append(ocr_warning)
+    return [], warnings, "pdf_no_readable_text", diagnostics
 
 
 def _extract_pdf_text_with_pdftotext(file_bytes: bytes) -> str:
@@ -2800,60 +2824,283 @@ def _printable_text_score(value: str) -> float:
     return useful / max(1, len(value))
 
 
-def _extract_contract_pdf_ocr_lines(file_bytes: bytes) -> tuple[list[str], str]:
+def _extract_contract_pdf_ocr_lines(file_bytes: bytes) -> tuple[list[str], str, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "ocr_attempted": True,
+        "ocr_available": bool(shutil.which("pdftoppm") and shutil.which("tesseract")),
+        "ocr_engine": "tesseract",
+        "ocr_text_nonempty": False,
+        "ocr_attempt_count": 0,
+    }
     if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
-        return [], "contract parser skipped OCR: PDF has no readable text layer and OCR tools are unavailable"
+        return [], "contract parser skipped OCR: OCR tools missing (pdftoppm/tesseract)", diagnostics
+    languages = _preferred_tesseract_languages()
+    diagnostics["ocr_languages"] = languages.split("+") if languages else []
+    best_lines: list[str] = []
+    best_score = -1
+    best_strategy = ""
+    failure_kinds: set[str] = set()
     try:
         with tempfile.TemporaryDirectory(prefix="wb-contract-ocr-") as tmp:
             pdf_path = Path(tmp) / "contract.pdf"
-            image_prefix = Path(tmp) / "page"
             pdf_path.write_bytes(file_bytes)
-            convert = subprocess.run(
-                ["pdftoppm", "-f", "1", "-singlefile", "-png", str(pdf_path), str(image_prefix)],
-                capture_output=True,
-                timeout=12,
-                check=False,
-            )
-            image_path = Path(str(image_prefix) + ".png")
-            if convert.returncode != 0 or not image_path.exists():
-                return [], "contract parser skipped OCR: first PDF page could not be rendered"
-            return _run_tesseract_image(image_path)
+            for strategy in CONTRACT_PDF_OCR_STRATEGIES:
+                image_prefix = Path(tmp) / str(strategy["id"])
+                render_result = _render_pdf_first_page_for_ocr(pdf_path, image_prefix=image_prefix, strategy=strategy)
+                if not render_result.get("ok"):
+                    diagnostics["ocr_attempt_count"] = int(diagnostics["ocr_attempt_count"]) + 1
+                    failure_kinds.add(str(render_result.get("reason") or "render_failed"))
+                    continue
+                image_path = Path(str(image_prefix) + ".png")
+                for psm in CONTRACT_OCR_PSMS:
+                    diagnostics["ocr_attempt_count"] = int(diagnostics["ocr_attempt_count"]) + 1
+                    strategy_id = f"{strategy['id']}_psm{psm}"
+                    lines, warning, attempt_diagnostics = _run_tesseract_image(
+                        image_path,
+                        psm=psm,
+                        languages=languages,
+                        strategy_id=strategy_id,
+                        timeout_seconds=float(strategy.get("ocr_timeout") or 60),
+                    )
+                    if warning:
+                        failure_kinds.add(warning)
+                    score_payload = _score_contract_metadata_lines(lines)
+                    score = int(score_payload["score"])
+                    if score > best_score:
+                        best_score = score
+                        best_lines = lines
+                        best_strategy = strategy_id
+                        diagnostics.update(attempt_diagnostics)
+                        diagnostics.update(
+                            {
+                                "ocr_strategy_used": strategy_id,
+                                "ocr_text_nonempty": bool(lines),
+                                "ocr_best_number_found": bool(score_payload["number_found"]),
+                                "ocr_best_date_found": bool(score_payload["date_found"]),
+                            }
+                        )
+                    if lines and score_payload["number_found"] and score_payload["date_found"]:
+                        return lines, "", diagnostics
+            if best_lines:
+                diagnostics["ocr_strategy_used"] = best_strategy
+                diagnostics["ocr_text_nonempty"] = True
+                return (
+                    best_lines,
+                    "contract parser OCR text exists but number/date pattern was not fully found",
+                    diagnostics,
+                )
+            diagnostics["ocr_failure_kinds"] = sorted(failure_kinds)[:8]
+            return [], "contract parser OCR text empty after bounded first-page strategies", diagnostics
     except (OSError, subprocess.SubprocessError):
-        return [], "contract parser skipped OCR: OCR command failed"
+        return [], "contract parser skipped OCR: OCR command failed", diagnostics
 
 
-def _extract_contract_image_lines(file_bytes: bytes, *, suffix: str) -> tuple[list[str], list[str], str]:
+def _render_pdf_first_page_for_ocr(pdf_path: Path, *, image_prefix: Path, strategy: Mapping[str, Any]) -> dict[str, Any]:
+    command = [
+        "pdftoppm",
+        "-f",
+        "1",
+        "-singlefile",
+        "-r",
+        str(int(strategy.get("dpi") or 150)),
+        "-png",
+    ]
+    if strategy.get("gray"):
+        command.append("-gray")
+    crop = str(strategy.get("crop") or "")
+    if crop == "top":
+        crop_pixels = _pdf_first_page_top_crop_pixels(pdf_path, dpi=int(strategy.get("dpi") or 150))
+        if crop_pixels:
+            command.extend(["-x", "0", "-y", "0", "-W", str(crop_pixels[0]), "-H", str(crop_pixels[1])])
+    command.extend([str(pdf_path), str(image_prefix)])
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=float(strategy.get("render_timeout") or 60),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "pdf_render_timeout"}
+    except OSError:
+        return {"ok": False, "reason": "pdf_render_os_error"}
+    image_path = Path(str(image_prefix) + ".png")
+    if result.returncode != 0 or not image_path.exists():
+        return {"ok": False, "reason": "pdf_render_failed"}
+    return {"ok": True}
+
+
+def _pdf_first_page_top_crop_pixels(pdf_path: Path, *, dpi: int) -> tuple[int, int] | None:
+    if not shutil.which("pdfinfo"):
+        return None
+    try:
+        result = subprocess.run(
+            ["pdfinfo", str(pdf_path)],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"Page size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", result.stdout)
+    if not match:
+        return None
+    width = max(1, int(float(match.group(1)) * dpi / 72))
+    height = max(1, int(float(match.group(2)) * dpi / 72 * 0.45))
+    return width, height
+
+
+def _extract_contract_image_lines(file_bytes: bytes, *, suffix: str) -> tuple[list[str], list[str], str, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "ocr_attempted": True,
+        "ocr_available": bool(shutil.which("tesseract")),
+        "ocr_engine": "tesseract",
+        "ocr_text_nonempty": False,
+        "ocr_attempt_count": 0,
+    }
     if not shutil.which("tesseract"):
-        return [], ["contract parser skipped OCR: image files require OCR and tesseract is unavailable"], "image_no_ocr"
+        return [], ["contract parser skipped OCR: OCR tool missing (tesseract)"], "image_no_ocr", diagnostics
+    languages = _preferred_tesseract_languages()
+    diagnostics["ocr_languages"] = languages.split("+") if languages else []
     try:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
             handle.write(file_bytes)
             image_path = Path(handle.name)
         try:
-            lines, warning = _run_tesseract_image(image_path)
-            return lines, ([warning] if warning and not lines else []), "image_ocr"
+            best_lines: list[str] = []
+            best_score = -1
+            best_warning = ""
+            for psm in CONTRACT_OCR_PSMS:
+                diagnostics["ocr_attempt_count"] = int(diagnostics["ocr_attempt_count"]) + 1
+                strategy_id = f"image_original_psm{psm}"
+                lines, warning, attempt_diagnostics = _run_tesseract_image(
+                    image_path,
+                    psm=psm,
+                    languages=languages,
+                    strategy_id=strategy_id,
+                    timeout_seconds=60,
+                )
+                score_payload = _score_contract_metadata_lines(lines)
+                score = int(score_payload["score"])
+                if score > best_score:
+                    best_score = score
+                    best_lines = lines
+                    best_warning = warning
+                    diagnostics.update(attempt_diagnostics)
+                    diagnostics.update(
+                        {
+                            "ocr_strategy_used": strategy_id,
+                            "ocr_text_nonempty": bool(lines),
+                            "ocr_best_number_found": bool(score_payload["number_found"]),
+                            "ocr_best_date_found": bool(score_payload["date_found"]),
+                        }
+                    )
+                if lines and score_payload["number_found"] and score_payload["date_found"]:
+                    return lines, [], "image_ocr", diagnostics
+            warning = ""
+            if best_lines:
+                warning = "contract parser OCR text exists but number/date pattern was not fully found"
+            elif best_warning:
+                warning = best_warning
+            else:
+                warning = "contract parser OCR text empty after bounded image strategies"
+            return best_lines, ([warning] if warning else []), "image_ocr", diagnostics
         finally:
             try:
                 image_path.unlink()
             except OSError:
                 pass
     except OSError:
-        return [], ["contract parser skipped OCR: image temp file could not be created"], "image_no_ocr"
+        return [], ["contract parser skipped OCR: image temp file could not be created"], "image_no_ocr", diagnostics
 
 
-def _run_tesseract_image(image_path: Path) -> tuple[list[str], str]:
+def _run_tesseract_image(
+    image_path: Path,
+    *,
+    psm: str,
+    languages: str,
+    strategy_id: str,
+    timeout_seconds: float,
+) -> tuple[list[str], str, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "ocr_engine": "tesseract",
+        "ocr_strategy_used": strategy_id,
+        "ocr_languages": languages.split("+") if languages else [],
+    }
+    command = ["tesseract", str(image_path), "stdout"]
+    if languages:
+        command.extend(["-l", languages])
+    command.extend(["--psm", str(psm)])
     try:
         result = subprocess.run(
-            ["tesseract", str(image_path), "stdout", "--psm", "6"],
+            command,
             capture_output=True,
-            timeout=12,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return [], "contract parser OCR command timed out", diagnostics
+    except (OSError, subprocess.SubprocessError):
+        return [], "contract parser skipped OCR: tesseract command failed", diagnostics
+    if result.returncode != 0:
+        return [], "contract parser skipped OCR: tesseract returned no readable text", diagnostics
+    lines = _text_to_lines(result.stdout.decode("utf-8", "replace"))
+    diagnostics["ocr_text_nonempty"] = bool(lines)
+    diagnostics["ocr_line_count"] = len(lines)
+    if not lines:
+        return [], "contract parser skipped OCR: tesseract returned no readable text", diagnostics
+    return lines, "", diagnostics
+
+
+def _preferred_tesseract_languages() -> str:
+    available = _available_tesseract_languages()
+    selected = [language for language in CONTRACT_OCR_PREFERRED_LANGUAGES if language in available]
+    return "+".join(selected)
+
+
+def _available_tesseract_languages() -> list[str]:
+    global _TESSERACT_LANGUAGES_CACHE
+    if _TESSERACT_LANGUAGES_CACHE is not None:
+        return list(_TESSERACT_LANGUAGES_CACHE)
+    if not shutil.which("tesseract"):
+        _TESSERACT_LANGUAGES_CACHE = []
+        return []
+    try:
+        result = subprocess.run(
+            ["tesseract", "--list-langs"],
+            capture_output=True,
+            text=True,
+            timeout=8,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return [], "contract parser skipped OCR: tesseract command failed"
-    if result.returncode != 0:
-        return [], "contract parser skipped OCR: tesseract returned no readable text"
-    return _text_to_lines(result.stdout.decode("utf-8", "replace")), ""
+        _TESSERACT_LANGUAGES_CACHE = []
+        return []
+    languages: list[str] = []
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            language = line.strip()
+            if language and not language.lower().startswith("list of available"):
+                languages.append(language)
+    _TESSERACT_LANGUAGES_CACHE = languages
+    return list(languages)
+
+
+def _score_contract_metadata_lines(lines: list[str]) -> dict[str, Any]:
+    normalized_lines = [_normalize_text_line(line) for line in lines]
+    normalized_lines = [line for line in normalized_lines if line]
+    first_line = normalized_lines[0] if normalized_lines else ""
+    top_text = "\n".join(normalized_lines[:40])[:4000]
+    number_found = bool(_extract_contract_number(first_line, normalized_lines[:8]))
+    date_found = bool(_extract_contract_document_date(top_text))
+    return {
+        "number_found": number_found,
+        "date_found": date_found,
+        "score": (2 if number_found else 0) + (2 if date_found else 0) + (1 if normalized_lines else 0),
+    }
 
 
 def _text_to_lines(value: str) -> list[str]:
@@ -2866,10 +3113,13 @@ def _extract_contract_number(first_line: str, header_lines: list[str] | tuple[st
         return ""
     header_lines = [_normalize_text_line(item) for item in (header_lines or []) if _normalize_text_line(item)]
     header_text = " ".join(header_lines[:8])
+    repeated_number = _extract_repeated_contract_number_from_ocr_line(line)
+    if repeated_number:
+        return repeated_number
     patterns = (
         r"(?iu)(?:合同(?:编号|号))\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
-        r"(?iu)\b(?:contract|контракт|договор)\s*(?:no\.?|number|№|#|n)?\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
-        r"(?iu)(?:^|\s)(?:no\.?|№|#)\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
+        r"(?iu)\b(?:contract|контракт|договор|kontrakt|koнtrakt|kohtpakt)\s*(?:no\.?|number|№|#|n[o0b]?\.?|nb|j)?\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
+        r"(?iu)(?:^|\s)(?:no\.?|n[o0b]?\.?|nb|№|#|j)\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
     )
     for pattern in patterns:
         match = re.search(pattern, line)
@@ -2885,14 +3135,68 @@ def _extract_contract_number(first_line: str, header_lines: list[str] | tuple[st
             if _looks_like_contract_number(candidate):
                 return candidate
         return ""
+    if _has_contract_number_context(line):
+        candidates = _contract_number_candidates(line)
+        if candidates:
+            return candidates[0]
     cleaned = _clean_contract_number(line)
     return cleaned if _looks_like_contract_number(cleaned) else ""
+
+
+def _extract_repeated_contract_number_from_ocr_line(value: str) -> str:
+    line = _normalize_text_line(value)
+    if not _has_contract_number_context(line):
+        return ""
+    candidates = _contract_number_candidates(line)
+    if not candidates:
+        return ""
+    normalized = [_normalize_contract_number_candidate(candidate) for candidate in candidates]
+    counts: dict[str, int] = {}
+    for candidate in normalized:
+        counts[candidate] = counts.get(candidate, 0) + 1
+    for candidate in normalized:
+        if counts.get(candidate, 0) > 1:
+            return candidate
+    return ""
+
+
+def _contract_number_candidates(value: str) -> list[str]:
+    line = _normalize_text_line(value)
+    candidates: list[str] = []
+    patterns = (
+        r"\b\d{1,8}\s*/\s*\d{1,8}\b",
+        r"\b[A-Za-zА-Яа-я]{1,12}[-_/]\d[A-Za-zА-Яа-я0-9._/\-]{1,40}\b",
+        r"\b\d{1,8}[-_][A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]{1,40}\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, line):
+            candidate = _normalize_contract_number_candidate(match.group(0))
+            if _looks_like_contract_number(candidate) and candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _normalize_contract_number_candidate(value: str) -> str:
+    cleaned = _clean_contract_number(value)
+    cleaned = re.sub(r"\s*/\s*", "/", cleaned)
+    cleaned = re.sub(r"\s*[-_]\s*", lambda match: match.group(0).strip(), cleaned)
+    return cleaned
+
+
+def _has_contract_number_context(value: str) -> bool:
+    line = _normalize_text_line(value).casefold()
+    return bool(
+        re.search(
+            r"(?iu)(contract|контракт|договор|kontrakt|koнtrakt|kohtpakt|合同|no\.?|nb|n[o0b]?\.?|№|#)",
+            line,
+        )
+    )
 
 
 def _clean_contract_number(value: str) -> str:
     cleaned = _normalize_text_line(value)
     cleaned = re.sub(r"(?iu)\b(?:dated|date|от|дата)\b.*$", "", cleaned).strip()
-    cleaned = re.sub(r"(?iu)\b\d{4}[-.]\d{1,2}[-.]\d{1,2}\b.*$", "", cleaned).strip()
+    cleaned = re.sub(r"(?iu)\b\d{4}[-./]\d{1,2}[-./]\d{1,2}\b.*$", "", cleaned).strip()
     cleaned = cleaned.strip(" :：#№-—\"'«»")
     return cleaned[:120]
 
@@ -2903,6 +3207,9 @@ def _is_generic_contract_heading(value: str) -> bool:
         "contract",
         "salescontract",
         "purchasecontract",
+        "kontrakt",
+        "koнtrakt",
+        "kohtpakt",
         "контракт",
         "договор",
         "договорпоставки",
@@ -2941,7 +3248,7 @@ def _parse_contract_date_fragment(value: str) -> str:
     if not text:
         return ""
     for pattern in (
-        r"\b(\d{4})[-.](\d{1,2})[-.](\d{1,2})\b",
+        r"\b(\d{4})[-./](\d{1,2})[-./](\d{1,2})\b",
         r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日",
     ):
         match = re.search(pattern, text)
@@ -2975,6 +3282,14 @@ def _parse_contract_date_fragment(value: str) -> str:
     )
     if match:
         return _format_contract_date(match.group(3), str(month_names[match.group(1).lower()]), match.group(2))
+    match = re.search(
+        r"(?iu)\b(\d{1,2})\s+("
+        + "|".join(re.escape(name) for name in sorted(month_names, key=len, reverse=True))
+        + r")\.?,?\s+(\d{4})\b",
+        text,
+    )
+    if match:
+        return _format_contract_date(match.group(3), str(month_names[match.group(2).lower()]), match.group(1))
     ru_months = {
         "января": 1,
         "февраля": 2,

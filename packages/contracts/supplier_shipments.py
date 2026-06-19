@@ -64,7 +64,7 @@ ORDER_STATUS_LABELS_RU = {
 DEFAULT_SUPPLIER_NAME = "HanShang Technology"
 
 SUPPLIER_INVOICE_PARSER_VERSION = "supplier_invoice_parser_v1"
-TRADE_DOCUMENT_CONTRACT_PARSER_VERSION = "contract_metadata_parser_v1"
+TRADE_DOCUMENT_CONTRACT_PARSER_VERSION = "contract_metadata_parser_v2"
 
 SUPPLIER_INVOICE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 

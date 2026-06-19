@@ -119,8 +119,9 @@ update_note: "Обновлён под current temporal closure seam, plan-report
     - settings-uploaded files live under `<runtime_dir>/trade_documents/files/<document_type>/<document_id>/<safe_filename>`;
     - supplier shipment invoice documents may reference existing `<runtime_dir>/supplier_invoices/files/...` paths to preserve backward-compatible invoice downloads;
     - contract parser metadata is stored in existing document registry fields: normalized `number`/`document_date` when available, plus `parser_version`, `parsed_metadata_json`, `warnings_json` and `errors_json`;
+    - `contract_metadata_parser_v2` adds bounded first-page OCR diagnostics under `parsed_metadata_json.diagnostics` for image-only PDF/JPG/PNG inputs: OCR availability, engine, selected languages, strategy used, attempt count, non-empty text flag, and number/date found flags. Runtime OCR tools are external host packages (`poppler-utils`, `tesseract-ocr`, language packs), not files committed to the repo;
     - empty document `supplier_name` values can be filled idempotently with canonical default supplier `HanShang Technology`, and empty contract `number`/`document_date` values can be reparsed from the stored runtime file without overwriting non-empty values;
-    - scanned/image-only contracts without available OCR remain valid file records and carry parser warnings instead of blocking storage;
+    - scanned/image-only contracts without available OCR remain valid file records and carry parser warnings instead of blocking storage; with OCR available, backfill can populate missing number/date from the stored first-page image text;
     - legacy shipment backfill is idempotent and does not move/delete physical invoice files.
 - Для current factory-order seam `temporal_source_snapshots[source_key=sales_funnel_history]` является authoritative server-side storage contract для persisted `orderCount` history:
   - bounded historical window может truthfully replace-иться целиком;
