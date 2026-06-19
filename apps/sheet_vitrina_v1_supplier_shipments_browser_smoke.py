@@ -64,15 +64,30 @@ def main() -> None:
             runtime=runtime,
             timestamp_factory=lambda: "2026-05-30T08:00:00Z",
         )
-        documents_block.create_trade_document_from_upload(
+        contract_upload = documents_block.create_trade_document_from_upload(
             document_type="contract",
             file_bytes=_build_contract_xlsx_fixture("BROWSER-CONTRACT-0601", "2026-06-01"),
             uploaded_filename="browser-contract.xlsx",
         )
-        documents_block.create_trade_document_from_upload(
+        contract_id = str((contract_upload.get("document") or {}).get("document_id") or "")
+        invoice_upload = documents_block.create_trade_document_from_upload(
             document_type="invoice",
             file_bytes=_build_invoice_fixture(),
             uploaded_filename="browser-invoice.xlsx",
+        )
+        invoice_id = str((invoice_upload.get("document") or {}).get("document_id") or "")
+        if not contract_id or not invoice_id:
+            raise AssertionError(f"settings document fixture creation failed: {contract_upload} {invoice_upload}")
+        documents_block.link_invoice_to_contract(
+            invoice_id,
+            contract_document_id=contract_id,
+            linked_by="browser-smoke",
+        )
+        documents_block.create_trade_document_from_upload(
+            document_type="invoice",
+            file_bytes=b"%PDF-1.4\n% wb-core browser smoke invoice without amount\n",
+            uploaded_filename="browser-invoice-no-amount.pdf",
+            uploaded_content_type="application/pdf",
         )
         original_list_supplier_shipments = entrypoint.handle_supplier_shipments_list_request
         first_list_seen = threading.Event()
@@ -113,9 +128,35 @@ def main() -> None:
                 expect(settings_page.locator("#contractsMessage")).to_have_text("", timeout=5000)
                 contracts_section = settings_page.locator("section[aria-labelledby='contractsTitle']")
                 expect(contracts_section.locator("thead")).not_to_contain_text("Тип")
+                expect(contracts_section.locator("thead")).not_to_contain_text("Сумма invoice")
                 expect(contracts_section.locator("#contractRows")).to_contain_text("BROWSER-CONTRACT-0601", timeout=5000)
                 expect(contracts_section.locator("#contractRows")).to_contain_text("HanShang Technology", timeout=5000)
                 expect(contracts_section.locator("#contractRows")).not_to_contain_text("26GN390")
+                contract_row = contracts_section.locator("#contractRows tr", has_text="BROWSER-CONTRACT-0601").first
+                expect(contract_row.get_by_role("button", name="Редактировать")).to_be_visible()
+                contract_row.get_by_role("button", name="Редактировать").click()
+                edit_row = contracts_section.locator("#contractRows tr[data-document-id]").first
+                expect(edit_row.get_by_role("button", name="Сохранить")).to_be_visible()
+                expect(edit_row.get_by_role("button", name="Отмена")).to_be_visible()
+                edit_row.locator("[data-contract-edit-field='number']").fill("SHOULD-CANCEL")
+                edit_row.get_by_role("button", name="Отмена").click()
+                expect(contracts_section.locator("#contractRows")).to_contain_text("BROWSER-CONTRACT-0601")
+                expect(contracts_section.locator("#contractRows")).not_to_contain_text("SHOULD-CANCEL")
+                contracts_section.locator("#contractRows tr", has_text="BROWSER-CONTRACT-0601").first.get_by_role("button", name="Редактировать").click()
+                edit_row = contracts_section.locator("#contractRows tr[data-document-id]").first
+                edit_row.locator("[data-contract-edit-field='number']").fill("BROWSER-CONTRACT-EDITED")
+                edit_row.locator("[data-contract-edit-field='document_date']").fill("2026-06-02")
+                edit_row.locator("[data-contract-edit-field='supplier_name']").fill("Browser Edited Supplier")
+                edit_row.get_by_role("button", name="Сохранить").click()
+                expect(settings_page.locator("#contractsMessage")).to_contain_text("Договор сохранён.", timeout=5000)
+                expect(contracts_section.locator("#contractRows")).to_contain_text("BROWSER-CONTRACT-EDITED", timeout=5000)
+                expect(contracts_section.locator("#contractRows")).to_contain_text("2026-06-02", timeout=5000)
+                expect(contracts_section.locator("#contractRows")).to_contain_text("Browser Edited Supplier", timeout=5000)
+                settings_page.reload(wait_until="domcontentloaded")
+                expect(settings_page.get_by_role("heading", name="Договоры")).to_be_visible()
+                contracts_section = settings_page.locator("section[aria-labelledby='contractsTitle']")
+                expect(contracts_section.locator("#contractRows")).to_contain_text("BROWSER-CONTRACT-EDITED", timeout=5000)
+                expect(contracts_section.locator("#contractRows")).to_contain_text("Browser Edited Supplier", timeout=5000)
                 settings_page.get_by_role("button", name="Инвойсы").click()
                 expect(settings_page.get_by_role("button", name="Добавить invoice")).to_be_visible()
                 expect(settings_page.get_by_role("button", name="Добавить контракт")).to_be_hidden()
@@ -123,8 +164,26 @@ def main() -> None:
                 invoices_section = settings_page.locator("section[aria-labelledby='invoicesTitle']")
                 expect(invoices_section.locator("thead")).not_to_contain_text("Тип")
                 expect(invoices_section.locator("thead")).to_contain_text("Контракт")
+                expect(invoices_section.locator("thead")).to_contain_text("Сумма invoice")
                 expect(invoices_section.locator("#invoiceRows")).to_contain_text("26GN390", timeout=5000)
                 expect(invoices_section.locator("#invoiceRows")).to_contain_text("Zhejiang Supplier", timeout=5000)
+                expect(invoices_section.locator("#invoiceRows")).to_contain_text("33 RMB", timeout=5000)
+                invoice_row = invoices_section.locator("#invoiceRows tr", has_text="26GN390").first
+                expect(invoice_row).to_contain_text("Контракт №BROWSER-CONTRACT-EDITED", timeout=5000)
+                expect(invoice_row.get_by_role("button", name="Сменить")).to_be_visible()
+                expect(invoice_row.get_by_role("button", name="Отвязать")).to_be_visible()
+                invoice_row.get_by_role("button", name="Отвязать").click()
+                expect(settings_page.locator("#invoicesMessage")).to_contain_text("Связь удалена.", timeout=5000)
+                invoice_row = invoices_section.locator("#invoiceRows tr", has_text="26GN390").first
+                expect(invoice_row).to_contain_text("Не привязан", timeout=5000)
+                expect(invoice_row.get_by_role("button", name="Связать")).to_be_visible()
+                invoice_row.locator("[data-contract-select]").select_option(contract_id)
+                invoice_row.get_by_role("button", name="Связать").click()
+                expect(settings_page.locator("#invoicesMessage")).to_contain_text("Связь сохранена.", timeout=5000)
+                invoice_row = invoices_section.locator("#invoiceRows tr", has_text="26GN390").first
+                expect(invoice_row).to_contain_text("Контракт №BROWSER-CONTRACT-EDITED", timeout=5000)
+                no_amount_row = invoices_section.locator("#invoiceRows tr", has_text="browser-invoice-no-amount.pdf").first
+                expect(no_amount_row.locator("td").nth(3)).to_have_text("-")
                 expect(invoices_section.locator("#invoiceRows")).not_to_contain_text("browser-contract.xlsx")
                 settings_page.get_by_role("button", name="Номенклатура").click()
                 expect(settings_page.get_by_text("Справочник номенклатуры")).to_be_visible()

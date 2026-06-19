@@ -657,17 +657,17 @@ class SupplierShipmentsBlock:
         }
 
     def update_trade_document(self, document_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        allowed_fields = {"number", "document_date", "supplier_name"}
+        unsupported_fields = sorted(set(payload.keys()) - allowed_fields)
+        if unsupported_fields:
+            raise ValueError("unsupported trade document metadata fields: " + ", ".join(unsupported_fields))
         updates: dict[str, Any] = {}
         if "number" in payload:
             updates["number"] = str(payload.get("number") or "").strip()
         if "document_date" in payload:
-            updates["document_date"] = _optional_iso_date(payload.get("document_date"))
+            updates["document_date"] = _optional_trade_document_date(payload.get("document_date"))
         if "supplier_name" in payload:
             updates["supplier_name"] = _document_supplier_name(payload.get("supplier_name"))
-        if "currency" in payload:
-            updates["currency"] = str(payload.get("currency") or "").strip().upper()
-        if "amount_total" in payload:
-            updates["amount_total"] = _optional_number(payload.get("amount_total"))
         document = self.runtime.update_trade_document(document_id, updates, updated_at=self.timestamp_factory())
         return {
             "contract_name": "sheet_vitrina_v1_trade_documents",
@@ -743,14 +743,16 @@ class SupplierShipmentsBlock:
         }
 
     def unlink_invoice_contract(self, invoice_document_id: str) -> dict[str, Any]:
-        deleted = self.runtime.delete_invoice_contract_link(invoice_document_id)
         invoice = self.runtime.load_trade_document(invoice_document_id)
+        if invoice is None or str(invoice.get("document_type") or "") != TRADE_DOCUMENT_TYPE_INVOICE:
+            raise ValueError(f"invoice document not found: {invoice_document_id}")
+        deleted = self.runtime.delete_invoice_contract_link(invoice_document_id)
         return {
             "contract_name": "sheet_vitrina_v1_invoice_contract_links",
             "status": "ok",
             "deleted": deleted,
             "invoice_document_id": invoice_document_id,
-            "invoice": self._with_document_download_path(invoice) if invoice else None,
+            "invoice": self._with_document_download_path(self.runtime.load_trade_document(invoice_document_id) or invoice),
         }
 
     def link_shipment_contract(
@@ -3511,6 +3513,19 @@ def _optional_iso_date(value: Any) -> str:
         date.fromisoformat(normalized)
     except ValueError:
         return normalized
+    return normalized
+
+
+def _optional_trade_document_date(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        raise ValueError("document_date must be an ISO date YYYY-MM-DD or blank")
+    try:
+        date.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError("document_date must be an ISO date YYYY-MM-DD or blank") from exc
     return normalized
 
 
