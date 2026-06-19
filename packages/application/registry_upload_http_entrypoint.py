@@ -1841,6 +1841,9 @@ class RegistryUploadHttpEntrypoint:
             )
         return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
 
+    def handle_trade_documents_contract_delete_request(self, invoice_document_id: str) -> dict[str, Any]:
+        return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+
     def handle_wb_supplies_list_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.list_supplies(params)
 

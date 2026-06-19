@@ -84,16 +84,18 @@
     .settings-panel[hidden] { display: none; }
     .document-toolbar { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; align-items: end; }
     .document-toolbar .toolbar { grid-column: span 2; }
-    .document-table { min-width: 1260px; }
+    .document-table { min-width: 1340px; }
     .document-table th.col-doc-type { width: 110px; }
     .document-table th.col-doc-number { width: 150px; }
     .document-table th.col-doc-date { width: 128px; }
     .document-table th.col-doc-supplier { width: 190px; }
+    .document-table th.col-doc-amount { width: 150px; }
     .document-table th.col-doc-link { width: 210px; }
     .document-table th.col-doc-source { width: 160px; }
     .document-table th.col-doc-file { width: 200px; }
     .document-table th.col-doc-updated { width: 164px; }
-    .document-table th.col-doc-actions { width: 220px; }
+    .document-table th.col-doc-actions { width: 260px; }
+    .document-edit-input { width: 100%; min-width: 0; }
     .link-select { min-width: 180px; }
     .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 900; background: rgba(167, 139, 250, .12); color: var(--accent); }
     .pill.warning { background: rgba(250, 204, 21, .12); color: var(--warning); }
@@ -258,6 +260,7 @@
                 <th class="col-doc-number">Номер</th>
                 <th class="col-doc-date">Дата</th>
                 <th class="col-doc-supplier">Поставщик</th>
+                <th class="col-doc-amount">Сумма invoice</th>
                 <th class="col-doc-link">Контракт</th>
                 <th class="col-doc-source">Источник</th>
                 <th class="col-doc-file">Файл</th>
@@ -266,7 +269,7 @@
               </tr>
             </thead>
             <tbody id="invoiceRows">
-              <tr><td colspan="8">Инвойсов пока нет.</td></tr>
+              <tr><td colspan="9">Инвойсов пока нет.</td></tr>
             </tbody>
           </table>
         </div>
@@ -323,6 +326,7 @@
       let items = [];
       let documents = [];
       let pendingDocumentType = "";
+      let editingContractId = "";
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -586,6 +590,9 @@
         try {
           const payload = await fetchJson(tradeDocumentsPath, { headers: { Accept: "application/json" } });
           documents = Array.isArray(payload.documents) ? payload.documents : [];
+          if (editingContractId && !documents.some((document) => document.document_id === editingContractId)) {
+            editingContractId = "";
+          }
           renderDocuments();
           setAllDocumentMessages("", "");
         } catch (error) {
@@ -612,13 +619,22 @@
         Array.from(contractRows.querySelectorAll("[data-document-archive]")).forEach((button) => {
           button.addEventListener("click", () => archiveDocument(button.dataset.documentArchive || ""));
         });
+        Array.from(contractRows.querySelectorAll("[data-contract-edit]")).forEach((button) => {
+          button.addEventListener("click", () => startContractEdit(button.dataset.contractEdit || ""));
+        });
+        Array.from(contractRows.querySelectorAll("[data-contract-cancel]")).forEach((button) => {
+          button.addEventListener("click", cancelContractEdit);
+        });
+        Array.from(contractRows.querySelectorAll("[data-contract-save]")).forEach((button) => {
+          button.addEventListener("click", () => saveContractEdit(button.dataset.contractSave || ""));
+        });
       }
 
       function renderInvoices() {
         const query = invoiceSearchInput.value.trim().toLowerCase();
         const visible = documents.filter((document) => document.document_type === "invoice" && (!query || documentText(document).includes(query)));
         if (!visible.length) {
-          invoiceRows.innerHTML = '<tr><td colspan="8">Инвойсов пока нет.</td></tr>';
+          invoiceRows.innerHTML = '<tr><td colspan="9">Инвойсов пока нет.</td></tr>';
           return;
         }
         invoiceRows.innerHTML = visible.map(renderInvoiceRow).join("");
@@ -634,6 +650,9 @@
             const select = row && row.querySelector("[data-contract-select]");
             linkInvoiceContract(button.dataset.documentLink || "", select ? select.value : "");
           });
+        });
+        Array.from(invoiceRows.querySelectorAll("[data-document-unlink]")).forEach((button) => {
+          button.addEventListener("click", () => unlinkInvoiceContract(button.dataset.documentUnlink || ""));
         });
       }
 
@@ -652,9 +671,28 @@
       }
 
       function renderContractRow(document) {
+        if (editingContractId === document.document_id) {
+          const actions = [
+            '<button class="primary compact" type="button" data-contract-save="' + escapeHtml(document.document_id || "") + '">Сохранить</button>',
+            '<button class="compact" type="button" data-contract-cancel>Отмена</button>'
+          ];
+          return [
+            '<tr data-document-id="' + escapeHtml(document.document_id || "") + '">',
+            '<td><input class="document-edit-input" data-contract-edit-field="number" value="' + escapeHtml(document.number || "") + '" placeholder="Номер договора"></td>',
+            '<td><input class="document-edit-input" data-contract-edit-field="document_date" type="date" value="' + escapeHtml(document.document_date || "") + '"></td>',
+            '<td><input class="document-edit-input" data-contract-edit-field="supplier_name" value="' + escapeHtml(document.supplier_name || "") + '" placeholder="Поставщик"></td>',
+            '<td>' + renderContractLinkCount(document) + '</td>',
+            '<td>' + escapeHtml(sourceLabel(document.source)) + '</td>',
+            '<td>' + escapeHtml(document.file_original_name || "-") + '</td>',
+            '<td>' + escapeHtml(document.updated_at || "-") + '</td>',
+            '<td><div class="compact-actions">' + actions.join("") + '</div>' + renderParserWarnings(document) + '</td>',
+            '</tr>'
+          ].join("");
+        }
         const actions = [
           '<a class="button-link compact" data-document-download href="' + escapeHtml(document.download_path || "#") + '">Скачать</a>',
-          '<button class="danger compact" type="button" data-document-archive="' + escapeHtml(document.document_id || "") + '">Archive</button>'
+          '<button class="compact" type="button" data-contract-edit="' + escapeHtml(document.document_id || "") + '">Редактировать</button>',
+          '<button class="danger compact" type="button" data-document-archive="' + escapeHtml(document.document_id || "") + '">Архивировать</button>'
         ];
         return [
           '<tr data-document-id="' + escapeHtml(document.document_id || "") + '">',
@@ -673,13 +711,15 @@
       function renderInvoiceRow(document) {
         const actions = [
           '<a class="button-link compact" data-document-download href="' + escapeHtml(document.download_path || "#") + '">Скачать</a>',
-          '<button class="danger compact" type="button" data-document-archive="' + escapeHtml(document.document_id || "") + '">Archive</button>'
+          renderInvoiceContractActions(document),
+          '<button class="danger compact" type="button" data-document-archive="' + escapeHtml(document.document_id || "") + '">Архивировать</button>'
         ];
         return [
           '<tr data-document-id="' + escapeHtml(document.document_id || "") + '">',
           '<td>' + renderDocumentField(document, "number") + '</td>',
           '<td>' + renderDocumentField(document, "document_date") + '</td>',
           '<td>' + escapeHtml(document.supplier_name || "-") + '</td>',
+          '<td>' + formatInvoiceAmount(document) + '</td>',
           '<td>' + renderInvoiceContractCell(document) + '</td>',
           '<td>' + escapeHtml(sourceLabel(document.source)) + '</td>',
           '<td>' + escapeHtml(document.file_original_name || "-") + '</td>',
@@ -702,19 +742,34 @@
       }
 
       function renderInvoiceContractCell(document) {
-        if (document.linked_contract_document_id) {
-          return '<span class="pill success">Контракт №' + escapeHtml(document.linked_contract_number || document.linked_contract_document_id) + '</span>';
-        }
         const contracts = documents.filter((item) => item.document_type === "contract" && item.status === "active");
         const options = ['<option value="">Выбрать контракт</option>'].concat(contracts.map((contract) => (
-          '<option value="' + escapeHtml(contract.document_id || "") + '">' + escapeHtml(contractLabel(contract)) + '</option>'
+          '<option value="' + escapeHtml(contract.document_id || "") + '"' + (contract.document_id === document.linked_contract_document_id ? ' selected' : '') + '>' + escapeHtml(contractLabel(contract)) + '</option>'
         ))).join("");
+        if (document.linked_contract_document_id) {
+          return [
+            '<span class="pill success">Контракт №' + escapeHtml(document.linked_contract_number || document.linked_contract_document_id) + '</span>',
+            '<div class="compact-actions" style="margin-top: 6px;">',
+            '<select class="link-select" data-contract-select>' + options + '</select>',
+            '</div>'
+          ].join("");
+        }
         return [
           '<span class="pill warning">Не привязан</span>',
           '<div class="compact-actions" style="margin-top: 6px;">',
           '<select class="link-select" data-contract-select>' + options + '</select>',
           '<button class="compact" type="button" data-document-link="' + escapeHtml(document.document_id || "") + '">Связать</button>',
           '</div>'
+        ].join("");
+      }
+
+      function renderInvoiceContractActions(document) {
+        if (!document.linked_contract_document_id) {
+          return "";
+        }
+        return [
+          '<button class="compact" type="button" data-document-link="' + escapeHtml(document.document_id || "") + '">Сменить</button>',
+          '<button class="compact" type="button" data-document-unlink="' + escapeHtml(document.document_id || "") + '">Отвязать</button>'
         ].join("");
       }
 
@@ -735,6 +790,24 @@
         const number = contract.number || contract.file_original_name || contract.document_id;
         const date = contract.document_date ? (" от " + contract.document_date) : "";
         return "№" + number + date;
+      }
+
+      function formatInvoiceAmount(document) {
+        const rawAmount = document.amount_total;
+        if (rawAmount === null || rawAmount === undefined || rawAmount === "") {
+          return "-";
+        }
+        const amount = Number(rawAmount);
+        if (!Number.isFinite(amount)) {
+          return "-";
+        }
+        const hasFraction = Math.round(amount * 100) % 100 !== 0;
+        const formatted = new Intl.NumberFormat("ru-RU", {
+          minimumFractionDigits: hasFraction ? 2 : 0,
+          maximumFractionDigits: 2
+        }).format(amount).replace(/\u00a0/g, " ");
+        const currency = String(document.currency || "").trim();
+        return escapeHtml(currency ? (formatted + " " + currency) : formatted);
       }
 
       function sourceLabel(source) {
@@ -801,6 +874,62 @@
           });
           await loadDocuments();
           setDocumentMessage("invoice", "Связь сохранена.", "success");
+        } catch (error) {
+          setDocumentMessage("invoice", error.message, "error");
+        }
+      }
+
+      function startContractEdit(documentId) {
+        editingContractId = documentId;
+        renderContracts();
+        setDocumentMessage("contract", "", "");
+      }
+
+      function cancelContractEdit() {
+        editingContractId = "";
+        renderContracts();
+        setDocumentMessage("contract", "", "");
+      }
+
+      async function saveContractEdit(documentId) {
+        const row = contractRows.querySelector('tr[data-document-id="' + CSS.escape(documentId) + '"]');
+        if (!documentId || !row) {
+          setDocumentMessage("contract", "Не удалось найти строку договора для сохранения.", "error");
+          return;
+        }
+        const payload = {};
+        ["number", "document_date", "supplier_name"].forEach((fieldName) => {
+          const input = row.querySelector('[data-contract-edit-field="' + fieldName + '"]');
+          payload[fieldName] = input ? input.value.trim() : "";
+        });
+        setDocumentMessage("contract", "Сохраняем договор...", "");
+        try {
+          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(documentId), {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify(payload)
+          });
+          editingContractId = "";
+          await loadDocuments();
+          setDocumentMessage("contract", "Договор сохранён.", "success");
+        } catch (error) {
+          setDocumentMessage("contract", error.message, "error");
+        }
+      }
+
+      async function unlinkInvoiceContract(invoiceDocumentId) {
+        if (!invoiceDocumentId) {
+          setDocumentMessage("invoice", "Не удалось найти invoice для отвязки.", "error");
+          return;
+        }
+        setDocumentMessage("invoice", "Отвязываем invoice от контракта...", "");
+        try {
+          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", {
+            method: "DELETE",
+            headers: { Accept: "application/json" }
+          });
+          await loadDocuments();
+          setDocumentMessage("invoice", "Связь удалена.", "success");
         } catch (error) {
           setDocumentMessage("invoice", error.message, "error");
         }

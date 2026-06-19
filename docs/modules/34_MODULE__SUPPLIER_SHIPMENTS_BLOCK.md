@@ -51,6 +51,7 @@ related_endpoints:
   - "DELETE /v1/sheet-vitrina-v1/settings/documents/{document_id}"
   - "GET /v1/sheet-vitrina-v1/settings/documents/{document_id}/file"
   - "PATCH /v1/sheet-vitrina-v1/settings/documents/{invoice_document_id}/contract"
+  - "DELETE /v1/sheet-vitrina-v1/settings/documents/{invoice_document_id}/contract"
 related_runners:
   - "apps/supplier_invoice_parser_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
@@ -93,8 +94,8 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 
 # 1.1 Trade Documents Registry
 
-- `Настройки -> Договоры` renders only active `contract` documents. The table omits a type column and shows number, date, supplier, linked invoice count, source, file, updated time and actions.
-- `Настройки -> Инвойсы` renders only active `invoice` documents. The table omits a type column and shows number, date, supplier, linked contract state, source, file, updated time and actions. Unlinked invoices show `Не привязан`; the link selector is built only from active contracts.
+- `Настройки -> Договоры` renders only active `contract` documents. The table omits a type column and shows number, date, supplier, linked invoice count, source, file, updated time and actions. Operator inline edit is limited to `number`, `document_date` and `supplier_name`; it never mutates file metadata, archive status or invoice links, and blank supplier edits fall back to canonical default supplier on the backend.
+- `Настройки -> Инвойсы` renders only active `invoice` documents. The table omits a type column and shows number, date, supplier, `Сумма invoice`, linked contract state, source, file, updated time and actions. Unlinked invoices show `Не привязан`; the link/change selector is built only from active contracts. Linked invoices expose an idempotent operator-only unlink action that removes only the invoice->contract row.
 - Supported files are `.pdf`, `.jpg`, `.jpeg`, `.png`, `.xlsx`. PDF/JPG/PNG are stored as files; contract metadata extraction is best-effort and bounded.
 - Contract uploads attempt to fill `number` and `document_date` automatically. XLSX files are read through `openpyxl`; PDF files first use `pdftotext`/embedded text when available and then bounded first-page OCR if runtime tools are installed. Runtime OCR dependencies are `poppler-utils`, `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-chi-sim` and optionally `tesseract-ocr-rus`. JPG/PNG files use the same Tesseract language selection over the original image. Missing OCR tools remain non-fatal and produce parser warnings.
 - OCR for image-only PDFs is first-page only. It renders bounded strategies through `pdftoppm` (page-size tolerant low DPI first, then grayscale/top-crop/higher-DPI fallbacks) and tries Tesseract `psm` values `6`, `11`, `4`, `3` with the available subset of `eng+chi_sim+rus`. The parser stops when both number and date are found; it does not OCR all contract pages.

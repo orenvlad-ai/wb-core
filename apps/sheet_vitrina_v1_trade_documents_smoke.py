@@ -229,8 +229,10 @@ def main() -> None:
                     fields={"document_type": "contract"},
                 )
                 auto_contract_doc = auto_contract_payload.get("document") or {}
+                auto_contract_id = str(auto_contract_doc.get("document_id") or "")
                 if (
                     auto_contract_code != 200
+                    or not auto_contract_id
                     or auto_contract_doc.get("number") != "AUTO-2026-0601"
                     or auto_contract_doc.get("document_date") != "2026-06-01"
                     or auto_contract_doc.get("parsed_number") != "AUTO-2026-0601"
@@ -238,6 +240,34 @@ def main() -> None:
                     or auto_contract_doc.get("supplier_name") != DEFAULT_SUPPLIER_NAME
                 ):
                     raise AssertionError(f"contract XLSX upload must parse number/date, got {auto_contract_code} {auto_contract_payload}")
+
+                edit_contract_code, edit_contract_payload = _opener_patch_json(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}/{auto_contract_id}",
+                    {"number": "AUTO-EDITED-0603", "document_date": "2026-06-03", "supplier_name": ""},
+                )
+                edit_contract_doc = edit_contract_payload.get("document") or {}
+                if (
+                    edit_contract_code != 200
+                    or edit_contract_doc.get("number") != "AUTO-EDITED-0603"
+                    or edit_contract_doc.get("document_date") != "2026-06-03"
+                    or edit_contract_doc.get("supplier_name") != DEFAULT_SUPPLIER_NAME
+                ):
+                    raise AssertionError(f"contract metadata PATCH must edit allowed fields and default supplier, got {edit_contract_code} {edit_contract_payload}")
+                invalid_edit_code, invalid_edit_payload = _opener_patch_json(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}/{auto_contract_id}",
+                    {"document_date": "03.06.2026"},
+                )
+                if invalid_edit_code != 400 or "YYYY-MM-DD" not in str(invalid_edit_payload.get("error", "")):
+                    raise AssertionError(f"invalid document_date PATCH must return 400, got {invalid_edit_code} {invalid_edit_payload}")
+                unsupported_edit_code, unsupported_edit_payload = _opener_patch_json(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}/{auto_contract_id}",
+                    {"amount_total": 99},
+                )
+                if unsupported_edit_code != 400 or "unsupported" not in str(unsupported_edit_payload.get("error", "")).lower():
+                    raise AssertionError(f"unsupported document metadata PATCH must return 400, got {unsupported_edit_code} {unsupported_edit_payload}")
 
                 chinese_contract_code, chinese_contract_payload = _opener_post_multipart(
                     operator,
@@ -374,12 +404,42 @@ def main() -> None:
                 if archive_contract_code != 400 or "linked invoice" not in str(archive_contract_payload.get("error", "")).lower():
                     raise AssertionError(f"linked contract archive must be rejected, got {archive_contract_code} {archive_contract_payload}")
 
+                unlink_code, unlink_payload = _opener_delete_json(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}/{invoice_id}/contract",
+                )
+                if (
+                    unlink_code != 200
+                    or unlink_payload.get("deleted") is not True
+                    or (unlink_payload.get("invoice") or {}).get("linked_contract_document_id")
+                ):
+                    raise AssertionError(f"invoice->contract unlink failed: {unlink_code} {unlink_payload}")
+                second_unlink_code, second_unlink_payload = _opener_delete_json(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}/{invoice_id}/contract",
+                )
+                if second_unlink_code != 200 or second_unlink_payload.get("deleted") is not False:
+                    raise AssertionError(f"invoice->contract unlink must be idempotent, got {second_unlink_code} {second_unlink_payload}")
+                relink_code, relink_payload = _opener_patch_json(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}/{invoice_id}/contract",
+                    {"contract_document_id": contract_id},
+                )
+                if relink_code != 200 or relink_payload.get("link", {}).get("contract_document_id") != contract_id:
+                    raise AssertionError(f"invoice->contract relink failed: {relink_code} {relink_payload}")
+
                 supplier_settings_code, supplier_settings_payload = _opener_json(
                     supplier,
                     f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}",
                 )
                 if supplier_settings_code != 403 or supplier_settings_payload.get("error") != "forbidden":
                     raise AssertionError("supplier role must not list settings documents")
+                supplier_unlink_code, supplier_unlink_payload = _opener_delete_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}/{invoice_id}/contract",
+                )
+                if supplier_unlink_code != 403 or supplier_unlink_payload.get("error") != "forbidden":
+                    raise AssertionError("supplier role must not unlink settings document contracts")
                 supplier_arbitrary_file_code, _, _ = _opener_bytes(
                     supplier,
                     f"{base_url}{contract_doc.get('download_path')}",

@@ -2586,6 +2586,25 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_trade_document_contract_link_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    invoice_document_id = _resolve_trade_document_id(parsed.path)
+                    payload = entrypoint.handle_trade_documents_contract_delete_request(invoice_document_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"trade document contract unlink failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_trade_document_item_path(parsed.path):
                 if not _ensure_operator_role(self, parsed.path):
                     return
