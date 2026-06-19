@@ -988,6 +988,15 @@ class SupplierShipmentsBlock:
             updates["supplier_name"] = _document_supplier_name(manual_supplier_name)
 
         document_type = str(existing.get("document_type") or "").strip()
+        if (
+            document_type == TRADE_DOCUMENT_TYPE_CONTRACT
+            and str(existing.get("number") or "").strip()
+            and str(existing.get("document_date") or "").strip()
+        ):
+            existing_warnings = _string_list(existing.get("warnings"))
+            cleaned_warnings = _remove_stale_contract_parser_warnings(existing_warnings)
+            if cleaned_warnings != existing_warnings:
+                updates["warnings"] = cleaned_warnings
         needs_contract_parse = (
             document_type == TRADE_DOCUMENT_TYPE_CONTRACT
             and (not str(existing.get("number") or "").strip() or not str(existing.get("document_date") or "").strip())
@@ -3366,8 +3375,25 @@ def _merge_contract_parser_warnings(
 ) -> list[str]:
     base = _string_list(existing)
     if str(parsed_number or "").strip() and str(parsed_date or "").strip():
-        base = [warning for warning in base if not str(warning or "").lower().startswith("contract parser")]
+        base = _remove_stale_contract_parser_warnings(base)
     return _merge_string_lists(base, incoming)
+
+
+def _remove_stale_contract_parser_warnings(warnings: Any) -> list[str]:
+    return [warning for warning in _string_list(warnings) if not _is_stale_contract_parser_warning(warning)]
+
+
+def _is_stale_contract_parser_warning(warning: str) -> bool:
+    normalized = str(warning or "").strip().lower()
+    return normalized.startswith(
+        (
+            "contract parser skipped ocr",
+            "contract parser ocr text",
+            "contract parser found no readable text",
+            "contract parser could not extract",
+            "contract parser found no text through pdftotext",
+        )
+    )
 
 
 def _invoice_download_path(shipment_id: str) -> str:
