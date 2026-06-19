@@ -65,7 +65,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, preserves deterministic nomenclature matching, and persists per-line invoice price conformity snapshots/statuses against current nomenclature purchase_price_yuan. Manual price recheck remains operator-only and UI-scoped to the operator embedded `Поставки -> От поставщика` frame. Operator settings now also own `Справочник договоров и инвойсов`: PDF/JPG/PNG/XLSX contract/invoice files, XLSX invoice metadata parsing, invoice->contract links, shipment-linked contract download, and idempotent legacy shipment invoice backfill. Standalone supplier role can read/download only shipment-linked invoice/contract files through supplier shipment routes and cannot access settings document CRUD or arbitrary document ids. No Google Sheets/GAS contour, no browser-local truth, no OCR for PDF/JPG/PNG."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads invoice contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, preserves deterministic nomenclature matching, and persists per-line invoice price conformity snapshots/statuses against current nomenclature purchase_price_yuan. Manual price recheck remains operator-only and UI-scoped to the operator embedded `Поставки -> От поставщика` frame. Operator settings are split into inner tabs `Номенклатура` and `Договоры и инвойсы`; the document registry owns PDF/JPG/PNG/XLSX contract/invoice files, XLSX invoice metadata parsing, bounded contract number/date parsing for XLSX and text-layer PDF, invoice->contract links, shipment-linked contract download, and idempotent legacy shipment invoice backfill. Standalone supplier role can read/download only shipment-linked invoice/contract files through supplier shipment routes and cannot access settings document CRUD or arbitrary document ids. No Google Sheets/GAS contour, no browser-local truth; image-only PDF/JPG/PNG contract parsing returns a warning unless runtime OCR tools are available."
 ---
 
 # 1. Contract
@@ -78,7 +78,7 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - Visible order card/form UI does not render editable `Supplier` or `Customer`. Supplier metadata is fixed server-side to `HanShang Technology`; the registry shows this fixed value in `供应商 / Supplier / Поставщик` with fallback for legacy rows. Customer is kept backward-compatible in stored/API payloads but is not required by create/save and is not shown.
 - Visible order product rows do not render `our_sku`/`SKU` fields. Matching still may keep legacy `internal_sku` in storage for backward compatibility, but the supplier/order UI shows only `平台ID / nmId / nmId` and `我方品名 / Our item name / Номенклатура`.
 - Registry matching column is `匹配 / Matching / Матчинг`; compact registry values are `OK` when every product line is matched and `Check` otherwise.
-- Operator settings surface: `GET /sheet-vitrina-v1/settings` is a service page reachable from the top-right `Настройки` button, not a top-level WebCore tab.
+- Operator settings surface: `GET /sheet-vitrina-v1/settings` is a service page reachable from the top-right `Настройки` button, not a top-level WebCore tab. Inside the page, inner settings tabs switch between `Номенклатура` and `Договоры и инвойсы` without reload; `Номенклатура` is the default active subsection and any browser-local tab state is UI preference only, not runtime truth.
 - Runtime truth is server-owned:
   - original XLSX files live under `<runtime_dir>/supplier_invoices/files/<shipment_id>/<safe_filename>`;
   - staged uploads live under `<runtime_dir>/supplier_invoices/uploads/<upload_id>/<safe_filename>`;
@@ -93,8 +93,11 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 
 # 1.1 Trade Documents Registry
 
-- `Настройки -> Справочник договоров и инвойсов` is an operator-only server-owned registry for `contract` and `invoice` documents.
-- Supported files are `.pdf`, `.jpg`, `.jpeg`, `.png`, `.xlsx`. PDF/JPG/PNG are stored as files without OCR/recognition in this MVP.
+- `Настройки -> Договоры и инвойсы` renders the operator-only server-owned `Справочник договоров и инвойсов` registry for `contract` and `invoice` documents.
+- Supported files are `.pdf`, `.jpg`, `.jpeg`, `.png`, `.xlsx`. PDF/JPG/PNG are stored as files; contract metadata extraction is best-effort and does not require bundled OCR.
+- Contract uploads attempt to fill `number` and `document_date` automatically. XLSX files are read through `openpyxl`; PDF files first use a text layer when available and may use runtime OCR only if safe system tools are already installed. JPG/PNG and scanned PDF without OCR support save successfully with parser warnings and empty parsed fields.
+- Contract number follows the MVP rule: the first non-empty document line is authoritative input, with labels such as `Contract No`, `Contract No.`, `Контракт №`, `合同编号` and `合同号` stripped when present. Contract date is searched only in a bounded header fragment and normalized to `YYYY-MM-DD` for formats such as `YYYY-MM-DD`, `YYYY.MM.DD`, `DD.MM.YYYY`, `MM/DD/YYYY`, `2026年5月13日`, English month names and Russian month names.
+- Manual `number`/`document_date` values on upload remain authoritative. If parser values are different, the manual values are stored on the document row while parsed values and warnings remain in `parsed_metadata_json`/`warnings_json`. Upload API responses expose `parsed_number`, `parsed_document_date`, `parser_warnings` and `parser_errors`.
 - XLSX invoice uploads through settings are parsed with the existing supplier invoice parser when applicable. Parsed metadata may fill invoice no/date, contract no/date, supplier, currency, totals, warnings and errors. Settings invoice upload creates only a document record; it does not create a supplier shipment/order card.
 - Settings upload deduplicates active settings documents by `document_type + file_sha256` and returns the existing document instead of creating another row for the same file.
 - Supplier shipment create from the existing invoice parser flow creates or finds an `invoice` document record, writes `invoice_document_id` to `sheet_vitrina_v1_supplier_shipments`, and keeps the existing `GET .../{shipment_id}/invoice` download backward-compatible.
@@ -108,6 +111,7 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - Parser uses `openpyxl` and searches for flexible invoice table headers including `NO.`, `MODELS / （型号）`, `NAME & SPECIFICATION / （品名规格）`, `QTY (PCS) / （数量）`, `U.PRICE / （单价）` and `AMOUNT / （总价）`.
 - `RMB`/`CNY`/`¥` invoice currency is normalized to `RMB`; declared invoice totals may be read from post-table `Total`/`总值` rows when the value is not available in pre-table metadata.
 - Contract metadata is extracted from ordinary cells, merged-cell values and bounded workbook drawing XML text. Supported labels include `Contract No`, `Contract No.`, `Contract Number`, `Contract Date`, `Date of Contract`, `合同号`, `合同编号`, `合同日期`, `下单日期`; date formats such as `2026.5.13`, `2026-05-13`, `13.05.2026` and `5/13/2026` normalize to `YYYY-MM-DD`.
+- The document-registry contract parser is separate from invoice table parsing: it reads only bounded header text, stores `parser_version=contract_metadata_parser_v1`, and returns non-fatal warnings/errors instead of blocking contract file storage when metadata cannot be extracted.
 - Merged-cell/fill-down blocks are handled for product type markers:
   - `高清膜` / `smk` -> `clear`
   - `防窥膜` / `(Anti-Spy)` -> `anti_spy`
@@ -118,7 +122,7 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 
 # 3. Nomenclature And Matching
 
-- Server-side nomenclature lives in `sheet_vitrina_v1_nomenclature_items` and is edited through `Настройки -> Справочник номенклатуры`.
+- Server-side nomenclature lives in `sheet_vitrina_v1_nomenclature_items` and is edited through `Настройки -> Номенклатура` in the `Справочник номенклатуры` subsection.
 - Nomenclature rows include `item_id`, `is_active`, `our_sku`, `nm_id`, `nomenclature_name`, `product_type`, `match_key`, nullable `purchase_price_yuan`, `aliases`, `compatible_models_text`, normalized `compatible_model_keys`, `comment`, `created_at`, `updated_at`.
 - Default operator settings UI shows only `Вкл.`, `nmId`, `Номенклатура`, `Тип`, `Match key`, `Цена закупки, ¥`, `Совместимые модели`, `Обновлено` and compact row actions. Legacy backend fields `our_sku`, `aliases` and `comment` remain stored/API-compatible but are not shown in the default table/export.
 - `product_type` canonical values remain `clear`, `anti_spy`, `matte`, `extra`, `other`; the settings UI displays Russian labels and sends canonical values in JSON payloads.

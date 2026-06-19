@@ -75,7 +75,12 @@
     .icon-button.save { border-color: rgba(52, 211, 153, .55); color: #03130d; background: var(--success); }
     .icon-button.disable { border-color: rgba(250, 204, 21, .58); color: #211600; background: var(--warning); }
     .file-input { display: none; }
-    .settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .settings-tabs { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 6px; width: fit-content; max-width: 100%; }
+    .settings-tab-button { min-height: 34px; border-color: transparent; background: transparent; color: var(--muted); }
+    .settings-tab-button:hover { border-color: var(--border); color: var(--text); background: var(--panel-2); }
+    .settings-tab-button.is-active { border-color: rgba(167, 139, 250, .48); background: var(--panel-2); color: var(--text); }
+    .settings-panels { min-width: 0; }
+    .settings-panel[hidden] { display: none; }
     .document-toolbar { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; align-items: end; }
     .document-toolbar .toolbar { grid-column: span 2; }
     .document-table { min-width: 1260px; }
@@ -115,7 +120,13 @@
         </div>
       </section>
 
-      <section class="block" aria-labelledby="nomenclatureTitle">
+      <nav class="settings-tabs" aria-label="Подразделы настроек">
+        <button class="settings-tab-button is-active" type="button" data-settings-tab-button="nomenclature" aria-controls="nomenclaturePanel" aria-selected="true">Номенклатура</button>
+        <button class="settings-tab-button" type="button" data-settings-tab-button="documents" aria-controls="documentsPanel" aria-selected="false">Договоры и инвойсы</button>
+      </nav>
+
+      <div class="settings-panels">
+      <section id="nomenclaturePanel" class="block settings-panel" data-settings-panel="nomenclature" aria-labelledby="nomenclatureTitle">
         <div class="toolbar" style="justify-content: space-between;">
           <div>
             <h2 id="nomenclatureTitle">Справочник номенклатуры</h2>
@@ -152,7 +163,7 @@
         </div>
       </section>
 
-      <section class="block" aria-labelledby="documentsTitle">
+      <section id="documentsPanel" class="block settings-panel" data-settings-panel="documents" aria-labelledby="documentsTitle" hidden>
         <div class="toolbar" style="justify-content: space-between;">
           <div>
             <h2 id="documentsTitle">Справочник договоров и инвойсов</h2>
@@ -216,6 +227,7 @@
           </table>
         </div>
       </section>
+      </div>
     </div>
   </main>
 
@@ -247,6 +259,9 @@
       const documentSearchInput = document.getElementById("documentSearchInput");
       const documentTypeFilter = document.getElementById("documentTypeFilter");
       const reloadDocumentsButton = document.getElementById("reloadDocumentsButton");
+      const settingsTabButtons = Array.from(document.querySelectorAll("[data-settings-tab-button]"));
+      const settingsPanels = Array.from(document.querySelectorAll("[data-settings-panel]"));
+      const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v1";
 
       const productTypeLabels = {
         clear: "Прозрачное",
@@ -273,6 +288,35 @@
       function setDocumentsMessage(text, tone) {
         documentsMessage.textContent = text || "";
         documentsMessage.className = "message" + (tone ? " " + tone : "");
+      }
+
+      function activateSettingsTab(tabName, options) {
+        const requested = tabName === "documents" ? "documents" : "nomenclature";
+        settingsTabButtons.forEach((button) => {
+          const isActive = button.dataset.settingsTabButton === requested;
+          button.classList.toggle("is-active", isActive);
+          button.setAttribute("aria-selected", isActive ? "true" : "false");
+        });
+        settingsPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.settingsPanel !== requested;
+        });
+        if (!options || options.persist !== false) {
+          try {
+            window.localStorage.setItem(SETTINGS_TAB_STORAGE_KEY, requested);
+          } catch (error) {
+            // Browser storage is only a UI preference.
+          }
+        }
+      }
+
+      function restoreSettingsTab() {
+        let saved = "";
+        try {
+          saved = window.localStorage.getItem(SETTINGS_TAB_STORAGE_KEY) || "";
+        } catch (error) {
+          saved = "";
+        }
+        activateSettingsTab(saved === "documents" ? "documents" : "nomenclature", { persist: false });
       }
 
       async function fetchJson(url, options) {
@@ -691,12 +735,16 @@
       documentSearchInput.addEventListener("input", renderDocuments);
       documentTypeFilter.addEventListener("change", renderDocuments);
       reloadDocumentsButton.addEventListener("click", loadDocuments);
+      settingsTabButtons.forEach((button) => {
+        button.addEventListener("click", () => activateSettingsTab(button.dataset.settingsTabButton || "nomenclature"));
+      });
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
       }
       if (vitrinaLink && config.vitrina_path) {
         vitrinaLink.href = config.vitrina_path;
       }
+      restoreSettingsTab();
       loadItems();
       loadDocuments();
     })();

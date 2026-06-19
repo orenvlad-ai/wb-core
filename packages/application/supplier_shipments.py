@@ -12,8 +12,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import tempfile
 from typing import Any, Mapping
 from uuid import uuid4
+import zlib
 
 from openpyxl import Workbook, load_workbook
 
@@ -50,6 +53,7 @@ from packages.contracts.supplier_shipments import (
     SHIPMENT_STATUS_MANUAL_OVERRIDE,
     SUPPLIER_INVOICE_CONTENT_TYPE,
     SUPPLIER_INVOICE_PARSER_VERSION,
+    TRADE_DOCUMENT_CONTRACT_PARSER_VERSION,
     TRADE_DOCUMENT_ALLOWED_EXTENSIONS,
     TRADE_DOCUMENT_CONTENT_TYPES_BY_EXTENSION,
     TRADE_DOCUMENT_LINK_SOURCE_MIGRATION,
@@ -559,8 +563,29 @@ class SupplierShipmentsBlock:
                 file_bytes,
                 filename=filename,
             )
-        metadata_number = str(number or "").strip() or str(parsed_metadata.get("invoice_no") or "").strip()
-        metadata_date = _optional_iso_date(document_date) or _optional_iso_date(parsed_metadata.get("invoice_date"))
+        elif normalized_type == TRADE_DOCUMENT_TYPE_CONTRACT:
+            parsed_metadata, warnings, errors, parser_version = self._parse_contract_document_metadata(
+                file_bytes,
+                filename=filename,
+            )
+        manual_number = str(number or "").strip()
+        manual_date = _optional_iso_date(document_date)
+        if normalized_type == TRADE_DOCUMENT_TYPE_CONTRACT:
+            parsed_number = str(parsed_metadata.get("parsed_number") or "").strip()
+            parsed_date = _optional_iso_date(parsed_metadata.get("parsed_document_date"))
+            if manual_number and parsed_number and _compact_compare(manual_number) != _compact_compare(parsed_number):
+                warnings.append(
+                    f"contract parser found number {parsed_number!r}, manual number {manual_number!r} kept"
+                )
+            if manual_date and parsed_date and manual_date != parsed_date:
+                warnings.append(
+                    f"contract parser found date {parsed_date!r}, manual date {manual_date!r} kept"
+                )
+            metadata_number = manual_number or parsed_number
+            metadata_date = manual_date or parsed_date
+        else:
+            metadata_number = manual_number or str(parsed_metadata.get("invoice_no") or "").strip()
+            metadata_date = manual_date or _optional_iso_date(parsed_metadata.get("invoice_date"))
         metadata_supplier = str(supplier_name or "").strip() or str(parsed_metadata.get("supplier_name") or "").strip()
         metadata_currency = str(currency or "").strip().upper() or str(parsed_metadata.get("currency") or "").strip().upper()
         metadata_amount = _optional_number(amount_total)
@@ -1099,6 +1124,56 @@ class SupplierShipmentsBlock:
             str(parsed_payload.get("parser_version") or SUPPLIER_INVOICE_PARSER_VERSION),
         )
 
+    def _parse_contract_document_metadata(self, file_bytes: bytes, *, filename: str) -> tuple[dict[str, Any], list[str], list[str], str]:
+        extension = Path(str(filename or "")).suffix.lower()
+        warnings: list[str] = []
+        errors: list[str] = []
+        lines: list[str] = []
+        extraction_method = ""
+        try:
+            if extension == ".xlsx":
+                lines = _extract_contract_xlsx_lines(file_bytes)
+                extraction_method = "xlsx_first_rows"
+            elif extension == ".pdf":
+                lines, extract_warnings, extraction_method = _extract_contract_pdf_lines(file_bytes)
+                warnings.extend(extract_warnings)
+            elif extension in {".jpg", ".jpeg", ".png"}:
+                lines, extract_warnings, extraction_method = _extract_contract_image_lines(
+                    file_bytes,
+                    suffix=extension,
+                )
+                warnings.extend(extract_warnings)
+            else:
+                warnings.append(f"contract parser skipped unsupported extension: {extension or 'unknown'}")
+        except Exception as exc:
+            return (
+                {"extraction_method": extraction_method or "contract_parser_error"},
+                warnings,
+                [f"contract parser failed: {exc}"],
+                TRADE_DOCUMENT_CONTRACT_PARSER_VERSION,
+            )
+
+        lines = [_normalize_text_line(line) for line in lines]
+        lines = [line for line in lines if line]
+        top_text = "\n".join(lines[:40])[:4000]
+        first_line = lines[0] if lines else ""
+        parsed_number = _extract_contract_number(first_line)
+        parsed_document_date = _extract_contract_document_date(top_text)
+        if not lines and extension in {".pdf", ".jpg", ".jpeg", ".png"} and not warnings:
+            warnings.append("contract parser found no readable text")
+        metadata = {
+            "parsed_number": parsed_number,
+            "parsed_document_date": parsed_document_date,
+            "first_non_empty_line": first_line,
+            "extraction_method": extraction_method or "unknown",
+            "text_line_count": len(lines),
+        }
+        if not parsed_number and first_line:
+            warnings.append("contract parser could not extract number from the first non-empty line")
+        if not parsed_document_date and top_text:
+            warnings.append("contract parser could not extract document date from the bounded header text")
+        return metadata, warnings, errors, TRADE_DOCUMENT_CONTRACT_PARSER_VERSION
+
     def _create_or_load_supplier_invoice_document(
         self,
         *,
@@ -1245,6 +1320,12 @@ class SupplierShipmentsBlock:
             return {}
         payload = dict(document)
         payload["download_path"] = _trade_document_download_path(str(payload.get("document_id") or ""))
+        parsed_metadata = payload.get("parsed_metadata")
+        parsed_metadata = parsed_metadata if isinstance(parsed_metadata, Mapping) else {}
+        payload["parsed_number"] = str(parsed_metadata.get("parsed_number") or "")
+        payload["parsed_document_date"] = str(parsed_metadata.get("parsed_document_date") or "")
+        payload["parser_warnings"] = _string_list(payload.get("warnings") if isinstance(payload.get("warnings"), list) else [])
+        payload["parser_errors"] = _string_list(payload.get("errors") if isinstance(payload.get("errors"), list) else [])
         return payload
 
     def _sha256_for_existing_runtime_file(self, relative_path: str, *, fallback_seed: str) -> str:
@@ -2386,6 +2467,380 @@ def _model_text_from_nomenclature_name(value: str) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^\s*(clean|clear|matte|anti[-\s]?spy)\s+", "", text, flags=re.IGNORECASE)
     return text.strip()
+
+
+def _extract_contract_xlsx_lines(file_bytes: bytes) -> list[str]:
+    workbook = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
+    try:
+        worksheet = workbook.worksheets[0]
+        lines: list[str] = []
+        for row in worksheet.iter_rows(min_row=1, max_row=16, max_col=8, values_only=True):
+            parts = [_normalize_text_line(cell) for cell in row if _normalize_text_line(cell)]
+            if parts:
+                lines.append(" ".join(parts))
+        return lines
+    finally:
+        workbook.close()
+
+
+def _extract_contract_pdf_lines(file_bytes: bytes) -> tuple[list[str], list[str], str]:
+    warnings: list[str] = []
+    if shutil.which("pdftotext"):
+        text = _extract_pdf_text_with_pdftotext(file_bytes)
+        lines = _text_to_lines(text)
+        if lines:
+            return lines, warnings, "pdf_pdftotext"
+        warnings.append("contract parser found no text through pdftotext")
+
+    text = _extract_pdf_text_layer(file_bytes)
+    lines = _text_to_lines(text)
+    if lines:
+        return lines, warnings, "pdf_text_layer"
+
+    ocr_lines, ocr_warning = _extract_contract_pdf_ocr_lines(file_bytes)
+    if ocr_lines:
+        return ocr_lines, warnings, "pdf_ocr_first_page"
+    warnings.append(ocr_warning)
+    return [], warnings, "pdf_no_readable_text"
+
+
+def _extract_pdf_text_with_pdftotext(file_bytes: bytes) -> str:
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+            handle.write(file_bytes)
+            temp_path = handle.name
+        result = subprocess.run(
+            ["pdftotext", "-f", "1", "-l", "1", "-layout", temp_path, "-"],
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    finally:
+        if temp_path:
+            try:
+                Path(temp_path).unlink()
+            except OSError:
+                pass
+
+
+def _extract_pdf_text_layer(file_bytes: bytes) -> str:
+    fragments: list[str] = []
+    for stream_dict, stream_bytes in _iter_pdf_streams(file_bytes):
+        filters = _pdf_stream_filters(stream_dict)
+        if "DCTDecode" in filters or b"Image" in stream_dict:
+            continue
+        payload = stream_bytes
+        if "FlateDecode" in filters:
+            try:
+                payload = zlib.decompress(stream_bytes)
+            except zlib.error:
+                continue
+        if not any(marker in payload for marker in (b"Tj", b"TJ", b"'", b'"')):
+            continue
+        fragments.extend(_extract_pdf_text_fragments(payload))
+        if len(fragments) >= 80:
+            break
+    return "\n".join(fragment for fragment in fragments if _normalize_text_line(fragment))
+
+
+def _iter_pdf_streams(file_bytes: bytes) -> list[tuple[bytes, bytes]]:
+    raw = file_bytes[:8_000_000]
+    streams: list[tuple[bytes, bytes]] = []
+    for match in re.finditer(rb"<<(?P<dict>.*?)>>\s*stream\r?\n(?P<body>.*?)\r?\nendstream", raw, flags=re.S):
+        streams.append((match.group("dict"), match.group("body")))
+    return streams
+
+
+def _pdf_stream_filters(stream_dict: bytes) -> set[str]:
+    filters: set[str] = set()
+    single = re.search(rb"/Filter\s*/([A-Za-z0-9]+)", stream_dict)
+    if single:
+        filters.add(single.group(1).decode("ascii", "ignore"))
+    for match in re.finditer(rb"/([A-Za-z0-9]+)", stream_dict):
+        name = match.group(1).decode("ascii", "ignore")
+        if name.endswith("Decode"):
+            filters.add(name)
+    return filters
+
+
+def _extract_pdf_text_fragments(content: bytes) -> list[str]:
+    fragments: list[str] = []
+    for array_match in re.finditer(rb"\[(?P<body>.*?)\]\s*TJ", content, flags=re.S):
+        fragments.extend(_decode_pdf_string_tokens(array_match.group("body")))
+    for literal_match in re.finditer(rb"(?P<token>\((?:\\.|[^\\()])*\))\s*(?:Tj|'|\")", content, flags=re.S):
+        decoded = _decode_pdf_literal_string(literal_match.group("token"))
+        if decoded:
+            fragments.append(decoded)
+    return [_normalize_text_line(fragment) for fragment in fragments if _normalize_text_line(fragment)]
+
+
+def _decode_pdf_string_tokens(value: bytes) -> list[str]:
+    fragments: list[str] = []
+    for literal_match in re.finditer(rb"\((?:\\.|[^\\()])*\)", value, flags=re.S):
+        decoded = _decode_pdf_literal_string(literal_match.group(0))
+        if decoded:
+            fragments.append(decoded)
+    for hex_match in re.finditer(rb"<([0-9A-Fa-f\s]+)>", value):
+        raw_hex = re.sub(rb"\s+", b"", hex_match.group(1))
+        if len(raw_hex) % 2:
+            raw_hex += b"0"
+        try:
+            decoded = _decode_pdf_bytes(bytes.fromhex(raw_hex.decode("ascii")))
+        except ValueError:
+            decoded = ""
+        if decoded:
+            fragments.append(decoded)
+    return fragments
+
+
+def _decode_pdf_literal_string(token: bytes) -> str:
+    body = token[1:-1]
+    result = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != 0x5C:
+            result.append(char)
+            index += 1
+            continue
+        index += 1
+        if index >= len(body):
+            break
+        escaped = body[index]
+        if escaped in b"nrtbf":
+            result.extend({ord("n"): b"\n", ord("r"): b"\r", ord("t"): b"\t", ord("b"): b"\b", ord("f"): b"\f"}[escaped])
+            index += 1
+            continue
+        if escaped in b"()\\":
+            result.append(escaped)
+            index += 1
+            continue
+        if 48 <= escaped <= 55:
+            octal = bytes([escaped])
+            index += 1
+            for _ in range(2):
+                if index < len(body) and 48 <= body[index] <= 55:
+                    octal += bytes([body[index]])
+                    index += 1
+            result.append(int(octal, 8))
+            continue
+        result.append(escaped)
+        index += 1
+    return _decode_pdf_bytes(bytes(result))
+
+
+def _decode_pdf_bytes(value: bytes) -> str:
+    if not value:
+        return ""
+    if value.startswith(b"\xfe\xff"):
+        return value[2:].decode("utf-16-be", "ignore")
+    if value.startswith(b"\xff\xfe"):
+        return value[2:].decode("utf-16-le", "ignore")
+    if value.count(b"\x00") > max(2, len(value) // 4):
+        decoded = value.decode("utf-16-be", "ignore")
+        if _printable_text_score(decoded) > 0.5:
+            return decoded
+    best = ""
+    best_score = -1.0
+    for encoding in ("utf-8", "cp1251", "latin-1"):
+        decoded = value.decode(encoding, "ignore")
+        score = _printable_text_score(decoded)
+        if score > best_score:
+            best = decoded
+            best_score = score
+    return best
+
+
+def _printable_text_score(value: str) -> float:
+    if not value:
+        return 0.0
+    useful = sum(1 for char in value if char.isalnum() or char.isspace() or char in "№#./:-_«»(),")
+    return useful / max(1, len(value))
+
+
+def _extract_contract_pdf_ocr_lines(file_bytes: bytes) -> tuple[list[str], str]:
+    if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
+        return [], "contract parser skipped OCR: PDF has no readable text layer and OCR tools are unavailable"
+    try:
+        with tempfile.TemporaryDirectory(prefix="wb-contract-ocr-") as tmp:
+            pdf_path = Path(tmp) / "contract.pdf"
+            image_prefix = Path(tmp) / "page"
+            pdf_path.write_bytes(file_bytes)
+            convert = subprocess.run(
+                ["pdftoppm", "-f", "1", "-singlefile", "-png", str(pdf_path), str(image_prefix)],
+                capture_output=True,
+                timeout=12,
+                check=False,
+            )
+            image_path = Path(str(image_prefix) + ".png")
+            if convert.returncode != 0 or not image_path.exists():
+                return [], "contract parser skipped OCR: first PDF page could not be rendered"
+            return _run_tesseract_image(image_path)
+    except (OSError, subprocess.SubprocessError):
+        return [], "contract parser skipped OCR: OCR command failed"
+
+
+def _extract_contract_image_lines(file_bytes: bytes, *, suffix: str) -> tuple[list[str], list[str], str]:
+    if not shutil.which("tesseract"):
+        return [], ["contract parser skipped OCR: image files require OCR and tesseract is unavailable"], "image_no_ocr"
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(file_bytes)
+            image_path = Path(handle.name)
+        try:
+            lines, warning = _run_tesseract_image(image_path)
+            return lines, ([warning] if warning and not lines else []), "image_ocr"
+        finally:
+            try:
+                image_path.unlink()
+            except OSError:
+                pass
+    except OSError:
+        return [], ["contract parser skipped OCR: image temp file could not be created"], "image_no_ocr"
+
+
+def _run_tesseract_image(image_path: Path) -> tuple[list[str], str]:
+    try:
+        result = subprocess.run(
+            ["tesseract", str(image_path), "stdout", "--psm", "6"],
+            capture_output=True,
+            timeout=12,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [], "contract parser skipped OCR: tesseract command failed"
+    if result.returncode != 0:
+        return [], "contract parser skipped OCR: tesseract returned no readable text"
+    return _text_to_lines(result.stdout.decode("utf-8", "replace")), ""
+
+
+def _text_to_lines(value: str) -> list[str]:
+    return [line for line in (_normalize_text_line(line) for line in str(value or "").splitlines()) if line]
+
+
+def _extract_contract_number(first_line: str) -> str:
+    line = _normalize_text_line(first_line)
+    if not line:
+        return ""
+    patterns = (
+        r"(?iu)(?:合同(?:编号|号))\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
+        r"(?iu)\b(?:contract|контракт)\s*(?:no\.?|number|№|#|n)?\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
+        r"(?iu)(?:^|\s)(?:no\.?|№|#)\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if match:
+            return _clean_contract_number(match.group(1))
+    return _clean_contract_number(line)
+
+
+def _clean_contract_number(value: str) -> str:
+    cleaned = _normalize_text_line(value)
+    cleaned = re.sub(r"(?iu)\b(?:dated|date|от)\b.*$", "", cleaned).strip()
+    cleaned = re.sub(r"(?iu)\b\d{4}[-.]\d{1,2}[-.]\d{1,2}\b.*$", "", cleaned).strip()
+    cleaned = cleaned.strip(" :：#№-—\"'«»")
+    return cleaned[:120]
+
+
+def _extract_contract_document_date(text: str) -> str:
+    bounded = str(text or "")[:4000]
+    if not bounded.strip():
+        return ""
+    label_pattern = re.compile(
+        r"(?iu)(contract\s+date|date\s+of\s+contract|合同日期|签订日期|date|дата)\s*[:：\-]?\s*([^\n]{0,120})"
+    )
+    for match in label_pattern.finditer(bounded):
+        parsed = _parse_contract_date_fragment(match.group(0))
+        if parsed:
+            return parsed
+    return _parse_contract_date_fragment(bounded)
+
+
+def _parse_contract_date_fragment(value: str) -> str:
+    text = _normalize_text_line(value)
+    if not text:
+        return ""
+    for pattern in (
+        r"\b(\d{4})[-.](\d{1,2})[-.](\d{1,2})\b",
+        r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return _format_contract_date(match.group(1), match.group(2), match.group(3))
+    match = re.search(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b", text)
+    if match:
+        return _format_contract_date(match.group(3), match.group(2), match.group(1))
+    match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text)
+    if match:
+        return _format_contract_date(match.group(3), match.group(1), match.group(2))
+    month_names = {
+        "jan": 1, "january": 1,
+        "feb": 2, "february": 2,
+        "mar": 3, "march": 3,
+        "apr": 4, "april": 4,
+        "may": 5,
+        "jun": 6, "june": 6,
+        "jul": 7, "july": 7,
+        "aug": 8, "august": 8,
+        "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10,
+        "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+    match = re.search(
+        r"(?iu)\b("
+        + "|".join(re.escape(name) for name in sorted(month_names, key=len, reverse=True))
+        + r")\.?\s+(\d{1,2}),?\s+(\d{4})\b",
+        text,
+    )
+    if match:
+        return _format_contract_date(match.group(3), str(month_names[match.group(1).lower()]), match.group(2))
+    ru_months = {
+        "января": 1,
+        "февраля": 2,
+        "марта": 3,
+        "апреля": 4,
+        "мая": 5,
+        "июня": 6,
+        "июля": 7,
+        "августа": 8,
+        "сентября": 9,
+        "октября": 10,
+        "ноября": 11,
+        "декабря": 12,
+    }
+    match = re.search(
+        r"(?iu)[«\"]?(\d{1,2})[»\"]?\s+("
+        + "|".join(ru_months)
+        + r")\s+(\d{4})",
+        text,
+    )
+    if match:
+        return _format_contract_date(match.group(3), str(ru_months[match.group(2).lower()]), match.group(1))
+    return ""
+
+
+def _format_contract_date(year: Any, month: Any, day: Any) -> str:
+    try:
+        return date(int(year), int(month), int(day)).isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _normalize_text_line(value: Any) -> str:
+    text = str(value or "").replace("\u00a0", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _compact_compare(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).strip().lower()
 
 
 def _invoice_download_path(shipment_id: str) -> str:

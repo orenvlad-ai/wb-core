@@ -42,6 +42,9 @@ def main() -> None:
     owner_password = "owner-password-not-secret"
     supplier_password = "supplier-password-not-secret"
     invoice_bytes = _build_invoice_fixture()
+    auto_contract_bytes = _build_contract_xlsx_fixture("AUTO-2026-0601", "2026.06.01")
+    override_contract_bytes = _build_contract_xlsx_fixture("PARSER-2026-0703", "2026年7月3日")
+    pdf_contract_bytes = _build_contract_pdf_fixture("PDF-2026-0602", "Contract Date: 06/02/2026")
     contract_bytes = b"%PDF-1.4\n% wb-core trade document smoke\n"
     with TemporaryDirectory(prefix="trade-documents-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -82,6 +85,62 @@ def main() -> None:
                 supplier = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(CookieJar()))
                 _login(operator, base_url, "owner", owner_password)
                 _login(supplier, base_url, "supplier", supplier_password)
+
+                auto_contract_code, auto_contract_payload = _opener_post_multipart(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}",
+                    auto_contract_bytes,
+                    filename="auto-contract.xlsx",
+                    fields={"document_type": "contract"},
+                )
+                auto_contract_doc = auto_contract_payload.get("document") or {}
+                if (
+                    auto_contract_code != 200
+                    or auto_contract_doc.get("number") != "AUTO-2026-0601"
+                    or auto_contract_doc.get("document_date") != "2026-06-01"
+                    or auto_contract_doc.get("parsed_number") != "AUTO-2026-0601"
+                    or auto_contract_doc.get("parsed_document_date") != "2026-06-01"
+                ):
+                    raise AssertionError(f"contract XLSX upload must parse number/date, got {auto_contract_code} {auto_contract_payload}")
+
+                pdf_contract_code, pdf_contract_payload = _opener_post_multipart(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}",
+                    pdf_contract_bytes,
+                    filename="text-contract.pdf",
+                    content_type="application/pdf",
+                    fields={"document_type": "contract"},
+                )
+                pdf_contract_doc = pdf_contract_payload.get("document") or {}
+                if (
+                    pdf_contract_code != 200
+                    or pdf_contract_doc.get("number") != "PDF-2026-0602"
+                    or pdf_contract_doc.get("document_date") != "2026-06-02"
+                ):
+                    raise AssertionError(f"contract PDF text upload must parse number/date, got {pdf_contract_code} {pdf_contract_payload}")
+
+                override_contract_code, override_contract_payload = _opener_post_multipart(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}",
+                    override_contract_bytes,
+                    filename="override-contract.xlsx",
+                    fields={
+                        "document_type": "contract",
+                        "number": "MANUAL-2026-0704",
+                        "document_date": "2026-07-04",
+                    },
+                )
+                override_contract_doc = override_contract_payload.get("document") or {}
+                override_warnings = " ".join(str(item) for item in override_contract_doc.get("parser_warnings") or [])
+                if (
+                    override_contract_code != 200
+                    or override_contract_doc.get("number") != "MANUAL-2026-0704"
+                    or override_contract_doc.get("document_date") != "2026-07-04"
+                    or override_contract_doc.get("parsed_number") != "PARSER-2026-0703"
+                    or override_contract_doc.get("parsed_document_date") != "2026-07-03"
+                    or "manual" not in override_warnings.lower()
+                ):
+                    raise AssertionError(f"manual contract metadata must override parser values, got {override_contract_code} {override_contract_payload}")
 
                 contract_code, contract_payload = _opener_post_multipart(
                     operator,
@@ -295,6 +354,38 @@ def _build_invoice_fixture() -> bytes:
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def _build_contract_xlsx_fixture(number: str, date_text: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Contract"
+    sheet.append([f"Contract No. {number}"])
+    sheet.append(["Contract Date", date_text])
+    sheet.append(["Supplier", "HanShang Technology"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_contract_pdf_fixture(number: str, date_line: str) -> bytes:
+    stream = (
+        "BT\n"
+        "/F1 12 Tf\n"
+        "72 760 Td\n"
+        f"(Contract No. {number}) Tj\n"
+        "0 -18 Td\n"
+        f"({date_line}) Tj\n"
+        "ET\n"
+    ).encode("utf-8")
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj\n"
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\n"
+        b"stream\n" + stream + b"endstream\n"
+        b"endobj\n"
+        b"%%EOF\n"
+    )
 
 
 def _login(opener: urllib_request.OpenerDirector, base_url: str, username: str, password: str) -> None:

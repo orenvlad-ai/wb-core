@@ -50,7 +50,7 @@ related_docs:
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments and trade document registry: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state, trade document rows/links and a separate manual monthly baseline table used only by the plan-report."
+update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments and trade document registry: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state, trade document rows/links including parsed contract metadata/warnings, and a separate manual monthly baseline table used only by the plan-report."
 ---
 
 # 1. Идентификатор и статус
@@ -118,6 +118,8 @@ update_note: "Обновлён под current temporal closure seam, plan-report
   - trade document files:
     - settings-uploaded files live under `<runtime_dir>/trade_documents/files/<document_type>/<document_id>/<safe_filename>`;
     - supplier shipment invoice documents may reference existing `<runtime_dir>/supplier_invoices/files/...` paths to preserve backward-compatible invoice downloads;
+    - contract parser metadata is stored in existing document registry fields: normalized `number`/`document_date` when available, plus `parser_version`, `parsed_metadata_json`, `warnings_json` and `errors_json`;
+    - scanned/image-only contracts without available OCR remain valid file records and carry parser warnings instead of blocking storage;
     - legacy shipment backfill is idempotent and does not move/delete physical invoice files.
 - Для current factory-order seam `temporal_source_snapshots[source_key=sales_funnel_history]` является authoritative server-side storage contract для persisted `orderCount` history:
   - bounded historical window может truthfully replace-иться целиком;
