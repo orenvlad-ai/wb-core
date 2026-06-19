@@ -61,6 +61,8 @@ ORDER_STATUS_LABELS_RU = {
     ORDER_STATUS_ACCEPTED_FF: "Принято на ФФ",
 }
 
+DEFAULT_SUPPLIER_NAME = "HanShang Technology"
+
 SUPPLIER_INVOICE_PARSER_VERSION = "supplier_invoice_parser_v1"
 TRADE_DOCUMENT_CONTRACT_PARSER_VERSION = "contract_metadata_parser_v1"
 

@@ -34,6 +34,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
@@ -59,6 +60,20 @@ def main() -> None:
             runtime=runtime,
             activated_at_factory=lambda: "2026-05-30T08:00:00Z",
         )
+        documents_block = SupplierShipmentsBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: "2026-05-30T08:00:00Z",
+        )
+        documents_block.create_trade_document_from_upload(
+            document_type="contract",
+            file_bytes=_build_contract_xlsx_fixture("BROWSER-CONTRACT-0601", "2026-06-01"),
+            uploaded_filename="browser-contract.xlsx",
+        )
+        documents_block.create_trade_document_from_upload(
+            document_type="invoice",
+            file_bytes=_build_invoice_fixture(),
+            uploaded_filename="browser-invoice.xlsx",
+        )
         original_list_supplier_shipments = entrypoint.handle_supplier_shipments_list_request
         first_list_seen = threading.Event()
         first_list_release = threading.Event()
@@ -80,19 +95,37 @@ def main() -> None:
                 page = browser.new_page(viewport={"width": 1440, "height": 1000})
                 settings_page = browser.new_page(viewport={"width": 1280, "height": 900})
                 settings_page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}", wait_until="domcontentloaded")
-                settings_page.evaluate("window.localStorage.removeItem('wb-core:sheet-vitrina-v1:settings-active-tab:v1')")
+                settings_page.evaluate("window.localStorage.removeItem('wb-core:sheet-vitrina-v1:settings-active-tab:v2')")
                 settings_page.reload(wait_until="domcontentloaded")
                 expect(settings_page.get_by_role("button", name="Номенклатура")).to_be_visible()
-                expect(settings_page.get_by_role("button", name="Договоры и инвойсы")).to_be_visible()
+                expect(settings_page.get_by_role("button", name="Договоры")).to_be_visible()
+                expect(settings_page.get_by_role("button", name="Инвойсы")).to_be_visible()
+                expect(settings_page.get_by_role("button", name="Договоры и инвойсы")).to_have_count(0)
                 expect(settings_page.get_by_text("Справочник номенклатуры")).to_be_visible()
-                expect(settings_page.get_by_text("Справочник договоров и инвойсов")).to_be_hidden()
+                expect(settings_page.locator("section[aria-labelledby='contractsTitle']")).to_be_hidden()
+                expect(settings_page.locator("section[aria-labelledby='invoicesTitle']")).to_be_hidden()
                 expect(settings_page.get_by_role("button", name="Добавить контракт")).to_be_hidden()
-                settings_page.get_by_role("button", name="Договоры и инвойсы").click()
+                settings_page.get_by_role("button", name="Договоры").click()
                 expect(settings_page.get_by_text("Справочник номенклатуры")).to_be_hidden()
-                expect(settings_page.get_by_text("Справочник договоров и инвойсов")).to_be_visible()
+                expect(settings_page.get_by_role("heading", name="Договоры")).to_be_visible()
                 expect(settings_page.get_by_role("button", name="Добавить контракт")).to_be_visible()
+                expect(settings_page.get_by_role("button", name="Добавить invoice")).to_be_hidden()
+                expect(settings_page.locator("#contractsMessage")).to_have_text("", timeout=5000)
+                contracts_section = settings_page.locator("section[aria-labelledby='contractsTitle']")
+                expect(contracts_section.locator("thead")).not_to_contain_text("Тип")
+                expect(contracts_section.locator("#contractRows")).to_contain_text("BROWSER-CONTRACT-0601", timeout=5000)
+                expect(contracts_section.locator("#contractRows")).to_contain_text("HanShang Technology", timeout=5000)
+                expect(contracts_section.locator("#contractRows")).not_to_contain_text("26GN390")
+                settings_page.get_by_role("button", name="Инвойсы").click()
                 expect(settings_page.get_by_role("button", name="Добавить invoice")).to_be_visible()
-                expect(settings_page.locator("#documentsMessage")).to_have_text("", timeout=5000)
+                expect(settings_page.get_by_role("button", name="Добавить контракт")).to_be_hidden()
+                expect(settings_page.locator("#invoicesMessage")).to_have_text("", timeout=5000)
+                invoices_section = settings_page.locator("section[aria-labelledby='invoicesTitle']")
+                expect(invoices_section.locator("thead")).not_to_contain_text("Тип")
+                expect(invoices_section.locator("thead")).to_contain_text("Контракт")
+                expect(invoices_section.locator("#invoiceRows")).to_contain_text("26GN390", timeout=5000)
+                expect(invoices_section.locator("#invoiceRows")).to_contain_text("Zhejiang Supplier", timeout=5000)
+                expect(invoices_section.locator("#invoiceRows")).not_to_contain_text("browser-contract.xlsx")
                 settings_page.get_by_role("button", name="Номенклатура").click()
                 expect(settings_page.get_by_text("Справочник номенклатуры")).to_be_visible()
                 nomenclature_section = settings_page.locator("section[aria-labelledby='nomenclatureTitle']")
@@ -486,6 +519,17 @@ def _build_invoice_fixture() -> bytes:
     sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 17e / 16e /14 / 13 / 13Pro", 4, 2, 8, ""])
     sheet.append([3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
     sheet.append([4, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_contract_xlsx_fixture(number: str, date_text: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Contract"
+    sheet.append([f"Contract No. {number}"])
+    sheet.append(["Contract Date", date_text])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

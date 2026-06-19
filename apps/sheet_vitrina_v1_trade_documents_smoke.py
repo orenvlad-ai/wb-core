@@ -35,6 +35,15 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
+from packages.contracts.supplier_shipments import (  # noqa: E402
+    DEFAULT_SUPPLIER_NAME,
+    SUPPLIER_INVOICE_CONTENT_TYPE,
+    TRADE_DOCUMENT_CONTRACT_PARSER_VERSION,
+    TRADE_DOCUMENT_SOURCE_SETTINGS_UPLOAD,
+    TRADE_DOCUMENT_STATUS_ACTIVE,
+    TRADE_DOCUMENT_TYPE_CONTRACT,
+)
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
@@ -44,6 +53,7 @@ def main() -> None:
     invoice_bytes = _build_invoice_fixture()
     auto_contract_bytes = _build_contract_xlsx_fixture("AUTO-2026-0601", "2026.06.01")
     override_contract_bytes = _build_contract_xlsx_fixture("PARSER-2026-0703", "2026年7月3日")
+    chinese_contract_bytes = _build_chinese_contract_xlsx_fixture("CN-2026-0910", "合同日期 2026年9月10日")
     pdf_contract_bytes = _build_contract_pdf_fixture("PDF-2026-0602", "Contract Date: 06/02/2026")
     contract_bytes = b"%PDF-1.4\n% wb-core trade document smoke\n"
     with TemporaryDirectory(prefix="trade-documents-smoke-") as tmp:
@@ -86,6 +96,89 @@ def main() -> None:
                 _login(operator, base_url, "owner", owner_password)
                 _login(supplier, base_url, "supplier", supplier_password)
 
+                backfill_block = SupplierShipmentsBlock(runtime=runtime, timestamp_factory=clock.next)
+                backfill_contract_bytes = _build_contract_xlsx_fixture("BACKFILL-2026-0801", "Contract Date: 2026-08-01")
+                backfill_contract_path = _write_runtime_contract_file(
+                    runtime_dir,
+                    document_id="tdoc_backfill_empty_contract",
+                    filename="backfill-empty-contract.xlsx",
+                    body=backfill_contract_bytes,
+                )
+                runtime.save_trade_document(
+                    {
+                        "document_id": "tdoc_backfill_empty_contract",
+                        "document_type": TRADE_DOCUMENT_TYPE_CONTRACT,
+                        "number": "",
+                        "document_date": "",
+                        "supplier_name": "",
+                        "currency": "",
+                        "amount_total": None,
+                        "source": TRADE_DOCUMENT_SOURCE_SETTINGS_UPLOAD,
+                        "source_shipment_id": "",
+                        "source_upload_id": "",
+                        "file_original_name": "backfill-empty-contract.xlsx",
+                        "file_content_type": SUPPLIER_INVOICE_CONTENT_TYPE,
+                        "file_sha256": hashlib.sha256(backfill_contract_bytes).hexdigest(),
+                        "file_path": backfill_contract_path,
+                        "parser_version": "",
+                        "parsed_metadata": {},
+                        "warnings": [],
+                        "errors": [],
+                        "status": TRADE_DOCUMENT_STATUS_ACTIVE,
+                        "created_at": clock.next(),
+                        "updated_at": clock.next(),
+                    }
+                )
+                manual_contract_bytes = _build_contract_xlsx_fixture("PARSER-SHOULD-NOT-WIN", "2026-08-02")
+                manual_contract_path = _write_runtime_contract_file(
+                    runtime_dir,
+                    document_id="tdoc_backfill_manual_contract",
+                    filename="backfill-manual-contract.xlsx",
+                    body=manual_contract_bytes,
+                )
+                runtime.save_trade_document(
+                    {
+                        "document_id": "tdoc_backfill_manual_contract",
+                        "document_type": TRADE_DOCUMENT_TYPE_CONTRACT,
+                        "number": "MANUAL-KEEP-0802",
+                        "document_date": "2026-08-03",
+                        "supplier_name": "",
+                        "currency": "",
+                        "amount_total": None,
+                        "source": TRADE_DOCUMENT_SOURCE_SETTINGS_UPLOAD,
+                        "source_shipment_id": "",
+                        "source_upload_id": "",
+                        "file_original_name": "backfill-manual-contract.xlsx",
+                        "file_content_type": SUPPLIER_INVOICE_CONTENT_TYPE,
+                        "file_sha256": hashlib.sha256(manual_contract_bytes).hexdigest(),
+                        "file_path": manual_contract_path,
+                        "parser_version": "",
+                        "parsed_metadata": {},
+                        "warnings": [],
+                        "errors": [],
+                        "status": TRADE_DOCUMENT_STATUS_ACTIVE,
+                        "created_at": clock.next(),
+                        "updated_at": clock.next(),
+                    }
+                )
+                backfill_result = backfill_block.backfill_trade_document_metadata()
+                empty_backfilled = runtime.load_trade_document("tdoc_backfill_empty_contract") or {}
+                manual_backfilled = runtime.load_trade_document("tdoc_backfill_manual_contract") or {}
+                if (
+                    backfill_result.get("updated_documents") != 2
+                    or empty_backfilled.get("number") != "BACKFILL-2026-0801"
+                    or empty_backfilled.get("document_date") != "2026-08-01"
+                    or empty_backfilled.get("supplier_name") != DEFAULT_SUPPLIER_NAME
+                    or empty_backfilled.get("parser_version") != TRADE_DOCUMENT_CONTRACT_PARSER_VERSION
+                    or manual_backfilled.get("number") != "MANUAL-KEEP-0802"
+                    or manual_backfilled.get("document_date") != "2026-08-03"
+                    or manual_backfilled.get("supplier_name") != DEFAULT_SUPPLIER_NAME
+                ):
+                    raise AssertionError(f"trade document metadata backfill failed: {backfill_result} {empty_backfilled} {manual_backfilled}")
+                second_backfill_result = backfill_block.backfill_trade_document_metadata()
+                if second_backfill_result.get("updated_documents") != 0:
+                    raise AssertionError(f"trade document metadata backfill must be idempotent, got {second_backfill_result}")
+
                 auto_contract_code, auto_contract_payload = _opener_post_multipart(
                     operator,
                     f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}",
@@ -100,8 +193,25 @@ def main() -> None:
                     or auto_contract_doc.get("document_date") != "2026-06-01"
                     or auto_contract_doc.get("parsed_number") != "AUTO-2026-0601"
                     or auto_contract_doc.get("parsed_document_date") != "2026-06-01"
+                    or auto_contract_doc.get("supplier_name") != DEFAULT_SUPPLIER_NAME
                 ):
                     raise AssertionError(f"contract XLSX upload must parse number/date, got {auto_contract_code} {auto_contract_payload}")
+
+                chinese_contract_code, chinese_contract_payload = _opener_post_multipart(
+                    operator,
+                    f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}",
+                    chinese_contract_bytes,
+                    filename="chinese-contract.xlsx",
+                    fields={"document_type": "contract"},
+                )
+                chinese_contract_doc = chinese_contract_payload.get("document") or {}
+                if (
+                    chinese_contract_code != 200
+                    or chinese_contract_doc.get("number") != "CN-2026-0910"
+                    or chinese_contract_doc.get("document_date") != "2026-09-10"
+                    or chinese_contract_doc.get("supplier_name") != DEFAULT_SUPPLIER_NAME
+                ):
+                    raise AssertionError(f"contract Chinese labels must parse number/date, got {chinese_contract_code} {chinese_contract_payload}")
 
                 pdf_contract_code, pdf_contract_payload = _opener_post_multipart(
                     operator,
@@ -116,6 +226,7 @@ def main() -> None:
                     pdf_contract_code != 200
                     or pdf_contract_doc.get("number") != "PDF-2026-0602"
                     or pdf_contract_doc.get("document_date") != "2026-06-02"
+                    or pdf_contract_doc.get("supplier_name") != DEFAULT_SUPPLIER_NAME
                 ):
                     raise AssertionError(f"contract PDF text upload must parse number/date, got {pdf_contract_code} {pdf_contract_payload}")
 
@@ -138,6 +249,7 @@ def main() -> None:
                     or override_contract_doc.get("document_date") != "2026-07-04"
                     or override_contract_doc.get("parsed_number") != "PARSER-2026-0703"
                     or override_contract_doc.get("parsed_document_date") != "2026-07-03"
+                    or override_contract_doc.get("supplier_name") != DEFAULT_SUPPLIER_NAME
                     or "manual" not in override_warnings.lower()
                 ):
                     raise AssertionError(f"manual contract metadata must override parser values, got {override_contract_code} {override_contract_payload}")
@@ -362,10 +474,27 @@ def _build_contract_xlsx_fixture(number: str, date_text: str) -> bytes:
     sheet.title = "Contract"
     sheet.append([f"Contract No. {number}"])
     sheet.append(["Contract Date", date_text])
-    sheet.append(["Supplier", "HanShang Technology"])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def _build_chinese_contract_xlsx_fixture(number: str, date_text: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Contract"
+    sheet.append([f"合同编号：{number}"])
+    sheet.append([date_text])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _write_runtime_contract_file(runtime_dir: Path, *, document_id: str, filename: str, body: bytes) -> str:
+    path = runtime_dir / "trade_documents" / "files" / "contract" / document_id / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    return path.relative_to(runtime_dir).as_posix()
 
 
 def _build_contract_pdf_fixture(number: str, date_line: str) -> bytes:
