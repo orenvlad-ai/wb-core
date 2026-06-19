@@ -126,7 +126,7 @@ def main() -> None:
                         "file_path": backfill_contract_path,
                         "parser_version": "",
                         "parsed_metadata": {},
-                        "warnings": [],
+                        "warnings": ["contract parser skipped OCR: OCR tools missing (pdftoppm/tesseract)"],
                         "errors": [],
                         "status": TRADE_DOCUMENT_STATUS_ACTIVE,
                         "created_at": clock.next(),
@@ -174,6 +174,7 @@ def main() -> None:
                     or empty_backfilled.get("document_date") != "2026-08-01"
                     or empty_backfilled.get("supplier_name") != DEFAULT_SUPPLIER_NAME
                     or empty_backfilled.get("parser_version") != TRADE_DOCUMENT_CONTRACT_PARSER_VERSION
+                    or empty_backfilled.get("warnings") != []
                     or manual_backfilled.get("number") != "MANUAL-KEEP-0802"
                     or manual_backfilled.get("document_date") != "2026-08-03"
                     or manual_backfilled.get("supplier_name") != DEFAULT_SUPPLIER_NAME
