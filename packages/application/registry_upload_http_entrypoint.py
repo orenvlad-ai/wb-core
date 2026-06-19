@@ -1792,6 +1792,9 @@ class RegistryUploadHttpEntrypoint:
             str(payload.get("parse_status") or ""),
         )
 
+    def handle_supplier_financial_document_delete_request(self, shipment_id: str, document_id: str) -> dict[str, Any]:
+        return self.supplier_financial_documents_block.delete_document(shipment_id, document_id)
+
     def handle_supplier_financial_document_file_request(self, shipment_id: str, document_id: str) -> tuple[bytes, str, str]:
         return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
 

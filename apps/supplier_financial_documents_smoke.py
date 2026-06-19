@@ -323,13 +323,43 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"rub/m3 mismatch: {efficiency}")
             if _approx(match.get("implied_rate"), 3799.92, tolerance=0.01) or _approx(match.get("relative_spread_pct"), 51.23, tolerance=0.01):
                 raise AssertionError(f"summary must not expose bogus rate/spread: {match}")
-            first_document_id = listed["documents"][0]["document_id"]
-            detail_status, detail = _get_json(f"{collection_url}/{first_document_id}")
-            if detail_status != 200 or detail.get("document_id") != first_document_id or not detail.get("expense_lines"):
+            quote_document_id = _document_id_by_type(listed, "logistics_quote")
+            if not quote_document_id:
+                raise AssertionError(f"uploaded quote document missing: {listed}")
+            detail_status, detail = _get_json(f"{collection_url}/{quote_document_id}")
+            if detail_status != 200 or detail.get("document_id") != quote_document_id or not detail.get("expense_lines"):
                 raise AssertionError(f"financial detail mismatch: {detail_status} {detail}")
-            file_status, file_bytes, headers = _get_bytes(f"{collection_url}/{first_document_id}/file")
+            file_status, file_bytes, headers = _get_bytes(f"{collection_url}/{quote_document_id}/file")
             if file_status != 200 or b"synthetic financial smoke" not in file_bytes:
                 raise AssertionError(f"financial file download mismatch: {file_status} {headers}")
+            delete_status, delete_payload = _delete_json(f"{collection_url}/{quote_document_id}")
+            if delete_status != 200 or delete_payload.get("deleted") is not True or delete_payload.get("file_deleted") is not True:
+                raise AssertionError(f"financial delete failed: {delete_status} {delete_payload}")
+            deleted_detail_status, deleted_detail = _get_json(f"{collection_url}/{quote_document_id}")
+            if deleted_detail_status != 404:
+                raise AssertionError(f"deleted financial detail must return 404: {deleted_detail_status} {deleted_detail}")
+            deleted_list_status, after_delete = _get_json(collection_url)
+            if (
+                deleted_list_status != 200
+                or len(after_delete.get("documents", [])) != 3
+                or len(after_delete.get("expense_lines", [])) != 5
+                or after_delete.get("summary", {}).get("quote", {}).get("logistics_usd") is not None
+                or after_delete.get("summary", {}).get("quote_invoice_match", {}).get("implied_rate") is not None
+            ):
+                raise AssertionError(f"financial list after delete mismatch: {deleted_list_status} {after_delete}")
+            status, payload = _post_multipart(collection_url, b"%PDF-1.4\n% synthetic financial smoke\n", filename="quote.pdf")
+            if status != 200 or payload.get("parse_status") != "parsed":
+                raise AssertionError(f"financial re-upload after delete failed: {status} {payload}")
+            final_status, final_list = _get_json(collection_url)
+            final_summary = final_list.get("summary") or {}
+            if (
+                final_status != 200
+                or len(final_list.get("documents", [])) != 4
+                or len(final_list.get("expense_lines", [])) != 14
+                or final_summary.get("quote", {}).get("logistics_usd") != 16151.0
+                or not _approx(final_summary.get("quote_invoice_match", {}).get("implied_rate"), 75.29, tolerance=0.01)
+            ):
+                raise AssertionError(f"financial re-upload summary mismatch: {final_status} {final_list}")
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -387,6 +417,13 @@ def _approx(actual: Any, expected: float, *, tolerance: float) -> bool:
         return False
 
 
+def _document_id_by_type(payload: Mapping[str, Any], document_type: str) -> str:
+    for document in payload.get("documents", []):
+        if document.get("document_type") == document_type:
+            return str(document.get("document_id") or "")
+    return ""
+
+
 def _get_json(url: str) -> tuple[int, dict[str, Any]]:
     request = urllib_request.Request(url, headers={"Accept": "application/json"})
     try:
@@ -403,6 +440,15 @@ def _get_bytes(url: str) -> tuple[int, bytes, dict[str, str]]:
             return response.status, response.read(), dict(response.headers.items())
     except urllib_request.HTTPError as exc:
         return exc.code, exc.read(), dict(exc.headers.items())
+
+
+def _delete_json(url: str) -> tuple[int, dict[str, Any]]:
+    request = urllib_request.Request(url, method="DELETE", headers={"Accept": "application/json"})
+    try:
+        with urllib_request.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_request.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _post_multipart(url: str, body: bytes, *, filename: str) -> tuple[int, dict[str, Any]]:

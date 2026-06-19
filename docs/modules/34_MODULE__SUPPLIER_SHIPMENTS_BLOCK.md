@@ -47,6 +47,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
   - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
+  - "DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/file"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
@@ -146,8 +147,9 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - `Финансовые документы` UI shows upload, document table, recognized fields, expense lines, original PDF download link when stored, status/warnings, and compact summary: quote totals/logistics/customs USD, invoice fact/VAT RUB, customs fee/duty/VAT/total RUB, logistics ₽/кг and ₽/м³, `расчётный курс по правилу КП`, absolute/relative deviation from CBR and `Счета минус КП-логистика`.
 - Protected routes are operator-only and follow the existing supplier shipment path:
   - list/upload collection: `/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents`;
-  - detail/patch status: `/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}`;
+  - detail/patch status/delete: `/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}`;
   - original file download: `/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/file`.
+- Operator delete removes exactly one financial-document record, its expense lines and the stored PDF only when the file path belongs to that document's runtime storage directory. Missing documents return controlled JSON 404; bulk delete is not part of the contract.
 
 # 2. Parser
 

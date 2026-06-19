@@ -2708,6 +2708,50 @@ class RegistryUploadDbBackedRuntime:
             payload["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in lines]
             return payload
 
+    def delete_supplier_financial_document(
+        self,
+        *,
+        supplier_order_id: str,
+        document_id: str,
+    ) -> dict[str, Any] | None:
+        supplier_order_id = str(supplier_order_id or "").strip()
+        document_id = str(document_id or "").strip()
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_financial_documents
+                WHERE supplier_order_id = ?
+                  AND document_id = ?
+                """,
+                (supplier_order_id, document_id),
+            ).fetchone()
+            if row is None:
+                return None
+            document = _supplier_financial_document_to_dict(row)
+            conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_supplier_financial_expense_lines
+                WHERE supplier_order_id = ?
+                  AND financial_document_id = ?
+                """,
+                (supplier_order_id, document_id),
+            )
+            cursor = conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_supplier_financial_documents
+                WHERE supplier_order_id = ?
+                  AND document_id = ?
+                """,
+                (supplier_order_id, document_id),
+            )
+            conn.commit()
+            if cursor.rowcount <= 0:
+                return None
+            return document
+
     def update_supplier_financial_document_status(
         self,
         *,

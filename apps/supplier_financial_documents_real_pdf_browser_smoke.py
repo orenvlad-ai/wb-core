@@ -129,6 +129,35 @@ def main() -> None:
                     expect(page.locator("#financialExpenseRows")).to_contain_text("1 121,00 USD", timeout=5000)
                     expect(page.locator("#financialWarnings")).not_to_contain_text("Quote parser did not find required amount", timeout=5000)
                     expect(page.locator("#financialDocumentsRows a[data-download]").first).to_be_visible()
+                    expect(quote_row.locator("[data-delete-financial-document]")).to_be_visible()
+
+                    page.once("dialog", lambda dialog: dialog.accept())
+                    quote_row.locator("[data-delete-financial-document]").click()
+                    expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ удалён.", timeout=10000)
+                    expect(page.locator("#financialDocumentsRows tr[data-financial-document-row]")).to_have_count(3, timeout=10000)
+                    expect(page.locator("#financialDocumentsRows")).not_to_contain_text("КП логиста", timeout=5000)
+                    expect(page.locator("#financeQuoteLogisticsUsd")).to_contain_text("0,00 USD", timeout=5000)
+                    expect(page.locator("#financeImpliedRate")).to_have_text("-", timeout=5000)
+                    expect(page.locator("#financeInvoiceRub")).to_contain_text("1 215 975", timeout=5000)
+
+                    page.locator("#financialDocumentFileInput").set_input_files(str(pdfs["quote"]))
+                    expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ загружен.", timeout=15000)
+                    expect(page.locator("#financialDocumentsRows tr[data-financial-document-row]")).to_have_count(4, timeout=10000)
+                    expect(page.locator("#financeQuoteLogisticsUsd")).to_contain_text("16 151", timeout=5000)
+                    expect(page.locator("#financeImpliedRate")).not_to_contain_text("3 799", timeout=5000)
+                    quote_row = page.locator("#financialDocumentsRows tr[data-financial-document-row]", has_text="КП логиста").first
+                    quote_row.click()
+                    expect(page.locator("#financialExpenseRows")).to_contain_text("14 360,00 USD", timeout=5000)
+
+                    for _ in range(4):
+                        if page.locator("#financialDocumentsRows tr[data-financial-document-row]").count() <= 0:
+                            break
+                        page.once("dialog", lambda dialog: dialog.accept())
+                        page.locator("#financialDocumentsRows [data-delete-financial-document]").first.click()
+                        expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ удалён.", timeout=10000)
+                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Финансовые документы не загружены.", timeout=10000)
+                    expect(page.locator("#financialExpenseRows")).to_contain_text("Расходные строки не загружены.", timeout=5000)
+                    expect(page.locator("#financeImpliedRate")).to_have_text("-", timeout=5000)
 
                     page.locator("#supplyCompositionTabButton").click()
                     expect(page.locator("#supplyCompositionPanel")).to_be_visible()
