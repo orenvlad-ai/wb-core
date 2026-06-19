@@ -476,6 +476,7 @@
                   <th>Статус</th>
                   <th>Файл</th>
                   <th>Комментарий</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody id="financialDocumentsRows"></tbody>
@@ -1219,7 +1220,7 @@
 
       function renderFinancialDocumentRows() {
         if (!financialDocuments.length) {
-          financialDocumentsRows.innerHTML = '<tr><td colspan="10">Финансовые документы не загружены.</td></tr>';
+          financialDocumentsRows.innerHTML = '<tr><td colspan="11">Финансовые документы не загружены.</td></tr>';
           return;
         }
         financialDocumentsRows.innerHTML = financialDocuments.map((document) => {
@@ -1233,6 +1234,7 @@
             ? '<a class="button-link compact" href="' + escapeHtml(document.download_path) + '" data-download>PDF</a>'
             : '<span class="muted-dash">-</span>';
           const warning = (Array.isArray(document.warnings) && document.warnings.length) ? document.warnings[0] : "";
+          const deleteButton = '<button class="danger compact" type="button" data-delete-financial-document="' + escapeHtml(document.document_id || "") + '" title="Удалить документ" aria-label="Удалить финансовый документ">&times;</button>';
           return [
             '<tr data-financial-document-row="' + escapeHtml(document.document_id || "") + '"' + (selected ? ' class="finance-row-selected"' : "") + '>',
             '<td>' + escapeHtml(document.document_date || "-") + '</td>',
@@ -1245,17 +1247,25 @@
             '<td><span class="badge ' + financialStatusTone(document.parse_status) + '">' + escapeHtml(financialStatusLabels[document.parse_status] || document.parse_status || "-") + '</span></td>',
             '<td>' + file + '</td>',
             '<td>' + escapeHtml(warning || "-") + '</td>',
+            '<td>' + deleteButton + '</td>',
             '</tr>'
           ].join("");
         }).join("");
         Array.from(financialDocumentsRows.querySelectorAll("[data-financial-document-row]")).forEach((row) => {
           row.addEventListener("click", (event) => {
-            if (event.target && event.target.closest("[data-download]")) {
+            if (event.target && event.target.closest("[data-download], [data-delete-financial-document]")) {
               event.stopPropagation();
               return;
             }
             selectedFinancialDocumentId = row.dataset.financialDocumentRow || "";
             renderFinancialDocuments();
+          });
+        });
+        Array.from(financialDocumentsRows.querySelectorAll("[data-delete-financial-document]")).forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            deleteFinancialDocument(button.dataset.deleteFinancialDocument || "");
           });
         });
       }
@@ -1409,6 +1419,30 @@
         } finally {
           addFinancialDocumentButton.disabled = false;
           financialDocumentFileInput.value = "";
+        }
+      }
+
+      async function deleteFinancialDocument(documentId) {
+        if (!canManageFinancialDocuments || !currentShipment || !currentShipment.shipment_id || !documentId) {
+          setMessage(financialDocumentsMessage, "Документ не выбран.", "error");
+          return;
+        }
+        if (!window.confirm("Удалить финансовый документ? Это действие нельзя отменить.")) {
+          return;
+        }
+        setMessage(financialDocumentsMessage, "Удаляем документ...", "");
+        try {
+          await fetchJson(financialDocumentPath(currentShipment.shipment_id, documentId), {
+            method: "DELETE",
+            headers: { Accept: "application/json" }
+          });
+          if (selectedFinancialDocumentId === documentId) {
+            selectedFinancialDocumentId = "";
+          }
+          await loadFinancialDocuments();
+          setMessage(financialDocumentsMessage, "Документ удалён.", "success");
+        } catch (error) {
+          setMessage(financialDocumentsMessage, error.message, "error");
         }
       }
 

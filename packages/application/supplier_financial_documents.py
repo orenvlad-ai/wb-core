@@ -331,6 +331,31 @@ class SupplierFinancialDocumentsBlock:
         payload["summary"] = build_financial_summary([payload], list(payload.get("expense_lines") or []))
         return payload
 
+    def delete_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
+        self._ensure_supplier_order(supplier_order_id)
+        document = self.runtime.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if document is None:
+            raise ValueError(f"financial document not found: {document_id}")
+        deleted = self.runtime.delete_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if deleted is None:
+            raise ValueError(f"financial document not found: {document_id}")
+        file_result = self._delete_owned_document_file(document)
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_financial_documents",
+            "status": "ok",
+            "supplier_order_id": supplier_order_id,
+            "document_id": document_id,
+            "deleted": True,
+            "file_deleted": bool(file_result.get("file_deleted")),
+            "warnings": _dedupe_strings(_string_list(file_result.get("warnings"))),
+        }
+
     def download_document_file(self, supplier_order_id: str, document_id: str) -> tuple[bytes, str, str]:
         self._ensure_supplier_order(supplier_order_id)
         document = self.runtime.load_supplier_financial_document(
@@ -369,6 +394,37 @@ class SupplierFinancialDocumentsBlock:
         target_path = target_dir / safe_filename
         target_path.write_bytes(body)
         return _relative_to_runtime(self.runtime.runtime_dir, target_path)
+
+    def _delete_owned_document_file(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        stored_file_path = str(document.get("stored_file_path") or "").strip()
+        supplier_order_id = str(document.get("supplier_order_id") or "").strip()
+        document_id = str(document.get("document_id") or "").strip()
+        warnings: list[str] = []
+        if not stored_file_path:
+            return {"file_deleted": False, "warnings": warnings}
+        try:
+            target_path = self._resolve_runtime_file(stored_file_path)
+        except ValueError as exc:
+            return {"file_deleted": False, "warnings": [f"stored PDF was not removed: {exc}"]}
+        files_root = (self.runtime.runtime_dir / "supplier_financial_documents" / "files").resolve()
+        expected_dir = (files_root / supplier_order_id / document_id).resolve()
+        if not _path_is_relative_to(expected_dir, files_root) or not _path_is_relative_to(target_path, expected_dir):
+            return {"file_deleted": False, "warnings": ["stored PDF was not removed: path does not belong to this financial document"]}
+        file_deleted = False
+        try:
+            if target_path.exists() and target_path.is_file():
+                target_path.unlink()
+                file_deleted = True
+            elif target_path.exists():
+                warnings.append("stored PDF was not removed: path is not a regular file")
+            for directory in (expected_dir, expected_dir.parent):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+        except OSError as exc:
+            warnings.append(f"stored PDF was not removed: {exc}")
+        return {"file_deleted": file_deleted, "warnings": warnings}
 
     def _resolve_runtime_file(self, relative_path: str) -> Path:
         normalized = str(relative_path or "").strip()
@@ -1578,6 +1634,14 @@ def _relative_to_runtime(runtime_dir: Path, target_path: Path) -> str:
         return str(target_path.resolve().relative_to(runtime_dir.resolve()))
     except ValueError:
         return str(target_path)
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _default_timestamp_factory() -> str:

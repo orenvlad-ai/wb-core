@@ -2704,6 +2704,25 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_supplier_financial_document_detail_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    payload = entrypoint.handle_supplier_financial_document_delete_request(shipment_id, document_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier financial document delete failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_trade_document_contract_link_path(parsed.path):
                 if not _ensure_operator_role(self, parsed.path):
                     return
