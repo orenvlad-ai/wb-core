@@ -1026,7 +1026,12 @@ class SupplierShipmentsBlock:
                 if merged_metadata != existing_metadata:
                     updates["parsed_metadata"] = merged_metadata
                 existing_warnings = _string_list(existing.get("warnings"))
-                merged_warnings = _merge_string_lists(existing_warnings, warnings)
+                merged_warnings = _merge_contract_parser_warnings(
+                    existing_warnings,
+                    warnings,
+                    parsed_number=parsed_number,
+                    parsed_date=parsed_date,
+                )
                 if merged_warnings != existing_warnings:
                     updates["warnings"] = merged_warnings
                 existing_errors = _string_list(existing.get("errors"))
@@ -3350,6 +3355,19 @@ def _merge_string_lists(existing: Any, incoming: Any) -> list[str]:
         seen.add(item)
         merged.append(item)
     return merged
+
+
+def _merge_contract_parser_warnings(
+    existing: Any,
+    incoming: Any,
+    *,
+    parsed_number: str,
+    parsed_date: str,
+) -> list[str]:
+    base = _string_list(existing)
+    if str(parsed_number or "").strip() and str(parsed_date or "").strip():
+        base = [warning for warning in base if not str(warning or "").lower().startswith("contract parser")]
+    return _merge_string_lists(base, incoming)
 
 
 def _invoice_download_path(shipment_id: str) -> str:
