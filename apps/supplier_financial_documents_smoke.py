@@ -30,6 +30,7 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
     SupplierFinancialDocumentsBlock,
+    build_financial_summary,
     parse_financial_document_text,
 )
 
@@ -39,6 +40,21 @@ QUOTE_TEXT = """
 Transitplus International Ltd
 Наименование груза: СТЕКЛА ДЛЯ СМАРТФОНА
 г. Москва 02.06.2026
+№
+1
+2
+3
+4
+5
+6
+Общая стоимость
+14360
+40985
+0
+320
+350
+1121
+57136 USD
 Город отправки: Guangzhou (Гуанчжоу)
 Пункт назначения: Москва
 Сроки доставки: 25-30 дней
@@ -46,17 +62,36 @@ Transitplus International Ltd
 Вес нетто, кг: 9644,6
 Объем, м3 45,32
 Оценочная стоимость груза, долл. 112155,36 USD или 785087,50 юаней
-Стоимость доставки 14360 USD
-Таможенные платежи и сборы 40985 USD
-Экологический сбор 0 USD
-Брокерские услуги 320 USD
-Комиссия компании 350 USD
-Страховая сумма 1121 USD
-ИТОГО: 57136 USD
+1. Предварительный расчет стоимости:
+Стоимость доставки
+Таможенные платежи и сборы
+Экологический сбор
+Брокерские услуги
+Комиссия компании
+Страховая ставка, % 1,0%
+ИТОГО:
 Оформление разрешительной документации 0 USD
 Стоимость оформления экспортных документов 80 - 150 USD
 Оплата за доставку производится: по курсу Банка ВТБ (на дату выставления счета)
 Предложение действительно в течение 5 календарных дней
+"""
+
+BROKEN_QUOTE_TEXT = """
+Коммерческое предложение на транспортно-экспедиционные услуги по тарифу «Авто стандарт 25-30 дней»
+Transitplus International Ltd
+Наименование груза: СТЕКЛА ДЛЯ СМАРТФОНА
+г. Москва 02.06.2026
+57136 USD
+Город отправки: Guangzhou (Гуанчжоу)
+Пункт назначения: Москва
+Вес брутто, кг. 9644,6
+Объем, м3 45,32
+Предварительный расчет стоимости:
+Стоимость доставки
+Таможенные платежи и сборы
+Брокерские услуги 320 USD
+ИТОГО:
+Оплата за доставку производится: по курсу Банка ВТБ (на дату выставления счета)
 """
 
 INVOICE_103_TEXT = """
@@ -116,14 +151,32 @@ def main() -> None:
 
 
 def _assert_parser_smoke() -> None:
-    quote = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")["normalized_parse"]
+    quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
+    quote = quote_payload["normalized_parse"]
     if (
         quote.get("document_type") != "logistics_quote"
         or quote.get("quote_date") != "2026-06-02"
         or quote.get("gross_weight_kg") != 9644.6
         or quote.get("total_amount") != 57136.0
+        or quote.get("quote_logistics_component_usd") != 16151.0
+        or quote.get("quote_customs_component_usd") != 40985.0
+        or quote.get("quote_required_amounts_complete") is not True
     ):
         raise AssertionError(f"quote parser fields mismatch: {quote}")
+    quote_lines = {line.get("category"): line for line in quote_payload.get("expense_lines", [])}
+    expected_quote_amounts = {
+        "delivery_cost": 14360.0,
+        "customs_payments_and_fees": 40985.0,
+        "brokerage_services": 320.0,
+        "company_commission": 350.0,
+        "insurance": 1121.0,
+    }
+    for category, expected in expected_quote_amounts.items():
+        actual = quote_lines.get(category, {}).get("amount")
+        if actual != expected:
+            raise AssertionError(f"quote line {category} mismatch: expected {expected}, got {actual}")
+    if any("required amount" in warning for warning in quote_payload.get("warnings", [])):
+        raise AssertionError(f"quote parser must not report missing required amounts: {quote_payload.get('warnings')}")
 
     invoice_103 = parse_financial_document_text(INVOICE_103_TEXT, filename="invoice-103.txt")["normalized_parse"]
     if (
@@ -151,6 +204,60 @@ def _assert_parser_smoke() -> None:
         or customs.get("total_customs_payments_rub") != 2892511.6
     ):
         raise AssertionError(f"customs parser fields mismatch: {customs}")
+    _assert_incomplete_quote_summary_smoke()
+
+
+def _assert_incomplete_quote_summary_smoke() -> None:
+    quote_payload = parse_financial_document_text(BROKEN_QUOTE_TEXT, filename="broken-quote.txt")
+    quote = quote_payload["normalized_parse"]
+    if quote.get("quote_required_amounts_complete") is not False:
+        raise AssertionError(f"incomplete quote must be marked incomplete: {quote}")
+    if "delivery_cost" not in quote.get("quote_missing_required_amounts", []):
+        raise AssertionError(f"incomplete quote must expose missing delivery: {quote}")
+    if not any("required amount" in warning for warning in quote_payload.get("warnings", [])):
+        raise AssertionError(f"incomplete quote must warn about required amounts: {quote_payload}")
+    documents, lines = _summary_fixture_documents_and_lines(quote_payload)
+    summary = build_financial_summary(documents, lines)
+    match = summary.get("quote_invoice_match") or {}
+    if match.get("implied_rate") is not None or match.get("estimated_bank_rate_on_quote_date") is not None:
+        raise AssertionError(f"incomplete quote must not calculate rate: {match}")
+    if match.get("status") != "needs_review":
+        raise AssertionError(f"incomplete quote match status mismatch: {match}")
+    if summary.get("quote", {}).get("required_amounts_complete") is not False:
+        raise AssertionError(f"summary must expose incomplete quote base: {summary}")
+
+
+def _summary_fixture_documents_and_lines(quote_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    invoice_103 = parse_financial_document_text(INVOICE_103_TEXT, filename="invoice-103.txt")
+    invoice_113 = parse_financial_document_text(INVOICE_113_TEXT, filename="invoice-113.txt")
+    documents = [
+        _document_from_parsed("quote", quote_payload, cbr_rate=78.0),
+        _document_from_parsed("invoice-103", invoice_103, cbr_rate=77.5),
+        _document_from_parsed("invoice-113", invoice_113, cbr_rate=78.2),
+    ]
+    lines: list[dict[str, Any]] = []
+    for document, parsed in zip(documents, (quote_payload, invoice_103, invoice_113), strict=True):
+        for line in parsed.get("expense_lines", []):
+            next_line = dict(line)
+            next_line["financial_document_id"] = document["document_id"]
+            lines.append(next_line)
+    return documents, lines
+
+
+def _document_from_parsed(document_id: str, parsed: dict[str, Any], *, cbr_rate: float) -> dict[str, Any]:
+    normalized = dict(parsed.get("normalized_parse") or {})
+    return {
+        "document_id": document_id,
+        "document_type": normalized.get("document_type"),
+        "parse_status": "needs_review" if normalized.get("quote_required_amounts_complete") is False else "parsed",
+        "document_date": normalized.get("document_date") or normalized.get("invoice_date") or normalized.get("quote_date"),
+        "total_amount": normalized.get("total_amount"),
+        "total_amount_rub": normalized.get("total_amount_rub"),
+        "cbr_usd_rate_value": cbr_rate,
+        "cbr_usd_rate_requested_date": normalized.get("document_date") or normalized.get("invoice_date") or normalized.get("quote_date"),
+        "cbr_usd_rate_effective_date": normalized.get("document_date") or normalized.get("invoice_date") or normalized.get("quote_date"),
+        "normalized_parse": normalized,
+    }
 
 
 def _assert_http_api_smoke() -> None:
@@ -206,6 +313,16 @@ def _assert_http_api_smoke() -> None:
                 or summary.get("quote_invoice_match", {}).get("status") != "needs_review"
             ):
                 raise AssertionError(f"financial summary mismatch: {summary}")
+            match = summary.get("quote_invoice_match", {})
+            efficiency = summary.get("logistics_efficiency", {})
+            if not _approx(match.get("implied_rate"), 75.29, tolerance=0.01):
+                raise AssertionError(f"implied rate must use full quote logistics component, got {match}")
+            if not _approx(efficiency.get("rub_per_kg"), 126.08, tolerance=0.01):
+                raise AssertionError(f"rub/kg mismatch: {efficiency}")
+            if not _approx(efficiency.get("rub_per_m3"), 26830.87, tolerance=0.01):
+                raise AssertionError(f"rub/m3 mismatch: {efficiency}")
+            if _approx(match.get("implied_rate"), 3799.92, tolerance=0.01) or _approx(match.get("relative_spread_pct"), 51.23, tolerance=0.01):
+                raise AssertionError(f"summary must not expose bogus rate/spread: {match}")
             first_document_id = listed["documents"][0]["document_id"]
             detail_status, detail = _get_json(f"{collection_url}/{first_document_id}")
             if detail_status != 200 or detail.get("document_id") != first_document_id or not detail.get("expense_lines"):
@@ -261,6 +378,13 @@ def _reserve_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _approx(actual: Any, expected: float, *, tolerance: float) -> bool:
+    try:
+        return abs(float(actual) - expected) <= tolerance
+    except (TypeError, ValueError):
+        return False
 
 
 def _get_json(url: str) -> tuple[int, dict[str, Any]]:

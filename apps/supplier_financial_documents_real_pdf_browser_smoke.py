@@ -112,6 +112,8 @@ def main() -> None:
                     expect(page.locator("#financeCustomsRub")).to_contain_text("2 892 511", timeout=5000)
                     expect(page.locator("#financeRubPerKg")).not_to_have_text("-")
                     expect(page.locator("#financeImpliedRate")).not_to_have_text("-")
+                    expect(page.locator("#financeImpliedRate")).not_to_contain_text("3 799", timeout=5000)
+                    expect(page.locator("#financeRateSpread")).not_to_contain_text("5 123", timeout=5000)
                     expect(page.locator("#financialWarnings")).to_be_visible()
                     expect(page.locator("#financialWarnings")).to_contain_text("reviewable", timeout=5000)
 
@@ -119,7 +121,13 @@ def main() -> None:
                     quote_row.click()
                     expect(page.locator("#financialRecognizedFields")).to_contain_text("стекла для смартфона", timeout=5000)
                     expect(page.locator("#financialExpenseRows")).to_contain_text("Стоимость доставки", timeout=5000)
+                    expect(page.locator("#financialExpenseRows")).to_contain_text("14 360,00 USD", timeout=5000)
                     expect(page.locator("#financialExpenseRows")).to_contain_text("Таможенные платежи", timeout=5000)
+                    expect(page.locator("#financialExpenseRows")).to_contain_text("40 985,00 USD", timeout=5000)
+                    expect(page.locator("#financialExpenseRows")).to_contain_text("320,00 USD", timeout=5000)
+                    expect(page.locator("#financialExpenseRows")).to_contain_text("350,00 USD", timeout=5000)
+                    expect(page.locator("#financialExpenseRows")).to_contain_text("1 121,00 USD", timeout=5000)
+                    expect(page.locator("#financialWarnings")).not_to_contain_text("Quote parser did not find required amount", timeout=5000)
                     expect(page.locator("#financialDocumentsRows a[data-download]").first).to_be_visible()
 
                     page.locator("#supplyCompositionTabButton").click()

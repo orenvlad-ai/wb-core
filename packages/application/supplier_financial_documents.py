@@ -57,6 +57,29 @@ from packages.contracts.supplier_financial_documents import (
 
 MONEY_QUANT = Decimal("0.01")
 RATE_QUANT = Decimal("0.0001")
+QUOTE_REQUIRED_AMOUNT_CATEGORIES = (EXPENSE_CATEGORY_DELIVERY, EXPENSE_CATEGORY_CUSTOMS_PAYMENTS)
+QUOTE_LOGISTICS_COMPONENT_CATEGORIES = (
+    EXPENSE_CATEGORY_DELIVERY,
+    EXPENSE_CATEGORY_BROKERAGE,
+    EXPENSE_CATEGORY_COMPANY_COMMISSION,
+    EXPENSE_CATEGORY_INSURANCE,
+)
+QUOTE_CORE_AMOUNT_CATEGORIES = (
+    EXPENSE_CATEGORY_DELIVERY,
+    EXPENSE_CATEGORY_CUSTOMS_PAYMENTS,
+    EXPENSE_CATEGORY_ECOLOGICAL_FEE,
+    EXPENSE_CATEGORY_BROKERAGE,
+    EXPENSE_CATEGORY_COMPANY_COMMISSION,
+    EXPENSE_CATEGORY_INSURANCE,
+)
+QUOTE_AMOUNT_CATEGORY_BY_ROW = {
+    1: EXPENSE_CATEGORY_DELIVERY,
+    2: EXPENSE_CATEGORY_CUSTOMS_PAYMENTS,
+    3: EXPENSE_CATEGORY_ECOLOGICAL_FEE,
+    4: EXPENSE_CATEGORY_BROKERAGE,
+    5: EXPENSE_CATEGORY_COMPANY_COMMISSION,
+    6: EXPENSE_CATEGORY_INSURANCE,
+}
 PCT_QUANT = Decimal("0.0001")
 
 
@@ -479,6 +502,9 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
     invoice_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE]
     customs_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION]
     quote_doc = quote_docs[0] if quote_docs else {}
+    quote_meta = dict(quote_doc.get("normalized_parse") or {})
+    quote_required_complete = bool(quote_meta.get("quote_required_amounts_complete")) if quote_docs else False
+    quote_missing_required = _string_list(quote_meta.get("quote_missing_required_amounts"))
     quote_lines = [line for line in active_lines if _line_document_type(line, active_documents) == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE]
     invoice_lines = [line for line in active_lines if _line_document_type(line, active_documents) == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE]
     customs_lines = [line for line in active_lines if _line_document_type(line, active_documents) == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION]
@@ -504,7 +530,6 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
     import_vat_rub = _sum_decimal(line.get("amount_rub") for line in customs_lines if line.get("category") == EXPENSE_CATEGORY_IMPORT_VAT_5010)
     customs_total_rub = _sum_decimal(line.get("amount_rub") for line in customs_lines if bool(line.get("included_in_customs_total")))
 
-    quote_meta = dict(quote_doc.get("normalized_parse") or {})
     gross_weight = _parse_decimal(quote_meta.get("gross_weight_kg"))
     volume = _parse_decimal(quote_meta.get("volume_m3"))
     logistics_rub_per_kg = _safe_div(invoice_fact_rub, gross_weight)
@@ -514,13 +539,18 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
     if quote_docs and volume is None:
         warnings.append("Объем из КП не распознан: ₽/м³ не рассчитан")
 
+    linked_quote_usd_for_rate = quote_logistics_usd if quote_required_complete else None
     rate_summary = _build_rate_summary(
         quote_doc=quote_doc,
         invoice_docs=invoice_docs,
         invoice_fact_rub=invoice_fact_rub,
-        linked_quote_usd_component=quote_logistics_usd,
+        linked_quote_usd_component=linked_quote_usd_for_rate,
+        quote_base_status="parsed" if quote_required_complete else ("missing_required_amounts" if quote_docs else ""),
     )
     warnings.extend(rate_summary.pop("warnings", []))
+    if quote_docs and not quote_required_complete:
+        missing_text = ", ".join(quote_missing_required) if quote_missing_required else "required quote amount(s)"
+        warnings.append(f"КП требует проверки: не распознаны обязательные суммы ({missing_text}); расчётный курс не рассчитан")
     if quote_docs and invoice_docs and quote_logistics_usd is not None:
         warnings.append(
             "Auto-match candidate uses logistics quote lines excluding customs payments; exact line-level evidence is reviewable"
@@ -536,6 +566,8 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
             "logistics_usd": _decimal_to_float(quote_logistics_usd),
             "customs_payments_usd": _decimal_to_float(quote_customs_usd),
             "logistics_rub_cbr": _decimal_to_float(quote_logistics_rub_cbr),
+            "required_amounts_complete": quote_required_complete,
+            "missing_required_amounts": quote_missing_required,
         },
         "invoices": {
             "fact_rub": _decimal_to_float(invoice_fact_rub),
@@ -585,6 +617,10 @@ def _parse_logistics_quote(text: str) -> tuple[dict[str, Any], list[dict[str, An
         total_quote_usd = amounts.get("total_quote_usd")
     if total_quote_usd is None:
         total_quote_usd = _parse_decimal(_first_match(text[:900], r"(?m)^\s*([\d .,]+)\s*USD\s*$"))
+    missing_required = _missing_required_quote_amounts(amounts, total_quote_usd)
+    quote_logistics_component = _sum_decimal(amounts.get(key) for key in QUOTE_LOGISTICS_COMPONENT_CATEGORIES)
+    quote_customs_component = _parse_decimal(amounts.get(EXPENSE_CATEGORY_CUSTOMS_PAYMENTS))
+    quote_core_sum = _sum_decimal(amounts.get(key) for key in QUOTE_CORE_AMOUNT_CATEGORIES)
     normalized = {
         "vendor": "Transitplus International Ltd" if "Transitplus International Ltd" in text else "Transitplus",
         "quote_date": quote_date,
@@ -604,6 +640,11 @@ def _parse_logistics_quote(text: str) -> tuple[dict[str, Any], list[dict[str, An
         "currency": "USD",
         "payment_rate_policy": "курс Банка ВТБ на дату выставления счёта" if "Банка ВТБ" in text else "",
         "validity_days": _int_or_none(_first_match(text, r"действительно в течение\s+(\d+)\s+календар")),
+        "quote_logistics_component_usd": _decimal_to_float(quote_logistics_component),
+        "quote_customs_component_usd": _decimal_to_float(quote_customs_component),
+        "quote_core_amounts_sum_usd": _decimal_to_float(quote_core_sum),
+        "quote_required_amounts_complete": not missing_required,
+        "quote_missing_required_amounts": missing_required,
     }
     lines = [
         _expense_line(
@@ -684,9 +725,14 @@ def _parse_logistics_quote(text: str) -> tuple[dict[str, Any], list[dict[str, An
     if amounts.get(EXPENSE_CATEGORY_EXPORT_DOCS):
         normalized["export_docs_possible_range_usd"] = amounts.get(EXPENSE_CATEGORY_EXPORT_DOCS)
         warnings.append("Export documents cost is possible/not included and must be reviewed before adding to totals")
-    missing = [key for key in (EXPENSE_CATEGORY_DELIVERY, EXPENSE_CATEGORY_CUSTOMS_PAYMENTS) if amounts.get(key) is None]
-    if missing:
-        warnings.append("Quote parser did not find required amount(s): " + ", ".join(missing))
+    if missing_required:
+        warnings.append("Quote parser did not find required amount(s): " + ", ".join(missing_required))
+    if total_quote_usd is not None and quote_core_sum is not None and not missing_required:
+        if abs(quote_core_sum - total_quote_usd) > Decimal("0.01"):
+            warnings.append(
+                "Quote parser needs review: core amount sum "
+                f"{_decimal_to_display(quote_core_sum)} does not match total {_decimal_to_display(total_quote_usd)}"
+            )
     return normalized, lines, warnings
 
 
@@ -831,21 +877,16 @@ def _extract_quote_amounts(text: str) -> dict[str, Decimal | str | None]:
         match = _first_match(text, pattern, flags=re.I)
         if match:
             values[key] = _parse_decimal(match)
-    top = text[: max(text.find("Коммерческое предложение"), 900)]
-    numbered = {}
-    for match in re.finditer(r"(?m)^[ \t]*([1-7])[ \t]+([\d .,]+)[ \t]*$", top):
-        numbered[int(match.group(1))] = _parse_decimal(match.group(2))
-    mapping = {
-        1: EXPENSE_CATEGORY_DELIVERY,
-        2: EXPENSE_CATEGORY_CUSTOMS_PAYMENTS,
-        3: EXPENSE_CATEGORY_ECOLOGICAL_FEE,
-        4: EXPENSE_CATEGORY_BROKERAGE,
-        5: EXPENSE_CATEGORY_COMPANY_COMMISSION,
-        6: EXPENSE_CATEGORY_INSURANCE,
-    }
-    for number, key in mapping.items():
-        if values.get(key) is None and numbered.get(number) is not None:
-            values[key] = numbered[number]
+    total = _extract_quote_total_usd(text)
+    numbered = _extract_quote_numbered_cost_column(text, total)
+    for number, key in QUOTE_AMOUNT_CATEGORY_BY_ROW.items():
+        numbered_value = numbered.get(number)
+        current_value = _parse_decimal(values.get(key))
+        should_replace = current_value is None
+        if key in QUOTE_REQUIRED_AMOUNT_CATEGORIES and total is not None and total > 0 and current_value == 0:
+            should_replace = True
+        if numbered_value is not None and should_replace:
+            values[key] = numbered_value
     values[EXPENSE_CATEGORY_PERMISSION_DOCS] = values.get(EXPENSE_CATEGORY_PERMISSION_DOCS)
     if values[EXPENSE_CATEGORY_PERMISSION_DOCS] is None:
         values[EXPENSE_CATEGORY_PERMISSION_DOCS] = _parse_decimal(
@@ -855,10 +896,137 @@ def _extract_quote_amounts(text: str) -> dict[str, Decimal | str | None]:
     range_match = re.search(r"Стоимость оформления экспортных документов\s+([\d .,]+)\s*[-–]\s*([\d .,]+)\s*USD", text, flags=re.I)
     if range_match:
         values[EXPENSE_CATEGORY_EXPORT_DOCS] = f"{_decimal_to_display(_parse_decimal(range_match.group(1)))}-{_decimal_to_display(_parse_decimal(range_match.group(2)))}"
-    total = _parse_decimal(_first_match(top, r"(?m)^\s*([\d .,]+)\s*USD\s*$"))
     if total is not None:
         values["total_quote_usd"] = total
     return values
+
+
+def _extract_quote_total_usd(text: str) -> Decimal | None:
+    explicit_totals: list[Decimal] = []
+    for match in re.finditer(r"ИТОГО:\s*(?:\n|\s)*([\d .,]+)\s*USD", text, flags=re.I):
+        value = _parse_decimal(match.group(1))
+        if value is not None and value > 0:
+            explicit_totals.append(value)
+    if explicit_totals:
+        return max(explicit_totals)
+    commercial_index = text.find("Коммерческое предложение")
+    top = text[:commercial_index] if commercial_index > 0 else text[:900]
+    candidates: list[Decimal] = []
+    for match in re.finditer(r"(?m)^\s*([\d .,]+)\s*USD\s*$", top):
+        value = _parse_decimal(match.group(1))
+        if value is not None and value > 0:
+            candidates.append(value)
+    return max(candidates) if candidates else None
+
+
+def _extract_quote_numbered_cost_column(text: str, total_quote_usd: Decimal | None) -> dict[int, Decimal]:
+    regions = _quote_amount_regions(text)
+    for region in regions:
+        direct = _extract_numbered_amount_pairs(region)
+        if _quote_numbered_amounts_are_usable(direct, total_quote_usd):
+            return direct
+    for region in regions:
+        sequence = _extract_amount_sequence_by_total(region, total_quote_usd)
+        if _quote_numbered_amounts_are_usable(sequence, total_quote_usd):
+            return sequence
+    best: dict[int, Decimal] = {}
+    for region in regions:
+        direct = _extract_numbered_amount_pairs(region)
+        if len(direct) > len(best):
+            best = direct
+    return best
+
+
+def _quote_amount_regions(text: str) -> list[str]:
+    regions: list[str] = []
+    commercial_index = text.find("Коммерческое предложение")
+    if commercial_index > 0:
+        regions.append(text[:commercial_index])
+    start = text.find("Предварительный расчет стоимости")
+    if start < 0:
+        start = text.find("Предварительный расч")
+    if start >= 0:
+        end = text.find("Дополнительные услуги", start)
+        if end < 0:
+            end = start + 2000
+        regions.append(text[start:end])
+    regions.append(text[:1200])
+    deduped: list[str] = []
+    for region in regions:
+        cleaned = str(region or "").strip()
+        if cleaned and cleaned not in deduped:
+            deduped.append(cleaned)
+    return deduped
+
+
+def _extract_numbered_amount_pairs(text: str) -> dict[int, Decimal]:
+    values: dict[int, Decimal] = {}
+    lines = _text_to_lines(text)
+    for index, line in enumerate(lines):
+        match = re.match(r"^([1-6])[\s.)]+([0-9][\d .,\u00a0\u202f]*)(?:\s*USD)?$", line, flags=re.I)
+        if match:
+            amount = _parse_decimal(match.group(2))
+            if amount is not None:
+                values[int(match.group(1))] = amount
+                continue
+        number_only = re.match(r"^([1-6])$", line)
+        if not number_only or index + 1 >= len(lines):
+            continue
+        next_amount = _parse_decimal(lines[index + 1])
+        if next_amount is None:
+            continue
+        if next_amount <= 6 and index + 2 < len(lines) and re.match(r"^[1-6]$", lines[index + 1]):
+            continue
+        values[int(number_only.group(1))] = next_amount
+    return values
+
+
+def _extract_amount_sequence_by_total(text: str, total_quote_usd: Decimal | None) -> dict[int, Decimal]:
+    if total_quote_usd is None or total_quote_usd <= 0:
+        return {}
+    numbers: list[Decimal] = []
+    for line in _text_to_lines(text):
+        if re.search(r"[A-Za-zА-Яа-я]", line) and "USD" not in line.upper():
+            continue
+        if not re.match(r"^[\d .,\u00a0\u202f]+(?:\s*USD)?$", line, flags=re.I):
+            continue
+        value = _parse_decimal(line)
+        if value is None:
+            continue
+        numbers.append(value)
+    for index in range(0, max(0, len(numbers) - 5)):
+        window = numbers[index : index + 6]
+        if len(window) < 6:
+            continue
+        if abs(sum(window, Decimal("0")) - total_quote_usd) <= Decimal("0.01"):
+            return {number: window[number - 1] for number in range(1, 7)}
+    return {}
+
+
+def _quote_numbered_amounts_are_usable(values: Mapping[int, Decimal], total_quote_usd: Decimal | None) -> bool:
+    if not all(number in values for number in range(1, 7)):
+        return False
+    if values.get(1) is None or values.get(2) is None:
+        return False
+    if total_quote_usd is None:
+        return True
+    amount_sum = sum((values.get(number) or Decimal("0")) for number in range(1, 7))
+    return abs(amount_sum - total_quote_usd) <= Decimal("0.01")
+
+
+def _missing_required_quote_amounts(
+    amounts: Mapping[str, Decimal | str | None],
+    total_quote_usd: Decimal | None,
+) -> list[str]:
+    missing: list[str] = []
+    for key in QUOTE_REQUIRED_AMOUNT_CATEGORIES:
+        value = _parse_decimal(amounts.get(key))
+        if value is None:
+            missing.append(key)
+            continue
+        if total_quote_usd is not None and total_quote_usd > 0 and value <= 0:
+            missing.append(key)
+    return missing
 
 
 def _extract_invoice_route(text: str) -> str:
@@ -940,8 +1108,15 @@ def _build_rate_summary(
     invoice_docs: list[Mapping[str, Any]],
     invoice_fact_rub: Decimal | None,
     linked_quote_usd_component: Decimal | None,
+    quote_base_status: str = "",
 ) -> dict[str, Any]:
     warnings: list[str] = []
+    if quote_doc and invoice_docs and quote_base_status and quote_base_status != "parsed":
+        return {
+            "status": "needs_review",
+            "quote_base_status": quote_base_status,
+            "warnings": ["Linked quote USD component is incomplete; rate comparison is not calculated"],
+        }
     if not quote_doc or not invoice_docs or not invoice_fact_rub or not linked_quote_usd_component:
         return {
             "status": "not_available",
@@ -1043,6 +1218,16 @@ def _parse_status_for_payload(
     if not normalized or not normalized.get("document_type"):
         return FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR
     if rate_result is not None and rate_result.status != FX_RATE_STATUS_OK:
+        return FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
+    if (
+        normalized.get("document_type") == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE
+        and normalized.get("quote_required_amounts_complete") is False
+    ):
+        missing = _string_list(normalized.get("quote_missing_required_amounts"))
+        if missing:
+            warning = "Quote parser did not find required amount(s): " + ", ".join(missing)
+            if warning not in warnings:
+                warnings.append(warning)
         return FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
     required_by_type = {
         FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE: ["quote_date", "total_amount"],
