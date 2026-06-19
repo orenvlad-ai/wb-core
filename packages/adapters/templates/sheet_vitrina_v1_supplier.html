@@ -445,7 +445,7 @@
           </div>
 
           <div class="finance-summary-grid" aria-label="Финансовая сводка">
-            <div class="total"><span>КП логиста, USD</span><strong id="financeQuoteTotalUsd">-</strong></div>
+            <div class="total"><span>КП всего, USD</span><strong id="financeQuoteTotalUsd">-</strong></div>
             <div class="total"><span>Логистика по КП, USD</span><strong id="financeQuoteLogisticsUsd">-</strong></div>
             <div class="total"><span>КП таможня, USD</span><strong id="financeQuoteCustomsUsd">-</strong></div>
             <div class="total"><span>Счета логиста, ₽</span><strong id="financeInvoiceRub">-</strong></div>
@@ -455,9 +455,9 @@
             <div class="total"><span>ДТ НДС, ₽</span><strong id="financeImportVatRub">-</strong></div>
             <div class="total"><span>ДТ всего, ₽</span><strong id="financeCustomsRub">-</strong></div>
             <div class="total"><span>Логистика ₽/кг</span><strong id="financeRubPerKg">-</strong></div>
-            <div class="total"><span>Расчётный курс</span><strong id="financeImpliedRate">-</strong></div>
-            <div class="total"><span>Дельта к ЦБ</span><strong id="financeRateSpread">-</strong></div>
-            <div class="total"><span>КП vs счета, ₽</span><strong id="financeQuoteInvoiceDelta">-</strong></div>
+            <div class="total"><span>Расчётный курс по правилу КП</span><strong id="financeImpliedRate">-</strong></div>
+            <div class="total"><span>Отклонение от ЦБ</span><strong id="financeRateSpread">-</strong></div>
+            <div class="total"><span>Счета минус КП-логистика, ₽</span><strong id="financeQuoteInvoiceDelta">-</strong></div>
           </div>
           <ul id="financialWarnings" class="warning-list" hidden></ul>
 
@@ -681,6 +681,17 @@
       function formatPercent(value) {
         const number = Number(value);
         return Number.isFinite(number) ? numberFormatter.format(number * 100) + "%" : "-";
+      }
+
+      function formatRateSpread(match) {
+        const parts = [];
+        if (match.absolute_spread != null) {
+          parts.push(formatNumber(match.absolute_spread) + " ₽/$");
+        }
+        if (match.relative_spread_pct != null) {
+          parts.push(formatPercent(match.relative_spread_pct));
+        }
+        return parts.length ? parts.join(" · ") : "-";
       }
 
           function setMessage(element, text, tone) {
@@ -1186,7 +1197,7 @@
         financeCustomsRub.textContent = formatAmount(customs.total_customs_payments_rub, "₽");
         financeRubPerKg.textContent = formatAmount(efficiency.rub_per_kg, "₽");
         financeImpliedRate.textContent = match.implied_rate ? formatNumber(match.implied_rate) : "-";
-        financeRateSpread.textContent = match.relative_spread_pct != null ? formatPercent(match.relative_spread_pct) : "-";
+        financeRateSpread.textContent = formatRateSpread(match);
         financeQuoteInvoiceDelta.textContent = formatAmount(match.delta_rub, "₽");
       }
 
