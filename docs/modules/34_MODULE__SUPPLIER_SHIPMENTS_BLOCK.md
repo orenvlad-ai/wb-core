@@ -22,6 +22,8 @@ related_tables:
   - "sheet_vitrina_v1_supplier_shipments"
   - "sheet_vitrina_v1_supplier_shipment_lines"
   - "sheet_vitrina_v1_nomenclature_items"
+  - "sheet_vitrina_v1_trade_documents"
+  - "sheet_vitrina_v1_invoice_contract_links"
 related_endpoints:
   - "GET /sheet-vitrina-v1/supplier"
   - "GET /sheet-vitrina-v1/settings"
@@ -34,18 +36,28 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/rematch"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/price-check"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
+  - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
   - "PATCH /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}"
   - "DELETE /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}"
+  - "GET /v1/sheet-vitrina-v1/settings/documents"
+  - "POST /v1/sheet-vitrina-v1/settings/documents"
+  - "PATCH /v1/sheet-vitrina-v1/settings/documents/{document_id}"
+  - "DELETE /v1/sheet-vitrina-v1/settings/documents/{document_id}"
+  - "GET /v1/sheet-vitrina-v1/settings/documents/{document_id}/file"
+  - "PATCH /v1/sheet-vitrina-v1/settings/documents/{invoice_document_id}/contract"
 related_runners:
   - "apps/supplier_invoice_parser_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_price_conformity_backfill.py"
   - "apps/registry_upload_http_entrypoint_auth_smoke.py"
   - "apps/registry_upload_http_entrypoint_supplier_auth_smoke.py"
+  - "apps/sheet_vitrina_v1_trade_documents_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py"
 related_docs:
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
@@ -53,7 +65,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, preserves deterministic nomenclature matching, and persists per-line invoice price conformity snapshots/statuses against current nomenclature purchase_price_yuan. Manual price recheck remains operator-only and UI-scoped to the operator embedded `Поставки -> От поставщика` frame: standalone `/sheet-vitrina-v1/supplier` and supplier/factory UI show saved statuses but do not render the recheck button. Operator nomenclature settings hide legacy SKU/alias/comment fields by default, add nullable purchase_price_yuan, and support operator-only XLSX export/import with dry-run validation; no Google Sheets/GAS contour, no browser-local truth, no low-confidence fuzzy matching."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, preserves deterministic nomenclature matching, and persists per-line invoice price conformity snapshots/statuses against current nomenclature purchase_price_yuan. Manual price recheck remains operator-only and UI-scoped to the operator embedded `Поставки -> От поставщика` frame. Operator settings now also own `Справочник договоров и инвойсов`: PDF/JPG/PNG/XLSX contract/invoice files, XLSX invoice metadata parsing, invoice->contract links, shipment-linked contract download, and idempotent legacy shipment invoice backfill. Standalone supplier role can read/download only shipment-linked invoice/contract files through supplier shipment routes and cannot access settings document CRUD or arbitrary document ids. No Google Sheets/GAS contour, no browser-local truth, no OCR for PDF/JPG/PNG."
 ---
 
 # 1. Contract
@@ -70,13 +82,26 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - Runtime truth is server-owned:
   - original XLSX files live under `<runtime_dir>/supplier_invoices/files/<shipment_id>/<safe_filename>`;
   - staged uploads live under `<runtime_dir>/supplier_invoices/uploads/<upload_id>/<safe_filename>`;
-  - SQLite stores upload metadata, shipment headers, editable line details, persisted price conformity fields and nomenclature rows.
+  - settings-uploaded trade document files live under `<runtime_dir>/trade_documents/files/<document_type>/<document_id>/<safe_filename>`;
+  - SQLite stores upload metadata, shipment headers, editable line details, persisted price conformity fields, nomenclature rows, trade document rows and invoice-contract links.
 - `shipment_date` is the only required manual field after parse. It is rendered as `出货日期 / Shipment date / Дата отгрузки`, is required on create/save, and is validated server-side even though the UI disables save until it is present.
 - Shipment headers persist `order_status` in `sheet_vitrina_v1_supplier_shipments` with non-destructive default `production`. Canonical values are `production` (`На производстве`), `in_transit` (`В пути`) and `accepted_ff` (`Принято на ФФ`). List and detail API responses expose `order_status`; legacy rows without the column/value fall back to `production`.
 - Factory-order supplier-registry inbound uses `order_status` server-side: only `production` and `in_transit` shipments can become `Товары в пути от фабрики`; `accepted_ff` shipments are excluded because their goods are already accepted on FF and must enter calculation through FF stock, not as factory inbound.
-- In the operator embedded registry table, `Currency / Валюта` is hidden from the list, `Статус заказа` is shown after `Invoice file` and before `Actions`, and status changes use a narrow status-only PATCH so shipment lines, invoice metadata, source file pointers and matching state are not rebuilt or erased. The status selector is not rendered in the standalone supplier-only view.
-- Orders can be deleted by operator role only. Delete controls use UI-level confirmation: the first click opens an inline confirmation with cancel, and backend DELETE is called only by the explicit confirm action. While confirmation is open, row clicks do not open the order card. Confirmed delete removes the DB order/lines and makes the original invoice download unavailable.
+- In the operator embedded registry table, `Currency / Валюта` is hidden from the list, compact `Документы` replaces the old invoice-only file column, `Статус заказа` is shown after `Документы` and before `Actions`, and status changes use a narrow status-only PATCH so shipment lines, invoice metadata, source file pointers and matching state are not rebuilt or erased. The status selector is not rendered in the standalone supplier-only view.
+- Orders can be deleted by operator role only. Delete controls use UI-level confirmation: the first click opens an inline confirmation with cancel, and backend DELETE is called only by the explicit confirm action. While confirmation is open, row clicks do not open the order card. Confirmed delete removes the DB order/lines, archives the invoice document link when present, and makes shipment-scoped invoice download unavailable without deleting the physical runtime invoice file.
 - Saved order cards expose `关闭 / Close / Закрыть`; the visible `重新匹配 / Re-match / Пересопоставить` action is not rendered in the supplier/order card. The rematch API remains available for internal compatibility and applies current nomenclature without overwriting manual overrides unless explicitly requested by API payload.
+
+# 1.1 Trade Documents Registry
+
+- `Настройки -> Справочник договоров и инвойсов` is an operator-only server-owned registry for `contract` and `invoice` documents.
+- Supported files are `.pdf`, `.jpg`, `.jpeg`, `.png`, `.xlsx`. PDF/JPG/PNG are stored as files without OCR/recognition in this MVP.
+- XLSX invoice uploads through settings are parsed with the existing supplier invoice parser when applicable. Parsed metadata may fill invoice no/date, contract no/date, supplier, currency, totals, warnings and errors. Settings invoice upload creates only a document record; it does not create a supplier shipment/order card.
+- Settings upload deduplicates active settings documents by `document_type + file_sha256` and returns the existing document instead of creating another row for the same file.
+- Supplier shipment create from the existing invoice parser flow creates or finds an `invoice` document record, writes `invoice_document_id` to `sheet_vitrina_v1_supplier_shipments`, and keeps the existing `GET .../{shipment_id}/invoice` download backward-compatible.
+- Legacy shipments with `source_file_path` and no `invoice_document_id` are backfilled idempotently into `invoice` document records. The record references the existing runtime invoice file path; physical legacy invoice files are not moved or deleted by the backfill.
+- `sheet_vitrina_v1_invoice_contract_links` allows one primary contract per invoice and many invoices per contract. Exact active contract candidates are found by contract number and date. If supplier shipment creation/backfill finds exactly one active contract candidate, it auto-links the invoice to that contract; zero or multiple candidates are returned as non-destructive candidate/status data.
+- The order card has a compact `Документы` block: invoice download, linked contract no/date and download, or operator-only select/upload controls for missing contract. Supplier standalone view can see/download linked documents but cannot link/upload/archive.
+- Contract archive is rejected while active invoice links point to that contract. Invoice archive removes the invoice-contract link. File rows are archived in DB; physical files are not removed by document archive.
 
 # 2. Parser
 

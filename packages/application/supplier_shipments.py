@@ -50,6 +50,19 @@ from packages.contracts.supplier_shipments import (
     SHIPMENT_STATUS_MANUAL_OVERRIDE,
     SUPPLIER_INVOICE_CONTENT_TYPE,
     SUPPLIER_INVOICE_PARSER_VERSION,
+    TRADE_DOCUMENT_ALLOWED_EXTENSIONS,
+    TRADE_DOCUMENT_CONTENT_TYPES_BY_EXTENSION,
+    TRADE_DOCUMENT_LINK_SOURCE_MIGRATION,
+    TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+    TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
+    TRADE_DOCUMENT_SOURCE_MIGRATION_EXISTING_SUPPLIER_INVOICE,
+    TRADE_DOCUMENT_SOURCE_SETTINGS_UPLOAD,
+    TRADE_DOCUMENT_SOURCE_SUPPLIER_SHIPMENT_PARSE,
+    TRADE_DOCUMENT_STATUS_ACTIVE,
+    TRADE_DOCUMENT_STATUS_ARCHIVED,
+    TRADE_DOCUMENT_TYPE_CONTRACT,
+    TRADE_DOCUMENT_TYPE_INVOICE,
+    TRADE_DOCUMENT_TYPES,
 )
 
 
@@ -94,11 +107,12 @@ class SupplierShipmentsBlock:
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
 
     def list_shipments(self) -> dict[str, Any]:
+        self.migrate_existing_supplier_shipments_into_trade_documents()
         rows = self.runtime.list_supplier_shipments()
         return {
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
             "status": "ok",
-            "shipments": [_with_invoice_download_path(row) for row in rows],
+            "shipments": [self._with_document_fields(_with_invoice_download_path(row)) for row in rows],
         }
 
     def parse_upload(
@@ -157,6 +171,10 @@ class SupplierShipmentsBlock:
                 "source_filename": filename,
                 "source_file_sha256": sha256,
                 "content_type": content_type,
+                "contract_candidates": self.find_contract_candidates(
+                    str(payload.get("metadata", {}).get("contract_no") or ""),
+                    str(payload.get("metadata", {}).get("contract_date") or ""),
+                ),
             }
         )
         return payload
@@ -195,6 +213,20 @@ class SupplierShipmentsBlock:
             shipment_id=shipment_id,
             filename=source_filename,
         )
+        invoice_document = self._create_or_load_supplier_invoice_document(
+            shipment_id=shipment_id,
+            upload_id=upload_id,
+            source_filename=source_filename,
+            content_type=str(upload.get("content_type") or SUPPLIER_INVOICE_CONTENT_TYPE),
+            source_file_sha256=str(upload.get("source_file_sha256") or ""),
+            source_file_path=source_path,
+            parser_version=str(upload.get("parser_version") or SUPPLIER_INVOICE_PARSER_VERSION),
+            metadata=metadata,
+            warnings=warnings,
+            errors=errors,
+            parsed_payload=edited_payload,
+            created_at=now,
+        )
         header = {
             "shipment_id": shipment_id,
             "created_at": now,
@@ -217,18 +249,27 @@ class SupplierShipmentsBlock:
             "source_filename": source_filename,
             "source_file_sha256": upload.get("source_file_sha256") or "",
             "source_file_path": source_path,
+            "invoice_document_id": invoice_document.get("document_id") or "",
             "parser_version": upload.get("parser_version") or SUPPLIER_INVOICE_PARSER_VERSION,
             "warnings": warnings,
             "errors": errors,
         }
         self.runtime.save_supplier_shipment(header=header, lines=lines)
+        self._autolink_invoice_contract_from_metadata(
+            invoice_document_id=str(invoice_document.get("document_id") or ""),
+            contract_no=str(metadata.get("contract_no") or ""),
+            contract_date=str(metadata.get("contract_date") or ""),
+            linked_by="system",
+            source=TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
+        )
         return self.get_shipment(shipment_id)
 
     def get_shipment(self, shipment_id: str) -> dict[str, Any]:
+        self.migrate_existing_supplier_shipments_into_trade_documents()
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        return _detail_payload(detail)
+        return self._with_document_fields(_detail_payload(detail))
 
     def update_shipment(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
@@ -270,6 +311,17 @@ class SupplierShipmentsBlock:
             "errors": errors,
         }
         self.runtime.save_supplier_shipment(header=header, lines=lines)
+        if "contract_document_id" in payload:
+            contract_document_id = str(payload.get("contract_document_id") or "").strip()
+            if contract_document_id:
+                self.link_shipment_contract(
+                    shipment_id,
+                    contract_document_id=contract_document_id,
+                    linked_by="operator",
+                    source=TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+                )
+            else:
+                self.unlink_shipment_contract(shipment_id)
         return self.get_shipment(shipment_id)
 
     def update_order_status(self, shipment_id: str, order_status: Any) -> dict[str, Any]:
@@ -371,11 +423,16 @@ class SupplierShipmentsBlock:
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = dict(detail.get("header") or {})
-        source_file_path = str(header.get("source_file_path") or "")
+        invoice_document_id = str(header.get("invoice_document_id") or "")
         deleted = self.runtime.delete_supplier_shipment(shipment_id)
         if not deleted:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        self._delete_runtime_invoice_file(source_file_path)
+        if invoice_document_id:
+            self.runtime.delete_invoice_contract_link(invoice_document_id)
+            try:
+                self.runtime.archive_trade_document(invoice_document_id, updated_at=self.timestamp_factory())
+            except ValueError:
+                pass
         return {
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
             "status": "ok",
@@ -429,11 +486,390 @@ class SupplierShipmentsBlock:
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = detail["header"]
-        file_path = self._resolve_runtime_file(str(header.get("source_file_path") or ""))
-        if not file_path.exists() or not file_path.is_file():
+        file_path: Path | None = None
+        source_file_path = str(header.get("source_file_path") or "")
+        if source_file_path:
+            file_path = self._resolve_runtime_file(source_file_path)
+        if (file_path is None or not file_path.exists() or not file_path.is_file()) and str(header.get("invoice_document_id") or ""):
+            document = self.runtime.load_trade_document(str(header.get("invoice_document_id") or ""))
+            if document is not None:
+                file_path = self._resolve_runtime_file(str(document.get("file_path") or ""))
+        if file_path is None or not file_path.exists() or not file_path.is_file():
             raise ValueError(f"supplier invoice file is missing for shipment: {shipment_id}")
         content_type = SUPPLIER_INVOICE_CONTENT_TYPE
         return file_path.read_bytes(), str(header.get("source_filename") or "supplier-invoice.xlsx"), content_type
+
+    def download_shipment_contract(self, shipment_id: str) -> tuple[bytes, str, str]:
+        shipment = self.get_shipment(shipment_id)
+        contract_document_id = str(shipment.get("contract_document_id") or "")
+        if not contract_document_id:
+            raise ValueError(f"supplier shipment contract is not linked: {shipment_id}")
+        return self.download_trade_document_file(contract_document_id)
+
+    def list_trade_documents(self, *, include_archived: bool = False) -> dict[str, Any]:
+        documents = [self._with_document_download_path(item) for item in self.runtime.list_trade_documents(include_archived=include_archived)]
+        return {
+            "contract_name": "sheet_vitrina_v1_trade_documents",
+            "status": "ok",
+            "documents": documents,
+        }
+
+    def create_trade_document_from_upload(
+        self,
+        *,
+        document_type: str,
+        file_bytes: bytes,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        number: str | None = None,
+        document_date: str | None = None,
+        supplier_name: str | None = None,
+        currency: str | None = None,
+        amount_total: Any = None,
+    ) -> dict[str, Any]:
+        normalized_type = _normalize_trade_document_type(document_type)
+        if not file_bytes:
+            raise ValueError("trade document upload file is empty")
+        filename = _safe_document_filename(uploaded_filename or f"{normalized_type}.xlsx", document_type=normalized_type)
+        extension = Path(filename).suffix.lower()
+        if extension not in TRADE_DOCUMENT_ALLOWED_EXTENSIONS:
+            raise ValueError("trade document upload must be one of: .pdf, .jpg, .jpeg, .png, .xlsx")
+        content_type = _document_content_type(filename, uploaded_content_type)
+        sha256 = hashlib.sha256(file_bytes).hexdigest()
+        duplicate = self.runtime.find_settings_trade_document_duplicate(
+            document_type=normalized_type,
+            file_sha256=sha256,
+        )
+        if duplicate is not None:
+            payload = self._with_document_download_path(duplicate)
+            payload["deduplicated"] = True
+            return {
+                "contract_name": "sheet_vitrina_v1_trade_documents",
+                "status": "duplicate_existing",
+                "document": payload,
+            }
+
+        now = self.timestamp_factory()
+        parsed_metadata: dict[str, Any] = {}
+        warnings: list[str] = []
+        errors: list[str] = []
+        parser_version = ""
+        if normalized_type == TRADE_DOCUMENT_TYPE_INVOICE and extension == ".xlsx":
+            parsed_metadata, warnings, errors, parser_version = self._parse_invoice_document_metadata(
+                file_bytes,
+                filename=filename,
+            )
+        metadata_number = str(number or "").strip() or str(parsed_metadata.get("invoice_no") or "").strip()
+        metadata_date = _optional_iso_date(document_date) or _optional_iso_date(parsed_metadata.get("invoice_date"))
+        metadata_supplier = str(supplier_name or "").strip() or str(parsed_metadata.get("supplier_name") or "").strip()
+        metadata_currency = str(currency or "").strip().upper() or str(parsed_metadata.get("currency") or "").strip().upper()
+        metadata_amount = _optional_number(amount_total)
+        if metadata_amount is None:
+            metadata_amount = _optional_number(parsed_metadata.get("declared_invoice_total"))
+        if metadata_amount is None:
+            metadata_amount = _optional_number(parsed_metadata.get("invoice_amount_total"))
+
+        document_id = "tdoc_" + uuid4().hex
+        file_path = self._write_trade_document_file(
+            document_type=normalized_type,
+            document_id=document_id,
+            filename=filename,
+            body=file_bytes,
+        )
+        document = self.runtime.save_trade_document(
+            {
+                "document_id": document_id,
+                "document_type": normalized_type,
+                "number": metadata_number,
+                "document_date": metadata_date,
+                "supplier_name": metadata_supplier,
+                "currency": metadata_currency,
+                "amount_total": metadata_amount,
+                "source": TRADE_DOCUMENT_SOURCE_SETTINGS_UPLOAD,
+                "source_shipment_id": "",
+                "source_upload_id": "",
+                "file_original_name": filename,
+                "file_content_type": content_type,
+                "file_sha256": sha256,
+                "file_path": file_path,
+                "parser_version": parser_version,
+                "parsed_metadata": parsed_metadata,
+                "warnings": warnings,
+                "errors": errors,
+                "status": TRADE_DOCUMENT_STATUS_ACTIVE,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_trade_documents",
+            "status": "ok",
+            "document": self._with_document_download_path(document),
+        }
+
+    def update_trade_document(self, document_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        updates: dict[str, Any] = {}
+        if "number" in payload:
+            updates["number"] = str(payload.get("number") or "").strip()
+        if "document_date" in payload:
+            updates["document_date"] = _optional_iso_date(payload.get("document_date"))
+        if "supplier_name" in payload:
+            updates["supplier_name"] = str(payload.get("supplier_name") or "").strip()
+        if "currency" in payload:
+            updates["currency"] = str(payload.get("currency") or "").strip().upper()
+        if "amount_total" in payload:
+            updates["amount_total"] = _optional_number(payload.get("amount_total"))
+        document = self.runtime.update_trade_document(document_id, updates, updated_at=self.timestamp_factory())
+        return {
+            "contract_name": "sheet_vitrina_v1_trade_documents",
+            "status": "ok",
+            "document": self._with_document_download_path(document),
+        }
+
+    def archive_trade_document(self, document_id: str) -> dict[str, Any]:
+        existing = self.runtime.load_trade_document(document_id)
+        if existing is None:
+            raise ValueError(f"trade document not found: {document_id}")
+        if (
+            str(existing.get("document_type") or "") == TRADE_DOCUMENT_TYPE_CONTRACT
+            and self.runtime.count_contract_document_links(document_id) > 0
+        ):
+            raise ValueError("contract document has linked invoice documents and cannot be archived")
+        if str(existing.get("document_type") or "") == TRADE_DOCUMENT_TYPE_INVOICE:
+            self.runtime.delete_invoice_contract_link(document_id)
+        document = self.runtime.archive_trade_document(document_id, updated_at=self.timestamp_factory())
+        return {
+            "contract_name": "sheet_vitrina_v1_trade_documents",
+            "status": "ok",
+            "document": self._with_document_download_path(document),
+        }
+
+    def download_trade_document_file(self, document_id: str) -> tuple[bytes, str, str]:
+        document = self.runtime.load_trade_document(document_id)
+        if document is None or str(document.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
+            raise ValueError(f"trade document not found: {document_id}")
+        file_path = self._resolve_runtime_file(str(document.get("file_path") or ""))
+        if not file_path.exists() or not file_path.is_file():
+            raise ValueError(f"trade document file is missing: {document_id}")
+        return (
+            file_path.read_bytes(),
+            str(document.get("file_original_name") or "document"),
+            str(document.get("file_content_type") or "application/octet-stream"),
+        )
+
+    def link_invoice_to_contract(
+        self,
+        invoice_document_id: str,
+        *,
+        contract_document_id: str,
+        linked_by: str = "",
+        source: str = TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+    ) -> dict[str, Any]:
+        invoice = self.runtime.load_trade_document(invoice_document_id)
+        if invoice is None or str(invoice.get("document_type") or "") != TRADE_DOCUMENT_TYPE_INVOICE:
+            raise ValueError(f"invoice document not found: {invoice_document_id}")
+        if str(invoice.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
+            raise ValueError(f"invoice document is not active: {invoice_document_id}")
+        contract = self.runtime.load_trade_document(contract_document_id)
+        if contract is None or str(contract.get("document_type") or "") != TRADE_DOCUMENT_TYPE_CONTRACT:
+            raise ValueError(f"contract document not found: {contract_document_id}")
+        if str(contract.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
+            raise ValueError(f"contract document is not active: {contract_document_id}")
+        now = self.timestamp_factory()
+        existing = self.runtime.load_invoice_contract_link(invoice_document_id)
+        link = self.runtime.save_invoice_contract_link(
+            invoice_document_id=invoice_document_id,
+            contract_document_id=contract_document_id,
+            created_at=str((existing or {}).get("created_at") or now),
+            updated_at=now,
+            linked_by=linked_by,
+            source=source,
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_invoice_contract_links",
+            "status": "ok",
+            "link": link,
+            "invoice": self._with_document_download_path(self.runtime.load_trade_document(invoice_document_id) or invoice),
+            "contract": self._with_document_download_path(contract),
+        }
+
+    def unlink_invoice_contract(self, invoice_document_id: str) -> dict[str, Any]:
+        deleted = self.runtime.delete_invoice_contract_link(invoice_document_id)
+        invoice = self.runtime.load_trade_document(invoice_document_id)
+        return {
+            "contract_name": "sheet_vitrina_v1_invoice_contract_links",
+            "status": "ok",
+            "deleted": deleted,
+            "invoice_document_id": invoice_document_id,
+            "invoice": self._with_document_download_path(invoice) if invoice else None,
+        }
+
+    def link_shipment_contract(
+        self,
+        shipment_id: str,
+        *,
+        contract_document_id: str,
+        linked_by: str = "",
+        source: str = TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+    ) -> dict[str, Any]:
+        shipment = self._ensure_shipment_invoice_document(shipment_id)
+        invoice_document_id = str(shipment.get("invoice_document_id") or "")
+        if not invoice_document_id:
+            raise ValueError(f"supplier shipment invoice document is missing: {shipment_id}")
+        result = self.link_invoice_to_contract(
+            invoice_document_id,
+            contract_document_id=contract_document_id,
+            linked_by=linked_by,
+            source=source,
+        )
+        result["shipment"] = self.get_shipment(shipment_id)
+        return result
+
+    def unlink_shipment_contract(self, shipment_id: str) -> dict[str, Any]:
+        shipment = self._ensure_shipment_invoice_document(shipment_id)
+        invoice_document_id = str(shipment.get("invoice_document_id") or "")
+        if not invoice_document_id:
+            raise ValueError(f"supplier shipment invoice document is missing: {shipment_id}")
+        result = self.unlink_invoice_contract(invoice_document_id)
+        result["shipment"] = self.get_shipment(shipment_id)
+        return result
+
+    def upload_shipment_contract(
+        self,
+        shipment_id: str,
+        *,
+        file_bytes: bytes,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        number: str | None = None,
+        document_date: str | None = None,
+        supplier_name: str | None = None,
+    ) -> dict[str, Any]:
+        shipment = self._ensure_shipment_invoice_document(shipment_id)
+        header_supplier = str(shipment.get("supplier_name") or DEFAULT_SUPPLIER_NAME)
+        created = self.create_trade_document_from_upload(
+            document_type=TRADE_DOCUMENT_TYPE_CONTRACT,
+            file_bytes=file_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+            number=number or shipment.get("contract_no") or "",
+            document_date=document_date or shipment.get("contract_date") or "",
+            supplier_name=supplier_name or header_supplier,
+        )
+        contract_document_id = str((created.get("document") or {}).get("document_id") or "")
+        if not contract_document_id:
+            raise ValueError("uploaded contract document was not saved")
+        linked = self.link_shipment_contract(
+            shipment_id,
+            contract_document_id=contract_document_id,
+            linked_by="operator",
+            source=TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+        )
+        linked["document_upload"] = created
+        return linked
+
+    def find_contract_candidates(self, number: str, document_date: str = "") -> list[dict[str, Any]]:
+        return [
+            self._with_document_download_path(item)
+            for item in self.runtime.find_contract_document_candidates(
+                number=str(number or "").strip(),
+                document_date=_optional_iso_date(document_date),
+            )
+        ]
+
+    def migrate_existing_supplier_shipments_into_trade_documents(self) -> dict[str, Any]:
+        rows = self.runtime.list_supplier_shipments()
+        created_count = 0
+        linked_count = 0
+        skipped_count = 0
+        for row in rows:
+            shipment_id = str(row.get("shipment_id") or "")
+            if not shipment_id:
+                skipped_count += 1
+                continue
+            detail = self.runtime.load_supplier_shipment(shipment_id)
+            if detail is None:
+                skipped_count += 1
+                continue
+            header = dict(detail.get("header") or {})
+            if str(header.get("invoice_document_id") or "").strip():
+                skipped_count += 1
+                continue
+            source_file_path = str(header.get("source_file_path") or "").strip()
+            if not source_file_path:
+                skipped_count += 1
+                continue
+            file_sha256 = str(header.get("source_file_sha256") or "").strip() or self._sha256_for_existing_runtime_file(
+                source_file_path,
+                fallback_seed=f"{shipment_id}:{source_file_path}",
+            )
+            existing = self.runtime.find_trade_document_by_source_file(
+                document_type=TRADE_DOCUMENT_TYPE_INVOICE,
+                file_sha256=file_sha256,
+                source_shipment_id=shipment_id,
+            )
+            now = self.timestamp_factory()
+            if existing is None:
+                existing = self.runtime.save_trade_document(
+                    {
+                        "document_id": "tdoc_" + uuid4().hex,
+                        "document_type": TRADE_DOCUMENT_TYPE_INVOICE,
+                        "number": header.get("invoice_no") or "",
+                        "document_date": header.get("invoice_date") or "",
+                        "supplier_name": header.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
+                        "currency": header.get("currency") or "",
+                        "amount_total": header.get("invoice_amount_total"),
+                        "source": TRADE_DOCUMENT_SOURCE_MIGRATION_EXISTING_SUPPLIER_INVOICE,
+                        "source_shipment_id": shipment_id,
+                        "source_upload_id": "",
+                        "file_original_name": header.get("source_filename") or "supplier-invoice.xlsx",
+                        "file_content_type": SUPPLIER_INVOICE_CONTENT_TYPE,
+                        "file_sha256": file_sha256,
+                        "file_path": source_file_path,
+                        "parser_version": header.get("parser_version") or "",
+                        "parsed_metadata": {
+                            "invoice_no": header.get("invoice_no") or "",
+                            "invoice_date": header.get("invoice_date") or "",
+                            "contract_no": header.get("contract_no") or "",
+                            "contract_date": header.get("contract_date") or "",
+                            "supplier_name": header.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
+                            "currency": header.get("currency") or "",
+                            "invoice_amount_total": header.get("invoice_amount_total"),
+                            "declared_invoice_total": header.get("declared_invoice_total"),
+                        },
+                        "warnings": header.get("warnings") or [],
+                        "errors": header.get("errors") or [],
+                        "status": TRADE_DOCUMENT_STATUS_ACTIVE,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                created_count += 1
+            updated = self.runtime.set_supplier_shipment_invoice_document_id(
+                shipment_id=shipment_id,
+                invoice_document_id=str(existing.get("document_id") or ""),
+                updated_at=now,
+            )
+            if updated:
+                contract_linked = self._autolink_invoice_contract_from_metadata(
+                    invoice_document_id=str(existing.get("document_id") or ""),
+                    contract_no=str(header.get("contract_no") or ""),
+                    contract_date=str(header.get("contract_date") or ""),
+                    linked_by="system",
+                    source=TRADE_DOCUMENT_LINK_SOURCE_MIGRATION,
+                )
+                if contract_linked:
+                    linked_count += 1
+            else:
+                skipped_count += 1
+        return {
+            "contract_name": "sheet_vitrina_v1_trade_documents_backfill",
+            "status": "ok",
+            "found_shipments": len(rows),
+            "created_documents": created_count,
+            "linked_contracts": linked_count,
+            "skipped_shipments": skipped_count,
+        }
 
     def list_nomenclature(self) -> dict[str, Any]:
         self._ensure_nomenclature_ready()
@@ -633,19 +1069,192 @@ class SupplierShipmentsBlock:
             raise ValueError("runtime file path escapes runtime dir")
         return path
 
-    def _delete_runtime_invoice_file(self, relative_path: str) -> None:
-        if not str(relative_path or "").strip():
-            return
+    def _write_trade_document_file(self, *, document_type: str, document_id: str, filename: str, body: bytes) -> str:
+        safe_filename = _safe_document_filename(filename, document_type=document_type)
+        target_dir = self.runtime.runtime_dir / "trade_documents" / "files" / document_type / document_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / safe_filename
+        target_path.write_bytes(body)
+        return _relative_to_runtime(self.runtime.runtime_dir, target_path)
+
+    def _parse_invoice_document_metadata(self, workbook_bytes: bytes, *, filename: str) -> tuple[dict[str, Any], list[str], list[str], str]:
+        try:
+            parsed_payload = parse_supplier_invoice_xlsx(
+                workbook_bytes,
+                filename=filename,
+                aliases=self._active_nomenclature_aliases(),
+            )
+        except Exception as exc:
+            return {}, [], [f"supplier invoice parser skipped: {exc}"], ""
+        metadata = dict(parsed_payload.get("metadata") or {})
+        summary = dict(parsed_payload.get("summary") or {})
+        if "invoice_amount_total" not in metadata and summary.get("invoice_amount_total") is not None:
+            metadata["invoice_amount_total"] = summary.get("invoice_amount_total")
+        if "declared_invoice_total" not in metadata and summary.get("declared_invoice_total") is not None:
+            metadata["declared_invoice_total"] = summary.get("declared_invoice_total")
+        return (
+            metadata,
+            _string_list(parsed_payload.get("warnings")),
+            _string_list(parsed_payload.get("errors")),
+            str(parsed_payload.get("parser_version") or SUPPLIER_INVOICE_PARSER_VERSION),
+        )
+
+    def _create_or_load_supplier_invoice_document(
+        self,
+        *,
+        shipment_id: str,
+        upload_id: str,
+        source_filename: str,
+        content_type: str,
+        source_file_sha256: str,
+        source_file_path: str,
+        parser_version: str,
+        metadata: Mapping[str, Any],
+        warnings: list[str],
+        errors: list[str],
+        parsed_payload: Mapping[str, Any],
+        created_at: str,
+    ) -> dict[str, Any]:
+        file_sha256 = str(source_file_sha256 or "").strip() or self._sha256_for_existing_runtime_file(
+            source_file_path,
+            fallback_seed=f"{shipment_id}:{source_file_path}",
+        )
+        existing = self.runtime.find_trade_document_by_source_file(
+            document_type=TRADE_DOCUMENT_TYPE_INVOICE,
+            file_sha256=file_sha256,
+            source_shipment_id=shipment_id,
+        )
+        if existing is not None:
+            return existing
+        parsed_metadata = {
+            "invoice_no": metadata.get("invoice_no") or "",
+            "invoice_date": metadata.get("invoice_date") or "",
+            "contract_no": metadata.get("contract_no") or "",
+            "contract_date": metadata.get("contract_date") or "",
+            "supplier_name": metadata.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
+            "currency": metadata.get("currency") or "",
+            "invoice_amount_total": parsed_payload.get("summary", {}).get("invoice_amount_total")
+            if isinstance(parsed_payload.get("summary"), Mapping)
+            else None,
+            "declared_invoice_total": metadata.get("declared_invoice_total"),
+        }
+        return self.runtime.save_trade_document(
+            {
+                "document_id": "tdoc_" + uuid4().hex,
+                "document_type": TRADE_DOCUMENT_TYPE_INVOICE,
+                "number": metadata.get("invoice_no") or "",
+                "document_date": metadata.get("invoice_date") or "",
+                "supplier_name": metadata.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
+                "currency": metadata.get("currency") or "",
+                "amount_total": parsed_metadata.get("invoice_amount_total") or metadata.get("declared_invoice_total"),
+                "source": TRADE_DOCUMENT_SOURCE_SUPPLIER_SHIPMENT_PARSE,
+                "source_shipment_id": shipment_id,
+                "source_upload_id": upload_id,
+                "file_original_name": source_filename,
+                "file_content_type": content_type or SUPPLIER_INVOICE_CONTENT_TYPE,
+                "file_sha256": file_sha256,
+                "file_path": source_file_path,
+                "parser_version": parser_version or SUPPLIER_INVOICE_PARSER_VERSION,
+                "parsed_metadata": parsed_metadata,
+                "warnings": warnings,
+                "errors": errors,
+                "status": TRADE_DOCUMENT_STATUS_ACTIVE,
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+        )
+
+    def _autolink_invoice_contract_from_metadata(
+        self,
+        *,
+        invoice_document_id: str,
+        contract_no: str,
+        contract_date: str,
+        linked_by: str,
+        source: str,
+    ) -> bool:
+        if not invoice_document_id:
+            return False
+        if self.runtime.load_invoice_contract_link(invoice_document_id) is not None:
+            return False
+        candidates = self.find_contract_candidates(contract_no, contract_date)
+        if len(candidates) != 1:
+            return False
+        self.link_invoice_to_contract(
+            invoice_document_id,
+            contract_document_id=str(candidates[0].get("document_id") or ""),
+            linked_by=linked_by,
+            source=source,
+        )
+        return True
+
+    def _ensure_shipment_invoice_document(self, shipment_id: str) -> dict[str, Any]:
+        detail = self.runtime.load_supplier_shipment(shipment_id)
+        if detail is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        header = dict(detail.get("header") or {})
+        if str(header.get("invoice_document_id") or "").strip():
+            return self._with_document_fields(_detail_payload(detail))
+        source_file_path = str(header.get("source_file_path") or "").strip()
+        if not source_file_path:
+            raise ValueError(f"supplier shipment invoice file is missing: {shipment_id}")
+        self.migrate_existing_supplier_shipments_into_trade_documents()
+        refreshed = self.runtime.load_supplier_shipment(shipment_id)
+        if refreshed is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        return self._with_document_fields(_detail_payload(refreshed))
+
+    def _with_document_fields(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        enriched = dict(payload)
+        shipment_id = str(enriched.get("shipment_id") or "")
+        invoice_document_id = str(enriched.get("invoice_document_id") or "")
+        invoice_document = self.runtime.load_trade_document(invoice_document_id) if invoice_document_id else None
+        if invoice_document is not None and str(invoice_document.get("status") or "") == TRADE_DOCUMENT_STATUS_ACTIVE:
+            enriched["invoice_document_id"] = str(invoice_document.get("document_id") or "")
+            enriched["invoice_download_path"] = _invoice_download_path(shipment_id)
+        else:
+            enriched["invoice_document_id"] = invoice_document_id
+            enriched["invoice_download_path"] = _invoice_download_path(shipment_id)
+
+        link = self.runtime.load_invoice_contract_link(invoice_document_id) if invoice_document_id else None
+        contract_document = None
+        if link is not None:
+            contract_document = self.runtime.load_trade_document(str(link.get("contract_document_id") or ""))
+        if contract_document is not None and str(contract_document.get("status") or "") == TRADE_DOCUMENT_STATUS_ACTIVE:
+            contract_document_id = str(contract_document.get("document_id") or "")
+            enriched["contract_document_id"] = contract_document_id
+            enriched["contract_no"] = contract_document.get("number") or enriched.get("contract_no") or ""
+            enriched["contract_date"] = contract_document.get("document_date") or enriched.get("contract_date") or ""
+            enriched["contract_download_path"] = _contract_download_path(shipment_id)
+            enriched["contract_link_status"] = "linked"
+            enriched["contract_candidates"] = []
+        else:
+            contract_no = str(enriched.get("contract_no") or "")
+            contract_date = str(enriched.get("contract_date") or "")
+            candidates = self.find_contract_candidates(contract_no, contract_date)
+            enriched["contract_document_id"] = ""
+            enriched["contract_download_path"] = ""
+            enriched["contract_link_status"] = (
+                "missing" if not candidates else "single_candidate" if len(candidates) == 1 else "multiple_candidates"
+            )
+            enriched["contract_candidates"] = candidates
+        return enriched
+
+    def _with_document_download_path(self, document: Mapping[str, Any] | None) -> dict[str, Any]:
+        if document is None:
+            return {}
+        payload = dict(document)
+        payload["download_path"] = _trade_document_download_path(str(payload.get("document_id") or ""))
+        return payload
+
+    def _sha256_for_existing_runtime_file(self, relative_path: str, *, fallback_seed: str) -> str:
         try:
             file_path = self._resolve_runtime_file(relative_path)
         except ValueError:
-            return
-        root = self.runtime.runtime_dir.resolve()
-        if file_path.exists() and file_path.is_file():
-            file_path.unlink()
-        parent = file_path.parent
-        if root != parent and root in parent.parents and parent.name.startswith("sup_"):
-            shutil.rmtree(parent, ignore_errors=True)
+            file_path = None
+        if file_path is not None and file_path.exists() and file_path.is_file():
+            return hashlib.sha256(file_path.read_bytes()).hexdigest()
+        return hashlib.sha256(str(fallback_seed or relative_path or "missing").encode("utf-8")).hexdigest()
 
     def _active_nomenclature_aliases(self) -> list[dict[str, Any]]:
         self._ensure_nomenclature_ready()
@@ -1783,6 +2392,40 @@ def _invoice_download_path(shipment_id: str) -> str:
     if not shipment_id:
         return ""
     return f"/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice"
+
+
+def _contract_download_path(shipment_id: str) -> str:
+    if not shipment_id:
+        return ""
+    return f"/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
+
+
+def _trade_document_download_path(document_id: str) -> str:
+    if not document_id:
+        return ""
+    return f"/v1/sheet-vitrina-v1/settings/documents/{document_id}/file"
+
+
+def _normalize_trade_document_type(value: Any) -> str:
+    document_type = str(value or "").strip().lower()
+    if document_type not in TRADE_DOCUMENT_TYPES:
+        raise ValueError("document_type must be contract or invoice")
+    return document_type
+
+
+def _document_content_type(filename: str, uploaded_content_type: str | None = None) -> str:
+    extension = Path(str(filename or "")).suffix.lower()
+    fallback = TRADE_DOCUMENT_CONTENT_TYPES_BY_EXTENSION.get(extension, "application/octet-stream")
+    content_type = str(uploaded_content_type or "").strip().split(";", 1)[0].strip().lower()
+    return content_type or fallback
+
+
+def _safe_document_filename(value: str, *, document_type: str) -> str:
+    fallback = f"{document_type or 'document'}.xlsx"
+    name = _safe_filename(value or fallback)
+    if not Path(name).suffix:
+        name = f"{name}.xlsx"
+    return name
 
 
 def _safe_filename(value: str) -> str:

@@ -45,7 +45,7 @@ from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1ManualOperatorState,
     SheetVitrinaV1RefreshResult,
 )
-from packages.contracts.supplier_shipments import ORDER_STATUS_DEFAULT
+from packages.contracts.supplier_shipments import ORDER_STATUS_DEFAULT, TRADE_DOCUMENT_STATUS_ACTIVE
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
@@ -2219,11 +2219,12 @@ class RegistryUploadDbBackedRuntime:
                     source_filename,
                     source_file_sha256,
                     source_file_path,
+                    invoice_document_id,
                     parser_version,
                     warnings_json,
                     errors_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     shipment_date = excluded.shipment_date,
@@ -2244,6 +2245,7 @@ class RegistryUploadDbBackedRuntime:
                     source_filename = excluded.source_filename,
                     source_file_sha256 = excluded.source_file_sha256,
                     source_file_path = excluded.source_file_path,
+                    invoice_document_id = COALESCE(NULLIF(excluded.invoice_document_id, ''), invoice_document_id),
                     parser_version = excluded.parser_version,
                     warnings_json = excluded.warnings_json,
                     errors_json = excluded.errors_json
@@ -2270,6 +2272,7 @@ class RegistryUploadDbBackedRuntime:
                     header.get("source_filename") or "",
                     header.get("source_file_sha256") or "",
                     header.get("source_file_path") or "",
+                    header.get("invoice_document_id") or "",
                     header.get("parser_version") or "",
                     json.dumps(list(header.get("warnings") or []), ensure_ascii=False),
                     json.dumps(list(header.get("errors") or []), ensure_ascii=False),
@@ -2365,6 +2368,8 @@ class RegistryUploadDbBackedRuntime:
                        order_status,
                        invoice_no,
                        invoice_date,
+                       contract_no,
+                       contract_date,
                        supplier_name,
                        currency,
                        product_qty_total,
@@ -2373,7 +2378,9 @@ class RegistryUploadDbBackedRuntime:
                        invoice_amount_total,
                        match_status,
                        source_filename,
-                       source_file_sha256
+                       source_file_sha256,
+                       source_file_path,
+                       invoice_document_id
                 FROM sheet_vitrina_v1_supplier_shipments
                 ORDER BY shipment_date DESC, created_at DESC
                 """
@@ -2444,6 +2451,387 @@ class RegistryUploadDbBackedRuntime:
                 WHERE shipment_id = ?
                 """,
                 (shipment_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def save_trade_document(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        document_id = str(document.get("document_id") or "").strip()
+        if not document_id:
+            raise ValueError("trade document_id is required")
+        created_at = str(document.get("created_at") or "").strip()
+        updated_at = str(document.get("updated_at") or "").strip()
+        _validate_timestamp(created_at, field_name="created_at")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        parsed_metadata = document.get("parsed_metadata")
+        warnings = document.get("warnings")
+        errors = document.get("errors")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_trade_documents(
+                    document_id,
+                    document_type,
+                    number,
+                    document_date,
+                    supplier_name,
+                    currency,
+                    amount_total,
+                    source,
+                    source_shipment_id,
+                    source_upload_id,
+                    file_original_name,
+                    file_content_type,
+                    file_sha256,
+                    file_path,
+                    parser_version,
+                    parsed_metadata_json,
+                    warnings_json,
+                    errors_json,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    document_type = excluded.document_type,
+                    number = excluded.number,
+                    document_date = excluded.document_date,
+                    supplier_name = excluded.supplier_name,
+                    currency = excluded.currency,
+                    amount_total = excluded.amount_total,
+                    source = excluded.source,
+                    source_shipment_id = excluded.source_shipment_id,
+                    source_upload_id = excluded.source_upload_id,
+                    file_original_name = excluded.file_original_name,
+                    file_content_type = excluded.file_content_type,
+                    file_sha256 = excluded.file_sha256,
+                    file_path = excluded.file_path,
+                    parser_version = excluded.parser_version,
+                    parsed_metadata_json = excluded.parsed_metadata_json,
+                    warnings_json = excluded.warnings_json,
+                    errors_json = excluded.errors_json,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    document_id,
+                    str(document.get("document_type") or ""),
+                    str(document.get("number") or ""),
+                    str(document.get("document_date") or ""),
+                    str(document.get("supplier_name") or ""),
+                    str(document.get("currency") or ""),
+                    document.get("amount_total"),
+                    str(document.get("source") or ""),
+                    str(document.get("source_shipment_id") or ""),
+                    str(document.get("source_upload_id") or ""),
+                    str(document.get("file_original_name") or ""),
+                    str(document.get("file_content_type") or ""),
+                    str(document.get("file_sha256") or ""),
+                    str(document.get("file_path") or ""),
+                    str(document.get("parser_version") or ""),
+                    json.dumps(dict(parsed_metadata) if isinstance(parsed_metadata, Mapping) else {}, ensure_ascii=False),
+                    json.dumps(list(warnings) if isinstance(warnings, list) else [], ensure_ascii=False),
+                    json.dumps(list(errors) if isinstance(errors, list) else [], ensure_ascii=False),
+                    str(document.get("status") or TRADE_DOCUMENT_STATUS_ACTIVE),
+                    created_at,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        loaded = self.load_trade_document(document_id)
+        if loaded is None:
+            raise ValueError(f"trade document was not saved: {document_id}")
+        return loaded
+
+    def list_trade_documents(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        where_clause = "" if include_archived else "WHERE d.status = 'active'"
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT d.*,
+                       link.contract_document_id AS linked_contract_document_id,
+                       contract.number AS linked_contract_number,
+                       contract.document_date AS linked_contract_date,
+                       COALESCE(invoice_counts.invoice_count, 0) AS linked_invoice_count
+                FROM sheet_vitrina_v1_trade_documents d
+                LEFT JOIN sheet_vitrina_v1_invoice_contract_links link
+                  ON link.invoice_document_id = d.document_id
+                LEFT JOIN sheet_vitrina_v1_trade_documents contract
+                  ON contract.document_id = link.contract_document_id
+                LEFT JOIN (
+                    SELECT contract_document_id, COUNT(*) AS invoice_count
+                    FROM sheet_vitrina_v1_invoice_contract_links
+                    GROUP BY contract_document_id
+                ) invoice_counts
+                  ON invoice_counts.contract_document_id = d.document_id
+                {where_clause}
+                ORDER BY d.updated_at DESC, d.created_at DESC, d.document_id ASC
+                """
+            ).fetchall()
+            return [_trade_document_to_dict(row) for row in rows]
+
+    def load_trade_document(self, document_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT d.*,
+                       link.contract_document_id AS linked_contract_document_id,
+                       contract.number AS linked_contract_number,
+                       contract.document_date AS linked_contract_date,
+                       COALESCE(invoice_counts.invoice_count, 0) AS linked_invoice_count
+                FROM sheet_vitrina_v1_trade_documents d
+                LEFT JOIN sheet_vitrina_v1_invoice_contract_links link
+                  ON link.invoice_document_id = d.document_id
+                LEFT JOIN sheet_vitrina_v1_trade_documents contract
+                  ON contract.document_id = link.contract_document_id
+                LEFT JOIN (
+                    SELECT contract_document_id, COUNT(*) AS invoice_count
+                    FROM sheet_vitrina_v1_invoice_contract_links
+                    GROUP BY contract_document_id
+                ) invoice_counts
+                  ON invoice_counts.contract_document_id = d.document_id
+                WHERE d.document_id = ?
+                """,
+                (str(document_id or "").strip(),),
+            ).fetchone()
+            return _trade_document_to_dict(row) if row is not None else None
+
+    def find_settings_trade_document_duplicate(self, *, document_type: str, file_sha256: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT document_id
+                FROM sheet_vitrina_v1_trade_documents
+                WHERE document_type = ?
+                  AND file_sha256 = ?
+                  AND source = 'settings_upload'
+                  AND status = 'active'
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (str(document_type or "").strip(), str(file_sha256 or "").strip()),
+            ).fetchone()
+            if row is None:
+                return None
+            return self.load_trade_document(str(row["document_id"]))
+
+    def find_trade_document_by_source_file(
+        self,
+        *,
+        document_type: str,
+        file_sha256: str,
+        source_shipment_id: str,
+    ) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT document_id
+                FROM sheet_vitrina_v1_trade_documents
+                WHERE document_type = ?
+                  AND file_sha256 = ?
+                  AND source_shipment_id = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (
+                    str(document_type or "").strip(),
+                    str(file_sha256 or "").strip(),
+                    str(source_shipment_id or "").strip(),
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            return self.load_trade_document(str(row["document_id"]))
+
+    def update_trade_document(self, document_id: str, updates: Mapping[str, Any], *, updated_at: str) -> dict[str, Any]:
+        existing = self.load_trade_document(document_id)
+        if existing is None:
+            raise ValueError(f"trade document not found: {document_id}")
+        _validate_timestamp(str(updated_at or ""), field_name="updated_at")
+        payload = {**existing, **dict(updates), "document_id": str(document_id), "created_at": existing["created_at"], "updated_at": updated_at}
+        return self.save_trade_document(payload)
+
+    def archive_trade_document(self, document_id: str, *, updated_at: str) -> dict[str, Any]:
+        _validate_timestamp(str(updated_at or ""), field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_trade_documents
+                SET status = 'archived',
+                    updated_at = ?
+                WHERE document_id = ?
+                """,
+                (updated_at, str(document_id or "").strip()),
+            )
+            conn.commit()
+            if cursor.rowcount <= 0:
+                raise ValueError(f"trade document not found: {document_id}")
+        loaded = self.load_trade_document(document_id)
+        if loaded is None:
+            raise ValueError(f"trade document not found: {document_id}")
+        return loaded
+
+    def save_invoice_contract_link(
+        self,
+        *,
+        invoice_document_id: str,
+        contract_document_id: str,
+        created_at: str,
+        updated_at: str,
+        linked_by: str,
+        source: str,
+    ) -> dict[str, Any]:
+        _validate_timestamp(str(created_at or ""), field_name="created_at")
+        _validate_timestamp(str(updated_at or ""), field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_invoice_contract_links(
+                    invoice_document_id,
+                    contract_document_id,
+                    created_at,
+                    updated_at,
+                    linked_by,
+                    source
+                )
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(invoice_document_id) DO UPDATE SET
+                    contract_document_id = excluded.contract_document_id,
+                    updated_at = excluded.updated_at,
+                    linked_by = excluded.linked_by,
+                    source = excluded.source
+                """,
+                (
+                    str(invoice_document_id or "").strip(),
+                    str(contract_document_id or "").strip(),
+                    created_at,
+                    updated_at,
+                    str(linked_by or ""),
+                    str(source or ""),
+                ),
+            )
+            conn.commit()
+        link = self.load_invoice_contract_link(invoice_document_id)
+        if link is None:
+            raise ValueError(f"invoice contract link was not saved: {invoice_document_id}")
+        return link
+
+    def load_invoice_contract_link(self, invoice_document_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_invoice_contract_links
+                WHERE invoice_document_id = ?
+                """,
+                (str(invoice_document_id or "").strip(),),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "invoice_document_id": row["invoice_document_id"],
+                "contract_document_id": row["contract_document_id"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "linked_by": row["linked_by"] or "",
+                "source": row["source"] or "",
+            }
+
+    def delete_invoice_contract_link(self, invoice_document_id: str) -> bool:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_invoice_contract_links
+                WHERE invoice_document_id = ?
+                """,
+                (str(invoice_document_id or "").strip(),),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def count_contract_document_links(self, contract_document_id: str) -> int:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS link_count
+                FROM sheet_vitrina_v1_invoice_contract_links
+                WHERE contract_document_id = ?
+                """,
+                (str(contract_document_id or "").strip(),),
+            ).fetchone()
+            return int(row["link_count"] if row is not None else 0)
+
+    def find_contract_document_candidates(self, *, number: str, document_date: str = "") -> list[dict[str, Any]]:
+        normalized_number = str(number or "").strip()
+        normalized_date = str(document_date or "").strip()
+        if not normalized_number and not normalized_date:
+            return []
+        clauses = ["document_type = 'contract'", "status = 'active'"]
+        params: list[Any] = []
+        if normalized_number:
+            clauses.append("number = ?")
+            params.append(normalized_number)
+        if normalized_date:
+            clauses.append("document_date = ?")
+            params.append(normalized_date)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM sheet_vitrina_v1_trade_documents
+                WHERE {" AND ".join(clauses)}
+                ORDER BY updated_at DESC, created_at DESC, document_id ASC
+                """,
+                tuple(params),
+            ).fetchall()
+            return [_trade_document_to_dict(row) for row in rows]
+
+    def set_supplier_shipment_invoice_document_id(
+        self,
+        *,
+        shipment_id: str,
+        invoice_document_id: str,
+        updated_at: str,
+    ) -> bool:
+        _validate_timestamp(str(updated_at or ""), field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_supplier_shipments
+                SET invoice_document_id = ?,
+                    updated_at = ?
+                WHERE shipment_id = ?
+                """,
+                (
+                    str(invoice_document_id or "").strip(),
+                    updated_at,
+                    str(shipment_id or "").strip(),
+                ),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -3822,6 +4210,8 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
+        "contract_no": row["contract_no"] or "",
+        "contract_date": row["contract_date"] or "",
         "supplier_name": row["supplier_name"] or "",
         "currency": row["currency"] or "",
         "product_qty_total": row["product_qty_total"],
@@ -3831,6 +4221,8 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "match_status": row["match_status"],
         "source_filename": row["source_filename"] or "",
         "source_file_sha256": row["source_file_sha256"] or "",
+        "source_file_path": row["source_file_path"] or "",
+        "invoice_document_id": row["invoice_document_id"] or "",
     }
 
 
@@ -3857,6 +4249,7 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source_filename": row["source_filename"] or "",
         "source_file_sha256": row["source_file_sha256"] or "",
         "source_file_path": row["source_file_path"] or "",
+        "invoice_document_id": row["invoice_document_id"] or "",
         "parser_version": row["parser_version"] or "",
         "warnings": _loads_json_list(row["warnings_json"]),
         "errors": _loads_json_list(row["errors_json"]),
@@ -4064,6 +4457,37 @@ def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "comment": row["comment"] or "",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+
+
+def _trade_document_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    keys = set(row.keys())
+    return {
+        "document_id": row["document_id"],
+        "document_type": row["document_type"] or "",
+        "number": row["number"] or "",
+        "document_date": row["document_date"] or "",
+        "supplier_name": row["supplier_name"] or "",
+        "currency": row["currency"] or "",
+        "amount_total": row["amount_total"],
+        "source": row["source"] or "",
+        "source_shipment_id": row["source_shipment_id"] or "",
+        "source_upload_id": row["source_upload_id"] or "",
+        "file_original_name": row["file_original_name"] or "",
+        "file_content_type": row["file_content_type"] or "",
+        "file_sha256": row["file_sha256"] or "",
+        "file_path": row["file_path"] or "",
+        "parser_version": row["parser_version"] or "",
+        "parsed_metadata": _loads_json_object(row["parsed_metadata_json"]),
+        "warnings": _loads_json_list(row["warnings_json"]),
+        "errors": _loads_json_list(row["errors_json"]),
+        "status": row["status"] or "",
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
+        "linked_contract_document_id": row["linked_contract_document_id"] if "linked_contract_document_id" in keys else "",
+        "linked_contract_number": row["linked_contract_number"] if "linked_contract_number" in keys else "",
+        "linked_contract_date": row["linked_contract_date"] if "linked_contract_date" in keys else "",
+        "linked_invoice_count": int(row["linked_invoice_count"] if "linked_invoice_count" in keys else 0),
     }
 
 
@@ -4513,6 +4937,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             source_filename TEXT,
             source_file_sha256 TEXT,
             source_file_path TEXT,
+            invoice_document_id TEXT,
             parser_version TEXT,
             warnings_json TEXT NOT NULL,
             errors_json TEXT NOT NULL
@@ -4520,6 +4945,51 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_shipments_by_date
         ON sheet_vitrina_v1_supplier_shipments(shipment_date DESC, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_trade_documents (
+            document_id TEXT PRIMARY KEY,
+            document_type TEXT NOT NULL,
+            number TEXT,
+            document_date TEXT,
+            supplier_name TEXT,
+            currency TEXT,
+            amount_total REAL,
+            source TEXT NOT NULL,
+            source_shipment_id TEXT,
+            source_upload_id TEXT,
+            file_original_name TEXT NOT NULL,
+            file_content_type TEXT NOT NULL,
+            file_sha256 TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            parser_version TEXT,
+            parsed_metadata_json TEXT NOT NULL DEFAULT '{}',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            errors_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_trade_documents_by_type_status
+        ON sheet_vitrina_v1_trade_documents(document_type, status, updated_at DESC);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_trade_documents_by_contract_match
+        ON sheet_vitrina_v1_trade_documents(document_type, status, number, document_date);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_trade_documents_by_source_file
+        ON sheet_vitrina_v1_trade_documents(document_type, file_sha256, source_shipment_id);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_invoice_contract_links (
+            invoice_document_id TEXT PRIMARY KEY,
+            contract_document_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            linked_by TEXT,
+            source TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_invoice_contract_links_by_contract
+        ON sheet_vitrina_v1_invoice_contract_links(contract_document_id);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_lines (
             line_id TEXT PRIMARY KEY,
@@ -4654,6 +5124,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipments",
         column_name="order_status",
         column_sql="TEXT NOT NULL DEFAULT 'production'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="invoice_document_id",
+        column_sql="TEXT",
     )
     _ensure_column(
         conn,

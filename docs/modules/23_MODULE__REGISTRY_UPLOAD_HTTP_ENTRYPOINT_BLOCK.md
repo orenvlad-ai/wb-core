@@ -114,11 +114,20 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/rematch"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/price-check"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
+  - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
   - "GET /sheet-vitrina-v1/settings"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
   - "PATCH /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}"
   - "DELETE /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}"
+  - "GET /v1/sheet-vitrina-v1/settings/documents"
+  - "POST /v1/sheet-vitrina-v1/settings/documents"
+  - "PATCH /v1/sheet-vitrina-v1/settings/documents/{document_id}"
+  - "DELETE /v1/sheet-vitrina-v1/settings/documents/{document_id}"
+  - "GET /v1/sheet-vitrina-v1/settings/documents/{document_id}/file"
+  - "PATCH /v1/sheet-vitrina-v1/settings/documents/{invoice_document_id}/contract"
   - "GET /sheet-vitrina-v1/supplier"
 related_runners:
   - "apps/seller_portal_relogin_session.py"
@@ -143,6 +152,7 @@ related_runners:
   - "apps/wb_regional_demand_diagnostics.py"
   - "apps/supplier_invoice_parser_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
+  - "apps/sheet_vitrina_v1_trade_documents_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
@@ -174,7 +184,7 @@ related_docs:
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под simple role-aware WebCore auth, supplier `Реестр заказов`, settings/nomenclature API/UI, strict feedbacks загрузку и operator UI: `Поставки -> От поставщика` добавляет protected supplier invoice parse/create/list/detail/patch/delete/rematch/manual-price-check/download routes and optional supplier-only login role; `Настройки` добавляет operator-only `Справочник номенклатуры`; `Отзывы` получает chunked WB feedbacks read route with final server-side date/star/answered filtering, official WB review tags/chips (`review_tags` from fields such as `bables`) and diagnostic meta, XLSX export route for the current table including tags, server-side AI prompt+model discovery config, protected `feedbacks/ai-prompt` + `feedbacks/ai-analyze` routes that pass tags into AI input, operational complaint journal read route, async read-only complaints status sync job route and protected async `submit-selected` job route. AI labels stay transient UI/session output; real complaint submit is guarded-runner-only through the existing Seller Portal runner/resolver path, with CLI explicit flag in CLI mode and auth-protected selected-row job in operator UI. The guarded runner verifies the WB `Опишите ситуацию` field value after blur before final submit, records sanitized request-payload description evidence when available, classifies disabled/already-complained actions as controlled skips, exposes per-row attempts for operator UI overlay, and blocks future submit when AI reason says text is absent while API/UI review tags exist. Uncertain submit attempts are confirmed only by read-only CLI confirmation/detail-network probes with direct-id/strict-strong-composite proof."
+update_note: "Обновлён под simple role-aware WebCore auth, supplier `Реестр заказов`, settings/nomenclature API/UI and settings trade document registry. `Поставки -> От поставщика` exposes protected supplier invoice parse/create/list/detail/patch/delete/rematch/manual-price-check/invoice-download routes plus shipment-linked contract link/upload/download routes; optional supplier-only login role can read/create/edit shipment data and download shipment-linked documents, but cannot mutate order status, rematch, price-check, delete, access settings document CRUD or fetch arbitrary document ids. `Настройки` includes operator-only `Справочник номенклатуры` and `Справочник договоров и инвойсов` with multipart upload, metadata patch, archive, file download and invoice->contract link routes. Settings invoice upload never creates supplier shipments."
 ---
 
 # 1. Идентификатор и статус
@@ -242,7 +252,8 @@ update_note: "Обновлён под simple role-aware WebCore auth, supplier `
   - `409` для duplicate `dataset_version`
   - `422` для contract-level rejection после parse/validation
 - Public/operator WebCore surface is guarded by simple app-level session auth when runtime env provides `WB_CORE_WEB_AUTH_USERNAME`, `WB_CORE_WEB_AUTH_PASSWORD_HASH` and `WB_CORE_WEB_AUTH_SESSION_SECRET` (or `WB_CORE_WEB_AUTH_REQUIRED=1`). `GET /login` renders the login form, `POST /login` verifies the PBKDF2-HMAC password hash and sets an httpOnly SameSite=Lax session cookie, and `GET/POST /logout` clears it. HTML routes redirect unauthenticated users to login; JSON/API routes return 401 JSON. Health/infrastructure probes may stay public when explicitly required, but operator/product routes under `/sheet-vitrina-v1` and `/v1/...` are protected in production.
-- Optional supplier credentials use the same session-secret/hash style through `WB_CORE_SUPPLIER_AUTH_USERNAME`, `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH` and `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`. Supplier role can access only `/sheet-vitrina-v1/supplier`, supplier shipment parse/list/create/detail/patch APIs, invoice downloads, login/logout and needed static/browser assets; supplier cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature APIs, supplier delete/rematch/manual price-check or unrelated operator APIs. Operator role remains full-access and can use the supplier module inside `Поставки`; the manual price recheck UI is exposed only in that operator embedded frame, not on standalone `/sheet-vitrina-v1/supplier`.
+- Optional supplier credentials use the same session-secret/hash style through `WB_CORE_SUPPLIER_AUTH_USERNAME`, `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH` and `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME`. Supplier role can access only `/sheet-vitrina-v1/supplier`, supplier shipment parse/list/create/detail/patch APIs, invoice downloads, shipment-linked contract downloads, login/logout and needed static/browser assets; supplier cannot access `/sheet-vitrina-v1/vitrina`, `/sheet-vitrina-v1/operator`, `/sheet-vitrina-v1/settings`, nomenclature APIs, settings document CRUD/file routes, supplier delete/rematch/manual price-check/order-status/contract-link mutations or unrelated operator APIs. Operator role remains full-access and can use the supplier module inside `Поставки`; manual price recheck and contract link/upload UI are exposed only in that operator embedded frame, not on standalone `/sheet-vitrina-v1/supplier`.
+- Settings document routes are operator-only: `GET/POST/PATCH/DELETE /v1/sheet-vitrina-v1/settings/documents...` and generic `.../{document_id}/file` never authorize supplier role by document id alone. Supplier/factory document file access is scoped through `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/invoice|contract`, where the document must be linked to an accessible shipment.
 - Для `sheet_vitrina_v1` тот же entrypoint обслуживает narrow operator surface в двух блоках:
   - `POST /v1/sheet-vitrina-v1/refresh` = existing heavy server-side action
   - `POST /v1/sheet-vitrina-v1/load` = thin operator action, который пишет уже готовый snapshot в live sheet через existing bound Apps Script bridge, но operator-facing result отдельно distinguishes technical bridge completion from confirmed sheet update

@@ -1751,6 +1751,96 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_shipments_invoice_request(self, shipment_id: str) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.download_invoice(shipment_id)
 
+    def handle_supplier_shipments_contract_request(self, shipment_id: str) -> tuple[bytes, str, str]:
+        return self.supplier_shipments_block.download_shipment_contract(shipment_id)
+
+    def handle_supplier_shipments_contract_patch_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        contract_document_id = str(payload.get("contract_document_id") or "").strip()
+        if contract_document_id:
+            return self.supplier_shipments_block.link_shipment_contract(
+                shipment_id,
+                contract_document_id=contract_document_id,
+                linked_by=actor,
+            )
+        return self.supplier_shipments_block.unlink_shipment_contract(shipment_id)
+
+    def handle_supplier_shipments_contract_upload_request(
+        self,
+        shipment_id: str,
+        file_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        fields: Mapping[str, Any] | None = None,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        del actor
+        fields = fields or {}
+        return self.supplier_shipments_block.upload_shipment_contract(
+            shipment_id,
+            file_bytes=file_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+            number=str(fields.get("number") or ""),
+            document_date=str(fields.get("document_date") or ""),
+            supplier_name=str(fields.get("supplier_name") or ""),
+        )
+
+    def handle_trade_documents_list_request(self) -> dict[str, Any]:
+        return self.supplier_shipments_block.list_trade_documents()
+
+    def handle_trade_documents_create_request(
+        self,
+        file_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+        fields: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        fields = fields or {}
+        return self.supplier_shipments_block.create_trade_document_from_upload(
+            document_type=str(fields.get("document_type") or ""),
+            file_bytes=file_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+            number=str(fields.get("number") or ""),
+            document_date=str(fields.get("document_date") or ""),
+            supplier_name=str(fields.get("supplier_name") or ""),
+            currency=str(fields.get("currency") or ""),
+            amount_total=fields.get("amount_total"),
+        )
+
+    def handle_trade_documents_patch_request(self, document_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.update_trade_document(document_id, payload)
+
+    def handle_trade_documents_archive_request(self, document_id: str) -> dict[str, Any]:
+        return self.supplier_shipments_block.archive_trade_document(document_id)
+
+    def handle_trade_documents_file_request(self, document_id: str) -> tuple[bytes, str, str]:
+        return self.supplier_shipments_block.download_trade_document_file(document_id)
+
+    def handle_trade_documents_contract_patch_request(
+        self,
+        invoice_document_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        contract_document_id = str(payload.get("contract_document_id") or "").strip()
+        if contract_document_id:
+            return self.supplier_shipments_block.link_invoice_to_contract(
+                invoice_document_id,
+                contract_document_id=contract_document_id,
+                linked_by=actor,
+            )
+        return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+
     def handle_wb_supplies_list_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.list_supplies(params)
 

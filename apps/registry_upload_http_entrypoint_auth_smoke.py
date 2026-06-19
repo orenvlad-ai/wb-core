@@ -34,6 +34,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
+    DEFAULT_TRADE_DOCUMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -95,6 +96,9 @@ def main() -> None:
                 nomenclature_code, nomenclature_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
                 if nomenclature_code != 401 or nomenclature_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated nomenclature API must return 401 JSON: {nomenclature_code} {nomenclature_payload}")
+                documents_code, documents_payload = _get_json(f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}")
+                if documents_code != 401 or documents_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated trade documents API must return 401 JSON: {documents_code} {documents_payload}")
                 user_config_code, user_config_payload = _get_json(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}")
                 if user_config_code != 401 or user_config_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated user-config API must return 401 JSON: {user_config_code} {user_config_payload}")
@@ -136,8 +140,12 @@ def main() -> None:
                 )
                 with opener.open(settings_request, timeout=5) as response:
                     body = response.read().decode("utf-8")
-                    if response.status != 200 or "Справочник номенклатуры" not in body:
-                        raise AssertionError("authenticated operator settings page must render nomenclature section")
+                    if (
+                        response.status != 200
+                        or "Справочник номенклатуры" not in body
+                        or "Справочник договоров и инвойсов" not in body
+                    ):
+                        raise AssertionError("authenticated operator settings page must render nomenclature and trade documents sections")
                 user_config_get = urllib_request.Request(
                     f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}",
                     headers={"Accept": "application/json"},
