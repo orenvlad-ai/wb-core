@@ -143,9 +143,10 @@ def main() -> None:
                     if (
                         response.status != 200
                         or "Справочник номенклатуры" not in body
-                        or "Справочник договоров и инвойсов" not in body
                         or ">Номенклатура<" not in body
-                        or ">Договоры и инвойсы<" not in body
+                        or ">Договоры<" not in body
+                        or ">Инвойсы<" not in body
+                        or ">Договоры и инвойсы<" in body
                     ):
                         raise AssertionError("authenticated operator settings page must render settings tabs and registry sections")
                 user_config_get = urllib_request.Request(

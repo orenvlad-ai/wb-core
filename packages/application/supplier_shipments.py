@@ -27,6 +27,7 @@ from packages.application.supplier_invoice_parser import (
     parse_supplier_invoice_xlsx,
 )
 from packages.contracts.supplier_shipments import (
+    DEFAULT_SUPPLIER_NAME,
     LINE_TYPE_EXTRA,
     LINE_TYPE_PRODUCT,
     MATCH_STATUS_AMBIGUOUS,
@@ -70,7 +71,6 @@ from packages.contracts.supplier_shipments import (
 )
 
 
-DEFAULT_SUPPLIER_NAME = "HanShang Technology"
 NOMENCLATURE_XLSX_FILENAME = "nomenclature.xlsx"
 NOMENCLATURE_XLSX_CONTENT_TYPE = SUPPLIER_INVOICE_CONTENT_TYPE
 NOMENCLATURE_XLSX_HEADERS = [
@@ -545,6 +545,15 @@ class SupplierShipmentsBlock:
             file_sha256=sha256,
         )
         if duplicate is not None:
+            duplicate = self._backfill_trade_document_record(
+                duplicate,
+                file_bytes=file_bytes,
+                filename=filename,
+                manual_number=number,
+                manual_document_date=document_date,
+                manual_supplier_name=supplier_name,
+            )
+            duplicate.pop("_backfill_stats", None)
             payload = self._with_document_download_path(duplicate)
             payload["deduplicated"] = True
             return {
@@ -586,7 +595,7 @@ class SupplierShipmentsBlock:
         else:
             metadata_number = manual_number or str(parsed_metadata.get("invoice_no") or "").strip()
             metadata_date = manual_date or _optional_iso_date(parsed_metadata.get("invoice_date"))
-        metadata_supplier = str(supplier_name or "").strip() or str(parsed_metadata.get("supplier_name") or "").strip()
+        metadata_supplier = _document_supplier_name(supplier_name, parsed_metadata.get("supplier_name"))
         metadata_currency = str(currency or "").strip().upper() or str(parsed_metadata.get("currency") or "").strip().upper()
         metadata_amount = _optional_number(amount_total)
         if metadata_amount is None:
@@ -639,7 +648,7 @@ class SupplierShipmentsBlock:
         if "document_date" in payload:
             updates["document_date"] = _optional_iso_date(payload.get("document_date"))
         if "supplier_name" in payload:
-            updates["supplier_name"] = str(payload.get("supplier_name") or "").strip()
+            updates["supplier_name"] = _document_supplier_name(payload.get("supplier_name"))
         if "currency" in payload:
             updates["currency"] = str(payload.get("currency") or "").strip().upper()
         if "amount_total" in payload:
@@ -793,6 +802,53 @@ class SupplierShipmentsBlock:
         linked["document_upload"] = created
         return linked
 
+    def backfill_trade_document_metadata(self, *, include_archived: bool = False) -> dict[str, Any]:
+        rows = self.runtime.list_trade_documents(include_archived=include_archived)
+        updated_count = 0
+        supplier_backfilled_count = 0
+        contract_parse_attempt_count = 0
+        contract_metadata_backfilled_count = 0
+        parser_warning_count = 0
+        missing_file_count = 0
+        unchanged_count = 0
+        for document in rows:
+            before = dict(document)
+            backfilled = self._backfill_trade_document_record(before)
+            stats = dict(backfilled.pop("_backfill_stats", {}) or {})
+            if backfilled != before:
+                updated_count += 1
+                if not str(before.get("supplier_name") or "").strip() and str(backfilled.get("supplier_name") or "").strip():
+                    supplier_backfilled_count += 1
+                if (
+                    str(before.get("document_type") or "") == TRADE_DOCUMENT_TYPE_CONTRACT
+                    and (
+                        (not str(before.get("number") or "").strip() and str(backfilled.get("number") or "").strip())
+                        or (not str(before.get("document_date") or "").strip() and str(backfilled.get("document_date") or "").strip())
+                    )
+                ):
+                    contract_metadata_backfilled_count += 1
+            else:
+                unchanged_count += 1
+            if stats.get("contract_parse_attempted"):
+                contract_parse_attempt_count += 1
+            if stats.get("parser_warning"):
+                parser_warning_count += 1
+            if stats.get("missing_file"):
+                missing_file_count += 1
+        return {
+            "contract_name": "sheet_vitrina_v1_trade_documents_metadata_backfill",
+            "status": "ok",
+            "scanned_documents": len(rows),
+            "updated_documents": updated_count,
+            "supplier_backfilled_documents": supplier_backfilled_count,
+            "contract_parse_attempted_documents": contract_parse_attempt_count,
+            "contract_metadata_backfilled_documents": contract_metadata_backfilled_count,
+            "parser_warning_documents": parser_warning_count,
+            "missing_file_documents": missing_file_count,
+            "unchanged_documents": unchanged_count,
+            "default_supplier_name": DEFAULT_SUPPLIER_NAME,
+        }
+
     def find_contract_candidates(self, number: str, document_date: str = "") -> list[dict[str, Any]]:
         return [
             self._with_document_download_path(item)
@@ -895,6 +951,86 @@ class SupplierShipmentsBlock:
             "linked_contracts": linked_count,
             "skipped_shipments": skipped_count,
         }
+
+    def _backfill_trade_document_record(
+        self,
+        document: Mapping[str, Any],
+        *,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        manual_number: Any = None,
+        manual_document_date: Any = None,
+        manual_supplier_name: Any = None,
+    ) -> dict[str, Any]:
+        document_id = str(document.get("document_id") or "").strip()
+        if not document_id:
+            return dict(document)
+        existing = dict(document)
+        updates: dict[str, Any] = {}
+        stats: dict[str, Any] = {}
+        existing_supplier = str(existing.get("supplier_name") or "").strip()
+        if not existing_supplier:
+            updates["supplier_name"] = _document_supplier_name(manual_supplier_name)
+
+        document_type = str(existing.get("document_type") or "").strip()
+        needs_contract_parse = (
+            document_type == TRADE_DOCUMENT_TYPE_CONTRACT
+            and (not str(existing.get("number") or "").strip() or not str(existing.get("document_date") or "").strip())
+        )
+        if needs_contract_parse:
+            payload_bytes = file_bytes
+            payload_filename = filename or str(existing.get("file_original_name") or "")
+            if payload_bytes is None:
+                try:
+                    payload_bytes = self._resolve_runtime_file(str(existing.get("file_path") or "")).read_bytes()
+                except (OSError, ValueError):
+                    payload_bytes = None
+                    stats["missing_file"] = True
+            if payload_bytes is not None:
+                stats["contract_parse_attempted"] = True
+                parsed_metadata, warnings, errors, parser_version = self._parse_contract_document_metadata(
+                    payload_bytes,
+                    filename=payload_filename,
+                )
+                manual_number_value = str(manual_number or "").strip()
+                manual_date_value = _optional_iso_date(manual_document_date)
+                parsed_number = str(parsed_metadata.get("parsed_number") or "").strip()
+                parsed_date = _optional_iso_date(parsed_metadata.get("parsed_document_date"))
+                if not str(existing.get("number") or "").strip() and (manual_number_value or parsed_number):
+                    updates["number"] = manual_number_value or parsed_number
+                if not str(existing.get("document_date") or "").strip() and (manual_date_value or parsed_date):
+                    updates["document_date"] = manual_date_value or parsed_date
+                if not existing_supplier:
+                    updates["supplier_name"] = _document_supplier_name(
+                        manual_supplier_name,
+                        parsed_metadata.get("supplier_name"),
+                    )
+                existing_metadata = existing.get("parsed_metadata")
+                existing_metadata = dict(existing_metadata) if isinstance(existing_metadata, Mapping) else {}
+                merged_metadata = {**existing_metadata, **dict(parsed_metadata)}
+                if merged_metadata != existing_metadata:
+                    updates["parsed_metadata"] = merged_metadata
+                existing_warnings = _string_list(existing.get("warnings"))
+                merged_warnings = _merge_string_lists(existing_warnings, warnings)
+                if merged_warnings != existing_warnings:
+                    updates["warnings"] = merged_warnings
+                existing_errors = _string_list(existing.get("errors"))
+                merged_errors = _merge_string_lists(existing_errors, errors)
+                if merged_errors != existing_errors:
+                    updates["errors"] = merged_errors
+                if parser_version and str(existing.get("parser_version") or "") != parser_version:
+                    updates["parser_version"] = parser_version
+                if warnings:
+                    stats["parser_warning"] = True
+
+        if not updates:
+            result = dict(existing)
+            result["_backfill_stats"] = stats
+            return result
+        updated = self.runtime.update_trade_document(document_id, updates, updated_at=self.timestamp_factory())
+        result = dict(updated)
+        result["_backfill_stats"] = stats
+        return result
 
     def list_nomenclature(self) -> dict[str, Any]:
         self._ensure_nomenclature_ready()
@@ -1157,7 +1293,7 @@ class SupplierShipmentsBlock:
         lines = [line for line in lines if line]
         top_text = "\n".join(lines[:40])[:4000]
         first_line = lines[0] if lines else ""
-        parsed_number = _extract_contract_number(first_line)
+        parsed_number = _extract_contract_number(first_line, lines[:8])
         parsed_document_date = _extract_contract_document_date(top_text)
         if not lines and extension in {".pdf", ".jpg", ".jpeg", ".png"} and not warnings:
             warnings.append("contract parser found no readable text")
@@ -2724,28 +2860,66 @@ def _text_to_lines(value: str) -> list[str]:
     return [line for line in (_normalize_text_line(line) for line in str(value or "").splitlines()) if line]
 
 
-def _extract_contract_number(first_line: str) -> str:
+def _extract_contract_number(first_line: str, header_lines: list[str] | tuple[str, ...] | None = None) -> str:
     line = _normalize_text_line(first_line)
     if not line:
         return ""
+    header_lines = [_normalize_text_line(item) for item in (header_lines or []) if _normalize_text_line(item)]
+    header_text = " ".join(header_lines[:8])
     patterns = (
         r"(?iu)(?:合同(?:编号|号))\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
-        r"(?iu)\b(?:contract|контракт)\s*(?:no\.?|number|№|#|n)?\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
+        r"(?iu)\b(?:contract|контракт|договор)\s*(?:no\.?|number|№|#|n)?\s*[:：#№\-]*\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
         r"(?iu)(?:^|\s)(?:no\.?|№|#)\s*([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9._/\-]+)",
     )
     for pattern in patterns:
         match = re.search(pattern, line)
-        if match:
+        if match and _looks_like_contract_number(match.group(1)):
             return _clean_contract_number(match.group(1))
-    return _clean_contract_number(line)
+    if _is_generic_contract_heading(line):
+        for pattern in patterns:
+            match = re.search(pattern, header_text)
+            if match and _looks_like_contract_number(match.group(1)):
+                return _clean_contract_number(match.group(1))
+        for candidate_line in header_lines[1:8]:
+            candidate = _clean_contract_number(candidate_line)
+            if _looks_like_contract_number(candidate):
+                return candidate
+        return ""
+    cleaned = _clean_contract_number(line)
+    return cleaned if _looks_like_contract_number(cleaned) else ""
 
 
 def _clean_contract_number(value: str) -> str:
     cleaned = _normalize_text_line(value)
-    cleaned = re.sub(r"(?iu)\b(?:dated|date|от)\b.*$", "", cleaned).strip()
+    cleaned = re.sub(r"(?iu)\b(?:dated|date|от|дата)\b.*$", "", cleaned).strip()
     cleaned = re.sub(r"(?iu)\b\d{4}[-.]\d{1,2}[-.]\d{1,2}\b.*$", "", cleaned).strip()
     cleaned = cleaned.strip(" :：#№-—\"'«»")
     return cleaned[:120]
+
+
+def _is_generic_contract_heading(value: str) -> bool:
+    normalized = re.sub(r"[\s:：#№.\-—\"'«»]+", "", str(value or "").casefold())
+    return normalized in {
+        "contract",
+        "salescontract",
+        "purchasecontract",
+        "контракт",
+        "договор",
+        "договорпоставки",
+        "合同",
+        "销售合同",
+    }
+
+
+def _looks_like_contract_number(value: str) -> bool:
+    cleaned = _clean_contract_number(value)
+    if not cleaned:
+        return False
+    if _is_generic_contract_heading(cleaned):
+        return False
+    if len(cleaned) > 80 and not re.search(r"\d", cleaned):
+        return False
+    return bool(re.search(r"\d", cleaned) or re.search(r"[A-Za-zА-Яа-я]{2,}[-_/]\w", cleaned))
 
 
 def _extract_contract_document_date(text: str) -> str:
@@ -2841,6 +3015,26 @@ def _normalize_text_line(value: Any) -> str:
 
 def _compact_compare(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip().lower()
+
+
+def _document_supplier_name(*values: Any) -> str:
+    for value in values:
+        supplier = str(value or "").strip()
+        if supplier:
+            return supplier
+    return DEFAULT_SUPPLIER_NAME
+
+
+def _merge_string_lists(existing: Any, incoming: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in [*_string_list(existing), *_string_list(incoming)]:
+        item = str(value or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    return merged
 
 
 def _invoice_download_path(shipment_id: str) -> str:
