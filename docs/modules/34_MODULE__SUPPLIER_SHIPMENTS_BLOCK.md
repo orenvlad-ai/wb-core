@@ -3,15 +3,17 @@ title: "Модуль: supplier_shipments_block"
 doc_id: "WB-CORE-MODULE-34-SUPPLIER-SHIPMENTS-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для блока `Поставки -> От поставщика`: Реестр заказов, supplier invoice parser, server-side nomenclature matching, persisted invoice price conformity, runtime storage, protected API and supplier-only UI."
-scope: "Server-owned invoice order registry under current WebCore runtime: XLSX parse with openpyxl, deterministic type/model matching through server-side nomenclature, persisted per-line invoice price conformity against current purchase_price_yuan snapshots, editable shipment card, filesystem-backed original invoice storage under runtime dir, SQLite metadata/lines/nomenclature, operator embedded UI, settings surface and supplier-only role boundary."
+purpose: "Зафиксировать canonical contract для блока `Поставки -> От поставщика`: Реестр заказов, supplier invoice parser, server-side nomenclature matching, persisted invoice price conformity, financial documents by supplier order, runtime storage, protected API and supplier-only UI."
+scope: "Server-owned invoice order registry under current WebCore runtime: XLSX parse with openpyxl, deterministic type/model matching through server-side nomenclature, persisted per-line invoice price conformity against current purchase_price_yuan snapshots, editable shipment card, filesystem-backed original invoice and financial-document storage under runtime dir, SQLite metadata/lines/nomenclature/financial documents/expense lines, operator embedded UI, settings surface and supplier-only role boundary."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
 related_modules:
   - "packages/contracts/supplier_shipments.py"
+  - "packages/contracts/supplier_financial_documents.py"
   - "packages/application/supplier_invoice_parser.py"
   - "packages/application/supplier_shipments.py"
+  - "packages/application/supplier_financial_documents.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -24,6 +26,8 @@ related_tables:
   - "sheet_vitrina_v1_nomenclature_items"
   - "sheet_vitrina_v1_trade_documents"
   - "sheet_vitrina_v1_invoice_contract_links"
+  - "sheet_vitrina_v1_supplier_financial_documents"
+  - "sheet_vitrina_v1_supplier_financial_expense_lines"
 related_endpoints:
   - "GET /sheet-vitrina-v1/supplier"
   - "GET /sheet-vitrina-v1/settings"
@@ -39,6 +43,11 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
   - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
+  - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
+  - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/file"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
@@ -55,6 +64,8 @@ related_endpoints:
 related_runners:
   - "apps/supplier_invoice_parser_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
+  - "apps/supplier_financial_documents_smoke.py"
+  - "apps/supplier_financial_documents_real_pdf_browser_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_price_conformity_backfill.py"
   - "apps/registry_upload_http_entrypoint_auth_smoke.py"
   - "apps/registry_upload_http_entrypoint_supplier_auth_smoke.py"
@@ -66,7 +77,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads invoice contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, preserves deterministic nomenclature matching, and persists per-line invoice price conformity snapshots/statuses against current nomenclature purchase_price_yuan. Manual price recheck remains operator-only and UI-scoped to the operator embedded `Поставки -> От поставщика` frame. Operator settings are split into inner tabs `Номенклатура`, `Договоры` and `Инвойсы`; contract and invoice document rows are rendered in separate subsections over the same server-owned registry. The document registry owns PDF/JPG/PNG/XLSX contract/invoice files, canonical default supplier fallback, XLSX invoice metadata parsing, bounded contract number/date parsing for XLSX, text-layer PDF and image-only first-page OCR when runtime tools are installed, idempotent document metadata/supplier backfill, invoice->contract links, shipment-linked contract download, and idempotent legacy shipment invoice backfill. Standalone supplier role can read/download only shipment-linked invoice/contract files through supplier shipment routes and cannot access settings document CRUD or arbitrary document ids. No Google Sheets/GAS contour, no browser-local truth; image-only PDF/JPG/PNG contract parsing returns safe diagnostics when OCR tools or patterns are missing."
+update_note: "Supplier-facing order registry uses trilingual Chinese/English/Russian labels, shows fixed supplier in the registry only, hides Supplier/Customer and order SKU fields from the card, defaults supplier metadata to HanShang Technology, persists operator-owned order_status on shipment headers, reads invoice contract no/date from cells or drawing XML text, keeps nmId/nomenclature visible, preserves deterministic nomenclature matching, and persists per-line invoice price conformity snapshots/statuses against current nomenclature purchase_price_yuan. Manual price recheck remains operator-only and UI-scoped to the operator embedded `Поставки -> От поставщика` frame. Operator settings are split into inner tabs `Номенклатура`, `Договоры` and `Инвойсы`; contract and invoice document rows are rendered in separate subsections over the same server-owned registry. The order card now has inner tabs `Состав поставки` and operator-only `Финансовые документы`; the financial contour stores supplier-order PDF originals, deterministic parsed financial document rows and expense lines for logistics quotes, logistics invoices and customs declarations, computes compact logistics/customs/FX/efficiency summary, and keeps quote-vs-invoice matching reviewable instead of silently allocating ambiguous costs. The document registry owns PDF/JPG/PNG/XLSX contract/invoice files, canonical default supplier fallback, XLSX invoice metadata parsing, bounded contract number/date parsing for XLSX, text-layer PDF and image-only first-page OCR when runtime tools are installed, idempotent document metadata/supplier backfill, invoice->contract links, shipment-linked contract download, and idempotent legacy shipment invoice backfill. Standalone supplier role can read/download only shipment-linked invoice/contract files through supplier shipment routes and cannot access settings document CRUD, financial-document routes or arbitrary document ids. No Google Sheets/GAS contour, no browser-local truth; image-only PDF/JPG/PNG contract parsing returns safe diagnostics when OCR tools or patterns are missing."
 ---
 
 # 1. Contract
@@ -91,6 +102,7 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - In the operator embedded registry table, `Currency / Валюта` is hidden from the list, compact `Документы` replaces the old invoice-only file column, `Статус заказа` is shown after `Документы` and before `Actions`, and status changes use a narrow status-only PATCH so shipment lines, invoice metadata, source file pointers and matching state are not rebuilt or erased. The status selector is not rendered in the standalone supplier-only view.
 - Orders can be deleted by operator role only. Delete controls use UI-level confirmation: the first click opens an inline confirmation with cancel, and backend DELETE is called only by the explicit confirm action. While confirmation is open, row clicks do not open the order card. Confirmed delete removes the DB order/lines, archives the invoice document link when present, and makes shipment-scoped invoice download unavailable without deleting the physical runtime invoice file.
 - Saved order cards expose `关闭 / Close / Закрыть`; the visible `重新匹配 / Re-match / Пересопоставить` action is not rendered in the supplier/order card. The rematch API remains available for internal compatibility and applies current nomenclature without overwriting manual overrides unless explicitly requested by API payload.
+- Saved order cards have an inner tab switcher. `Состав поставки` owns the existing editable order composition and remains the default view. `Финансовые документы` is rendered only in operator embedded mode and is hidden from supplier-only view.
 
 # 1.1 Trade Documents Registry
 
@@ -111,6 +123,30 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 - `sheet_vitrina_v1_invoice_contract_links` allows one primary contract per invoice and many invoices per contract. Exact active contract candidates are found by contract number and date. If supplier shipment creation/backfill finds exactly one active contract candidate, it auto-links the invoice to that contract; zero or multiple candidates are returned as non-destructive candidate/status data.
 - The order card has a compact `Документы` block: invoice download, linked contract no/date and download, or operator-only select/upload controls for missing contract. Supplier standalone view can see/download linked documents but cannot link/upload/archive.
 - Contract archive is rejected while active invoice links point to that contract. Invoice archive removes the invoice-contract link. File rows are archived in DB; physical files are not removed by document archive.
+
+# 1.2 Supplier Order Financial Documents
+
+- Financial documents are scoped to one saved supplier shipment/order (`supplier_order_id` = shipment id). Runtime truth is server-owned:
+  - PDF originals live under `<runtime_dir>/supplier_financial_documents/files/<supplier_order_id>/<document_id>/<safe_filename>`;
+  - SQLite table `sheet_vitrina_v1_supplier_financial_documents` stores document metadata, parser/rate status and raw/normalized parse JSON;
+  - SQLite table `sheet_vitrina_v1_supplier_financial_expense_lines` stores normalized expense lines by document/order.
+- MVP document types are `logistics_quote`, `logistics_invoice` and `customs_declaration`. Factory invoices, factory payments, RUB->CNY conversion, SKU cost allocation and WB mutations are out of this module scope.
+- Financial upload accepts PDF only and first attempts text-layer extraction. Runtime prefers `pdftotext` when available, then `pypdf`; OCR is not an MVP dependency for this parser and missing text/OCR returns controlled `parse_error`/warnings instead of silent failure.
+- Parser is deterministic/rule-based and returns normalized fields, expense lines, parser version, warnings and confidence/status. It detects Transitplus logistics quotes, logistics invoices like World-Logistik invoices 103/113, and aggregate customs declarations (`ДТ`) with customs fee/duty/VAT totals.
+- Expense lines store category/stage/description/amount/currency/amount_rub/VAT and inclusion flags. Logistics quote lines keep customs payments separate from logistics quote components, and possible/not-included export-document costs are marked reviewable rather than included in totals.
+- Server-side USD/RUB CBR rate provider is a seam. Runtime may request official CBR XML by document date and, if an exact date is unavailable, stores the last official effective date before the requested date. Tests and local smokes use `StaticUsdRateProvider`. Rate failure does not reject upload; document rows persist with `rate_pending`/`fx_rate_missing`.
+- CBR is a benchmark only. For quote-vs-invoice comparison the summary uses:
+  - `implied_rate = invoice_amount_rub / linked_quote_usd_component`;
+  - `spread_pct = implied_rate / cbr_usd_rate_on_invoice_date`;
+  - `estimated_bank_rate_on_quote_date = cbr_usd_rate_on_quote_date * spread_pct`;
+  - `quote_rub_equivalent = linked_quote_usd_component * estimated_bank_rate_on_quote_date`.
+  UI labels this as `расчётный курс по правилу КП` / `оценочный банковский курс`, not as a VTB truth.
+- MVP auto-match candidate links logistics invoices to logistics-related quote components (`delivery_cost`, `brokerage_services`, `company_commission`, `insurance`) and excludes customs payments/federal customs totals. The summary status is `needs_review` and the UI shows reviewable warnings because exact line-level evidence is intentionally not assumed.
+- `Финансовые документы` UI shows upload, document table, recognized fields, expense lines, original PDF download link when stored, status/warnings, and compact summary: quote totals/logistics/customs USD, invoice fact/VAT RUB, customs fee/duty/VAT/total RUB, logistics ₽/кг and ₽/м³, implied rate/spread and quote-vs-invoice delta.
+- Protected routes are operator-only and follow the existing supplier shipment path:
+  - list/upload collection: `/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents`;
+  - detail/patch status: `/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}`;
+  - original file download: `/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/file`.
 
 # 2. Parser
 

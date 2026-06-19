@@ -46,6 +46,10 @@ from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1RefreshResult,
 )
 from packages.contracts.supplier_shipments import ORDER_STATUS_DEFAULT, TRADE_DOCUMENT_STATUS_ACTIVE
+from packages.contracts.supplier_financial_documents import (
+    FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
+    FINANCIAL_DOCUMENT_PARSE_STATUSES,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
@@ -2455,6 +2459,295 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return cursor.rowcount > 0
 
+    def save_supplier_financial_document(
+        self,
+        *,
+        document: Mapping[str, Any],
+        expense_lines: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        document_id = str(document.get("document_id") or "").strip()
+        supplier_order_id = str(document.get("supplier_order_id") or document.get("order_id") or "").strip()
+        if not document_id:
+            raise ValueError("financial document_id is required")
+        if not supplier_order_id:
+            raise ValueError("financial supplier_order_id is required")
+        uploaded_at = str(document.get("uploaded_at") or "").strip()
+        updated_at = str(document.get("updated_at") or uploaded_at).strip()
+        _validate_timestamp(uploaded_at, field_name="uploaded_at")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        parse_status = str(document.get("parse_status") or FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED)
+        if parse_status not in FINANCIAL_DOCUMENT_PARSE_STATUSES:
+            raise ValueError(f"unsupported financial document parse_status: {parse_status}")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_financial_documents(
+                    document_id,
+                    supplier_order_id,
+                    document_type,
+                    original_filename,
+                    stored_file_path,
+                    file_content_type,
+                    file_sha256,
+                    uploaded_at,
+                    updated_at,
+                    parse_status,
+                    vendor,
+                    document_number,
+                    document_date,
+                    currency,
+                    total_amount,
+                    total_amount_rub,
+                    vat_rate,
+                    vat_amount_rub,
+                    due_date,
+                    route,
+                    contract_ref,
+                    cbr_usd_rate_requested_date,
+                    cbr_usd_rate_effective_date,
+                    cbr_usd_rate_value,
+                    rate_source,
+                    rate_source_status,
+                    raw_parse_json,
+                    normalized_parse_json,
+                    parser_version,
+                    warnings_json,
+                    errors_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    supplier_order_id = excluded.supplier_order_id,
+                    document_type = excluded.document_type,
+                    original_filename = excluded.original_filename,
+                    stored_file_path = excluded.stored_file_path,
+                    file_content_type = excluded.file_content_type,
+                    file_sha256 = excluded.file_sha256,
+                    updated_at = excluded.updated_at,
+                    parse_status = excluded.parse_status,
+                    vendor = excluded.vendor,
+                    document_number = excluded.document_number,
+                    document_date = excluded.document_date,
+                    currency = excluded.currency,
+                    total_amount = excluded.total_amount,
+                    total_amount_rub = excluded.total_amount_rub,
+                    vat_rate = excluded.vat_rate,
+                    vat_amount_rub = excluded.vat_amount_rub,
+                    due_date = excluded.due_date,
+                    route = excluded.route,
+                    contract_ref = excluded.contract_ref,
+                    cbr_usd_rate_requested_date = excluded.cbr_usd_rate_requested_date,
+                    cbr_usd_rate_effective_date = excluded.cbr_usd_rate_effective_date,
+                    cbr_usd_rate_value = excluded.cbr_usd_rate_value,
+                    rate_source = excluded.rate_source,
+                    rate_source_status = excluded.rate_source_status,
+                    raw_parse_json = excluded.raw_parse_json,
+                    normalized_parse_json = excluded.normalized_parse_json,
+                    parser_version = excluded.parser_version,
+                    warnings_json = excluded.warnings_json,
+                    errors_json = excluded.errors_json
+                """,
+                (
+                    document_id,
+                    supplier_order_id,
+                    str(document.get("document_type") or ""),
+                    str(document.get("original_filename") or ""),
+                    str(document.get("stored_file_path") or ""),
+                    str(document.get("file_content_type") or ""),
+                    str(document.get("file_sha256") or ""),
+                    uploaded_at,
+                    updated_at,
+                    parse_status,
+                    str(document.get("vendor") or ""),
+                    str(document.get("document_number") or ""),
+                    str(document.get("document_date") or ""),
+                    str(document.get("currency") or ""),
+                    document.get("total_amount"),
+                    document.get("total_amount_rub"),
+                    document.get("vat_rate"),
+                    document.get("vat_amount_rub"),
+                    str(document.get("due_date") or ""),
+                    str(document.get("route") or ""),
+                    str(document.get("contract_ref") or ""),
+                    str(document.get("cbr_usd_rate_requested_date") or ""),
+                    str(document.get("cbr_usd_rate_effective_date") or ""),
+                    document.get("cbr_usd_rate_value"),
+                    str(document.get("rate_source") or ""),
+                    str(document.get("rate_source_status") or ""),
+                    json.dumps(dict(document.get("raw_parse") or {}), ensure_ascii=False),
+                    json.dumps(dict(document.get("normalized_parse") or {}), ensure_ascii=False),
+                    str(document.get("parser_version") or ""),
+                    json.dumps(list(document.get("warnings") or []), ensure_ascii=False),
+                    json.dumps(list(document.get("errors") or []), ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_supplier_financial_expense_lines
+                WHERE financial_document_id = ?
+                """,
+                (document_id,),
+            )
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_financial_expense_lines(
+                    line_id,
+                    financial_document_id,
+                    supplier_order_id,
+                    sort_order,
+                    category,
+                    stage,
+                    description,
+                    amount,
+                    currency,
+                    amount_rub,
+                    vat_rate,
+                    vat_amount_rub,
+                    included_in_logistics_efficiency,
+                    included_in_customs_total,
+                    status,
+                    confidence,
+                    raw_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(line.get("line_id") or ""),
+                        document_id,
+                        supplier_order_id,
+                        int(line.get("sort_order") or index),
+                        str(line.get("category") or ""),
+                        str(line.get("stage") or ""),
+                        str(line.get("description") or ""),
+                        line.get("amount"),
+                        str(line.get("currency") or ""),
+                        line.get("amount_rub"),
+                        line.get("vat_rate"),
+                        line.get("vat_amount_rub"),
+                        1 if bool(line.get("included_in_logistics_efficiency")) else 0,
+                        1 if bool(line.get("included_in_customs_total")) else 0,
+                        str(line.get("status") or ""),
+                        line.get("confidence"),
+                        json.dumps(dict(line.get("raw") or {}), ensure_ascii=False),
+                    )
+                    for index, line in enumerate(expense_lines, start=1)
+                ],
+            )
+            conn.commit()
+        loaded = self.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if loaded is None:
+            raise ValueError(f"financial document was not saved: {document_id}")
+        return loaded
+
+    def list_supplier_financial_documents(self, supplier_order_id: str) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_financial_documents
+                WHERE supplier_order_id = ?
+                ORDER BY document_date DESC, uploaded_at DESC, document_id ASC
+                """,
+                (str(supplier_order_id or "").strip(),),
+            ).fetchall()
+            return [_supplier_financial_document_to_dict(row) for row in rows]
+
+    def list_supplier_financial_expense_lines(self, supplier_order_id: str) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_financial_expense_lines
+                WHERE supplier_order_id = ?
+                ORDER BY financial_document_id ASC, sort_order ASC, line_id ASC
+                """,
+                (str(supplier_order_id or "").strip(),),
+            ).fetchall()
+            return [_supplier_financial_expense_line_to_dict(row) for row in rows]
+
+    def load_supplier_financial_document(
+        self,
+        *,
+        supplier_order_id: str,
+        document_id: str,
+    ) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_financial_documents
+                WHERE supplier_order_id = ?
+                  AND document_id = ?
+                """,
+                (str(supplier_order_id or "").strip(), str(document_id or "").strip()),
+            ).fetchone()
+            if row is None:
+                return None
+            lines = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_financial_expense_lines
+                WHERE supplier_order_id = ?
+                  AND financial_document_id = ?
+                ORDER BY sort_order ASC, line_id ASC
+                """,
+                (str(supplier_order_id or "").strip(), str(document_id or "").strip()),
+            ).fetchall()
+            payload = _supplier_financial_document_to_dict(row)
+            payload["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in lines]
+            return payload
+
+    def update_supplier_financial_document_status(
+        self,
+        *,
+        supplier_order_id: str,
+        document_id: str,
+        parse_status: str,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        if parse_status not in FINANCIAL_DOCUMENT_PARSE_STATUSES:
+            raise ValueError(f"unsupported financial document parse_status: {parse_status}")
+        _validate_timestamp(str(updated_at or ""), field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_supplier_financial_documents
+                SET parse_status = ?,
+                    updated_at = ?
+                WHERE supplier_order_id = ?
+                  AND document_id = ?
+                """,
+                (
+                    str(parse_status or ""),
+                    updated_at,
+                    str(supplier_order_id or "").strip(),
+                    str(document_id or "").strip(),
+                ),
+            )
+            conn.commit()
+            if cursor.rowcount <= 0:
+                raise ValueError(f"financial document not found: {document_id}")
+        loaded = self.load_supplier_financial_document(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+        )
+        if loaded is None:
+            raise ValueError(f"financial document not found: {document_id}")
+        return loaded
+
     def save_trade_document(self, document: Mapping[str, Any]) -> dict[str, Any]:
         document_id = str(document.get("document_id") or "").strip()
         if not document_id:
@@ -4288,6 +4581,66 @@ def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _supplier_financial_document_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "document_id": row["document_id"],
+        "supplier_order_id": row["supplier_order_id"],
+        "order_id": row["supplier_order_id"],
+        "document_type": row["document_type"] or "",
+        "original_filename": row["original_filename"] or "",
+        "stored_file_path": row["stored_file_path"] or "",
+        "file_content_type": row["file_content_type"] or "",
+        "file_sha256": row["file_sha256"] or "",
+        "uploaded_at": row["uploaded_at"],
+        "updated_at": row["updated_at"],
+        "parse_status": row["parse_status"] or "",
+        "vendor": row["vendor"] or "",
+        "document_number": row["document_number"] or "",
+        "document_date": row["document_date"] or "",
+        "currency": row["currency"] or "",
+        "total_amount": row["total_amount"],
+        "total_amount_rub": row["total_amount_rub"],
+        "vat_rate": row["vat_rate"],
+        "vat_amount_rub": row["vat_amount_rub"],
+        "due_date": row["due_date"] or "",
+        "route": row["route"] or "",
+        "contract_ref": row["contract_ref"] or "",
+        "cbr_usd_rate_requested_date": row["cbr_usd_rate_requested_date"] or "",
+        "cbr_usd_rate_effective_date": row["cbr_usd_rate_effective_date"] or "",
+        "cbr_usd_rate_value": row["cbr_usd_rate_value"],
+        "rate_source": row["rate_source"] or "",
+        "rate_source_status": row["rate_source_status"] or "",
+        "raw_parse": _loads_json_object(row["raw_parse_json"]),
+        "normalized_parse": _loads_json_object(row["normalized_parse_json"]),
+        "parser_version": row["parser_version"] or "",
+        "warnings": _loads_json_list(row["warnings_json"]),
+        "errors": _loads_json_list(row["errors_json"]),
+    }
+
+
+def _supplier_financial_expense_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "line_id": row["line_id"],
+        "financial_document_id": row["financial_document_id"],
+        "supplier_order_id": row["supplier_order_id"],
+        "order_id": row["supplier_order_id"],
+        "sort_order": row["sort_order"],
+        "category": row["category"] or "",
+        "stage": row["stage"] or "",
+        "description": row["description"] or "",
+        "amount": row["amount"],
+        "currency": row["currency"] or "",
+        "amount_rub": row["amount_rub"],
+        "vat_rate": row["vat_rate"],
+        "vat_amount_rub": row["vat_amount_rub"],
+        "included_in_logistics_efficiency": bool(row["included_in_logistics_efficiency"]),
+        "included_in_customs_total": bool(row["included_in_customs_total"]),
+        "status": row["status"] or "",
+        "confidence": row["confidence"],
+        "raw": _loads_json_object(row["raw_json"]),
+    }
+
+
 def _first_existing_value(mapping: Mapping[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in mapping and mapping.get(key) is not None:
@@ -5024,6 +5377,69 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_lines_by_shipment
         ON sheet_vitrina_v1_supplier_shipment_lines(shipment_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_financial_documents (
+            document_id TEXT PRIMARY KEY,
+            supplier_order_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_shipments(shipment_id) ON DELETE CASCADE,
+            document_type TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            stored_file_path TEXT NOT NULL,
+            file_content_type TEXT NOT NULL,
+            file_sha256 TEXT NOT NULL,
+            uploaded_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            parse_status TEXT NOT NULL,
+            vendor TEXT,
+            document_number TEXT,
+            document_date TEXT,
+            currency TEXT,
+            total_amount REAL,
+            total_amount_rub REAL,
+            vat_rate REAL,
+            vat_amount_rub REAL,
+            due_date TEXT,
+            route TEXT,
+            contract_ref TEXT,
+            cbr_usd_rate_requested_date TEXT,
+            cbr_usd_rate_effective_date TEXT,
+            cbr_usd_rate_value REAL,
+            rate_source TEXT,
+            rate_source_status TEXT,
+            raw_parse_json TEXT NOT NULL DEFAULT '{}',
+            normalized_parse_json TEXT NOT NULL DEFAULT '{}',
+            parser_version TEXT,
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            errors_json TEXT NOT NULL DEFAULT '[]'
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_financial_documents_by_order
+        ON sheet_vitrina_v1_supplier_financial_documents(supplier_order_id, document_date DESC, uploaded_at DESC);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_financial_documents_by_type
+        ON sheet_vitrina_v1_supplier_financial_documents(document_type, parse_status);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_financial_expense_lines (
+            line_id TEXT PRIMARY KEY,
+            financial_document_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_financial_documents(document_id) ON DELETE CASCADE,
+            supplier_order_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_shipments(shipment_id) ON DELETE CASCADE,
+            sort_order INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            stage TEXT,
+            description TEXT,
+            amount REAL,
+            currency TEXT,
+            amount_rub REAL,
+            vat_rate REAL,
+            vat_amount_rub REAL,
+            included_in_logistics_efficiency INTEGER NOT NULL DEFAULT 0,
+            included_in_customs_total INTEGER NOT NULL DEFAULT 0,
+            status TEXT,
+            confidence REAL,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_financial_expense_lines_by_order
+        ON sheet_vitrina_v1_supplier_financial_expense_lines(supplier_order_id, financial_document_id, sort_order);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_nomenclature_items (
             item_id TEXT PRIMARY KEY,
