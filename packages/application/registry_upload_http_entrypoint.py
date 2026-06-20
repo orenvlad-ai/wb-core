@@ -1762,6 +1762,21 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_shipment_registry_request(self) -> dict[str, Any]:
         return self.supplier_financial_documents_block.list_shipment_registry()
 
+    def handle_supplier_shipment_registry_compare_quote_request(
+        self,
+        shipment_id: str,
+        file_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return self.supplier_financial_documents_block.compare_registry_quote(
+            shipment_id,
+            file_bytes=file_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+        )
+
     def handle_supplier_financial_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
         return self.supplier_financial_documents_block.list_documents(shipment_id)
 

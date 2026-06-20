@@ -153,6 +153,7 @@ DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-suppl
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
+DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH = f"{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}/compare-quote"
 DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT = "financial-documents"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
@@ -981,6 +982,34 @@ def _build_handler(
                         self,
                         HTTPStatus.UNPROCESSABLE_ENTITY,
                         {"error": f"supplier invoice parse failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    fields = upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {}
+                    shipment_id = str(fields.get("shipment_id") or "").strip()
+                    if not shipment_id:
+                        raise ValueError("shipment_id field is required")
+                    payload = entrypoint.handle_supplier_shipment_registry_compare_quote_request(
+                        shipment_id,
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment registry quote comparison failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -2904,11 +2933,10 @@ def _load_uploaded_file_payload(handler: BaseHTTPRequestHandler) -> dict[str, An
                     fields[part_name] = payload.decode(charset, errors="replace").strip()
             continue
         payload = part.get_payload(decode=True)
-        if payload:
+        if payload and not workbook_bytes:
             workbook_bytes = payload
             filename = str(part.get_filename() or "").strip()
             part_content_type = str(part.get_content_type() or "").strip()
-            break
     if not workbook_bytes:
         raise ValueError("multipart/form-data must contain non-empty file field")
     return {
@@ -4321,6 +4349,7 @@ def _render_sheet_vitrina_operator_ui(
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_shipment_registry_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
+        "supplier_shipment_registry_compare_quote_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "stock_report_active_skus": list(operator_ui_context.get("stock_report_active_skus") or []),
