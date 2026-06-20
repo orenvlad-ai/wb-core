@@ -40,6 +40,7 @@ from packages.contracts.supplier_financial_documents import (
     EXPENSE_LINE_STATUS_POSSIBLE_NOT_INCLUDED,
     FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS,
     FINANCIAL_DOCUMENT_CONTENT_TYPE,
+    FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
     FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED,
     FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW,
     FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
@@ -208,7 +209,12 @@ class SupplierFinancialDocumentsBlock:
 
     def list_documents(self, supplier_order_id: str) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
-        documents = [self._with_download_path(item) for item in self.runtime.list_supplier_financial_documents(supplier_order_id)]
+        documents = [
+            self._with_download_path(item)
+            for item in self._refresh_saved_document_parses(
+                self.runtime.list_supplier_financial_documents(supplier_order_id)
+            )
+        ]
         lines = self.runtime.list_supplier_financial_expense_lines(supplier_order_id)
         return {
             "contract_name": "sheet_vitrina_v1_supplier_financial_documents",
@@ -227,6 +233,7 @@ class SupplierFinancialDocumentsBlock:
         )
         if document is None:
             raise ValueError(f"financial document not found: {document_id}")
+        document = self._refresh_saved_document_parse(document)
         documents = [self._with_download_path(document)]
         lines = list(document.get("expense_lines") or [])
         payload = self._with_download_path(document)
@@ -392,6 +399,109 @@ class SupplierFinancialDocumentsBlock:
         else:
             return None
         return self.usd_rate_provider.get_usd_rate(requested_date)
+
+    def _refresh_saved_document_parses(self, documents: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [self._refresh_saved_document_parse(document) for document in documents]
+
+    def _refresh_saved_document_parse(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        payload = dict(document)
+        if not self._saved_document_needs_parse_refresh(payload):
+            return payload
+        stored_file_path = str(payload.get("stored_file_path") or "").strip()
+        original_filename = str(payload.get("original_filename") or "financial-document.pdf").strip() or "financial-document.pdf"
+        try:
+            file_path = self._resolve_runtime_file(stored_file_path)
+            file_bytes = file_path.read_bytes()
+        except OSError:
+            return payload
+        except ValueError:
+            return payload
+        parsed = parse_financial_document_pdf(
+            file_bytes,
+            filename=original_filename,
+            text_extractor=self.pdf_text_extractor,
+        )
+        normalized = dict(parsed.get("normalized_parse") or {})
+        existing_type = str(payload.get("document_type") or "")
+        parsed_type = str(normalized.get("document_type") or "")
+        if not parsed_type or (existing_type and parsed_type != existing_type):
+            return payload
+        warnings = _string_list(parsed.get("warnings"))
+        errors = _string_list(parsed.get("errors"))
+        expense_lines = [dict(item) for item in parsed.get("expense_lines") or []]
+        rate_result = self._rate_for_document(normalized)
+        if rate_result is not None:
+            normalized["cbr_usd_rate"] = _rate_result_to_dict(rate_result)
+            if rate_result.status != FX_RATE_STATUS_OK:
+                warnings.append(f"CBR USD rate is pending or missing for {rate_result.requested_date}")
+            else:
+                _apply_usd_rate_to_parse(normalized, expense_lines, rate_result.rate_value)
+        parse_status = _parse_status_for_payload(parsed, warnings, errors, rate_result)
+        if parse_status == FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR:
+            return payload
+        existing_status = str(payload.get("parse_status") or "")
+        if existing_status == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED:
+            parse_status = FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
+        now = self.timestamp_factory()
+        document_id = str(payload.get("document_id") or "")
+        supplier_order_id = str(payload.get("supplier_order_id") or "")
+        updated_document = {
+            **payload,
+            "document_type": parsed_type,
+            "updated_at": now,
+            "parse_status": parse_status,
+            "vendor": normalized.get("vendor") or "",
+            "document_number": normalized.get("document_number") or normalized.get("invoice_number") or normalized.get("declaration_number") or "",
+            "document_date": normalized.get("document_date") or normalized.get("invoice_date") or normalized.get("quote_date") or normalized.get("declaration_date") or "",
+            "currency": normalized.get("currency") or "",
+            "total_amount": _decimal_to_float(_parse_decimal(normalized.get("total_amount"))),
+            "total_amount_rub": _decimal_to_float(_parse_decimal(normalized.get("total_amount_rub"))),
+            "vat_rate": _decimal_to_float(_parse_decimal(normalized.get("vat_rate"))),
+            "vat_amount_rub": _decimal_to_float(_parse_decimal(normalized.get("vat_amount_rub"))),
+            "due_date": normalized.get("due_date") or "",
+            "route": normalized.get("route") or "",
+            "contract_ref": normalized.get("contract_ref") or normalized.get("contract") or "",
+            "cbr_usd_rate_requested_date": rate_result.requested_date if rate_result else "",
+            "cbr_usd_rate_effective_date": rate_result.effective_date if rate_result else "",
+            "cbr_usd_rate_value": _decimal_to_float(rate_result.rate_value if rate_result else None),
+            "rate_source": rate_result.source if rate_result else "",
+            "rate_source_status": rate_result.status if rate_result else "",
+            "raw_parse": dict(parsed.get("raw_parse") or {}),
+            "normalized_parse": normalized,
+            "parser_version": parsed.get("parser_version") or FINANCIAL_DOCUMENT_PARSER_VERSION,
+            "warnings": _dedupe_strings(warnings),
+            "errors": _dedupe_strings(errors),
+        }
+        stored_lines = [
+            _expense_line_for_storage(
+                line,
+                supplier_order_id=supplier_order_id,
+                document_id=document_id,
+                sort_order=index,
+            )
+            for index, line in enumerate(expense_lines, start=1)
+        ]
+        return self.runtime.save_supplier_financial_document(
+            document=updated_document,
+            expense_lines=stored_lines,
+        )
+
+    def _saved_document_needs_parse_refresh(self, document: Mapping[str, Any]) -> bool:
+        if str(document.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED:
+            return False
+        document_type = str(document.get("document_type") or "")
+        if document_type != FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
+            return False
+        if not str(document.get("stored_file_path") or "").strip():
+            return False
+        normalized = dict(document.get("normalized_parse") or {})
+        if _positive_decimal(normalized.get("customs_gross_weight_kg") or normalized.get("gross_weight_kg")) is None:
+            return True
+        if _positive_decimal(normalized.get("total_customs_value_rub")) is None:
+            return True
+        if str(document.get("parser_version") or "") != FINANCIAL_DOCUMENT_PARSER_VERSION:
+            return True
+        return False
 
     def _ensure_supplier_order(self, supplier_order_id: str) -> None:
         if self.runtime.load_supplier_shipment(str(supplier_order_id or "").strip()) is None:
