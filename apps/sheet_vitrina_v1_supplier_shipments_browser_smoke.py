@@ -235,6 +235,7 @@ def main() -> None:
                 operator_frame = page.frame_locator("iframe[title='Поставки']")
                 expect(operator_frame.locator("body")).to_contain_text("Расчёты", timeout=10000)
                 expect(operator_frame.get_by_role("button", name="Расчёты")).to_be_visible()
+                expect(operator_frame.get_by_role("button", name="Реестр поставок")).to_be_visible()
                 expect(operator_frame.get_by_role("button", name="От поставщика")).to_be_visible()
                 operator_frame.get_by_role("button", name="От поставщика").click()
                 expect(operator_frame.locator("iframe[title='От поставщика']")).to_be_visible(timeout=10000)
@@ -386,6 +387,27 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_role("button", name="关闭 / Close / Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
+
+                operator_frame.get_by_role("button", name="Реестр поставок").click()
+                expect(operator_frame.locator("#shipmentRegistryTitle")).to_be_visible(timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("A. Паспорт поставки", timeout=10000)
+                expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("26GN390", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: доставка+таможня, ₽/шт", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("факт доставка+таможня ₽/шт", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("—", timeout=5000)
+                registry_text = operator_frame.locator("#shipmentRegistryBody").inner_text()
+                if "NaN" in registry_text or "Infinity" in registry_text:
+                    raise AssertionError(f"shipment registry browser output contains invalid numbers: {registry_text}")
+                sticky_style = operator_frame.locator("#shipmentRegistryBody td.shipment-registry-sticky").first.evaluate(
+                    """(node) => {
+                        const styles = window.getComputedStyle(node);
+                        return {position: styles.position, left: styles.left};
+                    }"""
+                )
+                if sticky_style.get("position") != "sticky" or sticky_style.get("left") != "0px":
+                    raise AssertionError(f"shipment registry row labels must stay sticky, got {sticky_style}")
+                operator_frame.get_by_role("button", name="От поставщика").click()
+                expect(operator_frame.locator("iframe[title='От поставщика']")).to_be_visible(timeout=5000)
 
                 supplier_page = browser.new_page(viewport={"width": 1280, "height": 900})
                 supplier_page.goto(f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}", wait_until="domcontentloaded")

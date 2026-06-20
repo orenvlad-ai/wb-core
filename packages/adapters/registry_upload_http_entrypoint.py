@@ -152,6 +152,7 @@ DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
+DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
 DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT = "financial-documents"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
@@ -1897,6 +1898,21 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"supplier shipments list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_supplier_shipment_registry_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment registry failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -4304,6 +4320,7 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+        "supplier_shipment_registry_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "stock_report_active_skus": list(operator_ui_context.get("stock_report_active_skus") or []),

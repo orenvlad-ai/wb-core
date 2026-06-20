@@ -26,6 +26,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
@@ -588,6 +589,23 @@ def main() -> None:
                 raise AssertionError("list route must expose fixed supplier_name")
             if registry_payload["shipments"][0].get("order_status") != "accepted_ff":
                 raise AssertionError("list route must expose persisted order_status")
+            shipment_registry_status, shipment_registry = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}")
+            if (
+                shipment_registry_status != 200
+                or shipment_registry.get("contract_name") != "sheet_vitrina_v1_supplier_shipment_registry"
+                or shipment_registry.get("meta", {}).get("shipment_count") != 1
+            ):
+                raise AssertionError(f"shipment registry matrix route mismatch: {shipment_registry_status} {shipment_registry}")
+            shipment_registry_json = json.dumps(shipment_registry, ensure_ascii=False)
+            if "NaN" in shipment_registry_json or "Infinity" in shipment_registry_json:
+                raise AssertionError(f"shipment registry matrix must not expose invalid numbers: {shipment_registry}")
+            section_ids = {section.get("section_id") for section in shipment_registry.get("sections", [])}
+            if not {"passport", "cargo_physics", "quote_logistics", "fact_expenses", "fact_normalized", "documents"}.issubset(section_ids):
+                raise AssertionError(f"shipment registry matrix missing sections: {section_ids}")
+            if _registry_cell_display(shipment_registry, "quote_logistics", "quote_total_rub_per_unit", shipment_id) != "—":
+                raise AssertionError(f"shipment registry without financial docs must keep quote ₽/шт unavailable: {shipment_registry}")
+            if _registry_cell_display(shipment_registry, "fact_expenses", "fact_total_rub_per_unit", shipment_id) != "—":
+                raise AssertionError(f"shipment registry without financial docs must keep fact ₽/шт unavailable: {shipment_registry}")
             invoice_path = registry_payload["shipments"][0].get("invoice_download_path")
             invoice_status, invoice_bytes, invoice_headers = _get_bytes(f"{base_url}{invoice_path}")
             if invoice_status != 200 or hashlib.sha256(invoice_bytes).hexdigest() != workbook_sha256:
@@ -825,6 +843,16 @@ def _patch_json(url: str, payload: dict[str, object]) -> tuple[int, dict[str, ob
 def _delete_json(url: str) -> tuple[int, dict[str, object]]:
     request = urllib_request.Request(url, headers={"Accept": "application/json"}, method="DELETE")
     return _open_json(request)
+
+
+def _registry_cell_display(registry, section_id: str, row_id: str, shipment_id: str) -> str:
+    for section in registry.get("sections", []):
+        if section.get("section_id") != section_id:
+            continue
+        for row in section.get("rows", []):
+            if row.get("row_id") == row_id:
+                return str((row.get("cells", {}).get(shipment_id) or {}).get("display") or "")
+    return ""
 
 
 def _get_json(url: str) -> tuple[int, dict[str, object]]:

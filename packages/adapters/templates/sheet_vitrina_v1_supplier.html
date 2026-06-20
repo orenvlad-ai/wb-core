@@ -1209,6 +1209,7 @@
         const customs = summary.customs_declaration || {};
         const match = summary.quote_invoice_match || {};
         const perKg = summary.per_kg || {};
+        const perUnit = summary.per_unit || {};
         const quoteWeight = perKg.quote_weight || {};
         const customsWeight = perKg.customs_weight || {};
         const percent = summary.percent_of_value || {};
@@ -1230,6 +1231,13 @@
               ["Расчётный курс по правилу КП", match.implied_rate != null ? formatNumber(match.implied_rate) : "-"],
               ["Отклонение от ЦБ", formatRateSpread(match)],
               ["Счета минус КП-логистика, ₽", formatAmount(match.delta_rub, "₽")]
+            ]
+          },
+          {
+            title: "На штуку",
+            items: [
+              ["КП: доставка+таможня, ₽/шт", formatAmount(perUnit.quote_delivery_customs_rub_per_unit, "₽")],
+              ["Факт: доставка+таможня, ₽/шт", formatAmount(perUnit.fact_delivery_customs_rub_per_unit, "₽")]
             ]
           },
           {

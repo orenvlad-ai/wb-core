@@ -2152,6 +2152,113 @@
       background: #0f1117;
     }
 
+    .shipment-registry-block {
+      margin-top: 18px;
+    }
+
+    .shipment-registry-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .shipment-registry-lead,
+    .shipment-registry-summary {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .shipment-registry-table-wrap {
+      margin-top: 16px;
+      max-width: 100%;
+      max-height: 72vh;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--control-bg);
+    }
+
+    .shipment-registry-table {
+      width: max-content;
+      min-width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 12px;
+    }
+
+    .shipment-registry-table th,
+    .shipment-registry-table td {
+      padding: 9px 10px;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    .shipment-registry-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 3;
+      min-width: 150px;
+      background: #1b1e26;
+      color: var(--text);
+      text-align: left;
+    }
+
+    .shipment-registry-table .shipment-registry-sticky {
+      position: sticky;
+      left: 0;
+      z-index: 4;
+      min-width: 260px;
+      max-width: 320px;
+      background: #171b23;
+      white-space: normal;
+    }
+
+    .shipment-registry-table tbody td.shipment-registry-sticky {
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .shipment-registry-column-title,
+    .shipment-registry-cell-main {
+      display: block;
+      color: var(--text);
+      font-weight: 650;
+    }
+
+    .shipment-registry-column-sub,
+    .shipment-registry-cell-empty {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .shipment-registry-section-row th {
+      position: sticky;
+      left: 0;
+      z-index: 2;
+      padding: 10px;
+      background: #242832;
+      color: var(--muted-strong);
+      text-align: left;
+      font-size: 11px;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .shipment-registry-empty {
+      padding: 18px;
+      color: var(--muted);
+      text-align: center;
+    }
+
     .wb-supplies-block {
       margin-top: 18px;
     }
@@ -2989,12 +3096,13 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», WB/FBW registry живёт
-          в «Wildberries», а реестр заказов поставщика доступен в «От поставщика».
+          в «Wildberries», матрица поставок доступна в «Реестр поставок», а реестр заказов поставщика доступен в «От поставщика».
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы поставок">
           <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
           <button class="subsection-button" type="button" data-supply-mode-button="wildberries" aria-selected="false">Wildberries</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="shipment-registry" aria-selected="false">Реестр поставок</button>
           <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
         </div>
 
@@ -3436,6 +3544,36 @@
         </section>
         </section>
 
+        <section class="supply-mode-panel" data-supply-mode-panel="shipment-registry" hidden>
+          <section class="block shipment-registry-block" aria-labelledby="shipmentRegistryTitle">
+            <div class="shipment-registry-header">
+              <div>
+                <h2 id="shipmentRegistryTitle" class="block-title">Реестр поставок</h2>
+                <p class="shipment-registry-lead">Сравнительная матрица официальных поставок по финансовым документам и данным заказа.</p>
+                <p id="shipmentRegistrySummary" class="shipment-registry-summary">Данные ещё не загружены.</p>
+              </div>
+              <div class="block-actions">
+                <button id="shipmentRegistryRefreshButton" class="action-button primary-button" type="button">Обновить реестр</button>
+              </div>
+            </div>
+            <p id="shipmentRegistryMessage" class="section-message"></p>
+            <div class="shipment-registry-table-wrap">
+              <table class="shipment-registry-table" aria-label="Реестр поставок">
+                <thead id="shipmentRegistryHead">
+                  <tr>
+                    <th class="shipment-registry-sticky" scope="col">Метрика</th>
+                  </tr>
+                </thead>
+                <tbody id="shipmentRegistryBody">
+                  <tr>
+                    <td class="shipment-registry-empty" colspan="1">Реестр ещё не загружен.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section class="supply-mode-panel" data-supply-mode-panel="supplier" hidden>
           <iframe id="supplierShipmentsFrame" class="supplier-shipments-frame" title="От поставщика"></iframe>
         </section>
@@ -3786,6 +3924,12 @@
       const downloadRegionalRecommendationsZipButton = document.getElementById("downloadRegionalRecommendationsZipButton");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
+      const shipmentRegistryPanel = document.querySelector("[data-supply-mode-panel=\"shipment-registry\"]");
+      const shipmentRegistryRefreshButton = document.getElementById("shipmentRegistryRefreshButton");
+      const shipmentRegistrySummary = document.getElementById("shipmentRegistrySummary");
+      const shipmentRegistryMessage = document.getElementById("shipmentRegistryMessage");
+      const shipmentRegistryHead = document.getElementById("shipmentRegistryHead");
+      const shipmentRegistryBody = document.getElementById("shipmentRegistryBody");
       const wbSuppliesRefreshButton = document.getElementById("wbSuppliesRefreshButton");
       const wbSuppliesBackfillButton = document.getElementById("wbSuppliesBackfillButton");
       const wbSuppliesSupplyDateSortButton = document.getElementById("wbSuppliesSupplyDateSortButton");
@@ -3834,7 +3978,7 @@
       const DEFAULT_SUPPLY_SECTION = "factory";
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
-      const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "supplier"]);
+      const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "shipment-registry", "supplier"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
@@ -3944,6 +4088,9 @@
       let stockReportPayload = null;
       let stockReportSortState = { key: "active_order", direction: "asc" };
       let planReportPayload = null;
+      let shipmentRegistryPayload = null;
+      let shipmentRegistryInitialized = false;
+      let shipmentRegistryLoading = false;
       let wbSuppliesPayload = null;
       let wbSuppliesInitialized = false;
       let wbSuppliesLoading = false;
@@ -4479,6 +4626,9 @@
         if (activeModeName === "wildberries") {
           ensureWbSuppliesLoaded();
         }
+        if (activeModeName === "shipment-registry") {
+          ensureShipmentRegistryLoaded();
+        }
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ supply_mode: activeModeName });
         }
@@ -4559,6 +4709,10 @@
           }
           if (payload && payload.type === "sheet_vitrina_v1_supplier_shipments_changed") {
             loadFactoryStatus();
+            shipmentRegistryInitialized = false;
+            if (shipmentRegistryPanel && !shipmentRegistryPanel.hidden) {
+              loadShipmentRegistry();
+            }
           }
         });
       }
@@ -6797,6 +6951,139 @@
         renderRegionalResult(payload ? payload.last_result : null, payload && payload.active_sku_count);
       }
 
+      function setShipmentRegistryMessage(message, tone) {
+        if (!shipmentRegistryMessage) {
+          return;
+        }
+        shipmentRegistryMessage.textContent = message || "";
+        shipmentRegistryMessage.className = "section-message" + (tone ? " is-" + tone : "");
+      }
+
+      function updateShipmentRegistryBusyState() {
+        if (shipmentRegistryRefreshButton) {
+          shipmentRegistryRefreshButton.disabled = shipmentRegistryLoading;
+          shipmentRegistryRefreshButton.textContent = shipmentRegistryLoading ? "Обновляем..." : "Обновить реестр";
+        }
+      }
+
+      function ensureShipmentRegistryLoaded() {
+        if (shipmentRegistryInitialized || shipmentRegistryLoading) {
+          return;
+        }
+        shipmentRegistryInitialized = true;
+        loadShipmentRegistry();
+      }
+
+      async function loadShipmentRegistry() {
+        if (!config.supplier_shipment_registry_path) {
+          renderShipmentRegistry(null);
+          setShipmentRegistryMessage("Route реестра поставок не настроен.", "error");
+          return;
+        }
+        shipmentRegistryLoading = true;
+        updateShipmentRegistryBusyState();
+        setShipmentRegistryMessage("Читаем реестр поставок...", "");
+        try {
+          const response = await fetch(config.supplier_shipment_registry_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" },
+            cache: "no-store"
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          shipmentRegistryPayload = payload;
+          renderShipmentRegistry(payload);
+          setShipmentRegistryMessage("", "");
+        } catch (error) {
+          shipmentRegistryPayload = null;
+          renderShipmentRegistry(null);
+          setShipmentRegistryMessage(
+            "Не удалось прочитать реестр поставок: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          shipmentRegistryLoading = false;
+          updateShipmentRegistryBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      function renderShipmentRegistry(payload) {
+        const columns = Array.isArray(payload && payload.columns) ? payload.columns : [];
+        const sections = Array.isArray(payload && payload.sections) ? payload.sections : [];
+        const columnCount = columns.length + 1;
+        if (shipmentRegistrySummary) {
+          shipmentRegistrySummary.textContent = columns.length
+            ? "Поставок: " + columns.length
+            : "Поставки для реестра не найдены.";
+        }
+        if (shipmentRegistryHead) {
+          shipmentRegistryHead.innerHTML = [
+            "<tr>",
+            "<th class=\"shipment-registry-sticky\" scope=\"col\">Метрика</th>",
+            columns.map((column) => [
+              "<th scope=\"col\">",
+              "<span class=\"shipment-registry-column-title\">" + escapeHtml(registryDisplayValue(column.title || column.shipment_id)) + "</span>",
+              "<span class=\"shipment-registry-column-sub\">" + escapeHtml(registryDisplayValue(column.subtitle || column.order_status)) + "</span>",
+              "</th>"
+            ].join("")).join(""),
+            "</tr>"
+          ].join("");
+        }
+        if (!shipmentRegistryBody) {
+          return;
+        }
+        if (!columns.length) {
+          shipmentRegistryBody.innerHTML = "<tr><td class=\"shipment-registry-empty\" colspan=\"" + columnCount + "\">Поставки не найдены.</td></tr>";
+          return;
+        }
+        const bodyRows = [];
+        sections.forEach((section) => {
+          const sectionRows = Array.isArray(section && section.rows) ? section.rows : [];
+          bodyRows.push(
+            "<tr class=\"shipment-registry-section-row\"><th colspan=\"" + columnCount + "\">" + escapeHtml(registryDisplayValue(section.title)) + "</th></tr>"
+          );
+          sectionRows.forEach((row) => {
+            const cells = row && row.cells ? row.cells : {};
+            bodyRows.push([
+              "<tr>",
+              "<td class=\"shipment-registry-sticky\">" + escapeHtml(registryDisplayValue(row && row.label)) + "</td>",
+              columns.map((column) => {
+                const shipmentId = String(column.shipment_id || "");
+                const display = registryCellDisplay(cells[shipmentId]);
+                const emptyClass = display === "—" ? " shipment-registry-cell-empty" : "";
+                return "<td><span class=\"shipment-registry-cell-main" + emptyClass + "\">" + escapeHtml(display) + "</span></td>";
+              }).join(""),
+              "</tr>"
+            ].join(""));
+          });
+        });
+        shipmentRegistryBody.innerHTML = bodyRows.length
+          ? bodyRows.join("")
+          : "<tr><td class=\"shipment-registry-empty\" colspan=\"" + columnCount + "\">Строки реестра не найдены.</td></tr>";
+      }
+
+      function registryCellDisplay(cell) {
+        if (!cell || typeof cell !== "object") {
+          return "—";
+        }
+        if (cell.display !== null && cell.display !== undefined && String(cell.display).trim()) {
+          return registryDisplayValue(cell.display);
+        }
+        return registryDisplayValue(cell.value);
+      }
+
+      function registryDisplayValue(value) {
+        const text = String(value === null || value === undefined ? "" : value).trim();
+        const lower = text.toLowerCase();
+        if (!text || text === "-" || lower.includes("nan") || lower.includes("infinity")) {
+          return "—";
+        }
+        return text;
+      }
+
       function setWbSuppliesMessage(message, tone) {
         if (!wbSuppliesMessage) {
           return;
@@ -8417,6 +8704,12 @@
       sellerRecoveryStopButton.addEventListener("click", stopSellerRecovery);
       if (downloadRegionalRecommendationsZipButton) {
         downloadRegionalRecommendationsZipButton.addEventListener("click", downloadRegionalRecommendationsZip);
+      }
+      if (shipmentRegistryRefreshButton) {
+        shipmentRegistryRefreshButton.addEventListener("click", () => {
+          shipmentRegistryInitialized = true;
+          loadShipmentRegistry();
+        });
       }
 
       downloadStockFfTemplateButton.addEventListener("click", () => downloadBinary(

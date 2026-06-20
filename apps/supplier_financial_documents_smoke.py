@@ -20,6 +20,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     RegistryUploadHttpEntrypointConfig,
@@ -397,7 +398,7 @@ def _assert_incomplete_quote_summary_smoke() -> None:
 def _assert_summary_metrics_smoke() -> None:
     quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
     documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=True)
-    summary = build_financial_summary(documents, lines)
+    summary = build_financial_summary(documents, lines, shipment=_summary_shipment_fixture())
     _assert_current_financial_metrics(summary)
     if summary.get("warnings", []) and any("Нет " in warning for warning in summary.get("warnings", [])):
         raise AssertionError(f"complete summary must not report missing metric source warnings: {summary.get('warnings')}")
@@ -415,6 +416,11 @@ def _assert_missing_customs_data_summary_smoke() -> None:
     for key in ("logistics_pct", "customs_without_vat_pct", "customs_with_vat_pct", "delivery_customs_pct"):
         if fact_percent.get(key) is not None:
             raise AssertionError(f"missing-DT {key} must be unavailable: {fact_percent}")
+    per_unit = summary.get("per_unit", {})
+    if per_unit.get("quote_delivery_customs_rub_per_unit") is not None or per_unit.get("fact_delivery_customs_rub_per_unit") is not None:
+        raise AssertionError(f"missing total_units must make per-unit metrics unavailable: {per_unit}")
+    if "NaN" in json.dumps(summary, ensure_ascii=False) or "Infinity" in json.dumps(summary, ensure_ascii=False):
+        raise AssertionError(f"missing-data summary must not expose invalid numbers: {summary}")
 
 
 def _assert_new_quote_parser_smoke() -> None:
@@ -454,6 +460,7 @@ def _assert_new_quote_parser_smoke() -> None:
 def _assert_current_financial_metrics(summary: dict[str, Any]) -> None:
     quote_weight = summary.get("per_kg", {}).get("quote_weight", {})
     customs_weight = summary.get("per_kg", {}).get("customs_weight", {})
+    per_unit = summary.get("per_unit", {})
     quote_percent = summary.get("percent_of_value", {}).get("quote_cargo_value", {})
     fact_percent = summary.get("percent_of_value", {}).get("fact_customs_value", {})
     expected_metrics = [
@@ -466,18 +473,34 @@ def _assert_current_financial_metrics(summary: dict[str, Any]) -> None:
         (quote_percent.get("logistics_pct"), 14.40, "quote logistics percent"),
         (quote_percent.get("customs_pct"), 36.54, "quote customs percent"),
         (quote_percent.get("delivery_customs_pct"), 50.94, "quote total percent"),
+        (per_unit.get("total_units"), 116250.0, "total units"),
+        (per_unit.get("quote_total_rub_equivalent"), 4088263.64, "quote total RUB equivalent", 100.0),
+        (per_unit.get("quote_delivery_customs_rub_per_unit"), 35.17, "quote delivery+customs RUB/unit"),
+        (per_unit.get("fact_delivery_customs_rub_per_unit"), 35.34, "fact delivery+customs RUB/unit"),
         (fact_percent.get("logistics_pct"), 14.63, "fact logistics percent"),
         (fact_percent.get("customs_without_vat_pct"), 10.59, "fact customs without VAT percent"),
         (fact_percent.get("customs_with_vat_pct"), 34.79, "fact customs with VAT percent"),
         (fact_percent.get("delivery_customs_pct"), 49.42, "fact total percent"),
     ]
-    for actual, expected, label in expected_metrics:
-        if not _approx(actual, expected, tolerance=0.01):
+    for item in expected_metrics:
+        actual, expected, label = item[:3]
+        tolerance = item[3] if len(item) > 3 else 0.01
+        if not _approx(actual, expected, tolerance=tolerance):
             raise AssertionError(f"{label} mismatch: expected {expected}, got {actual}; summary={summary}")
     if not _approx(summary.get("customs_declaration", {}).get("gross_weight_kg"), 9784.6, tolerance=0.01):
         raise AssertionError(f"summary customs gross weight mismatch: {summary}")
     if fact_percent.get("customs_payments_without_vat_rub") != 880605.99:
         raise AssertionError(f"summary customs without VAT mismatch: {fact_percent}")
+
+
+def _summary_shipment_fixture() -> dict[str, Any]:
+    return {
+        "header": {
+            "shipment_id": "sup_financial",
+            "product_qty_total": 116250,
+        },
+        "lines": [],
+    }
 
 
 def _summary_fixture_documents_and_lines(quote_payload: dict[str, Any], *, include_customs: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -490,7 +513,13 @@ def _summary_fixture_documents_and_lines(quote_payload: dict[str, Any], *, inclu
 
 
 def _summary_documents_and_lines_from_payloads(payloads: list[tuple[str, dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    rates = {"quote": 78.0, "invoice-103": 77.5, "invoice-113": 78.2, "customs": None, "quote-2026-06-19": 78.0}
+    rates = {
+        "quote": 78.0,
+        "invoice-103": 77.5,
+        "invoice-113": 82.07119747159833,
+        "customs": None,
+        "quote-2026-06-19": 78.0,
+    }
     documents = [_document_from_parsed(document_id, payload, cbr_rate=rates.get(document_id)) for document_id, payload in payloads]
     lines: list[dict[str, Any]] = []
     for document, (_, parsed) in zip(documents, payloads, strict=True):
@@ -544,7 +573,7 @@ def _assert_http_api_smoke() -> None:
                 {
                     "2026-06-02": "78.00",
                     "2026-06-05": "77.50",
-                    "2026-06-18": "78.20",
+                    "2026-06-18": "82.07119747159833",
                 }
             ),
             pdf_text_extractor=_fixture_text_extractor,
@@ -579,6 +608,24 @@ def _assert_http_api_smoke() -> None:
             if not _approx(efficiency.get("rub_per_m3"), 26830.87, tolerance=0.01):
                 raise AssertionError(f"rub/m3 mismatch: {efficiency}")
             _assert_current_financial_metrics(summary)
+            registry_status, registry = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}")
+            if registry_status != 200 or registry.get("contract_name") != "sheet_vitrina_v1_supplier_shipment_registry":
+                raise AssertionError(f"shipment registry route mismatch: {registry_status} {registry}")
+            if registry.get("meta", {}).get("shipment_count") != 1:
+                raise AssertionError(f"shipment registry must expose one shipment column: {registry}")
+            registry_json = json.dumps(registry, ensure_ascii=False)
+            if "NaN" in registry_json or "Infinity" in registry_json:
+                raise AssertionError(f"shipment registry must not expose invalid numeric output: {registry}")
+            section_ids = [section.get("section_id") for section in registry.get("sections", [])]
+            for expected_section in ("passport", "cargo_physics", "quote_logistics", "fact_expenses", "fact_normalized", "documents"):
+                if expected_section not in section_ids:
+                    raise AssertionError(f"shipment registry missing section {expected_section}: {section_ids}")
+            if _registry_cell_display(registry, "quote_logistics", "quote_total_rub_per_unit", "sup_financial") != "35.17 ₽":
+                raise AssertionError(f"registry quote ₽/шт mismatch: {registry}")
+            if _registry_cell_display(registry, "fact_expenses", "fact_total_rub_per_unit", "sup_financial") != "35.34 ₽":
+                raise AssertionError(f"registry fact ₽/шт mismatch: {registry}")
+            if _registry_cell_display(registry, "cargo_physics", "customs_weight", "sup_financial") != "9 784.60 кг":
+                raise AssertionError(f"registry customs weight mismatch: {registry}")
             if _approx(match.get("implied_rate"), 3799.92, tolerance=0.01) or _approx(match.get("relative_spread_pct"), 51.23, tolerance=0.01):
                 raise AssertionError(f"summary must not expose bogus rate/spread: {match}")
             quote_document_id = _document_id_by_type(listed, "logistics_quote")
@@ -638,7 +685,7 @@ def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
             "supplier_name": "HanShang Technology",
             "customer_name": "",
             "currency": "CNY",
-            "product_qty_total": 0,
+            "product_qty_total": 116250,
             "product_amount_total": 0,
             "extras_amount_total": 0,
             "invoice_amount_total": 0,
@@ -679,6 +726,16 @@ def _document_id_by_type(payload: Mapping[str, Any], document_type: str) -> str:
     for document in payload.get("documents", []):
         if document.get("document_type") == document_type:
             return str(document.get("document_id") or "")
+    return ""
+
+
+def _registry_cell_display(registry: Mapping[str, Any], section_id: str, row_id: str, shipment_id: str) -> str:
+    for section in registry.get("sections", []):
+        if section.get("section_id") != section_id:
+            continue
+        for row in section.get("rows", []):
+            if row.get("row_id") == row_id:
+                return str((row.get("cells", {}).get(shipment_id) or {}).get("display") or "")
     return ""
 
 

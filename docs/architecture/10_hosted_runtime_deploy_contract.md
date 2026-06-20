@@ -69,6 +69,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 - `GET /sheet-vitrina-v1/supplier`
 - `GET /v1/sheet-vitrina-v1/supply/supplier-shipments`
+- `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/registry`
 - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse`
 - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments`
 - `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}`
@@ -442,6 +443,7 @@ Public probe validates:
 - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` returns JSON with active SKU count, methodology note, shared dataset state and optional last result
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies` returns protected cached WB supplies JSON only, supports `sort_key=supply_date&sort_dir=asc|desc`, and sorts all filtered rows before pagination.
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options` returns protected server-validated selector options for calculation-only WB supply overlays, including eligibility, disabled reasons, dates, active-SKU usable quantity and warehouse district mapping diagnostics.
+- `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/registry` returns protected read-only supplier shipment matrix JSON for `Поставки -> Реестр поставок`; it is built from existing supplier shipment and financial-document runtime truth and must return grouped rows with `—`/null-equivalent missing values instead of `NaN`/`Infinity`.
 - `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync` is the ordinary protected latest-window refresh: it fetches `offset=0`, compares raw hashes/`updatedDate`, upserts new/changed rows, enriches detail/goods only for new/changed rows by default, retries old critical-missing rows only when explicitly requested with `enrich=missing_critical`, and returns controlled JSON errors with sanitized upstream status/content-type/body prefix.
 - `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill` starts a protected background full-history backfill and returns `202` with `run_id`; the job walks WB list pagination by `limit/offset`, saves resumable progress after each page, keeps old rows, and records partial/blocker state on 429/timeout/non-JSON/upstream failures.
 - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status` returns protected JSON run progress and sync state for WB supplies incremental/backfill jobs.
