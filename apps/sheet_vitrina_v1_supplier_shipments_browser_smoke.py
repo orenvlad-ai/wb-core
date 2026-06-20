@@ -34,8 +34,39 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.supplier_financial_documents import (  # noqa: E402
+    StaticUsdRateProvider,
+    SupplierFinancialDocumentsBlock,
+)
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
+
+
+QUOTE_COMPARISON_TEXT = """
+Коммерческое предложение на транспортно-экспедиционные услуги по тарифу «Авто стандарт 25-30 дней»
+Transitplus International Ltd
+Наименование груза: СТЕКЛА ДЛЯ СМАРТФОНА
+г. Москва 19.06.2026
+Город отправки: Guangzhou (Гуанчжоу)
+Пункт назначения: Москва
+Сроки доставки: 25-30 дней
+Вес брутто, кг. 6713,45
+Вес нетто, кг: 6713,45
+Объем, м3 31,28
+Оценочная стоимость груза, долл. 77423,22 USD или 541962,50 юаней
+1. Предварительный расчет стоимости:
+№ Перечень услуг Общая стоимость
+1 Стоимость доставки 12420
+2 Таможенные платежи и сборы 27175
+3 Экологический сбор 0
+4 Брокерские услуги 350
+5 Комиссия компании 0
+6 Страховая ставка, % 775
+ИТОГО: 40720 USD
+Оформление разрешительной документации 0 USD
+Оплата за доставку производится: по курсу Банка ВТБ (на дату выставления счета)
+Предложение действительно в течение 5 календарных дней
+"""
 
 
 def main() -> None:
@@ -43,6 +74,8 @@ def main() -> None:
         tmp_path = Path(tmp)
         invoice_path = tmp_path / "PI-test 26GN390 (14.5.2026).xlsx"
         invoice_path.write_bytes(_build_invoice_fixture())
+        quote_comparison_path = tmp_path / "quote-comparison.pdf"
+        quote_comparison_path.write_bytes(b"%PDF-1.4\n% synthetic quote comparison browser smoke\n")
         runtime_dir = tmp_path / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         config = RegistryUploadHttpEntrypointConfig(
@@ -59,6 +92,12 @@ def main() -> None:
             runtime_dir=runtime_dir,
             runtime=runtime,
             activated_at_factory=lambda: "2026-05-30T08:00:00Z",
+        )
+        entrypoint.supplier_financial_documents_block = SupplierFinancialDocumentsBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: "2026-05-30T08:00:00Z",
+            usd_rate_provider=StaticUsdRateProvider({"2026-06-19": "78.00"}),
+            pdf_text_extractor=_fixture_financial_text_extractor,
         )
         documents_block = SupplierShipmentsBlock(
             runtime=runtime,
@@ -395,6 +434,28 @@ def main() -> None:
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: доставка+таможня, ₽/шт", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("факт доставка+таможня ₽/шт", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("—", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryQuoteFileButton")).to_be_visible(timeout=5000)
+                expect(operator_frame.locator("[data-shipment-registry-select]").first).to_be_visible(timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryCompareButton")).to_be_disabled()
+                operator_frame.locator("#shipmentRegistryQuoteFileInput").set_input_files(str(quote_comparison_path))
+                expect(operator_frame.locator("#shipmentRegistryQuoteFileName")).to_contain_text("quote-comparison.pdf", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryCompareButton")).to_be_disabled()
+                operator_frame.locator("[data-shipment-registry-select]").first.check()
+                expect(operator_frame.locator("#shipmentRegistryCompareButton")).to_be_enabled(timeout=5000)
+                operator_frame.locator("#shipmentRegistryCompareButton").click()
+                try:
+                    expect(operator_frame.locator("#shipmentRegistryComparisonBlock")).to_be_visible(timeout=10000)
+                except AssertionError as exc:
+                    message = operator_frame.locator("#shipmentRegistryMessage").inner_text(timeout=1000)
+                    button_text = operator_frame.locator("#shipmentRegistryCompareButton").inner_text(timeout=1000)
+                    raise AssertionError(
+                        f"shipment registry comparison did not render; message={message!r}; compare_button={button_text!r}"
+                    ) from exc
+                expect(operator_frame.locator("#shipmentRegistryComparisonBody")).to_contain_text("КП: доставка+таможня, % от стоимости груза", timeout=10000)
+                expect(operator_frame.locator("#shipmentRegistryComparisonBody")).to_contain_text("52.59%", timeout=10000)
+                comparison_text = operator_frame.locator("#shipmentRegistryComparisonBody").inner_text()
+                if "NaN" in comparison_text or "Infinity" in comparison_text:
+                    raise AssertionError(f"shipment registry comparison browser output contains invalid numbers: {comparison_text}")
                 registry_text = operator_frame.locator("#shipmentRegistryBody").inner_text()
                 if "NaN" in registry_text or "Infinity" in registry_text:
                     raise AssertionError(f"shipment registry browser output contains invalid numbers: {registry_text}")
@@ -583,6 +644,13 @@ def _patched_env(values: dict[str, str]):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _fixture_financial_text_extractor(file_bytes: bytes, filename: str):
+    del file_bytes
+    if str(filename or "") == "quote-comparison.pdf":
+        return QUOTE_COMPARISON_TEXT, {"method": "fixture_text", "filename": filename}, []
+    return "", {"method": "fixture_text", "filename": filename}, ["fixture text is not configured for this filename"]
 
 
 def _build_invoice_fixture() -> bytes:

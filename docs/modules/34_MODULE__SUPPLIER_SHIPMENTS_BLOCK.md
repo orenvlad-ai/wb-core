@@ -33,6 +33,7 @@ related_endpoints:
   - "GET /sheet-vitrina-v1/settings"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
+  - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/registry/compare-quote"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}"
@@ -160,10 +161,12 @@ update_note: "Supplier-facing order registry uses trilingual Chinese/English/Rus
 
 - `Поставки -> Реестр поставок` is an operator-only read-side matrix for comparing official supplier shipments. It does not create a parallel storage layer and does not call Google Sheets/GAS.
 - Protected read-only route: `GET /v1/sheet-vitrina-v1/supply/supplier-shipments/registry`. Response contract is `sheet_vitrina_v1_supplier_shipment_registry` with `columns[]` for shipments, grouped `sections[]`, row ids, labels and per-shipment cells shaped as `{value, display}`.
+- Protected temporary comparison route: `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/registry/compare-quote` accepts multipart `file` + `shipment_id`, parses the PDF with the existing logistics quote parser, and returns `sheet_vitrina_v1_supplier_shipment_registry_quote_comparison`. The uploaded quote is not saved as a financial document, supplier shipment or runtime source of truth.
 - The matrix is built from existing runtime truth: supplier shipment headers/lines, supplier financial documents, financial expense lines and `build_financial_summary(..., shipment=...)`. Missing financial documents or denominators produce `value = null` and `display = "—"` rather than `0`, `NaN` or `Infinity`.
 - Shipments are sorted by invoice date, then shipment/order date or upload/created date; newer shipments are rightmost. Column headers expose the invoice/order number and date so later sorting changes do not hide date evidence.
 - Row groups are: passport, cargo physics, cargo value, logistics quote, fact expenses, normalized fact metrics, lead times and documents. The UI renders these groups with horizontal scroll and sticky left row labels.
 - Registry quote RUB/unit uses `quote_total_usd * quote_total_rate / total_units`, where `quote_total_rate` is the same quote-vs-invoice CBR spread estimate when invoices are available and falls back to the quote-date CBR rate when only КП is available. Fact RUB/unit uses `(logistics_invoice_total_rub + customs_total_payments_rub) / total_units`.
+- The comparison UI lets an operator choose one temporary КП PDF, select exactly one shipment column, and render grouped rows with `КП`, `Поставка факт`, `Разница` and simple status (`лучше`, `хуже`, `примерно равно`). Numeric differences are `КП - Поставка`, percent differences use the shipment value as baseline when available, and missing baselines remain `—`.
 
 # 2. Parser
 

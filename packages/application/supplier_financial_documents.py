@@ -233,23 +233,109 @@ class SupplierFinancialDocumentsBlock:
             shipment_id = str(row.get("shipment_id") or "").strip()
             if not shipment_id:
                 continue
-            detail = self.runtime.load_supplier_shipment(shipment_id) or {"header": row, "lines": []}
-            documents = self._refresh_saved_document_parses(
-                self.runtime.list_supplier_financial_documents(shipment_id)
-            )
-            expense_lines = self.runtime.list_supplier_financial_expense_lines(shipment_id)
-            summary = build_financial_summary(documents, expense_lines, shipment=detail)
-            contexts.append(
-                {
-                    "shipment_id": shipment_id,
-                    "header": dict(detail.get("header") or row),
-                    "lines": [dict(item) for item in detail.get("lines") or []],
-                    "documents": documents,
-                    "expense_lines": expense_lines,
-                    "summary": summary,
-                }
-            )
+            contexts.append(self._shipment_registry_context(shipment_id, fallback_header=row))
         return build_supplier_shipment_registry(contexts)
+
+    def compare_registry_quote(
+        self,
+        shipment_id: str,
+        *,
+        file_bytes: bytes,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_supplier_order(shipment_id)
+        if not file_bytes:
+            raise ValueError("quote comparison upload file is empty")
+        filename = _safe_filename(uploaded_filename or "logistics-quote.pdf")
+        if Path(filename).suffix.lower() not in FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS:
+            raise ValueError("quote comparison upload must be a PDF file")
+        content_type = str(uploaded_content_type or "").split(";", 1)[0].strip().lower() or FINANCIAL_DOCUMENT_CONTENT_TYPE
+        parsed = parse_financial_document_pdf(
+            file_bytes,
+            filename=filename,
+            text_extractor=self.pdf_text_extractor,
+        )
+        normalized = dict(parsed.get("normalized_parse") or {})
+        warnings = _string_list(parsed.get("warnings"))
+        errors = _string_list(parsed.get("errors"))
+        if str(normalized.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE:
+            if not errors:
+                errors.append("uploaded file was not recognized as a logistics quote")
+            raise ValueError("comparison PDF must be a logistics quote")
+        expense_lines = [dict(item) for item in parsed.get("expense_lines") or []]
+        rate_result = self._rate_for_document(normalized)
+        if rate_result is not None:
+            normalized["cbr_usd_rate"] = _rate_result_to_dict(rate_result)
+            if rate_result.status != FX_RATE_STATUS_OK:
+                warnings.append(f"CBR USD rate is pending or missing for {rate_result.requested_date}")
+            else:
+                _apply_usd_rate_to_parse(normalized, expense_lines, rate_result.rate_value)
+        parse_status = _parse_status_for_payload(parsed, warnings, errors, rate_result)
+        if parse_status == FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR:
+            raise ValueError("; ".join(errors) or "comparison PDF parser returned parse_error")
+        now = self.timestamp_factory()
+        document_id = "temp_quote_comparison"
+        document = {
+            "document_id": document_id,
+            "supplier_order_id": str(shipment_id or "").strip(),
+            "document_type": normalized.get("document_type") or "",
+            "original_filename": filename,
+            "stored_file_path": "",
+            "file_content_type": content_type,
+            "file_sha256": hashlib.sha256(file_bytes).hexdigest(),
+            "uploaded_at": now,
+            "updated_at": now,
+            "parse_status": parse_status,
+            "vendor": normalized.get("vendor") or "",
+            "document_number": normalized.get("document_number") or "",
+            "document_date": normalized.get("document_date") or normalized.get("quote_date") or "",
+            "currency": normalized.get("currency") or "",
+            "total_amount": _decimal_to_float(_parse_decimal(normalized.get("total_amount"))),
+            "total_amount_rub": _decimal_to_float(_parse_decimal(normalized.get("total_amount_rub"))),
+            "vat_rate": _decimal_to_float(_parse_decimal(normalized.get("vat_rate"))),
+            "vat_amount_rub": _decimal_to_float(_parse_decimal(normalized.get("vat_amount_rub"))),
+            "due_date": normalized.get("due_date") or "",
+            "route": normalized.get("route") or "",
+            "contract_ref": normalized.get("contract_ref") or normalized.get("contract") or "",
+            "cbr_usd_rate_requested_date": rate_result.requested_date if rate_result else "",
+            "cbr_usd_rate_effective_date": rate_result.effective_date if rate_result else "",
+            "cbr_usd_rate_value": _decimal_to_float(rate_result.rate_value if rate_result else None),
+            "rate_source": rate_result.source if rate_result else "",
+            "rate_source_status": rate_result.status if rate_result else "",
+            "raw_parse": dict(parsed.get("raw_parse") or {}),
+            "normalized_parse": normalized,
+            "parser_version": parsed.get("parser_version") or FINANCIAL_DOCUMENT_PARSER_VERSION,
+            "warnings": _dedupe_strings(warnings),
+            "errors": _dedupe_strings(errors),
+        }
+        stored_lines = [
+            _expense_line_for_storage(
+                line,
+                supplier_order_id=str(shipment_id or "").strip(),
+                document_id=document_id,
+                sort_order=index,
+            )
+            for index, line in enumerate(expense_lines, start=1)
+        ]
+        shipment_context = self._shipment_registry_context(shipment_id)
+        shipment_detail = {
+            "header": dict(shipment_context.get("header") or {}),
+            "lines": [dict(item) for item in shipment_context.get("lines") or []],
+        }
+        quote_context = {
+            "shipment_id": "temporary_quote",
+            "header": {},
+            "lines": [],
+            "documents": [document],
+            "expense_lines": stored_lines,
+            "summary": build_financial_summary([document], stored_lines, shipment=shipment_detail),
+        }
+        return build_supplier_shipment_registry_quote_comparison(
+            quote_context=quote_context,
+            shipment_context=shipment_context,
+            uploaded_filename=filename,
+        )
 
     def get_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
@@ -534,6 +620,35 @@ class SupplierFinancialDocumentsBlock:
     def _ensure_supplier_order(self, supplier_order_id: str) -> None:
         if self.runtime.load_supplier_shipment(str(supplier_order_id or "").strip()) is None:
             raise ValueError(f"supplier shipment not found: {supplier_order_id}")
+
+    def _shipment_registry_context(
+        self,
+        shipment_id: str,
+        *,
+        fallback_header: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_shipment_id = str(shipment_id or "").strip()
+        detail = self.runtime.load_supplier_shipment(normalized_shipment_id)
+        if detail is None:
+            if fallback_header is None:
+                raise ValueError(f"supplier shipment not found: {shipment_id}")
+            detail = {"header": fallback_header, "lines": []}
+        documents = self._refresh_saved_document_parses(
+            self.runtime.list_supplier_financial_documents(normalized_shipment_id)
+        )
+        expense_lines = self.runtime.list_supplier_financial_expense_lines(normalized_shipment_id)
+        summary = build_financial_summary(documents, expense_lines, shipment=detail)
+        header = dict(detail.get("header") or fallback_header or {})
+        if not header.get("shipment_id") and normalized_shipment_id:
+            header["shipment_id"] = normalized_shipment_id
+        return {
+            "shipment_id": normalized_shipment_id,
+            "header": header,
+            "lines": [dict(item) for item in detail.get("lines") or []],
+            "documents": documents,
+            "expense_lines": expense_lines,
+            "summary": summary,
+        }
 
     def _write_document_file(self, *, supplier_order_id: str, document_id: str, filename: str, body: bytes) -> str:
         safe_filename = _safe_filename(filename)
@@ -970,6 +1085,312 @@ def build_supplier_shipment_registry(contexts: list[Mapping[str, Any]]) -> dict[
             "sort": "invoice_date/shipment_date/created_at ascending; newer shipments are rightmost",
         },
     }
+
+
+def build_supplier_shipment_registry_quote_comparison(
+    *,
+    quote_context: Mapping[str, Any],
+    shipment_context: Mapping[str, Any],
+    uploaded_filename: str,
+) -> dict[str, Any]:
+    quote_doc = _registry_doc(quote_context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)
+    parse_status = str(quote_doc.get("parse_status") or "")
+    warnings = _dedupe_strings(
+        [
+            *_string_list(quote_doc.get("warnings")),
+            *_string_list(quote_doc.get("errors")),
+        ]
+    )
+    return {
+        "contract_name": "sheet_vitrina_v1_supplier_shipment_registry_quote_comparison",
+        "status": "needs_review" if parse_status == FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW else "ok",
+        "quote": _comparison_quote_payload(quote_context, uploaded_filename=uploaded_filename),
+        "selected_shipment": _comparison_shipment_payload(shipment_context),
+        "sections": _comparison_sections(quote_context, shipment_context),
+        "warnings": warnings,
+    }
+
+
+def _comparison_quote_payload(context: Mapping[str, Any], *, uploaded_filename: str) -> dict[str, Any]:
+    quote_doc = _registry_doc(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)
+    normalized = dict(quote_doc.get("normalized_parse") or {})
+    return {
+        "filename": uploaded_filename,
+        "parse_status": quote_doc.get("parse_status") or "",
+        "document_type": quote_doc.get("document_type") or "",
+        "vendor": quote_doc.get("vendor") or normalized.get("vendor") or "",
+        "quote_date": normalized.get("quote_date") or quote_doc.get("document_date") or "",
+        "tariff": normalized.get("tariff") or "",
+        "route": normalized.get("route") or _registry_route(context),
+        "normalized_parse": normalized,
+        "summary": _registry_summary(context),
+        "warnings": _dedupe_strings(_string_list(quote_doc.get("warnings"))),
+        "errors": _dedupe_strings(_string_list(quote_doc.get("errors"))),
+    }
+
+
+def _comparison_shipment_payload(context: Mapping[str, Any]) -> dict[str, Any]:
+    column = _registry_column(context)
+    return {
+        **column,
+        "supplier": _registry_header(context).get("supplier_name") or "",
+        "logistics_vendor": _registry_logistics_vendor(context),
+        "document_status": _registry_document_status(context),
+        "summary": _registry_summary(context),
+    }
+
+
+def _comparison_sections(
+    quote_context: Mapping[str, Any],
+    shipment_context: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    sections = [
+        (
+            "cargo_physics",
+            "A. Физика груза",
+            [
+                _comparison_row(
+                    "gross_weight_kg",
+                    "Вес, кг",
+                    _registry_number(_summary_path(quote_context, "quote", "gross_weight_kg"), suffix=" кг"),
+                    _registry_number(_summary_path(shipment_context, "customs_declaration", "gross_weight_kg"), suffix=" кг"),
+                    suffix=" кг",
+                ),
+                _comparison_row(
+                    "volume_m3",
+                    "Объём, м³",
+                    _registry_number(_summary_path(quote_context, "logistics_efficiency", "volume_m3"), suffix=" м³"),
+                    _registry_number(_summary_path(shipment_context, "logistics_efficiency", "volume_m3"), suffix=" м³"),
+                    suffix=" м³",
+                ),
+                _comparison_row(
+                    "cargo_value_usd",
+                    "Стоимость груза, USD",
+                    _registry_money(_summary_path(quote_context, "quote", "estimated_cargo_value_usd"), "USD"),
+                    _registry_money(_summary_path(shipment_context, "quote", "estimated_cargo_value_usd"), "USD"),
+                    suffix=" USD",
+                ),
+            ],
+        ),
+        (
+            "quote_logistics",
+            "B. КП / логистика",
+            [
+                _comparison_row(
+                    "quote_logistics_usd",
+                    "Услуги логиста, USD",
+                    _registry_money(_summary_path(quote_context, "quote", "logistics_usd"), "USD"),
+                    _registry_money(_summary_path(shipment_context, "quote", "logistics_usd"), "USD"),
+                    suffix=" USD",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "quote_customs_usd",
+                    "Таможня по КП/оценке, USD",
+                    _registry_money(_summary_path(quote_context, "quote", "customs_payments_usd"), "USD"),
+                    _registry_money(_summary_path(shipment_context, "quote", "customs_payments_usd"), "USD"),
+                    suffix=" USD",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "quote_total_usd",
+                    "Всего доставка+таможня, USD",
+                    _registry_money(_summary_path(quote_context, "quote", "total_usd"), "USD"),
+                    _registry_money(_summary_path(shipment_context, "quote", "total_usd"), "USD"),
+                    suffix=" USD",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "quote_logistics_pct",
+                    "КП: услуги логиста, % от стоимости груза",
+                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "logistics_pct")),
+                    _registry_percent(_summary_path(shipment_context, "percent_of_value", "quote_cargo_value", "logistics_pct")),
+                    suffix="%",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "quote_customs_pct",
+                    "КП: таможня, % от стоимости груза",
+                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "customs_pct")),
+                    _registry_percent(_summary_path(shipment_context, "percent_of_value", "quote_cargo_value", "customs_pct")),
+                    suffix="%",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "quote_total_pct",
+                    "КП: доставка+таможня, % от стоимости груза",
+                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "delivery_customs_pct")),
+                    _registry_percent(_summary_path(shipment_context, "percent_of_value", "quote_cargo_value", "delivery_customs_pct")),
+                    suffix="%",
+                    direction="lower_is_better",
+                ),
+            ],
+        ),
+        (
+            "normalized",
+            "C. Нормализованные метрики",
+            [
+                _comparison_row(
+                    "logistics_rub_per_kg",
+                    "Услуги логиста, ₽/кг",
+                    _registry_money(_quote_component_rub_per_kg_for_comparison(quote_context, "logistics"), "₽"),
+                    _registry_money(_summary_path(shipment_context, "per_kg", "customs_weight", "logistics_invoice_rub_per_kg"), "₽"),
+                    suffix=" ₽",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "customs_rub_per_kg",
+                    "Таможня, ₽/кг",
+                    _registry_money(_quote_component_rub_per_kg_for_comparison(quote_context, "customs"), "₽"),
+                    _registry_money(_summary_path(shipment_context, "per_kg", "customs_weight", "customs_payments_rub_per_kg"), "₽"),
+                    suffix=" ₽",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "delivery_customs_rub_per_kg",
+                    "Доставка+таможня, ₽/кг",
+                    _registry_money(_quote_component_rub_per_kg_for_comparison(quote_context, "total"), "₽"),
+                    _registry_money(_summary_path(shipment_context, "per_kg", "customs_weight", "delivery_customs_rub_per_kg"), "₽"),
+                    suffix=" ₽",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "delivery_customs_rub_per_unit",
+                    "Доставка+таможня, ₽/шт",
+                    _registry_money(_summary_path(quote_context, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽"),
+                    _registry_money(_summary_path(shipment_context, "per_unit", "fact_delivery_customs_rub_per_unit"), "₽"),
+                    suffix=" ₽",
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "delivery_customs_pct_of_value",
+                    "Доставка+таможня, % от стоимости",
+                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "delivery_customs_pct")),
+                    _registry_percent(_summary_path(shipment_context, "percent_of_value", "fact_customs_value", "delivery_customs_pct")),
+                    suffix="%",
+                    direction="lower_is_better",
+                ),
+            ],
+        ),
+        (
+            "lead_times",
+            "D. Сроки",
+            [
+                _comparison_row(
+                    "quote_delivery_days",
+                    "Срок доставки по КП",
+                    _quote_delivery_days_cell(quote_context),
+                    _quote_delivery_days_cell(shipment_context),
+                    suffix=" дн.",
+                    decimals=0,
+                    direction="lower_is_better",
+                ),
+                _comparison_row(
+                    "actual_delivery_days",
+                    "Фактический срок поставки",
+                    _registry_blank(),
+                    _registry_number(_actual_delivery_days(shipment_context), suffix=" дн.", decimals=0),
+                    suffix=" дн.",
+                    decimals=0,
+                ),
+            ],
+        ),
+    ]
+    return [{"section_id": section_id, "title": title, "rows": rows} for section_id, title, rows in sections]
+
+
+def _comparison_row(
+    row_id: str,
+    label: str,
+    quote_cell: Mapping[str, Any],
+    shipment_cell: Mapping[str, Any],
+    *,
+    suffix: str = "",
+    decimals: int = 2,
+    direction: str = "neutral",
+) -> dict[str, Any]:
+    quote_payload = dict(quote_cell or _registry_blank())
+    shipment_payload = dict(shipment_cell or _registry_blank())
+    return {
+        "row_id": row_id,
+        "label": label,
+        "quote": quote_payload,
+        "shipment": shipment_payload,
+        "difference": _comparison_difference_cell(
+            quote_payload,
+            shipment_payload,
+            suffix=suffix,
+            decimals=decimals,
+        ),
+        "status": _comparison_status_cell(quote_payload, shipment_payload, direction=direction),
+    }
+
+
+def _comparison_difference_cell(
+    quote_cell: Mapping[str, Any],
+    shipment_cell: Mapping[str, Any],
+    *,
+    suffix: str,
+    decimals: int,
+) -> dict[str, Any]:
+    quote_value = _parse_decimal(quote_cell.get("value") if isinstance(quote_cell, Mapping) else None)
+    shipment_value = _parse_decimal(shipment_cell.get("value") if isinstance(shipment_cell, Mapping) else None)
+    if quote_value is None or shipment_value is None:
+        return _registry_blank()
+    delta = quote_value - shipment_value
+    delta_cell = _registry_number(delta, suffix=suffix, decimals=decimals, signed=True)
+    pct_delta = _percent(delta, shipment_value)
+    if pct_delta is not None:
+        pct_cell = _registry_number(pct_delta, suffix="%", decimals=2, signed=True)
+        delta_cell["display"] = f"{delta_cell['display']} · {pct_cell['display']}"
+    return delta_cell
+
+
+def _comparison_status_cell(
+    quote_cell: Mapping[str, Any],
+    shipment_cell: Mapping[str, Any],
+    *,
+    direction: str,
+) -> dict[str, Any]:
+    if direction != "lower_is_better":
+        return _registry_blank()
+    quote_value = _parse_decimal(quote_cell.get("value") if isinstance(quote_cell, Mapping) else None)
+    shipment_value = _parse_decimal(shipment_cell.get("value") if isinstance(shipment_cell, Mapping) else None)
+    if quote_value is None or shipment_value is None:
+        return _registry_blank()
+    delta = quote_value - shipment_value
+    tolerance = max(abs(shipment_value) * Decimal("0.005"), Decimal("0.01"))
+    if abs(delta) <= tolerance:
+        return _registry_cell("equal", "примерно равно")
+    if delta < 0:
+        return _registry_cell("better", "лучше")
+    return _registry_cell("worse", "хуже")
+
+
+def _quote_component_rub_per_kg_for_comparison(context: Mapping[str, Any], component: str) -> Decimal | None:
+    rate = _parse_decimal(_summary_path(context, "quote_invoice_match", "estimated_bank_rate_on_quote_date"))
+    quote_doc = _registry_doc(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)
+    if rate is None:
+        rate = _parse_decimal(quote_doc.get("cbr_usd_rate_value"))
+    if rate is None:
+        rate = _parse_decimal(dict(_registry_quote_meta(context).get("cbr_usd_rate") or {}).get("rate_value"))
+    weight = _parse_decimal(_summary_path(context, "quote", "gross_weight_kg"))
+    if component == "logistics":
+        usd = _parse_decimal(_summary_path(context, "quote", "logistics_usd"))
+    elif component == "customs":
+        usd = _parse_decimal(_summary_path(context, "quote", "customs_payments_usd"))
+    else:
+        usd = _parse_decimal(_summary_path(context, "quote", "total_usd"))
+    return _safe_div(usd * rate if usd is not None and rate is not None else None, weight)
+
+
+def _quote_delivery_days_cell(context: Mapping[str, Any]) -> dict[str, Any]:
+    quote = _registry_quote_meta(context)
+    min_days = _int_or_none(quote.get("delivery_days_min"))
+    max_days = _int_or_none(quote.get("delivery_days_max"))
+    value = max_days or min_days
+    display = _quote_delivery_days_display(context)
+    return _registry_cell(_decimal_to_float(Decimal(str(value))) if value is not None else None, display or "—")
 
 
 def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Callable[[Mapping[str, Any]], dict[str, Any]]]]]]:

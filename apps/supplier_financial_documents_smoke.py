@@ -20,6 +20,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH,
     DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
@@ -293,6 +294,7 @@ CN   107.250 ОООО-ОО
 
 TEXT_BY_FILENAME = {
     "quote.pdf": QUOTE_TEXT,
+    "quote-2026-06-19.pdf": QUOTE_2026_06_19_TEXT,
     "invoice-103.pdf": INVOICE_103_TEXT,
     "invoice-113.pdf": INVOICE_113_TEXT,
     "customs.pdf": CUSTOMS_TEXT,
@@ -428,7 +430,14 @@ def _assert_new_quote_parser_smoke() -> None:
     quote = quote_payload["normalized_parse"]
     expected = {
         "quote_date": "2026-06-19",
+        "vendor": "Transitplus International Ltd",
+        "tariff": "Авто стандарт 25-30 дней",
+        "origin": "Guangzhou / Гуанчжоу",
+        "destination": "Москва",
+        "delivery_days_min": 25,
+        "delivery_days_max": 30,
         "gross_weight_kg": 6713.45,
+        "net_weight_kg": 6713.45,
         "volume_m3": 31.28,
         "estimated_cargo_value_usd": 77423.22,
         "estimated_cargo_value_cny": 541962.50,
@@ -574,6 +583,7 @@ def _assert_http_api_smoke() -> None:
                     "2026-06-02": "78.00",
                     "2026-06-05": "77.50",
                     "2026-06-18": "82.07119747159833",
+                    "2026-06-19": "78.00",
                 }
             ),
             pdf_text_extractor=_fixture_text_extractor,
@@ -626,6 +636,37 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"registry fact ₽/шт mismatch: {registry}")
             if _registry_cell_display(registry, "cargo_physics", "customs_weight", "sup_financial") != "9 784.60 кг":
                 raise AssertionError(f"registry customs weight mismatch: {registry}")
+            compare_status, compare_payload = _post_multipart(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH}",
+                b"%PDF-1.4\n% synthetic quote comparison smoke\n",
+                filename="quote-2026-06-19.pdf",
+                fields={"shipment_id": "sup_financial"},
+            )
+            if (
+                compare_status != 200
+                or compare_payload.get("contract_name") != "sheet_vitrina_v1_supplier_shipment_registry_quote_comparison"
+                or compare_payload.get("selected_shipment", {}).get("shipment_id") != "sup_financial"
+            ):
+                raise AssertionError(f"registry compare quote route mismatch: {compare_status} {compare_payload}")
+            compare_json = json.dumps(compare_payload, ensure_ascii=False)
+            if "NaN" in compare_json or "Infinity" in compare_json:
+                raise AssertionError(f"registry compare quote must not expose invalid numbers: {compare_payload}")
+            quote_meta = compare_payload.get("quote", {}).get("normalized_parse", {})
+            if (
+                quote_meta.get("quote_date") != "2026-06-19"
+                or quote_meta.get("gross_weight_kg") != 6713.45
+                or quote_meta.get("total_quote_usd") != 40720.0
+            ):
+                raise AssertionError(f"registry compare quote parsed fields mismatch: {quote_meta}")
+            if _comparison_cell_display(compare_payload, "quote_logistics", "quote_total_pct", "quote") != "52.59%":
+                raise AssertionError(f"registry compare quote percent mismatch: {compare_payload}")
+            if _comparison_cell_display(compare_payload, "normalized", "delivery_customs_pct_of_value", "shipment") != "49.42%":
+                raise AssertionError(f"registry compare shipment fact percent mismatch: {compare_payload}")
+            if _comparison_cell_display(compare_payload, "normalized", "delivery_customs_rub_per_kg", "status") != "хуже":
+                raise AssertionError(f"registry compare status mismatch: {compare_payload}")
+            after_compare_status, after_compare_list = _get_json(collection_url)
+            if after_compare_status != 200 or len(after_compare_list.get("documents", [])) != 4:
+                raise AssertionError(f"temporary quote compare must not persist financial documents: {after_compare_status} {after_compare_list}")
             if _approx(match.get("implied_rate"), 3799.92, tolerance=0.01) or _approx(match.get("relative_spread_pct"), 51.23, tolerance=0.01):
                 raise AssertionError(f"summary must not expose bogus rate/spread: {match}")
             quote_document_id = _document_id_by_type(listed, "logistics_quote")
@@ -739,6 +780,16 @@ def _registry_cell_display(registry: Mapping[str, Any], section_id: str, row_id:
     return ""
 
 
+def _comparison_cell_display(comparison: Mapping[str, Any], section_id: str, row_id: str, cell_key: str) -> str:
+    for section in comparison.get("sections", []):
+        if section.get("section_id") != section_id:
+            continue
+        for row in section.get("rows", []):
+            if row.get("row_id") == row_id:
+                return str((row.get(cell_key) or {}).get("display") or "")
+    return ""
+
+
 def _get_json(url: str) -> tuple[int, dict[str, Any]]:
     request = urllib_request.Request(url, headers={"Accept": "application/json"})
     try:
@@ -766,13 +817,28 @@ def _delete_json(url: str) -> tuple[int, dict[str, Any]]:
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
-def _post_multipart(url: str, body: bytes, *, filename: str) -> tuple[int, dict[str, Any]]:
+def _post_multipart(url: str, body: bytes, *, filename: str, fields: Mapping[str, str] | None = None) -> tuple[int, dict[str, Any]]:
     boundary = "----wb-core-financial-smoke"
+    parts = []
+    for key, value in dict(fields or {}).items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            "Content-Type: application/pdf\r\n\r\n"
+        ).encode("utf-8") + body + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
     payload = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        "Content-Type: application/pdf\r\n\r\n"
-    ).encode("utf-8") + body + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        b"".join(parts)
+    )
     request = urllib_request.Request(
         url,
         data=payload,
