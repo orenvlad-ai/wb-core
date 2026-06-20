@@ -33,6 +33,7 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
     SupplierFinancialDocumentsBlock,
     build_financial_summary,
+    build_supplier_shipment_registry,
     parse_financial_document_text,
 )
 
@@ -346,6 +347,7 @@ def _assert_parser_smoke() -> None:
     _assert_summary_metrics_smoke()
     _assert_missing_customs_data_summary_smoke()
     _assert_new_quote_parser_smoke()
+    _assert_registry_lead_time_rows_smoke()
     _assert_incomplete_quote_summary_smoke()
 
 
@@ -464,6 +466,38 @@ def _assert_new_quote_parser_smoke() -> None:
         or not _approx(quote_percent.get("delivery_customs_pct"), 52.59, tolerance=0.01)
     ):
         raise AssertionError(f"new Transitplus quote percent metrics mismatch: {quote_percent}")
+
+
+def _assert_registry_lead_time_rows_smoke() -> None:
+    quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
+    documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=False)
+    shipment = {
+        "header": {
+            "shipment_id": "missing_dates",
+            "product_qty_total": 10,
+        },
+        "lines": [],
+    }
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "missing_dates",
+                "header": shipment["header"],
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": build_financial_summary(documents, lines, shipment=shipment),
+            }
+        ]
+    )
+    labels = _registry_row_labels(registry, "lead_times")
+    if "Срок до ДТ" not in labels:
+        raise AssertionError(f"registry lead-times must expose Срок до ДТ: {labels}")
+    forbidden = " ".join(labels).lower()
+    if "фактический срок" in forbidden or "отклонение срока" in forbidden:
+        raise AssertionError(f"registry lead-times must not expose misleading rows: {labels}")
+    if _registry_cell_display(registry, "lead_times", "days_to_customs_declaration", "missing_dates") != "—":
+        raise AssertionError(f"missing lead-time dates must render as unavailable: {registry}")
 
 
 def _assert_current_financial_metrics(summary: dict[str, Any]) -> None:
@@ -630,6 +664,14 @@ def _assert_http_api_smoke() -> None:
             for expected_section in ("passport", "cargo_physics", "quote_logistics", "fact_expenses", "fact_normalized", "documents"):
                 if expected_section not in section_ids:
                     raise AssertionError(f"shipment registry missing section {expected_section}: {section_ids}")
+            lead_time_labels = _registry_row_labels(registry, "lead_times")
+            if "Срок до ДТ" not in lead_time_labels:
+                raise AssertionError(f"shipment registry lead-time row missing: {lead_time_labels}")
+            forbidden_lead_time_labels = " ".join(lead_time_labels).lower()
+            if "фактический срок" in forbidden_lead_time_labels or "отклонение срока" in forbidden_lead_time_labels:
+                raise AssertionError(f"shipment registry exposes misleading lead-time rows: {lead_time_labels}")
+            if _registry_cell_display(registry, "lead_times", "days_to_customs_declaration", "sup_financial") != "8 дн.":
+                raise AssertionError(f"registry days-to-customs-declaration mismatch: {registry}")
             if _registry_cell_display(registry, "quote_logistics", "quote_total_rub_per_unit", "sup_financial") != "35.17 ₽":
                 raise AssertionError(f"registry quote ₽/шт mismatch: {registry}")
             if _registry_cell_display(registry, "fact_expenses", "fact_total_rub_per_unit", "sup_financial") != "35.34 ₽":
@@ -651,6 +693,8 @@ def _assert_http_api_smoke() -> None:
             compare_json = json.dumps(compare_payload, ensure_ascii=False)
             if "NaN" in compare_json or "Infinity" in compare_json:
                 raise AssertionError(f"registry compare quote must not expose invalid numbers: {compare_payload}")
+            if '"лучше"' in compare_json or '"хуже"' in compare_json:
+                raise AssertionError(f"registry compare quote must not expose bare better/worse statuses: {compare_payload}")
             quote_meta = compare_payload.get("quote", {}).get("normalized_parse", {})
             if (
                 quote_meta.get("quote_date") != "2026-06-19"
@@ -662,8 +706,66 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"registry compare quote percent mismatch: {compare_payload}")
             if _comparison_cell_display(compare_payload, "normalized", "delivery_customs_pct_of_value", "shipment") != "49.42%":
                 raise AssertionError(f"registry compare shipment fact percent mismatch: {compare_payload}")
-            if _comparison_cell_display(compare_payload, "normalized", "delivery_customs_rub_per_kg", "status") != "хуже":
-                raise AssertionError(f"registry compare status mismatch: {compare_payload}")
+            compare_lead_rows = _comparison_row_ids(compare_payload, "lead_times")
+            if "quote_delivery_days" not in compare_lead_rows or "days_to_customs_declaration" not in compare_lead_rows:
+                raise AssertionError(f"registry compare lead-time rows mismatch: {compare_lead_rows}")
+            if "actual_delivery_days" in compare_lead_rows or "delivery_days_delta" in compare_lead_rows:
+                raise AssertionError(f"registry compare must not expose misleading lead-time rows: {compare_lead_rows}")
+            if _comparison_cell_display(compare_payload, "lead_times", "days_to_customs_declaration", "shipment") != "8 дн.":
+                raise AssertionError(f"registry compare days-to-customs-declaration mismatch: {compare_payload}")
+            if _comparison_cell_display(compare_payload, "quote_logistics", "quote_logistics_usd", "status") != "КП выгоднее":
+                raise AssertionError(f"registry compare cheaper quote status mismatch: {compare_payload}")
+            if _comparison_cell_display(compare_payload, "normalized", "delivery_customs_rub_per_kg", "status") != "КП дороже":
+                raise AssertionError(f"registry compare costlier quote status mismatch: {compare_payload}")
+            quote_unit_cell = _comparison_cell(compare_payload, "normalized", "delivery_customs_rub_per_unit", "quote")
+            shipment_unit_cell = _comparison_cell(compare_payload, "normalized", "delivery_customs_rub_per_unit", "shipment")
+            quote_kg_cell = _comparison_cell(compare_payload, "normalized", "delivery_customs_rub_per_kg", "quote")
+            shipment_kg_cell = _comparison_cell(compare_payload, "normalized", "delivery_customs_rub_per_kg", "shipment")
+            estimator = quote_unit_cell.get("estimator") or {}
+            units_per_kg = 116250.0 / 9784.6
+            estimated_quote_units = 6713.45 * units_per_kg
+            quote_total_rub = compare_payload.get("quote", {}).get("summary", {}).get("quote", {}).get("total_rub_equivalent")
+            if not _approx(estimator.get("units_per_kg"), units_per_kg, tolerance=0.01):
+                raise AssertionError(f"registry compare units/kg estimator mismatch: {quote_unit_cell}")
+            if not _approx(estimator.get("estimated_quote_units"), estimated_quote_units, tolerance=1.0):
+                raise AssertionError(f"registry compare estimated quote units mismatch: {quote_unit_cell}")
+            if not _approx(quote_unit_cell.get("value"), float(quote_total_rub) / estimated_quote_units, tolerance=0.01):
+                raise AssertionError(f"registry compare quote ₽/шт must use estimated quote units: {quote_unit_cell}")
+            if _approx(quote_unit_cell.get("value"), float(quote_total_rub) / 116250.0, tolerance=0.01):
+                raise AssertionError(f"registry compare quote ₽/шт must not divide by selected shipment units: {quote_unit_cell}")
+            if (
+                float(quote_kg_cell.get("value")) > float(shipment_kg_cell.get("value"))
+                and not float(quote_unit_cell.get("value")) > float(shipment_unit_cell.get("value"))
+            ):
+                raise AssertionError(f"quote ₽/шт must stay costlier when same units/kg estimator makes ₽/кг costlier: {compare_payload}")
+            note = str(quote_unit_cell.get("note") or "")
+            if "оценочно" not in note or "шт/кг" not in note:
+                raise AssertionError(f"registry compare quote ₽/шт must explain estimator in note: {quote_unit_cell}")
+            runtime.save_supplier_shipment(
+                header={
+                    "shipment_id": "missing_estimator",
+                    "created_at": "2026-06-19T08:00:00Z",
+                    "updated_at": "2026-06-19T08:00:00Z",
+                    "shipment_date": "2026-06-19",
+                    "order_status": "in_transit",
+                    "invoice_no": "MISSING-ESTIMATOR",
+                    "invoice_date": "2026-06-19",
+                },
+                lines=[],
+            )
+            missing_compare_status, missing_compare_payload = _post_multipart(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH}",
+                b"%PDF-1.4\n% synthetic quote comparison smoke\n",
+                filename="quote-2026-06-19.pdf",
+                fields={"shipment_id": "missing_estimator"},
+            )
+            if missing_compare_status != 200:
+                raise AssertionError(f"registry missing-estimator compare route failed: {missing_compare_status} {missing_compare_payload}")
+            missing_quote_unit_cell = _comparison_cell(missing_compare_payload, "normalized", "delivery_customs_rub_per_unit", "quote")
+            if missing_quote_unit_cell.get("display") != "—":
+                raise AssertionError(f"missing estimator must make quote ₽/шт unavailable: {missing_compare_payload}")
+            if "Нет коэффициента шт/кг для оценки КП" not in missing_compare_payload.get("warnings", []):
+                raise AssertionError(f"missing estimator warning missing: {missing_compare_payload}")
             after_compare_status, after_compare_list = _get_json(collection_url)
             if after_compare_status != 200 or len(after_compare_list.get("documents", [])) != 4:
                 raise AssertionError(f"temporary quote compare must not persist financial documents: {after_compare_status} {after_compare_list}")
@@ -780,14 +882,32 @@ def _registry_cell_display(registry: Mapping[str, Any], section_id: str, row_id:
     return ""
 
 
-def _comparison_cell_display(comparison: Mapping[str, Any], section_id: str, row_id: str, cell_key: str) -> str:
+def _registry_row_labels(registry: Mapping[str, Any], section_id: str) -> list[str]:
+    for section in registry.get("sections", []):
+        if section.get("section_id") == section_id:
+            return [str(row.get("label") or "") for row in section.get("rows", [])]
+    return []
+
+
+def _comparison_row_ids(comparison: Mapping[str, Any], section_id: str) -> list[str]:
+    for section in comparison.get("sections", []):
+        if section.get("section_id") == section_id:
+            return [str(row.get("row_id") or "") for row in section.get("rows", [])]
+    return []
+
+
+def _comparison_cell(comparison: Mapping[str, Any], section_id: str, row_id: str, cell_key: str) -> dict[str, Any]:
     for section in comparison.get("sections", []):
         if section.get("section_id") != section_id:
             continue
         for row in section.get("rows", []):
             if row.get("row_id") == row_id:
-                return str((row.get(cell_key) or {}).get("display") or "")
-    return ""
+                return dict(row.get(cell_key) or {})
+    return {}
+
+
+def _comparison_cell_display(comparison: Mapping[str, Any], section_id: str, row_id: str, cell_key: str) -> str:
+    return str(_comparison_cell(comparison, section_id, row_id, cell_key).get("display") or "")
 
 
 def _get_json(url: str) -> tuple[int, dict[str, Any]]:

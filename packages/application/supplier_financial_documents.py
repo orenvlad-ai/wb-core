@@ -92,6 +92,7 @@ QUOTE_AMOUNT_LABELS = (
     (EXPENSE_CATEGORY_PACKAGING, ("Стоимость дополнительной упаковки",)),
 )
 PCT_QUANT = Decimal("0.0001")
+QUOTE_UNIT_ESTIMATOR_MISSING_WARNING = "Нет коэффициента шт/кг для оценки КП"
 
 
 @dataclass(frozen=True)
@@ -319,17 +320,13 @@ class SupplierFinancialDocumentsBlock:
             for index, line in enumerate(expense_lines, start=1)
         ]
         shipment_context = self._shipment_registry_context(shipment_id)
-        shipment_detail = {
-            "header": dict(shipment_context.get("header") or {}),
-            "lines": [dict(item) for item in shipment_context.get("lines") or []],
-        }
         quote_context = {
             "shipment_id": "temporary_quote",
             "header": {},
             "lines": [],
             "documents": [document],
             "expense_lines": stored_lines,
-            "summary": build_financial_summary([document], stored_lines, shipment=shipment_detail),
+            "summary": build_financial_summary([document], stored_lines),
         }
         return build_supplier_shipment_registry_quote_comparison(
             quote_context=quote_context,
@@ -1095,10 +1092,12 @@ def build_supplier_shipment_registry_quote_comparison(
 ) -> dict[str, Any]:
     quote_doc = _registry_doc(quote_context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)
     parse_status = str(quote_doc.get("parse_status") or "")
+    sections = _comparison_sections(quote_context, shipment_context)
     warnings = _dedupe_strings(
         [
             *_string_list(quote_doc.get("warnings")),
             *_string_list(quote_doc.get("errors")),
+            *_comparison_quote_unit_estimator_warnings(quote_context, shipment_context),
         ]
     )
     return {
@@ -1106,7 +1105,7 @@ def build_supplier_shipment_registry_quote_comparison(
         "status": "needs_review" if parse_status == FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW else "ok",
         "quote": _comparison_quote_payload(quote_context, uploaded_filename=uploaded_filename),
         "selected_shipment": _comparison_shipment_payload(shipment_context),
-        "sections": _comparison_sections(quote_context, shipment_context),
+        "sections": sections,
         "warnings": warnings,
     }
 
@@ -1257,7 +1256,7 @@ def _comparison_sections(
                 _comparison_row(
                     "delivery_customs_rub_per_unit",
                     "Доставка+таможня, ₽/шт",
-                    _registry_money(_summary_path(quote_context, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽"),
+                    _quote_delivery_customs_rub_per_unit_estimate_cell(quote_context, shipment_context),
                     _registry_money(_summary_path(shipment_context, "per_unit", "fact_delivery_customs_rub_per_unit"), "₽"),
                     suffix=" ₽",
                     direction="lower_is_better",
@@ -1283,13 +1282,12 @@ def _comparison_sections(
                     _quote_delivery_days_cell(shipment_context),
                     suffix=" дн.",
                     decimals=0,
-                    direction="lower_is_better",
                 ),
                 _comparison_row(
-                    "actual_delivery_days",
-                    "Фактический срок поставки",
+                    "days_to_customs_declaration",
+                    "Срок до ДТ",
                     _registry_blank(),
-                    _registry_number(_actual_delivery_days(shipment_context), suffix=" дн.", decimals=0),
+                    _registry_number(_days_to_customs_declaration(shipment_context), suffix=" дн.", decimals=0),
                     suffix=" дн.",
                     decimals=0,
                 ),
@@ -1363,8 +1361,78 @@ def _comparison_status_cell(
     if abs(delta) <= tolerance:
         return _registry_cell("equal", "примерно равно")
     if delta < 0:
-        return _registry_cell("better", "лучше")
-    return _registry_cell("worse", "хуже")
+        return _registry_cell("better", "КП выгоднее")
+    return _registry_cell("worse", "КП дороже")
+
+
+def _comparison_quote_unit_estimator_warnings(
+    quote_context: Mapping[str, Any],
+    shipment_context: Mapping[str, Any],
+) -> list[str]:
+    quote_total_rub = _parse_decimal(_summary_path(quote_context, "quote", "total_rub_equivalent"))
+    quote_weight = _parse_decimal(_summary_path(quote_context, "quote", "gross_weight_kg"))
+    if quote_total_rub is None or quote_weight is None or quote_weight == 0:
+        return []
+    if _selected_shipment_units_per_kg_estimator(shipment_context) is None:
+        return [QUOTE_UNIT_ESTIMATOR_MISSING_WARNING]
+    return []
+
+
+def _quote_delivery_customs_rub_per_unit_estimate_cell(
+    quote_context: Mapping[str, Any],
+    shipment_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    quote_total_rub = _parse_decimal(_summary_path(quote_context, "quote", "total_rub_equivalent"))
+    quote_weight = _parse_decimal(_summary_path(quote_context, "quote", "gross_weight_kg"))
+    estimator = _selected_shipment_units_per_kg_estimator(shipment_context)
+    if quote_total_rub is None or quote_weight is None or quote_weight == 0 or estimator is None:
+        cell = _registry_blank()
+        if quote_total_rub is not None and quote_weight is not None and quote_weight != 0:
+            cell["note"] = QUOTE_UNIT_ESTIMATOR_MISSING_WARNING
+        return cell
+    units_per_kg = estimator["units_per_kg"]
+    estimated_quote_units = quote_weight * units_per_kg
+    value = _safe_div(quote_total_rub, estimated_quote_units)
+    if value is None:
+        cell = _registry_blank()
+        cell["note"] = QUOTE_UNIT_ESTIMATOR_MISSING_WARNING
+        return cell
+    cell = _registry_money(value, "₽")
+    units_per_kg_display = _registry_number(units_per_kg).get("display") or "—"
+    estimated_units_display = _registry_number(estimated_quote_units, decimals=0).get("display") or "—"
+    cell["note"] = f"оценочно по {units_per_kg_display} шт/кг из выбранной поставки; {estimated_units_display} шт."
+    cell["estimator"] = {
+        "method": "selected_shipment_units_per_kg",
+        "units_per_kg": _decimal_to_float(units_per_kg),
+        "estimated_quote_units": _decimal_to_float(estimated_quote_units),
+        "quote_gross_weight_kg": _decimal_to_float(quote_weight),
+        "selected_shipment_total_units": _decimal_to_float(estimator["total_units"]),
+        "selected_shipment_weight_base_kg": _decimal_to_float(estimator["weight_base_kg"]),
+        "selected_shipment_weight_source": estimator["weight_source"],
+    }
+    return cell
+
+
+def _selected_shipment_units_per_kg_estimator(context: Mapping[str, Any]) -> dict[str, Any] | None:
+    total_units = _parse_decimal(_summary_path(context, "per_unit", "total_units"))
+    if total_units is None or total_units <= 0:
+        return None
+    weight_source = "customs_gross_weight_kg"
+    weight_base = _parse_decimal(_summary_path(context, "customs_declaration", "gross_weight_kg"))
+    if weight_base is None or weight_base <= 0:
+        weight_source = "quote_gross_weight_kg"
+        weight_base = _parse_decimal(_summary_path(context, "quote", "gross_weight_kg"))
+    if weight_base is None or weight_base <= 0:
+        return None
+    units_per_kg = _safe_div(total_units, weight_base)
+    if units_per_kg is None or units_per_kg <= 0:
+        return None
+    return {
+        "total_units": total_units,
+        "weight_base_kg": weight_base,
+        "weight_source": weight_source,
+        "units_per_kg": units_per_kg,
+    }
 
 
 def _quote_component_rub_per_kg_for_comparison(context: Mapping[str, Any], component: str) -> Decimal | None:
@@ -1491,8 +1559,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
             "G. Сроки",
             [
                 ("quote_delivery_days", "срок доставки по КП", lambda item: _registry_text(_quote_delivery_days_display(item))),
-                ("actual_days", "фактический срок", lambda item: _registry_number(_actual_delivery_days(item), suffix=" дн.", decimals=0)),
-                ("delivery_days_delta", "отклонение срока", lambda item: _registry_number(_delivery_days_delta(item), suffix=" дн.", decimals=0, signed=True)),
+                ("days_to_customs_declaration", "Срок до ДТ", lambda item: _registry_number(_days_to_customs_declaration(item), suffix=" дн.", decimals=0)),
             ],
         ),
         (
@@ -1618,7 +1685,7 @@ def _quote_delivery_days_display(context: Mapping[str, Any]) -> str:
     return ""
 
 
-def _actual_delivery_days(context: Mapping[str, Any]) -> Decimal | None:
+def _days_to_customs_declaration(context: Mapping[str, Any]) -> Decimal | None:
     header = _registry_header(context)
     start = _date_part(header.get("shipment_date"))
     end = _date_part(_registry_customs_meta(context).get("document_date") or _registry_customs_meta(context).get("declaration_date"))
@@ -1628,14 +1695,6 @@ def _actual_delivery_days(context: Mapping[str, Any]) -> Decimal | None:
         return Decimal(str((date.fromisoformat(end) - date.fromisoformat(start)).days))
     except ValueError:
         return None
-
-
-def _delivery_days_delta(context: Mapping[str, Any]) -> Decimal | None:
-    actual = _actual_delivery_days(context)
-    quote_max = _int_or_none(_registry_quote_meta(context).get("delivery_days_max"))
-    if actual is None or quote_max is None:
-        return None
-    return actual - Decimal(str(quote_max))
 
 
 def _quote_component_per_kg(context: Mapping[str, Any], component: str) -> Decimal | None:

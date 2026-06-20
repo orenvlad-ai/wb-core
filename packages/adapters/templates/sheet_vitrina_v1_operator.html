@@ -2402,6 +2402,19 @@
       color: var(--warning-text);
     }
 
+    .shipment-registry-comparison-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .shipment-registry-comparison-note {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
     .wb-supplies-block {
       margin-top: 18px;
     }
@@ -3732,7 +3745,7 @@
                       <th scope="col">КП</th>
                       <th scope="col">Поставка факт</th>
                       <th scope="col">Разница</th>
-                      <th scope="col">Вывод</th>
+                      <th scope="col">Оценка КП</th>
                     </tr>
                   </thead>
                   <tbody id="shipmentRegistryComparisonBody">
@@ -7320,9 +7333,9 @@
             bodyRows.push([
               "<tr>",
               "<td>" + escapeHtml(registryDisplayValue(row && row.label)) + "</td>",
-              "<td>" + escapeHtml(registryCellDisplay(row && row.quote)) + "</td>",
-              "<td>" + escapeHtml(registryCellDisplay(row && row.shipment)) + "</td>",
-              "<td>" + escapeHtml(registryCellDisplay(row && row.difference)) + "</td>",
+              "<td>" + renderShipmentRegistryComparisonCell(row && row.quote) + "</td>",
+              "<td>" + renderShipmentRegistryComparisonCell(row && row.shipment) + "</td>",
+              "<td>" + renderShipmentRegistryComparisonCell(row && row.difference) + "</td>",
               "<td>" + renderShipmentRegistryComparisonStatus(row && row.status, statusDisplay) + "</td>",
               "</tr>"
             ].join(""));
@@ -7332,6 +7345,23 @@
           ? bodyRows.join("")
           : "<tr><td class=\"shipment-registry-empty\" colspan=\"5\">Строки сравнения не найдены.</td></tr>";
         scheduleEmbeddedHeightPost();
+      }
+
+      function renderShipmentRegistryComparisonCell(cell) {
+        const display = registryCellDisplay(cell);
+        const note = cell && typeof cell === "object" ? String(cell.note || "") : "";
+        const displayHtml = display === "—"
+          ? "<span class=\"shipment-registry-cell-empty\">—</span>"
+          : escapeHtml(display);
+        if (!note) {
+          return displayHtml;
+        }
+        return [
+          "<span class=\"shipment-registry-comparison-cell\">",
+          "<span>" + displayHtml + "</span>",
+          "<span class=\"shipment-registry-comparison-note\">" + escapeHtml(note) + "</span>",
+          "</span>"
+        ].join("");
       }
 
       function renderShipmentRegistryComparisonStatus(statusCell, statusDisplay) {

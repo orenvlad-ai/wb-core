@@ -433,7 +433,12 @@ def main() -> None:
                 expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("26GN390", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: доставка+таможня, ₽/шт", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("факт доставка+таможня ₽/шт", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Срок до ДТ", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("—", timeout=5000)
+                registry_text = operator_frame.locator("#shipmentRegistryBody").inner_text()
+                lowered_registry_text = registry_text.lower()
+                if "фактический срок" in lowered_registry_text or "отклонение срока" in lowered_registry_text:
+                    raise AssertionError(f"shipment registry browser output contains misleading lead-time rows: {registry_text}")
                 expect(operator_frame.locator("#shipmentRegistryQuoteFileButton")).to_be_visible(timeout=5000)
                 expect(operator_frame.locator("[data-shipment-registry-select]").first).to_be_visible(timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryCompareButton")).to_be_disabled()
@@ -453,10 +458,21 @@ def main() -> None:
                     ) from exc
                 expect(operator_frame.locator("#shipmentRegistryComparisonBody")).to_contain_text("КП: доставка+таможня, % от стоимости груза", timeout=10000)
                 expect(operator_frame.locator("#shipmentRegistryComparisonBody")).to_contain_text("52.59%", timeout=10000)
+                expect(operator_frame.locator(".shipment-registry-comparison-table thead")).to_contain_text("Оценка КП", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryComparisonBody")).to_contain_text("Срок до ДТ", timeout=5000)
                 comparison_text = operator_frame.locator("#shipmentRegistryComparisonBody").inner_text()
                 if "NaN" in comparison_text or "Infinity" in comparison_text:
                     raise AssertionError(f"shipment registry comparison browser output contains invalid numbers: {comparison_text}")
-                registry_text = operator_frame.locator("#shipmentRegistryBody").inner_text()
+                comparison_header_text = operator_frame.locator(".shipment-registry-comparison-table thead").inner_text()
+                if "Вывод" in comparison_header_text:
+                    raise AssertionError("shipment registry comparison header must use Оценка КП, not Вывод")
+                lowered_comparison_text = comparison_text.lower()
+                if "фактический срок" in lowered_comparison_text or "отклонение срока" in lowered_comparison_text:
+                    raise AssertionError(f"shipment registry comparison contains misleading lead-time rows: {comparison_text}")
+                if "лучше" in comparison_text or "хуже" in comparison_text:
+                    raise AssertionError(f"shipment registry comparison must not expose bare better/worse statuses: {comparison_text}")
+                if "оценочно" not in comparison_text and "Нет коэффициента шт/кг для оценки КП" not in comparison_text:
+                    raise AssertionError(f"shipment registry comparison must explain quote ₽/шт estimator: {comparison_text}")
                 if "NaN" in registry_text or "Infinity" in registry_text:
                     raise AssertionError(f"shipment registry browser output contains invalid numbers: {registry_text}")
                 sticky_style = operator_frame.locator("#shipmentRegistryBody td.shipment-registry-sticky").first.evaluate(
