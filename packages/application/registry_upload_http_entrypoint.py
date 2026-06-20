@@ -1759,6 +1759,9 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_shipments_contract_request(self, shipment_id: str) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.download_shipment_contract(shipment_id)
 
+    def handle_supplier_shipment_registry_request(self) -> dict[str, Any]:
+        return self.supplier_financial_documents_block.list_shipment_registry()
+
     def handle_supplier_financial_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
         return self.supplier_financial_documents_block.list_documents(shipment_id)
 

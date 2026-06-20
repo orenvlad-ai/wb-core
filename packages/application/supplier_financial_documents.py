@@ -209,6 +209,7 @@ class SupplierFinancialDocumentsBlock:
 
     def list_documents(self, supplier_order_id: str) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
+        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
         documents = [
             self._with_download_path(item)
             for item in self._refresh_saved_document_parses(
@@ -222,8 +223,33 @@ class SupplierFinancialDocumentsBlock:
             "supplier_order_id": supplier_order_id,
             "documents": documents,
             "expense_lines": lines,
-            "summary": build_financial_summary(documents, lines),
+            "summary": build_financial_summary(documents, lines, shipment=shipment),
         }
+
+    def list_shipment_registry(self) -> dict[str, Any]:
+        rows = self.runtime.list_supplier_shipments()
+        contexts: list[dict[str, Any]] = []
+        for row in rows:
+            shipment_id = str(row.get("shipment_id") or "").strip()
+            if not shipment_id:
+                continue
+            detail = self.runtime.load_supplier_shipment(shipment_id) or {"header": row, "lines": []}
+            documents = self._refresh_saved_document_parses(
+                self.runtime.list_supplier_financial_documents(shipment_id)
+            )
+            expense_lines = self.runtime.list_supplier_financial_expense_lines(shipment_id)
+            summary = build_financial_summary(documents, expense_lines, shipment=detail)
+            contexts.append(
+                {
+                    "shipment_id": shipment_id,
+                    "header": dict(detail.get("header") or row),
+                    "lines": [dict(item) for item in detail.get("lines") or []],
+                    "documents": documents,
+                    "expense_lines": expense_lines,
+                    "summary": summary,
+                }
+            )
+        return build_supplier_shipment_registry(contexts)
 
     def get_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
@@ -234,11 +260,12 @@ class SupplierFinancialDocumentsBlock:
         if document is None:
             raise ValueError(f"financial document not found: {document_id}")
         document = self._refresh_saved_document_parse(document)
+        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
         documents = [self._with_download_path(document)]
         lines = list(document.get("expense_lines") or [])
         payload = self._with_download_path(document)
         payload["expense_lines"] = lines
-        payload["summary"] = build_financial_summary(documents, lines)
+        payload["summary"] = build_financial_summary(documents, lines, shipment=shipment)
         return payload
 
     def upload_document(
@@ -345,7 +372,8 @@ class SupplierFinancialDocumentsBlock:
             updated_at=self.timestamp_factory(),
         )
         payload = self._with_download_path(document)
-        payload["summary"] = build_financial_summary([payload], list(payload.get("expense_lines") or []))
+        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
+        payload["summary"] = build_financial_summary([payload], list(payload.get("expense_lines") or []), shipment=shipment)
         return payload
 
     def delete_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
@@ -695,7 +723,12 @@ def extract_pdf_text_layer(file_bytes: bytes, filename: str = "") -> tuple[str, 
     return text or "", diagnostics, warnings
 
 
-def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: list[Mapping[str, Any]]) -> dict[str, Any]:
+def build_financial_summary(
+    documents: list[Mapping[str, Any]],
+    expense_lines: list[Mapping[str, Any]],
+    *,
+    shipment: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     active_documents = [
         dict(document)
         for document in documents
@@ -808,6 +841,20 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
         linked_quote_usd_component=linked_quote_usd_for_rate,
         quote_base_status="parsed" if quote_required_complete else ("missing_required_amounts" if quote_docs else ""),
     )
+    total_units = _shipment_total_units(shipment)
+    estimated_bank_rate = _estimate_bank_rate_on_quote_date(
+        quote_doc=quote_doc,
+        invoice_docs=invoice_docs,
+        invoice_fact_rub=invoice_fact_rub,
+        linked_quote_usd_component=linked_quote_usd_for_rate,
+        quote_base_status="parsed" if quote_required_complete else ("missing_required_amounts" if quote_docs else ""),
+    )
+    quote_total_rate = estimated_bank_rate or (_parse_decimal(quote_doc.get("cbr_usd_rate_value")) if quote_doc else None)
+    quote_total_rub_equivalent = quote_total_usd * quote_total_rate if quote_total_usd is not None and quote_total_rate is not None else None
+    quote_delivery_customs_rub_per_unit = _safe_div(quote_total_rub_equivalent, total_units)
+    fact_delivery_customs_rub_per_unit = _safe_div(delivery_customs_total_rub, total_units)
+    if active_documents and total_units is None:
+        warnings.append("Нет количества штук в поставке")
     warnings.extend(rate_summary.pop("warnings", []))
     if quote_docs and not quote_required_complete:
         missing_text = ", ".join(quote_missing_required) if quote_missing_required else "required quote amount(s)"
@@ -824,6 +871,7 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
     return {
         "quote": {
             "total_usd": _decimal_to_float(quote_total_usd),
+            "total_rub_equivalent": _decimal_to_float(quote_total_rub_equivalent),
             "logistics_usd": _decimal_to_float(quote_logistics_usd),
             "customs_payments_usd": _decimal_to_float(quote_customs_usd),
             "logistics_rub_cbr": _decimal_to_float(quote_logistics_rub_cbr),
@@ -858,6 +906,13 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
             "quote_weight": per_kg_quote_weight,
             "customs_weight": per_kg_customs_weight,
         },
+        "per_unit": {
+            "total_units": _decimal_to_float(total_units),
+            "quote_delivery_customs_rub_per_unit": _decimal_to_float(quote_delivery_customs_rub_per_unit),
+            "fact_delivery_customs_rub_per_unit": _decimal_to_float(fact_delivery_customs_rub_per_unit),
+            "quote_total_rub_equivalent": _decimal_to_float(quote_total_rub_equivalent),
+            "fact_delivery_customs_total_rub": _decimal_to_float(delivery_customs_total_rub),
+        },
         "percent_of_value": {
             "quote_cargo_value": quote_percent_of_cargo_value,
             "fact_customs_value": fact_percent_of_customs_value,
@@ -865,6 +920,402 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
         "quote_invoice_match": rate_summary,
         "warnings": _dedupe_strings(warnings),
     }
+
+
+def _shipment_total_units(shipment: Mapping[str, Any] | None) -> Decimal | None:
+    if not isinstance(shipment, Mapping):
+        return None
+    header = shipment.get("header") if isinstance(shipment.get("header"), Mapping) else shipment
+    total = _positive_decimal(dict(header).get("product_qty_total"))
+    if total is not None:
+        return total
+    lines = shipment.get("lines") if isinstance(shipment.get("lines"), list) else []
+    return _positive_decimal(
+        _sum_decimal(
+            item.get("qty")
+            for item in lines
+            if isinstance(item, Mapping) and str(item.get("line_type") or "") == "product"
+        )
+    )
+
+
+def build_supplier_shipment_registry(contexts: list[Mapping[str, Any]]) -> dict[str, Any]:
+    sorted_contexts = sorted(
+        [dict(item) for item in contexts],
+        key=lambda item: _registry_sort_key(item),
+    )
+    columns = [_registry_column(item) for item in sorted_contexts]
+    sections = []
+    for section_id, title, rows in _registry_row_definitions():
+        section_rows = []
+        for row_id, label, cell_factory in rows:
+            section_rows.append(
+                {
+                    "row_id": row_id,
+                    "label": label,
+                    "cells": {
+                        column["shipment_id"]: cell_factory(context)
+                        for column, context in zip(columns, sorted_contexts, strict=False)
+                    },
+                }
+            )
+        sections.append({"section_id": section_id, "title": title, "rows": section_rows})
+    return {
+        "contract_name": "sheet_vitrina_v1_supplier_shipment_registry",
+        "status": "ok",
+        "columns": columns,
+        "sections": sections,
+        "meta": {
+            "shipment_count": len(columns),
+            "sort": "invoice_date/shipment_date/created_at ascending; newer shipments are rightmost",
+        },
+    }
+
+
+def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Callable[[Mapping[str, Any]], dict[str, Any]]]]]]:
+    return [
+        (
+            "passport",
+            "A. Паспорт поставки",
+            [
+                ("shipment_id", "order id / supplier order id", lambda item: _registry_text(_registry_header(item).get("shipment_id"))),
+                ("invoice_no", "номер заказа / инвойса", lambda item: _registry_text(_registry_header(item).get("invoice_no"))),
+                ("order_date", "дата заказа", lambda item: _registry_date(_date_part(_registry_header(item).get("created_at")))),
+                ("invoice_date", "дата инвойса", lambda item: _registry_date(_registry_header(item).get("invoice_date"))),
+                ("shipment_date", "дата отгрузки", lambda item: _registry_date(_registry_header(item).get("shipment_date"))),
+                ("customs_date", "дата ДТ", lambda item: _registry_date(_registry_customs_meta(item).get("document_date") or _registry_customs_meta(item).get("declaration_date"))),
+                ("accepted_date", "дата приёмки", lambda item: _registry_blank()),
+                ("supplier", "поставщик", lambda item: _registry_text(_registry_header(item).get("supplier_name"))),
+                ("logistics_vendor", "логист", lambda item: _registry_text(_registry_logistics_vendor(item))),
+                ("route", "маршрут", lambda item: _registry_text(_registry_route(item))),
+                ("delivery_type", "тип доставки / сценарий", lambda item: _registry_text(_registry_quote_meta(item).get("tariff"))),
+                ("document_status", "статус документов / warnings", lambda item: _registry_text(_registry_document_status(item))),
+            ],
+        ),
+        (
+            "cargo_physics",
+            "B. Физика груза",
+            [
+                ("units", "количество штук", lambda item: _registry_number(_summary_path(item, "per_unit", "total_units"), decimals=0)),
+                ("quote_weight", "вес КП", lambda item: _registry_number(_summary_path(item, "quote", "gross_weight_kg"), suffix=" кг")),
+                ("customs_weight", "вес ДТ", lambda item: _registry_number(_summary_path(item, "customs_declaration", "gross_weight_kg"), suffix=" кг")),
+                ("quote_volume", "объём КП", lambda item: _registry_number(_summary_path(item, "logistics_efficiency", "volume_m3"), suffix=" м³")),
+                ("density", "плотность кг/м³", lambda item: _registry_number(_safe_div(_dec(_summary_path(item, "quote", "gross_weight_kg")), _dec(_summary_path(item, "logistics_efficiency", "volume_m3"))), suffix=" кг/м³")),
+                ("units_per_quote_kg", "штук/кг по КП", lambda item: _registry_number(_safe_div(_dec(_summary_path(item, "per_unit", "total_units")), _dec(_summary_path(item, "quote", "gross_weight_kg"))))),
+                ("units_per_customs_kg", "штук/кг по ДТ", lambda item: _registry_number(_safe_div(_dec(_summary_path(item, "per_unit", "total_units")), _dec(_summary_path(item, "customs_declaration", "gross_weight_kg"))))),
+            ],
+        ),
+        (
+            "cargo_value",
+            "C. Стоимость товара",
+            [
+                ("quote_cargo_usd", "стоимость груза USD по КП", lambda item: _registry_money(_summary_path(item, "quote", "estimated_cargo_value_usd"), "USD")),
+                ("quote_cargo_cny", "стоимость груза CNY по КП", lambda item: _registry_money(_registry_quote_meta(item).get("estimated_cargo_value_cny"), "CNY")),
+                ("customs_value_rub", "таможенная стоимость ₽ из ДТ", lambda item: _registry_money(_summary_path(item, "customs_declaration", "total_customs_value_rub"), "₽")),
+                ("goods_value_rub", "стоимость товара ₽ по курсу/ДТ", lambda item: _registry_blank()),
+                ("goods_value_rub_per_unit", "стоимость товара ₽/шт", lambda item: _registry_money(_safe_div(_dec(_summary_path(item, "customs_declaration", "total_customs_value_rub")), _dec(_summary_path(item, "per_unit", "total_units"))), "₽")),
+            ],
+        ),
+        (
+            "quote_logistics",
+            "D. КП логиста",
+            [
+                ("quote_total_usd", "КП всего USD", lambda item: _registry_money(_summary_path(item, "quote", "total_usd"), "USD")),
+                ("quote_total_rub", "КП всего ₽", lambda item: _registry_money(_summary_path(item, "quote", "total_rub_equivalent"), "₽")),
+                ("quote_logistics_usd", "КП логистика USD", lambda item: _registry_money(_summary_path(item, "quote", "logistics_usd"), "USD")),
+                ("quote_customs_usd", "КП таможня USD", lambda item: _registry_money(_summary_path(item, "quote", "customs_payments_usd"), "USD")),
+                ("quote_logistics_pct", "КП: услуги логиста, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "logistics_pct"))),
+                ("quote_customs_pct", "КП: таможня, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "customs_pct"))),
+                ("quote_total_pct", "КП: доставка+таможня, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "delivery_customs_pct"))),
+                ("quote_total_rub_per_unit", "КП: доставка+таможня, ₽/шт", lambda item: _registry_money(_summary_path(item, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽")),
+                ("quote_logistics_rub_per_quote_kg", "КП: услуги логиста, ₽/кг по весу КП", lambda item: _registry_money(_quote_component_per_kg(item, "logistics"), "₽")),
+                ("quote_customs_rub_per_quote_kg", "КП: таможня, ₽/кг по весу КП", lambda item: _registry_money(_quote_component_per_kg(item, "customs"), "₽")),
+                ("quote_total_rub_per_quote_kg", "КП: доставка+таможня, ₽/кг по весу КП", lambda item: _registry_money(_quote_component_per_kg(item, "total"), "₽")),
+            ],
+        ),
+        (
+            "fact_expenses",
+            "E. Факт расходов",
+            [
+                ("invoice_fact_rub", "счета логиста ₽", lambda item: _registry_money(_summary_path(item, "invoices", "fact_rub"), "₽")),
+                ("invoice_vat_rub", "НДС по счетам ₽", lambda item: _registry_money(_summary_path(item, "invoices", "vat_rub"), "₽")),
+                ("customs_fee_rub", "ДТ сбор ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "customs_fee_1010_rub"), "₽")),
+                ("customs_duty_rub", "ДТ пошлина ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "import_duty_2010_rub"), "₽")),
+                ("customs_vat_rub", "ДТ НДС ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "import_vat_5010_rub"), "₽")),
+                ("customs_total_rub", "ДТ всего ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "total_customs_payments_rub"), "₽")),
+                ("customs_without_vat_rub", "таможня без НДС ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "customs_payments_without_vat_rub"), "₽")),
+                ("other_expenses_rub", "прочие расходы ₽", lambda item: _registry_blank()),
+                ("fact_total_rub", "факт доставка+таможня ₽", lambda item: _registry_money(_summary_path(item, "per_unit", "fact_delivery_customs_total_rub"), "₽")),
+                ("fact_total_rub_per_unit", "факт доставка+таможня ₽/шт", lambda item: _registry_money(_summary_path(item, "per_unit", "fact_delivery_customs_rub_per_unit"), "₽")),
+            ],
+        ),
+        (
+            "fact_normalized",
+            "F. Нормализованные метрики факта",
+            [
+                ("fact_logistics_per_quote_kg", "услуги логиста ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "logistics_invoice_rub_per_kg"), "₽")),
+                ("fact_customs_per_quote_kg", "таможня ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "customs_payments_rub_per_kg"), "₽")),
+                ("fact_total_per_quote_kg", "доставка+таможня ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "delivery_customs_rub_per_kg"), "₽")),
+                ("fact_logistics_per_dt_kg", "услуги логиста ₽/кг · вес ДТ", lambda item: _registry_money(_summary_path(item, "per_kg", "customs_weight", "logistics_invoice_rub_per_kg"), "₽")),
+                ("fact_customs_per_dt_kg", "таможня ₽/кг · вес ДТ", lambda item: _registry_money(_summary_path(item, "per_kg", "customs_weight", "customs_payments_rub_per_kg"), "₽")),
+                ("fact_total_per_dt_kg", "доставка+таможня ₽/кг · вес ДТ", lambda item: _registry_money(_summary_path(item, "per_kg", "customs_weight", "delivery_customs_rub_per_kg"), "₽")),
+                ("fact_logistics_pct", "факт: услуги логиста, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "logistics_pct"))),
+                ("fact_customs_without_vat_pct", "факт: таможня без НДС, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "customs_without_vat_pct"))),
+                ("fact_customs_with_vat_pct", "факт: таможня с НДС, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "customs_with_vat_pct"))),
+                ("fact_total_pct", "факт: доставка+таможня, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "delivery_customs_pct"))),
+            ],
+        ),
+        (
+            "lead_times",
+            "G. Сроки",
+            [
+                ("quote_delivery_days", "срок доставки по КП", lambda item: _registry_text(_quote_delivery_days_display(item))),
+                ("actual_days", "фактический срок", lambda item: _registry_number(_actual_delivery_days(item), suffix=" дн.", decimals=0)),
+                ("delivery_days_delta", "отклонение срока", lambda item: _registry_number(_delivery_days_delta(item), suffix=" дн.", decimals=0, signed=True)),
+            ],
+        ),
+        (
+            "documents",
+            "H. Документы",
+            [
+                ("has_quote", "есть КП", lambda item: _registry_bool(bool(_registry_doc(item, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)))),
+                ("has_invoices", "есть счета логиста", lambda item: _registry_bool(bool(_registry_docs(item, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE)))),
+                ("has_customs", "есть ДТ", lambda item: _registry_bool(bool(_registry_doc(item, FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION)))),
+                ("has_other_expenses", "есть прочие расходы", lambda item: _registry_bool(False)),
+                ("needs_review_count", "needs_review count", lambda item: _registry_number(_needs_review_count(item), decimals=0)),
+                ("parse_warnings_count", "parse warnings / needs_review count", lambda item: _registry_text(_parse_warning_status(item))),
+            ],
+        ),
+    ]
+
+
+def _registry_sort_key(context: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    header = _registry_header(context)
+    invoice_date = _date_part(header.get("invoice_date"))
+    shipment_date = _date_part(header.get("shipment_date"))
+    created_at = _date_part(header.get("created_at"))
+    return (invoice_date or shipment_date or created_at or "9999-99-99", created_at or "", str(header.get("invoice_no") or ""), str(header.get("shipment_id") or ""))
+
+
+def _registry_column(context: Mapping[str, Any]) -> dict[str, Any]:
+    header = _registry_header(context)
+    shipment_id = str(context.get("shipment_id") or header.get("shipment_id") or "")
+    invoice_no = str(header.get("invoice_no") or "").strip()
+    invoice_date = _date_part(header.get("invoice_date"))
+    shipment_date = _date_part(header.get("shipment_date"))
+    return {
+        "shipment_id": shipment_id,
+        "title": invoice_no or shipment_id,
+        "subtitle": invoice_date or shipment_date or _date_part(header.get("created_at")),
+        "invoice_no": invoice_no,
+        "invoice_date": invoice_date,
+        "shipment_date": shipment_date,
+        "order_status": header.get("order_status") or "",
+    }
+
+
+def _registry_header(context: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(context.get("header") or {})
+
+
+def _registry_summary(context: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(context.get("summary") or {})
+
+
+def _summary_path(context: Mapping[str, Any], *path: str) -> Any:
+    current: Any = _registry_summary(context)
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _registry_docs(context: Mapping[str, Any], document_type: str) -> list[dict[str, Any]]:
+    return [
+        dict(document)
+        for document in context.get("documents") or []
+        if isinstance(document, Mapping) and str(document.get("document_type") or "") == document_type
+    ]
+
+
+def _registry_doc(context: Mapping[str, Any], document_type: str) -> dict[str, Any]:
+    docs = _registry_docs(context, document_type)
+    return docs[0] if docs else {}
+
+
+def _registry_quote_meta(context: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(_registry_doc(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE).get("normalized_parse") or {})
+
+
+def _registry_customs_meta(context: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(_registry_doc(context, FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION).get("normalized_parse") or {})
+
+
+def _registry_logistics_vendor(context: Mapping[str, Any]) -> str:
+    for document_type in (FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE):
+        doc = _registry_doc(context, document_type)
+        if doc.get("vendor"):
+            return str(doc.get("vendor") or "")
+    return ""
+
+
+def _registry_route(context: Mapping[str, Any]) -> str:
+    for doc in _registry_docs(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE):
+        if doc.get("route"):
+            return str(doc.get("route") or "")
+    quote = _registry_quote_meta(context)
+    origin = str(quote.get("origin") or "").strip()
+    destination = str(quote.get("destination") or "").strip()
+    return " -> ".join(part for part in (origin, destination) if part)
+
+
+def _registry_document_status(context: Mapping[str, Any]) -> str:
+    documents = [dict(item) for item in context.get("documents") or [] if isinstance(item, Mapping)]
+    if not documents:
+        return "Финансовые документы не загружены"
+    types = {
+        "КП": bool(_registry_doc(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)),
+        "счета": bool(_registry_docs(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE)),
+        "ДТ": bool(_registry_doc(context, FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION)),
+    }
+    warnings_count = _parse_warnings_count(context)
+    status = ", ".join(label for label, present in types.items() if present) or "нет распознанных типов"
+    if warnings_count:
+        status += f" · warnings: {warnings_count}"
+    return status
+
+
+def _quote_delivery_days_display(context: Mapping[str, Any]) -> str:
+    quote = _registry_quote_meta(context)
+    min_days = _int_or_none(quote.get("delivery_days_min"))
+    max_days = _int_or_none(quote.get("delivery_days_max"))
+    if min_days and max_days:
+        return f"{min_days}-{max_days} дн."
+    if min_days:
+        return f"{min_days} дн."
+    return ""
+
+
+def _actual_delivery_days(context: Mapping[str, Any]) -> Decimal | None:
+    header = _registry_header(context)
+    start = _date_part(header.get("shipment_date"))
+    end = _date_part(_registry_customs_meta(context).get("document_date") or _registry_customs_meta(context).get("declaration_date"))
+    if not start or not end:
+        return None
+    try:
+        return Decimal(str((date.fromisoformat(end) - date.fromisoformat(start)).days))
+    except ValueError:
+        return None
+
+
+def _delivery_days_delta(context: Mapping[str, Any]) -> Decimal | None:
+    actual = _actual_delivery_days(context)
+    quote_max = _int_or_none(_registry_quote_meta(context).get("delivery_days_max"))
+    if actual is None or quote_max is None:
+        return None
+    return actual - Decimal(str(quote_max))
+
+
+def _quote_component_per_kg(context: Mapping[str, Any], component: str) -> Decimal | None:
+    summary = _registry_summary(context)
+    quote = dict(summary.get("quote") or {})
+    rate = _parse_decimal(_summary_path(context, "quote_invoice_match", "estimated_bank_rate_on_quote_date"))
+    weight = _parse_decimal(quote.get("gross_weight_kg"))
+    if rate is None or weight is None or weight == 0:
+        return None
+    if component == "logistics":
+        usd = _parse_decimal(quote.get("logistics_usd"))
+    elif component == "customs":
+        usd = _parse_decimal(quote.get("customs_payments_usd"))
+    else:
+        usd = _parse_decimal(quote.get("total_usd"))
+    return _safe_div(usd * rate if usd is not None else None, weight)
+
+
+def _needs_review_count(context: Mapping[str, Any]) -> int:
+    return sum(1 for document in context.get("documents") or [] if isinstance(document, Mapping) and str(document.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW)
+
+
+def _parse_warnings_count(context: Mapping[str, Any]) -> int:
+    count = 0
+    for document in context.get("documents") or []:
+        if isinstance(document, Mapping):
+            count += len(_string_list(document.get("warnings")))
+    count += len(_string_list(_registry_summary(context).get("warnings")))
+    return count
+
+
+def _parse_warning_status(context: Mapping[str, Any]) -> str:
+    needs_review = _needs_review_count(context)
+    warnings_count = _parse_warnings_count(context)
+    if needs_review or warnings_count:
+        return f"needs_review: {needs_review}; warnings: {warnings_count}"
+    return "нет"
+
+
+def _registry_cell(value: Any, display: str) -> dict[str, Any]:
+    return {"value": value, "display": display or "—"}
+
+
+def _registry_blank() -> dict[str, Any]:
+    return _registry_cell(None, "—")
+
+
+def _registry_text(value: Any) -> dict[str, Any]:
+    text = str(value or "").strip()
+    return _registry_cell(text or None, text or "—")
+
+
+def _registry_bool(value: bool) -> dict[str, Any]:
+    return _registry_cell(bool(value), "Да" if value else "Нет")
+
+
+def _registry_date(value: Any) -> dict[str, Any]:
+    normalized = _date_part(value)
+    return _registry_cell(normalized or None, normalized or "—")
+
+
+def _registry_number(value: Any, *, suffix: str = "", decimals: int = 2, signed: bool = False) -> dict[str, Any]:
+    decimal_value = _parse_decimal(value)
+    if decimal_value is None:
+        return _registry_blank()
+    quant = Decimal("1") if decimals <= 0 else Decimal("1").scaleb(-decimals)
+    rounded = decimal_value.quantize(quant, rounding=ROUND_HALF_UP)
+    display = f"{rounded:,.{max(decimals, 0)}f}".replace(",", " ")
+    if decimals <= 0:
+        display = str(int(rounded))
+    if signed and rounded > 0:
+        display = "+" + display
+    return _registry_cell(_decimal_to_float(decimal_value), display + suffix)
+
+
+def _registry_money(value: Any, currency: str) -> dict[str, Any]:
+    decimal_value = _parse_decimal(value)
+    if decimal_value is None:
+        return _registry_blank()
+    suffix = f" {currency}" if currency else ""
+    return _registry_number(decimal_value, suffix=suffix, decimals=2)
+
+
+def _registry_percent(value: Any) -> dict[str, Any]:
+    decimal_value = _parse_decimal(value)
+    if decimal_value is None:
+        return _registry_blank()
+    return _registry_number(decimal_value, suffix="%", decimals=2)
+
+
+def _date_part(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "T" in raw:
+        raw = raw.split("T", 1)[0]
+    return _optional_iso_date(raw) or raw[:10]
+
+
+def _dec(value: Any) -> Decimal | None:
+    return _parse_decimal(value)
 
 
 def financial_documents_path(supplier_order_id: str) -> str:
@@ -1477,6 +1928,30 @@ def _extract_customs_linked_references(text: str) -> dict[str, Any]:
     if cmr:
         refs["CMR"] = {"number": cmr.group(1), "date": _parse_date(cmr.group(2))}
     return refs
+
+
+def _estimate_bank_rate_on_quote_date(
+    *,
+    quote_doc: Mapping[str, Any],
+    invoice_docs: list[Mapping[str, Any]],
+    invoice_fact_rub: Decimal | None,
+    linked_quote_usd_component: Decimal | None,
+    quote_base_status: str = "",
+) -> Decimal | None:
+    if quote_doc and invoice_docs and quote_base_status and quote_base_status != "parsed":
+        return None
+    if not quote_doc or not invoice_docs or not invoice_fact_rub or not linked_quote_usd_component:
+        return None
+    if linked_quote_usd_component == 0:
+        return None
+    invoice_doc = _invoice_doc_for_rate(invoice_docs)
+    cbr_invoice_rate = _parse_decimal(invoice_doc.get("cbr_usd_rate_value"))
+    quote_cbr_rate = _parse_decimal(quote_doc.get("cbr_usd_rate_value"))
+    if cbr_invoice_rate is None or quote_cbr_rate is None:
+        return None
+    implied_rate = _safe_div(invoice_fact_rub, linked_quote_usd_component)
+    spread_pct = _safe_div(implied_rate, cbr_invoice_rate)
+    return quote_cbr_rate * spread_pct if spread_pct is not None else None
 
 
 def _build_rate_summary(

@@ -64,7 +64,7 @@ def main() -> None:
                 {
                     "2026-06-02": "78.00",
                     "2026-06-05": "77.50",
-                    "2026-06-18": "78.20",
+                    "2026-06-18": "82.07119747159833",
                 }
             ),
         )
@@ -109,6 +109,7 @@ def main() -> None:
                     expect(page.locator("#financialDocumentsRows")).to_contain_text("ДТ", timeout=5000)
                     summary_cards = page.locator("#financialSummaryGroups")
                     expect(summary_cards).to_contain_text("Основное", timeout=5000)
+                    expect(summary_cards).to_contain_text("На штуку", timeout=5000)
                     expect(summary_cards).to_contain_text("На кг", timeout=5000)
                     expect(summary_cards).to_contain_text("% от стоимости", timeout=5000)
                     expect(summary_cards).to_contain_text("КП всего, USD", timeout=5000)
@@ -123,6 +124,10 @@ def main() -> None:
                     expect(summary_cards).to_contain_text("57 665", timeout=5000)
                     expect(summary_cards).to_contain_text("ДТ всего, ₽", timeout=5000)
                     expect(summary_cards).to_contain_text("2 892 511", timeout=5000)
+                    expect(summary_cards).to_contain_text("КП: доставка+таможня, ₽/шт", timeout=5000)
+                    expect(summary_cards).to_contain_text("35,17", timeout=5000)
+                    expect(summary_cards).to_contain_text("Факт: доставка+таможня, ₽/шт", timeout=5000)
+                    expect(summary_cards).to_contain_text("35,34", timeout=5000)
                     expect(summary_cards).to_contain_text("Услуги логиста, ₽/кг · вес КП", timeout=5000)
                     expect(summary_cards).to_contain_text("126,08", timeout=5000)
                     expect(summary_cards).to_contain_text("Таможня, ₽/кг · вес ДТ", timeout=5000)
@@ -249,7 +254,7 @@ def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
             "supplier_name": "HanShang Technology",
             "customer_name": "",
             "currency": "CNY",
-            "product_qty_total": 1,
+            "product_qty_total": 116250,
             "product_amount_total": 785087.50,
             "extras_amount_total": 0,
             "invoice_amount_total": 785087.50,
