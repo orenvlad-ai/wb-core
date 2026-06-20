@@ -579,7 +579,7 @@ def parse_financial_document_pdf(
     )
     parsed["warnings"] = _dedupe_strings([*warnings, *_string_list(parsed.get("warnings"))])
     if (
-        text_extractor is None
+        (text_extractor is None or text_extractor is extract_pdf_text_layer)
         and _customs_parse_missing_weight_or_value(parsed)
         and dict(diagnostics).get("method") != "pypdf"
     ):
