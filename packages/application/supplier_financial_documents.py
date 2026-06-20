@@ -578,7 +578,40 @@ def parse_financial_document_pdf(
         extraction_diagnostics=diagnostics,
     )
     parsed["warnings"] = _dedupe_strings([*warnings, *_string_list(parsed.get("warnings"))])
+    if (
+        text_extractor is None
+        and _customs_parse_missing_weight_or_value(parsed)
+        and dict(diagnostics).get("method") != "pypdf"
+    ):
+        pypdf_diagnostics: dict[str, Any] = {
+            "filename": filename,
+            "method": "pypdf",
+            "fallback_from": dict(diagnostics).get("method") or "",
+        }
+        pypdf_text = _extract_pdf_text_with_pypdf(file_bytes, pypdf_diagnostics)
+        if _is_text_layer_sufficient(pypdf_text):
+            pypdf_diagnostics["text_char_count"] = len(pypdf_text)
+            fallback = parse_financial_document_text(
+                pypdf_text,
+                filename=filename,
+                extraction_diagnostics=pypdf_diagnostics,
+            )
+            if not _customs_parse_missing_weight_or_value(fallback):
+                raw_parse = dict(fallback.get("raw_parse") or {})
+                raw_parse["primary_extraction"] = dict(diagnostics)
+                fallback["raw_parse"] = raw_parse
+                fallback["warnings"] = _dedupe_strings(_string_list(fallback.get("warnings")))
+                return fallback
     return parsed
+
+
+def _customs_parse_missing_weight_or_value(parsed: Mapping[str, Any]) -> bool:
+    normalized = dict(parsed.get("normalized_parse") or {})
+    if str(normalized.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
+        return False
+    gross_weight = _positive_decimal(normalized.get("customs_gross_weight_kg") or normalized.get("gross_weight_kg"))
+    customs_value = _positive_decimal(normalized.get("total_customs_value_rub"))
+    return gross_weight is None or customs_value is None
 
 
 def parse_financial_document_text(
