@@ -595,15 +595,67 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
     import_duty_rub = _sum_decimal(line.get("amount_rub") for line in customs_lines if line.get("category") == EXPENSE_CATEGORY_IMPORT_DUTY_2010)
     import_vat_rub = _sum_decimal(line.get("amount_rub") for line in customs_lines if line.get("category") == EXPENSE_CATEGORY_IMPORT_VAT_5010)
     customs_total_rub = _sum_decimal(line.get("amount_rub") for line in customs_lines if bool(line.get("included_in_customs_total")))
+    customs_without_vat_rub = _sum_required(customs_fee_rub, import_duty_rub)
+    delivery_customs_total_rub = _sum_required(invoice_fact_rub, customs_total_rub)
 
-    gross_weight = _parse_decimal(quote_meta.get("gross_weight_kg"))
+    customs_metas = [dict(doc.get("normalized_parse") or {}) for doc in customs_docs]
+    quote_gross_weight = _positive_decimal(quote_meta.get("gross_weight_kg"))
+    customs_gross_weight = _positive_decimal(
+        _sum_decimal(
+            meta.get("customs_gross_weight_kg") if meta.get("customs_gross_weight_kg") is not None else meta.get("gross_weight_kg")
+            for meta in customs_metas
+        )
+    )
+    customs_net_weight = _positive_decimal(
+        _sum_decimal(
+            meta.get("customs_net_weight_kg") if meta.get("customs_net_weight_kg") is not None else meta.get("net_weight_kg")
+            for meta in customs_metas
+        )
+    )
+    quote_estimated_cargo_value_usd = _positive_decimal(quote_meta.get("estimated_cargo_value_usd"))
+    customs_total_customs_value_rub = _positive_decimal(
+        _sum_decimal(meta.get("total_customs_value_rub") for meta in customs_metas)
+    )
     volume = _parse_decimal(quote_meta.get("volume_m3"))
-    logistics_rub_per_kg = _safe_div(invoice_fact_rub, gross_weight)
+    logistics_rub_per_kg = _safe_div(invoice_fact_rub, quote_gross_weight)
     logistics_rub_per_m3 = _safe_div(invoice_fact_rub, volume)
-    if quote_docs and gross_weight is None:
-        warnings.append("Вес из КП не распознан: ₽/кг не рассчитан")
+    if quote_docs and quote_gross_weight is None:
+        warnings.append("Нет веса КП")
+    if customs_docs and customs_gross_weight is None:
+        warnings.append("Нет фактического веса из ДТ")
+    if quote_docs and quote_estimated_cargo_value_usd is None:
+        warnings.append("Нет стоимости груза по КП")
+    if customs_docs and customs_total_customs_value_rub is None:
+        warnings.append("Нет таможенной стоимости из ДТ")
     if quote_docs and volume is None:
         warnings.append("Объем из КП не распознан: ₽/м³ не рассчитан")
+
+    per_kg_quote_weight = {
+        "weight_kg": _decimal_to_float(quote_gross_weight),
+        "logistics_invoice_rub_per_kg": _decimal_to_float(_safe_div(invoice_fact_rub, quote_gross_weight)),
+        "customs_payments_rub_per_kg": _decimal_to_float(_safe_div(customs_total_rub, quote_gross_weight)),
+        "delivery_customs_rub_per_kg": _decimal_to_float(_safe_div(delivery_customs_total_rub, quote_gross_weight)),
+    }
+    per_kg_customs_weight = {
+        "weight_kg": _decimal_to_float(customs_gross_weight),
+        "logistics_invoice_rub_per_kg": _decimal_to_float(_safe_div(invoice_fact_rub, customs_gross_weight)),
+        "customs_payments_rub_per_kg": _decimal_to_float(_safe_div(customs_total_rub, customs_gross_weight)),
+        "delivery_customs_rub_per_kg": _decimal_to_float(_safe_div(delivery_customs_total_rub, customs_gross_weight)),
+    }
+    quote_percent_of_cargo_value = {
+        "cargo_value_usd": _decimal_to_float(quote_estimated_cargo_value_usd),
+        "logistics_pct": _decimal_to_float(_percent(quote_logistics_usd, quote_estimated_cargo_value_usd)),
+        "customs_pct": _decimal_to_float(_percent(quote_customs_usd, quote_estimated_cargo_value_usd)),
+        "delivery_customs_pct": _decimal_to_float(_percent(quote_total_usd, quote_estimated_cargo_value_usd)),
+    }
+    fact_percent_of_customs_value = {
+        "customs_value_rub": _decimal_to_float(customs_total_customs_value_rub),
+        "customs_payments_without_vat_rub": _decimal_to_float(customs_without_vat_rub),
+        "logistics_pct": _decimal_to_float(_percent(invoice_fact_rub, customs_total_customs_value_rub)),
+        "customs_without_vat_pct": _decimal_to_float(_percent(customs_without_vat_rub, customs_total_customs_value_rub)),
+        "customs_with_vat_pct": _decimal_to_float(_percent(customs_total_rub, customs_total_customs_value_rub)),
+        "delivery_customs_pct": _decimal_to_float(_percent(delivery_customs_total_rub, customs_total_customs_value_rub)),
+    }
 
     linked_quote_usd_for_rate = quote_logistics_usd if quote_required_complete else None
     rate_summary = _build_rate_summary(
@@ -632,6 +684,8 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
             "logistics_usd": _decimal_to_float(quote_logistics_usd),
             "customs_payments_usd": _decimal_to_float(quote_customs_usd),
             "logistics_rub_cbr": _decimal_to_float(quote_logistics_rub_cbr),
+            "gross_weight_kg": _decimal_to_float(quote_gross_weight),
+            "estimated_cargo_value_usd": _decimal_to_float(quote_estimated_cargo_value_usd),
             "required_amounts_complete": quote_required_complete,
             "missing_required_amounts": quote_missing_required,
         },
@@ -645,13 +699,25 @@ def build_financial_summary(documents: list[Mapping[str, Any]], expense_lines: l
             "import_duty_2010_rub": _decimal_to_float(import_duty_rub),
             "import_vat_5010_rub": _decimal_to_float(import_vat_rub),
             "total_customs_payments_rub": _decimal_to_float(customs_total_rub),
+            "customs_payments_without_vat_rub": _decimal_to_float(customs_without_vat_rub),
+            "total_customs_value_rub": _decimal_to_float(customs_total_customs_value_rub),
+            "gross_weight_kg": _decimal_to_float(customs_gross_weight),
+            "net_weight_kg": _decimal_to_float(customs_net_weight),
             "document_count": len(customs_docs),
         },
         "logistics_efficiency": {
             "rub_per_kg": _decimal_to_float(logistics_rub_per_kg),
             "rub_per_m3": _decimal_to_float(logistics_rub_per_m3),
-            "gross_weight_kg": _decimal_to_float(gross_weight),
+            "gross_weight_kg": _decimal_to_float(quote_gross_weight),
             "volume_m3": _decimal_to_float(volume),
+        },
+        "per_kg": {
+            "quote_weight": per_kg_quote_weight,
+            "customs_weight": per_kg_customs_weight,
+        },
+        "percent_of_value": {
+            "quote_cargo_value": quote_percent_of_cargo_value,
+            "fact_customs_value": fact_percent_of_customs_value,
         },
         "quote_invoice_match": rate_summary,
         "warnings": _dedupe_strings(warnings),
@@ -703,9 +769,16 @@ def _parse_logistics_quote(text: str) -> tuple[dict[str, Any], list[dict[str, An
         "estimated_cargo_value_usd": _decimal_to_float(_parse_decimal(_first_match(text, r"Оценочная стоимость груза,\s*долл\.\s*([\d .,]+)\s*USD"))),
         "estimated_cargo_value_cny": _decimal_to_float(_parse_decimal(_first_match(text, r"или\s*([\d .,]+)\s*юан"))),
         "total_amount": _decimal_to_float(total_quote_usd),
+        "total_quote_usd": _decimal_to_float(total_quote_usd),
         "currency": "USD",
         "payment_rate_policy": "курс Банка ВТБ на дату выставления счёта" if "Банка ВТБ" in text else "",
         "validity_days": _int_or_none(_first_match(text, r"действительно в течение\s+(\d+)\s+календар")),
+        "delivery_cost_usd": _decimal_to_float(_parse_decimal(amounts.get(EXPENSE_CATEGORY_DELIVERY))),
+        "customs_payments_and_fees_usd": _decimal_to_float(_parse_decimal(amounts.get(EXPENSE_CATEGORY_CUSTOMS_PAYMENTS))),
+        "ecological_fee_usd": _decimal_to_float(_parse_decimal(amounts.get(EXPENSE_CATEGORY_ECOLOGICAL_FEE))),
+        "brokerage_services_usd": _decimal_to_float(_parse_decimal(amounts.get(EXPENSE_CATEGORY_BROKERAGE))),
+        "company_commission_usd": _decimal_to_float(_parse_decimal(amounts.get(EXPENSE_CATEGORY_COMPANY_COMMISSION))),
+        "insurance_usd": _decimal_to_float(_parse_decimal(amounts.get(EXPENSE_CATEGORY_INSURANCE))),
         "quote_logistics_component_usd": _decimal_to_float(quote_logistics_component),
         "quote_customs_component_usd": _decimal_to_float(quote_customs_component),
         "quote_core_amounts_sum_usd": _decimal_to_float(quote_core_sum),
@@ -860,6 +933,7 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
     declaration_number = _first_match(text, r"\b(\d{8}/\d{6}/\d{6,})\b")
     declaration_date = _date_from_declaration_number(declaration_number) or _parse_date(_first_match(text, r"\b(\d{1,2}\.\d{1,2}\.\d{2,4})\s+\d{1,2}:\d{2}"))
     total_goods_count, total_places = _extract_customs_goods_places(text)
+    gross_weight_kg, net_weight_kg, weight_item_count = _extract_customs_item_weights(text)
     invoice_currency, invoice_amount_cny, customs_rate = _extract_customs_invoice_currency(text)
     total_customs_value_rub = _parse_decimal(_first_match(text, r"\bCN\s+([\d .,]+)"))
     customs_fee = _parse_decimal(_first_match(text, r"\b1010-([\d .,]+)-643"))
@@ -876,6 +950,11 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
         "declaration_date": declaration_date,
         "total_goods_count": total_goods_count,
         "total_places": total_places,
+        "customs_gross_weight_kg": _decimal_to_float(gross_weight_kg),
+        "customs_net_weight_kg": _decimal_to_float(net_weight_kg),
+        "gross_weight_kg": _decimal_to_float(gross_weight_kg),
+        "net_weight_kg": _decimal_to_float(net_weight_kg),
+        "customs_weight_item_count": weight_item_count,
         "invoice_currency": invoice_currency,
         "invoice_amount_cny": _decimal_to_float(invoice_amount_cny),
         "customs_currency_rate_cny": _decimal_to_float(customs_rate),
@@ -925,6 +1004,10 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
         warnings.append("Customs declaration number was not recognized")
     if total_payments is None:
         warnings.append("Total customs payments were not recognized")
+    if total_goods_count and weight_item_count and weight_item_count != total_goods_count:
+        warnings.append(f"Customs declaration item weight count {weight_item_count} does not match goods count {total_goods_count}")
+    if total_goods_count and not weight_item_count:
+        warnings.append("Customs declaration item gross/net weights were not recognized")
     return normalized, lines, warnings
 
 
@@ -1189,6 +1272,32 @@ def _extract_customs_goods_places(text: str) -> tuple[int | None, int | None]:
     if match:
         return _int_or_none(match.group(1)), _int_or_none(match.group(2))
     return None, None
+
+
+def _extract_customs_item_weights(text: str) -> tuple[Decimal | None, Decimal | None, int]:
+    lines = _text_to_lines(text)
+    gross_values: list[Decimal] = []
+    net_values: list[Decimal] = []
+    for index, line in enumerate(lines):
+        if not re.match(r"^\d{1,3}\s+\d{10}\s+", line):
+            continue
+        gross_weight: Decimal | None = None
+        net_weight: Decimal | None = None
+        for nearby in lines[index + 1 : index + 7]:
+            if gross_weight is None:
+                gross_match = re.match(r"^CN\s+([0-9][\d .,]*)\s+", nearby, flags=re.I)
+                if gross_match:
+                    gross_weight = _parse_decimal(gross_match.group(1))
+                    continue
+            if net_weight is None:
+                net_match = re.match(r"^\d{4}\s+\d{3}\s+([0-9][\d .,]*)\s*$", nearby)
+                if net_match:
+                    net_weight = _parse_decimal(net_match.group(1))
+        if gross_weight is not None:
+            gross_values.append(gross_weight)
+        if net_weight is not None:
+            net_values.append(net_weight)
+    return _sum_decimal(gross_values), _sum_decimal(net_values), len(gross_values)
 
 
 def _extract_customs_invoice_currency(text: str) -> tuple[str, Decimal | None, Decimal | None]:
@@ -1622,6 +1731,11 @@ def _safe_div(numerator: Decimal | None, denominator: Decimal | None) -> Decimal
     return numerator / denominator
 
 
+def _percent(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | None:
+    divided = _safe_div(numerator, denominator)
+    return divided * Decimal("100") if divided is not None else None
+
+
 def _sum_decimal(values: Any) -> Decimal | None:
     total = Decimal("0")
     found = False
@@ -1632,6 +1746,23 @@ def _sum_decimal(values: Any) -> Decimal | None:
         total += parsed
         found = True
     return total if found else None
+
+
+def _sum_required(*values: Any) -> Decimal | None:
+    parsed_values: list[Decimal] = []
+    for value in values:
+        parsed = _parse_decimal(value)
+        if parsed is None:
+            return None
+        parsed_values.append(parsed)
+    return sum(parsed_values, Decimal("0"))
+
+
+def _positive_decimal(value: Any) -> Decimal | None:
+    parsed = _parse_decimal(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
 
 
 def _first_match(text: str, pattern: str, *, flags: int = re.I) -> str:
