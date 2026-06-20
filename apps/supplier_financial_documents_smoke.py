@@ -120,6 +120,32 @@ Transitplus в Китае или после предоставления око�
 Transitplus International Ltd
 """
 
+QUOTE_2026_06_19_TEXT = """
+Коммерческое предложение на транспортно-экспедиционные услуги по тарифу «Авто стандарт 25-30 дней»
+Transitplus International Ltd
+Наименование груза: СТЕКЛА ДЛЯ СМАРТФОНА
+г. Москва 19.06.2026
+Город отправки: Guangzhou (Гуанчжоу)
+Пункт назначения: Москва
+Сроки доставки: 25-30 дней
+Вес брутто, кг. 6713,45
+Вес нетто, кг: 6713,45
+Объем, м3 31,28
+Оценочная стоимость груза, долл. 77423,22 USD или 541962,50 юаней
+1. Предварительный расчет стоимости:
+№ Перечень услуг Общая стоимость
+1 Стоимость доставки 12420
+2 Таможенные платежи и сборы 27175
+3 Экологический сбор 0
+4 Брокерские услуги 350
+5 Комиссия компании 0
+6 Страховая ставка, % 775
+ИТОГО: 40720 USD
+Оформление разрешительной документации 0 USD
+Оплата за доставку производится: по курсу Банка ВТБ (на дату выставления счета)
+Предложение действительно в течение 5 календарных дней
+"""
+
 BROKEN_QUOTE_TEXT = """
 Коммерческое предложение на транспортно-экспедиционные услуги по тарифу «Авто стандарт 25-30 дней»
 Transitplus International Ltd
@@ -178,6 +204,90 @@ CNY 785087.50 10.5831 010 00
 04031/0 103 от 05.06.2026
 04033/0 ORE от 04.06.2026
 457-ORE-002 ОТ 08.06.2026
+1 7020008000 С N
+CN   422.400 ОООО-ОО
+4000 000 380.160
+2 7020008000 С N
+CN   78.600 ОООО-ОО
+4000 000 70.740
+3 7020008000 С N
+CN   210.000 ОООО-ОО
+4000 000 189.000
+4 7020008000 С N
+CN   198.000 ОООО-ОО
+4000 000 178.200
+5 7020008000 С N
+CN   217.250 ОООО-ОО
+4000 000 195.530
+6 7020008000 С N
+CN   192.150 ОООО-ОО
+4000 000 172.940
+7 7020008000 С N
+CN   374.300 ОООО-ОО
+4000 000 336.870
+8 7020008000 С N
+CN   110.250 ОООО-ОО
+4000 000 99.230
+9 7020008000 С N
+CN   518.700 ОООО-ОО
+4000 000 466.830
+10 7020008000 С N
+CN   963.800 ОООО-ОО
+4000 000 867.420
+11 7020008000 С N
+CN   498.750 ОООО-ОО
+4000 000 448.880
+12 7020008000 С N
+CN   40.600 ОООО-ОО
+4000 000 36.540
+13 7020008000 С N
+CN   168.800 ОООО-ОО
+4000 000 151.920
+14 7020008000 С N
+CN   366.300 ОООО-ОО
+4000 000 329.670
+15 7020008000 С N
+CN   294.000 ОООО-ОО
+4000 000 264.600
+16 7020008000 С N
+CN   570.700 ОООО-ОО
+4000 000 513.630
+17 7020008000 С N
+CN   688.500 ОООО-ОО
+4000 000 619.650
+18 7020008000 С N
+CN   1214.950 ОООО-ОО
+4000 000 1093.460
+19 7020008000 С N
+CN   575.900 ОООО-ОО
+4000 000 518.310
+20 7020008000 С N
+CN   401.100 ОООО-ОО
+4000 000 360.990
+21 7020008000 С N
+CN   77.800 ОООО-ОО
+4000 000 70.020
+22 7020008000 С N
+CN   126.000 ОООО-ОО
+4000 000 113.400
+23 7020008000 С N
+CN   372.400 ОООО-ОО
+4000 000 335.160
+24 7020008000 С N
+CN   106.750 ОООО-ОО
+4000 000 96.080
+25 7020008000 С N
+CN   192.150 ОООО-ОО
+4000 000 172.940
+26 7020008000 С N
+CN   392.000 ОООО-ОО
+4000 000 352.800
+27 7020008000 С N
+CN   305.200 ОООО-ОО
+4000 000 274.680
+28 7020008000 С N
+CN   107.250 ОООО-ОО
+4000 000 96.530
 """
 
 TEXT_BY_FILENAME = {
@@ -224,9 +334,15 @@ def _assert_parser_smoke() -> None:
         customs.get("document_type") != "customs_declaration"
         or customs.get("declaration_number") != "10131010/100626/5187132"
         or customs.get("total_goods_count") != 28
+        or customs.get("total_places") != 465
+        or not _approx(customs.get("customs_gross_weight_kg"), 9784.6, tolerance=0.01)
+        or not _approx(customs.get("customs_net_weight_kg"), 8806.18, tolerance=0.01)
         or customs.get("total_customs_payments_rub") != 2892511.6
     ):
         raise AssertionError(f"customs parser fields mismatch: {customs}")
+    _assert_summary_metrics_smoke()
+    _assert_missing_customs_data_summary_smoke()
+    _assert_new_quote_parser_smoke()
     _assert_incomplete_quote_summary_smoke()
 
 
@@ -278,16 +394,106 @@ def _assert_incomplete_quote_summary_smoke() -> None:
         raise AssertionError(f"summary must expose incomplete quote base: {summary}")
 
 
-def _summary_fixture_documents_and_lines(quote_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _assert_summary_metrics_smoke() -> None:
+    quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
+    documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=True)
+    summary = build_financial_summary(documents, lines)
+    _assert_current_financial_metrics(summary)
+    if summary.get("warnings", []) and any("Нет " in warning for warning in summary.get("warnings", [])):
+        raise AssertionError(f"complete summary must not report missing metric source warnings: {summary.get('warnings')}")
+
+
+def _assert_missing_customs_data_summary_smoke() -> None:
+    quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
+    documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=False)
+    summary = build_financial_summary(documents, lines)
+    customs_weight = summary.get("per_kg", {}).get("customs_weight", {})
+    fact_percent = summary.get("percent_of_value", {}).get("fact_customs_value", {})
+    for key in ("logistics_invoice_rub_per_kg", "customs_payments_rub_per_kg", "delivery_customs_rub_per_kg"):
+        if customs_weight.get(key) is not None:
+            raise AssertionError(f"missing-DT {key} must be unavailable: {customs_weight}")
+    for key in ("logistics_pct", "customs_without_vat_pct", "customs_with_vat_pct", "delivery_customs_pct"):
+        if fact_percent.get(key) is not None:
+            raise AssertionError(f"missing-DT {key} must be unavailable: {fact_percent}")
+
+
+def _assert_new_quote_parser_smoke() -> None:
+    quote_payload = parse_financial_document_text(QUOTE_2026_06_19_TEXT, filename="transitplus-2026-06-19.txt")
+    quote = quote_payload["normalized_parse"]
+    expected = {
+        "quote_date": "2026-06-19",
+        "gross_weight_kg": 6713.45,
+        "volume_m3": 31.28,
+        "estimated_cargo_value_usd": 77423.22,
+        "estimated_cargo_value_cny": 541962.50,
+        "delivery_cost_usd": 12420.0,
+        "customs_payments_and_fees_usd": 27175.0,
+        "ecological_fee_usd": 0.0,
+        "brokerage_services_usd": 350.0,
+        "company_commission_usd": 0.0,
+        "insurance_usd": 775.0,
+        "total_quote_usd": 40720.0,
+        "quote_logistics_component_usd": 13545.0,
+        "quote_customs_component_usd": 27175.0,
+    }
+    for key, expected_value in expected.items():
+        actual = quote.get(key)
+        if actual != expected_value:
+            raise AssertionError(f"new Transitplus quote {key} mismatch: expected {expected_value}, got {actual}; quote={quote}")
+    documents, lines = _summary_documents_and_lines_from_payloads([("quote-2026-06-19", quote_payload)])
+    summary = build_financial_summary(documents, lines)
+    quote_percent = summary.get("percent_of_value", {}).get("quote_cargo_value", {})
+    if (
+        not _approx(quote_percent.get("logistics_pct"), 17.49, tolerance=0.01)
+        or not _approx(quote_percent.get("customs_pct"), 35.10, tolerance=0.01)
+        or not _approx(quote_percent.get("delivery_customs_pct"), 52.59, tolerance=0.01)
+    ):
+        raise AssertionError(f"new Transitplus quote percent metrics mismatch: {quote_percent}")
+
+
+def _assert_current_financial_metrics(summary: dict[str, Any]) -> None:
+    quote_weight = summary.get("per_kg", {}).get("quote_weight", {})
+    customs_weight = summary.get("per_kg", {}).get("customs_weight", {})
+    quote_percent = summary.get("percent_of_value", {}).get("quote_cargo_value", {})
+    fact_percent = summary.get("percent_of_value", {}).get("fact_customs_value", {})
+    expected_metrics = [
+        (quote_weight.get("logistics_invoice_rub_per_kg"), 126.08, "quote-weight logistics rub/kg"),
+        (quote_weight.get("customs_payments_rub_per_kg"), 299.91, "quote-weight customs rub/kg"),
+        (quote_weight.get("delivery_customs_rub_per_kg"), 425.99, "quote-weight total rub/kg"),
+        (customs_weight.get("logistics_invoice_rub_per_kg"), 124.27, "customs-weight logistics rub/kg"),
+        (customs_weight.get("customs_payments_rub_per_kg"), 295.62, "customs-weight customs rub/kg"),
+        (customs_weight.get("delivery_customs_rub_per_kg"), 419.89, "customs-weight total rub/kg"),
+        (quote_percent.get("logistics_pct"), 14.40, "quote logistics percent"),
+        (quote_percent.get("customs_pct"), 36.54, "quote customs percent"),
+        (quote_percent.get("delivery_customs_pct"), 50.94, "quote total percent"),
+        (fact_percent.get("logistics_pct"), 14.63, "fact logistics percent"),
+        (fact_percent.get("customs_without_vat_pct"), 10.59, "fact customs without VAT percent"),
+        (fact_percent.get("customs_with_vat_pct"), 34.79, "fact customs with VAT percent"),
+        (fact_percent.get("delivery_customs_pct"), 49.42, "fact total percent"),
+    ]
+    for actual, expected, label in expected_metrics:
+        if not _approx(actual, expected, tolerance=0.01):
+            raise AssertionError(f"{label} mismatch: expected {expected}, got {actual}; summary={summary}")
+    if not _approx(summary.get("customs_declaration", {}).get("gross_weight_kg"), 9784.6, tolerance=0.01):
+        raise AssertionError(f"summary customs gross weight mismatch: {summary}")
+    if fact_percent.get("customs_payments_without_vat_rub") != 880605.99:
+        raise AssertionError(f"summary customs without VAT mismatch: {fact_percent}")
+
+
+def _summary_fixture_documents_and_lines(quote_payload: dict[str, Any], *, include_customs: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     invoice_103 = parse_financial_document_text(INVOICE_103_TEXT, filename="invoice-103.txt")
     invoice_113 = parse_financial_document_text(INVOICE_113_TEXT, filename="invoice-113.txt")
-    documents = [
-        _document_from_parsed("quote", quote_payload, cbr_rate=78.0),
-        _document_from_parsed("invoice-103", invoice_103, cbr_rate=77.5),
-        _document_from_parsed("invoice-113", invoice_113, cbr_rate=78.2),
-    ]
+    payloads = [("quote", quote_payload), ("invoice-103", invoice_103), ("invoice-113", invoice_113)]
+    if include_customs:
+        payloads.append(("customs", parse_financial_document_text(CUSTOMS_TEXT, filename="customs.txt")))
+    return _summary_documents_and_lines_from_payloads(payloads)
+
+
+def _summary_documents_and_lines_from_payloads(payloads: list[tuple[str, dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rates = {"quote": 78.0, "invoice-103": 77.5, "invoice-113": 78.2, "customs": None, "quote-2026-06-19": 78.0}
+    documents = [_document_from_parsed(document_id, payload, cbr_rate=rates.get(document_id)) for document_id, payload in payloads]
     lines: list[dict[str, Any]] = []
-    for document, parsed in zip(documents, (quote_payload, invoice_103, invoice_113), strict=True):
+    for document, (_, parsed) in zip(documents, payloads, strict=True):
         for line in parsed.get("expense_lines", []):
             next_line = dict(line)
             next_line["financial_document_id"] = document["document_id"]
@@ -295,7 +501,7 @@ def _summary_fixture_documents_and_lines(quote_payload: dict[str, Any]) -> tuple
     return documents, lines
 
 
-def _document_from_parsed(document_id: str, parsed: dict[str, Any], *, cbr_rate: float) -> dict[str, Any]:
+def _document_from_parsed(document_id: str, parsed: dict[str, Any], *, cbr_rate: float | None) -> dict[str, Any]:
     normalized = dict(parsed.get("normalized_parse") or {})
     return {
         "document_id": document_id,
@@ -372,6 +578,7 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"rub/kg mismatch: {efficiency}")
             if not _approx(efficiency.get("rub_per_m3"), 26830.87, tolerance=0.01):
                 raise AssertionError(f"rub/m3 mismatch: {efficiency}")
+            _assert_current_financial_metrics(summary)
             if _approx(match.get("implied_rate"), 3799.92, tolerance=0.01) or _approx(match.get("relative_spread_pct"), 51.23, tolerance=0.01):
                 raise AssertionError(f"summary must not expose bogus rate/spread: {match}")
             quote_document_id = _document_id_by_type(listed, "logistics_quote")

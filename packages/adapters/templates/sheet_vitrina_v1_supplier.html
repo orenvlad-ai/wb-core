@@ -244,7 +244,17 @@
       display: grid;
       grid-template-columns: repeat(6, minmax(135px, 1fr));
       gap: 10px;
+    }
+    .finance-summary-stack {
+      display: grid;
+      gap: 14px;
       margin-top: 14px;
+    }
+    .finance-summary-section h4 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: var(--text);
+      letter-spacing: 0;
     }
     .finance-fields {
       display: grid;
@@ -470,21 +480,7 @@
             <ul id="financialUploadProgress" class="finance-upload-progress" hidden></ul>
           </div>
 
-          <div class="finance-summary-grid" aria-label="Финансовая сводка">
-            <div class="total"><span>КП всего, USD</span><strong id="financeQuoteTotalUsd">-</strong></div>
-            <div class="total"><span>Логистика по КП, USD</span><strong id="financeQuoteLogisticsUsd">-</strong></div>
-            <div class="total"><span>КП таможня, USD</span><strong id="financeQuoteCustomsUsd">-</strong></div>
-            <div class="total"><span>Счета логиста, ₽</span><strong id="financeInvoiceRub">-</strong></div>
-            <div class="total"><span>Счета НДС, ₽</span><strong id="financeInvoiceVatRub">-</strong></div>
-            <div class="total"><span>ДТ сбор, ₽</span><strong id="financeCustomsFeeRub">-</strong></div>
-            <div class="total"><span>ДТ пошлина, ₽</span><strong id="financeImportDutyRub">-</strong></div>
-            <div class="total"><span>ДТ НДС, ₽</span><strong id="financeImportVatRub">-</strong></div>
-            <div class="total"><span>ДТ всего, ₽</span><strong id="financeCustomsRub">-</strong></div>
-            <div class="total"><span>Логистика ₽/кг</span><strong id="financeRubPerKg">-</strong></div>
-            <div class="total"><span>Расчётный курс по правилу КП</span><strong id="financeImpliedRate">-</strong></div>
-            <div class="total"><span>Отклонение от ЦБ</span><strong id="financeRateSpread">-</strong></div>
-            <div class="total"><span>Счета минус КП-логистика, ₽</span><strong id="financeQuoteInvoiceDelta">-</strong></div>
-          </div>
+          <div id="financialSummaryGroups" class="finance-summary-stack" aria-label="Финансовая сводка"></div>
           <ul id="financialWarnings" class="warning-list" hidden></ul>
 
           <h3 style="margin-top: 18px;">Финансовые документы</h3>
@@ -588,22 +584,11 @@
       const financialRecognizedFields = document.getElementById("financialRecognizedFields");
       const financialExpenseRows = document.getElementById("financialExpenseRows");
       const financialWarnings = document.getElementById("financialWarnings");
-      const financeQuoteTotalUsd = document.getElementById("financeQuoteTotalUsd");
-      const financeQuoteLogisticsUsd = document.getElementById("financeQuoteLogisticsUsd");
-      const financeQuoteCustomsUsd = document.getElementById("financeQuoteCustomsUsd");
-      const financeInvoiceRub = document.getElementById("financeInvoiceRub");
-      const financeInvoiceVatRub = document.getElementById("financeInvoiceVatRub");
-      const financeCustomsFeeRub = document.getElementById("financeCustomsFeeRub");
-      const financeImportDutyRub = document.getElementById("financeImportDutyRub");
-      const financeImportVatRub = document.getElementById("financeImportVatRub");
-      const financeCustomsRub = document.getElementById("financeCustomsRub");
-      const financeRubPerKg = document.getElementById("financeRubPerKg");
-      const financeImpliedRate = document.getElementById("financeImpliedRate");
-      const financeRateSpread = document.getElementById("financeRateSpread");
-      const financeQuoteInvoiceDelta = document.getElementById("financeQuoteInvoiceDelta");
+      const financialSummaryGroups = document.getElementById("financialSummaryGroups");
       const metaInputs = Array.from(document.querySelectorAll("[data-meta-field]"));
           const numberFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
           const moneyFormatter = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          const percentPointFormatter = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           const defaultSupplierName = "HanShang Technology";
           const canDeleteShipments = config.can_delete_shipments !== false;
           const canEditOrderStatus = Boolean(config.can_edit_order_status);
@@ -709,6 +694,16 @@
       function formatPercent(value) {
         const number = Number(value);
         return Number.isFinite(number) ? numberFormatter.format(number * 100) + "%" : "-";
+      }
+
+      function formatPercentPoint(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? percentPointFormatter.format(number) + "%" : "-";
+      }
+
+      function financeValueOrDash(value) {
+        const text = String(value ?? "").trim();
+        return text && text !== "-" ? text : "—";
       }
 
       function formatRateSpread(match) {
@@ -1212,21 +1207,65 @@
         const quote = summary.quote || {};
         const invoices = summary.invoices || {};
         const customs = summary.customs_declaration || {};
-        const efficiency = summary.logistics_efficiency || {};
         const match = summary.quote_invoice_match || {};
-        financeQuoteTotalUsd.textContent = formatAmount(quote.total_usd, "USD");
-        financeQuoteLogisticsUsd.textContent = formatAmount(quote.logistics_usd, "USD");
-        financeQuoteCustomsUsd.textContent = formatAmount(quote.customs_payments_usd, "USD");
-        financeInvoiceRub.textContent = formatAmount(invoices.fact_rub, "₽");
-        financeInvoiceVatRub.textContent = formatAmount(invoices.vat_rub, "₽");
-        financeCustomsFeeRub.textContent = formatAmount(customs.customs_fee_1010_rub, "₽");
-        financeImportDutyRub.textContent = formatAmount(customs.import_duty_2010_rub, "₽");
-        financeImportVatRub.textContent = formatAmount(customs.import_vat_5010_rub, "₽");
-        financeCustomsRub.textContent = formatAmount(customs.total_customs_payments_rub, "₽");
-        financeRubPerKg.textContent = formatAmount(efficiency.rub_per_kg, "₽");
-        financeImpliedRate.textContent = match.implied_rate ? formatNumber(match.implied_rate) : "-";
-        financeRateSpread.textContent = formatRateSpread(match);
-        financeQuoteInvoiceDelta.textContent = formatAmount(match.delta_rub, "₽");
+        const perKg = summary.per_kg || {};
+        const quoteWeight = perKg.quote_weight || {};
+        const customsWeight = perKg.customs_weight || {};
+        const percent = summary.percent_of_value || {};
+        const quoteCargoPercent = percent.quote_cargo_value || {};
+        const factCustomsPercent = percent.fact_customs_value || {};
+        const groups = [
+          {
+            title: "Основное",
+            items: [
+              ["КП всего, USD", formatAmount(quote.total_usd, "USD")],
+              ["Логистика по КП, USD", formatAmount(quote.logistics_usd, "USD")],
+              ["КП таможня, USD", formatAmount(quote.customs_payments_usd, "USD")],
+              ["Счета логиста, ₽", formatAmount(invoices.fact_rub, "₽")],
+              ["Счета НДС, ₽", formatAmount(invoices.vat_rub, "₽")],
+              ["ДТ сбор, ₽", formatAmount(customs.customs_fee_1010_rub, "₽")],
+              ["ДТ пошлина, ₽", formatAmount(customs.import_duty_2010_rub, "₽")],
+              ["ДТ НДС, ₽", formatAmount(customs.import_vat_5010_rub, "₽")],
+              ["ДТ всего, ₽", formatAmount(customs.total_customs_payments_rub, "₽")],
+              ["Расчётный курс по правилу КП", match.implied_rate != null ? formatNumber(match.implied_rate) : "-"],
+              ["Отклонение от ЦБ", formatRateSpread(match)],
+              ["Счета минус КП-логистика, ₽", formatAmount(match.delta_rub, "₽")]
+            ]
+          },
+          {
+            title: "На кг",
+            items: [
+              ["Услуги логиста, ₽/кг · вес КП", formatAmount(quoteWeight.logistics_invoice_rub_per_kg, "₽")],
+              ["Таможня, ₽/кг · вес КП", formatAmount(quoteWeight.customs_payments_rub_per_kg, "₽")],
+              ["Итого доставка+таможня, ₽/кг · вес КП", formatAmount(quoteWeight.delivery_customs_rub_per_kg, "₽")],
+              ["Услуги логиста, ₽/кг · вес ДТ", formatAmount(customsWeight.logistics_invoice_rub_per_kg, "₽")],
+              ["Таможня, ₽/кг · вес ДТ", formatAmount(customsWeight.customs_payments_rub_per_kg, "₽")],
+              ["Итого доставка+таможня, ₽/кг · вес ДТ", formatAmount(customsWeight.delivery_customs_rub_per_kg, "₽")]
+            ]
+          },
+          {
+            title: "% от стоимости",
+            items: [
+              ["КП: услуги логиста, % от стоимости груза", formatPercentPoint(quoteCargoPercent.logistics_pct)],
+              ["КП: таможня, % от стоимости груза", formatPercentPoint(quoteCargoPercent.customs_pct)],
+              ["КП: доставка+таможня, % от стоимости груза", formatPercentPoint(quoteCargoPercent.delivery_customs_pct)],
+              ["Факт: услуги логиста, % от таможенной стоимости", formatPercentPoint(factCustomsPercent.logistics_pct)],
+              ["Факт: таможня без НДС, % от таможенной стоимости", formatPercentPoint(factCustomsPercent.customs_without_vat_pct)],
+              ["Факт: таможня с НДС, % от таможенной стоимости", formatPercentPoint(factCustomsPercent.customs_with_vat_pct)],
+              ["Факт: доставка+таможня, % от таможенной стоимости", formatPercentPoint(factCustomsPercent.delivery_customs_pct)]
+            ]
+          }
+        ];
+        financialSummaryGroups.innerHTML = groups.map((group) => (
+          '<section class="finance-summary-section">' +
+            '<h4>' + escapeHtml(group.title) + '</h4>' +
+            '<div class="finance-summary-grid">' +
+              group.items.map((item) => (
+                '<div class="total"><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(financeValueOrDash(item[1])) + '</strong></div>'
+              )).join("") +
+            '</div>' +
+          '</section>'
+        )).join("");
       }
 
       function renderFinancialWarnings() {
@@ -1364,11 +1403,15 @@
           ];
         }
         if (type === "customs_declaration") {
+          const customsGrossWeight = normalized.customs_gross_weight_kg ?? normalized.gross_weight_kg;
+          const customsNetWeight = normalized.customs_net_weight_kg ?? normalized.net_weight_kg;
           return [
             { label: "Номер ДТ", value: normalized.declaration_number || document.document_number },
             { label: "Дата", value: normalized.declaration_date || document.document_date },
             { label: "Товаров", value: normalized.total_goods_count },
             { label: "Мест", value: normalized.total_places },
+            { label: "Вес брутто ДТ", value: formatAmount(customsGrossWeight, "кг") },
+            { label: "Вес нетто ДТ", value: formatAmount(customsNetWeight, "кг") },
             { label: "Инвойс", value: formatAmount(normalized.invoice_amount_cny, normalized.invoice_currency || "CNY") },
             { label: "Курс CNY", value: formatNumber(normalized.customs_currency_rate_cny) },
             { label: "Таможенная стоимость", value: formatAmount(normalized.total_customs_value_rub, "₽") },
