@@ -487,17 +487,44 @@ def _assert_registry_lead_time_rows_smoke() -> None:
                 "documents": documents,
                 "expense_lines": lines,
                 "summary": build_financial_summary(documents, lines, shipment=shipment),
+            },
+            {
+                "shipment_id": "invalid_fact_dates",
+                "header": {
+                    "shipment_id": "invalid_fact_dates",
+                    "shipment_date": "not-a-date",
+                    "actual_shipment_date": "2026/06/02",
+                    "actual_ff_acceptance_date": "2026-06-99",
+                    "product_qty_total": 10,
+                },
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": build_financial_summary(documents, lines, shipment=shipment),
             }
         ]
     )
     labels = _registry_row_labels(registry, "lead_times")
     if "Срок до ДТ" not in labels:
         raise AssertionError(f"registry lead-times must expose Срок до ДТ: {labels}")
+    if "Фактический срок поставки" not in labels:
+        raise AssertionError(f"registry lead-times must expose actual delivery days: {labels}")
     forbidden = " ".join(labels).lower()
-    if "фактический срок" in forbidden or "отклонение срока" in forbidden:
+    if "отклонение срока" in forbidden:
         raise AssertionError(f"registry lead-times must not expose misleading rows: {labels}")
+    if _registry_cell_display(registry, "lead_times", "actual_delivery_days", "missing_dates") != "—":
+        raise AssertionError(f"missing fact shipment dates must render actual delivery days as unavailable: {registry}")
     if _registry_cell_display(registry, "lead_times", "days_to_customs_declaration", "missing_dates") != "—":
         raise AssertionError(f"missing lead-time dates must render as unavailable: {registry}")
+    if (
+        _registry_cell_display(registry, "passport", "shipment_date", "invalid_fact_dates") != "—"
+        or _registry_cell_display(registry, "passport", "actual_shipment_date", "invalid_fact_dates") != "—"
+        or _registry_cell_display(registry, "passport", "actual_ff_acceptance_date", "invalid_fact_dates") != "—"
+        or _registry_cell_display(registry, "lead_times", "actual_delivery_days", "invalid_fact_dates") != "—"
+    ):
+        raise AssertionError(f"invalid registry dates must render as unavailable: {registry}")
+    if len(registry.get("warnings", [])) < 3:
+        raise AssertionError(f"invalid registry dates must surface warnings: {registry}")
 
 
 def _assert_current_financial_metrics(summary: dict[str, Any]) -> None:
@@ -667,9 +694,13 @@ def _assert_http_api_smoke() -> None:
             lead_time_labels = _registry_row_labels(registry, "lead_times")
             if "Срок до ДТ" not in lead_time_labels:
                 raise AssertionError(f"shipment registry lead-time row missing: {lead_time_labels}")
+            if "Фактический срок поставки" not in lead_time_labels:
+                raise AssertionError(f"shipment registry actual delivery row missing: {lead_time_labels}")
             forbidden_lead_time_labels = " ".join(lead_time_labels).lower()
-            if "фактический срок" in forbidden_lead_time_labels or "отклонение срока" in forbidden_lead_time_labels:
+            if "отклонение срока" in forbidden_lead_time_labels:
                 raise AssertionError(f"shipment registry exposes misleading lead-time rows: {lead_time_labels}")
+            if _registry_cell_display(registry, "lead_times", "actual_delivery_days", "sup_financial") != "17 дн.":
+                raise AssertionError(f"registry actual delivery days mismatch: {registry}")
             if _registry_cell_display(registry, "lead_times", "days_to_customs_declaration", "sup_financial") != "8 дн.":
                 raise AssertionError(f"registry days-to-customs-declaration mismatch: {registry}")
             if _registry_cell_display(registry, "quote_logistics", "quote_total_rub_per_unit", "sup_financial") != "35.17 ₽":
@@ -820,6 +851,8 @@ def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
             "created_at": "2026-06-19T08:00:00Z",
             "updated_at": "2026-06-19T08:00:00Z",
             "shipment_date": "2026-06-02",
+            "actual_shipment_date": "2026-06-02",
+            "actual_ff_acceptance_date": "2026-06-19",
             "order_status": "in_transit",
             "invoice_no": "SAFE-ORDER",
             "invoice_date": "2026-06-02",

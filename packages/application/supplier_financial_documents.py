@@ -1057,6 +1057,7 @@ def build_supplier_shipment_registry(contexts: list[Mapping[str, Any]]) -> dict[
         key=lambda item: _registry_sort_key(item),
     )
     columns = [_registry_column(item) for item in sorted_contexts]
+    warnings = _registry_date_warnings(sorted_contexts)
     sections = []
     for section_id, title, rows in _registry_row_definitions():
         section_rows = []
@@ -1077,8 +1078,10 @@ def build_supplier_shipment_registry(contexts: list[Mapping[str, Any]]) -> dict[
         "status": "ok",
         "columns": columns,
         "sections": sections,
+        "warnings": warnings,
         "meta": {
             "shipment_count": len(columns),
+            "warning_count": len(warnings),
             "sort": "invoice_date/shipment_date/created_at ascending; newer shipments are rightmost",
         },
     }
@@ -1471,9 +1474,10 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("invoice_no", "номер заказа / инвойса", lambda item: _registry_text(_registry_header(item).get("invoice_no"))),
                 ("order_date", "дата заказа", lambda item: _registry_date(_date_part(_registry_header(item).get("created_at")))),
                 ("invoice_date", "дата инвойса", lambda item: _registry_date(_registry_header(item).get("invoice_date"))),
-                ("shipment_date", "дата отгрузки", lambda item: _registry_date(_registry_header(item).get("shipment_date"))),
+                ("shipment_date", "Плановая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("shipment_date"))),
+                ("actual_shipment_date", "Фактическая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("actual_shipment_date"))),
+                ("actual_ff_acceptance_date", "Фактическая дата приёмки на ФФ", lambda item: _registry_strict_date(_registry_header(item).get("actual_ff_acceptance_date"))),
                 ("customs_date", "дата ДТ", lambda item: _registry_date(_registry_customs_meta(item).get("document_date") or _registry_customs_meta(item).get("declaration_date"))),
-                ("accepted_date", "дата приёмки", lambda item: _registry_blank()),
                 ("supplier", "поставщик", lambda item: _registry_text(_registry_header(item).get("supplier_name"))),
                 ("logistics_vendor", "логист", lambda item: _registry_text(_registry_logistics_vendor(item))),
                 ("route", "маршрут", lambda item: _registry_text(_registry_route(item))),
@@ -1559,6 +1563,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
             "G. Сроки",
             [
                 ("quote_delivery_days", "срок доставки по КП", lambda item: _registry_text(_quote_delivery_days_display(item))),
+                ("actual_delivery_days", "Фактический срок поставки", lambda item: _registry_number(_actual_delivery_days(item), suffix=" дн.", decimals=0)),
                 ("days_to_customs_declaration", "Срок до ДТ", lambda item: _registry_number(_days_to_customs_declaration(item), suffix=" дн.", decimals=0)),
             ],
         ),
@@ -1580,7 +1585,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
 def _registry_sort_key(context: Mapping[str, Any]) -> tuple[str, str, str, str]:
     header = _registry_header(context)
     invoice_date = _date_part(header.get("invoice_date"))
-    shipment_date = _date_part(header.get("shipment_date"))
+    shipment_date = _strict_date_part(header.get("shipment_date"))
     created_at = _date_part(header.get("created_at"))
     return (invoice_date or shipment_date or created_at or "9999-99-99", created_at or "", str(header.get("invoice_no") or ""), str(header.get("shipment_id") or ""))
 
@@ -1598,6 +1603,9 @@ def _registry_column(context: Mapping[str, Any]) -> dict[str, Any]:
         "invoice_no": invoice_no,
         "invoice_date": invoice_date,
         "shipment_date": shipment_date,
+        "planned_shipment_date": shipment_date,
+        "actual_shipment_date": _strict_date_part(header.get("actual_shipment_date")),
+        "actual_ff_acceptance_date": _strict_date_part(header.get("actual_ff_acceptance_date")),
         "order_status": header.get("order_status") or "",
     }
 
@@ -1697,6 +1705,37 @@ def _days_to_customs_declaration(context: Mapping[str, Any]) -> Decimal | None:
         return None
 
 
+def _actual_delivery_days(context: Mapping[str, Any]) -> Decimal | None:
+    header = _registry_header(context)
+    start = _strict_date_part(header.get("actual_shipment_date"))
+    end = _strict_date_part(header.get("actual_ff_acceptance_date"))
+    if not start or not end:
+        return None
+    try:
+        return Decimal(str((date.fromisoformat(end) - date.fromisoformat(start)).days))
+    except ValueError:
+        return None
+
+
+def _registry_date_warnings(contexts: list[Mapping[str, Any]]) -> list[str]:
+    labels = {
+        "shipment_date": "Плановая дата отгрузки",
+        "actual_shipment_date": "Фактическая дата отгрузки",
+        "actual_ff_acceptance_date": "Фактическая дата приёмки на ФФ",
+    }
+    warnings: list[str] = []
+    for context in contexts:
+        header = _registry_header(context)
+        shipment_label = str(header.get("invoice_no") or header.get("shipment_id") or context.get("shipment_id") or "supplier shipment")
+        for field_name, label in labels.items():
+            raw = str(header.get(field_name) or "").strip()
+            if not raw:
+                continue
+            if not _strict_date_part(raw):
+                warnings.append(f"{shipment_label}: {label} has invalid date value {raw!r}; cell rendered as —.")
+    return _dedupe_strings(warnings)
+
+
 def _quote_component_per_kg(context: Mapping[str, Any], component: str) -> Decimal | None:
     summary = _registry_summary(context)
     quote = dict(summary.get("quote") or {})
@@ -1756,6 +1795,11 @@ def _registry_date(value: Any) -> dict[str, Any]:
     return _registry_cell(normalized or None, normalized or "—")
 
 
+def _registry_strict_date(value: Any) -> dict[str, Any]:
+    normalized = _strict_date_part(value)
+    return _registry_cell(normalized or None, normalized or "—")
+
+
 def _registry_number(value: Any, *, suffix: str = "", decimals: int = 2, signed: bool = False) -> dict[str, Any]:
     decimal_value = _parse_decimal(value)
     if decimal_value is None:
@@ -1792,6 +1836,20 @@ def _date_part(value: Any) -> str:
     if "T" in raw:
         raw = raw.split("T", 1)[0]
     return _optional_iso_date(raw) or raw[:10]
+
+
+def _strict_date_part(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "T" in raw:
+        raw = raw.split("T", 1)[0]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return ""
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError:
+        return ""
 
 
 def _dec(value: Any) -> Decimal | None:

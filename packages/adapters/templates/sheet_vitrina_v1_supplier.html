@@ -325,7 +325,9 @@
           <table>
             <thead>
               <tr>
-                <th>出货日期 / Shipment date / Дата отгрузки</th>
+                <th>计划出货日期 / Planned shipment date / Плановая дата отгрузки</th>
+                <th>实际出货日期 / Actual shipment date / Фактическая дата отгрузки</th>
+                <th>实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ</th>
                 <th>发票编号 / Invoice No / Номер invoice</th>
                 <th>发票日期 / Invoice date / Дата invoice</th>
                 <th>供应商 / Supplier / Поставщик</th>
@@ -342,7 +344,7 @@
               </tr>
             </thead>
             <tbody id="shipmentRows" data-registry-state="loading">
-              <tr data-registry-state="loading"><td colspan="13"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
+              <tr data-registry-state="loading"><td colspan="16"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -378,8 +380,16 @@
 
         <div class="grid" style="margin-top: 16px;">
           <div id="shipmentDateField" class="field required-missing">
-            <label for="shipmentDateInput">出货日期 / Shipment date / Дата отгрузки</label>
+            <label for="shipmentDateInput">计划出货日期 / Planned shipment date / Плановая дата отгрузки</label>
             <input id="shipmentDateInput" type="date" required>
+          </div>
+          <div class="field">
+            <label for="actualShipmentDateInput">实际出货日期 / Actual shipment date / Фактическая дата отгрузки</label>
+            <input id="actualShipmentDateInput" type="date">
+          </div>
+          <div class="field">
+            <label for="actualFfAcceptanceDateInput">实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ</label>
+            <input id="actualFfAcceptanceDateInput" type="date">
           </div>
           <div class="field">
             <label for="invoiceNoInput">发票编号 / Invoice No / Номер invoice</label>
@@ -548,6 +558,8 @@
       const selectedFileLabel = document.getElementById("selectedFileLabel");
       const shipmentDateField = document.getElementById("shipmentDateField");
       const shipmentDateInput = document.getElementById("shipmentDateInput");
+      const actualShipmentDateInput = document.getElementById("actualShipmentDateInput");
+      const actualFfAcceptanceDateInput = document.getElementById("actualFfAcceptanceDateInput");
       const saveShipmentButton = document.getElementById("saveShipmentButton");
       const closeShipmentButton = document.getElementById("closeShipmentButton");
       const cardTitle = document.getElementById("cardTitle");
@@ -777,20 +789,20 @@
       function renderRegistryLoading() {
         registryLoadState = "loading";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="13"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="16"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
       }
 
       function renderRegistryError(message) {
         registryLoadState = "error";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="13">' + escapeHtml(message || "加载失败 / Load failed / Ошибка загрузки.") + '</td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="16">' + escapeHtml(message || "加载失败 / Load failed / Ошибка загрузки.") + '</td></tr>';
       }
 
       function renderRegistry(rows) {
         if (!rows.length) {
           registryLoadState = "loaded_empty";
           shipmentRows.dataset.registryState = registryLoadState;
-          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="13">暂无订单 / No orders yet / Заказов пока нет.</td></tr>';
+          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="16">暂无订单 / No orders yet / Заказов пока нет.</td></tr>';
           return;
         }
             registryLoadState = "loaded_with_rows";
@@ -799,7 +811,9 @@
               const status = row.match_status === "all_matched" ? "OK" : "Check";
               const cells = [
                 '<tr data-row="' + escapeHtml(row.shipment_id) + '">',
-                '<td>' + escapeHtml(row.shipment_date || "-") + '</td>',
+                '<td>' + escapeHtml(row.planned_shipment_date || row.shipment_date || "-") + '</td>',
+                '<td>' + escapeHtml(row.actual_shipment_date || "-") + '</td>',
+                '<td>' + escapeHtml(row.actual_ff_acceptance_date || "-") + '</td>',
                 '<td>' + escapeHtml(row.invoice_no || "-") + '</td>',
                 '<td>' + escapeHtml(row.invoice_date || "-") + '</td>',
                 '<td>' + escapeHtml(row.supplier_name || defaultSupplierName) + '</td>',
@@ -970,6 +984,9 @@
         return {
           shipment_id: "",
           shipment_date: "",
+          planned_shipment_date: "",
+          actual_shipment_date: "",
+          actual_ff_acceptance_date: "",
           metadata: {
             invoice_no: "",
             invoice_date: "",
@@ -1039,13 +1056,16 @@
             ...blankShipment(),
             ...payload,
             shipment_date: shipmentDateInput.value || "",
+            planned_shipment_date: shipmentDateInput.value || "",
+            actual_shipment_date: actualShipmentDateInput.value || "",
+            actual_ff_acceptance_date: actualFfAcceptanceDateInput.value || "",
             metadata: payload.metadata || {},
             lines: Array.isArray(payload.lines) ? payload.lines : []
           };
           isNewShipment = true;
           renderCard();
           cardDirty = true;
-          setMessage(cardMessage, "发票已识别，请填写出货日期 / Invoice parsed, fill shipment date / Invoice распознан, заполните дату отгрузки.", "success");
+          setMessage(cardMessage, "发票已识别，请填写计划出货日期 / Invoice parsed, fill planned shipment date / Invoice распознан, заполните плановую дату отгрузки.", "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
           invoiceFileInput.value = "";
@@ -1061,7 +1081,9 @@
         const shipment = currentShipment || blankShipment();
         const metadata = shipment.metadata || {};
         cardTitle.textContent = shipment.shipment_id ? "订单 / Order / Заказ " + shipment.shipment_id : "新订单 / New order / Новый заказ";
-        shipmentDateInput.value = shipment.shipment_date || "";
+        shipmentDateInput.value = shipment.planned_shipment_date || shipment.shipment_date || "";
+        actualShipmentDateInput.value = shipment.actual_shipment_date || "";
+        actualFfAcceptanceDateInput.value = shipment.actual_ff_acceptance_date || "";
         metaInputs.forEach((input) => {
           input.value = metadata[input.dataset.metaField] ?? "";
         });
@@ -1684,6 +1706,9 @@
         });
         return {
           shipment_date: shipmentDateInput.value,
+          planned_shipment_date: shipmentDateInput.value,
+          actual_shipment_date: actualShipmentDateInput.value,
+          actual_ff_acceptance_date: actualFfAcceptanceDateInput.value,
           metadata,
           lines: (currentShipment && currentShipment.lines) || [],
           warnings: (currentShipment && currentShipment.warnings) || [],
@@ -1748,7 +1773,13 @@
             currentShipment = await fetchJson(shipmentsPath, {
               method: "POST",
               headers: { "Content-Type": "application/json", Accept: "application/json" },
-              body: JSON.stringify({ upload_id: currentUploadId, shipment_date: payload.shipment_date, payload })
+              body: JSON.stringify({
+                upload_id: currentUploadId,
+                shipment_date: payload.shipment_date,
+                actual_shipment_date: payload.actual_shipment_date,
+                actual_ff_acceptance_date: payload.actual_ff_acceptance_date,
+                payload
+              })
             });
             isNewShipment = false;
             currentUploadId = "";
@@ -1756,7 +1787,12 @@
             currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), {
               method: "PATCH",
               headers: { "Content-Type": "application/json", Accept: "application/json" },
-              body: JSON.stringify({ shipment_date: payload.shipment_date, payload })
+              body: JSON.stringify({
+                shipment_date: payload.shipment_date,
+                actual_shipment_date: payload.actual_shipment_date,
+                actual_ff_acceptance_date: payload.actual_ff_acceptance_date,
+                payload
+              })
             });
           }
           cardDirty = false;
@@ -1913,6 +1949,12 @@
       shipmentDateInput.addEventListener("input", () => {
         cardDirty = true;
         updateTotalsAndState();
+      });
+      [actualShipmentDateInput, actualFfAcceptanceDateInput].forEach((input) => {
+        input.addEventListener("input", () => {
+          cardDirty = true;
+          updateTotalsAndState();
+        });
       });
       metaInputs.forEach((input) => input.addEventListener("input", () => {
         cardDirty = true;

@@ -374,11 +374,25 @@ def main() -> None:
             if missing_date_status != 400 or "shipment_date" not in str(missing_date_payload.get("error", "")):
                 raise AssertionError("create must reject missing shipment_date")
 
+            invalid_actual_status, invalid_actual_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                {
+                    "upload_id": parse_payload["upload_id"],
+                    "shipment_date": "2026-05-14",
+                    "actual_shipment_date": "2026/05/16",
+                    "payload": parse_payload,
+                },
+            )
+            if invalid_actual_status != 400 or "actual_shipment_date" not in str(invalid_actual_payload.get("error", "")):
+                raise AssertionError(f"create must reject invalid actual_shipment_date, got {invalid_actual_status} {invalid_actual_payload}")
+
             create_status, detail = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
                 {
                     "upload_id": parse_payload["upload_id"],
                     "shipment_date": "2026-05-14",
+                    "actual_shipment_date": "2026-05-16",
+                    "actual_ff_acceptance_date": "2026-05-28",
                     "payload": parse_payload,
                 },
             )
@@ -387,6 +401,12 @@ def main() -> None:
             shipment_id = detail["shipment_id"]
             if detail.get("shipment_date") != "2026-05-14" or detail.get("match_status") != "has_unmatched":
                 raise AssertionError("created shipment must keep date and unmatched status")
+            if (
+                detail.get("planned_shipment_date") != "2026-05-14"
+                or detail.get("actual_shipment_date") != "2026-05-16"
+                or detail.get("actual_ff_acceptance_date") != "2026-05-28"
+            ):
+                raise AssertionError(f"created shipment must expose planned/fact dates, got {detail}")
             if detail.get("order_status") != "production":
                 raise AssertionError(f"created shipment must default order_status=production, got {detail.get('order_status')}")
             if detail.get("supplier_name") != "HanShang Technology" or detail.get("metadata", {}).get("supplier_name") != "HanShang Technology":
@@ -407,6 +427,12 @@ def main() -> None:
                 raise AssertionError("detail route must return persisted card payload")
             if loaded_detail.get("order_status") != "production":
                 raise AssertionError("detail route must expose default order_status")
+            if (
+                loaded_detail.get("planned_shipment_date") != "2026-05-14"
+                or loaded_detail.get("actual_shipment_date") != "2026-05-16"
+                or loaded_detail.get("actual_ff_acceptance_date") != "2026-05-28"
+            ):
+                raise AssertionError("detail route must expose planned/fact shipment dates")
             if loaded_detail.get("product_lines", [{}])[0].get("price_conformity_checked_at") != "2026-05-30T08:00:00Z":
                 raise AssertionError("detail route must expose persisted price conformity metadata without recalculation")
             price_check_status, price_checked = _post_json(
@@ -433,10 +459,21 @@ def main() -> None:
             edited["metadata"]["declared_invoice_total"] = 35
             patch_status, patched = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
-                {"shipment_date": "2026-05-15", "payload": edited},
+                {
+                    "shipment_date": "2026-05-15",
+                    "actual_shipment_date": "2026-05-17",
+                    "actual_ff_acceptance_date": "2026-05-30",
+                    "payload": edited,
+                },
             )
             if patch_status != 200 or patched.get("shipment_date") != "2026-05-15":
                 raise AssertionError(f"patch route must update shipment date, got {patch_status} {patched}")
+            if (
+                patched.get("planned_shipment_date") != "2026-05-15"
+                or patched.get("actual_shipment_date") != "2026-05-17"
+                or patched.get("actual_ff_acceptance_date") != "2026-05-30"
+            ):
+                raise AssertionError(f"patch route must update fact dates, got {patched}")
             if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 30.0:
                 raise AssertionError("patch route must mark manual_override and recalculate totals server-side")
             if patched.get("order_status") != "production":
@@ -452,8 +489,10 @@ def main() -> None:
                 len(status_patched.get("product_lines", [])) != 3
                 or status_patched.get("source_file_sha256") != workbook_sha256
                 or status_patched.get("invoice_no") != "26GN390"
+                or status_patched.get("actual_shipment_date") != "2026-05-17"
+                or status_patched.get("actual_ff_acceptance_date") != "2026-05-30"
             ):
-                raise AssertionError("status-only patch must not erase lines, metadata, or source file")
+                raise AssertionError("status-only patch must not erase lines, metadata, source file, or fact dates")
             invalid_status, invalid_payload = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 {"order_status": "delivered_to_mars"},
@@ -589,6 +628,12 @@ def main() -> None:
                 raise AssertionError("list route must expose fixed supplier_name")
             if registry_payload["shipments"][0].get("order_status") != "accepted_ff":
                 raise AssertionError("list route must expose persisted order_status")
+            if (
+                registry_payload["shipments"][0].get("planned_shipment_date") != "2026-05-15"
+                or registry_payload["shipments"][0].get("actual_shipment_date") != "2026-05-17"
+                or registry_payload["shipments"][0].get("actual_ff_acceptance_date") != "2026-05-30"
+            ):
+                raise AssertionError(f"list route must expose planned/fact dates, got {registry_payload}")
             shipment_registry_status, shipment_registry = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}")
             if (
                 shipment_registry_status != 200
@@ -606,6 +651,14 @@ def main() -> None:
                 raise AssertionError(f"shipment registry without financial docs must keep quote ₽/шт unavailable: {shipment_registry}")
             if _registry_cell_display(shipment_registry, "fact_expenses", "fact_total_rub_per_unit", shipment_id) != "—":
                 raise AssertionError(f"shipment registry without financial docs must keep fact ₽/шт unavailable: {shipment_registry}")
+            if _registry_cell_display(shipment_registry, "passport", "shipment_date", shipment_id) != "2026-05-15":
+                raise AssertionError(f"shipment registry must expose planned shipment date: {shipment_registry}")
+            if _registry_cell_display(shipment_registry, "passport", "actual_shipment_date", shipment_id) != "2026-05-17":
+                raise AssertionError(f"shipment registry must expose actual shipment date: {shipment_registry}")
+            if _registry_cell_display(shipment_registry, "passport", "actual_ff_acceptance_date", shipment_id) != "2026-05-30":
+                raise AssertionError(f"shipment registry must expose actual FF acceptance date: {shipment_registry}")
+            if _registry_cell_display(shipment_registry, "lead_times", "actual_delivery_days", shipment_id) != "13 дн.":
+                raise AssertionError(f"shipment registry must calculate actual delivery days: {shipment_registry}")
             invoice_path = registry_payload["shipments"][0].get("invoice_download_path")
             invoice_status, invoice_bytes, invoice_headers = _get_bytes(f"{base_url}{invoice_path}")
             if invoice_status != 200 or hashlib.sha256(invoice_bytes).hexdigest() != workbook_sha256:
@@ -658,6 +711,11 @@ def main() -> None:
                 raise AssertionError(f"legacy missing supplier must list with default fallback, got {legacy_list_payload}")
             if legacy_list_payload.get("shipments", [{}])[0].get("order_status") != "production":
                 raise AssertionError("legacy missing order_status must list with production fallback")
+            if (
+                legacy_list_payload.get("shipments", [{}])[0].get("actual_shipment_date") != ""
+                or legacy_list_payload.get("shipments", [{}])[0].get("actual_ff_acceptance_date") != ""
+            ):
+                raise AssertionError("legacy rows without fact dates must expose empty fact dates")
         finally:
             server.shutdown()
             server.server_close()

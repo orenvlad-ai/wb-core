@@ -207,6 +207,8 @@ class SupplierShipmentsBlock:
             raise ValueError(f"supplier shipment upload not found: {upload_id}")
         edited_payload = _resolve_edited_payload(payload, fallback=upload["parsed_payload"])
         shipment_date = _validate_iso_date(str(payload.get("shipment_date") or edited_payload.get("shipment_date") or ""))
+        actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_shipment_date")
+        actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_ff_acceptance_date")
         order_status = ORDER_STATUS_DEFAULT
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
@@ -251,6 +253,8 @@ class SupplierShipmentsBlock:
             "created_at": now,
             "updated_at": now,
             "shipment_date": shipment_date,
+            "actual_shipment_date": actual_shipment_date,
+            "actual_ff_acceptance_date": actual_ff_acceptance_date,
             "order_status": order_status,
             "invoice_no": metadata.get("invoice_no") or "",
             "invoice_date": metadata.get("invoice_date") or "",
@@ -298,12 +302,14 @@ class SupplierShipmentsBlock:
         shipment_date = _validate_iso_date(
             str(payload.get("shipment_date") or edited_payload.get("shipment_date") or existing["header"].get("shipment_date") or "")
         )
+        existing_header = dict(existing["header"])
+        actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_shipment_date")
+        actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_ff_acceptance_date")
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
             shipment_date=shipment_date,
             force_manual_override=False,
         )
-        existing_header = dict(existing["header"])
         order_status = _normalize_order_status(
             payload.get("order_status") if "order_status" in payload else existing_header.get("order_status")
         )
@@ -312,6 +318,8 @@ class SupplierShipmentsBlock:
             **existing_header,
             "updated_at": now,
             "shipment_date": shipment_date,
+            "actual_shipment_date": actual_shipment_date,
+            "actual_ff_acceptance_date": actual_ff_acceptance_date,
             "order_status": order_status,
             "invoice_no": metadata.get("invoice_no") or "",
             "invoice_date": metadata.get("invoice_date") or "",
@@ -1604,9 +1612,27 @@ def _resolve_edited_payload(payload: Mapping[str, Any], *, fallback: Mapping[str
     for key in ("metadata", "lines", "summary", "warnings", "errors"):
         if key in payload and key not in resolved:
             resolved[key] = payload[key]
-    if "shipment_date" in payload:
-        resolved["shipment_date"] = payload["shipment_date"]
+    for key in ("shipment_date", "actual_shipment_date", "actual_ff_acceptance_date"):
+        if key in payload:
+            resolved[key] = payload[key]
     return resolved
+
+
+def _resolve_optional_date_field(
+    payload: Mapping[str, Any],
+    edited_payload: Mapping[str, Any],
+    existing_header: Mapping[str, Any] | None,
+    field_name: str,
+) -> str:
+    if field_name in payload:
+        raw = payload.get(field_name)
+    elif field_name in edited_payload:
+        raw = edited_payload.get(field_name)
+    elif existing_header is not None:
+        raw = existing_header.get(field_name)
+    else:
+        raw = ""
+    return _validate_optional_iso_date(raw, field_name=field_name)
 
 
 def _normalize_edit_payload(
@@ -1765,6 +1791,9 @@ def _detail_payload(detail: Mapping[str, Any]) -> dict[str, Any]:
     header["supplier_name"] = DEFAULT_SUPPLIER_NAME
     header["customer_name"] = ""
     header["order_status"] = _normalize_order_status(header.get("order_status"))
+    header["planned_shipment_date"] = header.get("shipment_date") or ""
+    header["actual_shipment_date"] = header.get("actual_shipment_date") or ""
+    header["actual_ff_acceptance_date"] = header.get("actual_ff_acceptance_date") or ""
     lines = [dict(item) for item in detail.get("lines") or []]
     summary = {
         "product_qty_total": header.get("product_qty_total"),
@@ -1800,6 +1829,9 @@ def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:
     payload["supplier_name"] = DEFAULT_SUPPLIER_NAME
     payload["customer_name"] = ""
     payload["order_status"] = _normalize_order_status(payload.get("order_status"))
+    payload["planned_shipment_date"] = payload.get("shipment_date") or ""
+    payload["actual_shipment_date"] = payload.get("actual_shipment_date") or ""
+    payload["actual_ff_acceptance_date"] = payload.get("actual_ff_acceptance_date") or ""
     payload["invoice_download_path"] = _invoice_download_path(str(payload.get("shipment_id") or ""))
     return payload
 
@@ -3467,6 +3499,19 @@ def _validate_iso_date(value: str) -> str:
         date.fromisoformat(normalized)
     except ValueError as exc:
         raise ValueError("shipment_date must be an ISO date YYYY-MM-DD") from exc
+    return normalized
+
+
+def _validate_optional_iso_date(value: Any, *, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        raise ValueError(f"{field_name} must be an ISO date YYYY-MM-DD or blank")
+    try:
+        date.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO date YYYY-MM-DD or blank") from exc
     return normalized
 
 
