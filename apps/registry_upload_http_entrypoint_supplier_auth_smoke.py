@@ -138,6 +138,10 @@ def main() -> None:
                         raise AssertionError("supplier page must expose actual shipment date label")
                 if "实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ" not in supplier_page:
                         raise AssertionError("supplier page must expose actual FF acceptance date label")
+                if "预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥" not in supplier_page:
+                        raise AssertionError("supplier page must expose approximate yuan rate label")
+                if "预估成本 / Est. cost / Ориент. себестоимость, ₽/шт" not in supplier_page:
+                        raise AssertionError("supplier page must expose approximate landed cost column")
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
                         raise AssertionError("supplier role must access supplier shipment APIs")

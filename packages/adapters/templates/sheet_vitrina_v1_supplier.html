@@ -150,7 +150,7 @@
     .finance-upload-progress .warning { color: var(--warning); }
     .registry-wrap, .line-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     .registry-wrap, .line-wrap { background: rgba(16, 19, 27, 0.48); }
-    table { width: 100%; border-collapse: collapse; min-width: 980px; }
+    table { width: 100%; border-collapse: collapse; min-width: 1180px; }
     th, td { padding: 10px; border-bottom: 1px solid rgba(177, 139, 255, 0.14); text-align: left; vertical-align: top; }
     th {
       position: sticky;
@@ -381,6 +381,7 @@
                 <th>商品金额 / Product amount / Сумма товаров</th>
                 <th>其他费用 / Extras amount / Прочие позиции</th>
                 <th>发票总额 / Invoice total / Итого invoice</th>
+                <th>预估成本 / Est. cost / Ориент. себестоимость, ₽/шт</th>
                     <th data-currency-column>币种 / Currency / Валюта</th>
                     <th>匹配 / Matching / Матчинг</th>
                     <th>上传时间 / Uploaded / Дата загрузки</th>
@@ -390,7 +391,7 @@
               </tr>
             </thead>
             <tbody id="shipmentRows" data-registry-state="loading">
-              <tr data-registry-state="loading"><td colspan="16"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
+              <tr data-registry-state="loading"><td colspan="17"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -435,6 +436,10 @@
           <div class="field">
             <label for="actualFfAcceptanceDateInput">实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ</label>
             <input id="actualFfAcceptanceDateInput" type="date">
+          </div>
+          <div class="field">
+            <label for="approxYuanRateInput">预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥</label>
+            <input id="approxYuanRateInput" type="number" min="0" step="0.0001" inputmode="decimal">
           </div>
           <div class="field">
             <label for="invoiceNoInput">发票编号 / Invoice No / Номер invoice</label>
@@ -607,6 +612,7 @@
       const shipmentDateInput = document.getElementById("shipmentDateInput");
       const actualShipmentDateInput = document.getElementById("actualShipmentDateInput");
       const actualFfAcceptanceDateInput = document.getElementById("actualFfAcceptanceDateInput");
+      const approxYuanRateInput = document.getElementById("approxYuanRateInput");
       const saveShipmentButton = document.getElementById("saveShipmentButton");
       const closeShipmentButton = document.getElementById("closeShipmentButton");
       const cardTitle = document.getElementById("cardTitle");
@@ -773,6 +779,14 @@
         return Number.isFinite(number) ? moneyFormatter.format(number) : "-";
       }
 
+      function formatRegistryMoney(value) {
+        if (value === null || value === undefined || value === "") {
+          return "—";
+        }
+        const number = Number(value);
+        return Number.isFinite(number) ? moneyFormatter.format(number) : "—";
+      }
+
       function formatAmount(value, currency) {
         const formatted = formatMoney(value);
         return formatted === "-" ? "-" : (formatted + (currency ? " " + currency : ""));
@@ -832,6 +846,7 @@
             setStaticText("label[for='shipmentDateInput']", "Плановая дата отгрузки");
             setStaticText("label[for='actualShipmentDateInput']", "Фактическая дата отгрузки");
             setStaticText("label[for='actualFfAcceptanceDateInput']", "Фактическая дата приёмки на ФФ");
+            setStaticText("label[for='approxYuanRateInput']", "Примерный курс юаня, ₽/¥");
             setStaticText("label[for='invoiceNoInput']", "Номер invoice");
             setStaticText("label[for='invoiceDateInput']", "Дата invoice");
             setStaticText("label[for='currencyInput']", "Валюта");
@@ -848,6 +863,7 @@
               "Сумма товаров",
               "Прочие позиции",
               "Итого invoice",
+              "Ориент. себестоимость, ₽/шт",
               "Валюта",
               "Матчинг",
               "Дата загрузки",
@@ -1008,13 +1024,13 @@
       function renderRegistryLoading() {
         registryLoadState = "loading";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="16"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="17"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
       }
 
       function renderRegistryError(message) {
         registryLoadState = "error";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="16">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="17">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
       }
 
       function renderRegistry(rows) {
@@ -1025,7 +1041,7 @@
           const emptyText = hasUnfilteredRows
             ? "Нет заказов в выбранных статусах."
             : uiText("暂无订单 / No orders yet / Заказов пока нет.", "Заказов пока нет.");
-          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="16">' + escapeHtml(emptyText) + '</td></tr>';
+          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="17">' + escapeHtml(emptyText) + '</td></tr>';
           return;
         }
             registryLoadState = "loaded_with_rows";
@@ -1044,6 +1060,7 @@
                 '<td>' + escapeHtml(formatNumber(row.product_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.invoice_amount_total)) + '</td>',
+                '<td>' + escapeHtml(formatRegistryMoney(row.approx_landed_cost_per_unit_rub)) + '</td>',
               ];
               if (!canEditOrderStatus) {
                 cells.push('<td data-currency-column>' + escapeHtml(row.currency || "-") + '</td>');
@@ -1213,6 +1230,9 @@
           planned_shipment_date: "",
           actual_shipment_date: "",
           actual_ff_acceptance_date: "",
+          approx_yuan_rate: null,
+          approx_invoice_cost_rub: null,
+          approx_landed_cost_per_unit_rub: null,
           metadata: {
             invoice_no: "",
             invoice_date: "",
@@ -1285,6 +1305,7 @@
             planned_shipment_date: shipmentDateInput.value || "",
             actual_shipment_date: actualShipmentDateInput.value || "",
             actual_ff_acceptance_date: actualFfAcceptanceDateInput.value || "",
+            approx_yuan_rate: approxYuanRateInput.value || "",
             metadata: payload.metadata || {},
             lines: Array.isArray(payload.lines) ? payload.lines : []
           };
@@ -1310,6 +1331,7 @@
         shipmentDateInput.value = shipment.planned_shipment_date || shipment.shipment_date || "";
         actualShipmentDateInput.value = shipment.actual_shipment_date || "";
         actualFfAcceptanceDateInput.value = shipment.actual_ff_acceptance_date || "";
+        approxYuanRateInput.value = shipment.approx_yuan_rate ?? "";
         metaInputs.forEach((input) => {
           input.value = metadata[input.dataset.metaField] ?? "";
         });
@@ -2011,6 +2033,7 @@
           planned_shipment_date: shipmentDateInput.value,
           actual_shipment_date: actualShipmentDateInput.value,
           actual_ff_acceptance_date: actualFfAcceptanceDateInput.value,
+          approx_yuan_rate: approxYuanRateInput.value.trim(),
           metadata,
           lines: (currentShipment && currentShipment.lines) || [],
           warnings: (currentShipment && currentShipment.warnings) || [],
@@ -2080,6 +2103,7 @@
                 shipment_date: payload.shipment_date,
                 actual_shipment_date: payload.actual_shipment_date,
                 actual_ff_acceptance_date: payload.actual_ff_acceptance_date,
+                approx_yuan_rate: payload.approx_yuan_rate,
                 payload
               })
             });
@@ -2093,6 +2117,7 @@
                 shipment_date: payload.shipment_date,
                 actual_shipment_date: payload.actual_shipment_date,
                 actual_ff_acceptance_date: payload.actual_ff_acceptance_date,
+                approx_yuan_rate: payload.approx_yuan_rate,
                 payload
               })
             });
@@ -2258,7 +2283,7 @@
         cardDirty = true;
         updateTotalsAndState();
       });
-      [actualShipmentDateInput, actualFfAcceptanceDateInput].forEach((input) => {
+      [actualShipmentDateInput, actualFfAcceptanceDateInput, approxYuanRateInput].forEach((input) => {
         input.addEventListener("input", () => {
           cardDirty = true;
           updateTotalsAndState();

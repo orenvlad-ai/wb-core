@@ -32,6 +32,7 @@ from packages.application.supplier_invoice_parser import (
     normalize_invoice_model,
     parse_supplier_invoice_xlsx,
 )
+from packages.application.supplier_financial_documents import build_financial_summary
 from packages.contracts.supplier_shipments import (
     DEFAULT_SUPPLIER_NAME,
     LINE_TYPE_EXTRA,
@@ -119,6 +120,7 @@ NOMENCLATURE_PRODUCT_TYPE_BY_LABEL = {
     **{value.casefold(): key for key, value in NOMENCLATURE_PRODUCT_TYPE_LABELS.items()},
 }
 PRICE_CONFORMITY_MONEY_QUANT = Decimal("0.01")
+APPROX_YUAN_RATE_QUANT = Decimal("0.0001")
 PRICE_CONFORMITY_YUAN_CURRENCIES = {"CNY", "CNH", "RMB", "YUAN", "YUANS", "¥", "￥", "元"}
 CONTRACT_OCR_PREFERRED_LANGUAGES = ("eng", "chi_sim", "rus")
 CONTRACT_OCR_PSMS = ("6", "11", "4", "3")
@@ -160,7 +162,7 @@ class SupplierShipmentsBlock:
         return {
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
             "status": "ok",
-            "shipments": [self._with_document_fields(_with_invoice_download_path(row)) for row in rows],
+            "shipments": [self._with_approx_cost_fields(self._with_document_fields(_with_invoice_download_path(row))) for row in rows],
         }
 
     def parse_upload(
@@ -238,6 +240,7 @@ class SupplierShipmentsBlock:
         shipment_date = _validate_iso_date(str(payload.get("shipment_date") or edited_payload.get("shipment_date") or ""))
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_ff_acceptance_date")
+        approx_yuan_rate = _resolve_optional_positive_decimal_field(payload, edited_payload, None, "approx_yuan_rate")
         order_status = ORDER_STATUS_DEFAULT
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
@@ -292,6 +295,7 @@ class SupplierShipmentsBlock:
             "supplier_name": metadata.get("supplier_name") or "",
             "customer_name": metadata.get("customer_name") or "",
             "currency": metadata.get("currency") or "",
+            "approx_yuan_rate": approx_yuan_rate,
             "product_qty_total": summary["product_qty_total"],
             "product_amount_total": summary["product_amount_total"],
             "extras_amount_total": summary["extras_amount_total"],
@@ -321,7 +325,7 @@ class SupplierShipmentsBlock:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        return self._with_document_fields(_detail_payload(detail))
+        return self._with_approx_cost_fields(self._with_document_fields(_detail_payload(detail)))
 
     def update_shipment(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
@@ -334,6 +338,7 @@ class SupplierShipmentsBlock:
         existing_header = dict(existing["header"])
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_ff_acceptance_date")
+        approx_yuan_rate = _resolve_optional_positive_decimal_field(payload, edited_payload, existing_header, "approx_yuan_rate")
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
             shipment_date=shipment_date,
@@ -357,6 +362,7 @@ class SupplierShipmentsBlock:
             "supplier_name": metadata.get("supplier_name") or "",
             "customer_name": metadata.get("customer_name") or "",
             "currency": metadata.get("currency") or "",
+            "approx_yuan_rate": approx_yuan_rate,
             "product_qty_total": summary["product_qty_total"],
             "product_amount_total": summary["product_amount_total"],
             "extras_amount_total": summary["extras_amount_total"],
@@ -1720,6 +1726,18 @@ class SupplierShipmentsBlock:
                 "missing" if not candidates else "single_candidate" if len(candidates) == 1 else "multiple_candidates"
             )
             enriched["contract_candidates"] = candidates
+        return enriched
+
+    def _with_approx_cost_fields(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        enriched = dict(payload)
+        shipment_id = str(enriched.get("shipment_id") or "").strip()
+        documents = self.runtime.list_supplier_financial_documents(shipment_id) if shipment_id else []
+        expense_lines = self.runtime.list_supplier_financial_expense_lines(shipment_id) if shipment_id else []
+        summary = build_financial_summary(documents, expense_lines, shipment={"header": enriched, "lines": []})
+        per_unit = summary.get("per_unit") if isinstance(summary.get("per_unit"), Mapping) else {}
+        enriched["approx_yuan_rate"] = _read_optional_positive_decimal(enriched.get("approx_yuan_rate"))
+        enriched["approx_invoice_cost_rub"] = per_unit.get("approx_invoice_cost_rub")
+        enriched["approx_landed_cost_per_unit_rub"] = per_unit.get("approx_landed_cost_per_unit_rub")
         return enriched
 
     def _with_document_download_path(self, document: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -3991,6 +4009,64 @@ def _normalize_order_status(value: Any) -> str:
     if normalized not in ORDER_STATUSES:
         raise ValueError(f"unsupported supplier order_status: {normalized}")
     return normalized
+
+
+def _resolve_optional_positive_decimal_field(
+    payload: Mapping[str, Any],
+    edited_payload: Mapping[str, Any],
+    existing_header: Mapping[str, Any] | None,
+    field_name: str,
+) -> float | None:
+    if field_name in payload:
+        return _validate_optional_positive_decimal(payload.get(field_name), field_name=field_name)
+    if isinstance(payload.get("payload"), Mapping) and field_name in payload.get("payload", {}):
+        return _validate_optional_positive_decimal(payload.get("payload", {}).get(field_name), field_name=field_name)
+    if field_name in edited_payload:
+        return _validate_optional_positive_decimal(edited_payload.get(field_name), field_name=field_name)
+    if existing_header is not None:
+        return _validate_optional_positive_decimal(existing_header.get(field_name), field_name=field_name)
+    return None
+
+
+def _validate_optional_positive_decimal(value: Any, *, field_name: str) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a number greater than 0 or blank")
+    if isinstance(value, Decimal):
+        parsed = value
+    elif isinstance(value, (int, float)):
+        parsed = Decimal(str(value))
+    else:
+        text = str(value).strip().replace("\u00a0", "").replace(" ", "").replace("−", "-")
+        if not text:
+            return None
+        text = re.sub(r"[^0-9,.\-]", "", text)
+        if not text or text in {"-", ".", ","}:
+            raise ValueError(f"{field_name} must be a number greater than 0 or blank")
+        if text.count("-") > 1 or ("-" in text and not text.startswith("-")):
+            raise ValueError(f"{field_name} must be a number greater than 0 or blank")
+        if "," in text and "." in text:
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        elif "," in text:
+            text = text.replace(",", ".")
+        try:
+            parsed = Decimal(text)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{field_name} must be a number greater than 0 or blank") from exc
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be greater than 0")
+    return float(parsed.quantize(APPROX_YUAN_RATE_QUANT, rounding=ROUND_HALF_UP))
+
+
+def _read_optional_positive_decimal(value: Any) -> float | None:
+    try:
+        return _validate_optional_positive_decimal(value, field_name="approx_yuan_rate")
+    except ValueError:
+        return None
 
 
 def _normalize_price_conformity_status(value: Any) -> str:

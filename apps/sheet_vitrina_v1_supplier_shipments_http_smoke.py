@@ -390,6 +390,18 @@ def main() -> None:
             if invalid_actual_status != 400 or "actual_shipment_date" not in str(invalid_actual_payload.get("error", "")):
                 raise AssertionError(f"create must reject invalid actual_shipment_date, got {invalid_actual_status} {invalid_actual_payload}")
 
+            invalid_rate_status, invalid_rate_payload = _post_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                {
+                    "upload_id": parse_payload["upload_id"],
+                    "shipment_date": "2026-05-14",
+                    "approx_yuan_rate": "-1",
+                    "payload": parse_payload,
+                },
+            )
+            if invalid_rate_status != 400 or "approx_yuan_rate" not in str(invalid_rate_payload.get("error", "")):
+                raise AssertionError(f"create must reject non-positive approx_yuan_rate, got {invalid_rate_status} {invalid_rate_payload}")
+
             create_status, detail = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
                 {
@@ -397,6 +409,7 @@ def main() -> None:
                     "shipment_date": "2026-05-14",
                     "actual_shipment_date": "2026-05-16",
                     "actual_ff_acceptance_date": "2026-05-28",
+                    "approx_yuan_rate": "13,2",
                     "payload": parse_payload,
                 },
             )
@@ -413,6 +426,10 @@ def main() -> None:
                 raise AssertionError(f"created shipment must expose planned/fact dates, got {detail}")
             if detail.get("order_status") != "production":
                 raise AssertionError(f"created shipment must default order_status=production, got {detail.get('order_status')}")
+            if detail.get("approx_yuan_rate") != 13.2 or detail.get("approx_invoice_cost_rub") != 435.6:
+                raise AssertionError(f"created shipment must expose approx yuan rate and invoice RUB cost, got {detail}")
+            if detail.get("approx_landed_cost_per_unit_rub") is not None:
+                raise AssertionError(f"created shipment without factual expenses must not expose approximate landed cost, got {detail}")
             if detail.get("supplier_name") != "HanShang Technology" or detail.get("metadata", {}).get("supplier_name") != "HanShang Technology":
                 raise AssertionError("created shipment must persist fixed supplier_name")
             if detail.get("customer_name") not in {"", None} or detail.get("metadata", {}).get("customer_name") not in {"", None}:
@@ -426,9 +443,26 @@ def main() -> None:
             if detail["product_lines"][0].get("price_conformity_status") != "matched":
                 raise AssertionError("created shipment must persist price conformity status")
 
+            _seed_supplier_factual_expense(runtime, shipment_id, amount_rub=48.0)
+
             detail_status, loaded_detail = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
             if detail_status != 200 or loaded_detail.get("shipment_id") != shipment_id:
                 raise AssertionError("detail route must return persisted card payload")
+            if (
+                loaded_detail.get("approx_yuan_rate") != 13.2
+                or loaded_detail.get("approx_invoice_cost_rub") != 435.6
+                or loaded_detail.get("approx_landed_cost_per_unit_rub") != 25.45
+            ):
+                raise AssertionError(f"detail route must expose approximate landed cost with factual expenses, got {loaded_detail}")
+            post_expense_list_status, post_expense_list = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
+            listed_created = _shipment_by_id(post_expense_list, shipment_id)
+            if (
+                post_expense_list_status != 200
+                or listed_created.get("approx_yuan_rate") != 13.2
+                or listed_created.get("approx_invoice_cost_rub") != 435.6
+                or listed_created.get("approx_landed_cost_per_unit_rub") != 25.45
+            ):
+                raise AssertionError(f"list route must expose approximate landed cost with factual expenses, got {post_expense_list_status} {post_expense_list}")
             if loaded_detail.get("order_status") != "production":
                 raise AssertionError("detail route must expose default order_status")
             if (
@@ -451,6 +485,8 @@ def main() -> None:
                 or first_price_checked_line.get("price_conformity_context", {}).get("source") != "http_smoke"
             ):
                 raise AssertionError(f"manual price-check route must persist actor/context/mode, got {price_check_status} {price_checked}")
+            if price_checked.get("approx_yuan_rate") != 13.2 or price_checked.get("approx_landed_cost_per_unit_rub") != 25.45:
+                raise AssertionError("manual price-check must not erase approximate cost fields")
             loaded_detail = price_checked
 
             edited = json.loads(json.dumps(loaded_detail, ensure_ascii=False))
@@ -467,6 +503,7 @@ def main() -> None:
                     "shipment_date": "2026-05-15",
                     "actual_shipment_date": "2026-05-17",
                     "actual_ff_acceptance_date": "2026-05-30",
+                    "approx_yuan_rate": "14.5",
                     "payload": edited,
                 },
             )
@@ -482,6 +519,10 @@ def main() -> None:
                 raise AssertionError("patch route must mark manual_override and recalculate totals server-side")
             if patched.get("order_status") != "production":
                 raise AssertionError("full patch must preserve existing order_status")
+            if patched.get("approx_yuan_rate") != 14.5 or patched.get("approx_invoice_cost_rub") != 507.5:
+                raise AssertionError(f"patch route must update approx_yuan_rate and derived invoice cost, got {patched}")
+            if patched.get("approx_landed_cost_per_unit_rub") != 29.24:
+                raise AssertionError(f"patch route must recalculate approximate landed cost, got {patched}")
 
             status_patch_status, status_patched = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
@@ -495,8 +536,10 @@ def main() -> None:
                 or status_patched.get("invoice_no") != "26GN390"
                 or status_patched.get("actual_shipment_date") != "2026-05-17"
                 or status_patched.get("actual_ff_acceptance_date") != "2026-05-30"
+                or status_patched.get("approx_yuan_rate") != 14.5
+                or status_patched.get("approx_landed_cost_per_unit_rub") != 29.24
             ):
-                raise AssertionError("status-only patch must not erase lines, metadata, source file, or fact dates")
+                raise AssertionError("status-only patch must not erase lines, metadata, source file, fact dates, or approx yuan rate")
             invalid_status, invalid_payload = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 {"order_status": "delivered_to_mars"},
@@ -535,6 +578,8 @@ def main() -> None:
                 raise AssertionError("rematch must not overwrite manual_override rows by default")
             if rematched_products[2].get("internal_nm_id") != 210184534:
                 raise AssertionError("rematch must fill previously unmatched rows from nomenclature")
+            if rematched.get("approx_yuan_rate") != 14.5 or rematched.get("approx_landed_cost_per_unit_rub") != 29.24:
+                raise AssertionError("rematch must not erase approximate cost fields")
 
             import_status, import_payload = _post_multipart(
                 f"{base_url}{DEFAULT_NOMENCLATURE_IMPORT_PATH}",
@@ -720,6 +765,13 @@ def main() -> None:
                 or legacy_list_payload.get("shipments", [{}])[0].get("actual_ff_acceptance_date") != ""
             ):
                 raise AssertionError("legacy rows without fact dates must expose empty fact dates")
+            legacy_no_rate = legacy_list_payload.get("shipments", [{}])[0]
+            if (
+                legacy_no_rate.get("approx_yuan_rate") is not None
+                or legacy_no_rate.get("approx_invoice_cost_rub") is not None
+                or legacy_no_rate.get("approx_landed_cost_per_unit_rub") is not None
+            ):
+                raise AssertionError(f"legacy rows without approx_yuan_rate must expose empty approximate fields, got {legacy_no_rate}")
         finally:
             server.shutdown()
             server.server_close()
@@ -745,6 +797,67 @@ def _build_invoice_fixture() -> bytes:
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def _shipment_by_id(payload: dict, shipment_id: str) -> dict:
+    for shipment in payload.get("shipments", []):
+        if shipment.get("shipment_id") == shipment_id:
+            return shipment
+    return {}
+
+
+def _seed_supplier_factual_expense(
+    runtime: RegistryUploadDbBackedRuntime,
+    shipment_id: str,
+    *,
+    amount_rub: float,
+) -> None:
+    runtime.save_supplier_financial_document(
+        document={
+            "document_id": f"fdoc_{shipment_id}_logistics",
+            "supplier_order_id": shipment_id,
+            "document_type": "logistics_invoice",
+            "original_filename": "factual-logistics.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": "",
+            "uploaded_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+            "parse_status": "parsed",
+            "vendor": "Smoke Logistics",
+            "document_number": "SMOKE-EXPENSE",
+            "document_date": "2026-05-20",
+            "currency": "RUB",
+            "total_amount": amount_rub,
+            "total_amount_rub": amount_rub,
+            "normalized_parse": {"document_type": "logistics_invoice", "amount_rub": amount_rub},
+            "raw_parse": {},
+            "parser_version": "smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        expense_lines=[
+            {
+                "line_id": f"fline_{shipment_id}_logistics",
+                "financial_document_id": f"fdoc_{shipment_id}_logistics",
+                "supplier_order_id": shipment_id,
+                "sort_order": 1,
+                "category": "domestic_transport",
+                "stage": "fact",
+                "description": "Factual smoke logistics expense",
+                "amount": amount_rub,
+                "currency": "RUB",
+                "amount_rub": amount_rub,
+                "vat_rate": None,
+                "vat_amount_rub": None,
+                "included_in_logistics_efficiency": True,
+                "included_in_customs_total": False,
+                "status": "parsed",
+                "confidence": 1.0,
+                "raw": {},
+            }
+        ],
+    )
 
 
 def _build_price_conformity_invoice_fixture() -> bytes:
