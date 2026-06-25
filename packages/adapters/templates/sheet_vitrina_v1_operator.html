@@ -3539,7 +3539,7 @@
                   <button id="refreshSupplierRegistryInboundButton" class="action-button secondary-button" type="button">Обновить</button>
                 </div>
                 <p class="dataset-status" id="supplierRegistryInboundSummaryState">Читаем состояние...</p>
-                <p class="dataset-upload-hint">Read-only source из сохранённых supplier shipment cards. Текущий bounded default: дата приёмки = дата отгрузки + 30 дней.</p>
+                <p class="dataset-upload-hint">Read-only source из сохранённых supplier shipment cards. Текущий bounded default: расчётная приёмка = плановая дата отгрузки + 30 дней.</p>
                 <div class="shipment-summary-table-wrap" id="supplierRegistryInboundSummaryTableWrap" hidden>
                   <table class="shipment-summary-table is-wide">
                     <thead>
@@ -3547,7 +3547,7 @@
                         <th>Инвойс</th>
                         <th>Дата инвойса</th>
                         <th>Всего товаров</th>
-                        <th>Дата отгрузки</th>
+                        <th>Плановая дата отгрузки</th>
                         <th>Расчётная приёмка</th>
                         <th>Matched</th>
                         <th>Unmatched</th>
@@ -7214,7 +7214,11 @@
           shipmentRegistryComparisonPayload = null;
           renderShipmentRegistry(payload);
           renderShipmentRegistryComparison(null);
-          setShipmentRegistryMessage("", "");
+          const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings.filter(Boolean) : [];
+          setShipmentRegistryMessage(
+            warnings.length ? "Warnings: " + warnings.join(" ") : "",
+            warnings.length ? "warning" : ""
+          );
         } catch (error) {
           shipmentRegistryPayload = null;
           shipmentRegistryComparisonPayload = null;

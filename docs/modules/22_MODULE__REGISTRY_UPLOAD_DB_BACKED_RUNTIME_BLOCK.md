@@ -50,7 +50,7 @@ related_docs:
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments and trade document registry: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state, trade document rows/links including parsed contract metadata/warnings/default supplier backfill, and a separate manual monthly baseline table used only by the plan-report."
+update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments and trade document registry: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state including legacy planned `shipment_date` and nullable fact dates `actual_shipment_date` / `actual_ff_acceptance_date`, trade document rows/links including parsed contract metadata/warnings/default supplier backfill, and a separate manual monthly baseline table used only by the plan-report."
 ---
 
 # 1. Идентификатор и статус
@@ -111,7 +111,7 @@ update_note: "Обновлён под current temporal closure seam, plan-report
   - last successful factory-order result state.
   - supplier invoice registry state:
     - staged upload metadata in `sheet_vitrina_v1_supplier_shipment_uploads`;
-    - shipment headers/totals/status/file references and nullable `invoice_document_id` in `sheet_vitrina_v1_supplier_shipments`;
+    - shipment headers/totals/status/file references, legacy planned `shipment_date`, nullable `actual_shipment_date`, nullable `actual_ff_acceptance_date` and nullable `invoice_document_id` in `sheet_vitrina_v1_supplier_shipments`;
     - editable product/extra line details and persisted invoice price conformity snapshots/statuses in `sheet_vitrina_v1_supplier_shipment_lines`;
     - server-owned trade document registry in `sheet_vitrina_v1_trade_documents` for `contract` and `invoice` files;
     - one-primary-contract-per-invoice links in `sheet_vitrina_v1_invoice_contract_links`.

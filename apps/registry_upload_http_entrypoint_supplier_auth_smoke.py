@@ -131,6 +131,12 @@ def main() -> None:
                         raise AssertionError("supplier page must not include manual price recheck button markup")
                 if "价格匹配 / Price check / Соответствие цены" not in supplier_page:
                         raise AssertionError("supplier page must expose multilingual price conformity column header")
+                if "计划出货日期 / Planned shipment date / Плановая дата отгрузки" not in supplier_page:
+                        raise AssertionError("supplier page must expose planned shipment date label")
+                if "实际出货日期 / Actual shipment date / Фактическая дата отгрузки" not in supplier_page:
+                        raise AssertionError("supplier page must expose actual shipment date label")
+                if "实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ" not in supplier_page:
+                        raise AssertionError("supplier page must expose actual FF acceptance date label")
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
                         raise AssertionError("supplier role must access supplier shipment APIs")
@@ -148,6 +154,8 @@ def main() -> None:
                         {
                             "upload_id": parse_payload["upload_id"],
                             "shipment_date": "2026-05-14",
+                            "actual_shipment_date": "2026-05-16",
+                            "actual_ff_acceptance_date": "2026-05-28",
                             "order_status": "accepted_ff",
                             "payload": parse_payload,
                         },
@@ -156,10 +164,18 @@ def main() -> None:
                         raise AssertionError(f"supplier role must create supplier shipments, got {create_code} {create_payload}")
                 if create_payload.get("order_status") != "production":
                         raise AssertionError("supplier role must not set order_status during create")
+                if (
+                    create_payload.get("planned_shipment_date") != "2026-05-14"
+                    or create_payload.get("actual_shipment_date") != "2026-05-16"
+                    or create_payload.get("actual_ff_acceptance_date") != "2026-05-28"
+                ):
+                        raise AssertionError("supplier role must create planned/fact shipment dates")
                 shipment_id = str(create_payload["shipment_id"])
                 detail_code, detail_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
                 if detail_code != 200 or detail_payload.get("shipment_id") != shipment_id:
                         raise AssertionError("supplier role must read supplier shipment detail")
+                if detail_payload.get("actual_ff_acceptance_date") != "2026-05-28":
+                        raise AssertionError("supplier role detail must include actual FF acceptance date")
                 supplier_price_check_code, supplier_price_check_payload = _opener_post_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/price-check",
@@ -184,9 +200,19 @@ def main() -> None:
                 patch_code, patch_payload = _opener_patch_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
-                        {"shipment_date": "2026-05-15", "payload": patched_payload},
+                        {
+                            "shipment_date": "2026-05-15",
+                            "actual_shipment_date": "2026-05-17",
+                            "actual_ff_acceptance_date": "2026-05-30",
+                            "payload": patched_payload,
+                        },
                     )
-                if patch_code != 200 or patch_payload.get("shipment_date") != "2026-05-15":
+                if (
+                    patch_code != 200
+                    or patch_payload.get("shipment_date") != "2026-05-15"
+                    or patch_payload.get("actual_shipment_date") != "2026-05-17"
+                    or patch_payload.get("actual_ff_acceptance_date") != "2026-05-30"
+                ):
                         raise AssertionError(f"supplier role must edit supplier shipments, got {patch_code} {patch_payload}")
                 supplier_status_code, supplier_status_payload = _opener_patch_json(
                         supplier,

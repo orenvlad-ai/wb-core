@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 import json
 from pathlib import Path
+import re
 import sqlite3
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -2196,6 +2197,8 @@ class RegistryUploadDbBackedRuntime:
         _validate_timestamp(str(header.get("created_at") or ""), field_name="created_at")
         _validate_timestamp(str(header.get("updated_at") or ""), field_name="updated_at")
         _validate_iso_date(str(header.get("shipment_date") or ""), field_name="shipment_date")
+        _validate_optional_iso_date(header.get("actual_shipment_date"), field_name="actual_shipment_date")
+        _validate_optional_iso_date(header.get("actual_ff_acceptance_date"), field_name="actual_ff_acceptance_date")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
@@ -2206,6 +2209,8 @@ class RegistryUploadDbBackedRuntime:
                     created_at,
                     updated_at,
                     shipment_date,
+                    actual_shipment_date,
+                    actual_ff_acceptance_date,
                     order_status,
                     invoice_no,
                     invoice_date,
@@ -2228,10 +2233,12 @@ class RegistryUploadDbBackedRuntime:
                     warnings_json,
                     errors_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     shipment_date = excluded.shipment_date,
+                    actual_shipment_date = excluded.actual_shipment_date,
+                    actual_ff_acceptance_date = excluded.actual_ff_acceptance_date,
                     order_status = excluded.order_status,
                     invoice_no = excluded.invoice_no,
                     invoice_date = excluded.invoice_date,
@@ -2259,6 +2266,8 @@ class RegistryUploadDbBackedRuntime:
                     header.get("created_at"),
                     header.get("updated_at"),
                     header.get("shipment_date"),
+                    header.get("actual_shipment_date") or None,
+                    header.get("actual_ff_acceptance_date") or None,
                     header.get("order_status") or ORDER_STATUS_DEFAULT,
                     header.get("invoice_no") or "",
                     header.get("invoice_date") or "",
@@ -2369,6 +2378,8 @@ class RegistryUploadDbBackedRuntime:
                        created_at,
                        updated_at,
                        shipment_date,
+                       actual_shipment_date,
+                       actual_ff_acceptance_date,
                        order_status,
                        invoice_no,
                        invoice_date,
@@ -3926,6 +3937,15 @@ def _validate_iso_date(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a valid ISO 8601 date") from exc
 
 
+def _validate_optional_iso_date(value: Any, field_name: str) -> None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        raise ValueError(f"{field_name} must be a valid ISO 8601 date YYYY-MM-DD or blank")
+    _validate_iso_date(normalized, field_name=field_name)
+
+
 def _validate_month(value: str, field_name: str) -> None:
     try:
         date.fromisoformat(f"{value}-01")
@@ -4544,6 +4564,9 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "shipment_date": row["shipment_date"],
+        "planned_shipment_date": row["shipment_date"],
+        "actual_shipment_date": row["actual_shipment_date"] or "",
+        "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
@@ -4569,6 +4592,9 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "shipment_date": row["shipment_date"],
+        "planned_shipment_date": row["shipment_date"],
+        "actual_shipment_date": row["actual_shipment_date"] or "",
+        "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
@@ -5317,6 +5343,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             shipment_date TEXT NOT NULL,
+            actual_shipment_date TEXT,
+            actual_ff_acceptance_date TEXT,
             order_status TEXT NOT NULL DEFAULT 'production',
             invoice_no TEXT,
             invoice_date TEXT,
@@ -5584,6 +5612,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipments",
         column_name="order_status",
         column_sql="TEXT NOT NULL DEFAULT 'production'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="actual_shipment_date",
+        column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="actual_ff_acceptance_date",
+        column_sql="TEXT",
     )
     _ensure_column(
         conn,
