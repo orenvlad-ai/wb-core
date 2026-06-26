@@ -94,6 +94,11 @@ def main() -> None:
                     or '<button class="shell-logout-link" type="button" data-unified-tab-button="settings"' not in admin_shell
                 ):
                     raise AssertionError("direct settings path must render common shell with right-side settings action")
+                if (
+                    '<button class="shell-logout-link" type="button" data-unified-tab-button="settings" hidden disabled'
+                    not in admin_shell
+                ):
+                    raise AssertionError("settings shell action must be hidden by default before section JS filtering")
 
                 embedded_code, _, embedded_settings = _opener_text(
                     admin,
