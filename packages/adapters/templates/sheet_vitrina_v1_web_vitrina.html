@@ -116,7 +116,10 @@
       font-weight: 700;
       text-decoration: none;
       white-space: nowrap;
+      cursor: pointer;
     }
+
+    button.shell-logout-link { font-family: inherit; }
 
     .shell-logout-link:hover {
       border-color: var(--border-strong);
@@ -3957,9 +3960,9 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
-        <button class="unified-tab-button" type="button" data-unified-tab-button="settings" role="tab" aria-selected="false">Настройки</button>
       </nav>
       <div class="shell-actions">
+        <button class="shell-logout-link" type="button" data-unified-tab-button="settings" aria-selected="false">Настройки</button>
         <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
       </div>
     </header>

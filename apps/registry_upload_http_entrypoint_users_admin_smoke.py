@@ -23,8 +23,11 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_SETTINGS_USERS_PATH,
+    DEFAULT_SHEET_DAILY_REPORT_PATH,
+    DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
+    DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -42,6 +45,7 @@ def main() -> None:
     operator_password = "operator-password-old"
     operator_password_new = "operator-password-new"
     supply_password = "supply-password-not-secret"
+    settings_password = "settings-password-not-secret"
     with TemporaryDirectory(prefix="webcore-users-admin-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         config = RegistryUploadHttpEntrypointConfig(
@@ -60,6 +64,8 @@ def main() -> None:
                 "WB_CORE_WEB_AUTH_USERNAME": admin_username,
                 "WB_CORE_WEB_AUTH_PASSWORD_HASH": _password_hash(admin_password),
                 "WB_CORE_WEB_AUTH_SESSION_SECRET": "users-admin-smoke-session-secret",
+                "WB_CORE_SUPPLIER_AUTH_USERNAME": "hunshang",
+                "WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH": _password_hash("supplier-password-not-secret"),
             }
         ):
             server = build_registry_upload_http_server(
@@ -80,12 +86,14 @@ def main() -> None:
                 )
                 if admin_code != 200:
                     raise AssertionError(f"bootstrap admin login must load settings shell: {admin_code}")
+                admin_main_nav = admin_shell.split('<div class="shell-actions">', 1)[0]
                 if (
-                    'data-unified-tab-button="settings"' not in admin_shell
+                    'data-unified-tab-button="settings"' in admin_main_nav
                     or 'data-logout-link href="/logout"' not in admin_shell
                     or '"initial_tab": "settings"' not in admin_shell
+                    or '<button class="shell-logout-link" type="button" data-unified-tab-button="settings"' not in admin_shell
                 ):
-                    raise AssertionError("direct settings path must render common shell with active settings tab")
+                    raise AssertionError("direct settings path must render common shell with right-side settings action")
 
                 embedded_code, _, embedded_settings = _opener_text(
                     admin,
@@ -100,9 +108,18 @@ def main() -> None:
                         ">Договоры<",
                         ">Инвойсы<",
                         "id=\"userRows\"",
+                        "data-new-user-sections",
+                        'label: "Витрина"',
+                        'label: "Поставки"',
+                        'label: "Отчёты"',
+                        'label: "Отзывы"',
+                        'label: "Исследования"',
+                        'label: "Настройки"',
                     )
                 ):
                     raise AssertionError("embedded settings must expose directories and users groups")
+                if "newRoleSelect" in embedded_settings or "window.prompt" in embedded_settings:
+                    raise AssertionError("users UI must use section checkboxes and inline password change, not role select/prompt")
 
                 unauth_users_code, unauth_users_payload = _get_json(f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
                 if unauth_users_code != 401 or unauth_users_payload.get("error") != "authentication_required":
@@ -111,8 +128,26 @@ def main() -> None:
                 users_code, users_payload = _opener_json(admin, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
                 if users_code != 200 or not _has_user(users_payload, admin_username, "admin"):
                     raise AssertionError(f"admin users API must list env bootstrap admin: {users_code} {users_payload}")
+                if _section_ids(users_payload) != ["vitrina", "supply", "reports", "feedbacks", "research", "settings"]:
+                    raise AssertionError(f"users API must expose available sections: {users_payload}")
+                if not _env_user_has_readonly_reason(users_payload, admin_username) or not _env_user_has_readonly_reason(users_payload, "hunshang"):
+                    raise AssertionError(f"env users must expose readonly reason: {users_payload}")
                 if "password" in json.dumps(users_payload).lower() or "password_hash" in json.dumps(users_payload).lower():
                     raise AssertionError("users API must not expose password fields")
+
+                invalid_code, invalid_payload = _opener_post_json(
+                    admin,
+                    f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}",
+                    {
+                        "username": "invalid-section",
+                        "display_name": "Invalid Section",
+                        "allowed_sections": ["vitrina", "unknown"],
+                        "password": "invalid-section-password",
+                        "is_active": True,
+                    },
+                )
+                if invalid_code != 400 or "unsupported section" not in str(invalid_payload.get("error")):
+                    raise AssertionError(f"invalid section must be rejected: {invalid_code} {invalid_payload}")
 
                 operator_payload = _create_user(
                     admin,
@@ -120,12 +155,15 @@ def main() -> None:
                     {
                         "username": "runtime-operator",
                         "display_name": "Runtime Operator",
-                        "role": "operator",
+                        "allowed_sections": ["vitrina"],
+                        "manage_users": False,
                         "password": operator_password,
                         "is_active": True,
                     },
                 )
                 operator_id = str(operator_payload["user"]["user_id"])
+                if operator_payload["user"]["allowed_sections"] != ["vitrina"]:
+                    raise AssertionError(f"created runtime user must keep selected sections: {operator_payload}")
                 if "password" in json.dumps(operator_payload).lower() or "password_hash" in json.dumps(operator_payload).lower():
                     raise AssertionError("create user response must not expose password fields")
 
@@ -141,7 +179,16 @@ def main() -> None:
                     raise AssertionError("runtime operator must login with created password")
                 operator_users_code, operator_users_payload = _opener_json(operator, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
                 if operator_users_code != 403 or operator_users_payload.get("error") != "forbidden":
-                    raise AssertionError("non-admin runtime operator must not read users API")
+                    raise AssertionError("runtime user without manage_users must not read users API")
+
+                patched_operator = _patch_user(
+                    admin,
+                    base_url,
+                    operator_id,
+                    {"allowed_sections": ["vitrina", "reports"]},
+                )
+                if patched_operator["user"]["allowed_sections"] != ["vitrina", "reports"]:
+                    raise AssertionError(f"patch allowed_sections must persist: {patched_operator}")
 
                 _patch_user(
                     admin,
@@ -169,6 +216,40 @@ def main() -> None:
                 )
                 if new_password_code != 200:
                     raise AssertionError("new runtime password must work after password change")
+                operator_shell_code, _, operator_shell = _opener_text(new_password_opener, f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
+                if operator_shell_code != 200 or '"allowed_tabs": ["vitrina", "reports"]' not in operator_shell:
+                    raise AssertionError("patched runtime operator must see only selected shell sections")
+
+                settings_payload = _create_user(
+                    admin,
+                    base_url,
+                    {
+                        "username": "settings-no-users",
+                        "display_name": "Settings Without Users",
+                        "allowed_sections": ["settings"],
+                        "manage_users": False,
+                        "password": settings_password,
+                        "is_active": True,
+                    },
+                )
+                if settings_payload["user"]["allowed_sections"] != ["settings"] or settings_payload["user"]["manage_users"]:
+                    raise AssertionError(f"settings-only user must not receive manage_users: {settings_payload}")
+                settings_user = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(CookieJar()))
+                settings_code, _, settings_shell = _login(
+                    settings_user,
+                    base_url,
+                    "settings-no-users",
+                    settings_password,
+                    DEFAULT_SETTINGS_UI_PATH,
+                )
+                if settings_code != 200 or '"allowed_tabs": ["settings"]' not in settings_shell:
+                    raise AssertionError("settings-only user must load shell with only settings tab allowed")
+                settings_embedded_code, _, settings_embedded = _opener_text(settings_user, f"{base_url}{DEFAULT_SETTINGS_UI_PATH}?embedded=1")
+                if settings_embedded_code != 200 or '"can_manage_users": false' not in settings_embedded:
+                    raise AssertionError("settings-only user must render settings without users management access")
+                settings_users_code, settings_users_payload = _opener_json(settings_user, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
+                if settings_users_code != 403 or settings_users_payload.get("error") != "forbidden":
+                    raise AssertionError("settings section without manage_users must not access users API")
 
                 supply_payload = _create_user(
                     admin,
@@ -176,7 +257,7 @@ def main() -> None:
                     {
                         "username": "supply-only",
                         "display_name": "Supply Only",
-                        "role": "supply_operator",
+                        "allowed_sections": ["supply"],
                         "password": supply_password,
                         "is_active": True,
                     },
@@ -202,6 +283,18 @@ def main() -> None:
                 )
                 if forbidden_vitrina_code != 403 or forbidden_vitrina_payload.get("error") != "forbidden":
                     raise AssertionError("supply_operator must not access vitrina read API")
+                forbidden_reports_code, forbidden_reports_payload = _opener_json(supply, f"{base_url}{DEFAULT_SHEET_DAILY_REPORT_PATH}")
+                if forbidden_reports_code != 403 or forbidden_reports_payload.get("error") != "forbidden":
+                    raise AssertionError("supply_operator must not access reports API")
+                forbidden_feedbacks_code, forbidden_feedbacks_payload = _opener_json(supply, f"{base_url}{DEFAULT_SHEET_FEEDBACKS_PATH}")
+                if forbidden_feedbacks_code != 403 or forbidden_feedbacks_payload.get("error") != "forbidden":
+                    raise AssertionError("supply_operator must not access feedbacks API")
+                forbidden_research_code, forbidden_research_payload = _opener_json(
+                    supply,
+                    f"{base_url}{DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH}",
+                )
+                if forbidden_research_code != 403 or forbidden_research_payload.get("error") != "forbidden":
+                    raise AssertionError("supply_operator must not access research API")
                 forbidden_settings_code, _, _ = _opener_text(supply, f"{base_url}{DEFAULT_SETTINGS_UI_PATH}")
                 if forbidden_settings_code != 403:
                     raise AssertionError("supply_operator must not access settings")
@@ -323,6 +416,30 @@ def _has_user(payload: dict[str, object], username: str, role: str) -> bool:
             continue
         if user.get("username") == username and user.get("role") == role:
             return True
+    return False
+
+
+def _section_ids(payload: dict[str, object]) -> list[str]:
+    sections = payload.get("available_sections")
+    if not isinstance(sections, list):
+        return []
+    result: list[str] = []
+    for section in sections:
+        if isinstance(section, dict):
+            result.append(str(section.get("section_id") or ""))
+    return result
+
+
+def _env_user_has_readonly_reason(payload: dict[str, object], username: str) -> bool:
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return False
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        if user.get("username") != username:
+            continue
+        return bool(user.get("readonly")) and "env-пользователь" in str(user.get("readonly_reason") or "")
     return False
 
 

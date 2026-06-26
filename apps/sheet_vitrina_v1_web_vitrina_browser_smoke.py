@@ -827,12 +827,17 @@ def _route_page_composition_with_delay(route: object) -> None:
 def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
     page.goto(base_url + DEFAULT_SHEET_OPERATOR_UI_PATH, wait_until="domcontentloaded")
     page.wait_for_selector("[data-unified-tab-button='vitrina']", timeout=5000)
-    tabs = page.locator("[data-unified-tab-button]").evaluate_all(
+    tabs = page.locator(".unified-tab-strip [data-unified-tab-button]").evaluate_all(
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
     tab_texts = [item["text"] for item in tabs]
-    if tab_texts != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Настройки"]:
+    if tab_texts != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
         raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
+    shell_actions = page.locator(".shell-actions").evaluate(
+        "node => Array.from(node.querySelectorAll('button, a')).map(item => (item.textContent || '').trim())"
+    )
+    if shell_actions != ["Настройки", "Выйти"]:
+        raise AssertionError(f"operator route must expose settings next to logout, got {shell_actions}")
     active_tabs = [item["id"] for item in tabs if item["active"]]
     if active_tabs != ["vitrina"]:
         raise AssertionError(f"operator route must default to the vitrina tab, got {tabs}")
@@ -841,6 +846,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
     return {
         "route": DEFAULT_SHEET_OPERATOR_UI_PATH,
         "tabs": ", ".join(tab_texts),
+        "actions": ", ".join(shell_actions),
         "default_active": active_tabs[0],
     }
 
@@ -2425,7 +2431,8 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           const headers = headNodes.map(node => (node.textContent || '').trim());
           const headerIds = headNodes.map(node => node.getAttribute('data-col-id') || '');
           return {
-            unified_tabs: Array.from(document.querySelectorAll('[data-unified-tab-button]')).map(node => (node.textContent || '').trim()),
+            unified_tabs: Array.from(document.querySelectorAll('.unified-tab-strip [data-unified-tab-button]')).map(node => (node.textContent || '').trim()),
+            shell_actions: Array.from(document.querySelectorAll('.shell-actions button, .shell-actions a')).map(node => (node.textContent || '').trim()),
             active_unified_tab: ((document.querySelector('[data-unified-tab-button].is-active') || {}).textContent || '').trim(),
             update_tab_count: Array.from(document.querySelectorAll('[data-unified-tab-button]')).filter(node => (node.textContent || '').trim() === 'Обновление данных').length,
             retry_button_count: document.querySelectorAll('[data-retry-button]').length,
@@ -2459,8 +2466,10 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Настройки"]:
+    if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
+    if payload["shell_actions"] != ["Настройки", "Выйти"]:
+        raise AssertionError(f"web-vitrina must expose Settings next to logout, got {payload}")
     if payload["active_unified_tab"] != "Витрина" or payload["update_tab_count"] != 0:
         raise AssertionError(f"web-vitrina must default to Vitrina and omit update-data tab, got {payload}")
     if payload["retry_button_count"] != 0:
