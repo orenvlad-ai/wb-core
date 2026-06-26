@@ -116,6 +116,10 @@ def main() -> None:
                         ">Инвойсы<",
                         "id=\"userRows\"",
                         "data-new-user-sections",
+                        'data-access-picker="new"',
+                        "data-access-picker-toggle",
+                        "data-access-picker-popover",
+                        "data-access-summary",
                         'label: "Витрина"',
                         'label: "Поставки"',
                         'label: "Отчёты"',
@@ -125,8 +129,13 @@ def main() -> None:
                     )
                 ):
                     raise AssertionError("embedded settings must expose directories and users groups")
-                if "newRoleSelect" in embedded_settings or "window.prompt" in embedded_settings:
-                    raise AssertionError("users UI must use section checkboxes and inline password change, not role select/prompt")
+                if (
+                    "newRoleSelect" in embedded_settings
+                    or "window.prompt" in embedded_settings
+                    or "access-fieldset" in embedded_settings
+                    or "section-checkbox-grid" in embedded_settings
+                ):
+                    raise AssertionError("users UI must use compact access picker and inline password change, not role select/prompt")
 
                 unauth_users_code, unauth_users_payload = _get_json(f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
                 if unauth_users_code != 401 or unauth_users_payload.get("error") != "authentication_required":
@@ -309,6 +318,32 @@ def main() -> None:
                 if forbidden_users_code != 403 or forbidden_users_payload.get("error") != "forbidden":
                     raise AssertionError("supply_operator must not access users API")
 
+                ui_payload = _create_user(
+                    admin,
+                    base_url,
+                    {
+                        "username": "ui-picker-user",
+                        "display_name": "UI Picker User",
+                        "allowed_sections": ["supply"],
+                        "password": "ui-picker-password",
+                        "is_active": True,
+                    },
+                )
+                ui_user_id = str(ui_payload["user"]["user_id"])
+                try:
+                    _assert_users_access_picker_browser(base_url, admin_username, admin_password, ui_user_id)
+                    ui_user_after_code, ui_user_after_payload = _opener_json(
+                        admin,
+                        f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}",
+                    )
+                    if ui_user_after_code != 200:
+                        raise AssertionError(f"users API must remain readable after UI picker save: {ui_user_after_code}")
+                    ui_user_after = _find_user(ui_user_after_payload, "ui-picker-user")
+                    if not ui_user_after or ui_user_after.get("allowed_sections") != ["supply", "reports"]:
+                        raise AssertionError(f"UI picker save must persist selected sections: {ui_user_after_payload}")
+                finally:
+                    _delete_user(admin, base_url, ui_user_id)
+
                 _delete_user(admin, base_url, operator_id)
                 archived_code, archived_payload = _opener_json(new_password_opener, f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
                 if archived_code != 401 or archived_payload.get("error") != "authentication_required":
@@ -326,6 +361,10 @@ def main() -> None:
                 )
                 if duplicate_code != 400 or "username already exists" not in str(duplicate_payload.get("error")):
                     raise AssertionError("runtime username must be unique against env principals")
+                final_users_code, final_users_payload = _opener_json(admin, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
+                debug_usernames = _debug_usernames(final_users_payload)
+                if final_users_code != 200 or debug_usernames:
+                    raise AssertionError(f"users-admin smoke must not leave codex_debug_* users: {debug_usernames}")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -426,6 +465,30 @@ def _has_user(payload: dict[str, object], username: str, role: str) -> bool:
     return False
 
 
+def _find_user(payload: dict[str, object], username: str) -> dict[str, object] | None:
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return None
+    for user in users:
+        if isinstance(user, dict) and user.get("username") == username:
+            return user
+    return None
+
+
+def _debug_usernames(payload: dict[str, object]) -> list[str]:
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return []
+    result: list[str] = []
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        username = str(user.get("username") or "")
+        if username.startswith("codex_debug_"):
+            result.append(username)
+    return result
+
+
 def _section_ids(payload: dict[str, object]) -> list[str]:
     sections = payload.get("available_sections")
     if not isinstance(sections, list):
@@ -448,6 +511,90 @@ def _env_user_has_readonly_reason(payload: dict[str, object], username: str) -> 
             continue
         return bool(user.get("readonly")) and "env-пользователь" in str(user.get("readonly_reason") or "")
     return False
+
+
+def _assert_users_access_picker_browser(
+    base_url: str,
+    admin_username: str,
+    admin_password: str,
+    ui_user_id: str,
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_default_timeout(8_000)
+            page.goto(
+                f"{base_url}/login?next={urllib_parse.quote(DEFAULT_SETTINGS_UI_PATH)}",
+                wait_until="domcontentloaded",
+            )
+            page.fill('input[name="username"]', admin_username)
+            page.fill('input[name="password"]', admin_password)
+            page.click('button[type="submit"]')
+            page.wait_for_load_state("domcontentloaded")
+
+            page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}?embedded=1", wait_until="domcontentloaded")
+            page.locator('[data-settings-group-button="users"]').click()
+            page.wait_for_selector(f'tr[data-user-id="{ui_user_id}"]')
+
+            if page.locator("fieldset.access-fieldset").count() or page.locator(".section-checkbox-grid").count():
+                raise AssertionError("users UI must not render always-expanded access fieldset/grid")
+            create_picker = page.locator('[data-access-picker="new"]')
+            if create_picker.locator("[data-access-picker-popover]").is_visible():
+                raise AssertionError("create user access picker must be collapsed by default")
+            if "Доступы: 5 разделов" not in create_picker.locator("[data-access-summary]").inner_text():
+                raise AssertionError("create user access picker must render compact default summary")
+
+            create_picker.locator("[data-access-picker-toggle]").click()
+            create_popover = create_picker.locator("[data-access-picker-popover]")
+            if not create_popover.is_visible():
+                raise AssertionError("create user access picker must open on click")
+            create_labels = create_popover.inner_text()
+            for label in ("Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Настройки", "Управление пользователями"):
+                if label not in create_labels:
+                    raise AssertionError(f"create user access picker must include {label}")
+            create_picker.locator('[data-section-checkbox][value="vitrina"]').uncheck()
+            if "Доступы: 4 раздела" not in create_picker.locator("[data-access-summary]").inner_text():
+                raise AssertionError("create user access summary must update after section changes")
+            create_picker.locator("#newManageUsersInput").check()
+            if not create_picker.locator('[data-section-checkbox][value="settings"]').is_checked():
+                raise AssertionError("manage_users checkbox must auto-check settings section")
+            if "+ управление" not in create_picker.locator("[data-access-summary]").inner_text():
+                raise AssertionError("create user access summary must include manage-users state")
+            page.keyboard.press("Escape")
+            if create_popover.is_visible():
+                raise AssertionError("access picker must close on Escape")
+
+            user_row = page.locator(f'tr[data-user-id="{ui_user_id}"]')
+            if "Доступы: Поставки" not in user_row.locator("[data-access-summary]").inner_text():
+                raise AssertionError("table access picker must render compact row summary")
+            user_row.locator("[data-access-picker-toggle]").click()
+            if not user_row.locator("[data-access-picker-popover]").is_visible():
+                raise AssertionError("table access picker must open on click")
+            user_row.locator('[data-section-checkbox][value="reports"]').check()
+            if "Доступы: 2 раздела" not in user_row.locator("[data-access-summary]").inner_text():
+                raise AssertionError("table access summary must update after section changes")
+            with page.expect_request(
+                lambda request: request.method == "PATCH"
+                and f"{DEFAULT_SETTINGS_USERS_PATH}/{urllib_parse.quote(ui_user_id)}" in request.url
+            ) as request_info:
+                user_row.locator(f'[data-user-save="{ui_user_id}"]').click()
+            request = request_info.value
+            patch_payload = json.loads(request.post_data or "{}")
+            if patch_payload.get("allowed_sections") != ["supply", "reports"] or patch_payload.get("manage_users") is not False:
+                raise AssertionError(f"UI picker save must send selected access payload: {patch_payload}")
+            page.wait_for_selector("#usersMessage.message.success")
+
+            owner_row = page.locator("#userRows tr").filter(has_text="owner").first
+            if owner_row.locator(".access-picker-summary.is-readonly").count() != 1:
+                raise AssertionError("readonly env row must render compact access summary")
+            if owner_row.locator("[data-access-picker-toggle]").count() or owner_row.locator("[data-section-checkbox]").count():
+                raise AssertionError("readonly env row must not expose active access checkboxes")
+        finally:
+            browser.close()
 
 
 def _login(
