@@ -6558,10 +6558,10 @@
         metricPresentationScopeOrder("sku").forEach(function(metricKey) {
           addMetric(metricKey);
         });
+        optionByKey.forEach(function(_option, metricKey) {
+          addMetric(metricKey);
+        });
       }
-      optionByKey.forEach(function(_option, metricKey) {
-        addMetric(metricKey);
-      });
       return ordered;
     }
 
