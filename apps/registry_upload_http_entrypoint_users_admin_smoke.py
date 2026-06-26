@@ -99,6 +99,8 @@ def main() -> None:
                     not in admin_shell
                 ):
                     raise AssertionError("settings shell action must be hidden by default before section JS filtering")
+                if ".shell-logout-link[hidden]" not in admin_shell:
+                    raise AssertionError("settings shell action hidden state must not be overridden by shell action display CSS")
 
                 embedded_code, _, embedded_settings = _opener_text(
                     admin,
