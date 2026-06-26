@@ -144,9 +144,11 @@ def main() -> None:
                 )
                 with opener.open(settings_request, timeout=5) as response:
                     body = response.read().decode("utf-8")
+                    main_nav = body.split('<div class="shell-actions">', 1)[0]
                     if (
                         response.status != 200
-                        or 'data-unified-tab-button="settings"' not in body
+                        or 'data-unified-tab-button="settings"' in main_nav
+                        or '<button class="shell-logout-link" type="button" data-unified-tab-button="settings"' not in body
                         or 'data-logout-link href="/logout"' not in body
                         or '"initial_tab": "settings"' not in body
                     ):

@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import socketserver
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib import parse as urllib_parse
 from uuid import uuid4
 
@@ -124,6 +124,29 @@ WEB_AUTH_RUNTIME_ROLES = {
     WEB_AUTH_ROLE_OPERATOR,
     WEB_AUTH_ROLE_SUPPLIER,
     WEB_AUTH_ROLE_SUPPLY_OPERATOR,
+}
+WEB_AUTH_SECTION_VITRINA = "vitrina"
+WEB_AUTH_SECTION_SUPPLY = "supply"
+WEB_AUTH_SECTION_REPORTS = "reports"
+WEB_AUTH_SECTION_FEEDBACKS = "feedbacks"
+WEB_AUTH_SECTION_RESEARCH = "research"
+WEB_AUTH_SECTION_SETTINGS = "settings"
+WEB_AUTH_SECTION_DEFINITIONS = (
+    {"section_id": WEB_AUTH_SECTION_VITRINA, "label": "Витрина"},
+    {"section_id": WEB_AUTH_SECTION_SUPPLY, "label": "Поставки"},
+    {"section_id": WEB_AUTH_SECTION_REPORTS, "label": "Отчёты"},
+    {"section_id": WEB_AUTH_SECTION_FEEDBACKS, "label": "Отзывы"},
+    {"section_id": WEB_AUTH_SECTION_RESEARCH, "label": "Исследования"},
+    {"section_id": WEB_AUTH_SECTION_SETTINGS, "label": "Настройки"},
+)
+WEB_AUTH_SECTION_IDS = tuple(str(section["section_id"]) for section in WEB_AUTH_SECTION_DEFINITIONS)
+WEB_AUTH_UNIFIED_TAB_SECTIONS = {
+    "vitrina": WEB_AUTH_SECTION_VITRINA,
+    "factory-order": WEB_AUTH_SECTION_SUPPLY,
+    "reports": WEB_AUTH_SECTION_REPORTS,
+    "feedbacks": WEB_AUTH_SECTION_FEEDBACKS,
+    "research": WEB_AUTH_SECTION_RESEARCH,
+    "settings": WEB_AUTH_SECTION_SETTINGS,
 }
 DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
 DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
@@ -1369,21 +1392,25 @@ def _build_handler(
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
                         role=_current_web_user_role(self),
+                        allowed_sections=_current_web_user_allowed_sections(self),
                     ),
                 )
                 return
 
             if parsed.path == DEFAULT_SHEET_SUPPLIER_UI_PATH:
                 role = _current_web_user_role(self)
+                has_supply_access = role != WEB_AUTH_ROLE_SUPPLIER and (
+                    WEB_AUTH_SECTION_SUPPLY in _current_web_user_allowed_sections(self)
+                )
                 is_operator_embedded = (
-                    _role_has_supply_operator_access(role)
+                    has_supply_access
                     and _resolve_single_query_param(parsed.query, "embedded") == "operator"
                 )
                 _write_html_response(
                     self,
                     HTTPStatus.OK,
                     _render_sheet_vitrina_supplier_ui(
-                        can_delete_shipments=_role_has_supply_operator_access(role),
+                        can_delete_shipments=has_supply_access,
                         can_edit_order_status=is_operator_embedded,
                         can_recheck_prices=is_operator_embedded,
                         can_manage_documents=is_operator_embedded,
@@ -1402,7 +1429,7 @@ def _build_handler(
                         HTTPStatus.OK,
                         _render_sheet_vitrina_settings_ui(
                             embedded=True,
-                            can_manage_users=_current_web_user_role(self) == WEB_AUTH_ROLE_ADMIN,
+                            can_manage_users=_current_web_user_can_manage_users(self),
                         ),
                     )
                     return
@@ -1416,6 +1443,7 @@ def _build_handler(
                         job_path=sheet_job_path,
                         active_tab="settings",
                         role=_current_web_user_role(self),
+                        allowed_sections=_current_web_user_allowed_sections(self),
                     ),
                 )
                 return
@@ -1440,10 +1468,12 @@ def _build_handler(
                             refresh_path=sheet_refresh_path,
                             job_path=sheet_job_path,
                             role=_current_web_user_role(self),
+                            allowed_sections=_current_web_user_allowed_sections(self),
                         ),
                     )
                     return
-                if _current_web_user_role(self) == WEB_AUTH_ROLE_SUPPLY_OPERATOR and embedded_tab != "factory-order":
+                embedded_section = WEB_AUTH_UNIFIED_TAB_SECTIONS.get(embedded_tab, "")
+                if embedded_section and embedded_section not in _current_web_user_allowed_sections(self):
                     _write_auth_forbidden(self, parsed.path)
                     return
                 _write_html_response(
@@ -3765,8 +3795,7 @@ def _ensure_web_auth(handler: BaseHTTPRequestHandler, parsed: urllib_parse.Parse
         return True
     user = _authenticated_web_user(handler, config)
     if user:
-        role = str(user.get("role") or "")
-        if role in _allowed_roles_for_path(parsed.path):
+        if _user_can_access_path(user, parsed.path, query=parsed.query):
             return True
         _write_auth_forbidden(handler, parsed.path)
         return False
@@ -3793,7 +3822,7 @@ def _ensure_operator_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
     if not config["enabled"]:
         return True
     user = _authenticated_web_user(handler, config)
-    if user and _role_has_full_operator_access(str(user.get("role") or "")):
+    if user and _user_can_access_path(user, path):
         return True
     _write_auth_forbidden(handler, path)
     return False
@@ -3804,18 +3833,22 @@ def _ensure_supply_operator_role(handler: BaseHTTPRequestHandler, path: str) -> 
     if not config["enabled"]:
         return True
     user = _authenticated_web_user(handler, config)
-    if user and _role_has_supply_operator_access(str(user.get("role") or "")):
+    if user and _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
         return True
     _write_auth_forbidden(handler, path)
     return False
 
 
 def _ensure_admin_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
+    return _ensure_manage_users_access(handler, path)
+
+
+def _ensure_manage_users_access(handler: BaseHTTPRequestHandler, path: str) -> bool:
     config = _web_auth_config()
     if not config["enabled"]:
         return True
     user = _authenticated_web_user(handler, config)
-    if user and str(user.get("role") or "") == WEB_AUTH_ROLE_ADMIN:
+    if user and _user_can_manage_users(user):
         return True
     _write_auth_forbidden(handler, path)
     return False
@@ -3827,6 +3860,22 @@ def _current_web_user_role(handler: BaseHTTPRequestHandler) -> str:
         return WEB_AUTH_ROLE_ADMIN
     user = _authenticated_web_user(handler, config) or {}
     return str(user.get("role") or "").strip() or WEB_AUTH_ROLE_ADMIN
+
+
+def _current_web_user_allowed_sections(handler: BaseHTTPRequestHandler) -> list[str]:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+    user = _authenticated_web_user(handler, config) or {}
+    return _user_allowed_sections(user)
+
+
+def _current_web_user_can_manage_users(handler: BaseHTTPRequestHandler) -> bool:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return True
+    user = _authenticated_web_user(handler, config) or {}
+    return _user_can_manage_users(user)
 
 
 def _current_web_user_config_key(handler: BaseHTTPRequestHandler) -> str:
@@ -3864,7 +3913,7 @@ def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
         _write_login_form_response(handler, urllib_parse.urlencode({"next": next_path}), error="Неверный логин или пароль.")
         return
     role = str(principal.get("role") or "")
-    if role not in _allowed_roles_for_path(next_path):
+    if not _user_can_access_path(principal, next_path):
         next_path = DEFAULT_SHEET_SUPPLIER_UI_PATH if role == "supplier" else DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     cookie = _build_session_cookie(
         handler,
@@ -3994,12 +4043,26 @@ def _handle_settings_user_create(
         username = _normalize_runtime_username(payload.get("username"))
         _ensure_runtime_username_available(username, config, entrypoint)
         password = _validate_runtime_password(payload.get("password"))
-        role = _validate_runtime_role(payload.get("role"))
+        requested_role = _validate_runtime_role(payload.get("role")) if "role" in payload else ""
+        role = requested_role or WEB_AUTH_ROLE_OPERATOR
+        allowed_sections = _validate_runtime_allowed_sections(
+            payload.get("allowed_sections") if "allowed_sections" in payload else None,
+            role=role,
+        )
+        manage_users = _validate_runtime_manage_users(
+            payload.get("manage_users") if "manage_users" in payload else None,
+            role=role,
+        )
+        if not requested_role and "allowed_sections" in payload:
+            role = _runtime_role_for_allowed_sections(allowed_sections, manage_users=manage_users)
+        _ensure_runtime_access_consistent(role, allowed_sections, manage_users)
         user_payload = {
             "user_id": f"user_{uuid4().hex}",
             "username": username,
             "display_name": str(payload.get("display_name") or "").strip(),
             "role": role,
+            "allowed_sections": allowed_sections,
+            "manage_users": manage_users,
             "password_hash": _hash_pbkdf2_password(password),
             "is_active": _coerce_bool(payload.get("is_active", True)),
             "created_at": now,
@@ -4045,6 +4108,24 @@ def _handle_settings_user_patch(
             updates["display_name"] = str(payload.get("display_name") or "").strip()
         if "role" in payload:
             updates["role"] = _validate_runtime_role(payload.get("role"))
+        candidate_role = str(updates.get("role", existing.get("role") or ""))
+        if "allowed_sections" in payload:
+            updates["allowed_sections"] = _validate_runtime_allowed_sections(
+                payload.get("allowed_sections"),
+                role=candidate_role,
+            )
+        elif "role" in updates:
+            updates["allowed_sections"] = _default_allowed_sections_for_role(candidate_role)
+        if "manage_users" in payload:
+            updates["manage_users"] = _validate_runtime_manage_users(payload.get("manage_users"), role=candidate_role)
+        elif "role" in updates:
+            updates["manage_users"] = _default_manage_users_for_role(candidate_role)
+        if "allowed_sections" in updates and "role" not in updates:
+            updates["role"] = _runtime_role_for_allowed_sections(
+                updates["allowed_sections"],
+                manage_users=bool(updates.get("manage_users", existing.get("manage_users"))),
+            )
+            candidate_role = str(updates.get("role") or candidate_role)
         if "is_active" in payload:
             updates["is_active"] = _coerce_bool(payload.get("is_active"))
         if "password" in payload:
@@ -4053,13 +4134,24 @@ def _handle_settings_user_patch(
         if not updates:
             result = {"user": _public_runtime_user(existing), "canonical_store": "server_runtime_sqlite"}
         else:
-            candidate_role = str(updates.get("role", existing.get("role") or ""))
+            candidate_allowed_sections = _normalize_public_allowed_sections(
+                updates.get("allowed_sections", existing.get("allowed_sections")),
+                role=candidate_role,
+            )
+            candidate_manage_users = bool(
+                updates.get(
+                    "manage_users",
+                    existing.get("manage_users", _default_manage_users_for_role(candidate_role)),
+                )
+            )
+            _ensure_runtime_access_consistent(candidate_role, candidate_allowed_sections, candidate_manage_users)
             candidate_is_active = bool(updates.get("is_active", existing.get("is_active")))
-            _ensure_admin_not_exhausted(
+            _ensure_manage_users_not_exhausted(
                 config,
                 entrypoint,
                 candidate_user_id=user_id,
-                candidate_role=candidate_role,
+                candidate_allowed_sections=candidate_allowed_sections,
+                candidate_manage_users=candidate_manage_users,
                 candidate_is_active=candidate_is_active,
             )
             result = entrypoint.handle_sheet_vitrina_user_patch_request(
@@ -4096,11 +4188,15 @@ def _handle_settings_user_delete(
         if existing is None:
             _write_json_response(handler, HTTPStatus.NOT_FOUND, {"error": f"settings user not found: {user_id}"})
             return
-        _ensure_admin_not_exhausted(
+        _ensure_manage_users_not_exhausted(
             config,
             entrypoint,
             candidate_user_id=user_id,
-            candidate_role=str(existing.get("role") or ""),
+            candidate_allowed_sections=_normalize_public_allowed_sections(
+                existing.get("allowed_sections"),
+                role=str(existing.get("role") or ""),
+            ),
+            candidate_manage_users=bool(existing.get("manage_users")),
             candidate_is_active=False,
         )
         result = entrypoint.handle_sheet_vitrina_user_archive_request(user_id, updated_at=_utc_now_iso())
@@ -4126,6 +4222,7 @@ def _settings_users_response_payload(
     users.extend(_public_runtime_user(user) for user in runtime_payload.get("users", []) if isinstance(user, Mapping))
     return {
         "users": users,
+        "available_sections": _available_section_records(),
         "roles": [
             WEB_AUTH_ROLE_ADMIN,
             WEB_AUTH_ROLE_OPERATOR,
@@ -4144,7 +4241,10 @@ def _with_settings_users_context(
     payload = dict(result)
     if isinstance(payload.get("user"), Mapping):
         payload["user"] = _public_runtime_user(payload["user"])
-    payload["users"] = _settings_users_response_payload(entrypoint, config)["users"]
+    context = _settings_users_response_payload(entrypoint, config)
+    payload["users"] = context["users"]
+    payload["available_sections"] = context["available_sections"]
+    payload["roles"] = context["roles"]
     return payload
 
 
@@ -4159,11 +4259,14 @@ def _env_principal_user_records(config: Mapping[str, Any]) -> list[dict[str, Any
                 "username": operator_username,
                 "display_name": str(operator.get("display_name") or operator_username),
                 "role": WEB_AUTH_ROLE_ADMIN,
+                "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+                "manage_users": True,
                 "is_active": True,
                 "created_at": "",
                 "updated_at": "",
                 "source": "env_bootstrap",
                 "readonly": True,
+                "readonly_reason": "env-пользователь: меняется только через env/runtime secret",
             }
         )
     supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
@@ -4175,11 +4278,14 @@ def _env_principal_user_records(config: Mapping[str, Any]) -> list[dict[str, Any
                 "username": supplier_username,
                 "display_name": str(supplier.get("display_name") or supplier_username),
                 "role": WEB_AUTH_ROLE_SUPPLIER,
+                "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_SUPPLIER),
+                "manage_users": False,
                 "is_active": True,
                 "created_at": "",
                 "updated_at": "",
                 "source": "env_supplier",
                 "readonly": True,
+                "readonly_reason": "env-пользователь: меняется только через env/runtime secret",
             }
         )
     return users
@@ -4191,6 +4297,11 @@ def _public_runtime_user(user: Mapping[str, Any]) -> dict[str, Any]:
         "username": str(user.get("username") or ""),
         "display_name": str(user.get("display_name") or ""),
         "role": str(user.get("role") or ""),
+        "allowed_sections": _normalize_public_allowed_sections(
+            user.get("allowed_sections"),
+            role=str(user.get("role") or ""),
+        ),
+        "manage_users": bool(user.get("manage_users")),
         "is_active": bool(user.get("is_active")),
         "created_at": str(user.get("created_at") or ""),
         "updated_at": str(user.get("updated_at") or ""),
@@ -4215,6 +4326,94 @@ def _validate_runtime_role(value: Any) -> str:
     if not role:
         raise ValueError("role is invalid")
     return role
+
+
+def _available_section_records() -> list[dict[str, str]]:
+    return [
+        {"section_id": str(section["section_id"]), "label": str(section["label"])}
+        for section in WEB_AUTH_SECTION_DEFINITIONS
+    ]
+
+
+def _default_allowed_sections_for_role(role: str) -> list[str]:
+    normalized = str(role or "").strip()
+    if normalized in {WEB_AUTH_ROLE_ADMIN, WEB_AUTH_ROLE_OPERATOR}:
+        return list(WEB_AUTH_SECTION_IDS)
+    if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
+        return [WEB_AUTH_SECTION_SUPPLY]
+    return []
+
+
+def _default_manage_users_for_role(role: str) -> bool:
+    return str(role or "").strip() == WEB_AUTH_ROLE_ADMIN
+
+
+def _normalize_public_allowed_sections(value: Any, *, role: str = "") -> list[str]:
+    if value is None:
+        return _default_allowed_sections_for_role(role)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = []
+        value = parsed
+    if not isinstance(value, (list, tuple, set)):
+        return _default_allowed_sections_for_role(role)
+    valid = set(WEB_AUTH_SECTION_IDS)
+    sections: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        section_id = str(item or "").strip()
+        if section_id in valid and section_id not in seen:
+            sections.append(section_id)
+            seen.add(section_id)
+    return sections
+
+
+def _validate_runtime_allowed_sections(value: Any, *, role: str = "") -> list[str]:
+    if value is None:
+        return _default_allowed_sections_for_role(role)
+    if not isinstance(value, (list, tuple, set)):
+        raise ValueError("allowed_sections must be a list")
+    valid = set(WEB_AUTH_SECTION_IDS)
+    sections: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        section_id = str(item or "").strip()
+        if section_id not in valid:
+            raise ValueError(f"allowed_sections contains unsupported section: {section_id}")
+        if section_id not in seen:
+            sections.append(section_id)
+            seen.add(section_id)
+    return sections
+
+
+def _validate_runtime_manage_users(value: Any, *, role: str = "") -> bool:
+    if value is None:
+        return _default_manage_users_for_role(role)
+    return _coerce_bool(value)
+
+
+def _runtime_role_for_allowed_sections(allowed_sections: Sequence[str], *, manage_users: bool) -> str:
+    normalized = [str(section or "").strip() for section in allowed_sections if str(section or "").strip()]
+    if manage_users:
+        return WEB_AUTH_ROLE_ADMIN
+    if set(normalized) == {WEB_AUTH_SECTION_SUPPLY}:
+        return WEB_AUTH_ROLE_SUPPLY_OPERATOR
+    return WEB_AUTH_ROLE_OPERATOR
+
+
+def _ensure_runtime_access_consistent(role: str, allowed_sections: Sequence[str], manage_users: bool) -> None:
+    normalized_role = _validate_runtime_role(role)
+    sections = [str(section or "").strip() for section in allowed_sections if str(section or "").strip()]
+    if normalized_role == WEB_AUTH_ROLE_SUPPLIER:
+        if sections or manage_users:
+            raise ValueError("supplier users must use supplier-only access without shell sections")
+        return
+    if not sections:
+        raise ValueError("allowed_sections must include at least one section")
+    if manage_users and WEB_AUTH_SECTION_SETTINGS not in sections:
+        raise ValueError("manage_users requires settings access")
 
 
 def _validate_runtime_password(value: Any) -> str:
@@ -4250,30 +4449,33 @@ def _ensure_runtime_username_available(
         raise ValueError("username already exists")
 
 
-def _ensure_admin_not_exhausted(
+def _ensure_manage_users_not_exhausted(
     config: Mapping[str, Any],
     entrypoint: RegistryUploadHttpEntrypoint,
     *,
     candidate_user_id: str,
-    candidate_role: str,
+    candidate_allowed_sections: Sequence[str],
+    candidate_manage_users: bool,
     candidate_is_active: bool,
 ) -> None:
-    if _active_admin_count_after(
+    if _active_manage_users_count_after(
         config,
         entrypoint,
         candidate_user_id=candidate_user_id,
-        candidate_role=candidate_role,
+        candidate_allowed_sections=candidate_allowed_sections,
+        candidate_manage_users=candidate_manage_users,
         candidate_is_active=candidate_is_active,
     ) < 1:
-        raise ValueError("cannot disable or demote the last admin")
+        raise ValueError("cannot disable or demote the last admin/manage-users access")
 
 
-def _active_admin_count_after(
+def _active_manage_users_count_after(
     config: Mapping[str, Any],
     entrypoint: RegistryUploadHttpEntrypoint,
     *,
     candidate_user_id: str,
-    candidate_role: str,
+    candidate_allowed_sections: Sequence[str],
+    candidate_manage_users: bool,
     candidate_is_active: bool,
 ) -> int:
     count = 0
@@ -4286,11 +4488,16 @@ def _active_admin_count_after(
             continue
         user_id = str(user.get("user_id") or "")
         is_active = bool(user.get("is_active"))
-        role = str(user.get("role") or "")
+        allowed_sections = _normalize_public_allowed_sections(
+            user.get("allowed_sections"),
+            role=str(user.get("role") or ""),
+        )
+        manage_users = bool(user.get("manage_users"))
         if user_id == candidate_user_id:
             is_active = bool(candidate_is_active)
-            role = str(candidate_role or "")
-        if is_active and role == WEB_AUTH_ROLE_ADMIN:
+            allowed_sections = [str(section or "").strip() for section in candidate_allowed_sections]
+            manage_users = bool(candidate_manage_users)
+        if is_active and manage_users and WEB_AUTH_SECTION_SETTINGS in allowed_sections:
             count += 1
     return count
 
@@ -4368,6 +4575,8 @@ def _match_web_auth_principal(
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(operator.get("display_name") or username),
+            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+            "manage_users": True,
         }
     runtime_user = _load_runtime_user_by_username(entrypoint, normalized_username)
     if (
@@ -4381,6 +4590,8 @@ def _match_web_auth_principal(
                 "username": str(runtime_user.get("username") or username),
                 "role": role,
                 "display_name": str(runtime_user.get("display_name") or runtime_user.get("username") or username),
+                "allowed_sections": _normalize_public_allowed_sections(runtime_user.get("allowed_sections"), role=role),
+                "manage_users": bool(runtime_user.get("manage_users")),
             }
     supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
     if (
@@ -4392,6 +4603,8 @@ def _match_web_auth_principal(
             "username": str(supplier.get("username") or username),
             "role": WEB_AUTH_ROLE_SUPPLIER,
             "display_name": str(supplier.get("display_name") or username),
+            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_SUPPLIER),
+            "manage_users": False,
         }
     return None
 
@@ -4430,6 +4643,8 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(payload.get("d") or operator.get("display_name") or username),
+            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+            "manage_users": True,
         }
     runtime_user = _load_runtime_user_by_username(
         _handler_runtime_entrypoint(handler),
@@ -4446,6 +4661,8 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
             "username": str(runtime_user.get("username") or username),
             "role": runtime_role,
             "display_name": str(payload.get("d") or runtime_user.get("display_name") or runtime_user.get("username") or username),
+            "allowed_sections": _normalize_public_allowed_sections(runtime_user.get("allowed_sections"), role=runtime_role),
+            "manage_users": bool(runtime_user.get("manage_users")),
         }
     supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
     if (
@@ -4457,6 +4674,8 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
             "username": str(supplier.get("username") or username),
             "role": WEB_AUTH_ROLE_SUPPLIER,
             "display_name": str(payload.get("d") or supplier.get("display_name") or username),
+            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_SUPPLIER),
+            "manage_users": False,
         }
     return None
 
@@ -4579,6 +4798,33 @@ def _role_has_supply_operator_access(role: str) -> bool:
     return str(role or "").strip() in WEB_AUTH_SUPPLY_OPERATOR_ROLES
 
 
+def _user_allowed_sections(user: Mapping[str, Any]) -> list[str]:
+    return _normalize_public_allowed_sections(user.get("allowed_sections"), role=str(user.get("role") or ""))
+
+
+def _user_has_section_access(user: Mapping[str, Any], section_id: str) -> bool:
+    if str(user.get("role") or "").strip() == WEB_AUTH_ROLE_SUPPLIER:
+        return False
+    return str(section_id or "").strip() in _user_allowed_sections(user)
+
+
+def _user_can_manage_users(user: Mapping[str, Any]) -> bool:
+    return bool(user.get("manage_users")) and _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS)
+
+
+def _allowed_unified_tabs_for_user(user: Mapping[str, Any]) -> list[str]:
+    return _allowed_unified_tabs_for_sections(_user_allowed_sections(user))
+
+
+def _allowed_unified_tabs_for_sections(allowed_sections: Sequence[str]) -> list[str]:
+    allowed = {str(section or "").strip() for section in allowed_sections}
+    return [
+        tab_id
+        for tab_id, section_id in WEB_AUTH_UNIFIED_TAB_SECTIONS.items()
+        if section_id in allowed
+    ]
+
+
 def _allowed_unified_tabs_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip()
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
@@ -4591,6 +4837,90 @@ def _allowed_unified_tabs_for_role(role: str) -> list[str]:
 def _default_unified_tab_for_role(role: str) -> str:
     tabs = _allowed_unified_tabs_for_role(role)
     return tabs[0] if tabs else "vitrina"
+
+
+def _default_unified_tab_for_sections(allowed_sections: Sequence[str]) -> str:
+    tabs = _allowed_unified_tabs_for_sections(allowed_sections)
+    return tabs[0] if tabs else "vitrina"
+
+
+def _required_section_for_path(path: str) -> str:
+    normalized = str(path or "").split("?", 1)[0]
+    if normalized in {
+        DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+        DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
+        DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
+        DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH,
+        DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
+        DEFAULT_SHEET_REFRESH_PATH,
+        DEFAULT_SHEET_LOAD_PATH,
+        DEFAULT_SHEET_STATUS_PATH,
+        DEFAULT_SHEET_JOB_PATH,
+        DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
+        DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+    }:
+        return WEB_AUTH_SECTION_VITRINA
+    if normalized in {
+        DEFAULT_SHEET_DAILY_REPORT_PATH,
+        DEFAULT_SHEET_STOCK_REPORT_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
+        DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
+    }:
+        return WEB_AUTH_SECTION_REPORTS
+    if normalized == DEFAULT_SETTINGS_UI_PATH:
+        return WEB_AUTH_SECTION_SETTINGS
+    if (
+        normalized == DEFAULT_NOMENCLATURE_PATH
+        or normalized.startswith(DEFAULT_NOMENCLATURE_PATH + "/")
+        or normalized == DEFAULT_NOMENCLATURE_EXPORT_PATH
+        or normalized == DEFAULT_NOMENCLATURE_IMPORT_PATH
+        or normalized == DEFAULT_TRADE_DOCUMENTS_PATH
+        or normalized.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/")
+    ):
+        return WEB_AUTH_SECTION_SETTINGS
+    if (
+        normalized == DEFAULT_SHEET_FEEDBACKS_PATH
+        or normalized.startswith(DEFAULT_SHEET_FEEDBACKS_PATH + "/")
+    ):
+        return WEB_AUTH_SECTION_FEEDBACKS
+    if normalized.startswith("/v1/sheet-vitrina-v1/research/"):
+        return WEB_AUTH_SECTION_RESEARCH
+    if normalized.startswith("/v1/sheet-vitrina-v1/supply/"):
+        return WEB_AUTH_SECTION_SUPPLY
+    return ""
+
+
+def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = "") -> bool:
+    normalized = str(path or "").split("?", 1)[0]
+    role = str(user.get("role") or "").strip()
+    if normalized == DEFAULT_SETTINGS_USERS_PATH or normalized.startswith(DEFAULT_SETTINGS_USERS_PATH + "/"):
+        return _user_can_manage_users(user)
+    if normalized == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
+        return role != WEB_AUTH_ROLE_SUPPLIER and bool(_allowed_unified_tabs_for_user(user))
+    if normalized == DEFAULT_SHEET_OPERATOR_UI_PATH:
+        embedded_tab = ""
+        try:
+            embedded_tab = _resolve_operator_embedded_tab_from_query(query)
+        except ValueError:
+            return role != WEB_AUTH_ROLE_SUPPLIER and bool(_allowed_unified_tabs_for_user(user))
+        if embedded_tab:
+            section_id = WEB_AUTH_UNIFIED_TAB_SECTIONS.get(embedded_tab, "")
+            return bool(section_id) and _user_has_section_access(user, section_id)
+        return role != WEB_AUTH_ROLE_SUPPLIER and bool(_allowed_unified_tabs_for_user(user))
+    if normalized == DEFAULT_SHEET_SUPPLIER_UI_PATH:
+        return role == WEB_AUTH_ROLE_SUPPLIER or _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)
+    if normalized == DEFAULT_SUPPLIER_SHIPMENTS_PATH or normalized.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return role == WEB_AUTH_ROLE_SUPPLIER or _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)
+    required_section = _required_section_for_path(normalized)
+    if required_section:
+        return _user_has_section_access(user, required_section)
+    return _role_has_full_operator_access(role)
 
 
 def _load_runtime_user_by_username(
@@ -5057,14 +5387,21 @@ def _render_sheet_vitrina_web_vitrina_ui(
     refresh_path: str,
     job_path: str,
     role: str = WEB_AUTH_ROLE_ADMIN,
+    allowed_sections: Sequence[str] | None = None,
     active_tab: str = "",
 ) -> str:
     normalized_role = _normalize_runtime_role(role) or WEB_AUTH_ROLE_ADMIN
-    allowed_tabs = _allowed_unified_tabs_for_role(normalized_role)
-    initial_tab = active_tab if active_tab in allowed_tabs else _default_unified_tab_for_role(normalized_role)
+    normalized_sections = (
+        _normalize_public_allowed_sections(list(allowed_sections), role=normalized_role)
+        if allowed_sections is not None
+        else _default_allowed_sections_for_role(normalized_role)
+    )
+    allowed_tabs = _allowed_unified_tabs_for_sections(normalized_sections)
+    initial_tab = active_tab if active_tab in allowed_tabs else _default_unified_tab_for_sections(normalized_sections)
     config_payload = {
         "page_title": "Web-витрина",
         "current_role": normalized_role,
+        "allowed_sections": normalized_sections,
         "allowed_tabs": allowed_tabs,
         "initial_tab": initial_tab,
         "read_path": read_path,

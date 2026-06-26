@@ -948,6 +948,11 @@ class RegistryUploadDbBackedRuntime:
         role = str(user.get("role") or "").strip()
         if not role:
             raise ValueError("role is required")
+        allowed_sections = _normalize_sheet_vitrina_user_sections(
+            user.get("allowed_sections"),
+            role=role,
+        )
+        manage_users = bool(user.get("manage_users", _default_sheet_vitrina_manage_users_for_role(role)))
         password_hash = str(user.get("password_hash") or "").strip()
         if not password_hash:
             raise ValueError("password_hash is required")
@@ -966,18 +971,22 @@ class RegistryUploadDbBackedRuntime:
                     username,
                     display_name,
                     role,
+                    allowed_sections_json,
+                    manage_users,
                     password_hash,
                     is_active,
                     created_at,
                     updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
                     username,
                     str(user.get("display_name") or "").strip(),
                     role,
+                    json.dumps(allowed_sections, ensure_ascii=False),
+                    1 if manage_users else 0,
                     password_hash,
                     is_active,
                     created_at,
@@ -1005,6 +1014,16 @@ class RegistryUploadDbBackedRuntime:
             raise ValueError(f"sheet vitrina user not found: {normalized_user_id}")
         display_name = str(updates.get("display_name", existing.get("display_name") or "") or "").strip()
         role = str(updates.get("role", existing.get("role") or "") or "").strip()
+        allowed_sections = _normalize_sheet_vitrina_user_sections(
+            updates.get("allowed_sections", existing.get("allowed_sections")),
+            role=role,
+        )
+        manage_users = bool(
+            updates.get(
+                "manage_users",
+                existing.get("manage_users", _default_sheet_vitrina_manage_users_for_role(role)),
+            )
+        )
         password_hash = str(updates.get("password_hash", existing.get("password_hash") or "") or "").strip()
         if not role:
             raise ValueError("role is required")
@@ -1021,6 +1040,8 @@ class RegistryUploadDbBackedRuntime:
                 UPDATE sheet_vitrina_v1_users
                 SET display_name = ?,
                     role = ?,
+                    allowed_sections_json = ?,
+                    manage_users = ?,
                     password_hash = ?,
                     is_active = ?,
                     updated_at = ?
@@ -1029,6 +1050,8 @@ class RegistryUploadDbBackedRuntime:
                 (
                     display_name,
                     role,
+                    json.dumps(allowed_sections, ensure_ascii=False),
+                    1 if manage_users else 0,
                     password_hash,
                     1 if bool(is_active) else 0,
                     updated_at,
@@ -5129,11 +5152,14 @@ def _sheet_vitrina_user_config_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _sheet_vitrina_user_row_to_dict(row: sqlite3.Row, *, include_password_hash: bool) -> dict[str, Any]:
+    role = row["role"] or ""
     payload = {
         "user_id": row["user_id"],
         "username": row["username"] or "",
         "display_name": row["display_name"] or "",
-        "role": row["role"] or "",
+        "role": role,
+        "allowed_sections": _normalize_sheet_vitrina_user_sections(row["allowed_sections_json"], role=role),
+        "manage_users": bool(row["manage_users"]),
         "is_active": bool(row["is_active"]),
         "created_at": row["created_at"] or "",
         "updated_at": row["updated_at"] or "",
@@ -5316,6 +5342,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             username TEXT NOT NULL UNIQUE,
             display_name TEXT NOT NULL DEFAULT '',
             role TEXT NOT NULL,
+            allowed_sections_json TEXT NOT NULL DEFAULT '[]',
+            manage_users INTEGER NOT NULL DEFAULT 0,
             password_hash TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
@@ -5725,6 +5753,27 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON sheet_vitrina_v1_nomenclature_items(is_active, match_key);
         """
     )
+    users_access_columns_added = False
+    users_access_columns_added = (
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_users",
+            column_name="allowed_sections_json",
+            column_sql="TEXT NOT NULL DEFAULT '[]'",
+        )
+        or users_access_columns_added
+    )
+    users_access_columns_added = (
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_users",
+            column_name="manage_users",
+            column_sql="INTEGER NOT NULL DEFAULT 0",
+        )
+        or users_access_columns_added
+    )
+    if users_access_columns_added:
+        _backfill_sheet_vitrina_user_access_columns(conn)
     for column_name, column_sql in (
         ("cache_key", "TEXT"),
         ("wb_supply_id", "TEXT"),
@@ -5896,8 +5945,83 @@ def _ensure_column(
     table_name: str,
     column_name: str,
     column_sql: str,
-) -> None:
+) -> bool:
     existing = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     if any(str(row["name"]) == column_name for row in existing):
-        return
+        return False
     conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+    return True
+
+
+_SHEET_VITRINA_USER_SECTION_IDS = (
+    "vitrina",
+    "supply",
+    "reports",
+    "feedbacks",
+    "research",
+    "settings",
+)
+
+
+def _backfill_sheet_vitrina_user_access_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT user_id, role
+        FROM sheet_vitrina_v1_users
+        """
+    ).fetchall()
+    for row in rows:
+        role = str(row["role"] or "").strip()
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_users
+            SET allowed_sections_json = ?,
+                manage_users = ?
+            WHERE user_id = ?
+            """,
+            (
+                json.dumps(_default_sheet_vitrina_sections_for_role(role), ensure_ascii=False),
+                1 if _default_sheet_vitrina_manage_users_for_role(role) else 0,
+                row["user_id"],
+            ),
+        )
+
+
+def _normalize_sheet_vitrina_user_sections(value: Any, *, role: str = "") -> list[str]:
+    raw_value = value
+    if raw_value is None:
+        return _default_sheet_vitrina_sections_for_role(role)
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return _default_sheet_vitrina_sections_for_role(role)
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = []
+        raw_value = parsed
+    if not isinstance(raw_value, (list, tuple, set)):
+        return _default_sheet_vitrina_sections_for_role(role)
+    allowed: list[str] = []
+    seen: set[str] = set()
+    valid = set(_SHEET_VITRINA_USER_SECTION_IDS)
+    for item in raw_value:
+        section_id = str(item or "").strip()
+        if section_id not in valid or section_id in seen:
+            continue
+        seen.add(section_id)
+        allowed.append(section_id)
+    return allowed
+
+
+def _default_sheet_vitrina_sections_for_role(role: str) -> list[str]:
+    normalized = str(role or "").strip()
+    if normalized in {"admin", "operator"}:
+        return list(_SHEET_VITRINA_USER_SECTION_IDS)
+    if normalized == "supply_operator":
+        return ["supply"]
+    return []
+
+
+def _default_sheet_vitrina_manage_users_for_role(role: str) -> bool:
+    return str(role or "").strip() == "admin"

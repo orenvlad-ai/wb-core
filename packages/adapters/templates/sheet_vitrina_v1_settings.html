@@ -104,15 +104,24 @@
     .pill.warning { background: rgba(250, 204, 21, .12); color: var(--warning); }
     .pill.success { background: rgba(52, 211, 153, .12); color: var(--success); }
     .compact-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-    .users-form { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)) auto; gap: 10px; align-items: end; margin-top: 12px; }
-    .users-table { min-width: 1260px; }
+    .users-form { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)) minmax(260px, 1.4fr) minmax(120px, .7fr) auto; gap: 10px; align-items: end; margin-top: 12px; }
+    .users-table { min-width: 1420px; }
     .users-table th.col-user { width: 160px; }
     .users-table th.col-display { width: 190px; }
-    .users-table th.col-role { width: 150px; }
+    .users-table th.col-access { width: 310px; }
     .users-table th.col-status { width: 120px; }
     .users-table th.col-date { width: 170px; }
-    .users-table th.col-user-actions { width: 270px; }
+    .users-table th.col-user-actions { width: 320px; }
     .readonly-row { opacity: .72; }
+    .access-fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 8px; min-width: 0; }
+    .access-fieldset legend { padding: 0 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .section-checkbox-grid { display: grid; grid-template-columns: repeat(2, minmax(110px, 1fr)); gap: 6px 10px; }
+    .section-checkbox { display: inline-flex; gap: 6px; align-items: center; min-width: 0; font-size: 12px; color: var(--text); }
+    .section-checkbox input { width: auto; margin: 0; }
+    .manage-users-access { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+    .user-source-note { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .password-inline { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+    .password-inline input { min-width: 140px; }
     @media (max-width: 760px) {
       main { padding: 16px; }
       button, .button-link { width: 100%; }
@@ -316,13 +325,17 @@
             <input id="newDisplayNameInput" autocomplete="off" placeholder="Имя">
           </label>
           <label class="field">
-            <span>Роль</span>
-            <select id="newRoleSelect"></select>
-          </label>
-          <label class="field">
             <span>Пароль</span>
             <input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="Минимум 8 символов">
           </label>
+          <fieldset class="access-fieldset">
+            <legend>Доступы</legend>
+            <div class="section-checkbox-grid" data-new-user-sections></div>
+            <label class="section-checkbox manage-users-access">
+              <input type="checkbox" id="newManageUsersInput">
+              <span>Управление пользователями</span>
+            </label>
+          </fieldset>
           <label class="field">
             <span>Статус</span>
             <select id="newActiveSelect">
@@ -339,7 +352,7 @@
               <tr>
                 <th class="col-user">Пользователь</th>
                 <th class="col-display">Отображаемое имя</th>
-                <th class="col-role">Роль</th>
+                <th class="col-access">Доступы</th>
                 <th class="col-status">Статус</th>
                 <th class="col-date">Создан</th>
                 <th class="col-date">Обновлён</th>
@@ -402,8 +415,9 @@
       const createUserButton = document.getElementById("createUserButton");
       const newUsernameInput = document.getElementById("newUsernameInput");
       const newDisplayNameInput = document.getElementById("newDisplayNameInput");
-      const newRoleSelect = document.getElementById("newRoleSelect");
       const newPasswordInput = document.getElementById("newPasswordInput");
+      const newUserSections = document.querySelector("[data-new-user-sections]");
+      const newManageUsersInput = document.getElementById("newManageUsersInput");
       const newActiveSelect = document.getElementById("newActiveSelect");
       const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v2";
       const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
@@ -420,7 +434,14 @@
       let pendingDocumentType = "";
       let editingContractId = "";
       let users = [];
-      let userRoles = ["admin", "operator", "supply_operator", "supplier"];
+      let availableSections = [
+        {section_id: "vitrina", label: "Витрина"},
+        {section_id: "supply", label: "Поставки"},
+        {section_id: "reports", label: "Отчёты"},
+        {section_id: "feedbacks", label: "Отзывы"},
+        {section_id: "research", label: "Исследования"},
+        {section_id: "settings", label: "Настройки"}
+      ];
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -1080,26 +1101,62 @@
         }
       }
 
-      function roleLabel(role) {
-        const labels = {
-          admin: "admin",
-          operator: "operator",
-          supply_operator: "supply_operator",
-          supplier: "supplier"
-        };
-        return labels[role] || role || "";
+      function normalizeAllowedSections(value) {
+        if (!Array.isArray(value)) {
+          return [];
+        }
+        const validIds = new Set(availableSections.map((section) => section.section_id));
+        const seen = new Set();
+        return value
+          .map((sectionId) => String(sectionId || "").trim())
+          .filter((sectionId) => {
+            if (!validIds.has(sectionId) || seen.has(sectionId)) {
+              return false;
+            }
+            seen.add(sectionId);
+            return true;
+          });
       }
 
-      function renderRoleOptions(selectedRole) {
-        return userRoles.map((role) => (
-          '<option value="' + escapeHtml(role) + '"' + (role === selectedRole ? " selected" : "") + '>' +
-          escapeHtml(roleLabel(role)) +
-          '</option>'
-        )).join("");
+      function renderSectionCheckboxes(name, selectedSections, disabled) {
+        const selected = new Set(normalizeAllowedSections(selectedSections));
+        return availableSections.map((section) => {
+          const sectionId = String(section.section_id || "");
+          return [
+            '<label class="section-checkbox">',
+            '<input type="checkbox" data-section-checkbox="' + escapeHtml(name) + '" value="' + escapeHtml(sectionId) + '"' +
+              (selected.has(sectionId) ? " checked" : "") +
+              (disabled ? " disabled" : "") +
+            '>',
+            '<span>' + escapeHtml(section.label || sectionId) + '</span>',
+            '</label>'
+          ].join("");
+        }).join("");
       }
 
-      function renderUserRoleSelectOptions() {
-        newRoleSelect.innerHTML = renderRoleOptions("operator");
+      function renderCreateUserAccessControls() {
+        if (!newUserSections) {
+          return;
+        }
+        newUserSections.innerHTML = renderSectionCheckboxes("new-user", ["vitrina", "supply", "reports", "feedbacks", "research"], false);
+        newManageUsersInput.checked = false;
+      }
+
+      function selectedSectionsFrom(container) {
+        if (!container) {
+          return [];
+        }
+        return Array.from(container.querySelectorAll("[data-section-checkbox]:checked")).map((input) => input.value);
+      }
+
+      function ensureSettingsCheckedForManageUsers(container, manageInput) {
+        if (!container || !manageInput || !manageInput.checked) {
+          return;
+        }
+        const settingsCheckbox = container.querySelector('[data-section-checkbox][value="settings"]');
+        if (settingsCheckbox) {
+          settingsCheckbox.checked = true;
+        }
       }
 
       async function loadUsers() {
@@ -1113,8 +1170,10 @@
         try {
           const payload = await fetchJson(usersPath, { headers: { Accept: "application/json" } });
           users = Array.isArray(payload.users) ? payload.users : [];
-          userRoles = Array.isArray(payload.roles) && payload.roles.length ? payload.roles : userRoles;
-          renderUserRoleSelectOptions();
+          availableSections = Array.isArray(payload.available_sections) && payload.available_sections.length
+            ? payload.available_sections
+            : availableSections;
+          renderCreateUserAccessControls();
           renderUsers();
           setUsersMessage("Пользователи загружены: " + users.length, "success");
         } catch (error) {
@@ -1133,7 +1192,10 @@
           button.addEventListener("click", () => saveUser(button.dataset.userSave || ""));
         });
         Array.from(userRows.querySelectorAll("[data-user-password]")).forEach((button) => {
-          button.addEventListener("click", () => changeUserPassword(button.dataset.userPassword || ""));
+          button.addEventListener("click", () => toggleUserPasswordInput(button.dataset.userPassword || ""));
+        });
+        Array.from(userRows.querySelectorAll("[data-user-password-save]")).forEach((button) => {
+          button.addEventListener("click", () => saveUserPassword(button.dataset.userPasswordSave || ""));
         });
         Array.from(userRows.querySelectorAll("[data-user-delete]")).forEach((button) => {
           button.addEventListener("click", () => deleteUser(button.dataset.userDelete || ""));
@@ -1146,18 +1208,34 @@
         const rowClass = readonly ? ' class="readonly-row"' : "";
         const disabled = readonly ? " disabled" : "";
         const statusValue = user.is_active ? "true" : "false";
+        const sourceLabel = user.source ? ' <span class="pill">' + escapeHtml(user.source) + '</span>' : "";
+        const readonlyReason = readonly
+          ? '<span class="user-source-note">' + escapeHtml(user.readonly_reason || "env-пользователь: меняется только через env/runtime secret") + '</span>'
+          : "";
         const actions = readonly
-          ? '<span class="pill">env</span>'
+          ? '<span class="pill">только чтение</span>'
           : [
               '<button class="compact" type="button" data-user-password="' + escapeHtml(userId) + '">Сменить пароль</button>',
               '<button class="primary compact" type="button" data-user-save="' + escapeHtml(userId) + '">Сохранить</button>',
-              '<button class="danger compact" type="button" data-user-delete="' + escapeHtml(userId) + '">Удалить</button>'
+              '<button class="danger compact" type="button" data-user-delete="' + escapeHtml(userId) + '">Выключить</button>',
+              '<div class="password-inline" data-password-inline="' + escapeHtml(userId) + '" hidden>',
+              '<input type="password" autocomplete="new-password" placeholder="Новый пароль" data-user-new-password>',
+              '<button class="compact" type="button" data-user-password-save="' + escapeHtml(userId) + '">Сохранить пароль</button>',
+              '</div>'
             ].join("");
         return [
           '<tr data-user-id="' + escapeHtml(userId) + '"' + rowClass + '>',
-          '<td>' + escapeHtml(user.username || "") + '</td>',
+          '<td>' + escapeHtml(user.username || "") + sourceLabel + readonlyReason + '</td>',
           '<td><input data-user-field="display_name" value="' + escapeHtml(user.display_name || "") + '"' + disabled + '></td>',
-          '<td><select data-user-field="role"' + disabled + '>' + renderRoleOptions(String(user.role || "")) + '</select></td>',
+          '<td>',
+          '<div class="section-checkbox-grid" data-user-sections="' + escapeHtml(userId) + '">',
+          renderSectionCheckboxes(userId, user.allowed_sections || [], readonly),
+          '</div>',
+          '<label class="section-checkbox manage-users-access">',
+          '<input type="checkbox" data-user-field="manage_users"' + (user.manage_users ? " checked" : "") + disabled + '>',
+          '<span>Управление пользователями</span>',
+          '</label>',
+          '</td>',
           '<td><select data-user-field="is_active"' + disabled + '>',
           '<option value="true"' + (statusValue === "true" ? " selected" : "") + '>Активен</option>',
           '<option value="false"' + (statusValue === "false" ? " selected" : "") + '>Выключен</option>',
@@ -1173,10 +1251,13 @@
         const payload = {
           username: newUsernameInput.value.trim(),
           display_name: newDisplayNameInput.value.trim(),
-          role: newRoleSelect.value,
+          allowed_sections: selectedSectionsFrom(newUserSections),
+          manage_users: newManageUsersInput.checked,
           password: newPasswordInput.value,
           is_active: newActiveSelect.value === "true"
         };
+        ensureSettingsCheckedForManageUsers(newUserSections, newManageUsersInput);
+        payload.allowed_sections = selectedSectionsFrom(newUserSections);
         setUsersMessage("Создаём пользователя...", "");
         try {
           const result = await fetchJson(usersPath, {
@@ -1188,6 +1269,7 @@
           newUsernameInput.value = "";
           newDisplayNameInput.value = "";
           newPasswordInput.value = "";
+          renderCreateUserAccessControls();
           newActiveSelect.value = "true";
           renderUsers();
           setUsersMessage("Пользователь создан.", "success");
@@ -1207,10 +1289,15 @@
           const field = input.getAttribute("data-user-field");
           if (field === "is_active") {
             payload[field] = input.value === "true";
+          } else if (field === "manage_users") {
+            payload[field] = input.checked;
           } else {
             payload[field] = input.value;
           }
         });
+        const sectionContainer = row.querySelector("[data-user-sections]");
+        ensureSettingsCheckedForManageUsers(sectionContainer, row.querySelector('[data-user-field="manage_users"]'));
+        payload.allowed_sections = selectedSectionsFrom(sectionContainer);
         setUsersMessage("Сохраняем пользователя...", "");
         try {
           const result = await fetchJson(usersPath + "/" + encodeURIComponent(userId), {
@@ -1226,9 +1313,33 @@
         }
       }
 
-      async function changeUserPassword(userId) {
-        const password = window.prompt("Новый пароль");
-        if (password === null) {
+      function toggleUserPasswordInput(userId) {
+        const row = userRows.querySelector('tr[data-user-id="' + CSS.escape(userId) + '"]');
+        if (!row) {
+          setUsersMessage("Не удалось найти строку пользователя.", "error");
+          return;
+        }
+        const inline = row.querySelector("[data-password-inline]");
+        if (!inline) {
+          return;
+        }
+        inline.hidden = !inline.hidden;
+        const input = inline.querySelector("[data-user-new-password]");
+        if (!inline.hidden && input) {
+          input.focus();
+        }
+      }
+
+      async function saveUserPassword(userId) {
+        const row = userRows.querySelector('tr[data-user-id="' + CSS.escape(userId) + '"]');
+        if (!row) {
+          setUsersMessage("Не удалось найти строку пользователя.", "error");
+          return;
+        }
+        const input = row.querySelector("[data-user-new-password]");
+        const password = input ? input.value : "";
+        if (!password) {
+          setUsersMessage("Введите новый пароль.", "warning");
           return;
         }
         setUsersMessage("Меняем пароль...", "");
@@ -1306,7 +1417,7 @@
       });
       reloadUsersButton.addEventListener("click", loadUsers);
       createUserButton.addEventListener("click", createUser);
-      renderUserRoleSelectOptions();
+      renderCreateUserAccessControls();
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
       }
