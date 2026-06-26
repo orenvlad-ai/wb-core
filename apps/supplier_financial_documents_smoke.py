@@ -34,6 +34,7 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
     SupplierFinancialDocumentsBlock,
+    apply_supplier_order_document_match,
     build_financial_summary,
     build_supplier_shipment_registry,
     parse_financial_document_text,
@@ -345,6 +346,7 @@ CNY
 Amount of transfer
 (in figures and in writing)
 32 541.962,50
+Пятьсот сорок одна тысяча девятьсот шестьдесят два юаня 50/100
 Отправитель*
 Ordering Customer (Name, address, city, country)
 50
@@ -465,17 +467,26 @@ def _assert_parser_smoke() -> None:
         or bank_transfer.get("transfer_application_number") != "2"
         or bank_transfer.get("document_date") != "2026-05-21"
         or bank_transfer.get("execution_status") != "Исполнен"
+        or bank_transfer.get("execution_time") != "22.05.2026 00:43:03"
         or bank_transfer.get("debit_account") != "40802156616580000008"
         or bank_transfer.get("currency") != "CNY"
         or bank_transfer.get("transfer_amount") != 541962.5
-        or "IE TESTOV" not in str(bank_transfer.get("ordering_customer") or "")
+        or bank_transfer.get("amount_in_words") != "Пятьсот сорок одна тысяча девятьсот шестьдесят два юаня 50/100"
+        or bank_transfer.get("ordering_customer") != "IE TESTOV VLADISLAV RADIKOVICH"
+        or bank_transfer.get("payer_inn") != "560912740163"
+        or bank_transfer.get("payer_country_code") != "RU"
+        or bank_transfer.get("beneficiary_customer") != "GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD"
         or bank_transfer.get("beneficiary_account") != "40807156200610034920"
+        or bank_transfer.get("beneficiary_bank_swift_bic") != "VTBRCNSHXXX"
         or "VTB BANK" not in str(bank_transfer.get("beneficiary_bank") or "")
         or bank_transfer.get("contract_ref") != "CONTRACT 083/26 DD 13.05.2026"
+        or bank_transfer.get("contract_number") != "083/26"
+        or bank_transfer.get("contract_date") != "2026-05-13"
         or bank_transfer.get("charges_mode") != "OUR"
         or bank_transfer_payload.get("errors")
     ):
         raise AssertionError(f"bank transfer parser fields mismatch: {bank_transfer_payload}")
+    _assert_order_document_verification_smoke(bank_transfer_payload)
     _assert_summary_metrics_smoke()
     _assert_missing_customs_data_summary_smoke()
     _assert_new_quote_parser_smoke()
@@ -529,6 +540,156 @@ def _assert_incomplete_quote_summary_smoke() -> None:
         raise AssertionError(f"incomplete quote match status mismatch: {match}")
     if summary.get("quote", {}).get("required_amounts_complete") is not False:
         raise AssertionError(f"summary must expose incomplete quote base: {summary}")
+
+
+def _assert_order_document_verification_smoke(bank_transfer_payload: dict[str, Any]) -> None:
+    document = {
+        "document_type": "bank_transfer_application",
+        "parse_status": "parsed",
+        "normalized_parse": dict(bank_transfer_payload.get("normalized_parse") or {}),
+        "warnings": [],
+    }
+    matched = apply_supplier_order_document_match(
+        document,
+        {
+            "contract_no": "083/26",
+            "contract_date": "2026-05-13",
+            "invoice_amount_total": 541962.5,
+            "currency": "CNY",
+            "supplier_name": "GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD",
+        },
+    )
+    if matched.get("order_match_status") != "matched" or matched.get("parse_status") != "parsed":
+        raise AssertionError(f"matching bank transfer must stay parsed/matched: {matched}")
+
+    mismatch = apply_supplier_order_document_match(
+        document,
+        {"contract_no": "082/26", "contract_date": "2026-04-04", "currency": "CNY"},
+    )
+    if mismatch.get("order_match_status") != "mismatch" or mismatch.get("parse_status") != "needs_review":
+        raise AssertionError(f"wrong contract bank transfer must be needs_review/mismatch: {mismatch}")
+    if not any("другому заказу" in warning for warning in mismatch.get("warnings", [])):
+        raise AssertionError(f"mismatch warning missing: {mismatch}")
+
+    poor_parse = {
+        **document,
+        "normalized_parse": {
+            key: value
+            for key, value in dict(document["normalized_parse"]).items()
+            if key not in {"contract_ref", "contract_number", "contract_date", "payment_details"}
+        },
+    }
+    needs_review = apply_supplier_order_document_match(
+        poor_parse,
+        {"contract_no": "083/26", "contract_date": "2026-05-13", "currency": "CNY"},
+    )
+    if needs_review.get("order_match_status") != "needs_review" or needs_review.get("parse_status") != "needs_review":
+        raise AssertionError(f"poor parse must require review: {needs_review}")
+
+    with TemporaryDirectory(prefix="supplier-financial-linked-contract-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        now = "2026-05-30T08:00:00Z"
+        runtime.save_supplier_shipment(
+            header={
+                "shipment_id": "sup_linked_contract_match",
+                "created_at": now,
+                "updated_at": now,
+                "shipment_date": "2026-05-21",
+                "order_status": "production",
+                "invoice_no": "LINKED-CONTRACT-ORDER",
+                "invoice_date": "2026-05-21",
+                "contract_no": "",
+                "contract_date": "",
+                "supplier_name": "GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD",
+                "customer_name": "",
+                "currency": "CNY",
+                "product_qty_total": 1,
+                "product_amount_total": 541962.5,
+                "extras_amount_total": 0,
+                "invoice_amount_total": 541962.5,
+                "declared_invoice_total": 541962.5,
+                "match_status": "all_matched",
+                "source_filename": "linked-contract.xlsx",
+                "source_file_sha256": "linked-contract-sha",
+                "source_file_path": "",
+                "invoice_document_id": "tdoc_linked_invoice",
+                "parser_version": "fixture",
+                "warnings": [],
+                "errors": [],
+            },
+            lines=[],
+        )
+        runtime.save_trade_document(
+            {
+                "document_id": "tdoc_linked_invoice",
+                "document_type": "invoice",
+                "number": "LINKED-CONTRACT-ORDER",
+                "document_date": "2026-05-21",
+                "supplier_name": "GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD",
+                "currency": "CNY",
+                "amount_total": 541962.5,
+                "source": "fixture",
+                "source_shipment_id": "sup_linked_contract_match",
+                "source_upload_id": "",
+                "file_original_name": "linked-contract.xlsx",
+                "file_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "file_sha256": "linked-invoice-sha",
+                "file_path": "",
+                "parser_version": "fixture",
+                "parsed_metadata": {},
+                "warnings": [],
+                "errors": [],
+                "status": "active",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        runtime.save_trade_document(
+            {
+                "document_id": "tdoc_linked_contract",
+                "document_type": "contract",
+                "number": "083/26",
+                "document_date": "2026-05-13",
+                "supplier_name": "GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD",
+                "currency": "CNY",
+                "amount_total": None,
+                "source": "fixture",
+                "source_shipment_id": "",
+                "source_upload_id": "",
+                "file_original_name": "linked-contract.pdf",
+                "file_content_type": "application/pdf",
+                "file_sha256": "linked-contract-sha",
+                "file_path": "",
+                "parser_version": "fixture",
+                "parsed_metadata": {},
+                "warnings": [],
+                "errors": [],
+                "status": "active",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        runtime.save_invoice_contract_link(
+            invoice_document_id="tdoc_linked_invoice",
+            contract_document_id="tdoc_linked_contract",
+            created_at=now,
+            updated_at=now,
+            linked_by="smoke",
+            source="fixture",
+        )
+        block = SupplierFinancialDocumentsBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: now,
+            usd_rate_provider=StaticUsdRateProvider({}),
+            pdf_text_extractor=lambda file_bytes, filename: (BANK_TRANSFER_TEXT, {"method": "fixture"}, []),
+        )
+        linked_upload = block.upload_document(
+            "sup_linked_contract_match",
+            file_bytes=b"%PDF-1.4\n% linked contract smoke\n",
+            uploaded_filename="linked-bank-transfer.pdf",
+        )
+        if linked_upload.get("order_match_status") != "matched" or linked_upload.get("parse_status") != "parsed":
+            raise AssertionError(f"upload must match via linked contract when header contract is empty: {linked_upload}")
 
 
 def _assert_summary_metrics_smoke() -> None:
@@ -993,15 +1154,17 @@ def _assert_http_api_smoke() -> None:
 
             for filename in ("bank-control.pdf", "bank-transfer.pdf"):
                 status, payload = _post_multipart(collection_url, b"%PDF-1.4\n% synthetic bank smoke\n", filename=filename)
-                if status != 200 or payload.get("parse_status") != "parsed":
+                if status != 200 or payload.get("parse_status") != "needs_review" or payload.get("order_match_status") != "mismatch":
                     raise AssertionError(f"bank document upload failed for {filename}: {status} {payload}")
+                if not any("другому заказу" in warning for warning in payload.get("warnings", [])):
+                    raise AssertionError(f"bank document mismatch warning missing for {filename}: {payload}")
             bank_documents_status, bank_order_documents = _get_json(documents_url)
             if bank_documents_status != 200:
                 raise AssertionError(f"order documents after bank upload failed: {bank_documents_status} {bank_order_documents}")
             bank_rows = bank_order_documents.get("required_documents", [])
-            if _required_document_status(bank_rows, "bank_control_statement") != "Загружен":
+            if _required_document_status(bank_rows, "bank_control_statement") != "Проверить":
                 raise AssertionError(f"uploaded bank control statement must be shown: {bank_order_documents}")
-            if _required_document_status(bank_rows, "bank_transfer_application") != "Загружен":
+            if _required_document_status(bank_rows, "bank_transfer_application") != "Проверить":
                 raise AssertionError(f"uploaded bank transfer application must be shown: {bank_order_documents}")
             logistics_status, logistics_bytes, _ = _get_bytes(f"{documents_url}/logistics-package.zip")
             if logistics_status != 200:
@@ -1012,6 +1175,8 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"logistics package must be complete after bank uploads: {logistics_manifest}")
             if set(logistics_types) != {"contract", "bank_control_statement", "bank_transfer_application"}:
                 raise AssertionError(f"logistics package included wrong document types: {logistics_manifest}")
+            if not any("другому заказу" in warning for warning in logistics_manifest.get("warnings", [])):
+                raise AssertionError(f"logistics package must expose mismatch warnings: {logistics_manifest}")
             all_status, all_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
             all_manifest = _zip_manifest(all_bytes)
             all_types = [item.get("document_type") for item in all_manifest.get("included", [])]

@@ -71,6 +71,34 @@
         }
         button:disabled { cursor: not-allowed; opacity: 0.48; }
         .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .status-filter {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          margin-left: auto;
+          font-size: 12px;
+          color: var(--muted);
+        }
+        .status-filter strong {
+          color: var(--text);
+          font-size: 12px;
+        }
+        .status-filter label {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          min-height: 28px;
+          border: 1px solid var(--border);
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.03);
+          padding: 4px 8px;
+          color: var(--text);
+          font-weight: 750;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .status-filter input { margin: 0; }
         .row-actions, .delete-confirmation { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
         .delete-confirmation {
           padding: 7px;
@@ -299,6 +327,7 @@
       font-size: 13px;
     }
     .finance-row-selected td { background: rgba(56, 189, 248, 0.09); }
+    .document-row-warning td { background: rgba(245, 158, 11, 0.08); }
     .line-input { min-width: 100px; }
     .line-input.small { min-width: 72px; }
     .line-input.wide { min-width: 180px; }
@@ -318,7 +347,7 @@
     <div class="shell">
       <section class="topbar">
         <div>
-          <h1>订单登记表 / Order registry / Реестр заказов</h1>
+          <h1 id="supplierPageTitle">订单登记表 / Order registry / Реестр заказов</h1>
         </div>
         <div class="toolbar">
           <button id="addShipmentButton" class="primary" type="button">新增订单 / Add order / Добавить заказ</button>
@@ -330,6 +359,13 @@
       <section class="block" aria-label="订单登记表 / Order registry / Реестр заказов">
         <div class="card-head">
           <p id="registryMessage" class="message">读取订单 / Loading orders / Читаем заказы...</p>
+          <div id="orderStatusFilter" class="status-filter" hidden aria-label="Фильтр статусов заказов">
+            <strong>Статус</strong>
+            <label><input type="checkbox" value="all" data-order-status-filter>Все</label>
+            <label><input type="checkbox" value="production" data-order-status-filter>На производстве</label>
+            <label><input type="checkbox" value="in_transit" data-order-status-filter>В пути</label>
+            <label><input type="checkbox" value="accepted_ff" data-order-status-filter>Принято на ФФ</label>
+          </div>
         </div>
         <div class="registry-wrap">
           <table>
@@ -585,6 +621,8 @@
       const totalInvoice = document.getElementById("totalInvoice");
       const logoutLink = document.getElementById("logoutLink");
       const openStandaloneLink = document.getElementById("openStandaloneLink");
+      const supplierPageTitle = document.getElementById("supplierPageTitle");
+      const orderStatusFilter = document.getElementById("orderStatusFilter");
       const documentInvoiceDownloadLink = document.getElementById("documentInvoiceDownloadLink");
       const invoiceDocumentLabel = document.getElementById("invoiceDocumentLabel");
       const contractDocumentLabel = document.getElementById("contractDocumentLabel");
@@ -621,8 +659,11 @@
           const canManageDocuments = Boolean(config.can_manage_documents);
           const canManageFinancialDocuments = Boolean(config.can_manage_financial_documents);
           const isEmbeddedOperator = config.embedded === "operator" || window.self !== window.top;
+          const useRussianLabels = isEmbeddedOperator;
+          const statusFilterStorageKey = "wb-core:sheet-vitrina-v1:supplier-order-status-filter:v1";
 
       let currentShipment = null;
+      let allShipments = [];
       let currentUploadId = "";
       let isNewShipment = false;
       let cardDirty = false;
@@ -636,19 +677,28 @@
       let financialSummary = null;
       let selectedFinancialDocumentId = "";
 
-      const statusLabels = {
+      function uiText(trilingual, russian) {
+        return useRussianLabels ? russian : trilingual;
+      }
+
+      const statusLabels = useRussianLabels ? {
+        all_matched: "OK",
+        has_unmatched: "Проверить",
+        manual_override: "Ручная правка",
+        checksum_error: "Ошибка суммы"
+      } : {
         all_matched: "OK",
         has_unmatched: "需要检查 / Check / Проверить",
         manual_override: "手动修改 / Manual override / Ручная правка",
         checksum_error: "金额错误 / Total error / Ошибка суммы"
       };
           const lineStatusLabels = {
-            matched: "已匹配 / Matched / Сопоставлено",
-            matched_by_compatibility: "按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости",
-            unmatched: "未匹配 / Unmatched / Не сопоставлено",
-        ambiguous: "不明确 / Ambiguous / Неоднозначно",
-        manual_override: "手动修改 / Manual override / Ручная правка",
-            extra: "其他 / Extra / Прочее"
+            matched: uiText("已匹配 / Matched / Сопоставлено", "Сопоставлено"),
+            matched_by_compatibility: uiText("按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости", "Сопоставлено по совместимости"),
+            unmatched: uiText("未匹配 / Unmatched / Не сопоставлено", "Не сопоставлено"),
+        ambiguous: uiText("不明确 / Ambiguous / Неоднозначно", "Неоднозначно"),
+        manual_override: uiText("手动修改 / Manual override / Ручная правка", "Ручная правка"),
+            extra: uiText("其他 / Extra / Прочее", "Прочее")
           };
           const orderStatusLabels = {
             production: "На производстве",
@@ -768,6 +818,149 @@
             });
           }
 
+          function configureLocalizedLabels() {
+            if (!useRussianLabels) {
+              return;
+            }
+            document.title = "Реестр заказов";
+            supplierPageTitle.textContent = "Реестр заказов";
+            addShipmentButton.textContent = "Добавить заказ";
+            logoutLink.textContent = "Выйти";
+            saveShipmentButton.textContent = "Сохранить";
+            closeShipmentButton.textContent = "Закрыть";
+            document.querySelector("section.block[aria-label]")?.setAttribute("aria-label", "Реестр заказов");
+            setStaticText("label[for='shipmentDateInput']", "Плановая дата отгрузки");
+            setStaticText("label[for='actualShipmentDateInput']", "Фактическая дата отгрузки");
+            setStaticText("label[for='actualFfAcceptanceDateInput']", "Фактическая дата приёмки на ФФ");
+            setStaticText("label[for='invoiceNoInput']", "Номер invoice");
+            setStaticText("label[for='invoiceDateInput']", "Дата invoice");
+            setStaticText("label[for='currencyInput']", "Валюта");
+            setStaticText("label[for='contractNoInput']", "Номер контракта");
+            setStaticText("label[for='contractDateInput']", "Дата контракта");
+            const registryHeaders = [
+              "Плановая дата отгрузки",
+              "Фактическая дата отгрузки",
+              "Фактическая дата приёмки на ФФ",
+              "Номер invoice",
+              "Дата invoice",
+              "Поставщик",
+              "Кол-во товаров",
+              "Сумма товаров",
+              "Прочие позиции",
+              "Итого invoice",
+              "Валюта",
+              "Матчинг",
+              "Дата загрузки",
+              "Документы",
+              "Статус заказа",
+              "Действия"
+            ];
+            Array.from(document.querySelectorAll(".registry-wrap thead th")).forEach((node, index) => {
+              if (registryHeaders[index]) {
+                node.textContent = registryHeaders[index];
+              }
+            });
+            const uploadStrong = document.querySelector("#uploadPanel strong");
+            if (uploadStrong) uploadStrong.textContent = "Перетащите XLSX invoice сюда";
+            const uploadChoose = document.querySelector("#uploadPanel span:not(#selectedFileLabel)");
+            if (uploadChoose) uploadChoose.textContent = "Выбрать файл";
+            const selectedFile = document.getElementById("selectedFileLabel");
+            if (selectedFile) selectedFile.textContent = "Файл не выбран";
+            const totals = Array.from(document.querySelectorAll(".totals .total span"));
+            ["Кол-во товаров", "Сумма товаров", "Прочие позиции", "Итого invoice"].forEach((label, index) => {
+              if (totals[index]) totals[index].textContent = label;
+            });
+            const supplyHeadings = Array.from(document.querySelectorAll("#supplyCompositionPanel h3"));
+            if (supplyHeadings[0]) supplyHeadings[0].textContent = "Товарные строки";
+            if (supplyHeadings[1]) supplyHeadings[1].textContent = "Прочие позиции";
+            setTableHeaders("#productLines", [
+              "Тип товара", "Модель из invoice", "Нормализованная модель", "Match key", "nmId",
+              "Номенклатура", "Количество", "Цена", "Соответствие цены", "Сумма", "Комментарий", "Матчинг"
+            ]);
+            setTableHeaders("#extraLines", ["Номер строки", "Позиция", "Количество", "Цена", "Сумма", "Комментарий"]);
+            documentInvoiceDownloadLink.textContent = "Скачать invoice";
+            document.querySelector(".document-slot strong") && (document.querySelector(".document-slot strong").textContent = "Invoice");
+            const documentSlotTitles = document.querySelectorAll(".document-slot strong");
+            if (documentSlotTitles[1]) documentSlotTitles[1].textContent = "Контракт";
+          }
+
+          function setStaticText(selector, text) {
+            const node = document.querySelector(selector);
+            if (node) {
+              node.textContent = text;
+            }
+          }
+
+          function setTableHeaders(tbodySelector, labels) {
+            const body = document.querySelector(tbodySelector);
+            const table = body ? body.closest("table") : null;
+            Array.from((table && table.querySelectorAll("thead th")) || []).forEach((node, index) => {
+              if (labels[index]) {
+                node.textContent = labels[index];
+              }
+            });
+          }
+
+          function configureOrderStatusFilter() {
+            if (!orderStatusFilter) {
+              return;
+            }
+            orderStatusFilter.hidden = false;
+            Array.from(orderStatusFilter.querySelectorAll("[data-order-status-filter]")).forEach((input) => {
+              input.addEventListener("change", () => {
+                const next = readStatusFilterFromInputs();
+                persistStatusFilter(next);
+                applyStatusFilterState(next);
+                renderRegistry(applyOrderStatusFilter(allShipments));
+              });
+            });
+            applyStatusFilterState(readPersistedStatusFilter());
+          }
+
+          function readPersistedStatusFilter() {
+            try {
+              const parsed = JSON.parse(window.localStorage.getItem(statusFilterStorageKey) || "[]");
+              if (Array.isArray(parsed) && parsed.every((item) => ["production", "in_transit", "accepted_ff", "all"].includes(item))) {
+                return parsed.length ? parsed : ["production", "in_transit"];
+              }
+            } catch (error) {
+              // Ignore invalid UI preference.
+            }
+            return ["production", "in_transit"];
+          }
+
+          function persistStatusFilter(values) {
+            try {
+              window.localStorage.setItem(statusFilterStorageKey, JSON.stringify(values));
+            } catch (error) {
+              // UI preference only.
+            }
+          }
+
+          function readStatusFilterFromInputs() {
+            const checked = Array.from(orderStatusFilter.querySelectorAll("[data-order-status-filter]:checked")).map((input) => input.value);
+            if (checked.includes("all")) {
+              return ["all"];
+            }
+            return checked.length ? checked : ["production", "in_transit"];
+          }
+
+          function applyStatusFilterState(values) {
+            const selected = new Set(values && values.length ? values : ["production", "in_transit"]);
+            Array.from(orderStatusFilter.querySelectorAll("[data-order-status-filter]")).forEach((input) => {
+              input.checked = selected.has(input.value);
+            });
+          }
+
+          function applyOrderStatusFilter(rows) {
+            const selected = readPersistedStatusFilter();
+            if (selected.includes("all")) {
+              return rows.slice();
+            }
+            const allowed = new Set(selected);
+            return rows.filter((row) => allowed.has(orderStatusLabels[row.order_status] ? row.order_status : "production"));
+          }
+
           async function fetchJson(url, options) {
         const response = await fetch(url, options || {});
         const contentType = response.headers.get("content-type") || "";
@@ -800,10 +993,11 @@
 
       async function loadRegistry() {
         renderRegistryLoading();
-        setMessage(registryMessage, "读取订单 / Loading orders / Читаем заказы...", "");
+        setMessage(registryMessage, uiText("读取订单 / Loading orders / Читаем заказы...", "Читаем заказы..."), "");
         try {
           const payload = await fetchJson(shipmentsPath, { headers: { Accept: "application/json" } });
-          renderRegistry(Array.isArray(payload.shipments) ? payload.shipments : []);
+          allShipments = Array.isArray(payload.shipments) ? payload.shipments : [];
+          renderRegistry(applyOrderStatusFilter(allShipments));
           setMessage(registryMessage, "", "");
         } catch (error) {
           renderRegistryError(error.message);
@@ -814,26 +1008,30 @@
       function renderRegistryLoading() {
         registryLoadState = "loading";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="16"><span class="loading-inline">读取订单 / Loading orders / Загрузка<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="loading"><td colspan="16"><span class="loading-inline">' + escapeHtml(uiText("读取订单 / Loading orders / Загрузка", "Загрузка")) + '<span class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></span></span></td></tr>';
       }
 
       function renderRegistryError(message) {
         registryLoadState = "error";
         shipmentRows.dataset.registryState = registryLoadState;
-        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="16">' + escapeHtml(message || "加载失败 / Load failed / Ошибка загрузки.") + '</td></tr>';
+        shipmentRows.innerHTML = '<tr data-registry-state="error"><td colspan="16">' + escapeHtml(message || uiText("加载失败 / Load failed / Ошибка загрузки.", "Ошибка загрузки.")) + '</td></tr>';
       }
 
       function renderRegistry(rows) {
         if (!rows.length) {
           registryLoadState = "loaded_empty";
           shipmentRows.dataset.registryState = registryLoadState;
-          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="16">暂无订单 / No orders yet / Заказов пока нет.</td></tr>';
+          const hasUnfilteredRows = Array.isArray(allShipments) && allShipments.length > 0;
+          const emptyText = hasUnfilteredRows
+            ? "Нет заказов в выбранных статусах."
+            : uiText("暂无订单 / No orders yet / Заказов пока нет.", "Заказов пока нет.");
+          shipmentRows.innerHTML = '<tr data-registry-state="loaded_empty"><td colspan="16">' + escapeHtml(emptyText) + '</td></tr>';
           return;
         }
             registryLoadState = "loaded_with_rows";
             shipmentRows.dataset.registryState = registryLoadState;
             shipmentRows.innerHTML = rows.map((row) => {
-              const status = row.match_status === "all_matched" ? "OK" : "Check";
+              const status = statusLabels[row.match_status] || statusLabels.has_unmatched || "Проверить";
               const cells = [
                 '<tr data-row="' + escapeHtml(row.shipment_id) + '">',
                 '<td>' + escapeHtml(row.planned_shipment_date || row.shipment_date || "-") + '</td>',
@@ -879,9 +1077,11 @@
           }
 
           function renderRegistryDocumentCell(row) {
-            const invoiceLink = '<a class="button-link compact" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download aria-label="Download invoice ' + escapeHtml(row.invoice_no || row.shipment_id || "") + '" title="Download invoice">Invoice</a>';
+            const invoiceLabel = uiText("Invoice", "Скачать invoice");
+            const contractLabel = uiText("Contract", "Скачать контракт");
+            const invoiceLink = '<a class="button-link compact" href="' + escapeHtml(row.invoice_download_path || "#") + '" data-download aria-label="' + escapeHtml(invoiceLabel + " " + (row.invoice_no || row.shipment_id || "")) + '" title="' + escapeHtml(invoiceLabel) + '">' + escapeHtml(invoiceLabel) + '</a>';
             const contractPart = row.contract_download_path
-              ? '<a class="button-link compact" href="' + escapeHtml(row.contract_download_path || "#") + '" data-download aria-label="Download contract">Contract</a>'
+              ? '<a class="button-link compact" href="' + escapeHtml(row.contract_download_path || "#") + '" data-download aria-label="' + escapeHtml(contractLabel) + '">' + escapeHtml(contractLabel) + '</a>'
               : '<span class="muted-dash">Контракт: выбрать</span>';
             return '<div class="row-actions">' + invoiceLink + contractPart + '</div>';
           }
@@ -898,7 +1098,8 @@
             if (!canDeleteShipments) {
               return '<span class="muted-dash">-</span>';
             }
-            return '<div class="row-actions"><button class="danger compact" type="button" data-delete-shipment="' + escapeHtml(row.shipment_id) + '" aria-label="Delete order ' + escapeHtml(row.invoice_no || row.shipment_id || "") + '" title="Delete order">Delete</button></div>';
+            const deleteLabel = uiText("Delete", "Удалить");
+            return '<div class="row-actions"><button class="danger compact" type="button" data-delete-shipment="' + escapeHtml(row.shipment_id) + '" aria-label="' + escapeHtml(deleteLabel + " " + (row.invoice_no || row.shipment_id || "")) + '" title="' + escapeHtml(deleteLabel) + '">' + escapeHtml(deleteLabel) + '</button></div>';
           }
 
           function bindDeleteButtons() {
@@ -1066,12 +1267,12 @@
         }
         updateSelectedFileLabel(file);
         if (!file.name.toLowerCase().endsWith(".xlsx")) {
-          setMessage(cardMessage, "请上传XLSX发票 / Upload XLSX invoice / Загрузите XLSX invoice.", "error");
+          setMessage(cardMessage, uiText("请上传XLSX发票 / Upload XLSX invoice / Загрузите XLSX invoice.", "Загрузите XLSX invoice."), "error");
           invoiceFileInput.value = "";
           updateSelectedFileLabel(null);
           return;
         }
-        setMessage(cardMessage, "解析发票 / Parsing invoice / Парсим invoice...", "");
+        setMessage(cardMessage, uiText("解析发票 / Parsing invoice / Парсим invoice...", "Парсим invoice..."), "");
         const formData = new FormData();
         formData.append("file", file, file.name);
         try {
@@ -1090,7 +1291,7 @@
           isNewShipment = true;
           renderCard();
           cardDirty = true;
-          setMessage(cardMessage, "发票已识别，请填写计划出货日期 / Invoice parsed, fill planned shipment date / Invoice распознан, заполните плановую дату отгрузки.", "success");
+          setMessage(cardMessage, uiText("发票已识别，请填写计划出货日期 / Invoice parsed, fill planned shipment date / Invoice распознан, заполните плановую дату отгрузки.", "Invoice распознан, заполните плановую дату отгрузки."), "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
           invoiceFileInput.value = "";
@@ -1099,13 +1300,13 @@
       }
 
       function updateSelectedFileLabel(file) {
-        selectedFileLabel.textContent = file && file.name ? file.name : "未选择文件 / No file selected / Файл не выбран";
+        selectedFileLabel.textContent = file && file.name ? file.name : uiText("未选择文件 / No file selected / Файл не выбран", "Файл не выбран");
       }
 
       function renderCard() {
         const shipment = currentShipment || blankShipment();
         const metadata = shipment.metadata || {};
-        cardTitle.textContent = shipment.shipment_id ? "订单 / Order / Заказ " + shipment.shipment_id : "新订单 / New order / Новый заказ";
+        cardTitle.textContent = shipment.shipment_id ? uiText("订单 / Order / Заказ ", "Заказ ") + shipment.shipment_id : uiText("新订单 / New order / Новый заказ", "Новый заказ");
         shipmentDateInput.value = shipment.planned_shipment_date || shipment.shipment_date || "";
         actualShipmentDateInput.value = shipment.actual_shipment_date || "";
         actualFfAcceptanceDateInput.value = shipment.actual_ff_acceptance_date || "";
@@ -1127,7 +1328,9 @@
         const invoicePath = shipment.invoice_download_path || "";
         documentInvoiceDownloadLink.hidden = !invoicePath;
         documentInvoiceDownloadLink.href = invoicePath || "#";
-        invoiceDocumentLabel.textContent = shipment.invoice_document_id ? ("Document ID: " + shipment.invoice_document_id) : (shipment.shipment_id ? "Legacy invoice file" : "Invoice не сохранён");
+        invoiceDocumentLabel.textContent = shipment.invoice_document_id
+          ? (uiText("Document ID: ", "ID документа: ") + shipment.invoice_document_id)
+          : (shipment.shipment_id ? uiText("Legacy invoice file", "Файл invoice из заказа") : "Invoice не сохранён");
         const contractPath = shipment.contract_download_path || "";
         contractDownloadLink.hidden = !contractPath;
         contractDownloadLink.href = contractPath || "#";
@@ -1376,7 +1579,8 @@
           const status = document.status || (document.is_uploaded ? "uploaded" : "missing");
           const rowClass = [
             selected ? "finance-row-selected" : "",
-            document.is_uploaded ? "document-row-uploaded" : "document-row-missing"
+            document.is_uploaded ? "document-row-uploaded" : "document-row-missing",
+            status === "needs_review" || document.order_match_status === "mismatch" ? "document-row-warning" : ""
           ].filter(Boolean).join(" ");
           return [
             '<tr data-financial-document-row="' + escapeHtml(canSelect ? (document.document_id || "") : "") + '"' + (rowClass ? ' class="' + escapeHtml(rowClass) + '"' : "") + '>',
@@ -1445,10 +1649,30 @@
 
       function renderFinancialFields(document) {
         const normalized = document.normalized_parse || {};
-        const fields = financialFieldsForDocument(document.document_type, normalized, document);
+        const fields = orderMatchFields(document, normalized).concat(financialFieldsForDocument(document.document_type, normalized, document));
         financialRecognizedFields.innerHTML = fields.map((item) => (
           '<div class="finance-field"><span>' + escapeHtml(item.label) + '</span><strong>' + escapeHtml(item.value || "-") + '</strong></div>'
         )).join("");
+      }
+
+      function orderMatchFields(document, normalized) {
+        const status = document.order_match_status || normalized.order_match_status || "";
+        if (!status) {
+          return [];
+        }
+        const statusLabels = {
+          matched: "Соответствует заказу",
+          probable_match: "Вероятно соответствует",
+          needs_review: "Проверить",
+          mismatch: "Вероятно другой заказ"
+        };
+        const reasons = [].concat(document.order_match_reasons || normalized.order_match_reasons || []).filter(Boolean).join(" · ");
+        const warnings = [].concat(document.order_match_warnings || normalized.order_match_warnings || []).filter(Boolean).join(" · ");
+        return [
+          { label: "Проверка заказа", value: statusLabels[status] || status },
+          { label: "Причины проверки", value: reasons },
+          { label: "Предупреждение проверки", value: warnings }
+        ];
       }
 
       function financialFieldsForDocument(type, normalized, document) {
@@ -1670,8 +1894,8 @@
       function renderLineTables(lines) {
         const products = lines.filter((line) => line.line_type !== "extra");
         const extras = lines.filter((line) => line.line_type === "extra");
-        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="12">未识别商品明细 / No product lines recognized / Товарные строки не распознаны.</td></tr>';
-        extraLines.innerHTML = extras.length ? extras.map(renderExtraLine).join("") : '<tr><td colspan="6">未识别其他项目 / No extras recognized / Прочие позиции не распознаны.</td></tr>';
+        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="12">' + escapeHtml(uiText("未识别商品明细 / No product lines recognized / Товарные строки не распознаны.", "Товарные строки не распознаны.")) + '</td></tr>';
+        extraLines.innerHTML = extras.length ? extras.map(renderExtraLine).join("") : '<tr><td colspan="6">' + escapeHtml(uiText("未识别其他项目 / No extras recognized / Прочие позиции не распознаны.", "Прочие позиции не распознаны.")) + '</td></tr>';
         Array.from(shipmentCard.querySelectorAll("[data-line-field]")).forEach((input) => {
           input.addEventListener("input", () => {
             cardDirty = true;
@@ -1692,7 +1916,7 @@
           '<td><input class="line-input wide" data-line-field="model_raw" value="' + escapeHtml(line.model_raw || "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="model_normalized" value="' + escapeHtml(line.model_normalized || "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="match_key" value="' + escapeHtml(line.match_key || "") + '"></td>',
-          '<td><input class="line-input small" data-line-field="internal_nm_id" aria-label="平台ID / nmId / nmId" value="' + escapeHtml(line.internal_nm_id || "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="internal_nm_id" aria-label="' + escapeHtml(uiText("平台ID / nmId / nmId", "nmId")) + '" value="' + escapeHtml(line.internal_nm_id || "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="internal_name" value="' + escapeHtml(line.internal_name || "") + '"></td>',
           '<td><input class="line-input small" data-line-field="qty" value="' + escapeHtml(line.qty ?? "") + '"></td>',
           '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
@@ -1845,7 +2069,7 @@
           return;
         }
         saveShipmentButton.disabled = true;
-        setMessage(cardMessage, "保存中 / Saving / Сохраняем...", "");
+        setMessage(cardMessage, uiText("保存中 / Saving / Сохраняем...", "Сохраняем..."), "");
         try {
           if (isNewShipment) {
             currentShipment = await fetchJson(shipmentsPath, {
@@ -1883,7 +2107,7 @@
               renderCardTabs(currentShipment);
             }
           }
-          setMessage(cardMessage, "订单已保存 / Order saved / Заказ сохранён.", "success");
+          setMessage(cardMessage, uiText("订单已保存 / Order saved / Заказ сохранён.", "Заказ сохранён."), "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
           updateTotalsAndState();
@@ -1976,7 +2200,7 @@
       }
 
       function closeCard() {
-        if ((cardDirty || (isNewShipment && currentUploadId)) && !confirm("关闭且不保存修改？ / Close without saving changes? / Закрыть карточку без сохранения изменений?")) {
+        if ((cardDirty || (isNewShipment && currentUploadId)) && !confirm(uiText("关闭且不保存修改？ / Close without saving changes? / Закрыть карточку без сохранения изменений?", "Закрыть карточку без сохранения изменений?"))) {
           return;
         }
         shipmentCard.hidden = true;
@@ -1993,14 +2217,14 @@
             if (!shipmentId) {
               return;
             }
-        setMessage(registryMessage, "删除中 / Deleting / Удаляем заказ...", "");
+        setMessage(registryMessage, uiText("删除中 / Deleting / Удаляем заказ...", "Удаляем заказ..."), "");
         try {
           await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), { method: "DELETE", headers: { Accept: "application/json" } });
           if (currentShipment && currentShipment.shipment_id === shipmentId) {
             closeCardWithoutConfirm();
           }
           await loadRegistry();
-          setMessage(registryMessage, "订单已删除 / Order deleted / Заказ удалён.", "success");
+          setMessage(registryMessage, uiText("订单已删除 / Order deleted / Заказ удалён.", "Заказ удалён."), "success");
         } catch (error) {
           setMessage(registryMessage, error.message, "error");
         }
@@ -2064,6 +2288,8 @@
           }
 
           configureRegistryColumns();
+          configureLocalizedLabels();
+          configureOrderStatusFilter();
           loadActiveContracts();
           loadRegistry();
     })();

@@ -44,7 +44,10 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.supplier_shipments import SupplierShipmentsBlock
-from packages.application.supplier_financial_documents import SupplierFinancialDocumentsBlock
+from packages.application.supplier_financial_documents import (
+    SupplierFinancialDocumentsBlock,
+    apply_supplier_order_document_match,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
@@ -1859,7 +1862,10 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_order_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
         shipment = self.supplier_shipments_block.get_shipment(shipment_id)
         financial_payload = self.supplier_financial_documents_block.list_documents(shipment_id)
-        financial_documents = [dict(item) for item in financial_payload.get("documents") or []]
+        financial_documents = [
+            apply_supplier_order_document_match(dict(item), shipment)
+            for item in financial_payload.get("documents") or []
+        ]
         checklist = _build_supplier_order_documents_checklist(
             shipment=shipment,
             financial_documents=financial_documents,
@@ -4630,6 +4636,9 @@ def _supplier_order_financial_document_row(
 ) -> dict[str, Any]:
     document_type = str(document.get("document_type") or "").strip()
     parse_status = str(document.get("parse_status") or "")
+    normalized = dict(document.get("normalized_parse") or {})
+    order_match_warnings = _string_list(document.get("order_match_warnings") or normalized.get("order_match_warnings"))
+    warnings = _dedupe_strings([*_string_list(document.get("warnings")), *order_match_warnings])
     row = _supplier_order_base_document_row(
         document_type,
         required=required,
@@ -4648,11 +4657,19 @@ def _supplier_order_financial_document_row(
             "currency": "RUB" if document.get("total_amount_rub") is not None else str(document.get("currency") or ""),
             "download_path": str(document.get("download_path") or ""),
             "parse_status": parse_status,
-            "warnings": list(document.get("warnings") or []),
+            "warnings": warnings,
             "errors": list(document.get("errors") or []),
-            "normalized_parse": dict(document.get("normalized_parse") or {}),
+            "normalized_parse": normalized,
+            "order_match_status": str(document.get("order_match_status") or normalized.get("order_match_status") or ""),
+            "order_match_reasons": _string_list(document.get("order_match_reasons") or normalized.get("order_match_reasons")),
+            "order_match_warnings": order_match_warnings,
+            "matched_contract_number": str(document.get("matched_contract_number") or normalized.get("matched_contract_number") or ""),
+            "matched_contract_date": str(document.get("matched_contract_date") or normalized.get("matched_contract_date") or ""),
         }
     )
+    if row["order_match_status"] in {"needs_review", "mismatch"} and row["status"] == "uploaded":
+        row["status"] = "needs_review"
+        row["status_label"] = _supplier_order_document_status_label(row["status"])
     return row
 
 
@@ -4706,6 +4723,23 @@ def _supplier_order_document_status_label(status: str) -> str:
         "needs_review": "Проверить",
         "error": "Ошибка",
     }.get(status, status or "-")
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 def _supplier_order_documents_archive_path(shipment_id: str, filename: str) -> str:
@@ -4764,8 +4798,13 @@ def _build_supplier_order_documents_archive(
                     "document_id": row.get("document_id") or "",
                     "source_filename": filename,
                     "content_type": content_type,
+                    "status": row.get("status") or "",
+                    "order_match_status": row.get("order_match_status") or "",
+                    "warnings": _string_list(row.get("warnings")),
                 }
             )
+            for warning in _string_list(row.get("warnings")):
+                warnings.append(f"{row.get('document_name') or row.get('document_type')}: {warning}")
         manifest = {
             "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_manifest",
             "status": "ok",

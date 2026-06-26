@@ -57,6 +57,7 @@ from packages.contracts.supplier_financial_documents import (
     FX_RATE_STATUS_OK,
     FX_RATE_STATUS_PENDING,
 )
+from packages.contracts.supplier_shipments import TRADE_DOCUMENT_STATUS_ACTIVE
 
 MONEY_QUANT = Decimal("0.01")
 RATE_QUANT = Decimal("0.0001")
@@ -95,6 +96,14 @@ QUOTE_AMOUNT_LABELS = (
 )
 PCT_QUANT = Decimal("0.0001")
 QUOTE_UNIT_ESTIMATOR_MISSING_WARNING = "Нет коэффициента шт/кг для оценки КП"
+ORDER_MATCH_STATUS_MATCHED = "matched"
+ORDER_MATCH_STATUS_PROBABLE_MATCH = "probable_match"
+ORDER_MATCH_STATUS_NEEDS_REVIEW = "needs_review"
+ORDER_MATCH_STATUS_MISMATCH = "mismatch"
+ORDER_MATCH_DOCUMENT_TYPES = {
+    FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+}
 
 
 @dataclass(frozen=True)
@@ -212,9 +221,9 @@ class SupplierFinancialDocumentsBlock:
 
     def list_documents(self, supplier_order_id: str) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
-        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
+        shipment = _supplier_order_shipment_with_linked_contract(self.runtime, self.runtime.load_supplier_shipment(supplier_order_id) or {})
         documents = [
-            self._with_download_path(item)
+            apply_supplier_order_document_match(self._with_download_path(item), shipment)
             for item in self._refresh_saved_document_parses(
                 self.runtime.list_supplier_financial_documents(supplier_order_id)
             )
@@ -345,10 +354,11 @@ class SupplierFinancialDocumentsBlock:
         if document is None:
             raise ValueError(f"financial document not found: {document_id}")
         document = self._refresh_saved_document_parse(document)
-        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
-        documents = [self._with_download_path(document)]
+        shipment = _supplier_order_shipment_with_linked_contract(self.runtime, self.runtime.load_supplier_shipment(supplier_order_id) or {})
+        matched_document = apply_supplier_order_document_match(self._with_download_path(document), shipment)
+        documents = [matched_document]
         lines = list(document.get("expense_lines") or [])
-        payload = self._with_download_path(document)
+        payload = matched_document
         payload["expense_lines"] = lines
         payload["summary"] = build_financial_summary(documents, lines, shipment=shipment)
         return payload
@@ -430,6 +440,8 @@ class SupplierFinancialDocumentsBlock:
             "warnings": _dedupe_strings(warnings),
             "errors": _dedupe_strings(errors),
         }
+        shipment = _supplier_order_shipment_with_linked_contract(self.runtime, self.runtime.load_supplier_shipment(supplier_order_id) or {})
+        document = apply_supplier_order_document_match(document, shipment)
         stored_lines = []
         for index, line in enumerate(expense_lines, start=1):
             stored_line = _expense_line_for_storage(
@@ -2212,15 +2224,30 @@ def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[di
     document_date = _parse_date(_first_match(text, r"от\s*(?:г\.)?\s*(\d{1,2}\s+[А-Яа-яA-Za-z]+\s+\d{4})"))
     execution_status, execution_time = _extract_bank_transfer_execution(text)
     debit_account = _extract_bank_transfer_debit_account(text)
-    currency = _first_match(text, r"Currency Code\s*[\n ]+([A-Z]{3})")
-    transfer_amount = _extract_bank_transfer_amount(text)
-    ordering_customer = _extract_block_between(text, r"Ordering Customer.*?\)\s*50", r"Банк-посредник")
-    beneficiary_bank = _extract_block_between(text, r"Account with Institution.*?\)\s*57", r"Получатель")
-    beneficiary_block = _extract_block_between(text, r"Beneficiary Customer.*?\)\s*59", r"Назначение платежа")
+    currency = _first_match(text, r"Currency Code\s*[\n ]+([A-Z]{3})") or _first_match(text, r"\b(?:Валюта|Currency)\b\s*\n\s*([A-Z]{3})")
+    transfer_amount, amount_in_words = _extract_bank_transfer_amount_and_words(text)
+    ordering_block = _extract_bank_transfer_field_block(text, "50", ("Банк-посредник", "Intermediary Institution", "56"))
+    ordering_customer = _clean_bank_transfer_party_name(ordering_block)
+    payer_address = _clean_bank_transfer_party_address(ordering_block)
+    payer_country_code = _first_match(ordering_block, r"CODE\s+COUNTRY\s*:\s*([A-Z]{2})")
+    payer_inn = _first_match(ordering_block, r"\bINN\s*:\s*([0-9]{8,14})")
+    intermediary_bank = _extract_bank_transfer_field_block(text, "56", ("Банк получателя", "Account with Institution", "57"))
+    beneficiary_bank = _extract_bank_transfer_field_block(text, "57", ("Получатель", "Account number", "59"))
+    beneficiary_block = _extract_bank_transfer_field_block(text, "59", ("Назначение платежа", "Details of payment", "70"))
     beneficiary_account = _first_match(beneficiary_block, r"\b(\d{12,34})\b") or _extract_bank_transfer_beneficiary_account(text)
     beneficiary_customer = _clean_beneficiary_customer(beneficiary_block, beneficiary_account)
-    payment_details = _first_match(text, r"Details of payment\s*70\s*([^\n\r]+)")
+    beneficiary_address = _clean_bank_transfer_party_address(beneficiary_block, skip_account=beneficiary_account)
+    beneficiary_country = _extract_bank_transfer_country(beneficiary_block)
+    beneficiary_bank_swift_bic = _extract_bank_transfer_swift_bic(beneficiary_bank)
+    beneficiary_bank_address = _extract_bank_transfer_bank_address(beneficiary_bank, swift_bic=beneficiary_bank_swift_bic)
+    beneficiary_bank_country = _extract_bank_transfer_country(beneficiary_bank)
+    beneficiary_bank_clearing_code = _first_match(beneficiary_bank, r"(//[A-Z]{2}[0-9A-Z]+)")
+    payment_details = _extract_bank_transfer_payment_details(text)
+    contract_ref = _extract_bank_transfer_contract_ref(payment_details)
+    contract_number, contract_date = _extract_bank_transfer_contract_parts(contract_ref or payment_details)
     charges_mode = _extract_bank_transfer_charges_mode(text)
+    sender_to_receiver_info = _extract_bank_transfer_optional_block(text, "72", ("77B", "Расходы и комиссии"))
+    regulatory_reporting = _extract_bank_transfer_optional_block(text, "77B", ("Расходы и комиссии",))
     normalized = {
         "vendor": beneficiary_customer,
         "document_number": application_number,
@@ -2232,13 +2259,29 @@ def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[di
         "currency": currency,
         "transfer_amount": _decimal_to_float(transfer_amount),
         "total_amount": _decimal_to_float(transfer_amount),
-        "ordering_customer": _clean_multiline_value(ordering_customer),
+        "amount_in_words": amount_in_words,
+        "ordering_customer": ordering_customer,
+        "payer_address": payer_address,
+        "payer_inn": payer_inn,
+        "payer_country_code": payer_country_code,
+        "payer_country": payer_country_code,
+        "intermediary_bank": _clean_multiline_value(intermediary_bank),
         "beneficiary_customer": beneficiary_customer,
+        "beneficiary_address": beneficiary_address,
+        "beneficiary_country": beneficiary_country,
         "beneficiary_account": beneficiary_account,
         "beneficiary_bank": _clean_multiline_value(beneficiary_bank),
+        "beneficiary_bank_swift_bic": beneficiary_bank_swift_bic,
+        "beneficiary_bank_address": beneficiary_bank_address,
+        "beneficiary_bank_country": beneficiary_bank_country,
+        "beneficiary_bank_clearing_code": beneficiary_bank_clearing_code,
         "payment_details": payment_details,
-        "contract_ref": _extract_bank_transfer_contract_ref(payment_details),
+        "contract_ref": contract_ref,
+        "contract_number": contract_number,
+        "contract_date": contract_date,
         "charges_mode": charges_mode,
+        "sender_to_receiver_info": sender_to_receiver_info,
+        "regulatory_reporting": regulatory_reporting,
     }
     _append_missing_warnings(
         warnings,
@@ -2255,6 +2298,8 @@ def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[di
             "beneficiary_account": "beneficiary account",
             "beneficiary_bank": "beneficiary bank",
             "payment_details": "payment details",
+            "contract_number": "contract number",
+            "contract_date": "contract date",
             "charges_mode": "charges mode",
         },
     )
@@ -2317,9 +2362,17 @@ def _extract_bank_control_balance(text: str) -> tuple[str, Decimal | None]:
 def _extract_bank_transfer_execution(text: str) -> tuple[str, str]:
     match = re.search(r"\b(Исполнен|Отклон[её]н|Принят|В обработке)\b\s+(\d{1,2}\.\d{1,2}\.\d{4}\s+в\s+\d{1,2}:\d{2}:\d{2})", text, flags=re.I)
     if match:
-        return _clean_value(match.group(1)), _clean_value(match.group(2))
+        return _clean_value(match.group(1)), _normalize_bank_transfer_execution_time(match.group(2))
     status = _first_match(text[:500], r"\b(Исполнен|Отклон[её]н|Принят|В обработке)\b")
-    return status, ""
+    time_value = _first_match(text[:500], r"(\d{1,2}\.\d{1,2}\.\d{4}\s+в\s+\d{1,2}:\d{2}:\d{2})")
+    return status, _normalize_bank_transfer_execution_time(time_value)
+
+
+def _normalize_bank_transfer_execution_time(value: Any) -> str:
+    raw = _clean_value(value)
+    if not raw:
+        return ""
+    return re.sub(r"\s+в\s+", " ", raw, flags=re.I)
 
 
 def _extract_bank_transfer_debit_account(text: str) -> str:
@@ -2329,14 +2382,22 @@ def _extract_bank_transfer_debit_account(text: str) -> str:
 
 
 def _extract_bank_transfer_amount(text: str) -> Decimal | None:
+    amount, _words = _extract_bank_transfer_amount_and_words(text)
+    return amount
+
+
+def _extract_bank_transfer_amount_and_words(text: str) -> tuple[Decimal | None, str]:
     match = re.search(
-        r"Amount of transfer\s*\(in figures and in writing\)\s*(?:32\s+)?([0-9][\d .,\u00a0\u202f]*[,.]\d{2})",
+        r"Amount of transfer\s*\(in figures and in writing\)\s*(?:32\s+)?([0-9][\d .,\u00a0\u202f]*[,.]\d{2})(.*?)(?=\n\s*(?:Отправитель|Ordering Customer|\b50\b)|$)",
         text,
         flags=re.I | re.S,
     )
     if match:
-        return _parse_decimal(match.group(1))
-    return None
+        return _parse_decimal(match.group(1)), _clean_multiline_value(match.group(2))
+    match = re.search(r"\b32\s+([0-9][\d .,\u00a0\u202f]*[,.]\d{2})(.*?)(?=\n\s*(?:Отправитель|Ordering Customer|\b50\b)|$)", text, flags=re.I | re.S)
+    if match:
+        return _parse_decimal(match.group(1)), _clean_multiline_value(match.group(2))
+    return None, ""
 
 
 def _extract_bank_transfer_beneficiary_account(text: str) -> str:
@@ -2346,7 +2407,17 @@ def _extract_bank_transfer_beneficiary_account(text: str) -> str:
 
 def _extract_bank_transfer_contract_ref(payment_details: str) -> str:
     match = re.search(r"\b(CONTRACT\s+[A-Za-zА-Яа-я0-9/-]+\s+DD\s+\d{1,2}\.\d{1,2}\.\d{4})\b", payment_details, flags=re.I)
+    if match:
+        return _clean_value(match.group(1)).upper()
+    match = re.search(r"\b(контракт\s*(?:№\s*)?[A-Za-zА-Яа-я0-9/-]+\s*(?:от|DD)\s*\d{1,2}\.\d{1,2}\.\d{4})\b", payment_details, flags=re.I)
     return _clean_value(match.group(1)) if match else ""
+
+
+def _extract_bank_transfer_contract_parts(contract_ref: str) -> tuple[str, str]:
+    match = re.search(r"(?:CONTRACT|контракт)\s*№?\s*([A-Za-zА-Яа-я0-9/-]+)\s*(?:DD|от)\s*(\d{1,2}\.\d{1,2}\.\d{4})", contract_ref, flags=re.I)
+    if not match:
+        return "", ""
+    return _clean_value(match.group(1)), _parse_date(match.group(2))
 
 
 def _extract_bank_transfer_charges_mode(text: str) -> str:
@@ -2366,10 +2437,11 @@ def _extract_bank_transfer_charges_mode(text: str) -> str:
 
 
 def _clean_beneficiary_customer(block: str, account: str) -> str:
-    cleaned = _clean_multiline_value(block)
-    if account:
-        cleaned = re.sub(r"\b" + re.escape(account) + r"\b", "", cleaned).strip()
-    return _clean_value(cleaned)
+    for line in _bank_transfer_content_lines(block):
+        if account and re.sub(r"\D+", "", line) == account:
+            continue
+        return _clean_value(re.sub(r"^\s*59\s+", "", line))
+    return ""
 
 
 def _extract_block_between(text: str, start_pattern: str, end_pattern: str) -> str:
@@ -2377,10 +2449,307 @@ def _extract_block_between(text: str, start_pattern: str, end_pattern: str) -> s
     return match.group(1) if match else ""
 
 
+def _extract_bank_transfer_field_block(text: str, tag: str, next_tags: tuple[str, ...]) -> str:
+    tag_pattern = rf"(?:^|\n)\s*{re.escape(tag)}\s*(?:\n|\s+)"
+    next_patterns = [rf"(?:^|\n|\s){re.escape(next_tag)}\b" for next_tag in next_tags if re.fullmatch(r"\d{2}[A-Z]?", next_tag)]
+    label_patterns = [re.escape(next_tag) for next_tag in next_tags if not re.fullmatch(r"\d{2}[A-Z]?", next_tag)]
+    stop_pattern = "|".join(next_patterns + label_patterns) or r"$"
+    match = re.search(tag_pattern + r"(.*?)(?=" + stop_pattern + r"|$)", text, flags=re.I | re.S)
+    return match.group(1) if match else ""
+
+
+def _extract_bank_transfer_payment_details(text: str) -> str:
+    block = _extract_bank_transfer_optional_block(text, "70", ("72", "77B", "Расходы и комиссии"))
+    if block:
+        return _clean_multiline_value(block)
+    return _first_match(text, r"Details of payment\s*70\s*([^\n\r]+)")
+
+
+def _extract_bank_transfer_optional_block(text: str, tag: str, stop_markers: tuple[str, ...]) -> str:
+    start = rf"(?:^|\n).*?\b{re.escape(tag)}\b\s*"
+    stop_parts = [
+        rf"(?:^|\n).*?\b{re.escape(marker)}\b" if re.fullmatch(r"\d{2}[A-Z]?", marker) else re.escape(marker)
+        for marker in stop_markers
+    ]
+    stop = "|".join(stop_parts) or r"$"
+    match = re.search(start + r"(.*?)(?=" + stop + r"|$)", text, flags=re.I | re.S)
+    return _clean_multiline_value(match.group(1)) if match else ""
+
+
+def _clean_bank_transfer_party_name(block: str) -> str:
+    lines = _bank_transfer_content_lines(block)
+    return _clean_value(lines[0] if lines else "")
+
+
+def _clean_bank_transfer_party_address(block: str, *, skip_account: str = "") -> str:
+    lines = _bank_transfer_content_lines(block)
+    if skip_account:
+        lines = [line for line in lines if re.sub(r"\D+", "", line) != skip_account]
+    address_lines = []
+    for line in lines[1:]:
+        if re.search(r"\b(?:CODE\s+COUNTRY|INN|КПП|ОКПО|ОГРН)\b", line, flags=re.I):
+            continue
+        if re.fullmatch(r"[A-Z]{2}", line):
+            continue
+        address_lines.append(line)
+    return _clean_value(" ".join(address_lines))
+
+
+def _bank_transfer_content_lines(block: str) -> list[str]:
+    lines = _text_to_lines(block)
+    result: list[str] = []
+    for line in lines:
+        cleaned = _clean_value(line)
+        if not cleaned or re.fullmatch(r"\d{1,3}[A-Z]?", cleaned):
+            continue
+        result.append(cleaned)
+    return result
+
+
+def _extract_bank_transfer_swift_bic(block: str) -> str:
+    matches = re.findall(r"\b([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b", block)
+    if not matches:
+        return ""
+    preferred = [item for item in matches if len(item) == 11 or item.endswith("XXX")]
+    return (preferred or matches)[-1]
+
+
+def _extract_bank_transfer_country(block: str) -> str:
+    lines = _bank_transfer_content_lines(block)
+    for line in reversed(lines):
+        if re.fullmatch(r"[A-Z]{2}", line):
+            return line
+    code = _first_match(block, r"CODE\s+COUNTRY\s*:\s*([A-Z]{2})")
+    return code
+
+
+def _extract_bank_transfer_bank_address(block: str, *, swift_bic: str) -> str:
+    lines = _bank_transfer_content_lines(block)
+    address_lines: list[str] = []
+    swift_seen = False
+    for line in lines:
+        if swift_bic and swift_bic in line:
+            swift_seen = True
+            continue
+        if not swift_seen:
+            continue
+        if re.fullmatch(r"[A-Z]{2}", line):
+            continue
+        address_lines.append(line)
+    return _clean_value(" ".join(address_lines))
+
+
 def _append_missing_warnings(warnings: list[str], normalized: Mapping[str, Any], labels_by_field: Mapping[str, str]) -> None:
     missing = [label for field, label in labels_by_field.items() if not normalized.get(field)]
     if missing:
         warnings.append("Parser needs review: missing " + ", ".join(missing))
+
+
+def apply_supplier_order_document_match(document: Mapping[str, Any], shipment: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(document)
+    document_type = str(payload.get("document_type") or "").strip()
+    if document_type not in ORDER_MATCH_DOCUMENT_TYPES:
+        return payload
+    normalized = dict(payload.get("normalized_parse") or {})
+    match = verify_supplier_order_document_match(payload, shipment)
+    normalized.update(match)
+    payload["normalized_parse"] = normalized
+    payload.update(match)
+    warnings = _dedupe_strings([*_string_list(payload.get("warnings")), *_string_list(match.get("order_match_warnings"))])
+    payload["warnings"] = warnings
+    if (
+        match.get("order_match_status") in {ORDER_MATCH_STATUS_NEEDS_REVIEW, ORDER_MATCH_STATUS_MISMATCH}
+        and str(payload.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED
+    ):
+        payload["parse_status"] = FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW
+    return payload
+
+
+def _supplier_order_shipment_with_linked_contract(
+    runtime: RegistryUploadDbBackedRuntime,
+    shipment: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = dict(shipment)
+    source = payload.get("header") if isinstance(payload.get("header"), Mapping) else payload
+    header = dict(source)
+    invoice_document_id = str(header.get("invoice_document_id") or "").strip()
+    if not invoice_document_id:
+        return payload
+    link = runtime.load_invoice_contract_link(invoice_document_id)
+    if link is None:
+        return payload
+    contract = runtime.load_trade_document(str(link.get("contract_document_id") or ""))
+    if contract is None or str(contract.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
+        return payload
+    header["contract_document_id"] = str(contract.get("document_id") or "")
+    header["contract_no"] = str(contract.get("number") or header.get("contract_no") or "")
+    header["contract_date"] = str(contract.get("document_date") or header.get("contract_date") or "")
+    if isinstance(payload.get("header"), Mapping):
+        payload["header"] = header
+    else:
+        payload.update(header)
+    return payload
+
+
+def verify_supplier_order_document_match(document: Mapping[str, Any], shipment: Mapping[str, Any]) -> dict[str, Any]:
+    document_type = str(document.get("document_type") or "").strip()
+    normalized = dict(document.get("normalized_parse") or {})
+    order_identity = _supplier_order_identity(shipment)
+    document_identity = _supplier_order_document_identity(document)
+    reasons: list[str] = []
+    warnings: list[str] = []
+    order_contract_number = str(order_identity.get("contract_number") or "")
+    order_contract_date = str(order_identity.get("contract_date") or "")
+    document_contract_number = str(document_identity.get("contract_number") or "")
+    document_contract_date = str(document_identity.get("contract_date") or "")
+    number_matches = bool(order_contract_number and document_contract_number and _contract_number_key(order_contract_number) == _contract_number_key(document_contract_number))
+    date_matches = bool(order_contract_date and document_contract_date and order_contract_date == document_contract_date)
+    status = ORDER_MATCH_STATUS_NEEDS_REVIEW
+
+    if document_type not in ORDER_MATCH_DOCUMENT_TYPES:
+        return {
+            "order_match_status": "",
+            "order_match_reasons": [],
+            "order_match_warnings": [],
+            "matched_contract_number": "",
+            "matched_contract_date": "",
+        }
+
+    if not order_contract_number:
+        warnings.append("Не удалось проверить соответствие заказу: в заказе не указан номер контракта.")
+    if not document_contract_number:
+        warnings.append("Не удалось проверить соответствие заказу: в документе не распознан номер контракта.")
+
+    if order_contract_number and document_contract_number and not number_matches:
+        status = ORDER_MATCH_STATUS_MISMATCH
+        warnings.append(
+            "Документ, вероятно, относится к другому заказу: "
+            f"контракт документа {document_contract_number}, контракт заказа {order_contract_number}."
+        )
+    elif number_matches and order_contract_date and document_contract_date and not date_matches:
+        status = ORDER_MATCH_STATUS_MISMATCH
+        warnings.append(
+            "Документ, вероятно, относится к другому заказу: "
+            f"дата контракта документа {document_contract_date}, дата контракта заказа {order_contract_date}."
+        )
+    elif number_matches and date_matches:
+        status = ORDER_MATCH_STATUS_MATCHED
+        reasons.append(f"Контракт совпадает: {order_contract_number} от {order_contract_date}.")
+    elif number_matches:
+        status = ORDER_MATCH_STATUS_PROBABLE_MATCH
+        reasons.append(f"Номер контракта совпадает: {order_contract_number}.")
+    elif warnings:
+        status = ORDER_MATCH_STATUS_NEEDS_REVIEW
+
+    amount_reason = _supplier_order_amount_match_reason(order_identity, document_identity)
+    if amount_reason:
+        reasons.append(amount_reason)
+    vendor_reason = _supplier_order_vendor_match_reason(order_identity, document_identity)
+    if vendor_reason:
+        reasons.append(vendor_reason)
+
+    if status == ORDER_MATCH_STATUS_NEEDS_REVIEW and not warnings:
+        warnings.append("Не удалось проверить соответствие заказу: не распознаны сильные признаки контракта.")
+
+    matched_contract_number = order_contract_number if number_matches else ""
+    matched_contract_date = order_contract_date if date_matches else ""
+    if normalized.get("unique_contract_registration_number"):
+        reasons.append("УНК распознан: " + str(normalized.get("unique_contract_registration_number")))
+    return {
+        "order_match_status": status,
+        "order_match_reasons": _dedupe_strings(reasons),
+        "order_match_warnings": _dedupe_strings(warnings),
+        "matched_contract_number": matched_contract_number,
+        "matched_contract_date": matched_contract_date,
+    }
+
+
+def _supplier_order_identity(shipment: Mapping[str, Any]) -> dict[str, Any]:
+    source = shipment.get("header") if isinstance(shipment.get("header"), Mapping) else shipment
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
+    return {
+        "invoice_no": str(source.get("invoice_no") or metadata.get("invoice_no") or ""),
+        "invoice_date": _optional_iso_date(source.get("invoice_date") or metadata.get("invoice_date")),
+        "invoice_amount": _parse_decimal(source.get("invoice_amount_total") if source.get("invoice_amount_total") is not None else metadata.get("declared_invoice_total")),
+        "currency": str(source.get("currency") or metadata.get("currency") or "").strip().upper(),
+        "contract_number": str(source.get("contract_no") or metadata.get("contract_no") or ""),
+        "contract_date": _optional_iso_date(source.get("contract_date") or metadata.get("contract_date")),
+        "supplier": str(source.get("supplier_name") or metadata.get("supplier_name") or ""),
+    }
+
+
+def _supplier_order_document_identity(document: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(document.get("normalized_parse") or {})
+    contract_number = str(normalized.get("contract_number") or "")
+    contract_date = _optional_iso_date(normalized.get("contract_date"))
+    if not contract_number or not contract_date:
+        extracted_number, extracted_date = _contract_parts_from_ref(
+            str(normalized.get("contract_ref") or document.get("contract_ref") or normalized.get("payment_details") or normalized.get("contract") or "")
+        )
+        contract_number = contract_number or extracted_number
+        contract_date = contract_date or extracted_date
+    amount = (
+        _parse_decimal(normalized.get("transfer_amount"))
+        or _parse_decimal(normalized.get("payment_operation_amount"))
+        or _parse_decimal(normalized.get("contract_amount"))
+        or _parse_decimal(normalized.get("total_amount"))
+        or _parse_decimal(document.get("total_amount"))
+    )
+    vendor = str(
+        normalized.get("beneficiary_customer")
+        or normalized.get("non_resident_vendor")
+        or normalized.get("vendor")
+        or document.get("vendor")
+        or ""
+    )
+    return {
+        "contract_number": contract_number,
+        "contract_date": contract_date,
+        "contract_ref": str(normalized.get("contract_ref") or document.get("contract_ref") or ""),
+        "amount": amount,
+        "currency": str(normalized.get("currency") or document.get("currency") or normalized.get("payment_operation_currency_code") or normalized.get("contract_currency_code") or "").strip().upper(),
+        "vendor": vendor,
+    }
+
+
+def _contract_parts_from_ref(value: str) -> tuple[str, str]:
+    match = re.search(r"(?:CONTRACT|контракт|договор)\s*№?\s*([A-Za-zА-Яа-я0-9/-]+)\s*(?:DD|от)?\s*(\d{1,2}\.\d{1,2}\.\d{4})?", value, flags=re.I)
+    if not match:
+        return "", ""
+    return _clean_value(match.group(1)), _parse_date(match.group(2) or "")
+
+
+def _contract_number_key(value: str) -> str:
+    return re.sub(r"[^0-9A-ZА-Я/.-]+", "", str(value or "").upper())
+
+
+def _supplier_order_amount_match_reason(order_identity: Mapping[str, Any], document_identity: Mapping[str, Any]) -> str:
+    order_amount = _parse_decimal(order_identity.get("invoice_amount"))
+    document_amount = _parse_decimal(document_identity.get("amount"))
+    if order_amount is None or document_amount is None or order_amount <= 0 or document_amount <= 0:
+        return ""
+    order_currency = str(order_identity.get("currency") or "").upper()
+    document_currency = str(document_identity.get("currency") or "").upper()
+    if order_currency and document_currency and order_currency != document_currency:
+        return ""
+    tolerance = max(Decimal("0.01"), order_amount.copy_abs() * Decimal("0.001"))
+    if abs(order_amount - document_amount) <= tolerance:
+        return "Сумма и валюта совпадают с invoice."
+    return ""
+
+
+def _supplier_order_vendor_match_reason(order_identity: Mapping[str, Any], document_identity: Mapping[str, Any]) -> str:
+    order_vendor = _party_key(str(order_identity.get("supplier") or ""))
+    document_vendor = _party_key(str(document_identity.get("vendor") or ""))
+    if not order_vendor or not document_vendor:
+        return ""
+    if order_vendor in document_vendor or document_vendor in order_vendor:
+        return "Контрагент совпадает по названию."
+    return ""
+
+
+def _party_key(value: str) -> str:
+    return re.sub(r"[^0-9A-ZА-Я]+", "", str(value or "").upper())
 
 
 def _compact_spaced_code(value: Any) -> str:
@@ -2895,7 +3264,10 @@ def _parse_status_for_payload(
             "transfer_amount",
             "ordering_customer",
             "beneficiary_customer",
+            "beneficiary_account",
             "payment_details",
+            "contract_number",
+            "contract_date",
         ],
     }
     missing = [key for key in required_by_type.get(str(normalized.get("document_type") or ""), []) if not normalized.get(key)]

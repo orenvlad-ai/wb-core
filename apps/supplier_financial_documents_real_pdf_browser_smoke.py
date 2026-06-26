@@ -78,7 +78,8 @@ def main() -> None:
                 try:
                     page = browser.new_page(viewport={"width": 1440, "height": 1000})
                     page.goto(f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}?embedded=operator", wait_until="domcontentloaded")
-                    expect(page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible(timeout=10000)
+                    expect(page.locator("h1")).to_have_text("Реестр заказов", timeout=10000)
+                    expect(page.locator("h1")).not_to_contain_text("Order registry")
                     expect(page.locator("#shipmentRows")).to_contain_text("FIN-REAL-ORDER", timeout=10000)
                     order_row = page.locator("#shipmentRows tr[data-row]", has_text="FIN-REAL-ORDER").first
                     expect(order_row).to_be_visible()
@@ -94,7 +95,8 @@ def main() -> None:
 
                     page.locator("#financialDocumentsTabButton").click()
                     expect(page.locator("#financialDocumentsPanel")).to_be_visible()
-                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Финансовые документы не загружены.", timeout=5000)
+                    expect(page.locator("#financialDocumentsRows")).to_contain_text("КП логистов", timeout=5000)
+                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Не загружен", timeout=5000)
 
                     page.locator("#financialDocumentFileInput").set_input_files(
                         [str(pdfs[key]) for key in ("quote", "invoice_103", "invoice_113", "customs")]
@@ -103,9 +105,9 @@ def main() -> None:
                     expect(page.locator("#financialUploadProgress li")).to_have_count(4, timeout=5000)
                     expect(page.locator("#financialUploadProgress")).to_contain_text("Распознан", timeout=5000)
 
-                    expect(page.locator("#financialDocumentsRows tr[data-financial-document-row]")).to_have_count(4, timeout=10000)
-                    expect(page.locator("#financialDocumentsRows")).to_contain_text("КП логиста", timeout=5000)
-                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Счёт логиста", timeout=5000)
+                    expect(page.locator("#financialDocumentsRows [data-delete-financial-document]")).to_have_count(4, timeout=10000)
+                    expect(page.locator("#financialDocumentsRows")).to_contain_text("КП логистов", timeout=5000)
+                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Счёт логистов", timeout=5000)
                     expect(page.locator("#financialDocumentsRows")).to_contain_text("ДТ", timeout=5000)
                     summary_cards = page.locator("#financialSummaryGroups")
                     expect(summary_cards).to_contain_text("Основное", timeout=5000)
@@ -149,7 +151,7 @@ def main() -> None:
                     expect(page.locator("#financialRecognizedFields")).to_contain_text("Вес брутто ДТ", timeout=5000)
                     expect(page.locator("#financialRecognizedFields")).to_contain_text("9 784,60 кг", timeout=5000)
 
-                    quote_row = page.locator("#financialDocumentsRows tr[data-financial-document-row]", has_text="КП логиста").first
+                    quote_row = page.locator("#financialDocumentsRows tr[data-financial-document-row]", has_text="КП логистов").first
                     quote_row.click()
                     expect(page.locator("#financialRecognizedFields")).to_contain_text("стекла для смартфона", timeout=5000)
                     expect(page.locator("#financialExpenseRows")).to_contain_text("Стоимость доставки", timeout=5000)
@@ -166,8 +168,10 @@ def main() -> None:
                     page.once("dialog", lambda dialog: dialog.accept())
                     quote_row.locator("[data-delete-financial-document]").click()
                     expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ удалён.", timeout=10000)
-                    expect(page.locator("#financialDocumentsRows tr[data-financial-document-row]")).to_have_count(3, timeout=10000)
-                    expect(page.locator("#financialDocumentsRows")).not_to_contain_text("КП логиста", timeout=5000)
+                    expect(page.locator("#financialDocumentsRows [data-delete-financial-document]")).to_have_count(3, timeout=10000)
+                    quote_missing_row = page.locator("#financialDocumentsRows tr[data-financial-document-row]", has_text="КП логистов").first
+                    expect(quote_missing_row).to_contain_text("Не загружен", timeout=5000)
+                    expect(quote_missing_row.locator("[data-delete-financial-document]")).to_have_count(0)
                     expect(page.locator("#financialSummaryGroups")).to_contain_text("Логистика по КП, USD", timeout=5000)
                     expect(page.locator("#financialSummaryGroups")).to_contain_text("—", timeout=5000)
                     expect(page.locator("#financialSummaryGroups")).to_contain_text("Счета логиста, ₽", timeout=5000)
@@ -175,20 +179,21 @@ def main() -> None:
 
                     page.locator("#financialDocumentFileInput").set_input_files(str(pdfs["quote"]))
                     expect(page.locator("#financialDocumentsMessage")).to_contain_text("Загрузка завершена: 1", timeout=15000)
-                    expect(page.locator("#financialDocumentsRows tr[data-financial-document-row]")).to_have_count(4, timeout=10000)
+                    expect(page.locator("#financialDocumentsRows [data-delete-financial-document]")).to_have_count(4, timeout=10000)
                     expect(page.locator("#financialSummaryGroups")).to_contain_text("16 151", timeout=5000)
                     expect(page.locator("#financialSummaryGroups")).not_to_contain_text("3 799", timeout=5000)
-                    quote_row = page.locator("#financialDocumentsRows tr[data-financial-document-row]", has_text="КП логиста").first
+                    quote_row = page.locator("#financialDocumentsRows tr[data-financial-document-row]", has_text="КП логистов").first
                     quote_row.click()
                     expect(page.locator("#financialExpenseRows")).to_contain_text("14 360,00 USD", timeout=5000)
 
-                    for _ in range(4):
-                        if page.locator("#financialDocumentsRows tr[data-financial-document-row]").count() <= 0:
+                    for _ in range(6):
+                        if page.locator("#financialDocumentsRows [data-delete-financial-document]").count() <= 0:
                             break
                         page.once("dialog", lambda dialog: dialog.accept())
                         page.locator("#financialDocumentsRows [data-delete-financial-document]").first.click()
                         expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ удалён.", timeout=10000)
-                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Финансовые документы не загружены.", timeout=10000)
+                    expect(page.locator("#financialDocumentsRows [data-delete-financial-document]")).to_have_count(0, timeout=10000)
+                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Не загружен", timeout=10000)
                     expect(page.locator("#financialExpenseRows")).to_contain_text("Расходные строки не загружены.", timeout=5000)
                     expect(page.locator("#financialSummaryGroups")).to_contain_text("—", timeout=5000)
 

@@ -148,7 +148,7 @@ def main() -> None:
                 browser = playwright.chromium.launch()
                 page = browser.new_page(viewport={"width": 1440, "height": 1000})
                 settings_page = browser.new_page(viewport={"width": 1280, "height": 900})
-                settings_page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}", wait_until="domcontentloaded")
+                settings_page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}?embedded=1", wait_until="domcontentloaded")
                 settings_page.evaluate("window.localStorage.removeItem('wb-core:sheet-vitrina-v1:settings-active-tab:v2')")
                 settings_page.reload(wait_until="domcontentloaded")
                 expect(settings_page.get_by_role("button", name="Номенклатура")).to_be_visible()
@@ -268,7 +268,8 @@ def main() -> None:
                 compat_row.get_by_role("button", name="Сохранить").click()
                 expect(settings_page.locator("#nomenclatureMessage")).to_contain_text("Справочник сохранён.", timeout=5000)
                 page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
-                expect(page.get_by_role("link", name="Настройки")).to_be_visible()
+                page.evaluate("window.localStorage.removeItem('wb-core:sheet-vitrina-v1:supplier-order-status-filter:v1')")
+                expect(page.locator("[data-unified-tab-button='factory-order']")).to_be_visible()
                 page.locator("[data-unified-tab-button='factory-order']").click()
                 expect(page.locator("iframe[title='Поставки']")).to_be_visible(timeout=10000)
                 operator_frame = page.frame_locator("iframe[title='Поставки']")
@@ -282,8 +283,9 @@ def main() -> None:
                 expect(operator_frame.locator(".supplier-embed-block")).to_have_count(0)
                 expect(operator_frame.get_by_text("Реестр заказов", exact=True)).to_have_count(0)
                 frame = operator_frame.frame_locator("iframe[title='От поставщика']")
-                expect(frame.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible(timeout=10000)
-                expect(frame.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_have_count(1)
+                expect(frame.locator("h1")).to_have_text("Реестр заказов", timeout=10000)
+                expect(frame.locator("h1")).not_to_contain_text("Order registry")
+                expect(frame.locator("h1")).not_to_contain_text("订单登记表")
                 expect(frame.locator("h2", has_text="Реестр заказов")).to_have_count(0)
                 expect(frame.get_by_text("Invoice-заказы поставщиков, сохранённые в WebCore")).to_have_count(0)
                 if not first_list_seen.wait(timeout=3):
@@ -293,14 +295,17 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("Заказов пока нет")
                 first_list_release.set()
                 expect(frame.locator("#shipmentRows")).to_have_attribute("data-registry-state", "loaded_empty", timeout=5000)
-                expect(frame.locator("#shipmentRows")).to_contain_text("暂无订单 / No orders yet / Заказов пока нет.")
-                expect(frame.get_by_text("匹配 / Matching / Матчинг").first).to_be_visible()
-                expect(frame.get_by_text("供应商 / Supplier / Поставщик")).to_be_visible()
+                expect(frame.locator("#shipmentRows")).to_contain_text("Заказов пока нет.")
+                expect(frame.locator("#shipmentRows")).not_to_contain_text("No orders yet")
+                expect(frame.get_by_text("Матчинг").first).to_be_visible()
+                expect(frame.get_by_text("Поставщик")).to_be_visible()
+                expect(frame.get_by_text("匹配 / Matching / Матчинг")).to_have_count(0)
+                expect(frame.get_by_text("供应商 / Supplier / Поставщик")).to_have_count(0)
                 expect(frame.get_by_text("Реестр поставок")).to_have_count(0)
                 actions = frame.locator(".topbar .toolbar > *").evaluate_all("(nodes) => nodes.map((node) => node.textContent.trim())")
                 expected_actions = [
-                    "新增订单 / Add order / Добавить заказ",
-                    "退出 / Logout / Выйти",
+                    "Добавить заказ",
+                    "Выйти",
                     "Открыть отдельно",
                 ]
                 if actions != expected_actions:
@@ -334,18 +339,18 @@ def main() -> None:
                     raise AssertionError(f"table header must keep a visible lower border, got {header_style}")
                 if header_style["borderBottomColor"] in {"rgba(0, 0, 0, 0)", "transparent"}:
                     raise AssertionError(f"table header border must not be transparent, got {header_style}")
-                expect(frame.get_by_role("button", name="新增订单 / Add order / Добавить заказ")).to_be_visible()
-                frame.get_by_role("button", name="新增订单 / Add order / Добавить заказ").click()
-                expect(frame.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки")).to_be_visible()
-                expect(frame.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_be_visible()
-                expect(frame.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_be_visible()
+                expect(frame.get_by_role("button", name="Добавить заказ")).to_be_visible()
+                frame.get_by_role("button", name="Добавить заказ").click()
+                expect(frame.get_by_label("Плановая дата отгрузки")).to_be_visible()
+                expect(frame.get_by_label("Фактическая дата отгрузки")).to_be_visible()
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_be_visible()
                 expect(frame.get_by_text("Supplier", exact=True)).to_have_count(0)
                 expect(frame.get_by_text("Customer", exact=True)).to_have_count(0)
                 expect(frame.get_by_text("Наш SKU")).to_have_count(0)
                 expect(frame.get_by_text("Our SKU")).to_have_count(0)
                 expect(frame.get_by_text("我方SKU")).to_have_count(0)
                 expect(frame.get_by_text("Наш SKU / nmId")).to_have_count(0)
-                expect(frame.get_by_role("button", name="保存 / Save / Сохранить")).to_be_disabled()
+                expect(frame.get_by_role("button", name="Сохранить")).to_be_disabled()
                 parse_url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}"
                 page.route(
                     parse_url,
@@ -361,9 +366,12 @@ def main() -> None:
                 page.unroute(parse_url)
                 frame.locator("#invoiceFileInput").set_input_files(str(invoice_path))
                 expect(frame.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
-                expect(frame.get_by_text("平台ID / nmId / nmId")).to_be_visible()
-                expect(frame.get_by_text("我方品名 / Our item name / Номенклатура")).to_be_visible()
-                expect(frame.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
+                expect(frame.get_by_text("nmId", exact=True)).to_be_visible()
+                expect(frame.get_by_text("Номенклатура", exact=True)).to_be_visible()
+                expect(frame.get_by_text("Соответствие цены", exact=True)).to_be_visible()
+                expect(frame.get_by_text("平台ID / nmId / nmId")).to_have_count(0)
+                expect(frame.get_by_text("我方品名 / Our item name / Номенклатура")).to_have_count(0)
+                expect(frame.get_by_text("价格匹配 / Price check / Соответствие цены")).to_have_count(0)
                 expect(frame.locator("#productLines input[data-line-field='internal_sku']")).to_have_count(0)
                 expect(frame.locator("#productLines input[data-line-field='internal_nm_id']").first).to_have_value("210183919")
                 expect(frame.locator("#productLines .price-conformity")).to_have_count(3)
@@ -375,22 +383,22 @@ def main() -> None:
                     raise AssertionError(f"price conformity symbols must map to success/error classes, got {first_price_class!r}, {second_price_class!r}")
                 expect(frame.locator("#contractNoInput")).to_have_value("CNT-2026-0513")
                 expect(frame.locator("#contractDateInput")).to_have_value("2026-05-13")
-                expect(frame.locator("#productLines").get_by_text("已匹配 / Matched / Сопоставлено")).to_be_visible()
-                expect(frame.locator("#productLines").get_by_text("按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости")).to_be_visible()
+                expect(frame.locator("#productLines").get_by_text("Сопоставлено", exact=True)).to_be_visible()
+                expect(frame.locator("#productLines").get_by_text("Сопоставлено по совместимости", exact=True)).to_be_visible()
                 expect(frame.locator("select[data-line-field='match_status']")).to_have_count(0)
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
-                frame.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки").fill("2026-05-14")
-                frame.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки").fill("2026-05-16")
-                frame.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ").fill("2026-05-28")
-                expect(frame.get_by_role("button", name="保存 / Save / Сохранить")).to_be_enabled()
-                frame.get_by_role("button", name="保存 / Save / Сохранить").click()
-                expect(frame.get_by_text("订单已保存 / Order saved / Заказ сохранён.")).to_be_visible(timeout=5000)
+                frame.get_by_label("Плановая дата отгрузки").fill("2026-05-14")
+                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-16")
+                frame.get_by_label("Фактическая дата приёмки на ФФ").fill("2026-05-28")
+                expect(frame.get_by_role("button", name="Сохранить")).to_be_enabled()
+                frame.get_by_role("button", name="Сохранить").click()
+                expect(frame.get_by_text("Заказ сохранён.")).to_be_visible(timeout=5000)
                 expect(frame.locator("#supplyCompositionPanel #documentInvoiceDownloadLink")).to_have_count(0)
                 expect(frame.locator("#supplyCompositionPanel #contractManageControls")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
                 frame.get_by_role("tab", name="Документы").click()
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
-                expect(frame.locator("#invoiceDocumentLabel")).to_contain_text("Document ID:")
+                expect(frame.locator("#invoiceDocumentLabel")).to_contain_text("ID документа:")
                 expect(frame.locator("#contractDocumentLabel")).to_contain_text("Контракт: выбрать")
                 expect(frame.locator("#contractManageControls")).to_be_visible()
                 expect(frame.locator("#uploadContractButton")).to_be_visible()
@@ -408,9 +416,24 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows").get_by_text("2026-05-16")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("2026-05-28")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("HanShang Technology")).to_be_visible()
-                expect(frame.locator("#shipmentRows").get_by_text("Check")).to_be_visible()
-                frame.get_by_role("button", name="关闭 / Close / Закрыть").click()
+                expect(frame.locator("#shipmentRows").get_by_text("Проверить")).to_be_visible()
+                frame.get_by_role("button", name="Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
+                _seed_accepted_ff_supplier_order(entrypoint, invoice_path)
+                frame.locator("body").evaluate("() => window.location.reload()")
+                expect(frame.locator("#orderStatusFilter")).to_be_visible(timeout=5000)
+                expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
+                expect(frame.locator("#orderStatusFilter input[value='in_transit']")).to_be_checked()
+                expect(frame.locator("#orderStatusFilter input[value='accepted_ff']")).not_to_be_checked()
+                expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible(timeout=5000)
+                expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN391")
+                frame.locator("#orderStatusFilter input[value='all']").check()
+                expect(frame.locator("#shipmentRows").get_by_text("26GN391")).to_be_visible(timeout=5000)
+                frame.locator("#orderStatusFilter input[value='all']").uncheck()
+                expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
+                expect(frame.locator("#orderStatusFilter input[value='in_transit']")).to_be_checked()
+                expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible(timeout=5000)
+                expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN391")
                 header_texts = frame.locator(".registry-wrap thead th:visible").evaluate_all(
                             "(nodes) => nodes.map((node) => node.textContent.trim())"
                         )
@@ -419,12 +442,13 @@ def main() -> None:
                 try:
                         invoice_index = next(index for index, text in enumerate(header_texts) if text == "Документы")
                         status_index = header_texts.index("Статус заказа")
-                        actions_index = next(index for index, text in enumerate(header_texts) if "Actions" in text or "Действия" in text)
+                        actions_index = next(index for index, text in enumerate(header_texts) if text == "Действия")
                 except StopIteration as exc:
                         raise AssertionError(f"operator registry must expose invoice/status/actions headers, got {header_texts}") from exc
                 if not invoice_index < status_index < actions_index:
                         raise AssertionError(f"order status header must be after invoice and before actions, got {header_texts}")
-                status_select = frame.locator("[data-order-status-shipment]").first
+                active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
+                status_select = active_row.locator("[data-order-status-shipment]")
                 expect(status_select).to_have_value("production")
                 expect(status_select.locator("option:checked")).to_have_text("На производстве")
                 status_select.select_option("in_transit")
@@ -432,12 +456,13 @@ def main() -> None:
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
                 frame.locator("body").evaluate("() => window.location.reload()")
                 expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible(timeout=5000)
-                expect(frame.locator("[data-order-status-shipment]").first).to_have_value("in_transit")
-                expect(frame.locator("a[data-download]").first).to_have_text("Invoice")
-                expect(frame.locator("[data-delete-shipment]").first).to_have_text("Delete")
-                frame.locator("#shipmentRows tr[data-row]").first.click()
-                expect(frame.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_have_value("2026-05-16")
-                expect(frame.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("2026-05-28")
+                active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
+                expect(active_row.locator("[data-order-status-shipment]")).to_have_value("in_transit")
+                expect(active_row.locator("a[data-download]").first).to_have_text("Скачать invoice")
+                expect(active_row.locator("[data-delete-shipment]").first).to_have_text("Удалить")
+                active_row.click()
+                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-16")
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("2026-05-28")
                 expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
                 frame.get_by_role("tab", name="Документы").click()
@@ -445,7 +470,7 @@ def main() -> None:
                 expect(frame.locator("#contractDocumentLabel")).to_contain_text("Контракт: выбрать")
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
-                frame.get_by_role("button", name="关闭 / Close / Закрыть").click()
+                frame.get_by_role("button", name="Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
 
                 operator_frame.get_by_role("button", name="Реестр поставок").click()
@@ -520,18 +545,18 @@ def main() -> None:
                 expect(supplier_page.get_by_role("button", name="Проверить цены")).to_have_count(0)
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
                 expect(supplier_page.locator("[data-order-status-shipment]")).to_have_count(0)
-                frame.locator("[data-delete-shipment]").first.click()
+                frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first.locator("[data-delete-shipment]").click()
                 expect(frame.locator("[data-delete-confirmation]")).to_be_visible()
                 expect(frame.locator("#shipmentRows")).to_contain_text("26GN390")
-                frame.locator("#shipmentRows tr[data-row]").first.click()
+                frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first.click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
                 frame.locator("[data-delete-cancel]").click()
                 expect(frame.locator("[data-delete-confirmation]")).to_have_count(0)
                 expect(frame.locator("#shipmentRows")).to_contain_text("26GN390")
-                frame.locator("[data-delete-shipment]").first.click()
+                frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first.locator("[data-delete-shipment]").click()
                 expect(frame.locator("[data-delete-confirmation]")).to_be_visible()
                 frame.locator("[data-delete-confirm]").click()
-                expect(frame.locator("#registryMessage")).to_contain_text("订单已删除 / Order deleted / Заказ удалён.", timeout=5000)
+                expect(frame.locator("#registryMessage")).to_contain_text("Заказ удалён.", timeout=5000)
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN390")
                 _assert_supplier_role_browser_ui(browser, tmp_path, invoice_path)
                 browser.close()
@@ -661,6 +686,36 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+def _seed_accepted_ff_supplier_order(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    invoice_path: Path,
+) -> str:
+    parsed = entrypoint.handle_supplier_shipments_parse_request(
+        invoice_path.read_bytes(),
+        uploaded_filename="accepted-ff-browser-invoice.xlsx",
+    )
+    edited_payload = dict(parsed)
+    metadata = dict(edited_payload.get("metadata") or {})
+    metadata["invoice_no"] = "26GN391"
+    edited_payload["metadata"] = metadata
+    payload = {
+        "upload_id": parsed.get("upload_id"),
+        "shipment_date": "2026-05-14",
+        "actual_shipment_date": "2026-05-16",
+        "actual_ff_acceptance_date": "2026-05-28",
+        "payload": edited_payload,
+    }
+    created = entrypoint.handle_supplier_shipments_create_request(payload)
+    shipment_id = str(created.get("shipment_id") or "")
+    if not shipment_id:
+        raise AssertionError(f"accepted_ff seed shipment was not created: {created}")
+    entrypoint.handle_supplier_shipments_order_status_patch_request(
+        shipment_id,
+        {"order_status": "accepted_ff"},
+    )
+    return shipment_id
 
 
 def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> None:

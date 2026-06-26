@@ -1388,6 +1388,7 @@ def _build_handler(
                         can_recheck_prices=is_operator_embedded,
                         can_manage_documents=is_operator_embedded,
                         can_manage_financial_documents=is_operator_embedded,
+                        embedded="operator" if is_operator_embedded else "",
                     ),
                 )
                 return
@@ -4995,9 +4996,11 @@ def _render_sheet_vitrina_supplier_ui(
     can_recheck_prices: bool = True,
     can_manage_documents: bool = False,
     can_manage_financial_documents: bool = False,
+    embedded: str = "",
 ) -> str:
     config_payload = {
         "page_title": "Реестр заказов",
+        "embedded": str(embedded or ""),
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
