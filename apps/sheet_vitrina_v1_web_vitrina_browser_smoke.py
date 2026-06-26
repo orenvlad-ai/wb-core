@@ -106,6 +106,7 @@ def main() -> None:
         "dynamic_object_label": ready_result["dynamic_object_label"],
         "sku_separators": ready_result["sku_separators"],
         "filter_controls": ready_result["filter_controls"],
+        "filter_rail": ready_result["filter_rail"],
         "status_summary": ready_result["status_summary"],
         "auto_schedule_block": ready_result["auto_schedule_block"],
         "activity_surface": ready_result["activity_surface"],
@@ -496,6 +497,7 @@ def run_browser_checks(
             }
             if not all(filter_controls.values()):
                 raise AssertionError(f"missing filter controls: {filter_controls}")
+            filter_rail = _check_filter_rail_and_sku_metric_filter(page)
             table_toolbar = page.evaluate(
                 """() => {
                   const toolbar = document.querySelector('[data-table-toolbar]');
@@ -537,7 +539,7 @@ def run_browser_checks(
                   };
                 }"""
             )
-            expected_toolbar_labels = {"Диапазон", "Секции", "Группа"}
+            expected_toolbar_labels = {"Диапазон", "Секции", "Группа", "SKU-метрики"}
             forbidden_toolbar_labels = {"Поиск", "Столбцы", "Сброс"}
             missing_toolbar_labels = expected_toolbar_labels.difference(set(table_toolbar["labels"]))
             if (
@@ -712,6 +714,7 @@ def run_browser_checks(
         "right_edge_spacer": right_edge_spacer,
         "static_group_labels": static_group_labels,
         "filter_controls": filter_controls,
+        "filter_rail": filter_rail,
         "table_toolbar": table_toolbar,
         "status_summary": status_summary,
         "auto_schedule_block": auto_schedule_block,
@@ -803,6 +806,8 @@ def _print_summary(result: dict[str, object]) -> None:
     if "dynamic_object_label" in result:
         print("web_vitrina_browser_dynamic_object_label: ok ->", result["dynamic_object_label"])
     print("web_vitrina_browser_filters: ok ->", result["filter_controls"])
+    if "filter_rail" in result:
+        print("web_vitrina_browser_filter_rail: ok ->", result["filter_rail"])
     if "table_toolbar" in result:
         print("web_vitrina_browser_table_toolbar: ok ->", result["table_toolbar"])
     print("web_vitrina_browser_metric_toolbar_removed: ok ->", result["metric_toolbar_removed"])
@@ -848,6 +853,274 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "tabs": ", ".join(tab_texts),
         "actions": ", ".join(shell_actions),
         "default_active": active_tabs[0],
+    }
+
+
+def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
+    before = page.evaluate(
+        """() => {
+          const visible = (node) => {
+            if (!node) {
+              return false;
+            }
+            const rect = node.getBoundingClientRect();
+            const styles = getComputedStyle(node);
+            return rect.width > 2 && rect.height > 2 && styles.visibility !== 'hidden' && styles.display !== 'none';
+          };
+          const header = document.querySelector('[data-table-header]');
+          const toggle = document.querySelector('[data-filters-toggle]');
+          const loadStatus = document.querySelector('[data-table-load-status]');
+          const progress = document.querySelector('[data-global-progress]');
+          const loadButton = document.querySelector('[data-load-refresh-button]');
+          const rail = document.querySelector('[data-filters-rail]');
+          const section = document.querySelector('[data-filter-control="section"]');
+          const group = document.querySelector('[data-filter-control="group"]');
+          const toggleRect = toggle ? toggle.getBoundingClientRect() : {right: 0, top: 0, bottom: 0};
+          const statusRect = loadStatus ? loadStatus.getBoundingClientRect() : {left: 0, top: 0, bottom: 0};
+          const buttonRect = loadButton ? loadButton.getBoundingClientRect() : {left: 0, top: 0, bottom: 0};
+          const progressRect = progress ? progress.getBoundingClientRect() : {left: 0, top: 0, bottom: 0};
+          const loadLeft = loadStatus && !loadStatus.hidden
+            ? statusRect.left
+            : (progress && !progress.hidden ? progressRect.left : buttonRect.left);
+          return {
+            headerExists: !!header,
+            toggleVisible: visible(toggle),
+            toggleText: toggle ? (toggle.textContent || '').trim() : '',
+            toggleAriaExpanded: toggle ? toggle.getAttribute('aria-expanded') : '',
+            toggleLeftOfLoadCluster: !!toggle && toggleRect.right <= loadLeft + 2,
+            railHidden: rail ? !!rail.hidden : null,
+            sectionInRail: !!(rail && section && rail.contains(section)),
+            groupInRail: !!(rail && group && rail.contains(group)),
+            sectionVisibleBeforeOpen: visible(section),
+            groupVisibleBeforeOpen: visible(group),
+            sectionCount: document.querySelectorAll('[data-filter-control="section"]').length,
+            groupCount: document.querySelectorAll('[data-filter-control="group"]').length,
+            skuPickerCount: document.querySelectorAll('[data-sku-metric-picker]').length
+          };
+        }"""
+    )
+    if (
+        not before["headerExists"]
+        or not before["toggleVisible"]
+        or before["toggleText"] != "Фильтры"
+        or before["toggleAriaExpanded"] != "false"
+        or not before["toggleLeftOfLoadCluster"]
+        or before["railHidden"] is not True
+        or not before["sectionInRail"]
+        or not before["groupInRail"]
+        or before["sectionVisibleBeforeOpen"]
+        or before["groupVisibleBeforeOpen"]
+        or int(before["sectionCount"]) != 1
+        or int(before["groupCount"]) != 1
+        or int(before["skuPickerCount"]) != 1
+    ):
+        raise AssertionError(f"filter button/closed rail layout mismatch, got {before}")
+
+    page.locator("[data-filters-toggle]").click()
+    page.wait_for_selector("[data-filters-rail]:not([hidden])", timeout=5000)
+    opened = page.evaluate(
+        """() => {
+          const visible = (node) => {
+            if (!node) {
+              return false;
+            }
+            const rect = node.getBoundingClientRect();
+            const styles = getComputedStyle(node);
+            return rect.width > 2 && rect.height > 2 && styles.visibility !== 'hidden' && styles.display !== 'none';
+          };
+          const rail = document.querySelector('[data-filters-rail]');
+          const section = document.querySelector('[data-filter-control="section"]');
+          const group = document.querySelector('[data-filter-control="group"]');
+          const picker = document.querySelector('[data-sku-metric-picker]');
+          return {
+            railHidden: rail ? !!rail.hidden : null,
+            toggleAriaExpanded: (document.querySelector('[data-filters-toggle]') || {}).getAttribute?.('aria-expanded') || '',
+            sectionVisible: visible(section),
+            groupVisible: visible(group),
+            pickerVisible: visible(picker),
+            sectionLabel: section ? (section.getAttribute('aria-label') || '') : '',
+            groupLabel: group ? (group.getAttribute('aria-label') || '') : '',
+            summary: ((document.querySelector('[data-sku-metric-summary]') || {}).textContent || '').trim()
+          };
+        }"""
+    )
+    if (
+        opened["railHidden"]
+        or opened["toggleAriaExpanded"] != "true"
+        or not opened["sectionVisible"]
+        or not opened["groupVisible"]
+        or not opened["pickerVisible"]
+        or opened["sectionLabel"] != "Секции"
+        or opened["groupLabel"] != "Группа"
+        or opened["summary"] != "SKU-метрики: все"
+    ):
+        raise AssertionError(f"opened filter rail mismatch, got {opened}")
+
+    page.locator("[data-sku-metric-toggle]").click()
+    page.wait_for_selector("[data-sku-metric-panel]:not([hidden])", timeout=5000)
+    default_state = page.evaluate(
+        """() => {
+          const all = document.querySelector('[data-sku-metric-all]');
+          const options = Array.from(document.querySelectorAll('[data-sku-metric-option]'));
+          const visibleSkuRows = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"]'));
+          const visibleTotalRows = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="total"]'));
+          const skuMetricKeys = Array.from(new Set(visibleSkuRows.map((row) => {
+            const cell = row.querySelector('[data-metric-key]');
+            return cell ? (cell.getAttribute('data-metric-key') || '') : '';
+          }).filter(Boolean)));
+          const totalMetricKeys = Array.from(new Set(visibleTotalRows.map((row) => {
+            const cell = row.querySelector('[data-metric-key]');
+            return cell ? (cell.getAttribute('data-metric-key') || '') : '';
+          }).filter(Boolean)));
+          const optionValues = options.map((node) => node.value || node.getAttribute('data-sku-metric-option') || '').filter(Boolean);
+          const targetMetric = skuMetricKeys.find((key) => optionValues.includes(key)) || optionValues[0] || '';
+          return {
+            allChecked: !!(all && all.checked),
+            checkedIndividualCount: options.filter((node) => node.checked).length,
+            optionCount: options.length,
+            skuMetricKeys,
+            totalMetricKeys,
+            skuRowCount: visibleSkuRows.length,
+            totalRowCount: visibleTotalRows.length,
+            targetMetric
+          };
+        }"""
+    )
+    if (
+        not default_state["allChecked"]
+        or int(default_state["checkedIndividualCount"]) != 0
+        or int(default_state["optionCount"]) < 2
+        or not default_state["targetMetric"]
+        or len(default_state["skuMetricKeys"]) < 2
+        or len(default_state["totalMetricKeys"]) < 2
+        or int(default_state["skuRowCount"]) <= 0
+        or int(default_state["totalRowCount"]) <= 0
+    ):
+        raise AssertionError(f"SKU metric picker default state mismatch, got {default_state}")
+
+    target_metric = str(default_state["targetMetric"])
+    page.evaluate(
+        """(metricKey) => {
+          const selector = '[data-sku-metric-option="' + CSS.escape(metricKey) + '"]';
+          const option = document.querySelector(selector);
+          if (!option) {
+            throw new Error('missing option ' + metricKey);
+          }
+          option.click();
+        }""",
+        target_metric,
+    )
+    draft_state = page.evaluate(
+        """(metricKey) => {
+          const selector = '[data-sku-metric-option="' + CSS.escape(metricKey) + '"]';
+          const all = document.querySelector('[data-sku-metric-all]');
+          const option = document.querySelector(selector);
+          return {
+            allChecked: !!(all && all.checked),
+            targetChecked: !!(option && option.checked),
+            checkedIndividualCount: Array.from(document.querySelectorAll('[data-sku-metric-option]')).filter((node) => node.checked).length,
+            summary: ((document.querySelector('[data-sku-metric-summary]') || {}).textContent || '').trim()
+          };
+        }""",
+        target_metric,
+    )
+    if draft_state["allChecked"] or not draft_state["targetChecked"] or int(draft_state["checkedIndividualCount"]) != 1:
+        raise AssertionError(f"SKU metric draft selection mismatch, got {draft_state}")
+
+    page.locator("[data-sku-metric-apply]").click()
+    page.wait_for_function(
+        """(metricKey) => {
+          const skuRows = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"]'));
+          if (!skuRows.length) {
+            return false;
+          }
+          return skuRows.every((row) => {
+            const cell = row.querySelector('[data-metric-key]');
+            return cell && (cell.getAttribute('data-metric-key') || '') === metricKey;
+          });
+        }""",
+        arg=target_metric,
+        timeout=5000,
+    )
+    narrowed = page.evaluate(
+        """(metricKey) => {
+          const metricKeysForKind = (kind) => Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="' + kind + '"]')).map((row) => {
+            const cell = row.querySelector('[data-metric-key]');
+            return cell ? (cell.getAttribute('data-metric-key') || '') : '';
+          }).filter(Boolean)));
+          const skuRows = Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"]'));
+          const separators = Array.from(document.querySelectorAll('[data-table-body] tr.sku-separator-row'));
+          const separatorsHaveSkuRows = separators.every((row) => {
+            const next = row.nextElementSibling;
+            return !!next && (next.getAttribute('data-row-kind') || '') === 'sku';
+          });
+          return {
+            summary: ((document.querySelector('[data-sku-metric-summary]') || {}).textContent || '').trim(),
+            panelHidden: !!(document.querySelector('[data-sku-metric-panel]') || {}).hidden,
+            skuMetricKeys: metricKeysForKind('sku'),
+            totalMetricKeys: metricKeysForKind('total'),
+            skuRowCount: skuRows.length,
+            separatorsHaveSkuRows,
+            targetMetric: metricKey
+          };
+        }""",
+        target_metric,
+    )
+    if (
+        narrowed["summary"] != "SKU-метрики: 1"
+        or not narrowed["panelHidden"]
+        or narrowed["skuMetricKeys"] != [target_metric]
+        or set(narrowed["totalMetricKeys"]) != set(default_state["totalMetricKeys"])
+        or int(narrowed["skuRowCount"]) >= int(default_state["skuRowCount"])
+        or not narrowed["separatorsHaveSkuRows"]
+    ):
+        raise AssertionError(f"SKU metric filter must narrow only SKU rows and keep total rows full, got {narrowed}")
+
+    page.locator("[data-sku-metric-toggle]").click()
+    page.wait_for_selector("[data-sku-metric-panel]:not([hidden])", timeout=5000)
+    page.locator("[data-sku-metric-reset]").click()
+    page.wait_for_function(
+        """(expectedCount) => {
+          const keys = new Set(Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"] [data-metric-key]'))
+            .map((node) => node.getAttribute('data-metric-key') || '')
+            .filter(Boolean));
+          return keys.size === expectedCount;
+        }""",
+        arg=len(default_state["skuMetricKeys"]),
+        timeout=5000,
+    )
+    reset = page.evaluate(
+        """() => ({
+          summary: ((document.querySelector('[data-sku-metric-summary]') || {}).textContent || '').trim(),
+          allChecked: !!(document.querySelector('[data-sku-metric-all]') || {}).checked,
+          checkedIndividualCount: Array.from(document.querySelectorAll('[data-sku-metric-option]')).filter((node) => node.checked).length,
+          skuMetricKeys: Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="sku"] [data-metric-key]'))
+            .map((node) => node.getAttribute('data-metric-key') || '')
+            .filter(Boolean))),
+          totalMetricKeys: Array.from(new Set(Array.from(document.querySelectorAll('[data-table-body] tr[data-row-kind="total"] [data-metric-key]'))
+            .map((node) => node.getAttribute('data-metric-key') || '')
+            .filter(Boolean)))
+        })"""
+    )
+    if (
+        reset["summary"] != "SKU-метрики: все"
+        or not reset["allChecked"]
+        or int(reset["checkedIndividualCount"]) != 0
+        or set(reset["skuMetricKeys"]) != set(default_state["skuMetricKeys"])
+        or set(reset["totalMetricKeys"]) != set(default_state["totalMetricKeys"])
+    ):
+        raise AssertionError(f"SKU metric reset must restore full table, got {reset}")
+
+    page.locator("[data-filters-toggle]").click()
+    page.wait_for_function("() => !!document.querySelector('[data-filters-rail]').hidden", timeout=5000)
+    return {
+        "button": "Фильтры",
+        "default": "SKU-метрики: все",
+        "target_metric": target_metric,
+        "sku_rows_before": default_state["skuRowCount"],
+        "sku_rows_filtered": narrowed["skuRowCount"],
+        "total_metric_count": len(default_state["totalMetricKeys"]),
+        "reset_full": True,
     }
 
 
@@ -2250,6 +2523,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             const selectedText = node.options && node.selectedIndex >= 0 ? (node.options[node.selectedIndex].text || '') : '';
             return {
               exists: true,
+              visible: rect.width > 2 && rect.height > 2 && styles.visibility !== 'hidden' && styles.display !== 'none',
               text: selectedText,
               width: Math.round(rect.width),
               textWidth: measureText(node, selectedText),
@@ -2386,8 +2660,13 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         if (
             not control.get("exists")
             or not str(control.get("text") or "").startswith("Все ")
-            or int(control["textWidth"]) > available_text_width + 2
-            or int(control["paddingRight"]) < 22
+            or (
+                control.get("visible")
+                and (
+                    int(control["textWidth"]) > available_text_width + 2
+                    or int(control["paddingRight"]) < 22
+                )
+            )
         ):
             raise AssertionError(f"{control_name} must show its full selected label with chevron padding, got {payload}")
     return payload
