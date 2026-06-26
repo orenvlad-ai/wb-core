@@ -1153,6 +1153,42 @@ class RegistryUploadHttpEntrypoint:
             "canonical_store": "server_runtime_user_config",
         }
 
+    def handle_sheet_vitrina_users_list_request(self) -> dict[str, Any]:
+        return {
+            "users": self.runtime.list_sheet_vitrina_users(),
+            "canonical_store": "server_runtime_sqlite",
+        }
+
+    def load_sheet_vitrina_runtime_user_by_username(self, username: str) -> dict[str, Any] | None:
+        return self.runtime.load_sheet_vitrina_user_by_username(username)
+
+    def load_sheet_vitrina_runtime_user(self, user_id: str) -> dict[str, Any] | None:
+        return self.runtime.load_sheet_vitrina_user(user_id)
+
+    def handle_sheet_vitrina_user_create_request(self, user: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "user": self.runtime.save_sheet_vitrina_user(user),
+            "canonical_store": "server_runtime_sqlite",
+        }
+
+    def handle_sheet_vitrina_user_patch_request(
+        self,
+        user_id: str,
+        updates: Mapping[str, Any],
+        *,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        return {
+            "user": self.runtime.update_sheet_vitrina_user(user_id, updates, updated_at=updated_at),
+            "canonical_store": "server_runtime_sqlite",
+        }
+
+    def handle_sheet_vitrina_user_archive_request(self, user_id: str, *, updated_at: str) -> dict[str, Any]:
+        return {
+            "user": self.runtime.archive_sheet_vitrina_user(user_id, updated_at=updated_at),
+            "canonical_store": "server_runtime_sqlite",
+        }
+
     def handle_sheet_scheduled_auto_update_request(
         self,
         *,

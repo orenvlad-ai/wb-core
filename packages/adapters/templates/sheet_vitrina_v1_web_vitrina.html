@@ -154,6 +154,10 @@
       background: transparent;
     }
 
+    .settings-embed-frame {
+      height: 920px;
+    }
+
     .research-panel {
       display: grid;
       gap: 12px;
@@ -3953,9 +3957,9 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="settings" role="tab" aria-selected="false">Настройки</button>
       </nav>
       <div class="shell-actions">
-        <a class="shell-logout-link" data-settings-link href="/sheet-vitrina-v1/settings">Настройки</a>
         <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
       </div>
     </header>
@@ -4555,6 +4559,10 @@
         </section>
       </section>
     </section>
+
+    <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="settings" hidden>
+      <iframe class="operator-embed-frame settings-embed-frame" title="Настройки" data-settings-embed-frame scrolling="auto"></iframe>
+    </section>
   </main>
 
   <script>
@@ -4562,6 +4570,7 @@
     const unifiedTabButtons = Array.from(document.querySelectorAll("[data-unified-tab-button]"));
     const unifiedTabPanels = Array.from(document.querySelectorAll("[data-unified-tab-panel]"));
     const operatorEmbedFrames = Array.from(document.querySelectorAll("[data-operator-embed-frame]"));
+    const settingsEmbedFrame = document.querySelector("[data-settings-embed-frame]");
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
     const globalProgressNode = document.querySelector("[data-global-progress]");
@@ -4810,8 +4819,18 @@
       ["last_error", "Ошибка"]
     ];
     const RESEARCH_UNIFIED_TAB = "research";
+    const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
+    const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
+    const ALLOWED_UNIFIED_TABS = new Set(
+      CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
+        return VALID_UNIFIED_TABS.has(String(tabName || ""));
+      })
+    );
+    if (!ALLOWED_UNIFIED_TABS.size) {
+      ALLOWED_UNIFIED_TABS.add(DEFAULT_UNIFIED_TAB);
+    }
     const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker], details[data-feedbacks-complaints-column-manager]";
     const SELLER_RECOVERY_ACTIVE_STATUSES = new Set([
       "starting",
@@ -5642,20 +5661,32 @@
 
     function normalizeUnifiedTab(value) {
       const normalized = String(value || "").trim();
-      return VALID_UNIFIED_TABS.has(normalized) ? normalized : DEFAULT_UNIFIED_TAB;
+      return VALID_UNIFIED_TABS.has(normalized) && ALLOWED_UNIFIED_TABS.has(normalized)
+        ? normalized
+        : defaultAllowedUnifiedTab();
+    }
+
+    function defaultAllowedUnifiedTab() {
+      const configured = String(WEB_VITRINA_CONFIG.initial_tab || "").trim();
+      if (VALID_UNIFIED_TABS.has(configured) && ALLOWED_UNIFIED_TABS.has(configured)) {
+        return configured;
+      }
+      return ALLOWED_UNIFIED_TABS.has(DEFAULT_UNIFIED_TAB)
+        ? DEFAULT_UNIFIED_TAB
+        : Array.from(ALLOWED_UNIFIED_TABS)[0];
     }
 
     function initialUnifiedTab() {
       const params = new URLSearchParams(window.location.search);
       const queryTab = normalizeUnifiedTab(params.get("tab"));
-      if (queryTab !== DEFAULT_UNIFIED_TAB) {
+      if (queryTab !== defaultAllowedUnifiedTab()) {
         return queryTab;
       }
       const hashTab = normalizeUnifiedTab(String(window.location.hash || "").replace(/^#/, ""));
-      if (hashTab !== DEFAULT_UNIFIED_TAB) {
+      if (hashTab !== defaultAllowedUnifiedTab()) {
         return hashTab;
       }
-      return readPersistedUnifiedTab();
+      return normalizeUnifiedTab(readPersistedUnifiedTab() || defaultAllowedUnifiedTab());
     }
 
     function setupFloatingControlListeners() {
@@ -5780,6 +5811,22 @@
       });
     }
 
+    function applyUnifiedTabAccess() {
+      unifiedTabButtons.forEach(function(button) {
+        const tabName = String(button.getAttribute("data-unified-tab-button") || "");
+        const allowed = ALLOWED_UNIFIED_TABS.has(tabName);
+        button.hidden = !allowed;
+        button.disabled = !allowed;
+        button.setAttribute("aria-disabled", allowed ? "false" : "true");
+      });
+      unifiedTabPanels.forEach(function(panel) {
+        const tabName = String(panel.getAttribute("data-unified-tab-panel") || "");
+        if (!ALLOWED_UNIFIED_TABS.has(tabName)) {
+          panel.hidden = true;
+        }
+      });
+    }
+
     function activateUnifiedTab(tabName, options) {
       const activeTab = normalizeUnifiedTab(tabName);
       closeAllFloatingControls();
@@ -5800,9 +5847,12 @@
       if (activeTab === FEEDBACKS_UNIFIED_TAB) {
         ensureFeedbacksInitialized();
       }
+      if (activeTab === SETTINGS_UNIFIED_TAB) {
+        ensureSettingsEmbed();
+      }
       if (!options || options.persist !== false) {
         const url = new URL(window.location.href);
-        if (activeTab === DEFAULT_UNIFIED_TAB) {
+        if (activeTab === defaultAllowedUnifiedTab()) {
           url.searchParams.delete("tab");
           if (url.hash === "#vitrina") {
             url.hash = "";
@@ -5827,12 +5877,12 @@
 
     function readPersistedUnifiedTab() {
       if (!window || !window.localStorage) {
-        return DEFAULT_UNIFIED_TAB;
+        return defaultAllowedUnifiedTab();
       }
       try {
         return normalizeUnifiedTab(window.localStorage.getItem(unifiedTabStorageKey()));
       } catch (error) {
-        return DEFAULT_UNIFIED_TAB;
+        return defaultAllowedUnifiedTab();
       }
     }
 
@@ -5857,6 +5907,15 @@
       const url = new URL(WEB_VITRINA_CONFIG.operator_path, window.location.origin);
       url.searchParams.set("embedded_tab", tabName);
       frame.setAttribute("src", url.toString());
+    }
+
+    function ensureSettingsEmbed() {
+      if (!settingsEmbedFrame || settingsEmbedFrame.getAttribute("src")) {
+        return;
+      }
+      const url = new URL(WEB_VITRINA_CONFIG.settings_path || "/sheet-vitrina-v1/settings", window.location.origin);
+      url.searchParams.set("embedded", "1");
+      settingsEmbedFrame.setAttribute("src", url.toString());
     }
 
     function handleOperatorEmbedMessage(event) {
@@ -14532,10 +14591,15 @@
       }
     }
 
+    applyUnifiedTabAccess();
     activateUnifiedTab(initialUnifiedTab(), {persist: false});
-    loadVitrinaAutoSchedules();
+    if (ALLOWED_UNIFIED_TABS.has(DEFAULT_UNIFIED_TAB)) {
+      loadVitrinaAutoSchedules();
+    }
     purgeObsoleteHistoryStorage();
-    loadPageComposition();
+    if (ALLOWED_UNIFIED_TABS.has(DEFAULT_UNIFIED_TAB)) {
+      loadPageComposition();
+    }
   </script>
 </body>
 </html>
