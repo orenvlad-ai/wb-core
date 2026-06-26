@@ -68,9 +68,11 @@ def main() -> None:
                 "WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH": _password_hash("supplier-password-not-secret"),
             }
         ):
+            runtime_entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=runtime_dir)
+            _seed_service_user(runtime_entrypoint)
             server = build_registry_upload_http_server(
                 config,
-                entrypoint=RegistryUploadHttpEntrypoint(runtime_dir=runtime_dir),
+                entrypoint=runtime_entrypoint,
             )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -144,12 +146,59 @@ def main() -> None:
                 users_code, users_payload = _opener_json(admin, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
                 if users_code != 200 or not _has_user(users_payload, admin_username, "admin"):
                     raise AssertionError(f"admin users API must list env bootstrap admin: {users_code} {users_payload}")
+                if _service_usernames(users_payload):
+                    raise AssertionError(f"default users API must hide service users: {users_payload}")
+                if users_payload.get("hidden_service_users_count") != 1 or users_payload.get("service_users_hidden") is not True:
+                    raise AssertionError(f"default users API must report hidden service user count: {users_payload}")
+                if "service_users" in users_payload:
+                    raise AssertionError(f"default users API must not expose service_users diagnostics: {users_payload}")
+                service_code, service_payload = _opener_json(
+                    admin,
+                    f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}?include_service=1",
+                )
+                if service_code != 200 or "codex_live_supply_smoke" not in _service_usernames(service_payload, key="service_users"):
+                    raise AssertionError(f"diagnostic users API must expose service users separately: {service_code} {service_payload}")
+                if _service_usernames(service_payload):
+                    raise AssertionError(f"diagnostic users API must still keep users[] user-facing only: {service_payload}")
                 if _section_ids(users_payload) != ["vitrina", "supply", "reports", "feedbacks", "research", "settings"]:
                     raise AssertionError(f"users API must expose available sections: {users_payload}")
                 if not _env_user_has_readonly_reason(users_payload, admin_username) or not _env_user_has_readonly_reason(users_payload, "hunshang"):
                     raise AssertionError(f"env users must expose readonly reason: {users_payload}")
                 if "password" in json.dumps(users_payload).lower() or "password_hash" in json.dumps(users_payload).lower():
                     raise AssertionError("users API must not expose password fields")
+
+                reserved_code, reserved_payload = _opener_post_json(
+                    admin,
+                    f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}",
+                    {
+                        "username": "codex_live_supply_manual",
+                        "display_name": "Codex live supply manual",
+                        "allowed_sections": ["supply"],
+                        "password": "reserved-prefix-password",
+                        "is_active": True,
+                    },
+                )
+                if reserved_code != 400 or "reserved service/debug/test identity" not in str(reserved_payload.get("error")):
+                    raise AssertionError(f"reserved service username must be rejected: {reserved_code} {reserved_payload}")
+                reserved_display_code, reserved_display_payload = _opener_post_json(
+                    admin,
+                    f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}",
+                    {
+                        "username": "reserved-display-user",
+                        "display_name": "Codex live smoke user",
+                        "allowed_sections": ["supply"],
+                        "password": "reserved-display-password",
+                        "is_active": True,
+                    },
+                )
+                if (
+                    reserved_display_code != 400
+                    or "reserved service/debug/test identity" not in str(reserved_display_payload.get("error"))
+                ):
+                    raise AssertionError(
+                        f"reserved service display name must be rejected: "
+                        f"{reserved_display_code} {reserved_display_payload}"
+                    )
 
                 invalid_code, invalid_payload = _opener_post_json(
                     admin,
@@ -362,9 +411,11 @@ def main() -> None:
                 if duplicate_code != 400 or "username already exists" not in str(duplicate_payload.get("error")):
                     raise AssertionError("runtime username must be unique against env principals")
                 final_users_code, final_users_payload = _opener_json(admin, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
-                debug_usernames = _debug_usernames(final_users_payload)
-                if final_users_code != 200 or debug_usernames:
-                    raise AssertionError(f"users-admin smoke must not leave codex_debug_* users: {debug_usernames}")
+                service_usernames = _service_usernames(final_users_payload)
+                if final_users_code != 200 or service_usernames:
+                    raise AssertionError(f"users-admin smoke must not expose service/debug users: {service_usernames}")
+                if final_users_payload.get("hidden_service_users_count") != 1:
+                    raise AssertionError(f"seeded service user must stay hidden by default: {final_users_payload}")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -418,6 +469,23 @@ def _assert_last_admin_guard_without_env() -> None:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+
+def _seed_service_user(entrypoint: RegistryUploadHttpEntrypoint) -> None:
+    entrypoint.handle_sheet_vitrina_user_create_request(
+        {
+            "user_id": "user_service_codex_live_supply_smoke",
+            "username": "codex_live_supply_smoke",
+            "display_name": "Codex live supply smoke",
+            "role": "supply_operator",
+            "allowed_sections": ["supply"],
+            "manage_users": False,
+            "password_hash": _password_hash("service-password-not-secret"),
+            "is_active": False,
+            "created_at": "2026-06-26T00:00:00Z",
+            "updated_at": "2026-06-26T00:00:00Z",
+        }
+    )
 
 
 def _create_user(opener: urllib_request.OpenerDirector, base_url: str, payload: dict[str, object]) -> dict[str, object]:
@@ -475,8 +543,8 @@ def _find_user(payload: dict[str, object], username: str) -> dict[str, object] |
     return None
 
 
-def _debug_usernames(payload: dict[str, object]) -> list[str]:
-    users = payload.get("users")
+def _service_usernames(payload: dict[str, object], *, key: str = "users") -> list[str]:
+    users = payload.get(key)
     if not isinstance(users, list):
         return []
     result: list[str] = []
@@ -484,7 +552,8 @@ def _debug_usernames(payload: dict[str, object]) -> list[str]:
         if not isinstance(user, dict):
             continue
         username = str(user.get("username") or "")
-        if username.startswith("codex_debug_"):
+        display_name = str(user.get("display_name") or "").lower()
+        if username.startswith(("codex_", "smoke_", "test_")) or "codex live" in display_name or "codex debug" in display_name:
             result.append(username)
     return result
 
@@ -539,6 +608,11 @@ def _assert_users_access_picker_browser(
             page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}?embedded=1", wait_until="domcontentloaded")
             page.locator('[data-settings-group-button="users"]').click()
             page.wait_for_selector(f'tr[data-user-id="{ui_user_id}"]')
+            if page.locator("#userRows").inner_text().find("codex_live_supply_smoke") != -1:
+                raise AssertionError("users UI must not render service/debug runtime rows")
+            users_message = page.locator("#usersMessage").inner_text()
+            if "скрыто служебных: 1" not in users_message:
+                raise AssertionError(f"users UI must disclose hidden service count: {users_message}")
 
             if page.locator("fieldset.access-fieldset").count() or page.locator(".section-checkbox-grid").count():
                 raise AssertionError("users UI must not render always-expanded access fieldset/grid")

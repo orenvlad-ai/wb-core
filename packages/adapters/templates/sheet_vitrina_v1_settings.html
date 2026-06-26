@@ -1333,7 +1333,11 @@
             : availableSections;
           renderCreateUserAccessControls();
           renderUsers();
-          setUsersMessage("Пользователи загружены: " + users.length, "success");
+          const hiddenServiceUsersCount = Number(payload.hidden_service_users_count || 0);
+          const hiddenServiceSuffix = hiddenServiceUsersCount > 0
+            ? " · скрыто служебных: " + hiddenServiceUsersCount
+            : "";
+          setUsersMessage("Пользователи загружены: " + users.length + hiddenServiceSuffix, "success");
         } catch (error) {
           setUsersMessage(error.message, "error");
           userRows.innerHTML = '<tr><td colspan="7">Не удалось загрузить пользователей.</td></tr>';
