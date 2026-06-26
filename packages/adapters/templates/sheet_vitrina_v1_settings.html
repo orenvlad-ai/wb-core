@@ -104,18 +104,24 @@
     .pill.warning { background: rgba(250, 204, 21, .12); color: var(--warning); }
     .pill.success { background: rgba(52, 211, 153, .12); color: var(--success); }
     .compact-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-    .users-form { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)) minmax(260px, 1.4fr) minmax(120px, .7fr) auto; gap: 10px; align-items: end; margin-top: 12px; }
-    .users-table { min-width: 1420px; }
+    .users-form { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(150px, 1fr) minmax(160px, 1fr) minmax(180px, .9fr) minmax(116px, .55fr) auto; gap: 10px; align-items: end; margin-top: 12px; }
+    .users-table { min-width: 1320px; }
     .users-table th.col-user { width: 160px; }
     .users-table th.col-display { width: 190px; }
-    .users-table th.col-access { width: 310px; }
+    .users-table th.col-access { width: 210px; }
     .users-table th.col-status { width: 120px; }
     .users-table th.col-date { width: 170px; }
     .users-table th.col-user-actions { width: 320px; }
     .readonly-row { opacity: .72; }
-    .access-fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 8px; min-width: 0; }
-    .access-fieldset legend { padding: 0 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
-    .section-checkbox-grid { display: grid; grid-template-columns: repeat(2, minmax(110px, 1fr)); gap: 6px 10px; }
+    .access-picker { position: relative; min-width: 0; }
+    .access-picker-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .access-picker-toggle { width: 100%; justify-content: space-between; min-width: 0; background: var(--control); }
+    .access-picker-summary { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+    .access-picker-summary.is-readonly { display: inline-flex; max-width: 100%; min-height: 34px; align-items: center; border: 1px solid rgba(177, 139, 255, 0.18); border-radius: 6px; padding: 7px 8px; background: rgba(16, 19, 27, .5); color: var(--muted); }
+    .access-picker-chevron { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+    .access-picker-popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 245px; max-width: calc(100vw - 48px); border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #171923; box-shadow: 0 18px 42px rgba(0, 0, 0, .38); }
+    .access-picker-popover[hidden] { display: none; }
+    .access-picker-options { display: grid; grid-template-columns: 1fr; gap: 7px; }
     .section-checkbox { display: inline-flex; gap: 6px; align-items: center; min-width: 0; font-size: 12px; color: var(--text); }
     .section-checkbox input { width: auto; margin: 0; }
     .manage-users-access { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
@@ -328,14 +334,20 @@
             <span>Пароль</span>
             <input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="Минимум 8 символов">
           </label>
-          <fieldset class="access-fieldset">
-            <legend>Доступы</legend>
-            <div class="section-checkbox-grid" data-new-user-sections></div>
-            <label class="section-checkbox manage-users-access">
-              <input type="checkbox" id="newManageUsersInput">
-              <span>Управление пользователями</span>
-            </label>
-          </fieldset>
+          <div class="access-picker" data-access-picker="new">
+            <span class="access-picker-label">Доступы</span>
+            <button class="access-picker-toggle" type="button" data-access-picker-toggle aria-expanded="false">
+              <span class="access-picker-summary" data-access-summary>Доступы</span>
+              <span class="access-picker-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div class="access-picker-popover" data-access-picker-popover hidden>
+              <div class="access-picker-options" data-new-user-sections></div>
+              <label class="section-checkbox manage-users-access">
+                <input type="checkbox" id="newManageUsersInput">
+                <span>Управление пользователями</span>
+              </label>
+            </div>
+          </div>
           <label class="field">
             <span>Статус</span>
             <select id="newActiveSelect">
@@ -418,6 +430,7 @@
       const newPasswordInput = document.getElementById("newPasswordInput");
       const newUserSections = document.querySelector("[data-new-user-sections]");
       const newManageUsersInput = document.getElementById("newManageUsersInput");
+      const newAccessPicker = document.querySelector('[data-access-picker="new"]');
       const newActiveSelect = document.getElementById("newActiveSelect");
       const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v2";
       const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
@@ -1123,7 +1136,7 @@
         return availableSections.map((section) => {
           const sectionId = String(section.section_id || "");
           return [
-            '<label class="section-checkbox">',
+            '<label class="section-checkbox access-picker-option">',
             '<input type="checkbox" data-section-checkbox="' + escapeHtml(name) + '" value="' + escapeHtml(sectionId) + '"' +
               (selected.has(sectionId) ? " checked" : "") +
               (disabled ? " disabled" : "") +
@@ -1134,12 +1147,57 @@
         }).join("");
       }
 
+      function sectionLabel(sectionId) {
+        const section = availableSections.find((item) => String(item.section_id || "") === sectionId);
+        return section ? String(section.label || sectionId) : sectionId;
+      }
+
+      function sectionCountWord(count) {
+        const tail100 = count % 100;
+        const tail10 = count % 10;
+        if (tail100 >= 11 && tail100 <= 14) {
+          return "разделов";
+        }
+        if (tail10 === 1) {
+          return "раздел";
+        }
+        if (tail10 >= 2 && tail10 <= 4) {
+          return "раздела";
+        }
+        return "разделов";
+      }
+
+      function capitalizedSummary(text) {
+        return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+      }
+
+      function accessSummaryText(selectedSections, manageUsers, role, withPrefix) {
+        const normalized = normalizeAllowedSections(selectedSections);
+        const prefix = withPrefix ? "Доступы: " : "";
+        if (role === "supplier" && normalized.length === 0 && !manageUsers) {
+          return prefix + "Supplier-only";
+        }
+        let body = "";
+        if (normalized.length === availableSections.length && manageUsers) {
+          body = "все + управление";
+        } else if (normalized.length === 1) {
+          body = sectionLabel(normalized[0]) + (manageUsers ? " + управление" : "");
+        } else if (normalized.length > 1) {
+          body = normalized.length + " " + sectionCountWord(normalized.length) + (manageUsers ? " + управление" : "");
+        } else {
+          body = manageUsers ? "управление" : "нет разделов";
+        }
+        return prefix + (withPrefix ? body : capitalizedSummary(body));
+      }
+
       function renderCreateUserAccessControls() {
         if (!newUserSections) {
           return;
         }
         newUserSections.innerHTML = renderSectionCheckboxes("new-user", ["vitrina", "supply", "reports", "feedbacks", "research"], false);
         newManageUsersInput.checked = false;
+        initializeAccessPicker(newAccessPicker);
+        updateAccessPickerSummary(newAccessPicker);
       }
 
       function selectedSectionsFrom(container) {
@@ -1157,6 +1215,106 @@
         if (settingsCheckbox) {
           settingsCheckbox.checked = true;
         }
+      }
+
+      function closeAccessPickers(exceptPicker) {
+        Array.from(document.querySelectorAll("[data-access-picker]")).forEach((picker) => {
+          if (exceptPicker && picker === exceptPicker) {
+            return;
+          }
+          const popover = picker.querySelector("[data-access-picker-popover]");
+          const toggle = picker.querySelector("[data-access-picker-toggle]");
+          if (popover) {
+            popover.hidden = true;
+          }
+          if (toggle) {
+            toggle.setAttribute("aria-expanded", "false");
+          }
+        });
+      }
+
+      function updateAccessPickerSummary(picker) {
+        if (!picker) {
+          return;
+        }
+        const summary = picker.querySelector("[data-access-summary]");
+        const sectionContainer = picker.querySelector("[data-new-user-sections], [data-user-sections]");
+        const manageInput = picker.querySelector('#newManageUsersInput, [data-user-field="manage_users"]');
+        if (!summary) {
+          return;
+        }
+        summary.textContent = accessSummaryText(
+          selectedSectionsFrom(sectionContainer),
+          Boolean(manageInput && manageInput.checked),
+          picker.getAttribute("data-access-role") || "",
+          true
+        );
+      }
+
+      function initializeAccessPicker(picker) {
+        if (!picker || picker.dataset.accessPickerBound === "1") {
+          return;
+        }
+        picker.dataset.accessPickerBound = "1";
+        const toggle = picker.querySelector("[data-access-picker-toggle]");
+        const popover = picker.querySelector("[data-access-picker-popover]");
+        if (!toggle || !popover) {
+          return;
+        }
+        toggle.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const nextOpen = popover.hidden;
+          closeAccessPickers(picker);
+          popover.hidden = !nextOpen;
+          toggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+        });
+        popover.addEventListener("click", (event) => {
+          event.stopPropagation();
+        });
+        picker.addEventListener("change", (event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLInputElement)) {
+            return;
+          }
+          if (!target.matches('[data-section-checkbox], #newManageUsersInput, [data-user-field="manage_users"]')) {
+            return;
+          }
+          const sectionContainer = picker.querySelector("[data-new-user-sections], [data-user-sections]");
+          const manageInput = picker.querySelector('#newManageUsersInput, [data-user-field="manage_users"]');
+          ensureSettingsCheckedForManageUsers(sectionContainer, manageInput);
+          updateAccessPickerSummary(picker);
+        });
+        updateAccessPickerSummary(picker);
+      }
+
+      function renderUserAccessCell(user, userId, readonly) {
+        const allowedSections = user.allowed_sections || [];
+        const manageUsers = Boolean(user.manage_users);
+        const role = String(user.role || "");
+        if (readonly) {
+          return '<span class="access-picker-summary is-readonly" data-access-summary>' +
+            escapeHtml(accessSummaryText(allowedSections, manageUsers, role, false)) +
+            '</span>';
+        }
+        return [
+          '<div class="access-picker" data-access-picker="' + escapeHtml(userId) + '" data-access-role="' + escapeHtml(role) + '">',
+          '<button class="access-picker-toggle" type="button" data-access-picker-toggle aria-expanded="false">',
+          '<span class="access-picker-summary" data-access-summary>' +
+            escapeHtml(accessSummaryText(allowedSections, manageUsers, role, true)) +
+          '</span>',
+          '<span class="access-picker-chevron" aria-hidden="true">▾</span>',
+          '</button>',
+          '<div class="access-picker-popover" data-access-picker-popover hidden>',
+          '<div class="access-picker-options" data-user-sections="' + escapeHtml(userId) + '">',
+          renderSectionCheckboxes(userId, allowedSections, false),
+          '</div>',
+          '<label class="section-checkbox manage-users-access">',
+          '<input type="checkbox" data-user-field="manage_users"' + (manageUsers ? " checked" : "") + '>',
+          '<span>Управление пользователями</span>',
+          '</label>',
+          '</div>',
+          '</div>'
+        ].join("");
       }
 
       async function loadUsers() {
@@ -1200,6 +1358,9 @@
         Array.from(userRows.querySelectorAll("[data-user-delete]")).forEach((button) => {
           button.addEventListener("click", () => deleteUser(button.dataset.userDelete || ""));
         });
+        Array.from(userRows.querySelectorAll("[data-access-picker]")).forEach((picker) => {
+          initializeAccessPicker(picker);
+        });
       }
 
       function renderUserRow(user) {
@@ -1228,13 +1389,7 @@
           '<td>' + escapeHtml(user.username || "") + sourceLabel + readonlyReason + '</td>',
           '<td><input data-user-field="display_name" value="' + escapeHtml(user.display_name || "") + '"' + disabled + '></td>',
           '<td>',
-          '<div class="section-checkbox-grid" data-user-sections="' + escapeHtml(userId) + '">',
-          renderSectionCheckboxes(userId, user.allowed_sections || [], readonly),
-          '</div>',
-          '<label class="section-checkbox manage-users-access">',
-          '<input type="checkbox" data-user-field="manage_users"' + (user.manage_users ? " checked" : "") + disabled + '>',
-          '<span>Управление пользователями</span>',
-          '</label>',
+          renderUserAccessCell(user, userId, readonly),
           '</td>',
           '<td><select data-user-field="is_active"' + disabled + '>',
           '<option value="true"' + (statusValue === "true" ? " selected" : "") + '>Активен</option>',
@@ -1248,6 +1403,8 @@
       }
 
       async function createUser() {
+        ensureSettingsCheckedForManageUsers(newUserSections, newManageUsersInput);
+        updateAccessPickerSummary(newAccessPicker);
         const payload = {
           username: newUsernameInput.value.trim(),
           display_name: newDisplayNameInput.value.trim(),
@@ -1256,8 +1413,6 @@
           password: newPasswordInput.value,
           is_active: newActiveSelect.value === "true"
         };
-        ensureSettingsCheckedForManageUsers(newUserSections, newManageUsersInput);
-        payload.allowed_sections = selectedSectionsFrom(newUserSections);
         setUsersMessage("Создаём пользователя...", "");
         try {
           const result = await fetchJson(usersPath, {
@@ -1297,6 +1452,7 @@
         });
         const sectionContainer = row.querySelector("[data-user-sections]");
         ensureSettingsCheckedForManageUsers(sectionContainer, row.querySelector('[data-user-field="manage_users"]'));
+        updateAccessPickerSummary(row.querySelector("[data-access-picker]"));
         payload.allowed_sections = selectedSectionsFrom(sectionContainer);
         setUsersMessage("Сохраняем пользователя...", "");
         try {
@@ -1417,6 +1573,12 @@
       });
       reloadUsersButton.addEventListener("click", loadUsers);
       createUserButton.addEventListener("click", createUser);
+      document.addEventListener("click", () => closeAccessPickers());
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          closeAccessPickers();
+        }
+      });
       renderCreateUserAccessControls();
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
