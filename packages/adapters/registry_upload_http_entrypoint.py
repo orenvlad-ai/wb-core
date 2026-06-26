@@ -16,6 +16,7 @@ import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+import re
 import socketserver
 import time
 from typing import Any, Mapping, Sequence
@@ -148,6 +149,20 @@ WEB_AUTH_UNIFIED_TAB_SECTIONS = {
     "research": WEB_AUTH_SECTION_RESEARCH,
     "settings": WEB_AUTH_SECTION_SETTINGS,
 }
+SERVICE_USER_USERNAME_PREFIXES = (
+    "codex_",
+    "codex_live_",
+    "codex_debug_",
+    "smoke_",
+    "test_",
+)
+SERVICE_USER_DISPLAY_NAME_PHRASES = (
+    "codex live",
+    "codex debug",
+)
+SERVICE_USER_DISPLAY_NAME_WORDS = ("smoke", "test")
+SERVICE_USER_KINDS = {"service", "test", "debug"}
+SERVICE_USER_CREATORS = {"codex", "public_verify", "smoke"}
 DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
 DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
 DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check"
@@ -1449,7 +1464,7 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SETTINGS_USERS_PATH:
-                _handle_settings_users_list(self, entrypoint)
+                _handle_settings_users_list(self, entrypoint, query=parsed.query)
                 return
 
             if parsed.path == sheet_operator_ui_path:
@@ -4017,11 +4032,22 @@ def _write_auth_forbidden(handler: BaseHTTPRequestHandler, path: str) -> None:
 def _handle_settings_users_list(
     handler: BaseHTTPRequestHandler,
     entrypoint: RegistryUploadHttpEntrypoint,
+    *,
+    query: str = "",
 ) -> None:
     if not _ensure_admin_role(handler, DEFAULT_SETTINGS_USERS_PATH):
         return
     try:
-        _write_json_response(handler, HTTPStatus.OK, _settings_users_response_payload(entrypoint, _web_auth_config()))
+        include_service_users = _coerce_bool(_resolve_single_query_param(query, "include_service"))
+        _write_json_response(
+            handler,
+            HTTPStatus.OK,
+            _settings_users_response_payload(
+                entrypoint,
+                _web_auth_config(),
+                include_service_users=include_service_users,
+            ),
+        )
     except Exception as exc:  # pragma: no cover - bounded fallback
         _write_json_response(
             handler,
@@ -4041,6 +4067,8 @@ def _handle_settings_user_create(
         payload = _load_request_payload(handler)
         now = _utc_now_iso()
         username = _normalize_runtime_username(payload.get("username"))
+        display_name = str(payload.get("display_name") or "").strip()
+        _ensure_user_facing_runtime_identity(username=username, display_name=display_name)
         _ensure_runtime_username_available(username, config, entrypoint)
         password = _validate_runtime_password(payload.get("password"))
         requested_role = _validate_runtime_role(payload.get("role")) if "role" in payload else ""
@@ -4059,7 +4087,7 @@ def _handle_settings_user_create(
         user_payload = {
             "user_id": f"user_{uuid4().hex}",
             "username": username,
-            "display_name": str(payload.get("display_name") or "").strip(),
+            "display_name": display_name,
             "role": role,
             "allowed_sections": allowed_sections,
             "manage_users": manage_users,
@@ -4216,11 +4244,24 @@ def _handle_settings_user_delete(
 def _settings_users_response_payload(
     entrypoint: RegistryUploadHttpEntrypoint,
     config: Mapping[str, Any],
+    *,
+    include_service_users: bool = False,
 ) -> dict[str, Any]:
     runtime_payload = entrypoint.handle_sheet_vitrina_users_list_request()
     users = _env_principal_user_records(config)
-    users.extend(_public_runtime_user(user) for user in runtime_payload.get("users", []) if isinstance(user, Mapping))
-    return {
+    service_users: list[dict[str, Any]] = []
+    for user in runtime_payload.get("users", []):
+        if not isinstance(user, Mapping):
+            continue
+        service_reason = _runtime_service_user_reason(user)
+        public_user = _public_runtime_user(user)
+        if service_reason:
+            public_user["is_service_user"] = True
+            public_user["service_user_reason"] = service_reason
+            service_users.append(public_user)
+            continue
+        users.append(public_user)
+    payload: dict[str, Any] = {
         "users": users,
         "available_sections": _available_section_records(),
         "roles": [
@@ -4229,8 +4270,13 @@ def _settings_users_response_payload(
             WEB_AUTH_ROLE_SUPPLY_OPERATOR,
             WEB_AUTH_ROLE_SUPPLIER,
         ],
+        "hidden_service_users_count": len(service_users),
+        "service_users_hidden": True,
         "canonical_store": "server_runtime_sqlite",
     }
+    if include_service_users:
+        payload["service_users"] = service_users
+    return payload
 
 
 def _with_settings_users_context(
@@ -4245,6 +4291,8 @@ def _with_settings_users_context(
     payload["users"] = context["users"]
     payload["available_sections"] = context["available_sections"]
     payload["roles"] = context["roles"]
+    payload["hidden_service_users_count"] = context["hidden_service_users_count"]
+    payload["service_users_hidden"] = context["service_users_hidden"]
     return payload
 
 
@@ -4308,6 +4356,38 @@ def _public_runtime_user(user: Mapping[str, Any]) -> dict[str, Any]:
         "source": "runtime",
         "readonly": False,
     }
+
+
+def _runtime_service_user_reason(user: Mapping[str, Any]) -> str:
+    if _coerce_bool(user.get("is_service_user")):
+        return "is_service_user"
+    user_kind = str(user.get("user_kind") or "").strip().lower()
+    if user_kind in SERVICE_USER_KINDS:
+        return "user_kind"
+    created_by = str(user.get("created_by") or "").strip().lower()
+    if created_by in SERVICE_USER_CREATORS:
+        return "created_by"
+    username = _normalize_web_auth_username(str(user.get("username") or "")).lower()
+    if username.startswith(SERVICE_USER_USERNAME_PREFIXES):
+        return "username_prefix"
+    display_name = str(user.get("display_name") or "").strip().lower()
+    if any(phrase in display_name for phrase in SERVICE_USER_DISPLAY_NAME_PHRASES):
+        return "display_name"
+    if any(
+        re.search(r"(^|[\s_-])" + re.escape(word) + r"([\s_-]|$)", display_name)
+        for word in SERVICE_USER_DISPLAY_NAME_WORDS
+    ):
+        return "display_name"
+    return ""
+
+
+def _ensure_user_facing_runtime_identity(*, username: str, display_name: str) -> None:
+    reason = _runtime_service_user_reason({"username": username, "display_name": display_name})
+    if reason:
+        raise ValueError(
+            "username/display_name uses a reserved service/debug/test identity; "
+            "create service users through a service path"
+        )
 
 
 def _normalize_runtime_username(value: Any) -> str:
