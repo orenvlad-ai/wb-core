@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+from io import BytesIO
 import json
+import re
 import sqlite3
 import time
+import zipfile
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -106,6 +109,20 @@ from packages.application.sheet_vitrina_v1_live_plan import (
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaWriteTarget
+from packages.contracts.supplier_financial_documents import (
+    FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED,
+    FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW,
+    FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR,
+    FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+    FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE,
+)
+from packages.contracts.supplier_shipments import (
+    TRADE_DOCUMENT_TYPE_CONTRACT,
+    TRADE_DOCUMENT_TYPE_INVOICE,
+)
 
 OperatorLogEmitter = Callable[[str], None]
 SheetLoadRunner = Callable[[SheetVitrinaV1Envelope, OperatorLogEmitter], dict[str, Any]]
@@ -128,6 +145,29 @@ SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for websit
 SHEET_VITRINA_DAILY_BUSINESS_TIMES = ", ".join(
     f"{hour:02d}:00" for hour in DAILY_REFRESH_BUSINESS_HOURS
 )
+SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES = (
+    TRADE_DOCUMENT_TYPE_INVOICE,
+    TRADE_DOCUMENT_TYPE_CONTRACT,
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE,
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
+    FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
+    FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+)
+SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES = (
+    TRADE_DOCUMENT_TYPE_CONTRACT,
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+    FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+)
+SUPPLIER_ORDER_DOCUMENT_LABELS_RU = {
+    TRADE_DOCUMENT_TYPE_INVOICE: "Invoice",
+    TRADE_DOCUMENT_TYPE_CONTRACT: "Контракт",
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE: "КП логистов",
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE: "Счёт логистов",
+    FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION: "ДТ",
+    FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT: "Ведомость банковского контроля",
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: "Заявление на перевод ВТБ / платёжка",
+}
 SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
     f"Ежедневно в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}: "
     f"{SHEET_VITRINA_DAILY_AUTO_ACTION}"
@@ -1779,6 +1819,70 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_supplier_financial_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
         return self.supplier_financial_documents_block.list_documents(shipment_id)
+
+    def handle_supplier_order_documents_list_request(self, shipment_id: str) -> dict[str, Any]:
+        shipment = self.supplier_shipments_block.get_shipment(shipment_id)
+        financial_payload = self.supplier_financial_documents_block.list_documents(shipment_id)
+        financial_documents = [dict(item) for item in financial_payload.get("documents") or []]
+        checklist = _build_supplier_order_documents_checklist(
+            shipment=shipment,
+            financial_documents=financial_documents,
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_order_documents",
+            "status": "ok",
+            "supplier_order_id": shipment_id,
+            "shipment": shipment,
+            "required_document_types": list(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES),
+            "required_documents": checklist,
+            "documents": financial_documents,
+            "expense_lines": list(financial_payload.get("expense_lines") or []),
+            "summary": financial_payload.get("summary") or {},
+            "package_downloads": {
+                "all": {
+                    "download_path": _supplier_order_documents_archive_path(shipment_id, "archive.zip"),
+                    "label": "Скачать все документы",
+                },
+                "logistics": {
+                    "download_path": _supplier_order_documents_archive_path(shipment_id, "logistics-package.zip"),
+                    "label": "Скачать пакет для логистов",
+                    "document_types": list(SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES),
+                },
+            },
+            "missing_required_types": [
+                str(item.get("document_type") or "")
+                for item in checklist
+                if not bool(item.get("is_uploaded")) and bool(item.get("required"))
+            ],
+        }
+
+    def handle_supplier_order_documents_archive_request(
+        self,
+        shipment_id: str,
+        *,
+        package_kind: str,
+    ) -> tuple[bytes, str]:
+        documents_payload = self.handle_supplier_order_documents_list_request(shipment_id)
+        package_type = "logistics" if package_kind == "logistics-package.zip" else "all"
+        archive_bytes = _build_supplier_order_documents_archive(
+            documents_payload,
+            package_type=package_type,
+            file_loader=lambda item: self._load_supplier_order_document_file(shipment_id, item),
+        )
+        invoice_no = str((documents_payload.get("shipment") or {}).get("invoice_no") or shipment_id or "supplier-order").strip()
+        filename = _safe_archive_filename(f"{invoice_no}-{package_type}-documents.zip")
+        return archive_bytes, filename
+
+    def _load_supplier_order_document_file(self, shipment_id: str, item: Mapping[str, Any]) -> tuple[bytes, str, str]:
+        document_type = str(item.get("document_type") or "")
+        document_id = str(item.get("document_id") or "")
+        if document_type == TRADE_DOCUMENT_TYPE_INVOICE:
+            return self.supplier_shipments_block.download_invoice(shipment_id)
+        if document_type == TRADE_DOCUMENT_TYPE_CONTRACT:
+            return self.supplier_shipments_block.download_shipment_contract(shipment_id)
+        if document_id:
+            return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
+        raise ValueError(f"document file is missing: {document_type}")
 
     def handle_supplier_financial_documents_upload_request(
         self,
@@ -4420,6 +4524,256 @@ class SheetVitrinaV1OperatorJobStore:
             job.log_lines.append(f"{timestamp} {message}")
             if len(job.log_lines) > 4000:
                 job.log_lines = job.log_lines[-4000:]
+
+
+def _build_supplier_order_documents_checklist(
+    *,
+    shipment: Mapping[str, Any],
+    financial_documents: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    rows.append(_supplier_order_invoice_document_row(shipment))
+    rows.append(_supplier_order_contract_document_row(shipment))
+    financial_by_type: dict[str, list[Mapping[str, Any]]] = {}
+    for document in financial_documents:
+        document_type = str(document.get("document_type") or "").strip()
+        if document_type:
+            financial_by_type.setdefault(document_type, []).append(document)
+    for document_type in SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES:
+        if document_type in {TRADE_DOCUMENT_TYPE_INVOICE, TRADE_DOCUMENT_TYPE_CONTRACT}:
+            continue
+        documents = financial_by_type.get(document_type) or []
+        if documents:
+            rows.extend(_supplier_order_financial_document_row(item) for item in documents)
+        else:
+            rows.append(_supplier_order_missing_document_row(document_type))
+    known_types = set(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES)
+    for document in financial_documents:
+        document_type = str(document.get("document_type") or "").strip()
+        if document_type and document_type not in known_types:
+            rows.append(_supplier_order_financial_document_row(document, required=False))
+    return rows
+
+
+def _supplier_order_invoice_document_row(shipment: Mapping[str, Any]) -> dict[str, Any]:
+    is_uploaded = bool(shipment.get("invoice_download_path") or shipment.get("invoice_document_id"))
+    metadata = shipment.get("metadata") if isinstance(shipment.get("metadata"), Mapping) else {}
+    return {
+        **_supplier_order_base_document_row(TRADE_DOCUMENT_TYPE_INVOICE, required=True, is_uploaded=is_uploaded),
+        "source": "trade_document",
+        "document_id": str(shipment.get("invoice_document_id") or ""),
+        "document_number": str(shipment.get("invoice_no") or metadata.get("invoice_no") or ""),
+        "document_date": str(shipment.get("invoice_date") or metadata.get("invoice_date") or ""),
+        "counterparty": str(shipment.get("supplier_name") or metadata.get("supplier_name") or ""),
+        "amount": shipment.get("invoice_amount_total") if shipment.get("invoice_amount_total") is not None else metadata.get("declared_invoice_total"),
+        "currency": str(shipment.get("currency") or metadata.get("currency") or ""),
+        "download_path": str(shipment.get("invoice_download_path") or ""),
+    }
+
+
+def _supplier_order_contract_document_row(shipment: Mapping[str, Any]) -> dict[str, Any]:
+    is_uploaded = bool(shipment.get("contract_download_path") or shipment.get("contract_document_id"))
+    metadata = shipment.get("metadata") if isinstance(shipment.get("metadata"), Mapping) else {}
+    return {
+        **_supplier_order_base_document_row(TRADE_DOCUMENT_TYPE_CONTRACT, required=True, is_uploaded=is_uploaded),
+        "source": "trade_document",
+        "document_id": str(shipment.get("contract_document_id") or ""),
+        "document_number": str(shipment.get("contract_no") or metadata.get("contract_no") or ""),
+        "document_date": str(shipment.get("contract_date") or metadata.get("contract_date") or ""),
+        "counterparty": str(shipment.get("supplier_name") or metadata.get("supplier_name") or ""),
+        "amount": None,
+        "currency": "",
+        "download_path": str(shipment.get("contract_download_path") or ""),
+    }
+
+
+def _supplier_order_financial_document_row(
+    document: Mapping[str, Any],
+    *,
+    required: bool = True,
+) -> dict[str, Any]:
+    document_type = str(document.get("document_type") or "").strip()
+    parse_status = str(document.get("parse_status") or "")
+    row = _supplier_order_base_document_row(
+        document_type,
+        required=required,
+        is_uploaded=True,
+        parse_status=parse_status,
+    )
+    amount = document.get("total_amount_rub") if document.get("total_amount_rub") is not None else document.get("total_amount")
+    row.update(
+        {
+            "source": "financial_document",
+            "document_id": str(document.get("document_id") or ""),
+            "document_number": str(document.get("document_number") or ""),
+            "document_date": str(document.get("document_date") or ""),
+            "counterparty": str(document.get("vendor") or ""),
+            "amount": amount,
+            "currency": "RUB" if document.get("total_amount_rub") is not None else str(document.get("currency") or ""),
+            "download_path": str(document.get("download_path") or ""),
+            "parse_status": parse_status,
+            "warnings": list(document.get("warnings") or []),
+            "errors": list(document.get("errors") or []),
+            "normalized_parse": dict(document.get("normalized_parse") or {}),
+        }
+    )
+    return row
+
+
+def _supplier_order_missing_document_row(document_type: str) -> dict[str, Any]:
+    return _supplier_order_base_document_row(document_type, required=True, is_uploaded=False)
+
+
+def _supplier_order_base_document_row(
+    document_type: str,
+    *,
+    required: bool,
+    is_uploaded: bool,
+    parse_status: str = "",
+) -> dict[str, Any]:
+    status = _supplier_order_document_status(is_uploaded=is_uploaded, parse_status=parse_status)
+    return {
+        "document_type": document_type,
+        "document_name": SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(document_type, document_type or "Документ"),
+        "required": bool(required),
+        "is_uploaded": bool(is_uploaded),
+        "status": status,
+        "status_label": _supplier_order_document_status_label(status),
+        "source": "",
+        "document_id": "",
+        "document_number": "",
+        "document_date": "",
+        "counterparty": "",
+        "amount": None,
+        "currency": "",
+        "download_path": "",
+        "parse_status": parse_status,
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def _supplier_order_document_status(*, is_uploaded: bool, parse_status: str = "") -> str:
+    if not is_uploaded:
+        return "missing"
+    if parse_status == FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR:
+        return "error"
+    if parse_status in {FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW, FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED}:
+        return "needs_review"
+    return "uploaded"
+
+
+def _supplier_order_document_status_label(status: str) -> str:
+    return {
+        "uploaded": "Загружен",
+        "missing": "Не загружен",
+        "needs_review": "Проверить",
+        "error": "Ошибка",
+    }.get(status, status or "-")
+
+
+def _supplier_order_documents_archive_path(shipment_id: str, filename: str) -> str:
+    return f"/v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/documents/{filename}"
+
+
+def _build_supplier_order_documents_archive(
+    payload: Mapping[str, Any],
+    *,
+    package_type: str,
+    file_loader: Callable[[Mapping[str, Any]], tuple[bytes, str, str]],
+) -> bytes:
+    required_types = (
+        SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES
+        if package_type == "logistics"
+        else SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES
+    )
+    rows = [
+        dict(item)
+        for item in payload.get("required_documents") or []
+        if isinstance(item, Mapping) and str(item.get("document_type") or "") in required_types
+    ]
+    included: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    missing_required_types = [
+        document_type
+        for document_type in required_types
+        if not any(str(item.get("document_type") or "") == document_type and bool(item.get("is_uploaded")) for item in rows)
+    ]
+    if missing_required_types:
+        warnings.append(
+            "Missing required document(s): "
+            + ", ".join(SUPPLIER_ORDER_DOCUMENT_LABELS_RU.get(item, item) for item in missing_required_types)
+        )
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        used_names: set[str] = set()
+        for row in rows:
+            if not bool(row.get("is_uploaded")):
+                continue
+            try:
+                file_bytes, filename, content_type = file_loader(row)
+            except ValueError as exc:
+                warnings.append(f"{row.get('document_name') or row.get('document_type')}: {exc}")
+                continue
+            archive_name = _unique_archive_name(
+                used_names,
+                _archive_document_filename(row, filename),
+            )
+            archive.writestr(archive_name, file_bytes)
+            included.append(
+                {
+                    "archive_name": archive_name,
+                    "document_type": row.get("document_type") or "",
+                    "document_name": row.get("document_name") or "",
+                    "document_id": row.get("document_id") or "",
+                    "source_filename": filename,
+                    "content_type": content_type,
+                }
+            )
+        manifest = {
+            "contract_name": "sheet_vitrina_v1_supplier_order_documents_package_manifest",
+            "status": "ok",
+            "package_type": package_type,
+            "supplier_order_id": payload.get("supplier_order_id") or "",
+            "required_document_types": list(required_types),
+            "missing_required_types": missing_required_types,
+            "included": included,
+            "warnings": warnings,
+            "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        }
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    return buffer.getvalue()
+
+
+def _archive_document_filename(row: Mapping[str, Any], source_filename: str) -> str:
+    document_type = _safe_archive_part(str(row.get("document_type") or "document"))
+    number = _safe_archive_part(str(row.get("document_number") or row.get("document_id") or ""))
+    original = _safe_archive_filename(source_filename or "document.bin")
+    prefix = document_type + (f"_{number}" if number else "")
+    return f"{prefix}__{original}"
+
+
+def _unique_archive_name(used_names: set[str], filename: str) -> str:
+    candidate = filename
+    index = 2
+    while candidate in used_names:
+        path = Path(filename)
+        candidate = f"{path.stem}-{index}{path.suffix}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _safe_archive_filename(value: str) -> str:
+    name = str(value or "").strip() or "documents.zip"
+    safe = re.sub(r"[^A-Za-z0-9А-Яа-яЁё._()-]+", "_", name)
+    safe = re.sub(r"_+", "_", safe).strip("._")
+    return safe or "documents.zip"
+
+
+def _safe_archive_part(value: str) -> str:
+    safe = _safe_archive_filename(value)
+    return safe[:80] if len(safe) > 80 else safe
 
 
 def _run_promo_artifact_light_gc_after_refresh(

@@ -47,6 +47,8 @@ from packages.contracts.supplier_financial_documents import (
     FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR,
     FINANCIAL_DOCUMENT_PARSE_STATUSES,
     FINANCIAL_DOCUMENT_PARSER_VERSION,
+    FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE,
@@ -786,6 +788,10 @@ def parse_financial_document_text(
         normalized, expense_lines, parser_warnings = _parse_logistics_invoice(normalized_text)
     elif document_type == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
         normalized, expense_lines, parser_warnings = _parse_customs_declaration(normalized_text)
+    elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT:
+        normalized, expense_lines, parser_warnings = _parse_bank_control_statement(normalized_text)
+    elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
+        normalized, expense_lines, parser_warnings = _parse_bank_transfer_application(normalized_text)
     else:
         normalized, expense_lines, parser_warnings = {}, [], ["unsupported financial document type"]
     warnings.extend(parser_warnings)
@@ -808,6 +814,10 @@ def detect_financial_document_type(text: str, *, filename: str = "") -> str:
         return FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE
     if "декларация на товары" in haystack or re.search(r"\b\d{8}/\d{6}/\d{6,}\b", text):
         return FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION
+    if "ведомость банковского контроля по контракту" in haystack:
+        return FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT
+    if "заявление" in haystack and "на перевод" in haystack:
+        return FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION
     return ""
 
 
@@ -1669,7 +1679,7 @@ def _registry_route(context: Mapping[str, Any]) -> str:
 def _registry_document_status(context: Mapping[str, Any]) -> str:
     documents = [dict(item) for item in context.get("documents") or [] if isinstance(item, Mapping)]
     if not documents:
-        return "Финансовые документы не загружены"
+        return "Документы заказа не загружены"
     types = {
         "КП": bool(_registry_doc(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)),
         "счета": bool(_registry_docs(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE)),
@@ -2141,6 +2151,253 @@ def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str
     if total_goods_count and not weight_item_count:
         warnings.append("Customs declaration item gross/net weights were not recognized")
     return normalized, lines, warnings
+
+
+def _parse_bank_control_statement(text: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    unique_contract_number = _extract_bank_control_unique_contract_number(text)
+    document_date = _parse_date(_compact_spaced_date(_first_match(
+        text,
+        r"Уникальный номер контракта\s+[\d\s/]+\s+от\s+(\d{1,2}\.\d{1,2}\.\s*\d\s*\d\s*\d\s*\d)",
+    )))
+    resident_name = _extract_bank_control_resident(text)
+    non_resident = _extract_bank_control_non_resident(text)
+    contract_number, contract_date, contract_currency, contract_currency_code, contract_amount = _extract_bank_control_contract(text)
+    payment_date, payment_amount, payment_currency_code = _extract_bank_control_payment(text)
+    balance_date, calculated_balance = _extract_bank_control_balance(text)
+    normalized = {
+        "vendor": non_resident,
+        "document_number": unique_contract_number,
+        "document_date": document_date,
+        "unique_contract_registration_number": unique_contract_number,
+        "resident_name": resident_name,
+        "non_resident_vendor": non_resident,
+        "contract_number": contract_number,
+        "contract_date": contract_date,
+        "contract_ref": _join_parts("контракт", contract_number, f"от {contract_date}" if contract_date else ""),
+        "contract_currency": contract_currency,
+        "contract_currency_code": contract_currency_code,
+        "contract_amount": _decimal_to_float(contract_amount),
+        "currency": contract_currency_code or contract_currency,
+        "total_amount": _decimal_to_float(contract_amount),
+        "payment_operation_date": payment_date,
+        "payment_operation_amount": _decimal_to_float(payment_amount),
+        "payment_operation_currency_code": payment_currency_code,
+        "balance_date": balance_date,
+        "calculated_balance": _decimal_to_float(calculated_balance),
+    }
+    _append_missing_warnings(
+        warnings,
+        normalized,
+        {
+            "unique_contract_registration_number": "unique contract registration number",
+            "document_date": "bank control statement date",
+            "resident_name": "resident name",
+            "non_resident_vendor": "non-resident/vendor",
+            "contract_number": "contract number",
+            "contract_date": "contract date",
+            "contract_currency_code": "contract currency code",
+            "contract_amount": "contract amount",
+            "payment_operation_date": "payment operation date",
+            "payment_operation_amount": "payment operation amount",
+            "calculated_balance": "calculated balance",
+        },
+    )
+    return normalized, [], warnings
+
+
+def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    application_number = _first_match(text, r"на перевод\s*№\s*([A-Za-zА-Яа-я0-9/-]+)")
+    document_date = _parse_date(_first_match(text, r"от\s*(?:г\.)?\s*(\d{1,2}\s+[А-Яа-яA-Za-z]+\s+\d{4})"))
+    execution_status, execution_time = _extract_bank_transfer_execution(text)
+    debit_account = _extract_bank_transfer_debit_account(text)
+    currency = _first_match(text, r"Currency Code\s*[\n ]+([A-Z]{3})")
+    transfer_amount = _extract_bank_transfer_amount(text)
+    ordering_customer = _extract_block_between(text, r"Ordering Customer.*?\)\s*50", r"Банк-посредник")
+    beneficiary_bank = _extract_block_between(text, r"Account with Institution.*?\)\s*57", r"Получатель")
+    beneficiary_block = _extract_block_between(text, r"Beneficiary Customer.*?\)\s*59", r"Назначение платежа")
+    beneficiary_account = _first_match(beneficiary_block, r"\b(\d{12,34})\b") or _extract_bank_transfer_beneficiary_account(text)
+    beneficiary_customer = _clean_beneficiary_customer(beneficiary_block, beneficiary_account)
+    payment_details = _first_match(text, r"Details of payment\s*70\s*([^\n\r]+)")
+    charges_mode = _extract_bank_transfer_charges_mode(text)
+    normalized = {
+        "vendor": beneficiary_customer,
+        "document_number": application_number,
+        "document_date": document_date,
+        "transfer_application_number": application_number,
+        "execution_status": execution_status,
+        "execution_time": execution_time,
+        "debit_account": debit_account,
+        "currency": currency,
+        "transfer_amount": _decimal_to_float(transfer_amount),
+        "total_amount": _decimal_to_float(transfer_amount),
+        "ordering_customer": _clean_multiline_value(ordering_customer),
+        "beneficiary_customer": beneficiary_customer,
+        "beneficiary_account": beneficiary_account,
+        "beneficiary_bank": _clean_multiline_value(beneficiary_bank),
+        "payment_details": payment_details,
+        "contract_ref": _extract_bank_transfer_contract_ref(payment_details),
+        "charges_mode": charges_mode,
+    }
+    _append_missing_warnings(
+        warnings,
+        normalized,
+        {
+            "transfer_application_number": "transfer application number",
+            "document_date": "transfer application date",
+            "execution_status": "execution status",
+            "debit_account": "debit account",
+            "currency": "currency",
+            "transfer_amount": "transfer amount",
+            "ordering_customer": "ordering customer",
+            "beneficiary_customer": "beneficiary/customer",
+            "beneficiary_account": "beneficiary account",
+            "beneficiary_bank": "beneficiary bank",
+            "payment_details": "payment details",
+            "charges_mode": "charges mode",
+        },
+    )
+    return normalized, [], warnings
+
+
+def _extract_bank_control_unique_contract_number(text: str) -> str:
+    value = _first_match(text, r"Уникальный номер контракта\s+([\d\s/]+)\s+от")
+    compact = _compact_spaced_code(value)
+    return compact if re.fullmatch(r"\d{8}/\d{4}/\d{4}/\d/\d", compact) else compact
+
+
+def _extract_bank_control_resident(text: str) -> str:
+    value = _first_match(text, r"1\.Сведения о резиденте\s+(.+?)\s+1\.2\s+Адрес", flags=re.I | re.S)
+    return _clean_multiline_value(value)
+
+
+def _extract_bank_control_non_resident(text: str) -> str:
+    value = _first_match(text, r"2\.Реквизиты нерезидента.*?\n\s*1\s+2\s+3\s+4\s+(.+?)\s+3\.Общие сведения", flags=re.I | re.S)
+    cleaned = _clean_multiline_value(value)
+    cleaned = re.sub(r"\s+[А-Яа-яЁё]+\s+\d{3}$", "", cleaned).strip()
+    return cleaned
+
+
+def _extract_bank_control_contract(text: str) -> tuple[str, str, str, str, Decimal | None]:
+    match = re.search(
+        r"\b([A-Za-zА-Яа-я0-9/-]+)\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+([А-Яа-яA-Za-z]+)\s+(\d{3})\s+([\d .,\-]+)\s+\d{1,2}\.\d{1,2}\.\d{4}",
+        text,
+        flags=re.I,
+    )
+    if not match:
+        return "", "", "", "", None
+    number, raw_date, currency, currency_code, amount = match.groups()
+    return number, _parse_date(raw_date), currency.upper(), currency_code, _parse_decimal(amount)
+
+
+def _extract_bank_control_payment(text: str) -> tuple[str, Decimal | None, str]:
+    match = re.search(
+        r"\b(\d{1,2}\.\d{1,2}\.\s*\d\s*\d\s*\d\s*\d)\s+\d+\s+\d+\s+(\d{3})\s+([\d .,\-]+)\s+\d{3}\s+[\d .,\-]+",
+        text,
+        flags=re.I,
+    )
+    if not match:
+        return "", None, ""
+    raw_date, currency_code, amount = match.groups()
+    return _parse_date(_compact_spaced_date(raw_date)), _parse_decimal(amount), currency_code
+
+
+def _extract_bank_control_balance(text: str) -> tuple[str, Decimal | None]:
+    for line in reversed(_text_to_lines(text)):
+        if not re.match(r"^\d{1,2}\.\d{1,2}\.\d{4}\s+\d{3}\s+", line):
+            continue
+        numbers = re.findall(r"-?\d[\d .,\u00a0\u202f]*[,.]\d{2}", line)
+        if not numbers:
+            continue
+        return _parse_date(line), _parse_decimal(numbers[-1])
+    return "", None
+
+
+def _extract_bank_transfer_execution(text: str) -> tuple[str, str]:
+    match = re.search(r"\b(Исполнен|Отклон[её]н|Принят|В обработке)\b\s+(\d{1,2}\.\d{1,2}\.\d{4}\s+в\s+\d{1,2}:\d{2}:\d{2})", text, flags=re.I)
+    if match:
+        return _clean_value(match.group(1)), _clean_value(match.group(2))
+    status = _first_match(text[:500], r"\b(Исполнен|Отклон[её]н|Принят|В обработке)\b")
+    return status, ""
+
+
+def _extract_bank_transfer_debit_account(text: str) -> str:
+    value = _first_match(text, r"Please debit our account with\s+you\):\s*([\d\s]+)", flags=re.I)
+    digits = re.sub(r"\D+", "", value)
+    return digits
+
+
+def _extract_bank_transfer_amount(text: str) -> Decimal | None:
+    match = re.search(
+        r"Amount of transfer\s*\(in figures and in writing\)\s*(?:32\s+)?([0-9][\d .,\u00a0\u202f]*[,.]\d{2})",
+        text,
+        flags=re.I | re.S,
+    )
+    if match:
+        return _parse_decimal(match.group(1))
+    return None
+
+
+def _extract_bank_transfer_beneficiary_account(text: str) -> str:
+    value = _first_match(text, r"Account number \(IBAN\)\s*([\d\s]+)\s+Наименование", flags=re.I)
+    return re.sub(r"\D+", "", value)
+
+
+def _extract_bank_transfer_contract_ref(payment_details: str) -> str:
+    match = re.search(r"\b(CONTRACT\s+[A-Za-zА-Яа-я0-9/-]+\s+DD\s+\d{1,2}\.\d{1,2}\.\d{4})\b", payment_details, flags=re.I)
+    return _clean_value(match.group(1)) if match else ""
+
+
+def _extract_bank_transfer_charges_mode(text: str) -> str:
+    match = re.search(
+        r"Расходы и комиссии по переводу.*?(?=Продленный операционный день|Расходы и комиссии по переводу списать)",
+        text,
+        flags=re.I | re.S,
+    )
+    haystack = match.group(0) if match else text
+    if re.search(r"\bOUR\b", haystack):
+        return "OUR"
+    if re.search(r"\bSHA\b", haystack):
+        return "SHA"
+    if re.search(r"\bBEN\b", haystack):
+        return "BEN"
+    return ""
+
+
+def _clean_beneficiary_customer(block: str, account: str) -> str:
+    cleaned = _clean_multiline_value(block)
+    if account:
+        cleaned = re.sub(r"\b" + re.escape(account) + r"\b", "", cleaned).strip()
+    return _clean_value(cleaned)
+
+
+def _extract_block_between(text: str, start_pattern: str, end_pattern: str) -> str:
+    match = re.search(start_pattern + r"\s*(.*?)\s*" + end_pattern, text, flags=re.I | re.S)
+    return match.group(1) if match else ""
+
+
+def _append_missing_warnings(warnings: list[str], normalized: Mapping[str, Any], labels_by_field: Mapping[str, str]) -> None:
+    missing = [label for field, label in labels_by_field.items() if not normalized.get(field)]
+    if missing:
+        warnings.append("Parser needs review: missing " + ", ".join(missing))
+
+
+def _compact_spaced_code(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _compact_spaced_date(value: Any) -> str:
+    return re.sub(r"(?<=\d)\s+(?=\d)", "", str(value or ""))
+
+
+def _clean_multiline_value(value: Any) -> str:
+    lines = [line for line in _text_to_lines(str(value or "")) if not re.fullmatch(r"\d{1,3}", line)]
+    return _clean_value(" ".join(lines))
+
+
+def _join_parts(*values: Any) -> str:
+    return _clean_value(" ".join(str(value or "").strip() for value in values if str(value or "").strip()))
 
 
 def _extract_quote_amounts(text: str) -> dict[str, Decimal | str | None]:
@@ -2623,6 +2880,23 @@ def _parse_status_for_payload(
         FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE: ["quote_date", "total_amount"],
         FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE: ["invoice_number", "invoice_date", "amount_rub"],
         FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION: ["declaration_number", "total_customs_payments_rub"],
+        FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT: [
+            "unique_contract_registration_number",
+            "document_date",
+            "resident_name",
+            "non_resident_vendor",
+            "contract_number",
+            "contract_date",
+        ],
+        FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: [
+            "transfer_application_number",
+            "document_date",
+            "currency",
+            "transfer_amount",
+            "ordering_customer",
+            "beneficiary_customer",
+            "payment_details",
+        ],
     }
     missing = [key for key in required_by_type.get(str(normalized.get("document_type") or ""), []) if not normalized.get(key)]
     if missing:

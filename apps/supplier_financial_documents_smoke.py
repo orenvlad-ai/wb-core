@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from http import HTTPStatus
 import json
 from pathlib import Path
@@ -11,6 +12,7 @@ import threading
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib import request as urllib_request
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -293,12 +295,104 @@ CN   107.250 ОООО-ОО
 4000 000 96.530
 """
 
+BANK_CONTROL_TEXT = """
+Документ сформирован системой дистанционного банковского обслуживания Банка ВТБ (ПАО)
+ВЕДОМОСТЬ БАНКОВСКОГО КОНТРОЛЯ ПО КОНТРАКТУ
+Уникальный номер контракта 2 6 0 5 1 3 8 4 / 1 0 0 0 / 0 0 8 1 / 2 / 2 от 12.05.2026
+Раздел I. Учетная информация
+1.Сведения о резиденте
+Индивидуальный предприниматель ТЕСТОВ ВЛАДИСЛАВ РАДИКОВИЧ
+1.2 Адрес: Субъект Российской Федерации
+2.Реквизиты нерезидента (нерезидентов)
+Наименование
+Страна
+Признак аффилированного лица
+Наименование Код
+1 2 3 4
+Guangzhou Zifriend Communicate Technology
+Co., Ltd КИТАЙ 156
+3.Общие сведения о контракте
+№ Дата
+Валюта контракта
+Сумма контракта Дата завершения исполнения обязательств по
+контрактунаименование код
+1 2 3 4 5 6
+082/26 04.04.2026 ЮАНЬ 156 785087.50 31.12.2026
+Раздел II. Сведения о платежах
+1 13.05.202
+6 2 11100 156 785087.50 156 785087.50 30.06.20
+26 156 4
+Раздел V. Итоговые данные расчетов по контракту
+04.06.2026 156 0.00 785087.50 0.00 0.00 0.00 0.00 -785087.50
+"""
+
+BANK_TRANSFER_TEXT = """
+Филиал "Центральный" Банка ВТБ (ПАО)
+044525411
+Исполнен
+22.05.2026 в 00:43:03
+ЗАЯВЛЕНИЕ
+на перевод № 2
+от  г.21 мая 2026
+Сумму перевода просим списать с нашего счёта у Вас (Please debit our account with
+you):
+4 0 8 0 2 1 5 6 6 1 6 5 8 0 0 0 0 0 0 8
+Валюта
+Currency Code
+CNY
+Сумма перевода
+(цифрами и прописью)
+Amount of transfer
+(in figures and in writing)
+32 541.962,50
+Отправитель*
+Ordering Customer (Name, address, city, country)
+50
+IE TESTOV VLADISLAV RADIKOVICH
+CODE COUNTRY: RU
+INN: 560912740163
+Банк-посредник**
+Intermediary Institution (SWIFT BIC, national clearing
+code, name, city, country)
+56
+Банк получателя*
+Account with Institution, Beneficiary’s bank (SWIFT
+BIC, national clearing code, name, city, country)
+57
+//CN767290000018
+VTB BANK (PJSC) SHANGHAI BRANCH VTBRCNSHXXX
+SHANGHAI TOWER, RM. 2503-2505 FLOOR 25, 501 MIDDLE YINCHENG ROAD,
+PUDONG SHANGHAI
+CN
+Получатель*
+Номер счета (IBAN)
+Account number (IBAN)
+40807156200610034920
+Наименование, адрес, город, страна
+Beneficiary Customer (Name, address, city, country)
+59 GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD
+GUANGZHOU
+CN
+Назначение платежа*
+Details of payment 70 CONTRACT 083/26 DD 13.05.2026
+Расходы и комиссии по переводу (Bank charges and commissions):
+  - за счет отправителя
+OUR  - за счет получателя
+BEN  - расходы банка ВТБ за
+SHA
+счет отправителя, расходы
+инобанков - за счет получателя
+Продленный операционный день
+"""
+
 TEXT_BY_FILENAME = {
     "quote.pdf": QUOTE_TEXT,
     "quote-2026-06-19.pdf": QUOTE_2026_06_19_TEXT,
     "invoice-103.pdf": INVOICE_103_TEXT,
     "invoice-113.pdf": INVOICE_113_TEXT,
     "customs.pdf": CUSTOMS_TEXT,
+    "bank-control.pdf": BANK_CONTROL_TEXT,
+    "bank-transfer.pdf": BANK_TRANSFER_TEXT,
 }
 
 
@@ -344,6 +438,44 @@ def _assert_parser_smoke() -> None:
         or customs.get("total_customs_payments_rub") != 2892511.6
     ):
         raise AssertionError(f"customs parser fields mismatch: {customs}")
+
+    bank_control_payload = parse_financial_document_text(BANK_CONTROL_TEXT, filename="bank-control.txt")
+    bank_control = bank_control_payload["normalized_parse"]
+    if (
+        bank_control.get("document_type") != "bank_control_statement"
+        or bank_control.get("unique_contract_registration_number") != "26051384/1000/0081/2/2"
+        or bank_control.get("document_date") != "2026-05-12"
+        or bank_control.get("resident_name") != "Индивидуальный предприниматель ТЕСТОВ ВЛАДИСЛАВ РАДИКОВИЧ"
+        or bank_control.get("non_resident_vendor") != "Guangzhou Zifriend Communicate Technology Co., Ltd"
+        or bank_control.get("contract_number") != "082/26"
+        or bank_control.get("contract_date") != "2026-04-04"
+        or bank_control.get("contract_currency_code") != "156"
+        or bank_control.get("contract_amount") != 785087.5
+        or bank_control.get("payment_operation_date") != "2026-05-13"
+        or bank_control.get("payment_operation_amount") != 785087.5
+        or bank_control.get("calculated_balance") != -785087.5
+        or bank_control_payload.get("errors")
+    ):
+        raise AssertionError(f"bank control parser fields mismatch: {bank_control_payload}")
+
+    bank_transfer_payload = parse_financial_document_text(BANK_TRANSFER_TEXT, filename="bank-transfer.txt")
+    bank_transfer = bank_transfer_payload["normalized_parse"]
+    if (
+        bank_transfer.get("document_type") != "bank_transfer_application"
+        or bank_transfer.get("transfer_application_number") != "2"
+        or bank_transfer.get("document_date") != "2026-05-21"
+        or bank_transfer.get("execution_status") != "Исполнен"
+        or bank_transfer.get("debit_account") != "40802156616580000008"
+        or bank_transfer.get("currency") != "CNY"
+        or bank_transfer.get("transfer_amount") != 541962.5
+        or "IE TESTOV" not in str(bank_transfer.get("ordering_customer") or "")
+        or bank_transfer.get("beneficiary_account") != "40807156200610034920"
+        or "VTB BANK" not in str(bank_transfer.get("beneficiary_bank") or "")
+        or bank_transfer.get("contract_ref") != "CONTRACT 083/26 DD 13.05.2026"
+        or bank_transfer.get("charges_mode") != "OUR"
+        or bank_transfer_payload.get("errors")
+    ):
+        raise AssertionError(f"bank transfer parser fields mismatch: {bank_transfer_payload}")
     _assert_summary_metrics_smoke()
     _assert_missing_customs_data_summary_smoke()
     _assert_new_quote_parser_smoke()
@@ -839,12 +971,129 @@ def _assert_http_api_smoke() -> None:
                 or not _approx(final_summary.get("quote_invoice_match", {}).get("implied_rate"), 75.29, tolerance=0.01)
             ):
                 raise AssertionError(f"financial re-upload summary mismatch: {final_status} {final_list}")
+            documents_url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_financial/documents"
+            documents_status, order_documents = _get_json(documents_url)
+            if documents_status != 200 or order_documents.get("contract_name") != "sheet_vitrina_v1_supplier_order_documents":
+                raise AssertionError(f"order documents route mismatch: {documents_status} {order_documents}")
+            required_rows = order_documents.get("required_documents", [])
+            if _required_document_status(required_rows, "invoice") != "Загружен":
+                raise AssertionError(f"order documents must include uploaded invoice: {order_documents}")
+            if _required_document_status(required_rows, "contract") != "Загружен":
+                raise AssertionError(f"order documents must include uploaded contract: {order_documents}")
+            if _required_document_status(required_rows, "bank_control_statement") != "Не загружен":
+                raise AssertionError(f"missing bank control statement must be shown: {order_documents}")
+            if _required_document_status(required_rows, "bank_transfer_application") != "Не загружен":
+                raise AssertionError(f"missing bank transfer application must be shown: {order_documents}")
+            archive_status, archive_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
+            if archive_status != 200:
+                raise AssertionError(f"all-documents archive route failed: {archive_status}")
+            archive_manifest = _zip_manifest(archive_bytes)
+            if not set(archive_manifest.get("missing_required_types", [])) >= {"bank_control_statement", "bank_transfer_application"}:
+                raise AssertionError(f"all-documents archive must warn about missing bank docs: {archive_manifest}")
+
+            for filename in ("bank-control.pdf", "bank-transfer.pdf"):
+                status, payload = _post_multipart(collection_url, b"%PDF-1.4\n% synthetic bank smoke\n", filename=filename)
+                if status != 200 or payload.get("parse_status") != "parsed":
+                    raise AssertionError(f"bank document upload failed for {filename}: {status} {payload}")
+            bank_documents_status, bank_order_documents = _get_json(documents_url)
+            if bank_documents_status != 200:
+                raise AssertionError(f"order documents after bank upload failed: {bank_documents_status} {bank_order_documents}")
+            bank_rows = bank_order_documents.get("required_documents", [])
+            if _required_document_status(bank_rows, "bank_control_statement") != "Загружен":
+                raise AssertionError(f"uploaded bank control statement must be shown: {bank_order_documents}")
+            if _required_document_status(bank_rows, "bank_transfer_application") != "Загружен":
+                raise AssertionError(f"uploaded bank transfer application must be shown: {bank_order_documents}")
+            logistics_status, logistics_bytes, _ = _get_bytes(f"{documents_url}/logistics-package.zip")
+            if logistics_status != 200:
+                raise AssertionError(f"logistics package route failed: {logistics_status}")
+            logistics_manifest = _zip_manifest(logistics_bytes)
+            logistics_types = [item.get("document_type") for item in logistics_manifest.get("included", [])]
+            if set(logistics_manifest.get("missing_required_types", [])):
+                raise AssertionError(f"logistics package must be complete after bank uploads: {logistics_manifest}")
+            if set(logistics_types) != {"contract", "bank_control_statement", "bank_transfer_application"}:
+                raise AssertionError(f"logistics package included wrong document types: {logistics_manifest}")
+            all_status, all_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
+            all_manifest = _zip_manifest(all_bytes)
+            all_types = [item.get("document_type") for item in all_manifest.get("included", [])]
+            if all_status != 200 or len(all_manifest.get("included", [])) != 8:
+                raise AssertionError(f"all-documents archive must include all uploaded docs: {all_status} {all_manifest}")
+            for expected_type in ("invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application"):
+                if expected_type not in all_types:
+                    raise AssertionError(f"all-documents archive missing {expected_type}: {all_manifest}")
         finally:
             server.shutdown()
             thread.join(timeout=5)
 
 
 def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
+    invoice_file = runtime.runtime_dir / "trade_documents" / "files" / "invoice" / "tdoc_invoice_safe" / "safe-order.xlsx"
+    contract_file = runtime.runtime_dir / "trade_documents" / "files" / "contract" / "tdoc_contract_safe" / "contract-ore.pdf"
+    invoice_file.parent.mkdir(parents=True, exist_ok=True)
+    contract_file.parent.mkdir(parents=True, exist_ok=True)
+    invoice_bytes = b"synthetic invoice workbook bytes"
+    contract_bytes = b"%PDF-1.4\n% synthetic contract smoke\n"
+    invoice_file.write_bytes(invoice_bytes)
+    contract_file.write_bytes(contract_bytes)
+    invoice_relative = invoice_file.relative_to(runtime.runtime_dir).as_posix()
+    contract_relative = contract_file.relative_to(runtime.runtime_dir).as_posix()
+    runtime.save_trade_document(
+        {
+            "document_id": "tdoc_invoice_safe",
+            "document_type": "invoice",
+            "number": "SAFE-ORDER",
+            "document_date": "2026-06-02",
+            "supplier_name": "HanShang Technology",
+            "currency": "CNY",
+            "amount_total": 0,
+            "source": "smoke",
+            "source_shipment_id": "sup_financial",
+            "source_upload_id": "",
+            "file_original_name": "safe-order.xlsx",
+            "file_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "file_sha256": hashlib.sha256(invoice_bytes).hexdigest(),
+            "file_path": invoice_relative,
+            "parser_version": "fixture",
+            "parsed_metadata": {},
+            "warnings": [],
+            "errors": [],
+            "status": "active",
+            "created_at": "2026-06-19T08:00:00Z",
+            "updated_at": "2026-06-19T08:00:00Z",
+        }
+    )
+    runtime.save_trade_document(
+        {
+            "document_id": "tdoc_contract_safe",
+            "document_type": "contract",
+            "number": "ORE",
+            "document_date": "2026-06-04",
+            "supplier_name": "HanShang Technology",
+            "currency": "",
+            "amount_total": None,
+            "source": "smoke",
+            "source_shipment_id": "",
+            "source_upload_id": "",
+            "file_original_name": "contract-ore.pdf",
+            "file_content_type": "application/pdf",
+            "file_sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            "file_path": contract_relative,
+            "parser_version": "fixture",
+            "parsed_metadata": {},
+            "warnings": [],
+            "errors": [],
+            "status": "active",
+            "created_at": "2026-06-19T08:00:00Z",
+            "updated_at": "2026-06-19T08:00:00Z",
+        }
+    )
+    runtime.save_invoice_contract_link(
+        invoice_document_id="tdoc_invoice_safe",
+        contract_document_id="tdoc_contract_safe",
+        created_at="2026-06-19T08:00:00Z",
+        updated_at="2026-06-19T08:00:00Z",
+        linked_by="smoke",
+        source="smoke",
+    )
     runtime.save_supplier_shipment(
         header={
             "shipment_id": "sup_financial",
@@ -869,8 +1118,8 @@ def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
             "match_status": "all_matched",
             "source_filename": "safe.xlsx",
             "source_file_sha256": "",
-            "source_file_path": "",
-            "invoice_document_id": "",
+            "source_file_path": invoice_relative,
+            "invoice_document_id": "tdoc_invoice_safe",
             "parser_version": "fixture",
             "warnings": [],
             "errors": [],
@@ -903,6 +1152,20 @@ def _document_id_by_type(payload: Mapping[str, Any], document_type: str) -> str:
         if document.get("document_type") == document_type:
             return str(document.get("document_id") or "")
     return ""
+
+
+def _required_document_status(rows: list[Mapping[str, Any]], document_type: str) -> str:
+    for row in rows:
+        if row.get("document_type") == document_type:
+            return str(row.get("status_label") or "")
+    return ""
+
+
+def _zip_manifest(archive_bytes: bytes) -> dict[str, Any]:
+    from io import BytesIO
+
+    with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+        return json.loads(archive.read("manifest.json").decode("utf-8"))
 
 
 def _registry_cell_display(registry: Mapping[str, Any], section_id: str, row_id: str, shipment_id: str) -> str:

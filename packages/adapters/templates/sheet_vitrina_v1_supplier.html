@@ -138,6 +138,16 @@
     tbody tr:last-child td { border-bottom: 0; }
     tr[data-row] { cursor: pointer; }
     tr[data-row]:hover td { background: rgba(167, 139, 250, 0.08); }
+    .document-row-missing td {
+      color: var(--muted);
+      background: rgba(170, 176, 197, 0.05);
+    }
+    .document-row-missing .badge {
+      color: var(--muted);
+      background: rgba(170, 176, 197, 0.10);
+    }
+    .document-row-uploaded { cursor: pointer; }
+    .document-row-uploaded:hover td { background: rgba(56, 189, 248, 0.08); }
     .loading-inline { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 800; }
     .loading-dots { display: inline-flex; gap: 4px; align-items: center; }
     .loading-dots span {
@@ -358,7 +368,6 @@
           </div>
           <div class="toolbar">
             <span id="matchStatusBadge" class="badge">-</span>
-            <a id="invoiceDownloadLink" class="button-link" href="#" hidden>下载发票 / Download invoice / Скачать invoice</a>
             __SHEET_VITRINA_V1_PRICE_CHECK_BUTTON_HTML__
             <button id="saveShipmentButton" class="primary" type="button" disabled>保存 / Save / Сохранить</button>
             <button id="closeShipmentButton" type="button">关闭 / Close / Закрыть</button>
@@ -367,7 +376,7 @@
 
         <div class="card-tabs" role="tablist" aria-label="Раздел заказа">
           <button id="supplyCompositionTabButton" class="card-tab-button" type="button" role="tab" aria-selected="true" data-card-tab="supply">Состав поставки</button>
-          <button id="financialDocumentsTabButton" class="card-tab-button" type="button" role="tab" aria-selected="false" data-card-tab="financial" hidden>Финансовые документы</button>
+          <button id="financialDocumentsTabButton" class="card-tab-button" type="button" role="tab" aria-selected="false" data-card-tab="financial" hidden>Документы</button>
         </div>
 
         <div id="supplyCompositionPanel" role="tabpanel" data-card-panel="supply">
@@ -410,27 +419,6 @@
           <div class="field">
             <label for="contractDateInput">合同日期 / Contract date / Дата контракта</label>
             <input id="contractDateInput" type="date" data-meta-field="contract_date">
-          </div>
-        </div>
-
-        <div class="documents-panel" aria-label="Документы">
-          <div class="document-slot">
-            <strong>Invoice</strong>
-            <div class="document-actions">
-              <a id="documentInvoiceDownloadLink" class="button-link compact" href="#" hidden>Скачать invoice</a>
-              <span id="invoiceDocumentLabel">Invoice не сохранён</span>
-            </div>
-          </div>
-          <div class="document-slot">
-            <strong>Contract</strong>
-            <span id="contractDocumentLabel">Контракт: выбрать</span>
-            <div id="contractManageControls" class="document-actions" hidden>
-              <select id="contractCandidateSelect" class="contract-select"></select>
-              <button id="linkContractButton" class="compact" type="button">Выбрать контракт</button>
-              <button id="uploadContractButton" class="compact" type="button">Загрузить новый контракт</button>
-              <input id="contractFileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.xlsx" hidden>
-            </div>
-            <a id="contractDownloadLink" class="button-link compact" href="#" hidden>Скачать контракт</a>
           </div>
         </div>
 
@@ -483,8 +471,32 @@
         </div>
 
         <div id="financialDocumentsPanel" role="tabpanel" data-card-panel="financial" hidden>
+          <div class="documents-panel" aria-label="Документы заказа">
+            <div class="document-slot">
+              <strong>Invoice</strong>
+              <div class="document-actions">
+                <a id="documentInvoiceDownloadLink" class="button-link compact" href="#" hidden>Скачать invoice</a>
+                <span id="invoiceDocumentLabel">Invoice не сохранён</span>
+              </div>
+            </div>
+            <div class="document-slot">
+              <strong>Contract</strong>
+              <span id="contractDocumentLabel">Контракт: выбрать</span>
+              <div id="contractManageControls" class="document-actions" hidden>
+                <select id="contractCandidateSelect" class="contract-select"></select>
+                <button id="linkContractButton" class="compact" type="button">Выбрать контракт</button>
+                <button id="uploadContractButton" class="compact" type="button">Загрузить новый контракт</button>
+                <input id="contractFileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.xlsx" hidden>
+              </div>
+              <a id="contractDownloadLink" class="button-link compact" href="#" hidden>Скачать контракт</a>
+            </div>
+          </div>
+
+          <div id="operatorDocumentsArea">
           <div class="finance-toolbar">
             <button id="addFinancialDocumentButton" class="primary compact" type="button">Добавить документ</button>
+            <a id="allDocumentsPackageLink" class="button-link compact" href="#" hidden>Скачать все документы</a>
+            <a id="logisticsDocumentsPackageLink" class="button-link compact" href="#" hidden>Скачать пакет для логистов</a>
             <input id="financialDocumentFileInput" type="file" accept=".pdf" multiple hidden>
             <p id="financialDocumentsMessage" class="message"></p>
             <ul id="financialUploadProgress" class="finance-upload-progress" hidden></ul>
@@ -493,19 +505,17 @@
           <div id="financialSummaryGroups" class="finance-summary-stack" aria-label="Финансовая сводка"></div>
           <ul id="financialWarnings" class="warning-list" hidden></ul>
 
-          <h3 style="margin-top: 18px;">Финансовые документы</h3>
+          <h3 style="margin-top: 18px;">Документы</h3>
           <div class="line-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Дата</th>
                   <th>Тип</th>
+                  <th>Статус</th>
                   <th>Номер</th>
+                  <th>Дата</th>
                   <th>Контрагент</th>
                   <th>Сумма</th>
-                  <th>НДС</th>
-                  <th>Курс ЦБ USD/RUB</th>
-                  <th>Статус</th>
                   <th>Файл</th>
                   <th>Комментарий</th>
                   <th></th>
@@ -537,6 +547,7 @@
               <tbody id="financialExpenseRows"></tbody>
             </table>
           </div>
+          </div>
         </div>
       </section>
     </div>
@@ -565,7 +576,6 @@
       const cardTitle = document.getElementById("cardTitle");
       const cardMessage = document.getElementById("cardMessage");
       const matchStatusBadge = document.getElementById("matchStatusBadge");
-      const invoiceDownloadLink = document.getElementById("invoiceDownloadLink");
       const priceCheckButton = document.getElementById("priceCheckButton");
       const productLines = document.getElementById("productLines");
       const extraLines = document.getElementById("extraLines");
@@ -588,7 +598,10 @@
       const financialDocumentsTabButton = document.getElementById("financialDocumentsTabButton");
       const supplyCompositionPanel = document.getElementById("supplyCompositionPanel");
       const financialDocumentsPanel = document.getElementById("financialDocumentsPanel");
+      const operatorDocumentsArea = document.getElementById("operatorDocumentsArea");
       const addFinancialDocumentButton = document.getElementById("addFinancialDocumentButton");
+      const allDocumentsPackageLink = document.getElementById("allDocumentsPackageLink");
+      const logisticsDocumentsPackageLink = document.getElementById("logisticsDocumentsPackageLink");
       const financialDocumentFileInput = document.getElementById("financialDocumentFileInput");
       const financialDocumentsMessage = document.getElementById("financialDocumentsMessage");
       const financialUploadProgress = document.getElementById("financialUploadProgress");
@@ -616,6 +629,8 @@
       let registryLoadState = "loading";
       let activeContracts = [];
       let activeCardTab = "supply";
+      let orderRequiredDocuments = [];
+      let orderDocumentPackageDownloads = {};
       let financialDocuments = [];
       let financialExpenseLines = [];
       let financialSummary = null;
@@ -641,9 +656,19 @@
             accepted_ff: "Принято на ФФ"
           };
           const financialDocumentTypeLabels = {
+            invoice: "Invoice",
+            contract: "Контракт",
             logistics_quote: "КП логиста",
             logistics_invoice: "Счёт логиста",
-            customs_declaration: "ДТ"
+            customs_declaration: "ДТ",
+            bank_control_statement: "Ведомость банковского контроля",
+            bank_transfer_application: "Заявление на перевод ВТБ / платёжка"
+          };
+          const orderDocumentStatusLabels = {
+            uploaded: "Загружен",
+            missing: "Не загружен",
+            needs_review: "Проверить",
+            error: "Ошибка"
           };
           const financialStatusLabels = {
             parsed: "Распознан",
@@ -1088,8 +1113,6 @@
           input.value = metadata[input.dataset.metaField] ?? "";
         });
         uploadPanel.hidden = !isNewShipment;
-        invoiceDownloadLink.hidden = !shipment.invoice_download_path;
-        invoiceDownloadLink.href = shipment.invoice_download_path || "#";
         renderCardTabs(shipment);
         renderDocumentPanel(shipment);
         if (priceCheckButton) {
@@ -1129,28 +1152,33 @@
       }
 
       function renderCardTabs(shipment) {
-        const canShowFinance = canManageFinancialDocuments;
-        financialDocumentsTabButton.hidden = !canShowFinance;
-        financialDocumentsTabButton.disabled = !canShowFinance || !shipment.shipment_id;
-        if (!canShowFinance || !shipment.shipment_id) {
+        const canShowDocuments = Boolean(shipment.shipment_id);
+        financialDocumentsTabButton.hidden = !canShowDocuments;
+        financialDocumentsTabButton.disabled = !canShowDocuments;
+        if (!canShowDocuments) {
           activeCardTab = "supply";
         }
         supplyCompositionTabButton.setAttribute("aria-selected", activeCardTab === "supply" ? "true" : "false");
         financialDocumentsTabButton.setAttribute("aria-selected", activeCardTab === "financial" ? "true" : "false");
         supplyCompositionPanel.hidden = activeCardTab !== "supply";
         financialDocumentsPanel.hidden = activeCardTab !== "financial";
+        operatorDocumentsArea.hidden = !canManageFinancialDocuments;
       }
 
       function switchCardTab(tab) {
-        if (tab === "financial" && (!canManageFinancialDocuments || !currentShipment || !currentShipment.shipment_id)) {
+        if (tab === "financial" && (!currentShipment || !currentShipment.shipment_id)) {
           setMessage(cardMessage, "Сначала сохраните заказ.", "error");
           return;
         }
         activeCardTab = tab === "financial" ? "financial" : "supply";
         renderCardTabs(currentShipment || blankShipment());
-        if (activeCardTab === "financial") {
+        if (activeCardTab === "financial" && canManageFinancialDocuments) {
           loadFinancialDocuments();
         }
+      }
+
+      function orderDocumentsPath(shipmentId) {
+        return shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/documents";
       }
 
       function financialDocumentsPath(shipmentId) {
@@ -1162,6 +1190,8 @@
       }
 
       function resetFinancialState() {
+        orderRequiredDocuments = [];
+        orderDocumentPackageDownloads = {};
         financialDocuments = [];
         financialExpenseLines = [];
         financialSummary = null;
@@ -1195,11 +1225,13 @@
           resetFinancialState();
           return;
         }
-        setMessage(financialDocumentsMessage, "Загружаем финансовые документы...", "");
+        setMessage(financialDocumentsMessage, "Загружаем документы...", "");
         try {
-          const payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
+          const payload = await fetchJson(orderDocumentsPath(currentShipment.shipment_id), {
             headers: { Accept: "application/json" }
           });
+          orderRequiredDocuments = Array.isArray(payload.required_documents) ? payload.required_documents : [];
+          orderDocumentPackageDownloads = payload.package_downloads || {};
           financialDocuments = Array.isArray(payload.documents) ? payload.documents : [];
           financialExpenseLines = Array.isArray(payload.expense_lines) ? payload.expense_lines : [];
           financialSummary = payload.summary || null;
@@ -1218,10 +1250,20 @@
       }
 
       function renderFinancialDocuments() {
+        renderDocumentPackageLinks();
         renderFinancialSummary();
         renderFinancialWarnings();
         renderFinancialDocumentRows();
         renderFinancialSelectedDocument();
+      }
+
+      function renderDocumentPackageLinks() {
+        const allPackage = orderDocumentPackageDownloads.all || {};
+        const logisticsPackage = orderDocumentPackageDownloads.logistics || {};
+        allDocumentsPackageLink.hidden = !allPackage.download_path;
+        allDocumentsPackageLink.href = allPackage.download_path || "#";
+        logisticsDocumentsPackageLink.hidden = !logisticsPackage.download_path;
+        logisticsDocumentsPackageLink.href = logisticsPackage.download_path || "#";
       }
 
       function renderFinancialSummary() {
@@ -1315,32 +1357,35 @@
       }
 
       function renderFinancialDocumentRows() {
-        if (!financialDocuments.length) {
-          financialDocumentsRows.innerHTML = '<tr><td colspan="11">Финансовые документы не загружены.</td></tr>';
+        const rows = orderRequiredDocuments.length ? orderRequiredDocuments : [];
+        if (!rows.length) {
+          financialDocumentsRows.innerHTML = '<tr><td colspan="9">Документы заказа не загружены.</td></tr>';
           return;
         }
-        financialDocumentsRows.innerHTML = financialDocuments.map((document) => {
+        financialDocumentsRows.innerHTML = rows.map((document) => {
           const selected = document.document_id === selectedFinancialDocumentId;
-          const amount = document.total_amount_rub != null ? formatAmount(document.total_amount_rub, "₽") : formatAmount(document.total_amount, document.currency);
-          const vat = document.vat_amount_rub != null ? formatAmount(document.vat_amount_rub, "₽") : "-";
-          const rate = document.cbr_usd_rate_value != null
-            ? formatNumber(document.cbr_usd_rate_value) + (document.cbr_usd_rate_effective_date ? " · " + escapeHtml(document.cbr_usd_rate_effective_date) : "")
-            : escapeHtml(document.rate_source_status || "-");
+          const canSelect = document.source === "financial_document" && document.document_id;
+          const amount = document.amount != null ? formatAmount(document.amount, document.currency) : "-";
           const file = document.download_path
-            ? '<a class="button-link compact" href="' + escapeHtml(document.download_path) + '" data-download>PDF</a>'
+            ? '<a class="button-link compact" href="' + escapeHtml(document.download_path) + '" data-download>Скачать</a>'
             : '<span class="muted-dash">-</span>';
           const warning = (Array.isArray(document.warnings) && document.warnings.length) ? document.warnings[0] : "";
-          const deleteButton = '<button class="danger compact" type="button" data-delete-financial-document="' + escapeHtml(document.document_id || "") + '" title="Удалить документ" aria-label="Удалить финансовый документ">&times;</button>';
+          const deleteButton = canSelect
+            ? '<button class="danger compact" type="button" data-delete-financial-document="' + escapeHtml(document.document_id || "") + '" title="Удалить документ" aria-label="Удалить документ">&times;</button>'
+            : "";
+          const status = document.status || (document.is_uploaded ? "uploaded" : "missing");
+          const rowClass = [
+            selected ? "finance-row-selected" : "",
+            document.is_uploaded ? "document-row-uploaded" : "document-row-missing"
+          ].filter(Boolean).join(" ");
           return [
-            '<tr data-financial-document-row="' + escapeHtml(document.document_id || "") + '"' + (selected ? ' class="finance-row-selected"' : "") + '>',
-            '<td>' + escapeHtml(document.document_date || "-") + '</td>',
-            '<td>' + escapeHtml(financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '</td>',
+            '<tr data-financial-document-row="' + escapeHtml(canSelect ? (document.document_id || "") : "") + '"' + (rowClass ? ' class="' + escapeHtml(rowClass) + '"' : "") + '>',
+            '<td>' + escapeHtml(document.document_name || financialDocumentTypeLabels[document.document_type] || document.document_type || "-") + '</td>',
+            '<td><span class="badge ' + financialStatusTone(status) + '">' + escapeHtml(document.status_label || orderDocumentStatusLabels[status] || status || "-") + '</span></td>',
             '<td>' + escapeHtml(document.document_number || "-") + '</td>',
-            '<td>' + escapeHtml(document.vendor || "-") + '</td>',
+            '<td>' + escapeHtml(document.document_date || "-") + '</td>',
+            '<td>' + escapeHtml(document.counterparty || "-") + '</td>',
             '<td>' + escapeHtml(amount) + '</td>',
-            '<td>' + escapeHtml(vat) + '</td>',
-            '<td>' + rate + '</td>',
-            '<td><span class="badge ' + financialStatusTone(document.parse_status) + '">' + escapeHtml(financialStatusLabels[document.parse_status] || document.parse_status || "-") + '</span></td>',
             '<td>' + file + '</td>',
             '<td>' + escapeHtml(warning || "-") + '</td>',
             '<td>' + deleteButton + '</td>',
@@ -1351,6 +1396,9 @@
           row.addEventListener("click", (event) => {
             if (event.target && event.target.closest("[data-download], [data-delete-financial-document]")) {
               event.stopPropagation();
+              return;
+            }
+            if (!row.dataset.financialDocumentRow) {
               return;
             }
             selectedFinancialDocumentId = row.dataset.financialDocumentRow || "";
@@ -1367,10 +1415,10 @@
       }
 
       function financialStatusTone(status) {
-        if (status === "parsed" || status === "confirmed") {
+        if (status === "parsed" || status === "confirmed" || status === "uploaded") {
           return "success";
         }
-        if (status === "parse_error") {
+        if (status === "parse_error" || status === "error") {
           return "error";
         }
         return "warning";
@@ -1447,6 +1495,36 @@
             { label: "Таможенная стоимость", value: formatAmount(normalized.total_customs_value_rub, "₽") },
             { label: "Всего платежей", value: formatAmount(normalized.total_customs_payments_rub, "₽") },
             { label: "Статус выпуска", value: normalized.release_status }
+          ];
+        }
+        if (type === "bank_control_statement") {
+          return [
+            { label: "УНК", value: normalized.unique_contract_registration_number || document.document_number },
+            { label: "Дата ведомости", value: normalized.document_date || document.document_date },
+            { label: "Резидент", value: normalized.resident_name },
+            { label: "Нерезидент", value: normalized.non_resident_vendor || document.vendor },
+            { label: "Контракт", value: [normalized.contract_number, normalized.contract_date ? "от " + normalized.contract_date : ""].filter(Boolean).join(" ") },
+            { label: "Валюта контракта", value: [normalized.contract_currency, normalized.contract_currency_code].filter(Boolean).join(" / ") },
+            { label: "Сумма контракта", value: formatAmount(normalized.contract_amount, normalized.contract_currency_code || normalized.contract_currency) },
+            { label: "Дата операции", value: normalized.payment_operation_date },
+            { label: "Сумма операции", value: formatAmount(normalized.payment_operation_amount, normalized.payment_operation_currency_code || normalized.contract_currency_code) },
+            { label: "Сальдо", value: formatAmount(normalized.calculated_balance, normalized.contract_currency_code || normalized.contract_currency) }
+          ];
+        }
+        if (type === "bank_transfer_application") {
+          return [
+            { label: "Номер заявления", value: normalized.transfer_application_number || document.document_number },
+            { label: "Дата", value: normalized.document_date || document.document_date },
+            { label: "Статус исполнения", value: [normalized.execution_status, normalized.execution_time].filter(Boolean).join(" · ") },
+            { label: "Счет списания", value: normalized.debit_account },
+            { label: "Сумма перевода", value: formatAmount(normalized.transfer_amount || document.total_amount, normalized.currency || document.currency) },
+            { label: "Плательщик", value: normalized.ordering_customer },
+            { label: "Получатель", value: normalized.beneficiary_customer || document.vendor },
+            { label: "Счет получателя", value: normalized.beneficiary_account },
+            { label: "Банк получателя", value: normalized.beneficiary_bank },
+            { label: "Назначение", value: normalized.payment_details },
+            { label: "Контракт", value: normalized.contract_ref || document.contract_ref },
+            { label: "Комиссии", value: normalized.charges_mode }
           ];
         }
         return [{ label: "Тип", value: type || "-" }];
@@ -1570,7 +1648,7 @@
           setMessage(financialDocumentsMessage, "Документ не выбран.", "error");
           return;
         }
-        if (!window.confirm("Удалить финансовый документ? Это действие нельзя отменить.")) {
+        if (!window.confirm("Удалить документ заказа? Это действие нельзя отменить.")) {
           return;
         }
         setMessage(financialDocumentsMessage, "Удаляем документ...", "");
@@ -1856,6 +1934,9 @@
           currentShipment = payload.shipment || (await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), { headers: { Accept: "application/json" } }));
           renderCard();
           await loadRegistry();
+          if (activeCardTab === "financial" && canManageFinancialDocuments) {
+            await loadFinancialDocuments();
+          }
           setMessage(cardMessage, "Контракт связан.", "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
@@ -1883,6 +1964,9 @@
           await loadActiveContracts();
           renderCard();
           await loadRegistry();
+          if (activeCardTab === "financial" && canManageFinancialDocuments) {
+            await loadFinancialDocuments();
+          }
           setMessage(cardMessage, "Контракт загружен и связан.", "success");
         } catch (error) {
           setMessage(cardMessage, error.message, "error");

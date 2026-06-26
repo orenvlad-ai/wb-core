@@ -154,6 +154,7 @@ DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipment
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH = f"{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}/compare-quote"
+DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT = "documents"
 DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT = "financial-documents"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
@@ -2080,6 +2081,54 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_supplier_order_documents_archive_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, package_kind = _resolve_supplier_order_documents_archive_ids(parsed.path)
+                    archive_bytes, filename = entrypoint.handle_supplier_order_documents_archive_request(
+                        shipment_id,
+                        package_kind=package_kind,
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier order documents archive failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    archive_bytes,
+                    content_type="application/zip",
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if _is_supplier_order_documents_collection_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_order_documents_shipment_id(parsed.path)
+                    payload = entrypoint.handle_supplier_order_documents_list_request(shipment_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier order documents list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_supplier_financial_documents_collection_path(parsed.path):
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -3306,6 +3355,28 @@ def _is_supplier_shipment_price_check_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "price-check"
 
 
+def _supplier_order_documents_path_parts(path: str) -> list[str]:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return []
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/") if suffix else []
+
+
+def _is_supplier_order_documents_collection_path(path: str) -> bool:
+    parts = _supplier_order_documents_path_parts(path)
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT
+
+
+def _is_supplier_order_documents_archive_path(path: str) -> bool:
+    parts = _supplier_order_documents_path_parts(path)
+    return (
+        len(parts) == 3
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT
+        and parts[2] in {"archive.zip", "logistics-package.zip"}
+    )
+
+
 def _supplier_financial_path_parts(path: str) -> list[str]:
     if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
         return []
@@ -3418,6 +3489,19 @@ def _resolve_supplier_financial_shipment_id(path: str) -> str:
     if not _is_supplier_financial_documents_collection_path(path):
         raise ValueError(f"unsupported supplier financial documents path: {path}")
     return _supplier_financial_path_parts(path)[0]
+
+
+def _resolve_supplier_order_documents_shipment_id(path: str) -> str:
+    if not _is_supplier_order_documents_collection_path(path):
+        raise ValueError(f"unsupported supplier order documents path: {path}")
+    return _supplier_order_documents_path_parts(path)[0]
+
+
+def _resolve_supplier_order_documents_archive_ids(path: str) -> tuple[str, str]:
+    if not _is_supplier_order_documents_archive_path(path):
+        raise ValueError(f"unsupported supplier order documents archive path: {path}")
+    parts = _supplier_order_documents_path_parts(path)
+    return parts[0], parts[2]
 
 
 def _resolve_supplier_financial_document_ids(path: str) -> tuple[str, str]:

@@ -385,11 +385,22 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="保存 / Save / Сохранить")).to_be_enabled()
                 frame.get_by_role("button", name="保存 / Save / Сохранить").click()
                 expect(frame.get_by_text("订单已保存 / Order saved / Заказ сохранён.")).to_be_visible(timeout=5000)
+                expect(frame.locator("#supplyCompositionPanel #documentInvoiceDownloadLink")).to_have_count(0)
+                expect(frame.locator("#supplyCompositionPanel #contractManageControls")).to_have_count(0)
+                expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
+                frame.get_by_role("tab", name="Документы").click()
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
                 expect(frame.locator("#invoiceDocumentLabel")).to_contain_text("Document ID:")
                 expect(frame.locator("#contractDocumentLabel")).to_contain_text("Контракт: выбрать")
                 expect(frame.locator("#contractManageControls")).to_be_visible()
                 expect(frame.locator("#uploadContractButton")).to_be_visible()
+                expect(frame.get_by_role("link", name="Скачать все документы")).to_be_visible(timeout=5000)
+                expect(frame.get_by_role("link", name="Скачать пакет для логистов")).to_be_visible()
+                expect(frame.locator("#financialDocumentsRows")).to_contain_text("Invoice", timeout=5000)
+                expect(frame.locator("#financialDocumentsRows")).to_contain_text("Контракт")
+                expect(frame.locator("#financialDocumentsRows")).to_contain_text("КП логистов")
+                expect(frame.locator("#financialDocumentsRows")).to_contain_text("Не загружен")
+                frame.get_by_role("tab", name="Состав поставки").click()
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
                 frame.get_by_role("button", name="Проверить цены").click()
                 expect(frame.locator("#cardMessage")).to_contain_text("Проверка цен обновлена.", timeout=5000)
@@ -425,9 +436,11 @@ def main() -> None:
                 expect(frame.locator("a[data-download]").first).to_have_text("Invoice")
                 expect(frame.locator("[data-delete-shipment]").first).to_have_text("Delete")
                 frame.locator("#shipmentRows tr[data-row]").first.click()
-                expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_be_visible()
                 expect(frame.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_have_value("2026-05-16")
                 expect(frame.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("2026-05-28")
+                expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_have_count(0)
+                expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
+                frame.get_by_role("tab", name="Документы").click()
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
                 expect(frame.locator("#contractDocumentLabel")).to_contain_text("Контракт: выбрать")
                 expect(frame.get_by_role("button", name="Проверить цены")).to_be_enabled()
@@ -628,6 +641,20 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             )
             if price_check_probe.get("status") != 403 or price_check_probe.get("payload", {}).get("error") != "forbidden":
                 raise AssertionError(f"supplier must not call manual price-check route, got {price_check_probe}")
+            documents_probe = page.evaluate(
+                """async ({shipmentsPath, shipmentId}) => {
+                    const response = await fetch(shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/documents", {
+                        method: "GET",
+                        headers: {"Accept": "application/json"}
+                    });
+                    let payload = {};
+                    try { payload = await response.json(); } catch (error) { payload = {error: String(error)}; }
+                    return {status: response.status, payload};
+                }""",
+                {"shipmentsPath": DEFAULT_SUPPLIER_SHIPMENTS_PATH, "shipmentId": shipment_id},
+            )
+            if documents_probe.get("status") != 403 or documents_probe.get("payload", {}).get("error") != "forbidden":
+                raise AssertionError(f"supplier must not call operator documents route, got {documents_probe}")
         finally:
             if context is not None:
                 context.close()
