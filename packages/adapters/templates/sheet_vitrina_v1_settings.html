@@ -21,6 +21,9 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; font-family: Inter, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    body.is-embedded { min-height: 0; background: transparent; }
+    body.is-embedded main { padding: 0; }
+    body.is-embedded .topbar { display: none; }
     main { padding: 24px; }
     .shell { max-width: 1440px; margin: 0 auto; display: grid; gap: 18px; }
     .topbar, .block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
@@ -76,12 +79,12 @@
     .icon-button.save { border-color: rgba(52, 211, 153, .55); color: #03130d; background: var(--success); }
     .icon-button.disable { border-color: rgba(250, 204, 21, .58); color: #211600; background: var(--warning); }
     .file-input { display: none; }
-    .settings-tabs { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 6px; width: fit-content; max-width: 100%; }
+    .settings-tabs, .settings-group-tabs { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 6px; width: fit-content; max-width: 100%; }
     .settings-tab-button { min-height: 34px; border-color: transparent; background: transparent; color: var(--muted); }
     .settings-tab-button:hover { border-color: var(--border); color: var(--text); background: var(--panel-2); }
     .settings-tab-button.is-active { border-color: rgba(167, 139, 250, .48); background: var(--panel-2); color: var(--text); }
     .settings-panels { min-width: 0; }
-    .settings-panel[hidden] { display: none; }
+    .settings-panel[hidden], .settings-group-panel[hidden] { display: none; }
     .document-toolbar { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; align-items: end; }
     .document-toolbar .toolbar { grid-column: span 2; }
     .document-table { min-width: 1340px; }
@@ -101,15 +104,25 @@
     .pill.warning { background: rgba(250, 204, 21, .12); color: var(--warning); }
     .pill.success { background: rgba(52, 211, 153, .12); color: var(--success); }
     .compact-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .users-form { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)) auto; gap: 10px; align-items: end; margin-top: 12px; }
+    .users-table { min-width: 1260px; }
+    .users-table th.col-user { width: 160px; }
+    .users-table th.col-display { width: 190px; }
+    .users-table th.col-role { width: 150px; }
+    .users-table th.col-status { width: 120px; }
+    .users-table th.col-date { width: 170px; }
+    .users-table th.col-user-actions { width: 270px; }
+    .readonly-row { opacity: .72; }
     @media (max-width: 760px) {
       main { padding: 16px; }
       button, .button-link { width: 100%; }
       .document-toolbar { grid-template-columns: 1fr; }
       .document-toolbar .toolbar { grid-column: auto; }
+      .users-form { grid-template-columns: 1fr; }
     }
   </style>
 </head>
-<body>
+<body class="__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__">
   <main>
     <div class="shell">
       <section class="topbar">
@@ -123,13 +136,19 @@
         </div>
       </section>
 
-      <nav class="settings-tabs" aria-label="Подразделы настроек">
-        <button class="settings-tab-button is-active" type="button" data-settings-tab-button="nomenclature" aria-controls="nomenclaturePanel" aria-selected="true">Номенклатура</button>
-        <button class="settings-tab-button" type="button" data-settings-tab-button="contracts" aria-controls="contractsPanel" aria-selected="false">Договоры</button>
-        <button class="settings-tab-button" type="button" data-settings-tab-button="invoices" aria-controls="invoicesPanel" aria-selected="false">Инвойсы</button>
+      <nav class="settings-group-tabs" aria-label="Группы настроек">
+        <button class="settings-tab-button is-active" type="button" data-settings-group-button="directories" aria-controls="directoriesGroupPanel" aria-selected="true">Справочники</button>
+        <button class="settings-tab-button" type="button" data-settings-group-button="users" aria-controls="usersGroupPanel" aria-selected="false">Пользователи</button>
       </nav>
 
-      <div class="settings-panels">
+      <section id="directoriesGroupPanel" class="settings-group-panel" data-settings-group-panel="directories">
+        <nav class="settings-tabs" aria-label="Подразделы справочников">
+          <button class="settings-tab-button is-active" type="button" data-settings-tab-button="nomenclature" aria-controls="nomenclaturePanel" aria-selected="true">Номенклатура</button>
+          <button class="settings-tab-button" type="button" data-settings-tab-button="contracts" aria-controls="contractsPanel" aria-selected="false">Договоры</button>
+          <button class="settings-tab-button" type="button" data-settings-tab-button="invoices" aria-controls="invoicesPanel" aria-selected="false">Инвойсы</button>
+        </nav>
+
+        <div class="settings-panels">
       <section id="nomenclaturePanel" class="block settings-panel" data-settings-panel="nomenclature" aria-labelledby="nomenclatureTitle">
         <div class="toolbar" style="justify-content: space-between;">
           <div>
@@ -275,6 +294,64 @@
         </div>
       </section>
       </div>
+      </section>
+
+      <section id="usersGroupPanel" class="block settings-group-panel" data-settings-group-panel="users" aria-labelledby="usersTitle" hidden>
+        <div class="toolbar" style="justify-content: space-between;">
+          <div>
+            <h2 id="usersTitle">Пользователи</h2>
+            <p>Server-owned пользователи WebCore.</p>
+          </div>
+          <div class="toolbar">
+            <button id="reloadUsersButton" type="button">Обновить</button>
+          </div>
+        </div>
+        <div class="users-form" id="createUserForm">
+          <label class="field">
+            <span>Логин</span>
+            <input id="newUsernameInput" autocomplete="off" placeholder="login">
+          </label>
+          <label class="field">
+            <span>Отображаемое имя</span>
+            <input id="newDisplayNameInput" autocomplete="off" placeholder="Имя">
+          </label>
+          <label class="field">
+            <span>Роль</span>
+            <select id="newRoleSelect"></select>
+          </label>
+          <label class="field">
+            <span>Пароль</span>
+            <input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="Минимум 8 символов">
+          </label>
+          <label class="field">
+            <span>Статус</span>
+            <select id="newActiveSelect">
+              <option value="true">Активен</option>
+              <option value="false">Выключен</option>
+            </select>
+          </label>
+          <button id="createUserButton" class="primary" type="button">Добавить</button>
+        </div>
+        <p id="usersMessage" class="message">Читаем пользователей...</p>
+        <div class="table-wrap">
+          <table class="users-table">
+            <thead>
+              <tr>
+                <th class="col-user">Пользователь</th>
+                <th class="col-display">Отображаемое имя</th>
+                <th class="col-role">Роль</th>
+                <th class="col-status">Статус</th>
+                <th class="col-date">Создан</th>
+                <th class="col-date">Обновлён</th>
+                <th class="col-user-actions">Действия</th>
+              </tr>
+            </thead>
+            <tbody id="userRows">
+              <tr><td colspan="7">Пользователей пока нет.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </main>
 
@@ -286,6 +363,8 @@
       const nomenclatureExportPath = config.nomenclature_export_path;
       const nomenclatureImportPath = config.nomenclature_import_path;
       const tradeDocumentsPath = config.trade_documents_path;
+      const usersPath = config.settings_users_path;
+      const canManageUsers = config.can_manage_users !== false;
       const rowsBody = document.getElementById("nomenclatureRows");
       const message = document.getElementById("nomenclatureMessage");
       const filterInput = document.getElementById("nomenclatureFilter");
@@ -314,7 +393,20 @@
       const reloadInvoicesButton = document.getElementById("reloadInvoicesButton");
       const settingsTabButtons = Array.from(document.querySelectorAll("[data-settings-tab-button]"));
       const settingsPanels = Array.from(document.querySelectorAll("[data-settings-panel]"));
+      const settingsGroupButtons = Array.from(document.querySelectorAll("[data-settings-group-button]"));
+      const settingsGroupPanels = Array.from(document.querySelectorAll("[data-settings-group-panel]"));
+      const userRows = document.getElementById("userRows");
+      const usersMessage = document.getElementById("usersMessage");
+      const reloadUsersButton = document.getElementById("reloadUsersButton");
+      const createUserForm = document.getElementById("createUserForm");
+      const createUserButton = document.getElementById("createUserButton");
+      const newUsernameInput = document.getElementById("newUsernameInput");
+      const newDisplayNameInput = document.getElementById("newDisplayNameInput");
+      const newRoleSelect = document.getElementById("newRoleSelect");
+      const newPasswordInput = document.getElementById("newPasswordInput");
+      const newActiveSelect = document.getElementById("newActiveSelect");
       const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v2";
+      const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
 
       const productTypeLabels = {
         clear: "Прозрачное",
@@ -327,6 +419,8 @@
       let documents = [];
       let pendingDocumentType = "";
       let editingContractId = "";
+      let users = [];
+      let userRoles = ["admin", "operator", "supply_operator", "supplier"];
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -348,6 +442,43 @@
       function setAllDocumentMessages(text, tone) {
         setDocumentMessage("contract", text, tone);
         setDocumentMessage("invoice", text, tone);
+      }
+
+      function setUsersMessage(text, tone) {
+        usersMessage.textContent = text || "";
+        usersMessage.className = "message" + (tone ? " " + tone : "");
+      }
+
+      function activateSettingsGroup(groupName, options) {
+        const requested = groupName === "users" && canManageUsers ? "users" : "directories";
+        settingsGroupButtons.forEach((button) => {
+          const isActive = button.dataset.settingsGroupButton === requested;
+          button.classList.toggle("is-active", isActive);
+          button.setAttribute("aria-selected", isActive ? "true" : "false");
+        });
+        settingsGroupPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.settingsGroupPanel !== requested;
+        });
+        if (!options || options.persist !== false) {
+          try {
+            window.localStorage.setItem(SETTINGS_GROUP_STORAGE_KEY, requested);
+          } catch (error) {
+            // Browser-local settings group is a UI preference only.
+          }
+        }
+        if (requested === "users" && !users.length) {
+          loadUsers();
+        }
+      }
+
+      function restoreSettingsGroup() {
+        let saved = "";
+        try {
+          saved = window.localStorage.getItem(SETTINGS_GROUP_STORAGE_KEY) || "";
+        } catch (error) {
+          saved = "";
+        }
+        activateSettingsGroup(saved === "users" ? "users" : "directories", { persist: false });
       }
 
       function activateSettingsTab(tabName, options) {
@@ -949,6 +1080,190 @@
         }
       }
 
+      function roleLabel(role) {
+        const labels = {
+          admin: "admin",
+          operator: "operator",
+          supply_operator: "supply_operator",
+          supplier: "supplier"
+        };
+        return labels[role] || role || "";
+      }
+
+      function renderRoleOptions(selectedRole) {
+        return userRoles.map((role) => (
+          '<option value="' + escapeHtml(role) + '"' + (role === selectedRole ? " selected" : "") + '>' +
+          escapeHtml(roleLabel(role)) +
+          '</option>'
+        )).join("");
+      }
+
+      function renderUserRoleSelectOptions() {
+        newRoleSelect.innerHTML = renderRoleOptions("operator");
+      }
+
+      async function loadUsers() {
+        if (!canManageUsers || !usersPath) {
+          setUsersMessage("Управление пользователями доступно только admin.", "warning");
+          createUserForm.hidden = true;
+          userRows.innerHTML = '<tr><td colspan="7">Недостаточно прав.</td></tr>';
+          return;
+        }
+        setUsersMessage("Читаем пользователей...", "");
+        try {
+          const payload = await fetchJson(usersPath, { headers: { Accept: "application/json" } });
+          users = Array.isArray(payload.users) ? payload.users : [];
+          userRoles = Array.isArray(payload.roles) && payload.roles.length ? payload.roles : userRoles;
+          renderUserRoleSelectOptions();
+          renderUsers();
+          setUsersMessage("Пользователи загружены: " + users.length, "success");
+        } catch (error) {
+          setUsersMessage(error.message, "error");
+          userRows.innerHTML = '<tr><td colspan="7">Не удалось загрузить пользователей.</td></tr>';
+        }
+      }
+
+      function renderUsers() {
+        if (!users.length) {
+          userRows.innerHTML = '<tr><td colspan="7">Пользователей пока нет.</td></tr>';
+          return;
+        }
+        userRows.innerHTML = users.map(renderUserRow).join("");
+        Array.from(userRows.querySelectorAll("[data-user-save]")).forEach((button) => {
+          button.addEventListener("click", () => saveUser(button.dataset.userSave || ""));
+        });
+        Array.from(userRows.querySelectorAll("[data-user-password]")).forEach((button) => {
+          button.addEventListener("click", () => changeUserPassword(button.dataset.userPassword || ""));
+        });
+        Array.from(userRows.querySelectorAll("[data-user-delete]")).forEach((button) => {
+          button.addEventListener("click", () => deleteUser(button.dataset.userDelete || ""));
+        });
+      }
+
+      function renderUserRow(user) {
+        const userId = String(user.user_id || "");
+        const readonly = Boolean(user.readonly);
+        const rowClass = readonly ? ' class="readonly-row"' : "";
+        const disabled = readonly ? " disabled" : "";
+        const statusValue = user.is_active ? "true" : "false";
+        const actions = readonly
+          ? '<span class="pill">env</span>'
+          : [
+              '<button class="compact" type="button" data-user-password="' + escapeHtml(userId) + '">Сменить пароль</button>',
+              '<button class="primary compact" type="button" data-user-save="' + escapeHtml(userId) + '">Сохранить</button>',
+              '<button class="danger compact" type="button" data-user-delete="' + escapeHtml(userId) + '">Удалить</button>'
+            ].join("");
+        return [
+          '<tr data-user-id="' + escapeHtml(userId) + '"' + rowClass + '>',
+          '<td>' + escapeHtml(user.username || "") + '</td>',
+          '<td><input data-user-field="display_name" value="' + escapeHtml(user.display_name || "") + '"' + disabled + '></td>',
+          '<td><select data-user-field="role"' + disabled + '>' + renderRoleOptions(String(user.role || "")) + '</select></td>',
+          '<td><select data-user-field="is_active"' + disabled + '>',
+          '<option value="true"' + (statusValue === "true" ? " selected" : "") + '>Активен</option>',
+          '<option value="false"' + (statusValue === "false" ? " selected" : "") + '>Выключен</option>',
+          '</select></td>',
+          '<td>' + escapeHtml(user.created_at || "-") + '</td>',
+          '<td>' + escapeHtml(user.updated_at || "-") + '</td>',
+          '<td><div class="compact-actions">' + actions + '</div></td>',
+          '</tr>'
+        ].join("");
+      }
+
+      async function createUser() {
+        const payload = {
+          username: newUsernameInput.value.trim(),
+          display_name: newDisplayNameInput.value.trim(),
+          role: newRoleSelect.value,
+          password: newPasswordInput.value,
+          is_active: newActiveSelect.value === "true"
+        };
+        setUsersMessage("Создаём пользователя...", "");
+        try {
+          const result = await fetchJson(usersPath, {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify(payload)
+          });
+          users = Array.isArray(result.users) ? result.users : users;
+          newUsernameInput.value = "";
+          newDisplayNameInput.value = "";
+          newPasswordInput.value = "";
+          newActiveSelect.value = "true";
+          renderUsers();
+          setUsersMessage("Пользователь создан.", "success");
+        } catch (error) {
+          setUsersMessage(error.message, "error");
+        }
+      }
+
+      async function saveUser(userId) {
+        const row = userRows.querySelector('tr[data-user-id="' + CSS.escape(userId) + '"]');
+        if (!row) {
+          setUsersMessage("Не удалось найти строку пользователя.", "error");
+          return;
+        }
+        const payload = {};
+        Array.from(row.querySelectorAll("[data-user-field]")).forEach((input) => {
+          const field = input.getAttribute("data-user-field");
+          if (field === "is_active") {
+            payload[field] = input.value === "true";
+          } else {
+            payload[field] = input.value;
+          }
+        });
+        setUsersMessage("Сохраняем пользователя...", "");
+        try {
+          const result = await fetchJson(usersPath + "/" + encodeURIComponent(userId), {
+            method: "PATCH",
+            headers: { Accept: "application/json", "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify(payload)
+          });
+          users = Array.isArray(result.users) ? result.users : users;
+          renderUsers();
+          setUsersMessage("Пользователь сохранён.", "success");
+        } catch (error) {
+          setUsersMessage(error.message, "error");
+        }
+      }
+
+      async function changeUserPassword(userId) {
+        const password = window.prompt("Новый пароль");
+        if (password === null) {
+          return;
+        }
+        setUsersMessage("Меняем пароль...", "");
+        try {
+          const result = await fetchJson(usersPath + "/" + encodeURIComponent(userId), {
+            method: "PATCH",
+            headers: { Accept: "application/json", "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify({ password })
+          });
+          users = Array.isArray(result.users) ? result.users : users;
+          renderUsers();
+          setUsersMessage("Пароль изменён.", "success");
+        } catch (error) {
+          setUsersMessage(error.message, "error");
+        }
+      }
+
+      async function deleteUser(userId) {
+        if (!window.confirm("Выключить пользователя?")) {
+          return;
+        }
+        setUsersMessage("Выключаем пользователя...", "");
+        try {
+          const result = await fetchJson(usersPath + "/" + encodeURIComponent(userId), {
+            method: "DELETE",
+            headers: { Accept: "application/json" }
+          });
+          users = Array.isArray(result.users) ? result.users : users;
+          renderUsers();
+          setUsersMessage("Пользователь выключен.", "success");
+        } catch (error) {
+          setUsersMessage(error.message, "error");
+        }
+      }
+
       addItemButton.addEventListener("click", () => {
         const draft = {
           item_id: "",
@@ -982,12 +1297,23 @@
       settingsTabButtons.forEach((button) => {
         button.addEventListener("click", () => activateSettingsTab(button.dataset.settingsTabButton || "nomenclature"));
       });
+      settingsGroupButtons.forEach((button) => {
+        if (button.dataset.settingsGroupButton === "users" && !canManageUsers) {
+          button.hidden = true;
+          button.disabled = true;
+        }
+        button.addEventListener("click", () => activateSettingsGroup(button.dataset.settingsGroupButton || "directories"));
+      });
+      reloadUsersButton.addEventListener("click", loadUsers);
+      createUserButton.addEventListener("click", createUser);
+      renderUserRoleSelectOptions();
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
       }
       if (vitrinaLink && config.vitrina_path) {
         vitrinaLink.href = config.vitrina_path;
       }
+      restoreSettingsGroup();
       restoreSettingsTab();
       loadItems();
       loadDocuments();

@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timezone
 from email.parser import BytesParser
 from email.policy import default as default_email_policy
 import hashlib
@@ -20,6 +20,7 @@ import socketserver
 import time
 from typing import Any, Mapping
 from urllib import parse as urllib_parse
+from uuid import uuid4
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import (
@@ -108,6 +109,22 @@ DEFAULT_WEB_AUTH_LOGIN_PATH = "/login"
 DEFAULT_WEB_AUTH_LOGOUT_PATH = "/logout"
 WEB_AUTH_COOKIE_NAME = "wb_core_web_session"
 WEB_AUTH_DEFAULT_MAX_AGE_SECONDS = 8 * 60 * 60
+WEB_AUTH_ROLE_ADMIN = "admin"
+WEB_AUTH_ROLE_OPERATOR = "operator"
+WEB_AUTH_ROLE_SUPPLIER = "supplier"
+WEB_AUTH_ROLE_SUPPLY_OPERATOR = "supply_operator"
+WEB_AUTH_FULL_OPERATOR_ROLES = {WEB_AUTH_ROLE_ADMIN, WEB_AUTH_ROLE_OPERATOR}
+WEB_AUTH_SUPPLY_OPERATOR_ROLES = {
+    WEB_AUTH_ROLE_ADMIN,
+    WEB_AUTH_ROLE_OPERATOR,
+    WEB_AUTH_ROLE_SUPPLY_OPERATOR,
+}
+WEB_AUTH_RUNTIME_ROLES = {
+    WEB_AUTH_ROLE_ADMIN,
+    WEB_AUTH_ROLE_OPERATOR,
+    WEB_AUTH_ROLE_SUPPLIER,
+    WEB_AUTH_ROLE_SUPPLY_OPERATOR,
+}
 DEFAULT_FACTORY_ORDER_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/status"
 DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/template/stock-ff.xlsx"
 DEFAULT_FACTORY_ORDER_STOCK_FF_ONEC_CHECK_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/stock-ff/onec-check"
@@ -161,6 +178,7 @@ DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
 DEFAULT_NOMENCLATURE_IMPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
 DEFAULT_TRADE_DOCUMENTS_PATH = "/v1/sheet-vitrina-v1/settings/documents"
+DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
@@ -263,6 +281,8 @@ def _build_handler(
     sheet_operator_ui_path: str,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
+        runtime_entrypoint = entrypoint
+
         def do_POST(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
             if parsed.path == DEFAULT_WEB_AUTH_LOGIN_PATH:
@@ -272,6 +292,9 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if parsed.path == DEFAULT_SETTINGS_USERS_PATH:
+                _handle_settings_user_create(self, entrypoint)
                 return
             if parsed.path == upload_path:
                 try:
@@ -989,7 +1012,7 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH:
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     upload_payload = _load_uploaded_file_payload(self)
@@ -1017,7 +1040,7 @@ def _build_handler(
                 return
 
             if _is_supplier_shipment_contract_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
@@ -1044,7 +1067,7 @@ def _build_handler(
                 return
 
             if _is_supplier_financial_documents_collection_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_financial_shipment_id(parsed.path)
@@ -1110,7 +1133,7 @@ def _build_handler(
                 return
 
             if _is_supplier_shipment_rematch_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_rematch_path(parsed.path)
@@ -1130,7 +1153,7 @@ def _build_handler(
                 return
 
             if _is_supplier_shipment_price_check_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_price_check_path(parsed.path)
@@ -1345,6 +1368,7 @@ def _build_handler(
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
+                        role=_current_web_user_role(self),
                     ),
                 )
                 return
@@ -1352,14 +1376,14 @@ def _build_handler(
             if parsed.path == DEFAULT_SHEET_SUPPLIER_UI_PATH:
                 role = _current_web_user_role(self)
                 is_operator_embedded = (
-                    role == "operator"
+                    _role_has_supply_operator_access(role)
                     and _resolve_single_query_param(parsed.query, "embedded") == "operator"
                 )
                 _write_html_response(
                     self,
                     HTTPStatus.OK,
                     _render_sheet_vitrina_supplier_ui(
-                        can_delete_shipments=role == "operator",
+                        can_delete_shipments=_role_has_supply_operator_access(role),
                         can_edit_order_status=is_operator_embedded,
                         can_recheck_prices=is_operator_embedded,
                         can_manage_documents=is_operator_embedded,
@@ -1371,11 +1395,32 @@ def _build_handler(
             if parsed.path == DEFAULT_SETTINGS_UI_PATH:
                 if not _ensure_operator_role(self, parsed.path):
                     return
+                if _resolve_single_query_param(parsed.query, "embedded") == "1":
+                    _write_html_response(
+                        self,
+                        HTTPStatus.OK,
+                        _render_sheet_vitrina_settings_ui(
+                            embedded=True,
+                            can_manage_users=_current_web_user_role(self) == WEB_AUTH_ROLE_ADMIN,
+                        ),
+                    )
+                    return
                 _write_html_response(
                     self,
                     HTTPStatus.OK,
-                    _render_sheet_vitrina_settings_ui(),
+                    _render_sheet_vitrina_web_vitrina_ui(
+                        read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        operator_path=sheet_operator_ui_path,
+                        refresh_path=sheet_refresh_path,
+                        job_path=sheet_job_path,
+                        active_tab="settings",
+                        role=_current_web_user_role(self),
+                    ),
                 )
+                return
+
+            if parsed.path == DEFAULT_SETTINGS_USERS_PATH:
+                _handle_settings_users_list(self, entrypoint)
                 return
 
             if parsed.path == sheet_operator_ui_path:
@@ -1393,8 +1438,12 @@ def _build_handler(
                             operator_path=sheet_operator_ui_path,
                             refresh_path=sheet_refresh_path,
                             job_path=sheet_job_path,
+                            role=_current_web_user_role(self),
                         ),
                     )
+                    return
+                if _current_web_user_role(self) == WEB_AUTH_ROLE_SUPPLY_OPERATOR and embedded_tab != "factory-order":
+                    _write_auth_forbidden(self, parsed.path)
                     return
                 _write_html_response(
                     self,
@@ -1934,7 +1983,7 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH:
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     payload = entrypoint.handle_supplier_shipment_registry_request()
@@ -2082,7 +2131,7 @@ def _build_handler(
                 return
 
             if _is_supplier_order_documents_archive_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id, package_kind = _resolve_supplier_order_documents_archive_ids(parsed.path)
@@ -2111,7 +2160,7 @@ def _build_handler(
                 return
 
             if _is_supplier_order_documents_collection_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_order_documents_shipment_id(parsed.path)
@@ -2130,7 +2179,7 @@ def _build_handler(
                 return
 
             if _is_supplier_financial_documents_collection_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_financial_shipment_id(parsed.path)
@@ -2149,7 +2198,7 @@ def _build_handler(
                 return
 
             if _is_supplier_financial_document_file_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
@@ -2178,7 +2227,7 @@ def _build_handler(
                 return
 
             if _is_supplier_financial_document_detail_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
@@ -2607,8 +2656,11 @@ def _build_handler(
             parsed = urllib_parse.urlparse(self.path)
             if not _ensure_web_auth(self, parsed):
                 return
+            if _is_settings_user_item_path(parsed.path):
+                _handle_settings_user_patch(self, entrypoint, _resolve_settings_user_id(parsed.path))
+                return
             if _is_supplier_shipment_contract_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
@@ -2676,7 +2728,7 @@ def _build_handler(
                 return
 
             if _is_supplier_financial_document_detail_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
@@ -2703,10 +2755,10 @@ def _build_handler(
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
                     payload = _load_request_payload(self)
-                    if "contract_document_id" in payload and not _ensure_operator_role(self, parsed.path):
+                    if "contract_document_id" in payload and not _ensure_supply_operator_role(self, parsed.path):
                         return
                     if "order_status" in payload:
-                        if not _ensure_operator_role(self, parsed.path):
+                        if not _ensure_supply_operator_role(self, parsed.path):
                             return
                         if _is_supplier_order_status_only_payload(payload):
                             result = entrypoint.handle_supplier_shipments_order_status_patch_request(shipment_id, payload)
@@ -2758,6 +2810,9 @@ def _build_handler(
             parsed = urllib_parse.urlparse(self.path)
             if not _ensure_web_auth(self, parsed):
                 return
+            if _is_settings_user_item_path(parsed.path):
+                _handle_settings_user_delete(self, entrypoint, _resolve_settings_user_id(parsed.path))
+                return
             if parsed.path in {
                 DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH,
                 DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
@@ -2780,7 +2835,7 @@ def _build_handler(
                 return
 
             if _is_supplier_shipment_detail_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
@@ -2799,7 +2854,7 @@ def _build_handler(
                 return
 
             if _is_supplier_financial_document_detail_path(parsed.path):
-                if not _ensure_operator_role(self, parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
                     shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
@@ -3447,6 +3502,13 @@ def _is_trade_document_contract_link_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "contract"
 
 
+def _is_settings_user_item_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SETTINGS_USERS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SETTINGS_USERS_PATH) + 1 :]
+    return bool(suffix) and "/" not in suffix
+
+
 def _is_supplier_order_status_only_payload(payload: Mapping[str, Any]) -> bool:
     return set(payload.keys()) == {"order_status"}
 
@@ -3530,6 +3592,12 @@ def _resolve_trade_document_id(path: str) -> str:
     if _is_trade_document_item_path(path):
         return path[len(DEFAULT_TRADE_DOCUMENTS_PATH) + 1 :]
     raise ValueError(f"unsupported trade document path: {path}")
+
+
+def _resolve_settings_user_id(path: str) -> str:
+    if not _is_settings_user_item_path(path):
+        raise ValueError(f"unsupported settings user path: {path}")
+    return urllib_parse.unquote(path[len(DEFAULT_SETTINGS_USERS_PATH) + 1 :])
 
 
 def _resolve_wb_regional_district_from_download_path(path: str) -> str:
@@ -3672,14 +3740,14 @@ def _web_auth_config() -> dict[str, Any]:
         "operator": {
             "username": username,
             "password_hash": password_hash,
-            "role": "operator",
+            "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": username,
         },
         "supplier": {
             "enabled": supplier_enabled,
             "username": supplier_username,
             "password_hash": supplier_password_hash,
-            "role": "supplier",
+            "role": WEB_AUTH_ROLE_SUPPLIER,
             "display_name": supplier_display_name or supplier_username,
         },
         "session_secret": session_secret,
@@ -3724,7 +3792,29 @@ def _ensure_operator_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
     if not config["enabled"]:
         return True
     user = _authenticated_web_user(handler, config)
-    if user and str(user.get("role") or "") == "operator":
+    if user and _role_has_full_operator_access(str(user.get("role") or "")):
+        return True
+    _write_auth_forbidden(handler, path)
+    return False
+
+
+def _ensure_supply_operator_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return True
+    user = _authenticated_web_user(handler, config)
+    if user and _role_has_supply_operator_access(str(user.get("role") or "")):
+        return True
+    _write_auth_forbidden(handler, path)
+    return False
+
+
+def _ensure_admin_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return True
+    user = _authenticated_web_user(handler, config)
+    if user and str(user.get("role") or "") == WEB_AUTH_ROLE_ADMIN:
         return True
     _write_auth_forbidden(handler, path)
     return False
@@ -3733,9 +3823,9 @@ def _ensure_operator_role(handler: BaseHTTPRequestHandler, path: str) -> bool:
 def _current_web_user_role(handler: BaseHTTPRequestHandler) -> str:
     config = _web_auth_config()
     if not config["enabled"]:
-        return "operator"
+        return WEB_AUTH_ROLE_ADMIN
     user = _authenticated_web_user(handler, config) or {}
-    return str(user.get("role") or "").strip() or "operator"
+    return str(user.get("role") or "").strip() or WEB_AUTH_ROLE_ADMIN
 
 
 def _current_web_user_config_key(handler: BaseHTTPRequestHandler) -> str:
@@ -3743,10 +3833,10 @@ def _current_web_user_config_key(handler: BaseHTTPRequestHandler) -> str:
     if config["enabled"]:
         user = _authenticated_web_user(handler, config) or {}
         username = str(user.get("username") or "").strip()
-        role = str(user.get("role") or "operator").strip() or "operator"
+        role = str(user.get("role") or WEB_AUTH_ROLE_ADMIN).strip() or WEB_AUTH_ROLE_ADMIN
     else:
         username = "local_operator"
-        role = "operator"
+        role = WEB_AUTH_ROLE_ADMIN
     principal = f"{role}:{username or 'anonymous_operator'}"
     digest = hashlib.sha256(principal.encode("utf-8")).hexdigest()[:32]
     return f"webcore_user_{digest}"
@@ -3768,7 +3858,7 @@ def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
     username = str(payload.get("username") or "").strip()
     password = str(payload.get("password") or "")
     next_path = _safe_next_path(str(payload.get("next") or _resolve_single_query_param(query, "next") or DEFAULT_SHEET_WEB_VITRINA_UI_PATH))
-    principal = _match_web_auth_principal(username, password, config)
+    principal = _match_web_auth_principal(username, password, config, _handler_runtime_entrypoint(handler))
     if principal is None:
         _write_login_form_response(handler, urllib_parse.urlencode({"next": next_path}), error="Неверный логин или пароль.")
         return
@@ -3874,6 +3964,347 @@ def _write_auth_forbidden(handler: BaseHTTPRequestHandler, path: str) -> None:
     )
 
 
+def _handle_settings_users_list(
+    handler: BaseHTTPRequestHandler,
+    entrypoint: RegistryUploadHttpEntrypoint,
+) -> None:
+    if not _ensure_admin_role(handler, DEFAULT_SETTINGS_USERS_PATH):
+        return
+    try:
+        _write_json_response(handler, HTTPStatus.OK, _settings_users_response_payload(entrypoint, _web_auth_config()))
+    except Exception as exc:  # pragma: no cover - bounded fallback
+        _write_json_response(
+            handler,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            {"error": f"settings users list failed: {exc}"},
+        )
+
+
+def _handle_settings_user_create(
+    handler: BaseHTTPRequestHandler,
+    entrypoint: RegistryUploadHttpEntrypoint,
+) -> None:
+    if not _ensure_admin_role(handler, DEFAULT_SETTINGS_USERS_PATH):
+        return
+    config = _web_auth_config()
+    try:
+        payload = _load_request_payload(handler)
+        now = _utc_now_iso()
+        username = _normalize_runtime_username(payload.get("username"))
+        _ensure_runtime_username_available(username, config, entrypoint)
+        password = _validate_runtime_password(payload.get("password"))
+        role = _validate_runtime_role(payload.get("role"))
+        user_payload = {
+            "user_id": f"user_{uuid4().hex}",
+            "username": username,
+            "display_name": str(payload.get("display_name") or "").strip(),
+            "role": role,
+            "password_hash": _hash_pbkdf2_password(password),
+            "is_active": _coerce_bool(payload.get("is_active", True)),
+            "created_at": now,
+            "updated_at": now,
+        }
+        result = entrypoint.handle_sheet_vitrina_user_create_request(user_payload)
+    except ValueError as exc:
+        _write_json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return
+    except Exception as exc:  # pragma: no cover - bounded fallback
+        _write_json_response(
+            handler,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            {"error": f"settings user create failed: {exc}"},
+        )
+        return
+    _write_json_response(handler, HTTPStatus.CREATED, _with_settings_users_context(result, entrypoint, config))
+
+
+def _handle_settings_user_patch(
+    handler: BaseHTTPRequestHandler,
+    entrypoint: RegistryUploadHttpEntrypoint,
+    user_id: str,
+) -> None:
+    if not _ensure_admin_role(handler, DEFAULT_SETTINGS_USERS_PATH):
+        return
+    if user_id.startswith("env:"):
+        _write_json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "env principal is read-only"})
+        return
+    config = _web_auth_config()
+    try:
+        payload = _load_request_payload(handler)
+        existing = entrypoint.load_sheet_vitrina_runtime_user(user_id)
+        if existing is None:
+            _write_json_response(handler, HTTPStatus.NOT_FOUND, {"error": f"settings user not found: {user_id}"})
+            return
+        if "username" in payload:
+            requested_username = _normalize_runtime_username(payload.get("username"))
+            if requested_username != str(existing.get("username") or ""):
+                raise ValueError("username is immutable")
+        updates: dict[str, Any] = {}
+        if "display_name" in payload:
+            updates["display_name"] = str(payload.get("display_name") or "").strip()
+        if "role" in payload:
+            updates["role"] = _validate_runtime_role(payload.get("role"))
+        if "is_active" in payload:
+            updates["is_active"] = _coerce_bool(payload.get("is_active"))
+        if "password" in payload:
+            password = _validate_runtime_password(payload.get("password"))
+            updates["password_hash"] = _hash_pbkdf2_password(password)
+        if not updates:
+            result = {"user": _public_runtime_user(existing), "canonical_store": "server_runtime_sqlite"}
+        else:
+            candidate_role = str(updates.get("role", existing.get("role") or ""))
+            candidate_is_active = bool(updates.get("is_active", existing.get("is_active")))
+            _ensure_admin_not_exhausted(
+                config,
+                entrypoint,
+                candidate_user_id=user_id,
+                candidate_role=candidate_role,
+                candidate_is_active=candidate_is_active,
+            )
+            result = entrypoint.handle_sheet_vitrina_user_patch_request(
+                user_id,
+                updates,
+                updated_at=_utc_now_iso(),
+            )
+    except ValueError as exc:
+        _write_json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return
+    except Exception as exc:  # pragma: no cover - bounded fallback
+        _write_json_response(
+            handler,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            {"error": f"settings user patch failed: {exc}"},
+        )
+        return
+    _write_json_response(handler, HTTPStatus.OK, _with_settings_users_context(result, entrypoint, config))
+
+
+def _handle_settings_user_delete(
+    handler: BaseHTTPRequestHandler,
+    entrypoint: RegistryUploadHttpEntrypoint,
+    user_id: str,
+) -> None:
+    if not _ensure_admin_role(handler, DEFAULT_SETTINGS_USERS_PATH):
+        return
+    if user_id.startswith("env:"):
+        _write_json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "env principal is read-only"})
+        return
+    config = _web_auth_config()
+    try:
+        existing = entrypoint.load_sheet_vitrina_runtime_user(user_id)
+        if existing is None:
+            _write_json_response(handler, HTTPStatus.NOT_FOUND, {"error": f"settings user not found: {user_id}"})
+            return
+        _ensure_admin_not_exhausted(
+            config,
+            entrypoint,
+            candidate_user_id=user_id,
+            candidate_role=str(existing.get("role") or ""),
+            candidate_is_active=False,
+        )
+        result = entrypoint.handle_sheet_vitrina_user_archive_request(user_id, updated_at=_utc_now_iso())
+    except ValueError as exc:
+        _write_json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return
+    except Exception as exc:  # pragma: no cover - bounded fallback
+        _write_json_response(
+            handler,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            {"error": f"settings user delete failed: {exc}"},
+        )
+        return
+    _write_json_response(handler, HTTPStatus.OK, _with_settings_users_context(result, entrypoint, config))
+
+
+def _settings_users_response_payload(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    runtime_payload = entrypoint.handle_sheet_vitrina_users_list_request()
+    users = _env_principal_user_records(config)
+    users.extend(_public_runtime_user(user) for user in runtime_payload.get("users", []) if isinstance(user, Mapping))
+    return {
+        "users": users,
+        "roles": [
+            WEB_AUTH_ROLE_ADMIN,
+            WEB_AUTH_ROLE_OPERATOR,
+            WEB_AUTH_ROLE_SUPPLY_OPERATOR,
+            WEB_AUTH_ROLE_SUPPLIER,
+        ],
+        "canonical_store": "server_runtime_sqlite",
+    }
+
+
+def _with_settings_users_context(
+    result: Mapping[str, Any],
+    entrypoint: RegistryUploadHttpEntrypoint,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = dict(result)
+    if isinstance(payload.get("user"), Mapping):
+        payload["user"] = _public_runtime_user(payload["user"])
+    payload["users"] = _settings_users_response_payload(entrypoint, config)["users"]
+    return payload
+
+
+def _env_principal_user_records(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    users: list[dict[str, Any]] = []
+    operator = config.get("operator") if isinstance(config.get("operator"), Mapping) else {}
+    operator_username = str(operator.get("username") or "").strip()
+    if bool(config.get("enabled")) and operator_username:
+        users.append(
+            {
+                "user_id": "env:bootstrap-admin",
+                "username": operator_username,
+                "display_name": str(operator.get("display_name") or operator_username),
+                "role": WEB_AUTH_ROLE_ADMIN,
+                "is_active": True,
+                "created_at": "",
+                "updated_at": "",
+                "source": "env_bootstrap",
+                "readonly": True,
+            }
+        )
+    supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
+    supplier_username = str(supplier.get("username") or "").strip()
+    if bool(supplier.get("enabled")) and supplier_username:
+        users.append(
+            {
+                "user_id": "env:supplier",
+                "username": supplier_username,
+                "display_name": str(supplier.get("display_name") or supplier_username),
+                "role": WEB_AUTH_ROLE_SUPPLIER,
+                "is_active": True,
+                "created_at": "",
+                "updated_at": "",
+                "source": "env_supplier",
+                "readonly": True,
+            }
+        )
+    return users
+
+
+def _public_runtime_user(user: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "user_id": str(user.get("user_id") or ""),
+        "username": str(user.get("username") or ""),
+        "display_name": str(user.get("display_name") or ""),
+        "role": str(user.get("role") or ""),
+        "is_active": bool(user.get("is_active")),
+        "created_at": str(user.get("created_at") or ""),
+        "updated_at": str(user.get("updated_at") or ""),
+        "source": "runtime",
+        "readonly": False,
+    }
+
+
+def _normalize_runtime_username(value: Any) -> str:
+    username = _normalize_web_auth_username(str(value or ""))
+    if not username:
+        raise ValueError("username is required")
+    if len(username) > 64:
+        raise ValueError("username is too long")
+    if any(char.isspace() for char in username):
+        raise ValueError("username must not contain whitespace")
+    return username
+
+
+def _validate_runtime_role(value: Any) -> str:
+    role = _normalize_runtime_role(value)
+    if not role:
+        raise ValueError("role is invalid")
+    return role
+
+
+def _validate_runtime_password(value: Any) -> str:
+    password = str(value or "")
+    if len(password) < 8:
+        raise ValueError("password must be at least 8 characters")
+    if len(password) > 1024:
+        raise ValueError("password is too long")
+    return password
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "active", "enabled"}
+    return bool(value)
+
+
+def _ensure_runtime_username_available(
+    username: str,
+    config: Mapping[str, Any],
+    entrypoint: RegistryUploadHttpEntrypoint,
+) -> None:
+    normalized = _normalize_runtime_username(username)
+    for env_user in _env_principal_user_records(config):
+        if normalized == _normalize_web_auth_username(str(env_user.get("username") or "")):
+            raise ValueError("username already exists")
+    existing = entrypoint.load_sheet_vitrina_runtime_user_by_username(normalized)
+    if existing is not None:
+        raise ValueError("username already exists")
+
+
+def _ensure_admin_not_exhausted(
+    config: Mapping[str, Any],
+    entrypoint: RegistryUploadHttpEntrypoint,
+    *,
+    candidate_user_id: str,
+    candidate_role: str,
+    candidate_is_active: bool,
+) -> None:
+    if _active_admin_count_after(
+        config,
+        entrypoint,
+        candidate_user_id=candidate_user_id,
+        candidate_role=candidate_role,
+        candidate_is_active=candidate_is_active,
+    ) < 1:
+        raise ValueError("cannot disable or demote the last admin")
+
+
+def _active_admin_count_after(
+    config: Mapping[str, Any],
+    entrypoint: RegistryUploadHttpEntrypoint,
+    *,
+    candidate_user_id: str,
+    candidate_role: str,
+    candidate_is_active: bool,
+) -> int:
+    count = 0
+    operator = config.get("operator") if isinstance(config.get("operator"), Mapping) else {}
+    if bool(config.get("enabled")) and str(operator.get("username") or "").strip():
+        count += 1
+    runtime_payload = entrypoint.handle_sheet_vitrina_users_list_request()
+    for user in runtime_payload.get("users", []):
+        if not isinstance(user, Mapping):
+            continue
+        user_id = str(user.get("user_id") or "")
+        is_active = bool(user.get("is_active"))
+        role = str(user.get("role") or "")
+        if user_id == candidate_user_id:
+            is_active = bool(candidate_is_active)
+            role = str(candidate_role or "")
+        if is_active and role == WEB_AUTH_ROLE_ADMIN:
+            count += 1
+    return count
+
+
+def _hash_pbkdf2_password(password: str) -> str:
+    salt = os.urandom(16)
+    iterations = 260_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${_base64url_encode(salt)}${_base64url_encode(digest)}"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def _write_redirect_response(
     handler: BaseHTTPRequestHandler,
     status: HTTPStatus,
@@ -3915,26 +4346,50 @@ def _load_login_payload(handler: BaseHTTPRequestHandler) -> dict[str, str]:
     return {key: str(values[0] if values else "") for key, values in form.items()}
 
 
-def _match_web_auth_principal(username: str, password: str, config: Mapping[str, Any]) -> dict[str, str] | None:
+def _handler_runtime_entrypoint(handler: BaseHTTPRequestHandler) -> RegistryUploadHttpEntrypoint | None:
+    candidate = getattr(handler, "runtime_entrypoint", None)
+    return candidate if isinstance(candidate, RegistryUploadHttpEntrypoint) else None
+
+
+def _match_web_auth_principal(
+    username: str,
+    password: str,
+    config: Mapping[str, Any],
+    entrypoint: RegistryUploadHttpEntrypoint | None,
+) -> dict[str, str] | None:
+    normalized_username = _normalize_web_auth_username(username)
     operator = config.get("operator") if isinstance(config.get("operator"), Mapping) else {}
     if (
-        username == str(operator.get("username") or "")
+        normalized_username == _normalize_web_auth_username(str(operator.get("username") or ""))
         and _verify_pbkdf2_password(password, str(operator.get("password_hash") or ""))
     ):
         return {
-            "username": username,
-            "role": "operator",
+            "username": str(operator.get("username") or username),
+            "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(operator.get("display_name") or username),
         }
+    runtime_user = _load_runtime_user_by_username(entrypoint, normalized_username)
+    if (
+        runtime_user
+        and bool(runtime_user.get("is_active"))
+        and _verify_pbkdf2_password(password, str(runtime_user.get("password_hash") or ""))
+    ):
+        role = _normalize_runtime_role(runtime_user.get("role"))
+        if role:
+            return {
+                "username": str(runtime_user.get("username") or username),
+                "role": role,
+                "display_name": str(runtime_user.get("display_name") or runtime_user.get("username") or username),
+            }
     supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
     if (
         bool(supplier.get("enabled"))
-        and username == str(supplier.get("username") or "")
+        and normalized_username == _normalize_web_auth_username(str(supplier.get("username") or ""))
         and _verify_pbkdf2_password(password, str(supplier.get("password_hash") or ""))
     ):
         return {
-            "username": username,
-            "role": "supplier",
+            "username": str(supplier.get("username") or username),
+            "role": WEB_AUTH_ROLE_SUPPLIER,
             "display_name": str(supplier.get("display_name") or username),
         }
     return None
@@ -3964,19 +4419,42 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
     expires_at = int(payload.get("exp") or 0)
     if expires_at < int(time.time()):
         return None
-    role = str(payload.get("r") or "").strip() or "operator"
+    role = str(payload.get("r") or "").strip() or WEB_AUTH_ROLE_OPERATOR
     operator = config.get("operator") if isinstance(config.get("operator"), Mapping) else {}
-    if username == str(operator.get("username") or "") and role == "operator":
+    if (
+        _normalize_web_auth_username(username) == _normalize_web_auth_username(str(operator.get("username") or ""))
+        and role in {WEB_AUTH_ROLE_ADMIN, WEB_AUTH_ROLE_OPERATOR}
+    ):
         return {
-            "username": username,
-            "role": "operator",
+            "username": str(operator.get("username") or username),
+            "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(payload.get("d") or operator.get("display_name") or username),
         }
-    supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
-    if bool(supplier.get("enabled")) and username == str(supplier.get("username") or "") and role == "supplier":
+    runtime_user = _load_runtime_user_by_username(
+        _handler_runtime_entrypoint(handler),
+        _normalize_web_auth_username(username),
+    )
+    runtime_role = _normalize_runtime_role(runtime_user.get("role") if runtime_user else "")
+    if (
+        runtime_user
+        and bool(runtime_user.get("is_active"))
+        and runtime_role
+        and role == runtime_role
+    ):
         return {
-            "username": username,
-            "role": "supplier",
+            "username": str(runtime_user.get("username") or username),
+            "role": runtime_role,
+            "display_name": str(payload.get("d") or runtime_user.get("display_name") or runtime_user.get("username") or username),
+        }
+    supplier = config.get("supplier") if isinstance(config.get("supplier"), Mapping) else {}
+    if (
+        bool(supplier.get("enabled"))
+        and _normalize_web_auth_username(username) == _normalize_web_auth_username(str(supplier.get("username") or ""))
+        and role == WEB_AUTH_ROLE_SUPPLIER
+    ):
+        return {
+            "username": str(supplier.get("username") or username),
+            "role": WEB_AUTH_ROLE_SUPPLIER,
             "display_name": str(payload.get("d") or supplier.get("display_name") or username),
         }
     return None
@@ -4083,13 +4561,69 @@ def _safe_next_path(value: str) -> str:
     return next_path
 
 
+def _normalize_web_auth_username(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_runtime_role(value: Any) -> str:
+    role = str(value or "").strip()
+    return role if role in WEB_AUTH_RUNTIME_ROLES else ""
+
+
+def _role_has_full_operator_access(role: str) -> bool:
+    return str(role or "").strip() in WEB_AUTH_FULL_OPERATOR_ROLES
+
+
+def _role_has_supply_operator_access(role: str) -> bool:
+    return str(role or "").strip() in WEB_AUTH_SUPPLY_OPERATOR_ROLES
+
+
+def _allowed_unified_tabs_for_role(role: str) -> list[str]:
+    normalized = str(role or "").strip()
+    if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
+        return ["factory-order"]
+    if _role_has_full_operator_access(normalized):
+        return ["vitrina", "factory-order", "reports", "feedbacks", "research", "settings"]
+    return []
+
+
+def _default_unified_tab_for_role(role: str) -> str:
+    tabs = _allowed_unified_tabs_for_role(role)
+    return tabs[0] if tabs else "vitrina"
+
+
+def _load_runtime_user_by_username(
+    entrypoint: RegistryUploadHttpEntrypoint | None,
+    username: str,
+) -> dict[str, Any] | None:
+    normalized_username = _normalize_web_auth_username(username)
+    if not entrypoint or not normalized_username:
+        return None
+    try:
+        return entrypoint.load_sheet_vitrina_runtime_user_by_username(normalized_username)
+    except Exception:
+        return None
+
+
 def _allowed_roles_for_path(path: str) -> set[str]:
     normalized = str(path or "").split("?", 1)[0]
+    full_operator_roles = set(WEB_AUTH_FULL_OPERATOR_ROLES)
+    supply_operator_roles = set(WEB_AUTH_SUPPLY_OPERATOR_ROLES)
+    if normalized == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
+        return supply_operator_roles
+    if normalized == DEFAULT_SHEET_OPERATOR_UI_PATH:
+        return supply_operator_roles
+    if normalized == DEFAULT_SETTINGS_USERS_PATH or normalized.startswith(DEFAULT_SETTINGS_USERS_PATH + "/"):
+        return {WEB_AUTH_ROLE_ADMIN}
+    if normalized == DEFAULT_SETTINGS_UI_PATH:
+        return full_operator_roles
     if normalized == DEFAULT_SHEET_SUPPLIER_UI_PATH:
-        return {"operator", "supplier"}
+        return full_operator_roles | {WEB_AUTH_ROLE_SUPPLIER}
     if normalized == DEFAULT_SUPPLIER_SHIPMENTS_PATH or normalized.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
-        return {"operator", "supplier"}
-    return {"operator"}
+        return supply_operator_roles | {WEB_AUTH_ROLE_SUPPLIER}
+    if normalized.startswith("/v1/sheet-vitrina-v1/supply/"):
+        return supply_operator_roles
+    return full_operator_roles
 
 
 def _is_json_route(path: str, handler: BaseHTTPRequestHandler) -> bool:
@@ -4490,20 +5024,26 @@ def _render_sheet_vitrina_supplier_ui(
     )
 
 
-def _render_sheet_vitrina_settings_ui() -> str:
+def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_users: bool = True) -> str:
     config_payload = {
         "page_title": "Настройки",
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
         "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
+        "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
+        "embedded": bool(embedded),
+        "can_manage_users": bool(can_manage_users),
     }
     template = SETTINGS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return template.replace(
-        "__SHEET_VITRINA_V1_SETTINGS_CONFIG_JSON__",
-        json.dumps(config_payload, ensure_ascii=False),
+    return (
+        template.replace("__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__", "is-embedded" if embedded else "")
+        .replace(
+            "__SHEET_VITRINA_V1_SETTINGS_CONFIG_JSON__",
+            json.dumps(config_payload, ensure_ascii=False),
+        )
     )
 
 
@@ -4513,9 +5053,17 @@ def _render_sheet_vitrina_web_vitrina_ui(
     operator_path: str,
     refresh_path: str,
     job_path: str,
+    role: str = WEB_AUTH_ROLE_ADMIN,
+    active_tab: str = "",
 ) -> str:
+    normalized_role = _normalize_runtime_role(role) or WEB_AUTH_ROLE_ADMIN
+    allowed_tabs = _allowed_unified_tabs_for_role(normalized_role)
+    initial_tab = active_tab if active_tab in allowed_tabs else _default_unified_tab_for_role(normalized_role)
     config_payload = {
         "page_title": "Web-витрина",
+        "current_role": normalized_role,
+        "allowed_tabs": allowed_tabs,
+        "initial_tab": initial_tab,
         "read_path": read_path,
         "operator_path": operator_path,
         "refresh_path": refresh_path,
@@ -4541,6 +5089,11 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_auto_complaints_run_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH,
         "feedbacks_auto_complaints_tick_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,
+        "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
+        "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
+        "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
+        "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
+        "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "job_path": job_path,
         "seller_session_check_path": DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,

@@ -831,7 +831,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
     tab_texts = [item["text"] for item in tabs]
-    if tab_texts != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
+    if tab_texts != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Настройки"]:
         raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
     active_tabs = [item["id"] for item in tabs if item["active"]]
     if active_tabs != ["vitrina"]:
@@ -2459,7 +2459,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
+    if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Настройки"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
     if payload["active_unified_tab"] != "Витрина" or payload["update_tab_count"] != 0:
         raise AssertionError(f"web-vitrina must default to Vitrina and omit update-data tab, got {payload}")

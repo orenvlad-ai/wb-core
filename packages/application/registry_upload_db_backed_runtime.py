@@ -895,6 +895,162 @@ class RegistryUploadDbBackedRuntime:
             config_key=normalized_config_key,
         )
 
+    def list_sheet_vitrina_users(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_users
+                ORDER BY is_active DESC, role ASC, username ASC
+                """
+            ).fetchall()
+            return [_sheet_vitrina_user_row_to_dict(row, include_password_hash=False) for row in rows]
+
+    def load_sheet_vitrina_user(self, user_id: str) -> dict[str, Any] | None:
+        normalized_user_id = _normalize_required_storage_key(user_id, field_name="user_id")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_users
+                WHERE user_id = ?
+                """,
+                (normalized_user_id,),
+            ).fetchone()
+            return _sheet_vitrina_user_row_to_dict(row, include_password_hash=True) if row is not None else None
+
+    def load_sheet_vitrina_user_by_username(self, username: str) -> dict[str, Any] | None:
+        normalized_username = _normalize_username_storage_value(username)
+        if not normalized_username:
+            return None
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_users
+                WHERE username = ?
+                """,
+                (normalized_username,),
+            ).fetchone()
+            return _sheet_vitrina_user_row_to_dict(row, include_password_hash=True) if row is not None else None
+
+    def save_sheet_vitrina_user(self, user: Mapping[str, Any]) -> dict[str, Any]:
+        user_id = _normalize_required_storage_key(str(user.get("user_id") or ""), field_name="user_id")
+        username = _normalize_username_storage_value(str(user.get("username") or ""))
+        if not username:
+            raise ValueError("username is required")
+        role = str(user.get("role") or "").strip()
+        if not role:
+            raise ValueError("role is required")
+        password_hash = str(user.get("password_hash") or "").strip()
+        if not password_hash:
+            raise ValueError("password_hash is required")
+        created_at = str(user.get("created_at") or "").strip()
+        updated_at = str(user.get("updated_at") or "").strip()
+        _validate_timestamp(created_at, field_name="created_at")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        is_active = 1 if bool(user.get("is_active", True)) else 0
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_users(
+                    user_id,
+                    username,
+                    display_name,
+                    role,
+                    password_hash,
+                    is_active,
+                    created_at,
+                    updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    username,
+                    str(user.get("display_name") or "").strip(),
+                    role,
+                    password_hash,
+                    is_active,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        saved = self.load_sheet_vitrina_user(user_id)
+        if saved is None:
+            raise ValueError(f"sheet vitrina user was not saved: {user_id}")
+        saved.pop("password_hash", None)
+        return saved
+
+    def update_sheet_vitrina_user(
+        self,
+        user_id: str,
+        updates: Mapping[str, Any],
+        *,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        normalized_user_id = _normalize_required_storage_key(user_id, field_name="user_id")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        existing = self.load_sheet_vitrina_user(normalized_user_id)
+        if existing is None:
+            raise ValueError(f"sheet vitrina user not found: {normalized_user_id}")
+        display_name = str(updates.get("display_name", existing.get("display_name") or "") or "").strip()
+        role = str(updates.get("role", existing.get("role") or "") or "").strip()
+        password_hash = str(updates.get("password_hash", existing.get("password_hash") or "") or "").strip()
+        if not role:
+            raise ValueError("role is required")
+        if not password_hash:
+            raise ValueError("password_hash is required")
+        is_active = existing.get("is_active", True)
+        if "is_active" in updates:
+            is_active = bool(updates.get("is_active"))
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_users
+                SET display_name = ?,
+                    role = ?,
+                    password_hash = ?,
+                    is_active = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (
+                    display_name,
+                    role,
+                    password_hash,
+                    1 if bool(is_active) else 0,
+                    updated_at,
+                    normalized_user_id,
+                ),
+            )
+            conn.commit()
+            if cursor.rowcount <= 0:
+                raise ValueError(f"sheet vitrina user not found: {normalized_user_id}")
+        saved = self.load_sheet_vitrina_user(normalized_user_id)
+        if saved is None:
+            raise ValueError(f"sheet vitrina user not found: {normalized_user_id}")
+        saved.pop("password_hash", None)
+        return saved
+
+    def archive_sheet_vitrina_user(self, user_id: str, *, updated_at: str) -> dict[str, Any]:
+        return self.update_sheet_vitrina_user(
+            user_id,
+            {"is_active": False},
+            updated_at=updated_at,
+        )
+
     def save_sheet_vitrina_load_state(
         self,
         *,
@@ -3930,6 +4086,10 @@ def _normalize_required_storage_key(value: str, field_name: str) -> str:
     return normalized
 
 
+def _normalize_username_storage_value(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
 def _validate_iso_date(value: str, field_name: str) -> None:
     try:
         date.fromisoformat(value)
@@ -4968,6 +5128,23 @@ def _sheet_vitrina_user_config_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _sheet_vitrina_user_row_to_dict(row: sqlite3.Row, *, include_password_hash: bool) -> dict[str, Any]:
+    payload = {
+        "user_id": row["user_id"],
+        "username": row["username"] or "",
+        "display_name": row["display_name"] or "",
+        "role": row["role"] or "",
+        "is_active": bool(row["is_active"]),
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
+        "source": "runtime",
+        "readonly": False,
+    }
+    if include_password_hash:
+        payload["password_hash"] = row["password_hash"] or ""
+    return payload
+
+
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, SimpleNamespace):
         return {key: _to_jsonable(item) for key, item in vars(value).items()}
@@ -5133,6 +5310,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             revision INTEGER NOT NULL,
             PRIMARY KEY (user_key, config_key)
         );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_users (
+            user_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_users_by_role_active
+        ON sheet_vitrina_v1_users(role, is_active, username);
 
         CREATE TABLE IF NOT EXISTS cost_price_upload_versions (
             dataset_version TEXT PRIMARY KEY,

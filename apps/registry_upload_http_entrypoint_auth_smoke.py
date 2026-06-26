@@ -26,6 +26,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
     DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
     DEFAULT_SETTINGS_UI_PATH,
+    DEFAULT_SETTINGS_USERS_PATH,
     DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -102,6 +103,9 @@ def main() -> None:
                 user_config_code, user_config_payload = _get_json(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}")
                 if user_config_code != 401 or user_config_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated user-config API must return 401 JSON: {user_config_code} {user_config_payload}")
+                users_code, users_payload = _get_json(f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
+                if users_code != 401 or users_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated users API must return 401 JSON: {users_code} {users_payload}")
                 tick_code, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
                 if tick_code != 401 or tick_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation tick must return 401 JSON: {tick_code} {tick_payload}")
@@ -142,7 +146,22 @@ def main() -> None:
                     body = response.read().decode("utf-8")
                     if (
                         response.status != 200
-                        or "Справочник номенклатуры" not in body
+                        or 'data-unified-tab-button="settings"' not in body
+                        or 'data-logout-link href="/logout"' not in body
+                        or '"initial_tab": "settings"' not in body
+                    ):
+                        raise AssertionError("authenticated operator settings path must render common shell")
+                embedded_settings_request = urllib_request.Request(
+                    f"{base_url}{DEFAULT_SETTINGS_UI_PATH}?embedded=1",
+                    headers={"Accept": "text/html"},
+                    method="GET",
+                )
+                with opener.open(embedded_settings_request, timeout=5) as response:
+                    body = response.read().decode("utf-8")
+                    if (
+                        response.status != 200
+                        or ">Справочники<" not in body
+                        or ">Пользователи<" not in body
                         or ">Номенклатура<" not in body
                         or ">Договоры<" not in body
                         or ">Инвойсы<" not in body

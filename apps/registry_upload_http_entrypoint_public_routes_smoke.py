@@ -76,6 +76,8 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/settings/nomenclature/",
         "/v1/sheet-vitrina-v1/settings/documents",
         "/v1/sheet-vitrina-v1/settings/documents/",
+        "/v1/sheet-vitrina-v1/settings/users",
+        "/v1/sheet-vitrina-v1/settings/users/",
         "/sheet-vitrina-v1/supplier",
         "/sheet-vitrina-v1/settings",
         "/login",
@@ -135,6 +137,10 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include trade documents API exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/documents/ {") != 1:
         raise AssertionError("rendered nginx block must include trade document item API exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/users {") != 1:
+        raise AssertionError("rendered nginx block must include settings users API exactly once")
+    if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/users/ {") != 1:
+        raise AssertionError("rendered nginx block must include settings user item API exactly once")
     if rendered.count("location = /sheet-vitrina-v1/settings {") != 1:
         raise AssertionError("rendered nginx block must include settings page exactly once")
     if "client_max_body_size 32m;" not in rendered:

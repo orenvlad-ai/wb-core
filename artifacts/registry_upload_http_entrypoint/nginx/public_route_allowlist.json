@@ -343,6 +343,18 @@
       "methods": ["GET", "PATCH", "DELETE"]
     },
     {
+      "name": "sheet_vitrina_settings_users",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/settings/users",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_settings_user_items",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/settings/users/",
+      "methods": ["PATCH", "DELETE"]
+    },
+    {
       "name": "sheet_vitrina_operator_page",
       "match": "exact",
       "path": "/sheet-vitrina-v1/operator",

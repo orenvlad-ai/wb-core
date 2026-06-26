@@ -30,6 +30,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SETTINGS_UI_PATH,
+    DEFAULT_SETTINGS_USERS_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -239,10 +240,13 @@ def main() -> None:
                         raise AssertionError("supplier role must not access unrelated operator APIs")
                 forbidden_settings_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SETTINGS_UI_PATH}")
                 if forbidden_settings_code != 403:
-                        raise AssertionError("supplier role must not access operator settings page")
+                    raise AssertionError("supplier role must not access operator settings page")
+                forbidden_users_code, forbidden_users_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
+                if forbidden_users_code != 403 or forbidden_users_payload.get("error") != "forbidden":
+                    raise AssertionError("supplier role must not access users API")
                 forbidden_nomenclature_code, forbidden_nomenclature_payload = _opener_json(
-                        supplier,
-                        f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                    supplier,
+                    f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
                     )
                 if forbidden_nomenclature_code != 403 or forbidden_nomenclature_payload.get("error") != "forbidden":
                         raise AssertionError("supplier role must not access nomenclature API")
