@@ -377,6 +377,8 @@ GUANGZHOU
 CN
 Назначение платежа*
 Details of payment 70 CONTRACT 083/26 DD 13.05.2026
+Дополнительная информация**
+Sender to Receiver Information 72 /PYTR/GOD/
 Расходы и комиссии по переводу (Bank charges and commissions):
   - за счет отправителя
 OUR  - за счет получателя
@@ -385,6 +387,77 @@ SHA
 счет отправителя, расходы
 инобанков - за счет получателя
 Продленный операционный день
+"""
+
+BANK_TRANSFER_PDFTOTEXT_LAYOUT_TEXT = """
+ЗАЯВЛЕНИЕ
+
+на перевод № 2
+
+от 21 мая 2026 г.
+
+                                                                 Сумму перевода просим списать с нашего счёта у Вас (Please debit our account with
+  В случае необходимости просим связаться по                     you):
+  телефону
+  (If required please call on):                                                         4 0 8 0 2 1 5 6 6 1 6 5 8 0 0 0 0 0 0 8
+
+  Валюта                                                                   CNY
+  Currency Code
+
+  Сумма перевода                                                           541.962,50
+                                                                  32
+  (цифрами и прописью)                                                     Пятьсот сорок одна тысяча девятьсот шестьдесят два юаня 50/100
+  Amount of transfer
+  (in figures and in writing)
+
+  Отправитель*                                                             IE TESTOV VLADISLAV RADIKOVICH
+  (Наименование, адрес, город, страна, ИНН,                                V.I.LENINA APT.3 ELISTA
+                                                                  50
+  КПП, ОКПО и/или ОГРН)                                                    CODE COUNTRY: RU
+  Ordering Customer (Name, address, city, country)                         INN: 560912740163
+
+  Банк-посредник**
+  (SWIFT, национальный клиринговый код,
+  наименование, город, страна)                                    56
+  Intermediary Institution (SWIFT BIC, national clearing
+  code, name, city, country)
+
+  Банк получателя*                                                         //CN767290000018
+  Счет в Банке-посреднике, SWIFT,                                          VTB BANK (PJSC) SHANGHAI BRANCH VTBRCNSHXXX
+  национальный клиринговый код,                                            SHANGHAI TOWER, RM. 2503-2505 FLOOR 25, 501 MIDDLE YINCHENG ROAD,
+                                                                  57
+  наименование, город, страна                                              PUDONG SHANGHAI
+  Account with Institution, Beneficiary’s bank (SWIFT                      CN
+  BIC, national clearing code, name, city, country)
+
+  Получатель*                                                              40807156200610034920
+  Номер счета (IBAN)
+  Account number (IBAN)
+
+  Наименование, адрес, город, страна                              59       GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD
+  Beneficiary Customer (Name, address, city, country)                      GUANGZHOU
+                                                                           CN
+
+  Назначение платежа*                                                      CONTRACT 083/26 DD 13.05.2026
+                                                                  70
+  Details of payment
+
+  Дополнительная информация**                                              /PYTR/GOD/
+                                                                  72
+  Sender to Receiver Information
+
+  Информация для регулирующих органов**
+                                                                 77B
+  Regulatory reporting
+
+                           Расходы и комиссии по переводу (Bank charges and commissions):
+
+        OUR - за счет отправителя                               BEN - за счет получателя                              SHA - расходы банка ВТБ за
+                                                                                                                 счет отправителя, расходы
+
+                                                                                                       044525411
+                                                                                                       Исполнен
+                                                                                                       22.05.2026 в 00:43:03
 """
 
 TEXT_BY_FILENAME = {
@@ -461,7 +534,22 @@ def _assert_parser_smoke() -> None:
         raise AssertionError(f"bank control parser fields mismatch: {bank_control_payload}")
 
     bank_transfer_payload = parse_financial_document_text(BANK_TRANSFER_TEXT, filename="bank-transfer.txt")
-    bank_transfer = bank_transfer_payload["normalized_parse"]
+    _assert_bank_transfer_payload(bank_transfer_payload, label="bank transfer pypdf-layout")
+    bank_transfer_pdftotext_payload = parse_financial_document_text(
+        BANK_TRANSFER_PDFTOTEXT_LAYOUT_TEXT,
+        filename="bank-transfer-pdftotext-layout.txt",
+    )
+    _assert_bank_transfer_payload(bank_transfer_pdftotext_payload, label="bank transfer pdftotext-layout")
+    _assert_order_document_verification_smoke(bank_transfer_payload)
+    _assert_summary_metrics_smoke()
+    _assert_missing_customs_data_summary_smoke()
+    _assert_new_quote_parser_smoke()
+    _assert_registry_lead_time_rows_smoke()
+    _assert_incomplete_quote_summary_smoke()
+
+
+def _assert_bank_transfer_payload(payload: dict[str, Any], *, label: str) -> None:
+    bank_transfer = payload["normalized_parse"]
     if (
         bank_transfer.get("document_type") != "bank_transfer_application"
         or bank_transfer.get("transfer_application_number") != "2"
@@ -478,20 +566,19 @@ def _assert_parser_smoke() -> None:
         or bank_transfer.get("beneficiary_customer") != "GUANGZHOU ZIFRIEND COMMUNICATE TECHNOLOGY CO., LTD"
         or bank_transfer.get("beneficiary_account") != "40807156200610034920"
         or bank_transfer.get("beneficiary_bank_swift_bic") != "VTBRCNSHXXX"
+        or bank_transfer.get("beneficiary_bank_clearing_code") != "//CN767290000018"
+        or bank_transfer.get("beneficiary_bank_country") != "CN"
         or "VTB BANK" not in str(bank_transfer.get("beneficiary_bank") or "")
+        or bank_transfer.get("payment_details") != "CONTRACT 083/26 DD 13.05.2026"
         or bank_transfer.get("contract_ref") != "CONTRACT 083/26 DD 13.05.2026"
         or bank_transfer.get("contract_number") != "083/26"
         or bank_transfer.get("contract_date") != "2026-05-13"
         or bank_transfer.get("charges_mode") != "OUR"
-        or bank_transfer_payload.get("errors")
+        or bank_transfer.get("sender_to_receiver_info") != "/PYTR/GOD/"
+        or payload.get("errors")
+        or payload.get("warnings")
     ):
-        raise AssertionError(f"bank transfer parser fields mismatch: {bank_transfer_payload}")
-    _assert_order_document_verification_smoke(bank_transfer_payload)
-    _assert_summary_metrics_smoke()
-    _assert_missing_customs_data_summary_smoke()
-    _assert_new_quote_parser_smoke()
-    _assert_registry_lead_time_rows_smoke()
-    _assert_incomplete_quote_summary_smoke()
+        raise AssertionError(f"{label} parser fields mismatch: {payload}")
 
 
 def _assert_transitplus_quote_payload(quote_payload: dict[str, Any]) -> None:

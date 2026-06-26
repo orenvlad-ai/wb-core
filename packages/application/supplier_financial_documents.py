@@ -104,6 +104,23 @@ ORDER_MATCH_DOCUMENT_TYPES = {
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
 }
+BANK_TRANSFER_CRITICAL_FIELDS = (
+    "debit_account",
+    "currency",
+    "transfer_amount",
+    "ordering_customer",
+    "beneficiary_customer",
+    "beneficiary_account",
+    "payment_details",
+    "contract_number",
+    "contract_date",
+    "charges_mode",
+)
+BANK_CONTROL_REFRESH_FIELDS = (
+    "unique_contract_registration_number",
+    "contract_number",
+    "contract_date",
+)
 
 
 @dataclass(frozen=True)
@@ -615,15 +632,22 @@ class SupplierFinancialDocumentsBlock:
         if str(document.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED:
             return False
         document_type = str(document.get("document_type") or "")
-        if document_type != FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
-            return False
         if not str(document.get("stored_file_path") or "").strip():
             return False
         normalized = dict(document.get("normalized_parse") or {})
-        if _positive_decimal(normalized.get("customs_gross_weight_kg") or normalized.get("gross_weight_kg")) is None:
-            return True
-        if _positive_decimal(normalized.get("total_customs_value_rub")) is None:
-            return True
+        if document_type == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
+            if _positive_decimal(normalized.get("customs_gross_weight_kg") or normalized.get("gross_weight_kg")) is None:
+                return True
+            if _positive_decimal(normalized.get("total_customs_value_rub")) is None:
+                return True
+        elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
+            if _bank_transfer_missing_critical_fields(normalized):
+                return True
+        elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT:
+            if any(not normalized.get(field) for field in BANK_CONTROL_REFRESH_FIELDS):
+                return True
+        else:
+            return False
         if str(document.get("parser_version") or "") != FINANCIAL_DOCUMENT_PARSER_VERSION:
             return True
         return False
@@ -732,11 +756,8 @@ def parse_financial_document_pdf(
         extraction_diagnostics=diagnostics,
     )
     parsed["warnings"] = _dedupe_strings([*warnings, *_string_list(parsed.get("warnings"))])
-    if (
-        (text_extractor is None or text_extractor is extract_pdf_text_layer)
-        and _customs_parse_missing_weight_or_value(parsed)
-        and dict(diagnostics).get("method") != "pypdf"
-    ):
+    needs_pypdf_fallback = _customs_parse_missing_weight_or_value(parsed) or _bank_transfer_parse_missing_critical_fields(parsed)
+    if (text_extractor is None or text_extractor is extract_pdf_text_layer) and needs_pypdf_fallback and dict(diagnostics).get("method") != "pypdf":
         pypdf_diagnostics: dict[str, Any] = {
             "filename": filename,
             "method": "pypdf",
@@ -750,7 +771,7 @@ def parse_financial_document_pdf(
                 filename=filename,
                 extraction_diagnostics=pypdf_diagnostics,
             )
-            if not _customs_parse_missing_weight_or_value(fallback):
+            if _pypdf_fallback_is_better(parsed, fallback):
                 raw_parse = dict(fallback.get("raw_parse") or {})
                 raw_parse["primary_extraction"] = dict(diagnostics)
                 fallback["raw_parse"] = raw_parse
@@ -766,6 +787,29 @@ def _customs_parse_missing_weight_or_value(parsed: Mapping[str, Any]) -> bool:
     gross_weight = _positive_decimal(normalized.get("customs_gross_weight_kg") or normalized.get("gross_weight_kg"))
     customs_value = _positive_decimal(normalized.get("total_customs_value_rub"))
     return gross_weight is None or customs_value is None
+
+
+def _bank_transfer_parse_missing_critical_fields(parsed: Mapping[str, Any]) -> bool:
+    normalized = dict(parsed.get("normalized_parse") or {})
+    if str(normalized.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
+        return False
+    return bool(_bank_transfer_missing_critical_fields(normalized))
+
+
+def _bank_transfer_missing_critical_fields(normalized: Mapping[str, Any]) -> list[str]:
+    return [field for field in BANK_TRANSFER_CRITICAL_FIELDS if not normalized.get(field)]
+
+
+def _pypdf_fallback_is_better(primary: Mapping[str, Any], fallback: Mapping[str, Any]) -> bool:
+    primary_normalized = dict(primary.get("normalized_parse") or {})
+    fallback_normalized = dict(fallback.get("normalized_parse") or {})
+    primary_type = str(primary_normalized.get("document_type") or "")
+    fallback_type = str(fallback_normalized.get("document_type") or "")
+    if primary_type == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION and fallback_type == primary_type:
+        return not _customs_parse_missing_weight_or_value(fallback)
+    if primary_type == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION and fallback_type == primary_type:
+        return len(_bank_transfer_missing_critical_fields(fallback_normalized)) < len(_bank_transfer_missing_critical_fields(primary_normalized))
+    return False
 
 
 def parse_financial_document_text(
@@ -2224,7 +2268,7 @@ def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[di
     document_date = _parse_date(_first_match(text, r"от\s*(?:г\.)?\s*(\d{1,2}\s+[А-Яа-яA-Za-z]+\s+\d{4})"))
     execution_status, execution_time = _extract_bank_transfer_execution(text)
     debit_account = _extract_bank_transfer_debit_account(text)
-    currency = _first_match(text, r"Currency Code\s*[\n ]+([A-Z]{3})") or _first_match(text, r"\b(?:Валюта|Currency)\b\s*\n\s*([A-Z]{3})")
+    currency = _extract_bank_transfer_currency(text)
     transfer_amount, amount_in_words = _extract_bank_transfer_amount_and_words(text)
     ordering_block = _extract_bank_transfer_field_block(text, "50", ("Банк-посредник", "Intermediary Institution", "56"))
     ordering_customer = _clean_bank_transfer_party_name(ordering_block)
@@ -2243,7 +2287,9 @@ def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[di
     beneficiary_bank_country = _extract_bank_transfer_country(beneficiary_bank)
     beneficiary_bank_clearing_code = _first_match(beneficiary_bank, r"(//[A-Z]{2}[0-9A-Z]+)")
     payment_details = _extract_bank_transfer_payment_details(text)
-    contract_ref = _extract_bank_transfer_contract_ref(payment_details)
+    contract_ref = _extract_bank_transfer_contract_ref(payment_details, text)
+    if contract_ref and (not payment_details or "CONTRACT" not in payment_details.upper()):
+        payment_details = contract_ref
     contract_number, contract_date = _extract_bank_transfer_contract_parts(contract_ref or payment_details)
     charges_mode = _extract_bank_transfer_charges_mode(text)
     sender_to_receiver_info = _extract_bank_transfer_optional_block(text, "72", ("77B", "Расходы и комиссии"))
@@ -2265,12 +2311,12 @@ def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[di
         "payer_inn": payer_inn,
         "payer_country_code": payer_country_code,
         "payer_country": payer_country_code,
-        "intermediary_bank": _clean_multiline_value(intermediary_bank),
+        "intermediary_bank": _clean_bank_transfer_block_value(intermediary_bank),
         "beneficiary_customer": beneficiary_customer,
         "beneficiary_address": beneficiary_address,
         "beneficiary_country": beneficiary_country,
         "beneficiary_account": beneficiary_account,
-        "beneficiary_bank": _clean_multiline_value(beneficiary_bank),
+        "beneficiary_bank": _clean_bank_transfer_block_value(beneficiary_bank),
         "beneficiary_bank_swift_bic": beneficiary_bank_swift_bic,
         "beneficiary_bank_address": beneficiary_bank_address,
         "beneficiary_bank_country": beneficiary_bank_country,
@@ -2377,8 +2423,20 @@ def _normalize_bank_transfer_execution_time(value: Any) -> str:
 
 def _extract_bank_transfer_debit_account(text: str) -> str:
     value = _first_match(text, r"Please debit our account with\s+you\):\s*([\d\s]+)", flags=re.I)
-    digits = re.sub(r"\D+", "", value)
-    return digits
+    digits = _compact_bank_transfer_account(value)
+    if digits:
+        return digits
+    segment = _bank_transfer_segment(text, ("Please debit our account", "Сумму перевода просим списать"), ("Валюта", "Currency Code"))
+    return _first_bank_transfer_account(segment)
+
+
+def _extract_bank_transfer_currency(text: str) -> str:
+    value = _extract_bank_transfer_labeled_value(text, ("Валюта", "Currency Code"))
+    currency = _first_match(value, r"\b([A-Z]{3})\b")
+    if currency:
+        return currency.upper()
+    match = re.search(r"(?:Валюта|Currency Code).*?\b([A-Z]{3})\b", text, flags=re.I | re.S)
+    return match.group(1).upper() if match else ""
 
 
 def _extract_bank_transfer_amount(text: str) -> Decimal | None:
@@ -2387,30 +2445,43 @@ def _extract_bank_transfer_amount(text: str) -> Decimal | None:
 
 
 def _extract_bank_transfer_amount_and_words(text: str) -> tuple[Decimal | None, str]:
+    label_amount = _extract_bank_transfer_labeled_value(text, ("Сумма перевода", "Amount of transfer"))
+    amount = _parse_decimal(_first_match(label_amount, r"([0-9][\d .,\u00a0\u202f]*[,.]\d{2})"))
+    amount_words = _extract_bank_transfer_amount_words(text)
+    if amount is not None:
+        return amount, amount_words
     match = re.search(
         r"Amount of transfer\s*\(in figures and in writing\)\s*(?:32\s+)?([0-9][\d .,\u00a0\u202f]*[,.]\d{2})(.*?)(?=\n\s*(?:Отправитель|Ordering Customer|\b50\b)|$)",
         text,
         flags=re.I | re.S,
     )
     if match:
-        return _parse_decimal(match.group(1)), _clean_multiline_value(match.group(2))
+        return _parse_decimal(match.group(1)), amount_words or _clean_multiline_value(match.group(2))
     match = re.search(r"\b32\s+([0-9][\d .,\u00a0\u202f]*[,.]\d{2})(.*?)(?=\n\s*(?:Отправитель|Ordering Customer|\b50\b)|$)", text, flags=re.I | re.S)
     if match:
-        return _parse_decimal(match.group(1)), _clean_multiline_value(match.group(2))
+        return _parse_decimal(match.group(1)), amount_words or _clean_multiline_value(match.group(2))
     return None, ""
 
 
 def _extract_bank_transfer_beneficiary_account(text: str) -> str:
     value = _first_match(text, r"Account number \(IBAN\)\s*([\d\s]+)\s+Наименование", flags=re.I)
-    return re.sub(r"\D+", "", value)
+    digits = _compact_bank_transfer_account(value)
+    if digits:
+        return digits
+    segment = _bank_transfer_segment(text, ("Получатель", "Account number (IBAN)"), ("Назначение платежа", "Details of payment", "70"))
+    return _first_bank_transfer_account(segment)
 
 
-def _extract_bank_transfer_contract_ref(payment_details: str) -> str:
-    match = re.search(r"\b(CONTRACT\s+[A-Za-zА-Яа-я0-9/-]+\s+DD\s+\d{1,2}\.\d{1,2}\.\d{4})\b", payment_details, flags=re.I)
-    if match:
-        return _clean_value(match.group(1)).upper()
+def _extract_bank_transfer_contract_ref(payment_details: str, text: str = "") -> str:
+    haystacks = [payment_details, text]
+    for haystack in haystacks:
+        match = re.search(r"\b(CONTRACT\s+[A-Za-zА-Яа-я0-9/-]+\s+DD\s+\d{1,2}\.\d{1,2}\.\d{4})\b", haystack, flags=re.I)
+        if match:
+            return _clean_value(match.group(1)).upper()
     match = re.search(r"\b(контракт\s*(?:№\s*)?[A-Za-zА-Яа-я0-9/-]+\s*(?:от|DD)\s*\d{1,2}\.\d{1,2}\.\d{4})\b", payment_details, flags=re.I)
-    return _clean_value(match.group(1)) if match else ""
+    if match:
+        return _clean_value(match.group(1))
+    return ""
 
 
 def _extract_bank_transfer_contract_parts(contract_ref: str) -> tuple[str, str]:
@@ -2436,6 +2507,18 @@ def _extract_bank_transfer_charges_mode(text: str) -> str:
     return ""
 
 
+def _extract_bank_transfer_amount_words(text: str) -> str:
+    value = _extract_bank_transfer_labeled_value(text, ("(цифрами и прописью)", "(in figures and in writing)"))
+    if value and not re.search(r"[0-9][\d .,\u00a0\u202f]*[,.]\d{2}", value):
+        return value
+    match = re.search(
+        r"\b32\s+[0-9][\d .,\u00a0\u202f]*[,.]\d{2}\s+(.+?)(?=\n\s*(?:Отправитель|Ordering Customer|\b50\b)|$)",
+        text,
+        flags=re.I | re.S,
+    )
+    return _clean_multiline_value(match.group(1)) if match else ""
+
+
 def _clean_beneficiary_customer(block: str, account: str) -> str:
     for line in _bank_transfer_content_lines(block):
         if account and re.sub(r"\D+", "", line) == account:
@@ -2449,31 +2532,110 @@ def _extract_block_between(text: str, start_pattern: str, end_pattern: str) -> s
     return match.group(1) if match else ""
 
 
+def _extract_bank_transfer_section_by_labels(
+    text: str,
+    start_markers: tuple[str, ...],
+    stop_markers: tuple[str, ...],
+) -> str:
+    section: list[str] = []
+    collecting = False
+    for line in _text_to_lines(text):
+        if collecting and _bank_transfer_line_has_marker(line, stop_markers):
+            break
+        if not collecting and _bank_transfer_line_has_marker(line, start_markers):
+            collecting = True
+        if collecting:
+            section.append(line)
+    return "\n".join(section)
+
+
+def _extract_bank_transfer_tag_block(text: str, tag: str, stop_markers: tuple[str, ...]) -> str:
+    lines = _text_to_lines(text)
+    result: list[str] = []
+    collecting = False
+    for line in lines:
+        if not collecting:
+            value = _bank_transfer_value_after_tag(line, tag)
+            if value is None:
+                continue
+            collecting = True
+            if value:
+                result.append(value)
+            continue
+        if _bank_transfer_line_has_other_tag(line, tag) or _bank_transfer_line_has_marker(line, stop_markers):
+            break
+        result.append(line)
+    return "\n".join(result)
+
+
+def _bank_transfer_line_has_marker(line: str, markers: tuple[str, ...]) -> bool:
+    haystack = _clean_value(line).casefold()
+    for marker in markers:
+        cleaned = _clean_value(marker).casefold()
+        if not cleaned:
+            continue
+        if re.fullmatch(r"\d{2}[A-Z]?", marker, flags=re.I):
+            if re.search(rf"(?:^|\s){re.escape(marker)}(?:\s|$)", line, flags=re.I):
+                return True
+        elif cleaned in haystack:
+            return True
+    return False
+
+
+def _bank_transfer_line_has_other_tag(line: str, current_tag: str) -> bool:
+    for tag in ("32", "50", "56", "57", "59", "70", "72", "77B"):
+        if tag == current_tag:
+            continue
+        if _bank_transfer_value_after_tag(line, tag) is not None:
+            return True
+    return False
+
+
+def _bank_transfer_value_after_tag(line: str, tag: str) -> str | None:
+    cleaned = _clean_value(line)
+    match = re.search(rf"(?:^|\s){re.escape(tag)}(?:\s+|$)(.*)$", cleaned, flags=re.I)
+    if not match:
+        return None
+    return _clean_value(match.group(1))
+
+
 def _extract_bank_transfer_field_block(text: str, tag: str, next_tags: tuple[str, ...]) -> str:
-    tag_pattern = rf"(?:^|\n)\s*{re.escape(tag)}\s*(?:\n|\s+)"
-    next_patterns = [rf"(?:^|\n|\s){re.escape(next_tag)}\b" for next_tag in next_tags if re.fullmatch(r"\d{2}[A-Z]?", next_tag)]
-    label_patterns = [re.escape(next_tag) for next_tag in next_tags if not re.fullmatch(r"\d{2}[A-Z]?", next_tag)]
-    stop_pattern = "|".join(next_patterns + label_patterns) or r"$"
-    match = re.search(tag_pattern + r"(.*?)(?=" + stop_pattern + r"|$)", text, flags=re.I | re.S)
-    return match.group(1) if match else ""
+    label_sections = {
+        "50": (("Отправитель", "Ordering Customer"), ("Банк-посредник", "Intermediary Institution", "56")),
+        "56": (("Банк-посредник", "Intermediary Institution"), ("Банк получателя", "Account with Institution", "57")),
+        "57": (("Банк получателя", "Account with Institution"), ("Получатель", "Account number", "59")),
+        "59": (("Получатель", "Account number", "Beneficiary Customer"), ("Назначение платежа", "Details of payment", "70")),
+    }
+    section = ""
+    if tag in label_sections:
+        start_markers, stop_markers = label_sections[tag]
+        section = _extract_bank_transfer_section_by_labels(text, start_markers, stop_markers)
+    tag_block = _extract_bank_transfer_tag_block(text, tag, next_tags)
+    return "\n".join(_dedupe_strings([section, tag_block]))
 
 
 def _extract_bank_transfer_payment_details(text: str) -> str:
+    labeled = _extract_bank_transfer_labeled_value(text, ("Назначение платежа", "Details of payment"))
+    if labeled:
+        return labeled
     block = _extract_bank_transfer_optional_block(text, "70", ("72", "77B", "Расходы и комиссии"))
-    if block:
-        return _clean_multiline_value(block)
-    return _first_match(text, r"Details of payment\s*70\s*([^\n\r]+)")
+    contract_ref = _extract_bank_transfer_contract_ref(block, text)
+    if contract_ref and (not block or "CONTRACT" not in block.upper()):
+        return contract_ref
+    return block or _first_match(text, r"Details of payment\s*70\s*([^\n\r]+)")
 
 
 def _extract_bank_transfer_optional_block(text: str, tag: str, stop_markers: tuple[str, ...]) -> str:
-    start = rf"(?:^|\n).*?\b{re.escape(tag)}\b\s*"
-    stop_parts = [
-        rf"(?:^|\n).*?\b{re.escape(marker)}\b" if re.fullmatch(r"\d{2}[A-Z]?", marker) else re.escape(marker)
-        for marker in stop_markers
-    ]
-    stop = "|".join(stop_parts) or r"$"
-    match = re.search(start + r"(.*?)(?=" + stop + r"|$)", text, flags=re.I | re.S)
-    return _clean_multiline_value(match.group(1)) if match else ""
+    label_values = {
+        "70": ("Назначение платежа", "Details of payment"),
+        "72": ("Дополнительная информация", "Sender to Receiver Information"),
+        "77B": ("Информация для регулирующих органов", "Regulatory reporting"),
+    }
+    labeled = _extract_bank_transfer_labeled_value(text, label_values.get(tag, ()))
+    if labeled:
+        return labeled
+    block = _extract_bank_transfer_tag_block(text, tag, stop_markers)
+    return _clean_multiline_value("\n".join(_bank_transfer_content_lines(block)))
 
 
 def _clean_bank_transfer_party_name(block: str) -> str:
@@ -2495,14 +2657,160 @@ def _clean_bank_transfer_party_address(block: str, *, skip_account: str = "") ->
     return _clean_value(" ".join(address_lines))
 
 
+def _clean_bank_transfer_block_value(block: str) -> str:
+    return _clean_multiline_value("\n".join(_bank_transfer_content_lines(block)))
+
+
+def _extract_bank_transfer_labeled_value(text: str, labels: tuple[str, ...]) -> str:
+    for line in _text_to_lines(text):
+        value = _bank_transfer_value_from_labeled_line(line, labels)
+        if value:
+            return value
+    return ""
+
+
+def _bank_transfer_value_from_labeled_line(line: str, labels: tuple[str, ...]) -> str:
+    cleaned = _clean_value(line)
+    for label in labels:
+        stripped = _strip_bank_transfer_label(cleaned, label)
+        if stripped is None:
+            continue
+        value = _strip_bank_transfer_leading_tag(stripped)
+        if value and not _is_bank_transfer_label_only_line(value):
+            return value
+    return ""
+
+
+def _bank_transfer_value_from_line(line: str) -> str:
+    cleaned = _strip_bank_transfer_leading_tag(_clean_value(line))
+    if not cleaned or re.fullmatch(r"\d{1,3}[A-Z]?", cleaned, flags=re.I):
+        return ""
+    for label in _bank_transfer_value_labels():
+        stripped = _strip_bank_transfer_label(cleaned, label)
+        if stripped is None:
+            continue
+        cleaned = _strip_bank_transfer_leading_tag(stripped)
+        break
+    if not cleaned or _is_bank_transfer_label_only_line(cleaned):
+        return ""
+    return cleaned
+
+
+def _strip_bank_transfer_label(line: str, label: str) -> str | None:
+    cleaned = _clean_value(line)
+    label_clean = _clean_value(label)
+    if not label_clean:
+        return None
+    escaped = re.escape(label_clean).replace(r"\*", r"\*?")
+    match = re.match(rf"^{escaped}\s*[:：,-]?\s*(.*)$", cleaned, flags=re.I)
+    if not match:
+        return None
+    return _clean_value(re.sub(r"^[*:\-–— ]+", "", match.group(1)))
+
+
+def _strip_bank_transfer_leading_tag(value: str) -> str:
+    return _clean_value(re.sub(r"^(?:32|50|56|57|59|70|72|77B)\s+", "", _clean_value(value), flags=re.I))
+
+
+def _is_bank_transfer_label_only_line(line: str) -> bool:
+    cleaned = _clean_value(line)
+    if not cleaned:
+        return True
+    if re.fullmatch(r"\d{1,3}[A-Z]?", cleaned, flags=re.I):
+        return True
+    lower = cleaned.casefold()
+    label_fragments = (
+        "наименование",
+        "ordering customer",
+        "банк-посредник",
+        "intermediary institution",
+        "банк получателя",
+        "account with institution",
+        "получатель",
+        "account number",
+        "beneficiary customer",
+        "назначение платежа",
+        "details of payment",
+        "дополнительная информация",
+        "sender to receiver information",
+        "информация для регулирующих органов",
+        "regulatory reporting",
+        "swift",
+        "national clearing code",
+        "номер счета",
+        "bic",
+    )
+    return any(fragment in lower for fragment in label_fragments)
+
+
+def _bank_transfer_value_labels() -> tuple[str, ...]:
+    return (
+        "Отправитель*",
+        "(Наименование, адрес, город, страна, ИНН,",
+        "КПП, ОКПО и/или ОГРН)",
+        "Ordering Customer (Name, address, city, country)",
+        "Банк-посредник**",
+        "(SWIFT, национальный клиринговый код,",
+        "Счет в Банке-посреднике, SWIFT,",
+        "национальный клиринговый код,",
+        "наименование, город, страна)",
+        "наименование, город, страна",
+        "Intermediary Institution (SWIFT BIC, national clearing",
+        "code, name, city, country)",
+        "Банк получателя*",
+        "Account with Institution, Beneficiary’s bank (SWIFT",
+        "Account with Institution, Beneficiary's bank (SWIFT",
+        "BIC, national clearing code, name, city, country)",
+        "Получатель*",
+        "Номер счета (IBAN)",
+        "Account number (IBAN)",
+        "Наименование, адрес, город, страна",
+        "Beneficiary Customer (Name, address, city, country)",
+        "Назначение платежа*",
+        "Details of payment",
+        "Дополнительная информация**",
+        "Sender to Receiver Information",
+        "Информация для регулирующих органов**",
+        "Regulatory reporting",
+    )
+
+
+def _compact_bank_transfer_account(value: Any) -> str:
+    digits = re.sub(r"\D+", "", str(value or ""))
+    return digits if 12 <= len(digits) <= 34 else ""
+
+
+def _first_bank_transfer_account(text: str) -> str:
+    for match in re.finditer(r"(?:\d[\s\u00a0\u202f]*){12,34}", str(text or "")):
+        digits = _compact_bank_transfer_account(match.group(0))
+        if digits:
+            return digits
+    return ""
+
+
+def _bank_transfer_segment(text: str, start_markers: tuple[str, ...], stop_markers: tuple[str, ...]) -> str:
+    lines = _text_to_lines(text)
+    result: list[str] = []
+    collecting = False
+    for line in lines:
+        if not collecting and _bank_transfer_line_has_marker(line, start_markers):
+            collecting = True
+        if collecting and result and _bank_transfer_line_has_marker(line, stop_markers):
+            break
+        if collecting:
+            result.append(line)
+    return "\n".join(result)
+
+
 def _bank_transfer_content_lines(block: str) -> list[str]:
     lines = _text_to_lines(block)
     result: list[str] = []
     for line in lines:
-        cleaned = _clean_value(line)
+        cleaned = _bank_transfer_value_from_line(line)
         if not cleaned or re.fullmatch(r"\d{1,3}[A-Z]?", cleaned):
             continue
-        result.append(cleaned)
+        if cleaned not in result:
+            result.append(cleaned)
     return result
 
 
