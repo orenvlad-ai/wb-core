@@ -974,27 +974,65 @@ def _check_filter_rail_and_sku_metric_filter(page: object) -> dict[str, object]:
           }).filter(Boolean)));
           const optionValues = options.map((node) => node.value || node.getAttribute('data-sku-metric-option') || '').filter(Boolean);
           const targetMetric = skuMetricKeys.find((key) => optionValues.includes(key)) || optionValues[0] || '';
+          const firstOption = document.querySelector('[data-sku-metric-options] > *');
+          const toggle = document.querySelector('[data-sku-metric-toggle]');
+          const panel = document.querySelector('[data-sku-metric-panel]');
+          const separator = document.querySelector('[data-table-body] tr.sku-separator-row');
+          const separatorCell = separator ? separator.querySelector('td') : null;
+          const separatorLabel = separator ? separator.querySelector('.sku-separator-label') : null;
+          const toggleStyle = toggle ? getComputedStyle(toggle) : null;
+          const panelStyle = panel ? getComputedStyle(panel) : null;
+          const separatorCellStyle = separatorCell ? getComputedStyle(separatorCell) : null;
+          const separatorLabelStyle = separatorLabel ? getComputedStyle(separatorLabel) : null;
           return {
             allChecked: !!(all && all.checked),
             checkedIndividualCount: options.filter((node) => node.checked).length,
             optionCount: options.length,
+            firstOptionIsAll: !!(firstOption && firstOption.classList.contains('sku-metric-option-all')),
+            optionValues,
             skuMetricKeys,
             totalMetricKeys,
             skuRowCount: visibleSkuRows.length,
             totalRowCount: visibleTotalRows.length,
-            targetMetric
+            targetMetric,
+            skuMetricToggleBackground: toggleStyle ? toggleStyle.backgroundColor : '',
+            skuMetricPanelBackground: panelStyle ? panelStyle.backgroundColor : '',
+            separatorRowHeight: separator ? separator.getBoundingClientRect().height : 0,
+            separatorCellPaddingTop: separatorCellStyle ? separatorCellStyle.paddingTop : '',
+            separatorCellPaddingBottom: separatorCellStyle ? separatorCellStyle.paddingBottom : '',
+            separatorLabelBackground: separatorLabelStyle ? separatorLabelStyle.backgroundColor : '',
+            separatorLabelBorderTopWidth: separatorLabelStyle ? separatorLabelStyle.borderTopWidth : '',
+            separatorLabelBorderRadius: separatorLabelStyle ? separatorLabelStyle.borderRadius : '',
+            separatorLabelFontSize: separatorLabelStyle ? separatorLabelStyle.fontSize : '',
+            separatorLabelFontWeight: separatorLabelStyle ? separatorLabelStyle.fontWeight : ''
           };
         }"""
     )
+    white_backgrounds = {"rgb(255, 255, 255)", "rgba(255, 255, 255, 1)", "white"}
+    label_backgrounds = {"rgba(0, 0, 0, 0)", "transparent"}
+    separator_font_size = float(str(default_state["separatorLabelFontSize"]).replace("px", "") or 0)
+    separator_font_weight = int(float(default_state["separatorLabelFontWeight"] or 0))
     if (
         not default_state["allChecked"]
         or int(default_state["checkedIndividualCount"]) != 0
         or int(default_state["optionCount"]) < 2
+        or not default_state["firstOptionIsAll"]
+        or default_state["optionValues"] != default_state["skuMetricKeys"]
         or not default_state["targetMetric"]
         or len(default_state["skuMetricKeys"]) < 2
         or len(default_state["totalMetricKeys"]) < 2
         or int(default_state["skuRowCount"]) <= 0
         or int(default_state["totalRowCount"]) <= 0
+        or default_state["skuMetricToggleBackground"] in white_backgrounds
+        or default_state["skuMetricPanelBackground"] in white_backgrounds
+        or float(default_state["separatorRowHeight"]) > 26
+        or default_state["separatorCellPaddingTop"] != "0px"
+        or default_state["separatorCellPaddingBottom"] != "0px"
+        or default_state["separatorLabelBackground"] not in label_backgrounds
+        or default_state["separatorLabelBorderTopWidth"] != "0px"
+        or default_state["separatorLabelBorderRadius"] != "0px"
+        or not (9 <= separator_font_size <= 11.5)
+        or separator_font_weight < 700
     ):
         raise AssertionError(f"SKU metric picker default state mismatch, got {default_state}")
 
@@ -4196,7 +4234,8 @@ def _check_sku_separators(page: object) -> dict[str, object]:
     )
     if (
         int(state["count"]) <= 0
-        or int(state["minHeight"]) < 24
+        or int(state["minHeight"]) < 18
+        or int(state["minHeight"]) > 26
         or state["firstBoundary"] != "total->sku"
         or int(state["labeledCount"]) != int(state["count"])
         or not state["firstLabel"]
