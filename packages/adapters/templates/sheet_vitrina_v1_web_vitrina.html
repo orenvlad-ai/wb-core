@@ -1837,6 +1837,20 @@
       white-space: nowrap;
     }
 
+    .table-filters-toggle {
+      min-height: 28px;
+      padding: 5px 9px;
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .table-filters-toggle[aria-expanded="true"] {
+      border-color: rgba(139, 92, 246, 0.52);
+      color: var(--text);
+      background: rgba(139, 92, 246, 0.16);
+    }
+
     .panel h2 {
       margin: 0;
       font-size: 18px;
@@ -2124,6 +2138,171 @@
       clip: rect(0, 0, 0, 0);
       white-space: nowrap;
       border: 0;
+    }
+
+    .table-filters-rail {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 6px;
+      overflow: visible;
+      width: 100%;
+    }
+
+    .table-filters-rail[hidden] {
+      display: none;
+    }
+
+    .table-filters-rail-inner {
+      display: inline-flex;
+      align-items: flex-end;
+      justify-content: flex-end;
+      gap: 6px;
+      max-width: 100%;
+      padding: 5px 6px;
+      border: 1px solid rgba(139, 92, 246, 0.24);
+      border-radius: 6px;
+      background: rgba(17, 24, 39, 0.86);
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+    }
+
+    .table-filters-rail .table-filter-controls {
+      flex: 0 1 auto;
+      gap: 6px;
+    }
+
+    .table-filters-rail .toolbar-field {
+      flex: 0 0 178px;
+      min-width: 158px;
+      max-width: 220px;
+    }
+
+    .table-filters-rail .filter-label {
+      color: #cbd5e1;
+      font-size: 9px;
+      letter-spacing: 0.06em;
+    }
+
+    .table-filters-rail .select {
+      min-height: 28px;
+      padding-top: 4px;
+      padding-bottom: 4px;
+      font-size: 11px;
+    }
+
+    .sku-metric-picker {
+      position: relative;
+      flex: 0 0 178px;
+      min-width: 158px;
+      max-width: 220px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      text-align: left;
+    }
+
+    .sku-metric-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      min-height: 28px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 5px 8px;
+      background: #ffffff;
+      color: var(--text);
+      font: inherit;
+      font-size: 11px;
+      line-height: 1.2;
+      cursor: pointer;
+    }
+
+    .sku-metric-toggle::after {
+      content: "";
+      flex: 0 0 auto;
+      width: 0;
+      height: 0;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 5px solid currentColor;
+      opacity: .72;
+    }
+
+    .sku-metric-toggle[aria-expanded="true"] {
+      border-color: rgba(139, 92, 246, 0.62);
+      box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.16);
+    }
+
+    .sku-metric-panel {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      z-index: 70;
+      width: min(340px, calc(100vw - 32px));
+      max-height: min(420px, 70vh);
+      overflow: auto;
+      padding: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.36);
+      border-radius: 6px;
+      background: #111827;
+      color: #f8fafc;
+      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.34);
+    }
+
+    .sku-metric-panel[hidden] {
+      display: none;
+    }
+
+    .sku-metric-options {
+      display: grid;
+      gap: 4px;
+      max-height: 290px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .sku-metric-option {
+      display: grid;
+      grid-template-columns: 16px minmax(0, 1fr);
+      gap: 7px;
+      align-items: start;
+      min-height: 26px;
+      padding: 4px 5px;
+      border-radius: 4px;
+      color: #e5e7eb;
+      font-size: 11px;
+      line-height: 1.3;
+      cursor: pointer;
+    }
+
+    .sku-metric-option:hover {
+      background: rgba(148, 163, 184, 0.14);
+    }
+
+    .sku-metric-option input {
+      margin: 1px 0 0;
+    }
+
+    .sku-metric-option-meta {
+      display: block;
+      margin-top: 1px;
+      color: #9ca3af;
+      font-size: 10px;
+      line-height: 1.25;
+    }
+
+    .sku-metric-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .sku-metric-actions .button {
+      min-height: 28px;
+      padding: 5px 9px;
+      font-size: 11px;
     }
 
     .toolbar-field-search {
@@ -3803,6 +3982,27 @@
         max-width: none;
       }
 
+      .table-load-action-cluster {
+        margin-left: 0;
+      }
+
+      .table-filters-rail-inner {
+        width: 100%;
+        flex-wrap: wrap;
+      }
+
+      .table-filters-rail .table-filter-controls {
+        flex: 1 1 100%;
+        flex-wrap: wrap;
+      }
+
+      .table-filters-rail .toolbar-field,
+      .sku-metric-picker {
+        flex: 1 1 160px;
+        min-width: 140px;
+        max-width: none;
+      }
+
       .table-load-status {
         flex: 0 0 24px;
         max-width: 24px;
@@ -4035,9 +4235,9 @@
                     </div>
                   </div>
                 </div>
-                <div class="filters-grid table-filter-controls" data-filter-controls></div>
               </div>
               <span class="table-load-action-cluster">
+                <button class="button secondary table-filters-toggle" type="button" data-filters-toggle aria-label="Открыть фильтры витрины" aria-expanded="false" aria-controls="table-filters-rail">Фильтры</button>
                 <p class="table-load-status tone-neutral" data-table-load-status data-load-status-text="нет данных" title="Загрузка: нет данных" aria-label="Загрузка: нет данных" hidden><span class="table-load-status-dot" aria-hidden="true"></span></p>
                 <div class="top-progress" data-global-progress hidden>
                   <span class="top-progress-pulse" aria-hidden="true"></span>
@@ -4045,6 +4245,24 @@
                 </div>
                 <button class="button primary" type="button" data-load-refresh-button>Загрузить</button>
               </span>
+            </div>
+          </div>
+          <div class="table-filters-rail" id="table-filters-rail" data-filters-rail hidden>
+            <div class="table-filters-rail-inner">
+              <div class="filters-grid table-filter-controls" data-filter-controls></div>
+              <div class="sku-metric-picker" data-sku-metric-picker>
+                <span class="filter-label">SKU-метрики</span>
+                <button class="sku-metric-toggle" type="button" data-sku-metric-toggle aria-label="Выбрать SKU-метрики" aria-expanded="false" aria-controls="sku-metric-panel">
+                  <span data-sku-metric-summary>SKU-метрики: все</span>
+                </button>
+                <div class="sku-metric-panel" id="sku-metric-panel" data-sku-metric-panel hidden>
+                  <div class="sku-metric-options" data-sku-metric-options></div>
+                  <div class="sku-metric-actions">
+                    <button class="button secondary" type="button" data-sku-metric-reset>Сбросить</button>
+                    <button class="button primary" type="button" data-sku-metric-apply>Показать</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -4614,6 +4832,15 @@
     const loadingTableBodyNode = document.querySelector("[data-loading-table-body]");
     const loadingTableEmptyNode = document.querySelector("[data-loading-table-empty]");
     const filterControlsNode = document.querySelector("[data-filter-controls]");
+    const filtersToggleButton = document.querySelector("[data-filters-toggle]");
+    const filtersRailNode = document.querySelector("[data-filters-rail]");
+    const skuMetricPickerNode = document.querySelector("[data-sku-metric-picker]");
+    const skuMetricToggleButton = document.querySelector("[data-sku-metric-toggle]");
+    const skuMetricPanelNode = document.querySelector("[data-sku-metric-panel]");
+    const skuMetricOptionsNode = document.querySelector("[data-sku-metric-options]");
+    const skuMetricSummaryNode = document.querySelector("[data-sku-metric-summary]");
+    const skuMetricApplyButton = document.querySelector("[data-sku-metric-apply]");
+    const skuMetricResetButton = document.querySelector("[data-sku-metric-reset]");
     const filterMetaNode = document.querySelector("[data-filter-meta]");
     const filterSummaryNode = document.querySelector("[data-filter-summary]");
     const tableMetaNode = document.querySelector("[data-table-meta]");
@@ -4910,6 +5137,10 @@
         metricStorageKey: "",
         metricKeys: [],
         selectedMetricKeys: new Set(),
+        draftMetricAll: true,
+        draftMetricKeys: new Set(),
+        filtersRailOpen: false,
+        skuMetricPickerOpen: false,
         sort: ""
       },
       columns: {
@@ -5463,6 +5694,39 @@
       loadPageComposition();
     });
 
+    if (filtersToggleButton) {
+      filtersToggleButton.addEventListener("click", function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        setFiltersRailOpen(!state.filters.filtersRailOpen);
+      });
+    }
+
+    if (skuMetricToggleButton) {
+      skuMetricToggleButton.addEventListener("click", function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!state.filters.filtersRailOpen) {
+          setFiltersRailOpen(true);
+        }
+        setSkuMetricPickerOpen(!state.filters.skuMetricPickerOpen);
+      });
+    }
+
+    if (skuMetricApplyButton) {
+      skuMetricApplyButton.addEventListener("click", function(event) {
+        event.preventDefault();
+        applySkuMetricSelection();
+      });
+    }
+
+    if (skuMetricResetButton) {
+      skuMetricResetButton.addEventListener("click", function(event) {
+        event.preventDefault();
+        resetSkuMetricSelection();
+      });
+    }
+
     resetFiltersButton.addEventListener("click", function() {
       resetFilterState(state.composition);
       resetMetricSelectionToAll(state.composition);
@@ -5707,6 +5971,14 @@
         });
       });
       document.addEventListener("pointerdown", function(event) {
+        if (
+          state.filters.skuMetricPickerOpen &&
+          skuMetricPickerNode &&
+          event.target instanceof Node &&
+          !skuMetricPickerNode.contains(event.target)
+        ) {
+          setSkuMetricPickerOpen(false);
+        }
         if (!isInsideAnyOpenFloatingControl(event.target)) {
           closeAllFloatingControls();
         }
@@ -5733,6 +6005,56 @@
       syncDetailsPopoverAria(detailsNode);
     }
 
+    function syncDraftMetricSelectionFromApplied() {
+      const metricKeys = state.filters.metricKeys || [];
+      const selected = state.filters.selectedMetricKeys || new Set(metricKeys);
+      if (!metricKeys.length || selected.size >= metricKeys.length) {
+        state.filters.draftMetricAll = true;
+        state.filters.draftMetricKeys = new Set();
+        return;
+      }
+      const allowed = new Set(metricKeys);
+      state.filters.draftMetricAll = false;
+      state.filters.draftMetricKeys = new Set(
+        Array.from(selected).filter(function(metricKey) {
+          return allowed.has(metricKey);
+        })
+      );
+      if (!state.filters.draftMetricKeys.size) {
+        state.filters.draftMetricAll = true;
+      }
+    }
+
+    function setSkuMetricPickerOpen(open) {
+      const nextOpen = Boolean(open) && !!(state.filters.metricKeys || []).length;
+      if (nextOpen) {
+        syncDraftMetricSelectionFromApplied();
+      }
+      state.filters.skuMetricPickerOpen = nextOpen;
+      syncMetricControlValues();
+    }
+
+    function setFiltersRailOpen(open, options) {
+      const nextOpen = Boolean(open);
+      if (nextOpen && (!options || options.skipCloseAll !== true)) {
+        closeAllFloatingControls({exceptRoot: filtersRailNode});
+      }
+      state.filters.filtersRailOpen = nextOpen;
+      if (!nextOpen) {
+        state.filters.skuMetricPickerOpen = false;
+      } else {
+        syncDraftMetricSelectionFromApplied();
+      }
+      if (filtersRailNode) {
+        filtersRailNode.hidden = !nextOpen;
+      }
+      if (filtersToggleButton) {
+        filtersToggleButton.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+        filtersToggleButton.setAttribute("aria-label", nextOpen ? "Закрыть фильтры витрины" : "Открыть фильтры витрины");
+      }
+      syncMetricControlValues();
+    }
+
     function sameFloatingScope(leftNode, rightNode) {
       if (!leftNode || !rightNode) {
         return false;
@@ -5751,6 +6073,12 @@
       const roots = [];
       if (historyPanelNode && historyPopoverNode && !historyPopoverNode.hidden) {
         roots.push(historyPanelNode);
+      }
+      if (filtersRailNode && state.filters.filtersRailOpen) {
+        roots.push(filtersRailNode);
+      }
+      if (filtersToggleButton && state.filters.filtersRailOpen) {
+        roots.push(filtersToggleButton);
       }
       document.querySelectorAll(FLOATING_DETAILS_SELECTOR).forEach(function(detailsNode) {
         if (detailsNode.open) {
@@ -5782,6 +6110,13 @@
       const exceptRoot = (options && options.exceptRoot) || null;
       if (historyPanelNode && !sameFloatingScope(historyPanelNode, exceptRoot)) {
         setHistoryPopoverOpen(false, {skipCloseAll: true});
+      }
+      if (
+        filtersRailNode &&
+        !sameFloatingScope(filtersRailNode, exceptRoot) &&
+        !sameFloatingScope(filtersToggleButton, exceptRoot)
+      ) {
+        setFiltersRailOpen(false, {skipCloseAll: true});
       }
       document.querySelectorAll(FLOATING_DETAILS_SELECTOR).forEach(function(detailsNode) {
         if (!sameFloatingScope(detailsNode, exceptRoot)) {
@@ -6151,8 +6486,14 @@
       });
     }
 
+    function skuMetricFilterOptions(payload) {
+      return metricFilterOptions(payload).filter(function(option) {
+        return String(option.scope_group_id || "sku").toLowerCase() !== "total";
+      });
+    }
+
     function metricFilterKeys(payload) {
-      return metricFilterOptions(payload).map(function(option) {
+      return skuMetricFilterOptions(payload).map(function(option) {
         return String(option.value || "");
       }).filter(Boolean);
     }
@@ -6239,18 +6580,7 @@
     }
 
     function persistMetricSelection() {
-      if (!state.filters.metricStorageKey || !window || !window.localStorage) {
-        return;
-      }
-      try {
-        window.localStorage.setItem(state.filters.metricStorageKey, JSON.stringify({
-          version: 1,
-          all_metric_keys: (state.filters.selectedMetricKeys || new Set()).size === (state.filters.metricKeys || []).length,
-          selected_metric_keys: Array.from(state.filters.selectedMetricKeys || [])
-        }));
-      } catch (error) {
-        // Browser-local metric persistence must not block filtering.
-      }
+      // The compact SKU metric filter is page-local only; stale toolbar storage is ignored.
     }
 
     function initializeMetricSelection(payload) {
@@ -6258,16 +6588,18 @@
       state.filters.metricStorageKey = buildMetricSelectionStorageKey(payload);
       state.filters.metricKeys = metricKeys;
       state.filters.selectedMetricKeys = new Set(metricKeys);
+      state.filters.draftMetricAll = true;
+      state.filters.draftMetricKeys = new Set();
       state.filters.metric = ALL_VALUE;
-      persistMetricSelection();
     }
 
     function resetMetricSelectionToAll(payload) {
       const metricKeys = metricFilterKeys(payload);
       state.filters.metricKeys = metricKeys;
       state.filters.selectedMetricKeys = new Set(metricKeys);
+      state.filters.draftMetricAll = true;
+      state.filters.draftMetricKeys = new Set();
       state.filters.metric = ALL_VALUE;
-      persistMetricSelection();
     }
 
     function buildMetricPresentationStorageKey(payload) {
@@ -8274,7 +8606,7 @@
         node.addEventListener("input", handleFilterInput);
         node.addEventListener("change", handleFilterInput);
       });
-      attachMetricFilterListeners();
+      renderSkuMetricOptions(payload);
       syncControlValues();
     }
 
@@ -8862,36 +9194,126 @@
       ].join("");
     }
 
+    function skuMetricOptionMeta(option) {
+      const parts = [];
+      const sectionLabel = String(option.section_label || "").trim();
+      const scopeLabel = String(option.scope_group_label || "").trim();
+      if (sectionLabel) {
+        parts.push(sectionLabel);
+      }
+      if (scopeLabel && scopeLabel !== "SKU") {
+        parts.push(scopeLabel);
+      }
+      if (typeof option.count === "number") {
+        parts.push(String(option.count));
+      }
+      return parts.join(" · ");
+    }
+
+    function renderSkuMetricOptions(payload) {
+      if (!skuMetricOptionsNode) {
+        return;
+      }
+      const options = skuMetricFilterOptions(payload);
+      const parts = [
+        '<label class="sku-metric-option sku-metric-option-all">',
+        '<input type="checkbox" data-sku-metric-all value="' + escapeHtml(ALL_VALUE) + '">',
+        '<span>Все метрики</span>',
+        '</label>'
+      ];
+      if (!options.length) {
+        parts.push('<p class="filter-summary">SKU-метрики недоступны</p>');
+      } else {
+        options.forEach(function(option) {
+          const metricKey = String(option.value || "");
+          const label = String(option.label || metricKey);
+          const meta = skuMetricOptionMeta(option);
+          parts.push([
+            '<label class="sku-metric-option">',
+            '<input type="checkbox" data-sku-metric-option="' + escapeHtml(metricKey) + '" value="' + escapeHtml(metricKey) + '">',
+            '<span>',
+            escapeHtml(label),
+            meta ? '<span class="sku-metric-option-meta">' + escapeHtml(meta) + '</span>' : '',
+            '</span>',
+            '</label>'
+          ].join(""));
+        });
+      }
+      skuMetricOptionsNode.innerHTML = parts.join("");
+      attachMetricFilterListeners();
+      syncMetricControlValues();
+    }
+
     function attachMetricFilterListeners() {
-      // The former toolbar metric selector is intentionally not rendered.
+      if (!skuMetricOptionsNode) {
+        return;
+      }
+      skuMetricOptionsNode.querySelectorAll("[data-sku-metric-all]").forEach(function(node) {
+        node.addEventListener("change", function(event) {
+          updateAllMetricSelection(!!event.currentTarget.checked);
+        });
+      });
+      skuMetricOptionsNode.querySelectorAll("[data-sku-metric-option]").forEach(function(node) {
+        node.addEventListener("change", function(event) {
+          updateMetricSelection(
+            String(event.currentTarget.getAttribute("data-sku-metric-option") || event.currentTarget.value || ""),
+            !!event.currentTarget.checked
+          );
+        });
+      });
     }
 
     function updateAllMetricSelection(checked) {
-      state.filters.selectedMetricKeys = checked
-        ? new Set(state.filters.metricKeys || [])
-        : new Set();
+      state.filters.draftMetricAll = true;
+      state.filters.draftMetricKeys = new Set();
       state.filters.metric = ALL_VALUE;
-      persistMetricSelection();
       syncMetricControlValues();
-      renderMetricPresentationPanel(state.composition);
-      renderTable();
     }
 
     function updateMetricSelection(metricKey, checked) {
       if (!metricKey || (state.filters.metricKeys || []).indexOf(metricKey) === -1) {
         return;
       }
-      const selected = new Set(state.filters.selectedMetricKeys || []);
+      const selected = new Set(state.filters.draftMetricKeys || []);
       if (checked) {
         selected.add(metricKey);
       } else {
         selected.delete(metricKey);
       }
-      state.filters.selectedMetricKeys = selected;
+      state.filters.draftMetricKeys = selected;
+      state.filters.draftMetricAll = selected.size === 0;
       state.filters.metric = ALL_VALUE;
-      persistMetricSelection();
       syncMetricControlValues();
-      renderMetricPresentationPanel(state.composition);
+    }
+
+    function applySkuMetricSelection() {
+      const metricKeys = state.filters.metricKeys || [];
+      if (state.filters.draftMetricAll || !(state.filters.draftMetricKeys || new Set()).size) {
+        state.filters.selectedMetricKeys = new Set(metricKeys);
+        state.filters.draftMetricAll = true;
+        state.filters.draftMetricKeys = new Set();
+      } else {
+        const allowed = new Set(metricKeys);
+        state.filters.selectedMetricKeys = new Set(
+          Array.from(state.filters.draftMetricKeys || []).filter(function(metricKey) {
+            return allowed.has(metricKey);
+          })
+        );
+        if (!state.filters.selectedMetricKeys.size) {
+          state.filters.selectedMetricKeys = new Set(metricKeys);
+          state.filters.draftMetricAll = true;
+          state.filters.draftMetricKeys = new Set();
+        }
+      }
+      state.filters.metric = ALL_VALUE;
+      setSkuMetricPickerOpen(false);
+      syncMetricControlValues();
+      renderTable();
+    }
+
+    function resetSkuMetricSelection() {
+      resetMetricSelectionToAll(state.composition);
+      syncMetricControlValues();
       renderTable();
     }
 
@@ -8899,9 +9321,16 @@
       const totalCount = (state.filters.metricKeys || []).length;
       const selectedCount = (state.filters.selectedMetricKeys || new Set()).size;
       if (selectedCount === totalCount) {
-        return "Все метрики";
+        return "SKU-метрики: все";
       }
-      return "Метрики: " + selectedCount;
+      return "SKU-метрики: " + selectedCount;
+    }
+
+    function draftMetricSummaryLabel() {
+      if (state.filters.draftMetricAll || !(state.filters.draftMetricKeys || new Set()).size) {
+        return "SKU-метрики: все";
+      }
+      return "SKU-метрики: " + (state.filters.draftMetricKeys || new Set()).size;
     }
 
     function syncMetricControlValues() {
@@ -8909,6 +9338,27 @@
       if (hiddenNode) {
         hiddenNode.value = ALL_VALUE;
       }
+      if (skuMetricSummaryNode) {
+        skuMetricSummaryNode.textContent = state.filters.skuMetricPickerOpen ? draftMetricSummaryLabel() : metricSummaryLabel();
+      }
+      if (skuMetricToggleButton) {
+        skuMetricToggleButton.disabled = !(state.filters.metricKeys || []).length;
+        skuMetricToggleButton.setAttribute("aria-expanded", state.filters.skuMetricPickerOpen ? "true" : "false");
+      }
+      if (skuMetricPanelNode) {
+        skuMetricPanelNode.hidden = !state.filters.skuMetricPickerOpen;
+      }
+      if (!skuMetricOptionsNode) {
+        return;
+      }
+      const draftKeys = state.filters.draftMetricKeys || new Set();
+      skuMetricOptionsNode.querySelectorAll("[data-sku-metric-all]").forEach(function(node) {
+        node.checked = !!state.filters.draftMetricAll || draftKeys.size === 0;
+      });
+      skuMetricOptionsNode.querySelectorAll("[data-sku-metric-option]").forEach(function(node) {
+        const metricKey = String(node.getAttribute("data-sku-metric-option") || node.value || "");
+        node.checked = !state.filters.draftMetricAll && draftKeys.has(metricKey);
+      });
     }
 
     function handleFilterInput(event) {
@@ -9053,6 +9503,25 @@
       updateTableObjectIndicator();
     }
 
+    function skuMetricFilterKeepsRow(row) {
+      if (String((row && row.row_kind) || "").toLowerCase() !== "sku") {
+        return true;
+      }
+      const metricKeys = state.filters.metricKeys || [];
+      if (!metricKeys.length) {
+        return true;
+      }
+      const selected = state.filters.selectedMetricKeys || new Set(metricKeys);
+      if (selected.size >= metricKeys.length) {
+        return true;
+      }
+      const metricKey = String(cellValue(row, "metric_key") || "");
+      if (!metricKey || metricKeys.indexOf(metricKey) === -1) {
+        return true;
+      }
+      return selected.has(metricKey);
+    }
+
     function applyFilters(rows) {
       const searchNeedle = (state.filters.search || "").trim().toLowerCase();
       return rows.filter(function(row) {
@@ -9066,6 +9535,9 @@
           return false;
         }
         if (state.filters.scope_kind !== ALL_VALUE && String(row.row_kind || "") !== state.filters.scope_kind) {
+          return false;
+        }
+        if (!skuMetricFilterKeepsRow(row)) {
           return false;
         }
         return true;
