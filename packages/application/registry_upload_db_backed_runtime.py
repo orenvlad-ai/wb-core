@@ -2038,6 +2038,109 @@ class RegistryUploadDbBackedRuntime:
                 result.append(payload)
             return result
 
+    def upsert_wb_supply_transit_cost_enrichment(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        supply_id = str(record.get("supply_id") or "").strip()
+        if not supply_id:
+            raise ValueError("supply_id is required")
+        now = str(record.get("updated_at") or record.get("fetched_at") or record.get("created_at") or "").strip()
+        if now:
+            _validate_timestamp(now, field_name="updated_at")
+        created_at = str(record.get("created_at") or now).strip()
+        if created_at:
+            _validate_timestamp(created_at, field_name="created_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supply_transit_cost_enrichment(
+                    supply_id,
+                    amount,
+                    currency,
+                    amount_label,
+                    is_transit,
+                    source,
+                    evidence_type,
+                    confidence,
+                    fetched_at,
+                    status,
+                    error,
+                    source_endpoint_path,
+                    created_at,
+                    updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(supply_id) DO UPDATE SET
+                    amount = excluded.amount,
+                    currency = excluded.currency,
+                    amount_label = excluded.amount_label,
+                    is_transit = excluded.is_transit,
+                    source = excluded.source,
+                    evidence_type = excluded.evidence_type,
+                    confidence = excluded.confidence,
+                    fetched_at = excluded.fetched_at,
+                    status = excluded.status,
+                    error = excluded.error,
+                    source_endpoint_path = excluded.source_endpoint_path,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    supply_id,
+                    _optional_float(record.get("amount")),
+                    str(record.get("currency") or "RUB").strip()[:16],
+                    str(record.get("amount_label") or "").strip()[:80],
+                    1 if record.get("is_transit", True) else 0,
+                    str(record.get("source") or "seller_portal_browser").strip()[:80],
+                    str(record.get("evidence_type") or "network_json").strip()[:80],
+                    str(record.get("confidence") or "").strip()[:40],
+                    str(record.get("fetched_at") or "").strip(),
+                    str(record.get("status") or "failed").strip()[:40],
+                    _safe_runtime_error(record.get("error")),
+                    str(record.get("source_endpoint_path") or "").strip()[:260],
+                    created_at,
+                    now,
+                ),
+            )
+            conn.commit()
+        return self.load_wb_supply_transit_cost_enrichment(supply_id) or {}
+
+    def list_wb_supply_transit_cost_enrichments(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment
+                ORDER BY updated_at DESC, supply_id DESC
+                """
+            ).fetchall()
+            return [_wb_supply_transit_cost_enrichment_to_dict(row) for row in rows]
+
+    def load_wb_supply_transit_cost_enrichment(self, supply_id: str) -> dict[str, Any] | None:
+        normalized_id = str(supply_id or "").strip()
+        if not normalized_id:
+            return None
+        lookup_values = {
+            normalized_id,
+            normalized_id.removeprefix("supply:"),
+            normalized_id.removeprefix("preorder:"),
+        }
+        placeholders = ",".join("?" for _ in lookup_values)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment
+                WHERE supply_id IN ({placeholders})
+                LIMIT 1
+                """,
+                tuple(lookup_values),
+            ).fetchone()
+            return _wb_supply_transit_cost_enrichment_to_dict(row) if row else None
+
     def load_wb_supply_record(self, supply_id: str) -> dict[str, Any] | None:
         normalized_id = str(supply_id or "").strip()
         if not normalized_id:
@@ -2288,6 +2391,127 @@ class RegistryUploadDbBackedRuntime:
                 """
             ).fetchone()
             return _wb_supplies_sync_run_to_dict(row) if row else None
+
+    def create_wb_supply_transit_cost_enrichment_run(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        phase: str,
+        started_at: str,
+        candidate_count: int,
+        logs: list[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        _validate_timestamp(started_at, field_name="started_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs(
+                    run_id,
+                    status,
+                    phase,
+                    started_at,
+                    updated_at,
+                    candidate_count,
+                    logs_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(run_id),
+                    str(status),
+                    str(phase),
+                    started_at,
+                    started_at,
+                    int(candidate_count or 0),
+                    json.dumps(list(logs or []), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        return self.load_wb_supply_transit_cost_enrichment_run(run_id) or {}
+
+    def update_wb_supply_transit_cost_enrichment_run(self, run_id: str, **fields: Any) -> dict[str, Any]:
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            raise ValueError("run_id is required")
+        allowed = {
+            "status",
+            "phase",
+            "updated_at",
+            "completed_at",
+            "candidate_count",
+            "processed_count",
+            "success_count",
+            "not_found_count",
+            "failed_count",
+            "session_expired_count",
+            "last_error",
+            "lock_status_json",
+            "logs_json",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, value in fields.items():
+            column = "logs_json" if key == "logs" else "lock_status_json" if key == "lock_status" else key
+            if column not in allowed:
+                continue
+            assignments.append(f"{column} = ?")
+            if column in {"logs_json", "lock_status_json"}:
+                values.append(json.dumps(value, ensure_ascii=False))
+            elif column == "last_error":
+                values.append(_safe_runtime_error(value))
+            else:
+                values.append(value)
+        if not assignments:
+            return self.load_wb_supply_transit_cost_enrichment_run(normalized_run_id) or {}
+        values.append(normalized_run_id)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                f"""
+                UPDATE sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs
+                SET {', '.join(assignments)}
+                WHERE run_id = ?
+                """,
+                values,
+            )
+            conn.commit()
+        return self.load_wb_supply_transit_cost_enrichment_run(normalized_run_id) or {}
+
+    def load_wb_supply_transit_cost_enrichment_run(self, run_id: str) -> dict[str, Any] | None:
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return None
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs
+                WHERE run_id = ?
+                """,
+                (normalized_run_id,),
+            ).fetchone()
+            return _wb_supply_transit_cost_run_to_dict(row) if row else None
+
+    def load_active_wb_supply_transit_cost_enrichment_run(self) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs
+                WHERE status IN ('queued', 'running')
+                ORDER BY started_at DESC, updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return _wb_supply_transit_cost_run_to_dict(row) if row else None
 
     def save_supplier_shipment_upload(
         self,
@@ -5088,6 +5312,45 @@ def _wb_supplies_sync_run_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _wb_supply_transit_cost_enrichment_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "supply_id": row["supply_id"],
+        "amount": row["amount"],
+        "currency": row["currency"] or "RUB",
+        "amount_label": row["amount_label"] or "",
+        "is_transit": bool(row["is_transit"]),
+        "source": row["source"] or "",
+        "evidence_type": row["evidence_type"] or "",
+        "confidence": row["confidence"] or "",
+        "fetched_at": row["fetched_at"] or "",
+        "status": row["status"] or "",
+        "error": row["error"] or "",
+        "source_endpoint_path": row["source_endpoint_path"] or "",
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
+    }
+
+
+def _wb_supply_transit_cost_run_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "run_id": row["run_id"],
+        "status": row["status"] or "",
+        "phase": row["phase"] or "",
+        "started_at": row["started_at"] or "",
+        "updated_at": row["updated_at"] or "",
+        "completed_at": row["completed_at"] or "",
+        "candidate_count": row["candidate_count"] or 0,
+        "processed_count": row["processed_count"] or 0,
+        "success_count": row["success_count"] or 0,
+        "not_found_count": row["not_found_count"] or 0,
+        "failed_count": row["failed_count"] or 0,
+        "session_expired_count": row["session_expired_count"] or 0,
+        "last_error": row["last_error"] or "",
+        "lock_status": _loads_json_object(row["lock_status_json"]),
+        "logs": _loads_json_list(row["logs_json"]),
+    }
+
+
 def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     barcode = str(row["barcode"] or "").strip()
     barcodes = [str(item) for item in _loads_json_list(row["barcodes_json"]) if str(item or "").strip()]
@@ -5602,6 +5865,44 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             logs_json TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supply_transit_cost_enrichment (
+            supply_id TEXT PRIMARY KEY,
+            amount REAL,
+            currency TEXT NOT NULL DEFAULT 'RUB',
+            amount_label TEXT,
+            is_transit INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL,
+            evidence_type TEXT NOT NULL,
+            confidence TEXT,
+            fetched_at TEXT,
+            status TEXT NOT NULL,
+            error TEXT,
+            source_endpoint_path TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supply_transit_cost_enrichment_by_status
+        ON sheet_vitrina_v1_wb_supply_transit_cost_enrichment(status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            phase TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            candidate_count INTEGER DEFAULT 0,
+            processed_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            not_found_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
+            session_expired_count INTEGER DEFAULT 0,
+            last_error TEXT,
+            lock_status_json TEXT,
+            logs_json TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_uploads (
             upload_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
@@ -6029,6 +6330,33 @@ def _ensure_column(
         return False
     conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
     return True
+
+
+def _optional_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        amount = float(value)
+        return amount if amount == amount else None
+    text = str(value).strip().replace("\u00a0", " ").replace(" ", "").replace(",", ".")
+    if not text:
+        return None
+    try:
+        amount = float(text)
+    except ValueError:
+        return None
+    return amount if amount == amount else None
+
+
+def _safe_runtime_error(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    blocked = ("token", "cookie", "secret", "password", "authorization", "storage_state", "header")
+    if any(marker in lowered for marker in blocked):
+        return "[redacted]"
+    return text[:800]
 
 
 _SHEET_VITRINA_USER_SECTION_IDS = (

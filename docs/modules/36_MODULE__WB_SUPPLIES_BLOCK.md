@@ -3,15 +3,17 @@ title: "Модуль: wb_supplies_block"
 doc_id: "WB-CORE-MODULE-36-WB-SUPPLIES-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для read-only блока `Поставки -> Wildberries`: WB API / FBW Supplies registry, runtime cache/history, protected API and operator UI."
-scope: "Official WB FBW Supplies read-only contour under current WebCore runtime: adapter over `supplies-api.wildberries.ru`, SQLite cache/state/warehouse tables, protected list/sync/detail API routes, embedded operator UI filters/table/pagination and targeted smokes."
+purpose: "Зафиксировать canonical contract для read-only блока `Поставки -> Wildberries`: WB API / FBW Supplies registry, runtime cache/history, protected API, separate Seller Portal transit-cost enrichment and operator UI."
+scope: "Official WB FBW Supplies read-only contour under current WebCore runtime plus a separate read-only Seller Portal browser/network-json enrichment for missing transit cabinet cost: adapter over `supplies-api.wildberries.ru`, supplemental Seller Portal `supply/cost` source boundary, SQLite cache/state/warehouse/enrichment tables, protected list/sync/detail/enrichment API routes, embedded operator UI filters/table/pagination and targeted smokes."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "Official Wildberries Developer Portal: Supplies API / FBW Supplies"
+  - "Seller Portal network research: `seller-supply.wildberries.ru/.../api/v1/supply/cost` internal JSON for cabinet transit cost"
 related_modules:
   - "packages/adapters/wb_supplies.py"
+  - "packages/adapters/seller_portal_transit_costs.py"
   - "packages/application/wb_supplies.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_http_entrypoint.py"
@@ -22,11 +24,15 @@ related_tables:
   - "sheet_vitrina_v1_wb_supplies_sync_state"
   - "sheet_vitrina_v1_wb_supplies_sync_runs"
   - "sheet_vitrina_v1_wb_supplies_warehouses"
+  - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment"
+  - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
+  - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
+  - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}"
 related_runners:
@@ -42,13 +48,14 @@ related_runners:
   - "apps/wb_supplies_live_diagnostics.py"
   - "apps/wb_supplies_normalization_smoke.py"
   - "apps/wb_supplies_renormalize_cache.py"
+  - "apps/wb_supplies_transit_cost_enrichment_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. Missing transit cabinet cost is filled only by an explicit, separate `Обновить стоимость транзита` Seller Portal browser/network-json enrichment job that stores normalized facts and provenance, never official raw evidence. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -62,7 +69,8 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - source note: `WB API / FBW Supplies · read-only`;
   - lead: `Read-only список поставок WB API / FBW Supplies`.
 - The UI is read-only. It does not create, update, delete or draft WB supplies.
-- The module does not implement WB Seller Portal browser automation and does not use FBS APIs.
+- Official WB API remains canonical for supply list/status/route/quantity evidence.
+- Seller Portal is used only by the explicit transit-cost enrichment button/job and only as a supplemental read-only source for missing transit cost. It is not part of ordinary official sync, does not run on page open, and does not use FBS APIs.
 
 # 2. Official API Boundary
 
@@ -70,6 +78,8 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
 - Required token env: `WB_API_TOKEN`.
 - Optional base override: `WB_SUPPLIES_API_BASE_URL`.
 - Timeout follows shared official API helper conventions.
+- Seller Portal `seller-supply.wildberries.ru/.../api/v1/supply/cost` is not an official WB Developer API endpoint and must not be added to `packages/adapters/wb_supplies.py`.
+- Seller Portal transit-cost enrichment lives under `packages/adapters/seller_portal_transit_costs.py`, uses the shared Seller Portal browser/session contour, and stores only normalized supplemental facts with source/evidence provenance.
 - Implemented read methods:
   - `POST /api/v1/supplies`;
   - `GET /api/v1/supplies/{ID}`;
@@ -100,6 +110,10 @@ Tables:
 - `sheet_vitrina_v1_wb_supplies_sync_state`: last sync fields plus `backfill_complete`, `backfill_started_at`, `backfill_completed_at`, `highest_synced_offset`, `last_successful_offset`, `last_mode`, latest-window counters, `may_have_more` and sanitized `last_error`.
 - `sheet_vitrina_v1_wb_supplies_sync_runs`: per-run progress for `incremental_refresh`, `full_backfill` and explicit missing-critical enrichment requests: status/phase, offset/limit, pages/raw/upserted/new/changed/unchanged/enriched/failed counters, `may_have_more`, last error and compact sanitized logs.
 - `sheet_vitrina_v1_wb_supplies_warehouses`: cached warehouse dictionary/options.
+- `sheet_vitrina_v1_wb_supply_transit_cost_enrichment`: supplemental Seller Portal facts keyed by `supply_id`, with `amount`, `currency`, `amount_label`, `is_transit`, `source=seller_portal_browser`, `evidence_type=network_json`, `confidence`, `fetched_at`, `status`, sanitized `error`, sanitized `source_endpoint_path`, `created_at` and `updated_at`.
+- `sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs`: background run state for explicit transit-cost enrichment jobs, with counters for processed/success/not-found/failed/session-expired rows, sanitized last error, compact logs and optional lock status.
+
+Transit-cost enrichment persistence must not store cookies, headers, Authorization values, storage-state content, raw HTML, screenshots or full raw network payloads.
 
 The cache is an operator registry/cache only:
 - it is not accepted ЕБД metric truth;
@@ -138,6 +152,26 @@ Response shape:
 - `rows`.
 - `sync_state`;
 - `active_run` when a backfill/latest run is still queued/running.
+- `transit_cost_enrichment` meta with source/evidence boundary and active run status.
+
+Rows expose Seller Portal enrichment as supplemental fields:
+- `seller_portal_transit_cost`;
+- `seller_portal_transit_cost_display`;
+- `seller_portal_transit_cost_source`;
+- `seller_portal_transit_cost_evidence_type`;
+- `seller_portal_transit_cost_fetched_at`;
+- `seller_portal_transit_cost_status`;
+- `seller_portal_transit_cost_confidence`;
+- `effective_cost_total`;
+- `effective_cost_display`;
+- `effective_cost_source`.
+
+Display priority:
+1. official `cost_total`, when official evidence provides it;
+2. Seller Portal enrichment amount only when the row is transit, official `cost_total` is unknown and enrichment status is `success`;
+3. `—`.
+
+Seller Portal values must not overwrite `cost_total` or become official raw evidence.
 
 `POST /v1/sheet-vitrina-v1/supply/wb-supplies/sync`
 
@@ -178,6 +212,29 @@ Full backfill walks `POST /api/v1/supplies?limit=<limit>&offset=<offset>` until 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status?run_id=...`
 
 Returns the requested run or active run plus sync state and cached row count.
+
+`POST /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich`
+
+Starts a separate read-only background Seller Portal browser/network-json enrichment job and returns `202`.
+
+Body:
+- optional `supply_ids`;
+- optional `list_params`;
+- optional `limit`, default `50`, max `100`;
+- optional `force`, default `false`.
+
+Candidate rules:
+- cached WB supply rows only;
+- transit rows only: `has_transit_cost_marker=true` or transit warehouse evidence is present;
+- official `cost_total` must be unknown;
+- existing fresh/success Seller Portal enrichment is skipped unless `force=true`; MVP freshness TTL is 24 hours from `fetched_at`/`updated_at`;
+- explicit ids/list params prioritize the current visible/filter scope; otherwise newest missing/stale transit rows are selected server-side.
+
+The worker uses the shared Seller Portal storage-state path/lock contract, navigates to `/supplies-management/all-supplies`, searches by supply id, waits for `listSupplies` and `supply/cost` network JSON, joins by `data.{supplyID}`, and extracts `costInSupplierCurrency.amountWithVat` before falling back to `cost`.
+
+`GET /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status?run_id=...`
+
+Returns run status/counters, sanitized last error and current Seller Portal automation lock/session status when available. Session expiration is a controlled status, not a crash.
 
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 
@@ -261,6 +318,9 @@ Cost fields:
 - for transit rows with `acceptanceCost = 0` and no explicit total/transit cost, `cost_total = null`, `cost_display = —`, and `has_transit_cost_marker = true`;
 - the UI must not render `0 ₽` for unknown transit cost.
 - for non-transit accepted rows where official detail has `paidAcceptanceCoefficient = 0` and no explicit `acceptanceCost`, `cost_total = 0` with evidence `paidAcceptanceCoefficient.free_accepted_non_transit`; the UI renders `0 ₽` and coefficient `Бесплатно`.
+- Seller Portal transit-cost enrichment adds supplemental `seller_portal_transit_cost*` and `effective_cost*` fields only after an explicit enrichment run; official `cost_total` stays unchanged.
+- `effective_cost_total` is official `cost_total` first, then successful Seller Portal `supply/cost` amount for missing transit cost, then `null`.
+- `effective_cost_source` is `official_wb_api`, `seller_portal_browser` or `unknown`; UI/debug text must keep this provenance available.
 
 Type labels:
 - known `boxTypeID=1` renders as `Короб`;
@@ -341,6 +401,7 @@ First open behavior:
 Buttons:
 - `Обновить поставки` = incremental latest-window refresh only; it does not scan all offsets and does not re-enrich unchanged rows or old unknown-quantity rows.
 - `Загрузить всю историю` = one-time full backfill job; UI polls `sync-status` and shows offset/pages/fetched/upserted/enriched counters and last error.
+- `Обновить стоимость транзита` = explicit Seller Portal read-only browser/network-json enrichment for missing transit costs only. It is not triggered on first open, is not part of `Обновить поставки`, preserves current filters/page/sort through `list_params`, disables while an active run exists and shows progress/status: `стоимость транзита: запуск`, `обработано X/Y`, final success/failed counters or `нужна переавторизация Seller Portal`.
 
 Sorting:
 - `Дата поставки` is clickable and toggles `asc/desc`.
@@ -383,8 +444,9 @@ Transit cost limitation as of this module revision:
 - official detail/goods/package evidence for target transit rows exposes route, quantities, `acceptanceCost=0`, `paidAcceptanceCoefficient=0`, `storageCoef` and `deliveryCoef`, but no ready cabinet transit total;
 - `/api/v1/transit-tariffs` exposes route tariffs (`boxTariff`, `palletTariff`, `activeFrom`), but tested formulas such as `boxTariff * quantity`, `boxTariff * acceptedQuantity`, pallet multiples and VAT/no-VAT variants did not stably match cabinet amounts for `39265519`, `39265492`, `39265590`, `39265571`;
 - official Reports / Acceptance Expenses was checked with Analytics/Reports permission through `GET /api/v1/acceptance_report`, task status polling and task download for bounded windows around the target rows; the task completed, but download returned zero rows and did not expose the target values `15523.72`, `11543.52`, `14062.54`, `10726.11` or a usable `incomeId`/supply join key;
-- production must keep transit amount as `—` with `с транзитом` until a ready source or proven formula is available;
-- read-only Seller Portal network diagnostics are allowed, but current live storage state may be expired; no cookies/tokens/storage-state content may be logged.
+- official API alone must keep transit amount as `—` with `с транзитом` when no supplemental evidence exists;
+- Seller Portal browser research found a read-only internal network JSON source `POST seller-supply.wildberries.ru/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost`, with response `data.{supplyID}.costInSupplierCurrency.amountWithVat`, matching screenshot-backed target rows `40422317 -> 10164`, `40421940 -> 45980`, `40119116 -> 23724`, `40119056 -> 3043.69`;
+- this source is stored and rendered only as `source=seller_portal_browser`, `evidence_type=network_json`; no cookies/tokens/storage-state content, raw HTML, screenshots, headers or full raw payloads may be logged or persisted.
 
 Targeted smokes:
 - `python3 apps/wb_supply_overlay_smoke.py`;
@@ -396,6 +458,7 @@ Targeted smokes:
 - `python3 apps/wb_supplies_incremental_sync_smoke.py`;
 - `python3 apps/wb_supplies_filter_sort_date_smoke.py`;
 - `python3 apps/wb_supplies_acceptance_expenses_report_smoke.py`;
+- `python3 apps/wb_supplies_transit_cost_enrichment_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_http_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py`.
 
@@ -417,7 +480,9 @@ This module does not implement:
 - transit directions screen;
 - unproven reverse-engineering of WB cabinet transit cost formula;
 - FBS orders/supplies;
-- Seller Portal browser automation;
+- general Seller Portal browser automation outside the bounded read-only transit-cost enrichment worker;
+- automatic Seller Portal scans on page open or inside ordinary official `Обновить поставки`;
+- DOM scraping as the primary transit-cost source;
 - Google Sheets/GAS writes;
 - accepted metric truth in web-vitrina ready snapshots;
 - AI logic.

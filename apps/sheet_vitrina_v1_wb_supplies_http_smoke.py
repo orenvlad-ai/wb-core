@@ -8,6 +8,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import time
 from urllib import error as urllib_error, request as urllib_request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +27,8 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
     DEFAULT_WB_SUPPLIES_SYNC_PATH,
+    DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+    DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
     build_registry_upload_http_server,
 )
 from packages.adapters.wb_supplies import WbSuppliesHttpStatusError, WbSuppliesListResult, WbSuppliesTransportError  # noqa: E402
@@ -282,6 +285,54 @@ class FakeWbSuppliesSource:
         return []
 
 
+class FakeTransitCostSource:
+    def __init__(self, amounts: dict[str, float]) -> None:
+        self.amounts = {str(key): float(value) for key, value in amounts.items()}
+        self.calls: list[list[str]] = []
+
+    def fetch_costs(self, candidates, *, run_id, runtime_dir, fetched_at):
+        supply_ids = [str(item.get("supply_id") or "") for item in candidates]
+        self.calls.append(supply_ids)
+        results = []
+        for supply_id in supply_ids:
+            amount = self.amounts.get(supply_id)
+            if amount is None:
+                results.append(
+                    {
+                        "supply_id": supply_id,
+                        "amount": None,
+                        "currency": "RUB",
+                        "amount_label": "",
+                        "is_transit": True,
+                        "source": "seller_portal_browser",
+                        "evidence_type": "network_json",
+                        "confidence": "none",
+                        "fetched_at": fetched_at,
+                        "status": "not_found",
+                        "error": "target row not found",
+                        "source_endpoint_path": "/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost",
+                    }
+                )
+                continue
+            results.append(
+                {
+                    "supply_id": supply_id,
+                    "amount": amount,
+                    "currency": "RUB",
+                    "amount_label": f"{int(amount):,}".replace(",", " ") + " ₽",
+                    "is_transit": True,
+                    "source": "seller_portal_browser",
+                    "evidence_type": "network_json",
+                    "confidence": "high",
+                    "fetched_at": fetched_at,
+                    "status": "success",
+                    "error": "",
+                    "source_endpoint_path": "/ns/seller-api/suppliers-portal-goods/api/v1/supply/cost",
+                }
+            )
+        return results
+
+
 def main() -> None:
     with TemporaryDirectory(prefix="wb-supplies-http-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -334,6 +385,8 @@ def main() -> None:
 
             fake_source = FakeWbSuppliesSource()
             entrypoint.wb_supplies_block.source = fake_source
+            fake_transit_cost_source = FakeTransitCostSource({"1003": 3333.0})
+            entrypoint.wb_supplies_block.transit_cost_source = fake_transit_cost_source
             sync_status, sync_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
                 {"limit": 100, "offset": 0, "enrich_details": True},
@@ -412,6 +465,9 @@ def main() -> None:
             all_ids = {row["wb_supply_id"] for row in all_payload.get("rows", [])}
             if all_status != 200 or all_ids != {"39265492", "39265540", "1001", "1002", "1003", "1004", "1005"}:
                 raise AssertionError(f"all size filter must include unknown quantity rows, got {all_status} {all_payload}")
+            all_rows = {row["wb_supply_id"]: row for row in all_payload.get("rows", [])}
+            if all_rows["1003"].get("effective_cost_source") != "unknown":
+                raise AssertionError(f"unknown transit row must remain unknown before Seller Portal enrichment: {all_rows['1003']}")
             status_options = all_payload.get("filters", {}).get("options", {}).get("statuses", [])
             if [item.get("value") for item in status_options] != [1, 2, 3, 4, 5, 6]:
                 raise AssertionError(f"status selector must expose official statuses 1..6, got {status_options}")
@@ -525,6 +581,37 @@ def main() -> None:
             if search_status != 200 or [row["wb_supply_id"] for row in search_payload.get("rows", [])] != ["1002"]:
                 raise AssertionError(f"search must match preorderID/visible number, got {search_status} {search_payload}")
 
+            transit_enrich_status, transit_enrich_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH}",
+                {"supply_ids": ["1003", "39265492", "39265540"], "limit": 10, "force": False},
+            )
+            if (
+                transit_enrich_status != 202
+                or transit_enrich_payload.get("accepted") is not True
+                or transit_enrich_payload.get("candidate_count") != 1
+            ):
+                raise AssertionError(
+                    f"transit cost enrich route must accept exactly missing transit cost candidate, got "
+                    f"{transit_enrich_status} {transit_enrich_payload}"
+                )
+            transit_run = _wait_transit_cost_run(base_url, str(transit_enrich_payload.get("run_id") or ""))
+            if transit_run.get("status") != "success" or transit_run.get("success_count") != 1:
+                raise AssertionError(f"transit cost fake run must finish successfully, got {transit_run}")
+            if fake_transit_cost_source.calls != [["1003"]]:
+                raise AssertionError(f"transit cost source must receive only missing unknown transit row, got {fake_transit_cost_source.calls}")
+            enriched_status, enriched_payload = _get_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search=1003&size_filter=all"
+            )
+            enriched_row = (enriched_payload.get("rows") or [{}])[0]
+            if (
+                enriched_status != 200
+                or enriched_row.get("cost_total") is not None
+                or enriched_row.get("effective_cost_total") != 3333.0
+                or enriched_row.get("effective_cost_source") != "seller_portal_browser"
+                or enriched_row.get("seller_portal_transit_cost_display") != "3 333 ₽"
+            ):
+                raise AssertionError(f"Seller Portal enrichment must fill effective cost only, got {enriched_row}")
+
             page_status, page_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?size_filter=all&limit=20&offset=20")
             if page_status != 200 or page_payload.get("pagination", {}).get("offset") != 7:
                 raise AssertionError(f"oversized offset must clamp to filtered count, got {page_status} {page_payload}")
@@ -580,6 +667,7 @@ def main() -> None:
                 "Основные от 250 шт",
                 "Показать записей",
                 "Загрузить всю историю",
+                "Обновить стоимость транзита",
                 "Учесть WB-поставки",
                 "Выбрать eligible",
                 "ФО",
@@ -589,6 +677,8 @@ def main() -> None:
                 "wb_supplies_overlay_options_path",
                 "wb_supplies_backfill_path",
                 "wb_supplies_sync_status_path",
+                "wb_supplies_transit_cost_enrich_path",
+                "wb_supplies_transit_cost_status_path",
             ):
                 if operator_status != 200 or expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose WB supplies UI token {expected!r}")
@@ -635,6 +725,23 @@ def _get_text(url: str) -> tuple[int, str]:
             return response.status, response.read().decode("utf-8")
     except urllib_error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8")
+
+
+def _wait_transit_cost_run(base_url: str, run_id: str) -> dict:
+    if not run_id:
+        raise AssertionError("run_id is required")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        status, payload = _get_json(
+            f"{base_url}{DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH}?run_id={run_id}"
+        )
+        if status != 200:
+            raise AssertionError(f"transit cost status route failed: {status} {payload}")
+        run = payload.get("run") or {}
+        if run.get("status") not in {"queued", "running"}:
+            return run
+        time.sleep(0.05)
+    raise AssertionError("transit cost run did not finish")
 
 
 if __name__ == "__main__":

@@ -2064,6 +2064,12 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_supplies_sync_status_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.get_sync_status(params)
 
+    def handle_wb_supplies_transit_cost_enrich_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.wb_supplies_block.start_transit_cost_enrichment(payload)
+
+    def handle_wb_supplies_transit_cost_status_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        return self.wb_supplies_block.get_transit_cost_enrichment_status(params)
+
     def handle_wb_supplies_detail_request(self, supply_id: str) -> dict[str, Any]:
         return self.wb_supplies_block.get_supply(supply_id)
 

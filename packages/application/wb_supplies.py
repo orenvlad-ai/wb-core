@@ -19,6 +19,13 @@ from packages.adapters.wb_supplies import (
     WbSuppliesListResult,
     WbSuppliesTransportError,
 )
+from packages.adapters.seller_portal_transit_costs import (
+    SELLER_PORTAL_SUPPLY_COST_ENDPOINT_PATH,
+    SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
+    SELLER_PORTAL_TRANSIT_COST_SOURCE,
+    SellerPortalTransitCostNetworkJsonSource,
+    SellerPortalTransitCostSourceError,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.wb_supply_overlay import (
     augment_supply_row_with_district,
@@ -33,10 +40,14 @@ CONTRACT_NAME = "sheet_vitrina_v1_wb_supplies"
 CONTRACT_VERSION = "v1"
 DEFAULT_SYNC_LIMIT = 1000
 DEFAULT_PAGE_LIMIT = 20
+DEFAULT_TRANSIT_COST_ENRICHMENT_LIMIT = 50
+MAX_TRANSIT_COST_ENRICHMENT_LIMIT = 100
+TRANSIT_COST_ENRICHMENT_FRESH_SECONDS = 24 * 60 * 60
 SYNC_MODE_INCREMENTAL_REFRESH = "incremental_refresh"
 SYNC_MODE_FULL_BACKFILL = "full_backfill"
 SYNC_MODE_ENRICH_MISSING = "enrich_missing"
 RUN_ACTIVE_STATUSES = {"queued", "running"}
+TRANSIT_COST_RUN_ACTIVE_STATUSES = {"queued", "running"}
 ALLOWED_PAGE_LIMITS = (20, 50, 100)
 ALLOWED_SORT_KEYS = {"supply_date"}
 DEFAULT_SORT_KEY = "supply_date"
@@ -116,6 +127,18 @@ class WbSuppliesSource(Protocol):
         raise NotImplementedError
 
 
+class WbTransitCostEnrichmentSource(Protocol):
+    def fetch_costs(
+        self,
+        candidates: list[Mapping[str, Any]],
+        *,
+        run_id: str,
+        runtime_dir: Any,
+        fetched_at: str,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+
 class WbSuppliesBlockError(RuntimeError):
     def __init__(self, message: str, *, http_status: int = 502) -> None:
         self.http_status = int(http_status)
@@ -130,21 +153,27 @@ class WbSuppliesBlock:
         *,
         runtime: RegistryUploadDbBackedRuntime,
         source: WbSuppliesSource | None = None,
+        transit_cost_source: WbTransitCostEnrichmentSource | None = None,
         timestamp_factory: Any | None = None,
     ) -> None:
         self.runtime = runtime
         self.source = source or HttpBackedWbSuppliesSource()
+        self.transit_cost_source = transit_cost_source or SellerPortalTransitCostNetworkJsonSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
         self._run_lock = threading.Lock()
+        self._transit_cost_run_lock = threading.Lock()
 
     def list_supplies(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_list_request(params or {})
         rows = self.runtime.list_wb_supplies()
+        transit_cost_enrichments = _transit_cost_enrichment_map(self.runtime.list_wb_supply_transit_cost_enrichments())
+        rows = [_row_with_transit_cost_enrichment(row, transit_cost_enrichments) for row in rows]
         warehouses = self.runtime.list_wb_supplies_warehouses()
         district_mapping = self.current_warehouse_district_mapping(rows=rows, warehouses=warehouses)
         rows = [augment_supply_row_with_district(row, district_mapping) for row in rows]
         state = self.runtime.load_wb_supplies_sync_state()
         active_run = self.runtime.load_active_wb_supplies_sync_run()
+        active_transit_cost_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
         cache_completeness = _cache_completeness(state, rows)
         after_non_size_filters = [
             row
@@ -241,6 +270,15 @@ class WbSuppliesBlock:
             "rows": page_rows,
             "sync_state": _public_sync_state(state, cache_completeness),
             "active_run": active_run if active_run and active_run.get("status") in RUN_ACTIVE_STATUSES else None,
+            "transit_cost_enrichment": {
+                "active_run": active_transit_cost_run
+                if active_transit_cost_run and active_transit_cost_run.get("status") in TRANSIT_COST_RUN_ACTIVE_STATUSES
+                else None,
+                "source": SELLER_PORTAL_TRANSIT_COST_SOURCE,
+                "evidence_type": SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
+                "read_only": True,
+                "official_api": False,
+            },
         }
 
     def build_overlay_options(self) -> dict[str, Any]:
@@ -540,6 +578,91 @@ class WbSuppliesBlock:
             "cached_total_rows": len(rows),
         }
 
+    def start_transit_cost_enrichment(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        request = _normalize_transit_cost_enrichment_request(payload or {})
+        with self._transit_cost_run_lock:
+            active_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+            if active_run:
+                return {
+                    "contract_name": CONTRACT_NAME,
+                    "contract_version": CONTRACT_VERSION,
+                    "status": active_run.get("status") or "running",
+                    "accepted": True,
+                    "run_id": active_run.get("run_id"),
+                    "candidate_count": active_run.get("candidate_count") or 0,
+                    "started_at": active_run.get("started_at") or "",
+                    "active_run": active_run,
+                }
+            candidates = self._select_transit_cost_enrichment_candidates(request)
+            run_id = _new_transit_cost_run_id()
+            queued_at = self.timestamp_factory()
+            run = self.runtime.create_wb_supply_transit_cost_enrichment_run(
+                run_id=run_id,
+                status="queued",
+                phase="queued",
+                started_at=queued_at,
+                candidate_count=len(candidates),
+                logs=[
+                    _run_log(
+                        queued_at,
+                        f"Seller Portal transit cost enrichment queued; candidates={len(candidates)}",
+                    )
+                ],
+            )
+            if not candidates:
+                completed = self.timestamp_factory()
+                run = self.runtime.update_wb_supply_transit_cost_enrichment_run(
+                    run_id,
+                    status="success",
+                    phase="no_candidates",
+                    updated_at=completed,
+                    completed_at=completed,
+                    logs=[_run_log(completed, "no missing transit cost candidates")],
+                )
+            else:
+                thread = threading.Thread(
+                    target=self._run_transit_cost_enrichment_guarded,
+                    args=(run_id, candidates),
+                    name=f"wb-transit-cost-{run_id[:8]}",
+                    daemon=True,
+                )
+                thread.start()
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "status": run.get("status") or "queued",
+            "accepted": True,
+            "run_id": run_id,
+            "candidate_count": len(candidates),
+            "started_at": queued_at,
+            "active_run": run,
+        }
+
+    def get_transit_cost_enrichment_status(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        run_id = str((params or {}).get("run_id") or "").strip()
+        run = (
+            self.runtime.load_wb_supply_transit_cost_enrichment_run(run_id)
+            if run_id
+            else self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+        )
+        lock_status: dict[str, Any] = {}
+        try:
+            from apps.seller_portal_automation_guard import current_lock_status
+
+            lock_status = current_lock_status(self.runtime.runtime_dir)
+        except Exception:
+            lock_status = {}
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "run": run,
+            "lock_status": lock_status,
+            "source": SELLER_PORTAL_TRANSIT_COST_SOURCE,
+            "evidence_type": SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
+            "read_only": True,
+            "official_api": False,
+        }
+
     def get_supply(self, supply_id: str) -> dict[str, Any]:
         normalized_id = str(supply_id or "").strip()
         if not normalized_id:
@@ -549,6 +672,9 @@ class WbSuppliesBlock:
             raise WbSuppliesBlockError(f"WB supply not found in cache: {normalized_id}", http_status=404)
         record = self._ensure_supply_detail_record(record)
         detail = _supply_detail_payload(record)
+        transit_cost = self.runtime.load_wb_supply_transit_cost_enrichment(normalized_id)
+        if transit_cost and isinstance(detail.get("supply"), Mapping):
+            detail["supply"] = _row_with_transit_cost_enrichment(detail["supply"], _transit_cost_enrichment_map([transit_cost]))
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -645,6 +771,181 @@ class WbSuppliesBlock:
         if fetched_any or _normalized_row_public_fingerprint(normalized) != _normalized_row_public_fingerprint(next_normalized):
             self.runtime.save_wb_supply_rows(rows=[next_normalized], warehouses=[], synced_at=synced_at)
         return next_record
+
+    def _select_transit_cost_enrichment_candidates(self, request: Mapping[str, Any]) -> list[dict[str, Any]]:
+        rows = self.runtime.list_wb_supplies()
+        warehouses = self.runtime.list_wb_supplies_warehouses()
+        district_mapping = self._cached_warehouse_district_mapping(rows=rows, warehouses=warehouses)
+        rows = [augment_supply_row_with_district(row, district_mapping) for row in rows]
+        enrichments = _transit_cost_enrichment_map(self.runtime.list_wb_supply_transit_cost_enrichments())
+        force = bool(request.get("force"))
+        explicit_ids = [str(item).strip() for item in request.get("supply_ids") or [] if str(item or "").strip()]
+        limit = int(request.get("limit") or DEFAULT_TRANSIT_COST_ENRICHMENT_LIMIT)
+        if explicit_ids:
+            wanted = set(explicit_ids)
+            scope = [
+                row
+                for row in rows
+                if wanted.intersection(_row_identity_values(row))
+            ]
+        else:
+            list_params = request.get("list_params") if isinstance(request.get("list_params"), Mapping) else {}
+            if list_params:
+                list_request = _normalize_list_request(list_params)
+                after_filters = [
+                    row
+                    for row in rows
+                    if _row_matches_search(row, list_request["search"])
+                    and _row_matches_warehouse(row, list_request["warehouse_id"], list_request["warehouse"])
+                    and _row_matches_districts(row, list_request["district_keys"])
+                    and _row_matches_statuses(row, list_request["status_ids"])
+                    and _row_matches_size_filter(row, list_request["size_filter"])
+                ]
+                sorted_rows = _sort_rows(after_filters, list_request["sort_key"], list_request["sort_dir"])
+                offset = min(list_request["offset"], len(sorted_rows))
+                scope = sorted_rows[offset : offset + list_request["limit"]]
+            else:
+                scope = _sort_rows(rows, DEFAULT_SORT_KEY, DEFAULT_SORT_DIR)
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in scope:
+            supply_id = _transit_cost_supply_id(row)
+            if not supply_id or supply_id in seen:
+                continue
+            if not _is_transit_cost_enrichment_candidate(row):
+                continue
+            if not force and _has_fresh_success_transit_cost(row, enrichments, now_text=self.timestamp_factory()):
+                continue
+            candidates.append(
+                {
+                    "supply_id": supply_id,
+                    "warehouse_display": str(row.get("warehouse_display") or ""),
+                    "supply_date": str(row.get("supply_date") or ""),
+                }
+            )
+            seen.add(supply_id)
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    def _run_transit_cost_enrichment_guarded(self, run_id: str, candidates: list[Mapping[str, Any]]) -> None:
+        try:
+            self._run_transit_cost_enrichment(run_id, candidates)
+        except Exception as exc:  # noqa: BLE001 - background job must persist controlled failure.
+            failed_at = self.timestamp_factory()
+            error = _safe_error_message(exc)
+            self.runtime.update_wb_supply_transit_cost_enrichment_run(
+                run_id,
+                status="failed",
+                phase="failed",
+                updated_at=failed_at,
+                completed_at=failed_at,
+                last_error=error,
+                logs=[_run_log(failed_at, error)],
+            )
+
+    def _run_transit_cost_enrichment(self, run_id: str, candidates: list[Mapping[str, Any]]) -> dict[str, Any]:
+        started_at = self.timestamp_factory()
+        logs = [_run_log(started_at, f"Seller Portal transit cost enrichment started; candidates={len(candidates)}")]
+        self.runtime.update_wb_supply_transit_cost_enrichment_run(
+            run_id,
+            status="running",
+            phase="browser_network_json",
+            updated_at=started_at,
+            candidate_count=len(candidates),
+            logs=logs,
+        )
+        results: list[dict[str, Any]]
+        try:
+            results = self.transit_cost_source.fetch_costs(
+                list(candidates),
+                run_id=run_id,
+                runtime_dir=self.runtime.runtime_dir,
+                fetched_at=started_at,
+            )
+        except SellerPortalTransitCostSourceError as exc:
+            status = "session_expired" if exc.code == "session_expired" else "failed"
+            fetched_at = self.timestamp_factory()
+            results = [
+                {
+                    "supply_id": str(candidate.get("supply_id") or ""),
+                    "amount": None,
+                    "currency": "RUB",
+                    "amount_label": "",
+                    "is_transit": True,
+                    "source": SELLER_PORTAL_TRANSIT_COST_SOURCE,
+                    "evidence_type": SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
+                    "confidence": "none",
+                    "fetched_at": fetched_at,
+                    "status": status,
+                    "error": str(exc),
+                    "source_endpoint_path": SELLER_PORTAL_SUPPLY_COST_ENDPOINT_PATH,
+                }
+                for candidate in candidates
+            ]
+            logs.append(_run_log(fetched_at, f"Seller Portal transit cost source failed: {exc.code}"))
+        counters = {
+            "processed_count": 0,
+            "success_count": 0,
+            "not_found_count": 0,
+            "failed_count": 0,
+            "session_expired_count": 0,
+        }
+        updated_at = self.timestamp_factory()
+        for result in results:
+            supply_id = str(result.get("supply_id") or "").strip()
+            if not supply_id:
+                continue
+            status = str(result.get("status") or "failed")
+            record = {
+                **result,
+                "created_at": updated_at,
+                "updated_at": updated_at,
+                "source": SELLER_PORTAL_TRANSIT_COST_SOURCE,
+                "evidence_type": SELLER_PORTAL_TRANSIT_COST_EVIDENCE_TYPE,
+                "source_endpoint_path": str(result.get("source_endpoint_path") or SELLER_PORTAL_SUPPLY_COST_ENDPOINT_PATH),
+            }
+            self.runtime.upsert_wb_supply_transit_cost_enrichment(record)
+            counters["processed_count"] += 1
+            if status == "success":
+                counters["success_count"] += 1
+            elif status == "not_found":
+                counters["not_found_count"] += 1
+            elif status == "session_expired":
+                counters["session_expired_count"] += 1
+            else:
+                counters["failed_count"] += 1
+            self.runtime.update_wb_supply_transit_cost_enrichment_run(
+                run_id,
+                updated_at=self.timestamp_factory(),
+                **counters,
+            )
+        completed_at = self.timestamp_factory()
+        if counters["session_expired_count"]:
+            status = "session_expired"
+        elif counters["failed_count"] or counters["not_found_count"]:
+            status = "partial" if counters["success_count"] else "failed"
+        else:
+            status = "success"
+        logs.append(
+            _run_log(
+                completed_at,
+                "Seller Portal transit cost enrichment completed: "
+                f"success={counters['success_count']} not_found={counters['not_found_count']} "
+                f"failed={counters['failed_count']} session_expired={counters['session_expired_count']}",
+            )
+        )
+        return self.runtime.update_wb_supply_transit_cost_enrichment_run(
+            run_id,
+            status=status,
+            phase="completed",
+            updated_at=completed_at,
+            completed_at=completed_at,
+            candidate_count=len(candidates),
+            last_error="" if status == "success" else _last_error(results),
+            logs=logs,
+            **counters,
+        )
 
     def _run_full_backfill_guarded(self, run_id: str, request: Mapping[str, Any]) -> None:
         try:
@@ -1278,6 +1579,13 @@ def _normalize_backfill_request(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _normalize_limit(value: Any) -> int:
     normalized = _optional_int(value) or DEFAULT_PAGE_LIMIT
     return normalized if normalized in ALLOWED_PAGE_LIMITS else DEFAULT_PAGE_LIMIT
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    normalized = _optional_int(value)
+    if normalized is None:
+        normalized = int(default)
+    return min(max(int(normalized), int(minimum)), int(maximum))
 
 
 def _normalize_size_filter(value: Any) -> str:
@@ -2378,6 +2686,176 @@ def _row_with_display_fields(row: Mapping[str, Any]) -> dict[str, Any]:
         interface_year=interface_year,
     )
     return result
+
+
+def _row_with_transit_cost_enrichment(
+    row: Mapping[str, Any],
+    enrichments: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    result = dict(row)
+    enrichment = _lookup_transit_cost_enrichment(row, enrichments)
+    amount = _optional_number(enrichment.get("amount")) if enrichment else None
+    status = str(enrichment.get("status") or "") if enrichment else ""
+    confidence = str(enrichment.get("confidence") or "") if enrichment else ""
+    is_success = bool(enrichment and status == "success" and amount is not None and confidence in {"high", "medium"})
+    result["seller_portal_transit_cost"] = amount if is_success else None
+    result["seller_portal_transit_cost_display"] = str(enrichment.get("amount_label") or _format_effective_cost(amount)) if is_success else "—"
+    result["seller_portal_transit_cost_source"] = str(enrichment.get("source") or "") if enrichment else ""
+    result["seller_portal_transit_cost_evidence_type"] = str(enrichment.get("evidence_type") or "") if enrichment else ""
+    result["seller_portal_transit_cost_fetched_at"] = str(enrichment.get("fetched_at") or "") if enrichment else ""
+    result["seller_portal_transit_cost_status"] = status
+    result["seller_portal_transit_cost_confidence"] = confidence
+    official_cost = _optional_number(row.get("cost_total"))
+    if official_cost is not None:
+        result["effective_cost_total"] = official_cost
+        result["effective_cost_display"] = _format_effective_cost(official_cost)
+        result["effective_cost_source"] = "official_wb_api"
+    elif is_success:
+        result["effective_cost_total"] = amount
+        result["effective_cost_display"] = result["seller_portal_transit_cost_display"]
+        result["effective_cost_source"] = SELLER_PORTAL_TRANSIT_COST_SOURCE
+    else:
+        result["effective_cost_total"] = None
+        result["effective_cost_display"] = "—"
+        result["effective_cost_source"] = "unknown"
+    return result
+
+
+def _transit_cost_enrichment_map(records: list[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        supply_id = str(record.get("supply_id") or "").strip()
+        if supply_id:
+            result[supply_id] = record
+            result[f"supply:{supply_id}"] = record
+    return result
+
+
+def _lookup_transit_cost_enrichment(
+    row: Mapping[str, Any],
+    enrichments: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    for value in _row_identity_values(row):
+        match = enrichments.get(value)
+        if match:
+            return match
+    return {}
+
+
+def _row_identity_values(row: Mapping[str, Any]) -> set[str]:
+    values = {
+        str(row.get("supply_id") or "").strip(),
+        str(row.get("cache_key") or "").strip(),
+        str(row.get("wb_supply_id") or "").strip(),
+        str(row.get("visible_number") or "").strip(),
+        str(row.get("number_label") or "").strip(),
+    }
+    expanded: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        expanded.add(value)
+        expanded.add(value.removeprefix("supply:"))
+        if not value.startswith(("supply:", "preorder:")):
+            expanded.add(f"supply:{value}")
+    return {value for value in expanded if value}
+
+
+def _transit_cost_supply_id(row: Mapping[str, Any]) -> str:
+    for key in ("wb_supply_id", "visible_number", "supply_id"):
+        value = str(row.get(key) or "").strip()
+        if value.startswith("supply:"):
+            value = value.removeprefix("supply:")
+        if value and value.isdigit():
+            return value
+    return ""
+
+
+def _is_transit_cost_enrichment_candidate(row: Mapping[str, Any]) -> bool:
+    if _optional_number(row.get("cost_total")) is not None:
+        return False
+    has_transit = bool(
+        row.get("has_transit_cost_marker")
+        or str(row.get("transit_warehouse_id") or "").strip()
+        or str(row.get("transit_warehouse_name") or "").strip()
+    )
+    return bool(has_transit and _transit_cost_supply_id(row))
+
+
+def _has_fresh_success_transit_cost(
+    row: Mapping[str, Any],
+    enrichments: Mapping[str, Mapping[str, Any]],
+    *,
+    now_text: str,
+) -> bool:
+    enrichment = _lookup_transit_cost_enrichment(row, enrichments)
+    return bool(
+        enrichment
+        and str(enrichment.get("status") or "") == "success"
+        and _optional_number(enrichment.get("amount")) is not None
+        and _is_recent_iso_timestamp(
+            str(enrichment.get("fetched_at") or enrichment.get("updated_at") or ""),
+            now_text=now_text,
+            max_age_seconds=TRANSIT_COST_ENRICHMENT_FRESH_SECONDS,
+        )
+    )
+
+
+def _is_recent_iso_timestamp(value: str, *, now_text: str, max_age_seconds: int) -> bool:
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        now = datetime.fromisoformat(str(now_text).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    age_seconds = (now - timestamp).total_seconds()
+    return 0 <= age_seconds <= max(0, int(max_age_seconds))
+
+
+def _format_effective_cost(value: float | None) -> str:
+    if value is None:
+        return "—"
+    if abs(value - round(value)) < 0.005:
+        return f"{int(round(value)):,}".replace(",", " ") + " ₽"
+    integer, fractional = f"{value:.2f}".split(".")
+    return f"{int(integer):,}".replace(",", " ") + f",{fractional} ₽"
+
+
+def _normalize_transit_cost_enrichment_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+    raw_ids = payload.get("supply_ids")
+    supply_ids: list[str] = []
+    if isinstance(raw_ids, (list, tuple, set)):
+        for value in raw_ids:
+            normalized = str(value or "").strip()
+            if normalized:
+                supply_ids.append(normalized)
+    list_params = payload.get("list_params") if isinstance(payload.get("list_params"), Mapping) else {}
+    return {
+        "supply_ids": supply_ids[:MAX_TRANSIT_COST_ENRICHMENT_LIMIT],
+        "list_params": dict(list_params),
+        "limit": _bounded_int(
+            payload.get("limit"),
+            default=DEFAULT_TRANSIT_COST_ENRICHMENT_LIMIT,
+            minimum=1,
+            maximum=MAX_TRANSIT_COST_ENRICHMENT_LIMIT,
+        ),
+        "force": bool(payload.get("force")),
+    }
+
+
+def _new_transit_cost_run_id() -> str:
+    return "wb_supply_transit_cost_" + uuid.uuid4().hex
+
+
+def _last_error(results: list[Mapping[str, Any]]) -> str:
+    for result in reversed(results):
+        error = str(result.get("error") or "").strip()
+        if error:
+            return _safe_error_message(RuntimeError(error))
+    return ""
 
 
 def _current_business_year() -> int:

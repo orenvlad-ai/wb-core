@@ -3773,6 +3773,7 @@
               </div>
               <div class="block-actions">
                 <button id="wbSuppliesRefreshButton" class="action-button primary-button" type="button">Обновить поставки</button>
+                <button id="wbSuppliesTransitCostButton" class="action-button" type="button" title="Read-only enrichment через Seller Portal browser session; не запускает WB API sync и не мутирует WB.">Обновить стоимость транзита</button>
                 <button id="wbSuppliesBackfillButton" class="action-button" type="button" title="Одноразовая полная синхронизация всех доступных поставок WB. Может выполняться долго.">Загрузить всю историю</button>
               </div>
             </div>
@@ -4123,6 +4124,7 @@
       const shipmentRegistryComparisonSummary = document.getElementById("shipmentRegistryComparisonSummary");
       const shipmentRegistryComparisonBody = document.getElementById("shipmentRegistryComparisonBody");
       const wbSuppliesRefreshButton = document.getElementById("wbSuppliesRefreshButton");
+      const wbSuppliesTransitCostButton = document.getElementById("wbSuppliesTransitCostButton");
       const wbSuppliesBackfillButton = document.getElementById("wbSuppliesBackfillButton");
       const wbSuppliesSupplyDateSortButton = document.getElementById("wbSuppliesSupplyDateSortButton");
       const wbSuppliesSupplyDateSortArrow = document.getElementById("wbSuppliesSupplyDateSortArrow");
@@ -4292,8 +4294,10 @@
       let wbSuppliesLoading = false;
       let wbSuppliesSyncing = false;
       let wbSuppliesBackfilling = false;
+      let wbSuppliesTransitCostRefreshing = false;
       let wbSuppliesDetailLoading = false;
       let wbSuppliesBackfillPollHandle = 0;
+      let wbSuppliesTransitCostPollHandle = 0;
       let wbSuppliesSearchTimer = 0;
       let wbSuppliesLoadSeq = 0;
       let wbSuppliesSyncSeq = 0;
@@ -7494,11 +7498,15 @@
 
       function updateWbSuppliesBusyState() {
         if (wbSuppliesRefreshButton) {
-          wbSuppliesRefreshButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling;
+          wbSuppliesRefreshButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling || wbSuppliesTransitCostRefreshing;
           wbSuppliesRefreshButton.textContent = wbSuppliesSyncing ? "Обновляем..." : "Обновить поставки";
         }
+        if (wbSuppliesTransitCostButton) {
+          wbSuppliesTransitCostButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling || wbSuppliesTransitCostRefreshing;
+          wbSuppliesTransitCostButton.textContent = wbSuppliesTransitCostRefreshing ? "Стоимость транзита..." : "Обновить стоимость транзита";
+        }
         if (wbSuppliesBackfillButton) {
-          wbSuppliesBackfillButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling;
+          wbSuppliesBackfillButton.disabled = wbSuppliesLoading || wbSuppliesSyncing || wbSuppliesBackfilling || wbSuppliesTransitCostRefreshing;
           wbSuppliesBackfillButton.textContent = wbSuppliesBackfilling ? "Загружаем историю..." : "Загрузить всю историю";
         }
       }
@@ -7734,6 +7742,107 @@
         }
       }
 
+      function currentWbSuppliesListParams() {
+        return {
+          search: wbSuppliesState.search,
+          warehouse_id: wbSuppliesState.warehouse_id,
+          district_keys: wbSuppliesState.district_keys.slice(),
+          status_ids: sortedWbSuppliesStatusIds(wbSuppliesState.status_ids),
+          size_filter: wbSuppliesState.size_filter || WB_SUPPLIES_DEFAULT_SIZE_FILTER,
+          limit: wbSuppliesState.limit || WB_SUPPLIES_DEFAULT_LIMIT,
+          offset: wbSuppliesState.offset || 0,
+          sort_key: wbSuppliesState.sort_key || "supply_date",
+          sort_dir: wbSuppliesState.sort_dir || "desc"
+        };
+      }
+
+      async function startWbSuppliesTransitCostEnrichment() {
+        if (!config.wb_supplies_transit_cost_enrich_path || wbSuppliesTransitCostRefreshing) {
+          return;
+        }
+        wbSuppliesTransitCostRefreshing = true;
+        updateWbSuppliesBusyState();
+        setWbSuppliesMessage("стоимость транзита: запуск", "");
+        try {
+          const response = await fetch(config.wb_supplies_transit_cost_enrich_path, {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ list_params: currentWbSuppliesListParams(), limit: 50, force: false })
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          const runId = payload.run_id || (payload.active_run && payload.active_run.run_id) || "";
+          if (!runId) {
+            throw new Error("transit cost route did not return run_id");
+          }
+          setWbSuppliesMessage("стоимость транзита: запуск, кандидатов " + valueOrDash(payload.candidate_count), "");
+          pollWbSuppliesTransitCost(runId);
+        } catch (error) {
+          wbSuppliesTransitCostRefreshing = false;
+          updateWbSuppliesBusyState();
+          setWbSuppliesMessage(
+            "Стоимость транзита не запущена: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        }
+      }
+
+      async function pollWbSuppliesTransitCost(runId) {
+        if (!config.wb_supplies_transit_cost_status_path || !runId) {
+          wbSuppliesTransitCostRefreshing = false;
+          updateWbSuppliesBusyState();
+          return;
+        }
+        window.clearTimeout(wbSuppliesTransitCostPollHandle);
+        try {
+          const query = new URLSearchParams({ run_id: runId }).toString();
+          const response = await fetch(config.wb_supplies_transit_cost_status_path + "?" + query, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          const run = payload.run || {};
+          const processed = Number(run.processed_count || 0);
+          const total = Number(run.candidate_count || 0);
+          const sessionExpired = Number(run.session_expired_count || 0) > 0 || run.status === "session_expired";
+          setWbSuppliesMessage(
+            sessionExpired
+              ? "нужна переавторизация Seller Portal"
+              : "стоимость транзита: обработано " + processed + "/" + total +
+                ", success " + valueOrDash(run.success_count) +
+                ", failed " + valueOrDash(run.failed_count) +
+                (run.last_error ? ". Ошибка: " + run.last_error : ""),
+            sessionExpired || run.status === "failed" || run.status === "partial" ? "warning" : ""
+          );
+          if (run.status === "queued" || run.status === "running") {
+            wbSuppliesTransitCostPollHandle = window.setTimeout(() => pollWbSuppliesTransitCost(runId), 2500);
+            return;
+          }
+          wbSuppliesTransitCostRefreshing = false;
+          updateWbSuppliesBusyState();
+          await loadWbSupplies({ skipInitialSync: true });
+          if (!sessionExpired) {
+            setWbSuppliesMessage(
+              "стоимость транзита: готово, success " + valueOrDash(run.success_count) +
+                ", failed " + valueOrDash(run.failed_count),
+              run.status === "success" ? "" : "warning"
+            );
+          }
+        } catch (error) {
+          wbSuppliesTransitCostRefreshing = false;
+          updateWbSuppliesBusyState();
+          setWbSuppliesMessage(
+            "Не удалось прочитать статус стоимости транзита: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        }
+      }
+
       function renderWbSupplies(payload) {
         const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
         renderWbSuppliesOptions(payload);
@@ -7909,6 +8018,7 @@
         const meta = payload && payload.meta ? payload.meta : {};
         const state = payload && payload.sync_state ? payload.sync_state : {};
         const activeRun = payload && payload.active_run ? payload.active_run : null;
+        const transitCostRun = payload && payload.transit_cost_enrichment ? payload.transit_cost_enrichment.active_run : null;
         const statusOptions = (((payload && payload.filters) || {}).options || {}).statuses || [];
         const items = [
           "В cache: " + valueOrDash(summary.cached_total_rows),
@@ -7929,6 +8039,13 @@
             "Fetched: " + valueOrDash(activeRun.raw_fetched),
             "Upserted: " + valueOrDash(activeRun.upserted),
             "Enriched: " + valueOrDash(activeRun.enriched)
+          );
+        }
+        if (transitCostRun) {
+          items.push(
+            "Transit cost: " + valueOrDash(transitCostRun.status),
+            "TC processed: " + valueOrDash(transitCostRun.processed_count) + "/" + valueOrDash(transitCostRun.candidate_count),
+            "TC success: " + valueOrDash(transitCostRun.success_count)
           );
         }
         wbSuppliesSummary.innerHTML = items.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
@@ -7963,8 +8080,13 @@
             ? "<span class=\"wb-supplies-sub\">Упаковано " + escapeHtml(formatWbNumber(row.packed_quantity)) + " → Принято " + escapeHtml(formatWbNumber(row.accepted_quantity)) + "</span>"
             : "";
           const costSub = row.has_transit_cost_marker
-            ? "<span class=\"wb-supplies-sub\">с транзитом</span>"
+            ? "<span class=\"wb-supplies-sub\">" +
+              (row.effective_cost_source === "seller_portal_browser" ? "с транзитом · Seller Portal" : "с транзитом") +
+              "</span>"
             : "";
+          const costValue = row.effective_cost_total !== null && row.effective_cost_total !== undefined
+            ? row.effective_cost_total
+            : row.cost_total;
           const warehouseFact = row.warehouse_fact_line
             ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.warehouse_fact_line) + "</span>"
             : "";
@@ -7976,7 +8098,7 @@
             "<td><span class=\"wb-supplies-status-pill" + statusTone + "\">" + escapeHtml(row.status_label || "—") + "</span></td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbNumber(row.quantity_added)) + "</span>" + quantitySub + "</td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbCoefficient(row.acceptance_coefficient)) + "</span></td>",
-            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(row.cost_total)) + "</span>" + costSub + "</td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(costValue)) + "</span>" + costSub + "</td>",
             "</tr>"
           ].join("");
         }).join("");
@@ -9231,6 +9353,7 @@
       calculateRegionalSupplyButton.addEventListener("click", calculateRegionalSupply);
       downloadRecommendationButton.addEventListener("click", downloadRecommendation);
       wbSuppliesRefreshButton.addEventListener("click", () => syncWbSupplies({ limit: 1000, offset: 0 }));
+      wbSuppliesTransitCostButton.addEventListener("click", startWbSuppliesTransitCostEnrichment);
       wbSuppliesBackfillButton.addEventListener("click", startWbSuppliesBackfill);
       wbSuppliesSupplyDateSortButton.addEventListener("click", () => {
         wbSuppliesState.sort_key = "supply_date";
