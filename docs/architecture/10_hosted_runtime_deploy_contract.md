@@ -90,7 +90,9 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /sheet-vitrina-v1/settings`
 - `GET /v1/sheet-vitrina-v1/settings/nomenclature`
 - `POST /v1/sheet-vitrina-v1/settings/nomenclature`
+- `POST /v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync`
 - `PATCH /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}`
+- `POST /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}/barcode-sync`
 - `DELETE /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}`
 - `GET /v1/sheet-vitrina-v1/settings/users`
 - `POST /v1/sheet-vitrina-v1/settings/users`

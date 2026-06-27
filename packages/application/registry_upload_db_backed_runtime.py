@@ -3432,6 +3432,18 @@ class RegistryUploadDbBackedRuntime:
             compatible_model_keys = (
                 item.get("compatible_model_keys") if isinstance(item.get("compatible_model_keys"), list) else []
             )
+            raw_barcodes = item.get("barcodes") if isinstance(item.get("barcodes"), list) else []
+            barcode = str(item.get("barcode") or item.get("primary_barcode") or "").strip()
+            normalized_barcodes: list[str] = []
+            seen_barcodes: set[str] = set()
+            for raw_barcode in [barcode, *raw_barcodes]:
+                normalized_barcode = str(raw_barcode or "").strip()
+                if not normalized_barcode or normalized_barcode in seen_barcodes:
+                    continue
+                seen_barcodes.add(normalized_barcode)
+                normalized_barcodes.append(normalized_barcode)
+            if not barcode and normalized_barcodes:
+                barcode = normalized_barcodes[0]
             purchase_price_yuan = item.get("purchase_price_yuan")
             if purchase_price_yuan is not None:
                 purchase_price_yuan = float(purchase_price_yuan)
@@ -3441,6 +3453,16 @@ class RegistryUploadDbBackedRuntime:
                     "is_active": 1 if bool(item.get("is_active")) else 0,
                     "our_sku": str(item.get("our_sku") or ""),
                     "nm_id": item.get("nm_id"),
+                    "barcode": barcode,
+                    "barcodes_json": json.dumps(normalized_barcodes, ensure_ascii=False),
+                    "barcode_source": str(item.get("barcode_source") or ("manual" if barcode else "missing")),
+                    "barcode_status": str(item.get("barcode_status") or ("ready" if barcode else "missing")),
+                    "barcode_synced_at": str(item.get("barcode_synced_at") or ""),
+                    "barcode_updated_at": str(item.get("barcode_updated_at") or ""),
+                    "barcode_evidence_json": json.dumps(
+                        item.get("barcode_evidence") if isinstance(item.get("barcode_evidence"), Mapping) else {},
+                        ensure_ascii=False,
+                    ),
                     "nomenclature_name": str(item.get("nomenclature_name") or ""),
                     "product_type": str(item.get("product_type") or ""),
                     "match_key": str(item.get("match_key") or ""),
@@ -3467,6 +3489,13 @@ class RegistryUploadDbBackedRuntime:
                         is_active,
                         our_sku,
                         nm_id,
+                        barcode,
+                        barcodes_json,
+                        barcode_source,
+                        barcode_status,
+                        barcode_synced_at,
+                        barcode_updated_at,
+                        barcode_evidence_json,
                         nomenclature_name,
                         product_type,
                         match_key,
@@ -3478,11 +3507,18 @@ class RegistryUploadDbBackedRuntime:
                         created_at,
                         updated_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(item_id) DO UPDATE SET
                         is_active = excluded.is_active,
                         our_sku = excluded.our_sku,
                         nm_id = excluded.nm_id,
+                        barcode = excluded.barcode,
+                        barcodes_json = excluded.barcodes_json,
+                        barcode_source = excluded.barcode_source,
+                        barcode_status = excluded.barcode_status,
+                        barcode_synced_at = excluded.barcode_synced_at,
+                        barcode_updated_at = excluded.barcode_updated_at,
+                        barcode_evidence_json = excluded.barcode_evidence_json,
                         nomenclature_name = excluded.nomenclature_name,
                         product_type = excluded.product_type,
                         match_key = excluded.match_key,
@@ -3498,6 +3534,13 @@ class RegistryUploadDbBackedRuntime:
                         prepared["is_active"],
                         prepared["our_sku"],
                         prepared["nm_id"],
+                        prepared["barcode"],
+                        prepared["barcodes_json"],
+                        prepared["barcode_source"],
+                        prepared["barcode_status"],
+                        prepared["barcode_synced_at"],
+                        prepared["barcode_updated_at"],
+                        prepared["barcode_evidence_json"],
                         prepared["nomenclature_name"],
                         prepared["product_type"],
                         prepared["match_key"],
@@ -5046,11 +5089,24 @@ def _wb_supplies_sync_run_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    barcode = str(row["barcode"] or "").strip()
+    barcodes = [str(item) for item in _loads_json_list(row["barcodes_json"]) if str(item or "").strip()]
+    if barcode and barcode not in barcodes:
+        barcodes = [barcode, *barcodes]
     return {
         "item_id": row["item_id"],
         "is_active": bool(row["is_active"]),
         "our_sku": row["our_sku"] or "",
         "nm_id": row["nm_id"],
+        "barcode": barcode,
+        "primary_barcode": barcode,
+        "barcodes": barcodes,
+        "barcode_source": row["barcode_source"] or "missing",
+        "barcode_status": row["barcode_status"] or ("ready" if barcode else "missing"),
+        "barcode_ready": bool(barcode),
+        "barcode_synced_at": row["barcode_synced_at"] or "",
+        "barcode_updated_at": row["barcode_updated_at"] or "",
+        "barcode_evidence": _loads_json_object(row["barcode_evidence_json"]),
         "nomenclature_name": row["nomenclature_name"] or "",
         "product_type": row["product_type"] or "",
         "match_key": row["match_key"] or "",
@@ -5737,6 +5793,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             is_active INTEGER NOT NULL,
             our_sku TEXT,
             nm_id INTEGER,
+            barcode TEXT NOT NULL DEFAULT '',
+            barcodes_json TEXT NOT NULL DEFAULT '[]',
+            barcode_source TEXT NOT NULL DEFAULT 'missing',
+            barcode_status TEXT NOT NULL DEFAULT 'missing',
+            barcode_synced_at TEXT,
+            barcode_updated_at TEXT,
+            barcode_evidence_json TEXT NOT NULL DEFAULT '{}',
             nomenclature_name TEXT NOT NULL,
             product_type TEXT NOT NULL,
             match_key TEXT NOT NULL,
@@ -5829,6 +5892,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         column_name="compatible_model_keys_json",
         column_sql="TEXT NOT NULL DEFAULT '[]'",
     )
+    for column_name, column_sql in (
+        ("barcode", "TEXT NOT NULL DEFAULT ''"),
+        ("barcodes_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("barcode_source", "TEXT NOT NULL DEFAULT 'missing'"),
+        ("barcode_status", "TEXT NOT NULL DEFAULT 'missing'"),
+        ("barcode_synced_at", "TEXT"),
+        ("barcode_updated_at", "TEXT"),
+        ("barcode_evidence_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_nomenclature_items",
+            column_name=column_name,
+            column_sql=column_sql,
+        )
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_auto_update_state",

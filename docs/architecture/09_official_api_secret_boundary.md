@@ -17,6 +17,7 @@
 - `ads_compact_block`
 - `fin_report_daily_block`
 - `wb_feedbacks` / `sheet_vitrina_v1_feedbacks` read-only route
+- `wb_content` / `Настройки -> Номенклатура` read-only barcode sync from WB Content cards
 
 `web_source_snapshot_block` и `seller_funnel_snapshot_block` не используют direct WB token path: они ходят в repo-owned hosted runtime contour. Active hosted target is `wb-core-eu-root` / `89.191.226.88`, with `api.selleros.pro` allowed as the current live DNS name; archived `selleros-root` / `178.72.152.177` is rollback/read-only evidence only, and mutating deploy/apply-nginx/restart/update/GC paths must fail fast unless the explicit emergency rollback override is set.
 
@@ -64,3 +65,5 @@
 Следствие: module adapter получает secret только через runtime boundary, а не строит собственную secret-loading схему.
 
 Для feedbacks MVP это означает: `GET /v1/sheet-vitrina-v1/feedbacks` использует тот же `WB_API_TOKEN` через adapter boundary `packages/adapters/wb_feedbacks.py`; отсутствие прав WB token на категорию feedbacks должно surface-иться как явная 401/403 upstream error, а не как fallback на другой secret name.
+
+Для nomenclature barcode sync это означает: `POST /v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync` и `POST /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}/barcode-sync` используют тот же `WB_API_TOKEN` через read-only adapter boundary `packages/adapters/wb_content.py` к WB Content `POST /content/v2/get/cards/list`. Optional base URL override is `WB_CONTENT_API_BASE_URL`; отсутствие token или Content permission surface-ится как controlled `token_missing`/`sync_error` diagnostics and does not reject saving nomenclature rows.
