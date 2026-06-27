@@ -169,6 +169,12 @@
       "methods": ["GET", "POST"]
     },
     {
+      "name": "sheet_vitrina_ads",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/ads/",
+      "methods": ["GET", "POST"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina_group_refresh",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina/group-refresh",
