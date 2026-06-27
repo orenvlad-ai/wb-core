@@ -667,7 +667,6 @@ def main() -> None:
                 "Основные от 250 шт",
                 "Показать записей",
                 "Загрузить всю историю",
-                "Обновить стоимость транзита",
                 "Учесть WB-поставки",
                 "Выбрать eligible",
                 "ФО",
@@ -682,6 +681,8 @@ def main() -> None:
             ):
                 if operator_status != 200 or expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose WB supplies UI token {expected!r}")
+            if "Обновить стоимость транзита" in operator_html:
+                raise AssertionError("operator UI must not expose transit-cost refresh as a second primary button")
         finally:
             server.shutdown()
             thread.join(timeout=5)

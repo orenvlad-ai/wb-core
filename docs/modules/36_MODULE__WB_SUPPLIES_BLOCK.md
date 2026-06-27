@@ -55,7 +55,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. Missing transit cabinet cost is filled only by an explicit, separate `Обновить стоимость транзита` Seller Portal browser/network-json enrichment job that stores normalized facts and provenance, never official raw evidence. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. User-triggered `Обновить поставки` first runs official WB API sync, then attempts the separate Seller Portal browser/network-json enrichment job for missing transit cabinet cost; the enrichment stores normalized facts and provenance, never official raw evidence, and Seller Portal/session failures do not invalidate successful official sync. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -70,7 +70,7 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - lead: `Read-only список поставок WB API / FBW Supplies`.
 - The UI is read-only. It does not create, update, delete or draft WB supplies.
 - Official WB API remains canonical for supply list/status/route/quantity evidence.
-- Seller Portal is used only by the explicit transit-cost enrichment button/job and only as a supplemental read-only source for missing transit cost. It is not part of ordinary official sync, does not run on page open, and does not use FBS APIs.
+- Seller Portal is used only by the post-sync transit-cost enrichment job and only as a supplemental read-only source for missing transit cost. It is not part of the backend official sync route, does not run on page open, and does not use FBS APIs.
 
 # 2. Official API Boundary
 
@@ -236,6 +236,8 @@ The worker uses the shared Seller Portal storage-state path/lock contract, navig
 
 Returns run status/counters, sanitized last error and current Seller Portal automation lock/session status when available. Session expiration is a controlled status, not a crash.
 
+The operator UI may orchestrate this route after a successful `POST .../wb-supplies/sync`, but the routes remain separate. `POST .../wb-supplies/sync` must not become browser/session dependent.
+
 `GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}`
 
 Returns cached normalized row plus raw list/detail/goods/package evidence for diagnostics and normalized goods composition for future/current supply detail UI.
@@ -399,9 +401,13 @@ First open behavior:
 - if token/API is unavailable, the UI shows a controlled error instead of a silent empty table.
 
 Buttons:
-- `Обновить поставки` = incremental latest-window refresh only; it does not scan all offsets and does not re-enrich unchanged rows or old unknown-quantity rows.
+- `Обновить поставки` = one primary operator action. It first runs incremental latest-window official WB API refresh; after that official stage succeeds, the UI calls the separate Seller Portal transit-cost enrichment route for missing transit costs in the current list scope. It does not scan all offsets and does not re-enrich unchanged rows or old unknown-quantity rows.
+- official sync failure stops the flow and does not launch Seller Portal enrichment;
+- Seller Portal `session_expired`, automation lock busy, partial failure or no-candidate states are rendered as transit-cost stage messages and do not turn the completed official sync into a failed refresh;
+- page open / cache read does not trigger transit-cost enrichment;
+- Seller Portal session recovery remains the existing shared `Действия и состояния` / `Проверка и восстановление Seller-сессии` contour, using canonical `/opt/wb-web-bot/storage_state.json` and the shared `seller_portal_automation.lock.json`.
 - `Загрузить всю историю` = one-time full backfill job; UI polls `sync-status` and shows offset/pages/fetched/upserted/enriched counters and last error.
-- `Обновить стоимость транзита` = explicit Seller Portal read-only browser/network-json enrichment for missing transit costs only. It is not triggered on first open, is not part of `Обновить поставки`, preserves current filters/page/sort through `list_params`, disables while an active run exists and shows progress/status: `стоимость транзита: запуск`, `обработано X/Y`, final success/failed counters or `нужна переавторизация Seller Portal`.
+- A separate transit-cost refresh button is not part of the primary UI. The backend route remains available for diagnostics and smokes.
 
 Sorting:
 - `Дата поставки` is clickable and toggles `asc/desc`.
@@ -481,7 +487,7 @@ This module does not implement:
 - unproven reverse-engineering of WB cabinet transit cost formula;
 - FBS orders/supplies;
 - general Seller Portal browser automation outside the bounded read-only transit-cost enrichment worker;
-- automatic Seller Portal scans on page open or inside ordinary official `Обновить поставки`;
+- automatic Seller Portal scans on page open or inside the backend official WB sync route;
 - DOM scraping as the primary transit-cost source;
 - Google Sheets/GAS writes;
 - accepted metric truth in web-vitrina ready snapshots;
