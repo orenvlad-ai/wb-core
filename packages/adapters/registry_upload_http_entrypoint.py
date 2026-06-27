@@ -35,6 +35,7 @@ from packages.application.sheet_vitrina_v1_feedbacks import (
     FEEDBACKS_EXPORT_CONTENT_TYPE,
     SheetVitrinaV1FeedbacksError,
 )
+from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
@@ -93,6 +94,10 @@ DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH = "/v1/sheet-vitrina-v1/fee
 DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/runs"
 DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/run"
 DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/tick"
+DEFAULT_SHEET_ADS_SKUS_PATH = "/v1/sheet-vitrina-v1/ads/skus"
+DEFAULT_SHEET_ADS_SKU_PREFIX = "/v1/sheet-vitrina-v1/ads/sku"
+DEFAULT_SHEET_ADS_BID_PREVIEW_PATH = "/v1/sheet-vitrina-v1/ads/bid-change/preview"
+DEFAULT_SHEET_ADS_BID_COMMIT_PATH = "/v1/sheet-vitrina-v1/ads/bid-change/commit"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -130,6 +135,7 @@ WEB_AUTH_SECTION_VITRINA = "vitrina"
 WEB_AUTH_SECTION_SUPPLY = "supply"
 WEB_AUTH_SECTION_REPORTS = "reports"
 WEB_AUTH_SECTION_FEEDBACKS = "feedbacks"
+WEB_AUTH_SECTION_ADS = "ads"
 WEB_AUTH_SECTION_RESEARCH = "research"
 WEB_AUTH_SECTION_SETTINGS = "settings"
 WEB_AUTH_SECTION_DEFINITIONS = (
@@ -137,6 +143,7 @@ WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_SUPPLY, "label": "Поставки"},
     {"section_id": WEB_AUTH_SECTION_REPORTS, "label": "Отчёты"},
     {"section_id": WEB_AUTH_SECTION_FEEDBACKS, "label": "Отзывы"},
+    {"section_id": WEB_AUTH_SECTION_ADS, "label": "Реклама"},
     {"section_id": WEB_AUTH_SECTION_RESEARCH, "label": "Исследования"},
     {"section_id": WEB_AUTH_SECTION_SETTINGS, "label": "Настройки"},
 )
@@ -146,6 +153,7 @@ WEB_AUTH_UNIFIED_TAB_SECTIONS = {
     "factory-order": WEB_AUTH_SECTION_SUPPLY,
     "reports": WEB_AUTH_SECTION_REPORTS,
     "feedbacks": WEB_AUTH_SECTION_FEEDBACKS,
+    "ads": WEB_AUTH_SECTION_ADS,
     "research": WEB_AUTH_SECTION_RESEARCH,
     "settings": WEB_AUTH_SECTION_SETTINGS,
 }
@@ -719,6 +727,55 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"sheet vitrina research promotions calculation failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_ADS_BID_PREVIEW_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_ads_bid_preview_request(payload)
+                except SheetVitrinaV1AdsError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina ads bid preview failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_ADS_BID_COMMIT_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_ads_bid_commit_request(
+                        payload,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except SheetVitrinaV1AdsError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina ads bid commit failed: {exc}"},
                     )
                     return
 
@@ -1571,6 +1628,49 @@ def _build_handler(
                         embedded_tab=embedded_tab,
                     ),
                 )
+                return
+
+            if parsed.path == DEFAULT_SHEET_ADS_SKUS_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_ads_skus_request(_flatten_query_params(parsed.query))
+                except SheetVitrinaV1AdsError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina ads skus failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path.startswith(DEFAULT_SHEET_ADS_SKU_PREFIX + "/"):
+                try:
+                    nm_id = _resolve_sheet_ads_sku_nm_id(parsed.path)
+                    payload = entrypoint.handle_sheet_ads_sku_request(
+                        nm_id,
+                        _flatten_query_params(parsed.query),
+                    )
+                except SheetVitrinaV1AdsError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina ads sku failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
@@ -3263,6 +3363,22 @@ def _flatten_query_params(query_string: str) -> dict[str, Any]:
         if values:
             flattened[key] = values if len(values) > 1 else values[-1]
     return flattened
+
+
+def _resolve_sheet_ads_sku_nm_id(path: str) -> int:
+    prefix = DEFAULT_SHEET_ADS_SKU_PREFIX + "/"
+    if not path.startswith(prefix):
+        raise ValueError("unsupported ads sku path")
+    remainder = path[len(prefix) :].strip("/")
+    if not remainder or "/" in remainder:
+        raise ValueError("ads sku path must end with nm_id")
+    try:
+        nm_id = int(remainder)
+    except ValueError as exc:
+        raise ValueError("ads sku nm_id must be numeric") from exc
+    if nm_id <= 0:
+        raise ValueError("ads sku nm_id must be positive")
+    return nm_id
 
 
 def _resolve_optional_query_bool(query_string: str, name: str) -> bool:
@@ -5010,7 +5126,7 @@ def _allowed_unified_tabs_for_role(role: str) -> list[str]:
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
         return ["factory-order"]
     if _role_has_full_operator_access(normalized):
-        return ["vitrina", "factory-order", "reports", "feedbacks", "research", "settings"]
+        return ["vitrina", "factory-order", "reports", "feedbacks", "ads", "research", "settings"]
     return []
 
 
@@ -5069,6 +5185,8 @@ def _required_section_for_path(path: str) -> str:
         or normalized.startswith(DEFAULT_SHEET_FEEDBACKS_PATH + "/")
     ):
         return WEB_AUTH_SECTION_FEEDBACKS
+    if normalized.startswith("/v1/sheet-vitrina-v1/ads/"):
+        return WEB_AUTH_SECTION_ADS
     if normalized.startswith("/v1/sheet-vitrina-v1/research/"):
         return WEB_AUTH_SECTION_RESEARCH
     if normalized.startswith("/v1/sheet-vitrina-v1/supply/"):
@@ -5611,6 +5729,10 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "feedbacks_auto_complaints_runs_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH,
         "feedbacks_auto_complaints_run_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH,
         "feedbacks_auto_complaints_tick_path": DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH,
+        "ads_skus_path": DEFAULT_SHEET_ADS_SKUS_PATH,
+        "ads_sku_path": DEFAULT_SHEET_ADS_SKU_PREFIX,
+        "ads_bid_preview_path": DEFAULT_SHEET_ADS_BID_PREVIEW_PATH,
+        "ads_bid_commit_path": DEFAULT_SHEET_ADS_BID_COMMIT_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
