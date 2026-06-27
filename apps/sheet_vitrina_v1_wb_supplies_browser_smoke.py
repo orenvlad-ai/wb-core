@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -49,7 +50,8 @@ def main() -> None:
             activated_at_factory=lambda: "2026-06-08T08:00:00Z",
         )
         entrypoint.wb_supplies_block.source = MissingTokenSource()
-        entrypoint.wb_supplies_block.transit_cost_source = FakeTransitCostSource({"1003": 3333.0})
+        fake_transit_cost_source = FakeTransitCostSource({"1003": 3333.0})
+        entrypoint.wb_supplies_block.transit_cost_source = fake_transit_cost_source
         cfg = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=port,
@@ -92,7 +94,7 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesSizeFilterSelect")).to_have_value("main_250")
                 expect(operator_frame.locator("#wbSuppliesPageSizeSelect")).to_have_value("20")
                 expect(operator_frame.locator("#wbSuppliesBackfillButton")).to_be_visible()
-                expect(operator_frame.locator("#wbSuppliesTransitCostButton")).to_be_visible()
+                expect(operator_frame.locator("#wbSuppliesTransitCostButton")).to_have_count(0)
                 expect(operator_frame.locator("#wbSuppliesSupplyDateSortButton")).to_be_visible()
                 page_size_options = operator_frame.locator("#wbSuppliesPageSizeSelect option").evaluate_all(
                     "(nodes) => nodes.map((node) => node.value)"
@@ -116,6 +118,8 @@ def main() -> None:
                     raise AssertionError(f"WB supplies columns changed: {actual_columns}")
                 expect(operator_frame.locator("#wbSuppliesPageButtons")).to_be_visible()
                 expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("WB_API_TOKEN", timeout=10000)
+                if fake_transit_cost_source.calls:
+                    raise AssertionError(f"failed initial official sync must not call transit enrichment, got {fake_transit_cost_source.calls}")
 
                 entrypoint.wb_supplies_block.source = FakeWbSuppliesSource()
                 operator_frame.locator("#wbSuppliesRefreshButton").click()
@@ -127,9 +131,11 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1001")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("1002")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003")
-                operator_frame.locator("#wbSuppliesTransitCostButton").click()
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("3 333 ₽", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("Seller Portal", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки обновлены. Стоимость транзита обновлена: 1.", timeout=10000)
+                if fake_transit_cost_source.calls != [["1003"]]:
+                    raise AssertionError(f"refresh click must call transit enrichment after official sync only for 1003, got {fake_transit_cost_source.calls}")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Скрыто размером: 3")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Unknown qty: 2")
                 operator_frame.locator("#wbSuppliesTableBody tr", has_text="39265492").click()
@@ -152,6 +158,104 @@ def main() -> None:
 
                 operator_frame.locator("#wbSuppliesSizeFilterSelect").select_option("all")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1002", timeout=10000)
+                operator_frame.locator("#wbSuppliesSearchInput").fill("1003")
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003", timeout=10000)
+                operator_frame.locator("#wbSuppliesRefreshButton").click()
+                expect(operator_frame.locator("#wbSuppliesSearchInput")).to_have_value("1003", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки обновлены. Транзитная стоимость не требовала обновления.", timeout=10000)
+
+                transit_mode = {"kind": ""}
+
+                def fulfill_transit_enrich(route):
+                    kind = transit_mode["kind"]
+                    candidate_count = 0 if kind == "no_candidates" else 1
+                    route.fulfill(
+                        status=202,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "accepted": True,
+                                "run_id": "ui-transit-" + kind,
+                                "candidate_count": candidate_count,
+                                "started_at": "2026-06-28T00:00:00Z",
+                                "active_run": {
+                                    "run_id": "ui-transit-" + kind,
+                                    "status": "success" if kind == "no_candidates" else "queued",
+                                    "candidate_count": candidate_count,
+                                    "processed_count": 0,
+                                    "success_count": 0,
+                                    "failed_count": 0,
+                                    "session_expired_count": 0,
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+
+                def fulfill_transit_status(route):
+                    kind = transit_mode["kind"]
+                    if kind == "session_expired":
+                        run = {
+                            "run_id": "ui-transit-session_expired",
+                            "status": "session_expired",
+                            "candidate_count": 1,
+                            "processed_count": 1,
+                            "success_count": 0,
+                            "failed_count": 0,
+                            "not_found_count": 0,
+                            "session_expired_count": 1,
+                            "last_error": "",
+                        }
+                    elif kind == "lock_busy":
+                        run = {
+                            "run_id": "ui-transit-lock_busy",
+                            "status": "failed",
+                            "candidate_count": 1,
+                            "processed_count": 1,
+                            "success_count": 0,
+                            "failed_count": 1,
+                            "not_found_count": 0,
+                            "session_expired_count": 0,
+                            "last_error": "seller_portal_automation_busy: owner=feedbacks purpose=status_sync run_id=smoke",
+                        }
+                    else:
+                        run = {
+                            "run_id": "ui-transit-" + kind,
+                            "status": "success",
+                            "candidate_count": 0,
+                            "processed_count": 0,
+                            "success_count": 0,
+                            "failed_count": 0,
+                            "not_found_count": 0,
+                            "session_expired_count": 0,
+                            "last_error": "",
+                        }
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps({"run": run}, ensure_ascii=False),
+                    )
+
+                page.route(re.compile(".*/transit-cost/enrich$"), fulfill_transit_enrich)
+                page.route(re.compile(".*/transit-cost/status\\?.*"), fulfill_transit_status)
+
+                transit_mode["kind"] = "session_expired"
+                operator_frame.locator("#wbSuppliesRefreshButton").click()
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text(
+                    "Поставки обновлены. Стоимость транзита не обновилась: Seller-сессия протухла. Восстановите сессию в блоке «Действия и состояния».",
+                    timeout=10000,
+                )
+
+                transit_mode["kind"] = "lock_busy"
+                operator_frame.locator("#wbSuppliesRefreshButton").click()
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text(
+                    "Поставки обновлены. Стоимость транзита не запущена: другой Seller Portal процесс уже выполняется.",
+                    timeout=10000,
+                )
+
+                page.unroute(re.compile(".*/transit-cost/enrich$"))
+                page.unroute(re.compile(".*/transit-cost/status\\?.*"))
                 operator_frame.locator("#wbSuppliesSearchInput").fill("2002")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1002", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("1001")
