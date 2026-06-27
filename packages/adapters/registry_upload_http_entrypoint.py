@@ -204,6 +204,8 @@ DEFAULT_WB_SUPPLIES_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies"
 DEFAULT_WB_SUPPLIES_SYNC_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync"
 DEFAULT_WB_SUPPLIES_BACKFILL_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
 DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
+DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
+DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
@@ -1419,6 +1421,30 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.ACCEPTED, result)
                 return
 
+            if parsed.path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_wb_supplies_transit_cost_enrich_request(payload)
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB transit cost enrichment failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.ACCEPTED, result)
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -2117,6 +2143,26 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"WB supplies sync status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH:
+                try:
+                    payload = entrypoint.handle_wb_supplies_transit_cost_status_request(_flatten_query_params(parsed.query))
+                except WbSuppliesBlockError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus(exc.http_status),
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_wb_supplies"},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB transit cost enrichment status failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -5428,6 +5474,8 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
         "wb_supplies_backfill_path": DEFAULT_WB_SUPPLIES_BACKFILL_PATH,
         "wb_supplies_sync_status_path": DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH,
+        "wb_supplies_transit_cost_enrich_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+        "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,

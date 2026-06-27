@@ -19,6 +19,7 @@ INPUT_BUNDLE_FIXTURE = (
 )
 
 from apps.sheet_vitrina_v1_wb_supplies_http_smoke import (  # noqa: E402
+    FakeTransitCostSource,
     FakeWbSuppliesSource,
     MissingTokenSource,
     _reserve_free_port,
@@ -48,6 +49,7 @@ def main() -> None:
             activated_at_factory=lambda: "2026-06-08T08:00:00Z",
         )
         entrypoint.wb_supplies_block.source = MissingTokenSource()
+        entrypoint.wb_supplies_block.transit_cost_source = FakeTransitCostSource({"1003": 3333.0})
         cfg = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=port,
@@ -90,6 +92,7 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesSizeFilterSelect")).to_have_value("main_250")
                 expect(operator_frame.locator("#wbSuppliesPageSizeSelect")).to_have_value("20")
                 expect(operator_frame.locator("#wbSuppliesBackfillButton")).to_be_visible()
+                expect(operator_frame.locator("#wbSuppliesTransitCostButton")).to_be_visible()
                 expect(operator_frame.locator("#wbSuppliesSupplyDateSortButton")).to_be_visible()
                 page_size_options = operator_frame.locator("#wbSuppliesPageSizeSelect option").evaluate_all(
                     "(nodes) => nodes.map((node) => node.value)"
@@ -124,6 +127,9 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1001")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("1002")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003")
+                operator_frame.locator("#wbSuppliesTransitCostButton").click()
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("3 333 ₽", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("Seller Portal", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Скрыто размером: 3")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Unknown qty: 2")
                 operator_frame.locator("#wbSuppliesTableBody tr", has_text="39265492").click()
