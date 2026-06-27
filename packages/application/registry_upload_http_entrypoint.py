@@ -27,6 +27,7 @@ from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1Feedba
 from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiBlock
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import SheetVitrinaV1FeedbacksAutoComplaintsBlock
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitrinaV1FeedbacksComplaintsBlock
+from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -608,6 +609,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_ai_block: SheetVitrinaV1FeedbacksAiBlock | None = None,
         feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
         feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
+        ads_block: SheetVitrinaV1AdsBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -660,6 +662,12 @@ class RegistryUploadHttpEntrypoint:
             feedbacks_ai_block=self.feedbacks_ai_block,
             complaints_block=self.feedbacks_complaints_block,
             now_factory=self.now_factory,
+        )
+        self.ads_block = ads_block or SheetVitrinaV1AdsBlock(
+            runtime=self.runtime,
+            runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
@@ -1048,6 +1056,22 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_feedbacks_auto_complaints_tick_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.feedbacks_auto_complaints_block.tick(payload)
+
+    def handle_sheet_ads_skus_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.ads_block.build_sku_table(params or {})
+
+    def handle_sheet_ads_sku_request(
+        self,
+        nm_id: int,
+        params: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.ads_block.build_sku_detail(nm_id, params or {})
+
+    def handle_sheet_ads_bid_preview_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.ads_block.preview_bid_change(payload)
+
+    def handle_sheet_ads_bid_commit_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+        return self.ads_block.commit_bid_change(payload, actor=actor)
 
     def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()

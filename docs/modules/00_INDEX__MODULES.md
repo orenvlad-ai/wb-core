@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–36`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–37`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -42,6 +42,7 @@ source_basis:
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/35_MODULE__SPP_PROXY_BLOCK.md"
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
+  - "docs/modules/37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -83,6 +84,7 @@ related_docs:
   - "34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "35_MODULE__SPP_PROXY_BLOCK.md"
   - "36_MODULE__WB_SUPPLIES_BLOCK.md"
+  - "37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
 source_of_truth_level: "navigation_only"
 update_note: "Обновлён под Google Sheets decommission: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
@@ -101,7 +103,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–36`; module `36` active в repo как read-only WB API / FBW Supplies registry для operator `Поставки -> Wildberries`.
+На текущем `main` main-confirmed модульные блоки доходят до `01–37`; module `37` active в repo как SKU-first operator `Реклама` поверх WB Promotion API with guarded bid-change workflow.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -130,6 +132,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 - `onec_stocks_block` как active bounded 1C/Soykasoft source для остатков, себестоимости WB и товарного капитала, с отдельным parser/normalizer, date-specific historical load, dynamic stage names, explicit stage-mapping boundary, web-vitrina source group `onec_product_capital` и runtime-extended 1C profitability metrics.
 - `spp_proxy_block` как active bounded anonymous public WB card source для `SPP-прокси`: current-only buyer price, formula over existing `prices_snapshot.price_seller_discounted`, accepted-current preservation and separate web-vitrina source group `WB public card / бот`; existing `spp` remains unchanged.
 - `wb_supplies_block` как active bounded read-only WB/FBW supplies registry: official WB Supplies API adapter, server-side runtime cache/state/run/warehouse tables, protected list/incremental sync/full backfill/sync-status/detail routes, targeted active-status reconciliation with hard-delete for confirmed removed active rows and preservation of accepted/historical rows, numeric `Основные от 250 шт` / `Мелкие до 249 шт` size filters without status overrides, checkbox multi-status filters with persisted UI state, route/warehouse/quantity/cost evidence normalization, empty-date-bottom supply-date server sort, year-aware date display, compact operator table and pagination without WB mutations.
+- `sheet_vitrina_v1_ads_operator_block` как active SKU-first operator-раздел `Реклама`: active SKU/nm_id universe from `registry_upload_config_v2`, enrichment from `sheet_vitrina_v1_nomenclature_items`, WB Promotion reverse index `nm_id -> campaigns[] -> placements[]`, read routes for SKU table/drawer, guarded backend-only bid `preview -> commit -> audit -> delayed refresh` workflow over one nm_id/advert_id/placement, and explicit no-bulk/no-auto-bidding/no-direct-frontend-PATCH boundary.
 
 Главный незакрытый gap текущей линии:
 - текущий `main` уже содержит server upload line and bounded refresh/read split for website/operator web-vitrina;
@@ -216,6 +219,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 | `34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md` | `supplier_shipments_block` | `web/operator/supply` | server-owned supplier invoice registry under `Поставки -> От поставщика`: XLSX parse/storage, deterministic nomenclature matching, persisted per-line invoice price conformity against `purchase_price_yuan`, operator-only manual price recheck, operator-only nomenclature settings with XLSX export/import dry-run, operator-owned `order_status`, safe delete confirmation, optional supplier-only role isolation and optional factory-order `Товары в пути от фабрики` source using matched `nmId` rows with `shipment_date + 30 days` acceptance default |
 | `35_MODULE__SPP_PROXY_BLOCK.md` | `spp_proxy_block` | `public-web/live-source` | active anonymous public WB card source for `SPP-прокси`: buyer price extraction, formula over `prices_snapshot.price_seller_discounted`, current-only accepted-current preservation, `WB public card / бот` loading group and fixture/integration smokes |
 | `36_MODULE__WB_SUPPLIES_BLOCK.md` | `wb_supplies_block` | `web/operator/supply/official-api` | read-only `Поставки -> Wildberries` registry over official WB FBW Supplies API: runtime cache/history, protected list/incremental sync/full backfill/sync-status/detail routes, targeted active-status reconciliation with hard-delete for confirmed removed active rows and historical accepted-row preservation, warehouse/checkbox-status/search/size filters with persisted UI state, route/warehouse/quantity/cost evidence normalization, empty-date-bottom supply-date sort, year-aware date display, numeric `Основные от 250 шт` filter, compact table and pagination; no WB mutations, no ЕБД metric truth writes |
+| `37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md` | `sheet_vitrina_v1_ads_operator_block` | `web/operator/wb-promotion` | SKU-first `Реклама` tab over WB Promotion API: active SKU/nm_id table from `registry_upload_config_v2`, nomenclature enrichment, reverse index `nm_id -> campaigns[] -> placements[]`, drawer with campaign metrics/min/recommended/current bids, guarded backend-only one-row bid preview/commit/audit/delayed-refresh workflow; no bulk changes, no auto-bidding, no direct frontend WB/PATCH writes |
 
 # 5. Как эта папка используется дальше
 

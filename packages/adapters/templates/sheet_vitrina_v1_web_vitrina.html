@@ -3950,9 +3950,202 @@
       color: var(--success-text);
     }
 
+    .ads-panel {
+      display: grid;
+      gap: 14px;
+    }
+
+    .ads-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .ads-workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(360px, 42vw);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .ads-table-shell,
+    .ads-drawer {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .ads-table-scroll,
+    .ads-drawer-scroll {
+      overflow: auto;
+      max-height: min(68vh, 760px);
+    }
+
+    .ads-table,
+    .ads-detail-table {
+      width: 100%;
+      min-width: 920px;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 12px;
+    }
+
+    .ads-detail-table {
+      min-width: 1180px;
+    }
+
+    .ads-table th,
+    .ads-table td,
+    .ads-detail-table th,
+    .ads-detail-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ads-table tbody tr {
+      cursor: pointer;
+    }
+
+    .ads-table tbody tr:hover {
+      background: var(--panel-subtle);
+    }
+
+    .ads-drawer-head,
+    .ads-modal-head,
+    .ads-modal-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .ads-drawer-title,
+    .ads-modal-title {
+      margin: 0;
+      font-size: 16px;
+      line-height: 1.3;
+    }
+
+    .ads-drawer-body {
+      padding: 12px;
+    }
+
+    .ads-bid-control {
+      display: grid;
+      grid-template-columns: 88px 92px;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .ads-bid-control .input {
+      min-width: 0;
+      height: 32px;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+
+    .ads-status-pill {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      font-size: 11px;
+    }
+
+    .ads-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(15, 23, 42, 0.64);
+    }
+
+    .ads-modal-backdrop[hidden],
+    .ads-drawer[hidden] {
+      display: none;
+    }
+
+    .ads-modal {
+      width: min(640px, 100%);
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.36);
+    }
+
+    .ads-modal-body {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+    }
+
+    .ads-fact-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .ads-fact {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: var(--panel-subtle);
+      min-width: 0;
+    }
+
+    .ads-fact-label {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
+    }
+
+    .ads-fact-value {
+      display: block;
+      overflow-wrap: anywhere;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .ads-danger-note {
+      border: 1px solid rgba(248, 113, 113, 0.42);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--error-bg);
+      color: var(--error-text);
+    }
+
     @media (max-width: 900px) {
       .page {
         padding: 12px;
+      }
+
+      .ads-workspace {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .ads-fact-grid {
+        grid-template-columns: minmax(0, 1fr);
       }
 
       .shell-header {
@@ -4179,6 +4372,7 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Поставки</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="ads" role="tab" aria-selected="false">Реклама</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
       </nav>
       <div class="shell-actions">
@@ -4655,6 +4849,58 @@
 	      </section>
 	    </section>
 
+    <section class="unified-tab-panel" data-unified-tab-panel="ads" hidden>
+      <section class="panel ads-panel" data-ads-panel>
+        <div class="ads-toolbar">
+          <div>
+            <h2>Реклама</h2>
+            <p class="panel-meta" data-ads-meta>WB Promotion API</p>
+          </div>
+          <button class="button secondary" type="button" data-ads-refresh>Обновить</button>
+        </div>
+        <p class="research-error" data-ads-error></p>
+        <div class="ads-workspace">
+          <div class="ads-table-shell">
+            <div class="ads-table-scroll">
+              <table class="ads-table" data-ads-sku-table>
+                <thead>
+                  <tr>
+                    <th style="width:120px">nm_id</th>
+                    <th style="width:220px">SKU</th>
+                    <th style="width:220px">Название</th>
+                    <th style="width:110px">Кампании</th>
+                    <th style="width:100px">Spend</th>
+                    <th style="width:90px">Views</th>
+                    <th style="width:90px">Clicks</th>
+                    <th style="width:80px">CTR</th>
+                    <th style="width:120px">Статус</th>
+                  </tr>
+                </thead>
+                <tbody data-ads-sku-body>
+                  <tr><td colspan="9">Загрузка…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <aside class="ads-drawer" data-ads-drawer hidden>
+            <div class="ads-drawer-head">
+              <div>
+                <h3 class="ads-drawer-title" data-ads-drawer-title>SKU</h3>
+                <p class="panel-meta" data-ads-drawer-meta></p>
+              </div>
+              <button class="button ghost" type="button" data-ads-drawer-close>Закрыть</button>
+            </div>
+            <div class="ads-drawer-body">
+              <p class="research-error" data-ads-drawer-error></p>
+              <div class="ads-drawer-scroll" data-ads-drawer-content>
+                <p class="research-result-note">Выберите SKU.</p>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </section>
+
     <section class="unified-tab-panel" data-unified-tab-panel="research" hidden>
       <section class="panel research-panel" data-research-panel>
         <div class="research-section-tabs" role="tablist" aria-label="Разделы исследования">
@@ -4806,6 +5052,20 @@
     </section>
   </main>
 
+  <div class="ads-modal-backdrop" data-ads-modal hidden>
+    <section class="ads-modal" role="dialog" aria-modal="true" aria-labelledby="ads-bid-modal-title">
+      <div class="ads-modal-head">
+        <h3 class="ads-modal-title" id="ads-bid-modal-title">Подтверждение ставки</h3>
+        <button class="button ghost" type="button" data-ads-modal-close>Закрыть</button>
+      </div>
+      <div class="ads-modal-body" data-ads-modal-body></div>
+      <div class="ads-modal-actions">
+        <button class="button secondary" type="button" data-ads-modal-close>Отмена</button>
+        <button class="button danger" type="button" data-ads-commit disabled>Изменить live ставку</button>
+      </div>
+    </section>
+  </div>
+
   <script>
     const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
     const unifiedTabButtons = Array.from(document.querySelectorAll("[data-unified-tab-button]"));
@@ -4945,6 +5205,19 @@
     const feedbacksAutoErrorNode = document.querySelector("[data-feedbacks-auto-error]");
     const feedbacksAutoSchedulesBodyNode = document.querySelector("[data-feedbacks-auto-schedules-body]");
     const feedbacksAutoLogBodyNode = document.querySelector("[data-feedbacks-auto-log-body]");
+    const adsPanelNode = document.querySelector("[data-ads-panel]");
+    const adsRefreshButton = document.querySelector("[data-ads-refresh]");
+    const adsMetaNode = document.querySelector("[data-ads-meta]");
+    const adsErrorNode = document.querySelector("[data-ads-error]");
+    const adsSkuBodyNode = document.querySelector("[data-ads-sku-body]");
+    const adsDrawerNode = document.querySelector("[data-ads-drawer]");
+    const adsDrawerTitleNode = document.querySelector("[data-ads-drawer-title]");
+    const adsDrawerMetaNode = document.querySelector("[data-ads-drawer-meta]");
+    const adsDrawerErrorNode = document.querySelector("[data-ads-drawer-error]");
+    const adsDrawerContentNode = document.querySelector("[data-ads-drawer-content]");
+    const adsModalNode = document.querySelector("[data-ads-modal]");
+    const adsModalBodyNode = document.querySelector("[data-ads-modal-body]");
+    const adsCommitButton = document.querySelector("[data-ads-commit]");
     const vitrinaAutoAddButton = document.querySelector("[data-vitrina-auto-add]");
     const vitrinaAutoSaveButton = document.querySelector("[data-vitrina-auto-save]");
     const vitrinaAutoMetaNode = document.querySelector("[data-vitrina-auto-schedule-meta]");
@@ -4971,6 +5244,7 @@
     ]);
     const DEFAULT_UNIFIED_TAB = "vitrina";
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
+    const ADS_UNIFIED_TAB = "ads";
     const FEEDBACKS_AI_MAX_QUEUE_ROWS = 25;
     const FEEDBACKS_MAX_RANGE_DAYS = 62;
     const FEEDBACKS_WB_CATEGORY_LABELS = {
@@ -5071,7 +5345,7 @@
     const RESEARCH_UNIFIED_TAB = "research";
     const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
     const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
     const ALLOWED_UNIFIED_TABS = new Set(
       CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
@@ -5347,6 +5621,25 @@
         },
         error: ""
       },
+      ads: {
+        loading: false,
+        loaded: false,
+        rows: [],
+        meta: null,
+        period: null,
+        lastRefreshedAt: "",
+        error: "",
+        selectedNmId: "",
+        detailLoading: false,
+        detail: null,
+        detailError: "",
+        previewLoading: false,
+        preview: null,
+        previewError: "",
+        commitLoading: false,
+        commitResult: null,
+        commitError: ""
+      },
       vitrinaAuto: {
         loading: false,
         saving: false,
@@ -5394,6 +5687,23 @@
     }
     if (vitrinaAutoPanelNode) {
       vitrinaAutoPanelNode.open = false;
+    }
+    if (adsRefreshButton) {
+      adsRefreshButton.addEventListener("click", function() {
+        loadAdsSkus({force: true});
+      });
+    }
+    if (adsPanelNode) {
+      adsPanelNode.addEventListener("click", handleAdsPanelClick);
+    }
+    if (adsDrawerNode) {
+      adsDrawerNode.addEventListener("click", handleAdsDrawerClick);
+    }
+    if (adsModalNode) {
+      adsModalNode.addEventListener("click", handleAdsModalClick);
+    }
+    if (adsCommitButton) {
+      adsCommitButton.addEventListener("click", commitAdsBidChange);
     }
 
     loadRefreshButton.addEventListener("click", function() {
@@ -6207,6 +6517,9 @@
       }
       if (activeTab === FEEDBACKS_UNIFIED_TAB) {
         ensureFeedbacksInitialized();
+      }
+      if (activeTab === ADS_UNIFIED_TAB) {
+        ensureAdsLoaded();
       }
       if (activeTab === SETTINGS_UNIFIED_TAB) {
         ensureSettingsEmbed();
@@ -15177,6 +15490,403 @@
           setActionButtonsDisabled(false);
         }
       }
+    }
+
+    function ensureAdsLoaded() {
+      if (!state.ads.loaded && !state.ads.loading) {
+        loadAdsSkus({force: false});
+      }
+    }
+
+    async function loadAdsSkus(options) {
+      if (!WEB_VITRINA_CONFIG.ads_skus_path || state.ads.loading) {
+        return;
+      }
+      if (state.ads.loaded && !(options && options.force)) {
+        renderAdsSkus();
+        return;
+      }
+      state.ads.loading = true;
+      state.ads.error = "";
+      renderAdsSkus();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.ads_skus_path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from ads skus route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "ads skus route returned " + response.status);
+        }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_ads_skus") {
+          throw new Error("unexpected ads skus payload");
+        }
+        state.ads.rows = Array.isArray(payload.rows) ? payload.rows : [];
+        state.ads.meta = payload.meta || null;
+        state.ads.period = payload.period || null;
+        state.ads.lastRefreshedAt = String(payload.last_refreshed_at || "");
+        state.ads.loaded = true;
+      } catch (error) {
+        state.ads.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.ads.loading = false;
+        renderAdsSkus();
+      }
+    }
+
+    function renderAdsSkus() {
+      if (!adsSkuBodyNode) {
+        return;
+      }
+      if (adsMetaNode) {
+        const parts = [];
+        if (state.ads.lastRefreshedAt) {
+          parts.push("Обновлено: " + state.ads.lastRefreshedAt);
+        }
+        if (state.ads.period) {
+          parts.push(String(state.ads.period.date_from || "") + " - " + String(state.ads.period.date_to || ""));
+        }
+        adsMetaNode.textContent = parts.join(" · ") || "WB Promotion API";
+      }
+      if (adsErrorNode) {
+        adsErrorNode.textContent = state.ads.error || "";
+      }
+      if (adsRefreshButton) {
+        adsRefreshButton.disabled = !!state.ads.loading;
+        adsRefreshButton.textContent = state.ads.loading ? "Загрузка…" : "Обновить";
+      }
+      if (state.ads.loading && !state.ads.loaded) {
+        adsSkuBodyNode.innerHTML = '<tr><td colspan="9">Загрузка…</td></tr>';
+        return;
+      }
+      if (state.ads.error && !state.ads.loaded) {
+        adsSkuBodyNode.innerHTML = '<tr><td colspan="9">Загрузка не выполнена.</td></tr>';
+        return;
+      }
+      const rows = state.ads.rows || [];
+      if (!rows.length) {
+        adsSkuBodyNode.innerHTML = '<tr><td colspan="9">SKU не найдены.</td></tr>';
+        return;
+      }
+      adsSkuBodyNode.innerHTML = rows.map(function(row) {
+        const nmId = String(row.nm_id || "");
+        return [
+          '<tr data-ads-open-sku="' + escapeHtml(nmId) + '">',
+          '<td>' + escapeHtml(nmId) + '</td>',
+          '<td>' + escapeHtml(row.our_sku || "—") + '</td>',
+          '<td>' + escapeHtml(row.display_name || "—") + '</td>',
+          '<td>' + escapeHtml(formatNumber(Number(row.campaign_count || 0), 0, true)) + '</td>',
+          '<td>' + escapeHtml(adsMoney(row.spend_rub)) + '</td>',
+          '<td>' + escapeHtml(formatNumber(Number(row.views || 0), 0, true)) + '</td>',
+          '<td>' + escapeHtml(formatNumber(Number(row.clicks || 0), 0, true)) + '</td>',
+          '<td>' + escapeHtml(adsPercent(row.ctr)) + '</td>',
+          '<td><span class="ads-status-pill">' + escapeHtml(adsStatusLabel(row.status || "") + (row.stats_status === "error" ? " · stats error" : "")) + '</span></td>',
+          '</tr>'
+        ].join("");
+      }).join("");
+    }
+
+    function handleAdsPanelClick(event) {
+      const row = event.target.closest("[data-ads-open-sku]");
+      if (row) {
+        openAdsSkuDrawer(row.getAttribute("data-ads-open-sku") || "");
+      }
+    }
+
+    function handleAdsDrawerClick(event) {
+      if (event.target.closest("[data-ads-drawer-close]")) {
+        closeAdsDrawer();
+        return;
+      }
+      const previewButton = event.target.closest("[data-ads-preview-index]");
+      if (previewButton) {
+        previewAdsBidChange(Number(previewButton.getAttribute("data-ads-preview-index") || "-1"));
+      }
+    }
+
+    function handleAdsModalClick(event) {
+      if (event.target === adsModalNode || event.target.closest("[data-ads-modal-close]")) {
+        closeAdsModal();
+      }
+    }
+
+    async function openAdsSkuDrawer(nmId) {
+      const normalized = String(nmId || "").trim();
+      if (!normalized) {
+        return;
+      }
+      state.ads.selectedNmId = normalized;
+      state.ads.detailLoading = true;
+      state.ads.detailError = "";
+      state.ads.detail = null;
+      if (adsDrawerNode) {
+        adsDrawerNode.hidden = false;
+      }
+      renderAdsDrawer();
+      try {
+        const path = String(WEB_VITRINA_CONFIG.ads_sku_path || "") + "/" + encodeURIComponent(normalized);
+        const response = await fetch(path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from ads sku route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "ads sku route returned " + response.status);
+        }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_ads_sku") {
+          throw new Error("unexpected ads sku payload");
+        }
+        state.ads.detail = payload;
+      } catch (error) {
+        state.ads.detailError = String(error && error.message ? error.message : error);
+      } finally {
+        state.ads.detailLoading = false;
+        renderAdsDrawer();
+      }
+    }
+
+    function closeAdsDrawer() {
+      state.ads.selectedNmId = "";
+      state.ads.detail = null;
+      state.ads.detailError = "";
+      if (adsDrawerNode) {
+        adsDrawerNode.hidden = true;
+      }
+    }
+
+    function renderAdsDrawer() {
+      if (!adsDrawerContentNode) {
+        return;
+      }
+      const detail = state.ads.detail || null;
+      const sku = detail && detail.sku ? detail.sku : {nm_id: state.ads.selectedNmId};
+      if (adsDrawerTitleNode) {
+        adsDrawerTitleNode.textContent = "nm_id " + String(sku.nm_id || state.ads.selectedNmId || "");
+      }
+      if (adsDrawerMetaNode) {
+        adsDrawerMetaNode.textContent = [sku.our_sku || "", sku.display_name || ""].filter(Boolean).join(" · ");
+      }
+      if (adsDrawerErrorNode) {
+        adsDrawerErrorNode.textContent = state.ads.detailError || state.ads.previewError || state.ads.commitError || "";
+      }
+      if (state.ads.detailLoading) {
+        adsDrawerContentNode.innerHTML = '<p class="research-result-note">Загрузка кампаний…</p>';
+        return;
+      }
+      if (state.ads.detailError) {
+        adsDrawerContentNode.innerHTML = '<p class="research-result-note">Данные drawer не загружены.</p>';
+        return;
+      }
+      if (!detail) {
+        adsDrawerContentNode.innerHTML = '<p class="research-result-note">Выберите SKU.</p>';
+        return;
+      }
+      const rows = Array.isArray(detail.rows) ? detail.rows : [];
+      if (!rows.length) {
+        adsDrawerContentNode.innerHTML = '<p class="research-result-note">Связанных рекламных кампаний нет.</p>';
+        return;
+      }
+      adsDrawerContentNode.innerHTML = [
+        '<table class="ads-detail-table">',
+        '<thead><tr>',
+        '<th style="width:105px">advert_id</th>',
+        '<th style="width:180px">Кампания</th>',
+        '<th style="width:72px">Статус</th>',
+        '<th style="width:82px">payment</th>',
+        '<th style="width:82px">bid</th>',
+        '<th style="width:120px">Placement</th>',
+        '<th style="width:90px">Текущая</th>',
+        '<th style="width:90px">Min</th>',
+        '<th style="width:110px">Recommended</th>',
+        '<th style="width:70px">Views</th>',
+        '<th style="width:70px">Clicks</th>',
+        '<th style="width:70px">CTR</th>',
+        '<th style="width:80px">CPC</th>',
+        '<th style="width:70px">CR</th>',
+        '<th style="width:70px">Orders</th>',
+        '<th style="width:90px">Spend</th>',
+        '<th style="width:190px">Ставка</th>',
+        '</tr></thead>',
+        '<tbody>',
+        rows.map(renderAdsDetailRow).join(""),
+        '</tbody>',
+        '</table>'
+      ].join("");
+    }
+
+    function renderAdsDetailRow(row, index) {
+      const currentRub = row.current_bid_rub == null ? "" : String(row.current_bid_rub);
+      return [
+        '<tr>',
+        '<td>' + escapeHtml(row.advert_id || "") + '</td>',
+        '<td>' + escapeHtml(row.campaign_name || "—") + '</td>',
+        '<td>' + escapeHtml(row.status || "") + '</td>',
+        '<td>' + escapeHtml(row.payment_type || "—") + '</td>',
+        '<td>' + escapeHtml(row.bid_type || "—") + '</td>',
+        '<td>' + escapeHtml(row.placement || "—") + '</td>',
+        '<td>' + escapeHtml(adsMoney(row.current_bid_rub)) + '</td>',
+        '<td>' + escapeHtml(adsMoney(row.min_bid_rub)) + '</td>',
+        '<td>' + escapeHtml(row.recommended_bid_status === "not_available" ? "—" : adsMoney(row.recommended_bid_rub)) + '</td>',
+        '<td>' + escapeHtml(formatNumber(Number(row.views || 0), 0, true)) + '</td>',
+        '<td>' + escapeHtml(formatNumber(Number(row.clicks || 0), 0, true)) + '</td>',
+        '<td>' + escapeHtml(adsPercent(row.ctr)) + '</td>',
+        '<td>' + escapeHtml(adsMoney(row.cpc)) + '</td>',
+        '<td>' + escapeHtml(adsPercent(row.cr)) + '</td>',
+        '<td>' + escapeHtml(formatNumber(Number(row.orders || 0), 0, true)) + '</td>',
+        '<td>' + escapeHtml(adsMoney(row.spend_rub)) + '</td>',
+        '<td><div class="ads-bid-control"><input class="input" type="number" min="0" step="0.01" value="' + escapeHtml(currentRub) + '" data-ads-bid-input="' + index + '"><button class="button secondary" type="button" data-ads-preview-index="' + index + '">Preview</button></div></td>',
+        '</tr>'
+      ].join("");
+    }
+
+    async function previewAdsBidChange(index) {
+      const detail = state.ads.detail || {};
+      const rows = Array.isArray(detail.rows) ? detail.rows : [];
+      const row = rows[index];
+      if (!row) {
+        return;
+      }
+      const input = adsDrawerContentNode ? adsDrawerContentNode.querySelector('[data-ads-bid-input="' + index + '"]') : null;
+      const requestedBidRub = input ? input.value : "";
+      state.ads.previewLoading = true;
+      state.ads.previewError = "";
+      state.ads.commitError = "";
+      if (adsDrawerErrorNode) {
+        adsDrawerErrorNode.textContent = "";
+      }
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.ads_bid_preview_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            nm_id: row.nm_id,
+            advert_id: row.advert_id,
+            placement: row.placement,
+            requested_bid_rub: requestedBidRub
+          })
+        });
+        const payload = await readJsonResponse(response, "non-json response from ads bid preview route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "ads bid preview route returned " + response.status);
+        }
+        state.ads.preview = payload.preview || null;
+        state.ads.commitResult = null;
+        openAdsModal();
+      } catch (error) {
+        state.ads.previewError = String(error && error.message ? error.message : error);
+        renderAdsDrawer();
+      } finally {
+        state.ads.previewLoading = false;
+      }
+    }
+
+    function openAdsModal() {
+      if (!adsModalNode) {
+        return;
+      }
+      adsModalNode.hidden = false;
+      renderAdsModal();
+    }
+
+    function closeAdsModal() {
+      if (adsModalNode) {
+        adsModalNode.hidden = true;
+      }
+      state.ads.preview = null;
+      state.ads.commitResult = null;
+      state.ads.commitError = "";
+    }
+
+    function renderAdsModal() {
+      if (!adsModalBodyNode) {
+        return;
+      }
+      const preview = state.ads.preview || {};
+      const result = state.ads.commitResult || null;
+      const facts = [
+        ["SKU / nm_id", preview.nm_id],
+        ["advert_id", preview.advert_id],
+        ["Кампания", preview.campaign_name || "—"],
+        ["Placement", preview.placement],
+        ["Старая ставка", adsMoney(preview.old_bid_rub)],
+        ["Новая ставка", adsMoney(preview.new_bid_rub)],
+        ["Delta", adsMoney(preview.delta_rub)],
+        ["Min bid", preview.min_bid_rub == null ? "—" : adsMoney(preview.min_bid_rub)]
+      ];
+      adsModalBodyNode.innerHTML = [
+        '<div class="ads-danger-note">Это изменит live WB advertising spend для одной связки SKU/nm_id → advert_id → placement.</div>',
+        '<div class="ads-fact-grid">',
+        facts.map(function(fact) {
+          return '<div class="ads-fact"><span class="ads-fact-label">' + escapeHtml(fact[0]) + '</span><span class="ads-fact-value">' + escapeHtml(fact[1] == null ? "—" : fact[1]) + '</span></div>';
+        }).join(""),
+        '</div>',
+        preview.warnings && preview.warnings.length ? '<p class="research-result-note">Warnings: ' + escapeHtml(preview.warnings.join(", ")) + '</p>' : '',
+        state.ads.commitError ? '<p class="research-error">' + escapeHtml(state.ads.commitError) + '</p>' : '',
+        result ? '<p class="research-result-note">Commit: ' + escapeHtml(result.status || "") + ' · operation_id ' + escapeHtml(result.operation_id || "") + '</p>' : ''
+      ].join("");
+      if (adsCommitButton) {
+        adsCommitButton.disabled = !preview.preview_id || !!state.ads.commitLoading || !!result;
+        adsCommitButton.textContent = state.ads.commitLoading ? "Commit…" : "Изменить live ставку";
+      }
+    }
+
+    async function commitAdsBidChange() {
+      const preview = state.ads.preview || {};
+      if (!preview.preview_id || state.ads.commitLoading) {
+        return;
+      }
+      state.ads.commitLoading = true;
+      state.ads.commitError = "";
+      renderAdsModal();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.ads_bid_commit_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({preview_id: preview.preview_id})
+        });
+        const payload = await readJsonResponse(response, "non-json response from ads bid commit route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "ads bid commit route returned " + response.status);
+        }
+        state.ads.commitResult = payload;
+        window.setTimeout(function() {
+          if (state.ads.selectedNmId) {
+            openAdsSkuDrawer(state.ads.selectedNmId);
+            loadAdsSkus({force: true});
+          }
+        }, Number(payload.delayed_refresh_after_seconds || 30) * 1000);
+      } catch (error) {
+        state.ads.commitError = String(error && error.message ? error.message : error);
+      } finally {
+        state.ads.commitLoading = false;
+        renderAdsModal();
+      }
+    }
+
+    function adsMoney(value) {
+      if (value === null || value === undefined || value === "") {
+        return "—";
+      }
+      const numberValue = Number(value);
+      if (!Number.isFinite(numberValue)) {
+        return "—";
+      }
+      return formatNumber(numberValue, 2, true) + " руб.";
+    }
+
+    function adsPercent(value) {
+      const numberValue = Number(value || 0) * 100;
+      return formatNumber(numberValue, 2, true) + "%";
+    }
+
+    function adsStatusLabel(value) {
+      const normalized = String(value || "");
+      if (normalized === "linked") {
+        return "есть кампании";
+      }
+      if (normalized === "no_campaigns") {
+        return "нет кампаний";
+      }
+      if (normalized === "missing_in_registry") {
+        return "вне справочника";
+      }
+      return normalized || "—";
     }
 
     applyUnifiedTabAccess();
