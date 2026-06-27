@@ -46,18 +46,19 @@
     .message.success { color: var(--success); }
     .message.warning { color: var(--warning); }
     .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; margin-top: 12px; }
-    table { width: 100%; min-width: 1180px; border-collapse: collapse; table-layout: fixed; }
+    table { width: 100%; min-width: 1360px; border-collapse: collapse; table-layout: fixed; }
     th, td { padding: 9px; border-bottom: 1px solid rgba(177, 139, 255, 0.14); text-align: left; vertical-align: top; }
     th { position: sticky; top: 0; z-index: 1; background: #171923; color: var(--muted); font-size: 12px; text-transform: uppercase; }
     th.col-active { width: 58px; }
     th.col-nmid { width: 118px; }
+    th.col-barcode { width: 190px; }
     th.col-name { width: 220px; }
     th.col-type { width: 150px; }
     th.col-match { width: 220px; }
     th.col-price { width: 138px; }
     th.col-models { width: 260px; }
     th.col-updated { width: 174px; }
-    th.col-actions { width: 96px; }
+    th.col-actions { width: 136px; }
     input, select, textarea {
       width: 100%; min-height: 34px; border: 1px solid rgba(177, 139, 255, 0.28); border-radius: 6px;
       padding: 7px 8px; background: var(--control); color: var(--text); font: inherit;
@@ -74,6 +75,10 @@
     .compat-keys { margin-top: 6px; color: var(--muted); font-size: 12px; }
     .compat-keys summary { cursor: pointer; width: fit-content; }
     .compat-keys div { margin-top: 4px; max-height: 64px; overflow: auto; word-break: break-word; }
+    .barcode-status { margin-top: 6px; color: var(--muted); font-size: 12px; }
+    .barcode-status.is-ready { color: var(--success); }
+    .barcode-status.is-warning { color: var(--warning); }
+    .barcode-status.is-error { color: var(--danger); }
     .actions-cell { display: flex; align-items: center; gap: 6px; }
     .icon-button { width: 34px; min-width: 34px; min-height: 32px; padding: 0; border-radius: 7px; font-size: 16px; line-height: 1; }
     .icon-button.save { border-color: rgba(52, 211, 153, .55); color: #03130d; background: var(--success); }
@@ -173,6 +178,7 @@
           <div class="toolbar">
             <input id="nomenclatureFilter" class="wide" placeholder="Поиск по match key / nmId / номенклатуре / модели">
             <button id="addItemButton" class="primary" type="button">Добавить строку</button>
+            <button id="syncBarcodesButton" type="button">Обновить ШК из WB</button>
             <button id="exportNomenclatureButton" type="button">Скачать Excel</button>
             <button id="importNomenclatureButton" type="button">Загрузить Excel</button>
             <input id="importNomenclatureFile" class="file-input" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
@@ -185,6 +191,7 @@
               <tr>
                 <th class="col-active">Вкл.</th>
                 <th class="col-nmid">nmId</th>
+                <th class="col-barcode">ШК</th>
                 <th class="col-name">Номенклатура</th>
                 <th class="col-type">Тип</th>
                 <th class="col-match">Match key</th>
@@ -195,7 +202,7 @@
               </tr>
             </thead>
             <tbody id="nomenclatureRows">
-              <tr><td colspan="9">Справочник пуст.</td></tr>
+              <tr><td colspan="10">Справочник пуст.</td></tr>
             </tbody>
           </table>
         </div>
@@ -387,6 +394,7 @@
       const nomenclaturePath = config.nomenclature_path;
       const nomenclatureExportPath = config.nomenclature_export_path;
       const nomenclatureImportPath = config.nomenclature_import_path;
+      const nomenclatureBarcodeSyncPath = config.nomenclature_barcode_sync_path;
       const tradeDocumentsPath = config.trade_documents_path;
       const usersPath = config.settings_users_path;
       const canManageUsers = config.can_manage_users !== false;
@@ -394,6 +402,7 @@
       const message = document.getElementById("nomenclatureMessage");
       const filterInput = document.getElementById("nomenclatureFilter");
       const addItemButton = document.getElementById("addItemButton");
+      const syncBarcodesButton = document.getElementById("syncBarcodesButton");
       const exportButton = document.getElementById("exportNomenclatureButton");
       const importButton = document.getElementById("importNomenclatureButton");
       const importFileInput = document.getElementById("importNomenclatureFile");
@@ -576,12 +585,15 @@
         const query = filterInput.value.trim().toLowerCase();
         const visible = query ? items.filter((item) => itemText(item).includes(query)) : items;
         if (!visible.length) {
-          rowsBody.innerHTML = '<tr><td colspan="9">Справочник пуст.</td></tr>';
+          rowsBody.innerHTML = '<tr><td colspan="10">Справочник пуст.</td></tr>';
           return;
         }
         rowsBody.innerHTML = visible.map(renderRow).join("");
         Array.from(rowsBody.querySelectorAll("[data-save-item]")).forEach((button) => {
           button.addEventListener("click", () => saveRow(button.closest("tr")));
+        });
+        Array.from(rowsBody.querySelectorAll("[data-sync-barcode]")).forEach((button) => {
+          button.addEventListener("click", () => syncRowBarcode(button.closest("tr")));
         });
         Array.from(rowsBody.querySelectorAll("[data-disable-item]")).forEach((button) => {
           button.addEventListener("click", () => deactivateRow(button.closest("tr")));
@@ -591,6 +603,8 @@
       function itemText(item) {
         return [
           item.match_key, item.nm_id, item.nomenclature_name,
+          item.barcode, (item.barcodes || []).join(" "),
+          item.barcode_source, item.barcode_status,
           item.product_type, productTypeLabels[item.product_type] || "",
           item.compatible_models_text, (item.compatible_model_keys || []).join(" ")
         ].join(" ").toLowerCase();
@@ -603,15 +617,45 @@
           '<tr data-item-id="' + escapeHtml(item.item_id || "") + '"' + rowClass + '>',
           '<td class="checkbox-cell"><input type="checkbox" data-field="is_active"' + (item.is_active ? " checked" : "") + '></td>',
           '<td><input class="narrow" data-field="nm_id" value="' + escapeHtml(item.nm_id ?? "") + '"></td>',
+          '<td><input class="wide" data-field="barcode" inputmode="numeric" value="' + escapeHtml(item.barcode || "") + '">' + renderBarcodeStatus(item) + '</td>',
           '<td><input class="wide" data-field="nomenclature_name" value="' + escapeHtml(item.nomenclature_name || "") + '"></td>',
           '<td><select class="type-select" data-field="product_type">' + productTypeOptions(item.product_type || "clear") + '</select></td>',
           '<td><input class="wide" data-field="match_key" value="' + escapeHtml(item.match_key || "") + '"></td>',
           '<td><input class="price-input" data-field="purchase_price_yuan" inputmode="decimal" value="' + escapeHtml(item.purchase_price_yuan ?? "") + '"></td>',
           '<td><textarea class="models-textarea" data-field="compatible_models_text" placeholder="Например: iPhone 17e, iPhone 16e, iPhone 14">' + escapeHtml(item.compatible_models_text || "") + '</textarea>' + renderCompatibleKeys(compatibleKeys) + '</td>',
           '<td>' + escapeHtml(item.updated_at || "-") + '</td>',
-          '<td><div class="actions-cell"><button class="icon-button save" type="button" data-save-item title="Сохранить" aria-label="Сохранить">✓</button><button class="icon-button disable" type="button" data-disable-item title="Выключить" aria-label="Выключить">⏸</button></div></td>',
+          '<td><div class="actions-cell"><button class="icon-button save" type="button" data-save-item title="Сохранить" aria-label="Сохранить">✓</button><button class="icon-button" type="button" data-sync-barcode title="Обновить ШК из WB" aria-label="Обновить ШК из WB">↻</button><button class="icon-button disable" type="button" data-disable-item title="Выключить" aria-label="Выключить">⏸</button></div></td>',
           '</tr>'
         ].join("");
+      }
+
+      function renderBarcodeStatus(item) {
+        const status = String(item.barcode_status || (item.barcode ? "ready" : "missing"));
+        const source = String(item.barcode_source || "");
+        const barcodes = Array.isArray(item.barcodes) ? item.barcodes.filter(Boolean) : [];
+        let className = "barcode-status";
+        if (status === "manual" || status === "ready") {
+          className += " is-ready";
+        } else if (status === "sync_error" || status === "token_missing") {
+          className += " is-error";
+        } else {
+          className += " is-warning";
+        }
+        const label = barcodeStatusLabel(status, source);
+        const details = barcodes.length > 1
+          ? '<details class="compat-keys"><summary>Всего ШК: ' + barcodes.length + '</summary>' + barcodes.map((barcode) => '<div>' + escapeHtml(barcode) + '</div>').join("") + '</details>'
+          : "";
+        return '<div class="' + className + '">' + escapeHtml(label) + '</div>' + details;
+      }
+
+      function barcodeStatusLabel(status, source) {
+        if (status === "manual") return "manual";
+        if (status === "multiple") return "WB, несколько";
+        if (status === "ready" && source === "wb_content") return "WB";
+        if (status === "ready") return "есть";
+        if (status === "token_missing") return "нет токена";
+        if (status === "sync_error") return "ошибка sync";
+        return "нет ШК";
       }
 
       function renderCompatibleKeys(keys) {
@@ -679,6 +723,46 @@
           });
           await loadItems();
           setMessage("Справочник сохранён.", "success");
+        } catch (error) {
+          setMessage(error.message, "error");
+        }
+      }
+
+      async function syncRowBarcode(row) {
+        const itemId = row.dataset.itemId || "";
+        if (!itemId) {
+          setMessage("Сначала сохраните строку, затем обновите ШК из WB.", "warning");
+          return;
+        }
+        setMessage("Обновляем ШК из WB...", "");
+        try {
+          await fetchJson(nomenclaturePath + "/" + encodeURIComponent(itemId) + "/barcode-sync", {
+            method: "POST",
+            headers: { Accept: "application/json" }
+          });
+          await loadItems();
+          setMessage("ШК обновлён.", "success");
+        } catch (error) {
+          setMessage(error.message, "error");
+        }
+      }
+
+      async function syncMissingBarcodes() {
+        if (!nomenclatureBarcodeSyncPath) {
+          return;
+        }
+        setMessage("Обновляем отсутствующие ШК из WB...", "");
+        try {
+          const payload = await fetchJson(nomenclatureBarcodeSyncPath, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ active_only: true, only_missing: true, limit: 50 })
+          });
+          await loadItems();
+          setMessage(
+            "ШК sync: обновлено " + (payload.updated || 0) + ", manual пропущено " + (payload.skipped_manual || 0) + ", не найдено " + (payload.not_found || 0) + ", ошибок " + (payload.errors || 0) + ".",
+            "success"
+          );
         } catch (error) {
           setMessage(error.message, "error");
         }
@@ -1540,6 +1624,10 @@
           item_id: "",
           is_active: true,
           nm_id: null,
+          barcode: "",
+          barcodes: [],
+          barcode_source: "missing",
+          barcode_status: "missing",
           nomenclature_name: "",
           product_type: "clear",
           match_key: "",
@@ -1551,9 +1639,11 @@
         rowsBody.insertAdjacentHTML("afterbegin", renderRow(draft));
         const row = rowsBody.querySelector("tr[data-item-id='']");
         row.querySelector("[data-save-item]").addEventListener("click", () => saveRow(row));
+        row.querySelector("[data-sync-barcode]").addEventListener("click", () => syncRowBarcode(row));
         row.querySelector("[data-disable-item]").addEventListener("click", () => deactivateRow(row));
         setMessage("", "");
       });
+      syncBarcodesButton.addEventListener("click", syncMissingBarcodes);
       exportButton.addEventListener("click", downloadNomenclature);
       importButton.addEventListener("click", () => importFileInput.click());
       importFileInput.addEventListener("change", () => uploadNomenclature(importFileInput.files && importFileInput.files[0]));

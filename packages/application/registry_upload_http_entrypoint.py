@@ -2100,6 +2100,12 @@ class RegistryUploadHttpEntrypoint:
     def handle_nomenclature_delete_request(self, item_id: str) -> dict[str, Any]:
         return self.supplier_shipments_block.deactivate_nomenclature_item(item_id)
 
+    def handle_nomenclature_barcode_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.sync_nomenclature_barcodes(payload)
+
+    def handle_nomenclature_item_barcode_sync_request(self, item_id: str) -> dict[str, Any]:
+        return self.supplier_shipments_block.sync_nomenclature_item_barcode(item_id)
+
     def _run_sheet_auto_update(
         self,
         *,

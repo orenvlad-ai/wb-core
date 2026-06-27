@@ -14,12 +14,18 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 from uuid import uuid4
 import zlib
 
 from openpyxl import Workbook, load_workbook
 
+from packages.adapters.official_api_runtime import OfficialApiRuntimeError
+from packages.adapters.wb_content import (
+    HttpBackedWbContentSource,
+    WbContentHttpStatusError,
+    WbContentTransportError,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.supplier_invoice_parser import (
     extract_iphone_model_keys,
@@ -52,6 +58,18 @@ from packages.contracts.supplier_shipments import (
     SHIPMENT_STATUS_CHECKSUM_ERROR,
     SHIPMENT_STATUS_HAS_UNMATCHED,
     SHIPMENT_STATUS_MANUAL_OVERRIDE,
+    NOMENCLATURE_BARCODE_SOURCE_ERROR,
+    NOMENCLATURE_BARCODE_SOURCE_MANUAL,
+    NOMENCLATURE_BARCODE_SOURCE_MISSING,
+    NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT,
+    NOMENCLATURE_BARCODE_SOURCES,
+    NOMENCLATURE_BARCODE_STATUS_MANUAL,
+    NOMENCLATURE_BARCODE_STATUS_MISSING,
+    NOMENCLATURE_BARCODE_STATUS_MULTIPLE,
+    NOMENCLATURE_BARCODE_STATUS_READY,
+    NOMENCLATURE_BARCODE_STATUS_SYNC_ERROR,
+    NOMENCLATURE_BARCODE_STATUS_TOKEN_MISSING,
+    NOMENCLATURE_BARCODE_STATUSES,
     SUPPLIER_INVOICE_CONTENT_TYPE,
     SUPPLIER_INVOICE_PARSER_VERSION,
     TRADE_DOCUMENT_CONTRACT_PARSER_VERSION,
@@ -77,6 +95,10 @@ NOMENCLATURE_XLSX_HEADERS = [
     "ID строки",
     "Включено",
     "nmId",
+    "ШК / barcode",
+    "Все ШК",
+    "Источник ШК",
+    "Статус ШК",
     "Номенклатура",
     "Тип",
     "Match key",
@@ -115,14 +137,21 @@ CONTRACT_PDF_OCR_STRATEGIES: tuple[dict[str, Any], ...] = (
 _TESSERACT_LANGUAGES_CACHE: list[str] | None = None
 
 
+class NomenclatureBarcodeSource(Protocol):
+    def fetch_barcodes_by_nm_ids(self, nm_ids: list[int]) -> Mapping[int, Any]:
+        raise NotImplementedError
+
+
 class SupplierShipmentsBlock:
     def __init__(
         self,
         *,
         runtime: RegistryUploadDbBackedRuntime,
+        barcode_source: NomenclatureBarcodeSource | None = None,
         timestamp_factory: callable | None = None,
     ) -> None:
         self.runtime = runtime
+        self.barcode_source = barcode_source or HttpBackedWbContentSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
 
     def list_shipments(self) -> dict[str, Any]:
@@ -1073,10 +1102,12 @@ class SupplierShipmentsBlock:
 
     def list_nomenclature(self) -> dict[str, Any]:
         self._ensure_nomenclature_ready()
+        items = self.runtime.list_nomenclature_items()
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
-            "items": self.runtime.list_nomenclature_items(),
+            "summary": _nomenclature_barcode_summary(items),
+            "items": items,
         }
 
     def export_nomenclature_xlsx(self) -> tuple[bytes, str, str]:
@@ -1091,6 +1122,10 @@ class SupplierShipmentsBlock:
                     str(item.get("item_id") or ""),
                     "да" if bool(item.get("is_active")) else "нет",
                     item.get("nm_id") if item.get("nm_id") is not None else "",
+                    str(item.get("barcode") or ""),
+                    ", ".join(str(barcode) for barcode in item.get("barcodes") or [] if str(barcode or "").strip()),
+                    str(item.get("barcode_source") or ""),
+                    str(item.get("barcode_status") or ""),
                     str(item.get("nomenclature_name") or ""),
                     NOMENCLATURE_PRODUCT_TYPE_LABELS.get(str(item.get("product_type") or ""), str(item.get("product_type") or "")),
                     str(item.get("match_key") or ""),
@@ -1101,7 +1136,7 @@ class SupplierShipmentsBlock:
                 ]
             )
         worksheet.freeze_panes = "A2"
-        for index, width in enumerate([24, 12, 14, 34, 18, 28, 18, 34, 34, 24], start=1):
+        for index, width in enumerate([24, 12, 14, 22, 34, 18, 18, 34, 18, 28, 18, 34, 34, 24], start=1):
             worksheet.column_dimensions[worksheet.cell(row=1, column=index).column_letter].width = width
         output = BytesIO()
         workbook.save(output)
@@ -1201,17 +1236,28 @@ class SupplierShipmentsBlock:
 
     def create_nomenclature_item(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         now = self.timestamp_factory()
+        prepared_payload = _prepare_nomenclature_barcode_payload(
+            existing=None,
+            payload=payload,
+            updated_at=now,
+        )
         item = _normalize_nomenclature_payload(
-            payload,
+            prepared_payload,
             item_id="nom_" + uuid4().hex,
             created_at=now,
             updated_at=now,
+        )
+        item, barcode_sync = self._sync_nomenclature_barcode_item(
+            item,
+            reason="auto_save",
+            allow_existing_non_manual=False,
         )
         self._validate_nomenclature_unique(item)
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
             "item": self.runtime.save_nomenclature_item(item),
+            "barcode_sync": barcode_sync,
         }
 
     def update_nomenclature_item(self, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1219,17 +1265,28 @@ class SupplierShipmentsBlock:
         if existing is None:
             raise ValueError(f"nomenclature item not found: {item_id}")
         now = self.timestamp_factory()
+        prepared_payload = _prepare_nomenclature_barcode_payload(
+            existing=existing,
+            payload=payload,
+            updated_at=now,
+        )
         item = _normalize_nomenclature_payload(
-            {**existing, **dict(payload)},
+            {**existing, **prepared_payload},
             item_id=item_id,
             created_at=str(existing.get("created_at") or now),
             updated_at=now,
+        )
+        item, barcode_sync = self._sync_nomenclature_barcode_item(
+            item,
+            reason="auto_save",
+            allow_existing_non_manual=False,
         )
         self._validate_nomenclature_unique(item)
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
             "item": self.runtime.save_nomenclature_item(item),
+            "barcode_sync": barcode_sync,
         }
 
     def deactivate_nomenclature_item(self, item_id: str) -> dict[str, Any]:
@@ -1239,6 +1296,177 @@ class SupplierShipmentsBlock:
             "status": "ok",
             "item": item,
         }
+
+    def sync_nomenclature_item_barcode(self, item_id: str) -> dict[str, Any]:
+        existing = self.runtime.load_nomenclature_item(item_id)
+        if existing is None:
+            raise ValueError(f"nomenclature item not found: {item_id}")
+        item, barcode_sync = self._sync_nomenclature_barcode_item(
+            existing,
+            reason="manual_row_sync",
+            allow_existing_non_manual=True,
+        )
+        saved = self.runtime.save_nomenclature_item(item) if barcode_sync.get("save_item", False) else existing
+        return {
+            "contract_name": "sheet_vitrina_v1_nomenclature_barcode_sync",
+            "status": "ok",
+            "item": saved,
+            "barcode_sync": {key: value for key, value in barcode_sync.items() if key != "save_item"},
+        }
+
+    def sync_nomenclature_barcodes(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        active_only = bool(payload.get("active_only", True))
+        limit = _bounded_int(payload.get("limit"), default=50, minimum=1, maximum=100)
+        only_missing = bool(payload.get("only_missing", True))
+        rows = self.runtime.list_nomenclature_items(active_only=active_only)
+        selected = rows[:limit]
+        counts = {
+            "processed": 0,
+            "updated": 0,
+            "skipped_manual": 0,
+            "skipped_existing": 0,
+            "missing_nm_id": 0,
+            "not_found": 0,
+            "token_missing": 0,
+            "errors": 0,
+        }
+        results: list[dict[str, Any]] = []
+        for row in selected:
+            if (
+                str(row.get("barcode_source") or "") == NOMENCLATURE_BARCODE_SOURCE_MANUAL
+                and str(row.get("barcode") or "").strip()
+            ):
+                counts["skipped_manual"] += 1
+                counts["processed"] += 1
+                continue
+            if only_missing and str(row.get("barcode") or "").strip():
+                counts["skipped_existing"] += 1
+                counts["processed"] += 1
+                continue
+            item, barcode_sync = self._sync_nomenclature_barcode_item(
+                row,
+                reason="manual_batch_sync",
+                allow_existing_non_manual=not only_missing,
+            )
+            sync_status = str(barcode_sync.get("status") or "")
+            if sync_status == "skipped_manual":
+                counts["skipped_manual"] += 1
+            elif sync_status == "missing_nm_id":
+                counts["missing_nm_id"] += 1
+            elif sync_status == "not_found":
+                counts["not_found"] += 1
+            elif sync_status == "token_missing":
+                counts["token_missing"] += 1
+            elif sync_status in {"sync_error", "error"}:
+                counts["errors"] += 1
+            if barcode_sync.get("save_item", False):
+                saved = self.runtime.save_nomenclature_item(item)
+                if str(saved.get("barcode") or "").strip():
+                    counts["updated"] += 1
+                results.append(saved)
+            counts["processed"] += 1
+        items = self.runtime.list_nomenclature_items()
+        return {
+            "contract_name": "sheet_vitrina_v1_nomenclature_barcode_sync",
+            "status": "ok",
+            "active_only": active_only,
+            "only_missing": only_missing,
+            "limit": limit,
+            **counts,
+            "items": results,
+            "summary": _nomenclature_barcode_summary(items),
+        }
+
+    def _sync_nomenclature_barcode_item(
+        self,
+        item: Mapping[str, Any],
+        *,
+        reason: str,
+        allow_existing_non_manual: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_item = dict(item)
+        if (
+            str(normalized_item.get("barcode_source") or "") == NOMENCLATURE_BARCODE_SOURCE_MANUAL
+            and str(normalized_item.get("barcode") or "").strip()
+        ):
+            return normalized_item, {"status": "skipped_manual", "reason": reason, "save_item": False}
+        if str(normalized_item.get("barcode") or "").strip() and not allow_existing_non_manual:
+            return normalized_item, {"status": "skipped_existing", "reason": reason, "save_item": False}
+        nm_id = _optional_int(normalized_item.get("nm_id"))
+        now = self.timestamp_factory()
+        if nm_id is None:
+            normalized_item.update(
+                {
+                    "barcode": "",
+                    "barcodes": [],
+                    "barcode_source": NOMENCLATURE_BARCODE_SOURCE_MISSING,
+                    "barcode_status": NOMENCLATURE_BARCODE_STATUS_MISSING,
+                    "barcode_evidence": {"reason": "missing_nm_id", "sync_reason": reason},
+                    "barcode_updated_at": now,
+                }
+            )
+            return normalized_item, {"status": "missing_nm_id", "reason": reason, "save_item": True}
+        try:
+            resolutions = self.barcode_source.fetch_barcodes_by_nm_ids([nm_id])
+            resolution = resolutions.get(nm_id) if isinstance(resolutions, Mapping) else None
+            barcodes = _barcode_resolution_barcodes(resolution)
+            evidence = _barcode_resolution_evidence(resolution, nm_id=nm_id, sync_reason=reason)
+        except OfficialApiRuntimeError as exc:
+            return _nomenclature_barcode_sync_error_item(
+                normalized_item,
+                status=NOMENCLATURE_BARCODE_STATUS_TOKEN_MISSING,
+                error=exc,
+                updated_at=now,
+                sync_reason=reason,
+            )
+        except (WbContentHttpStatusError, WbContentTransportError, RuntimeError) as exc:
+            return _nomenclature_barcode_sync_error_item(
+                normalized_item,
+                status=NOMENCLATURE_BARCODE_STATUS_SYNC_ERROR,
+                error=exc,
+                updated_at=now,
+                sync_reason=reason,
+            )
+
+        if not barcodes:
+            normalized_item.update(
+                {
+                    "barcode": "",
+                    "barcodes": [],
+                    "barcode_source": NOMENCLATURE_BARCODE_SOURCE_MISSING,
+                    "barcode_status": NOMENCLATURE_BARCODE_STATUS_MISSING,
+                    "barcode_synced_at": now,
+                    "barcode_updated_at": now,
+                    "barcode_evidence": {**evidence, "result": "not_found"},
+                }
+            )
+            return normalized_item, {"status": "not_found", "reason": reason, "save_item": True}
+
+        deterministic_barcodes = sorted(_normalize_barcode_list(barcodes))
+        primary_barcode = deterministic_barcodes[0]
+        status = (
+            NOMENCLATURE_BARCODE_STATUS_MULTIPLE
+            if len(deterministic_barcodes) > 1
+            else NOMENCLATURE_BARCODE_STATUS_READY
+        )
+        normalized_item.update(
+            {
+                "barcode": primary_barcode,
+                "barcodes": deterministic_barcodes,
+                "barcode_source": NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT,
+                "barcode_status": status,
+                "barcode_synced_at": now,
+                "barcode_updated_at": now,
+                "barcode_evidence": {
+                    **evidence,
+                    "result": "resolved",
+                    "selected_primary": primary_barcode,
+                    "barcode_count": len(deterministic_barcodes),
+                },
+            }
+        )
+        return normalized_item, {"status": status, "reason": reason, "save_item": True}
 
     def _copy_upload_to_shipment_file(self, *, upload_path: str, shipment_id: str, filename: str) -> str:
         source_path = self._resolve_runtime_file(upload_path)
@@ -2184,11 +2412,30 @@ def _normalize_nomenclature_payload(
         payload.get("purchase_price_yuan"),
         field_name="nomenclature purchase_price_yuan",
     )
+    barcode = _normalize_barcode(payload.get("barcode") or payload.get("primary_barcode"))
+    barcodes = _normalize_barcode_list([barcode, *_raw_barcode_list(payload.get("barcodes"))])
+    if not barcode and barcodes:
+        barcode = barcodes[0]
+    barcode_source = _normalize_barcode_source(payload.get("barcode_source"), has_barcode=bool(barcode))
+    barcode_status = _normalize_barcode_status(
+        payload.get("barcode_status"),
+        barcode_source=barcode_source,
+        barcode_count=len(barcodes),
+        has_barcode=bool(barcode),
+    )
     return {
         "item_id": item_id,
         "is_active": is_active,
         "our_sku": str(payload.get("our_sku") or "").strip(),
         "nm_id": _optional_int(payload.get("nm_id")),
+        "barcode": barcode,
+        "primary_barcode": barcode,
+        "barcodes": barcodes,
+        "barcode_source": barcode_source,
+        "barcode_status": barcode_status,
+        "barcode_synced_at": str(payload.get("barcode_synced_at") or "").strip(),
+        "barcode_updated_at": str(payload.get("barcode_updated_at") or "").strip(),
+        "barcode_evidence": payload.get("barcode_evidence") if isinstance(payload.get("barcode_evidence"), Mapping) else {},
         "nomenclature_name": nomenclature_name,
         "product_type": product_type,
         "match_key": match_key,
@@ -2199,6 +2446,188 @@ def _normalize_nomenclature_payload(
         "comment": str(payload.get("comment") or "").strip(),
         "created_at": created_at,
         "updated_at": updated_at,
+    }
+
+
+def _prepare_nomenclature_barcode_payload(
+    *,
+    existing: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
+    updated_at: str,
+) -> dict[str, Any]:
+    prepared = dict(payload)
+    barcode_present = "barcode" in payload or "primary_barcode" in payload
+    if not barcode_present:
+        return prepared
+    incoming = _normalize_barcode(payload.get("barcode") if "barcode" in payload else payload.get("primary_barcode"))
+    existing_barcode = _normalize_barcode((existing or {}).get("barcode") or (existing or {}).get("primary_barcode"))
+    if incoming == existing_barcode and existing is not None:
+        prepared.setdefault("barcodes", existing.get("barcodes") or ([incoming] if incoming else []))
+        prepared.setdefault("barcode_source", existing.get("barcode_source") or "")
+        prepared.setdefault("barcode_status", existing.get("barcode_status") or "")
+        prepared.setdefault("barcode_synced_at", existing.get("barcode_synced_at") or "")
+        prepared.setdefault("barcode_updated_at", existing.get("barcode_updated_at") or "")
+        prepared.setdefault("barcode_evidence", existing.get("barcode_evidence") or {})
+        return prepared
+    if incoming:
+        prepared.update(
+            {
+                "barcode": incoming,
+                "primary_barcode": incoming,
+                "barcodes": _normalize_barcode_list([incoming, *_raw_barcode_list(payload.get("barcodes"))]),
+                "barcode_source": NOMENCLATURE_BARCODE_SOURCE_MANUAL,
+                "barcode_status": NOMENCLATURE_BARCODE_STATUS_MANUAL,
+                "barcode_updated_at": updated_at,
+                "barcode_evidence": {"source": "manual_override"},
+            }
+        )
+        return prepared
+    prepared.update(
+        {
+            "barcode": "",
+            "primary_barcode": "",
+            "barcodes": [],
+            "barcode_source": NOMENCLATURE_BARCODE_SOURCE_MISSING,
+            "barcode_status": NOMENCLATURE_BARCODE_STATUS_MISSING,
+            "barcode_updated_at": updated_at,
+            "barcode_evidence": {"source": "manual_clear"},
+        }
+    )
+    return prepared
+
+
+def _normalize_barcode(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def _raw_barcode_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [item for item in re.split(r"[\n,;]+", value)]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def _normalize_barcode_list(value: Any) -> list[str]:
+    raw_items = _raw_barcode_list(value) if not isinstance(value, list) else value
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        barcode = _normalize_barcode(raw)
+        if not barcode or barcode in seen:
+            continue
+        seen.add(barcode)
+        normalized.append(barcode)
+    return normalized
+
+
+def _normalize_barcode_source(value: Any, *, has_barcode: bool) -> str:
+    normalized = str(value or "").strip()
+    if normalized in NOMENCLATURE_BARCODE_SOURCES:
+        return normalized
+    return NOMENCLATURE_BARCODE_SOURCE_MANUAL if has_barcode else NOMENCLATURE_BARCODE_SOURCE_MISSING
+
+
+def _normalize_barcode_status(value: Any, *, barcode_source: str, barcode_count: int, has_barcode: bool) -> str:
+    normalized = str(value or "").strip()
+    if normalized in NOMENCLATURE_BARCODE_STATUSES:
+        return normalized
+    if barcode_source == NOMENCLATURE_BARCODE_SOURCE_MANUAL and has_barcode:
+        return NOMENCLATURE_BARCODE_STATUS_MANUAL
+    if barcode_count > 1:
+        return NOMENCLATURE_BARCODE_STATUS_MULTIPLE
+    return NOMENCLATURE_BARCODE_STATUS_READY if has_barcode else NOMENCLATURE_BARCODE_STATUS_MISSING
+
+
+def _barcode_resolution_barcodes(resolution: Any) -> list[str]:
+    if resolution is None:
+        return []
+    if isinstance(resolution, Mapping):
+        return _normalize_barcode_list(resolution.get("barcodes") or resolution.get("skus") or [])
+    return _normalize_barcode_list(getattr(resolution, "barcodes", []))
+
+
+def _barcode_resolution_evidence(resolution: Any, *, nm_id: int, sync_reason: str) -> dict[str, Any]:
+    if isinstance(resolution, Mapping):
+        cards_found = _optional_int(resolution.get("cards_found"))
+        pages_fetched = _optional_int(resolution.get("pages_fetched"))
+        endpoint = str(resolution.get("endpoint") or "/content/v2/get/cards/list")
+    else:
+        cards_found = _optional_int(getattr(resolution, "cards_found", None))
+        pages_fetched = _optional_int(getattr(resolution, "pages_fetched", None))
+        endpoint = str(getattr(resolution, "endpoint", "/content/v2/get/cards/list"))
+    return {
+        "source": NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT,
+        "endpoint": endpoint,
+        "nm_id": nm_id,
+        "cards_found": cards_found or 0,
+        "pages_fetched": pages_fetched or 0,
+        "sync_reason": sync_reason,
+    }
+
+
+def _nomenclature_barcode_sync_error_item(
+    item: Mapping[str, Any],
+    *,
+    status: str,
+    error: Exception,
+    updated_at: str,
+    sync_reason: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    normalized = dict(item)
+    existing_barcode = _normalize_barcode(normalized.get("barcode"))
+    normalized.update(
+        {
+            "barcode_source": normalized.get("barcode_source") or NOMENCLATURE_BARCODE_SOURCE_ERROR,
+            "barcode_status": status,
+            "barcode_updated_at": updated_at,
+            "barcode_evidence": {
+                "source": NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT,
+                "result": status,
+                "sync_reason": sync_reason,
+                "error": _safe_barcode_error(error),
+            },
+        }
+    )
+    if not existing_barcode:
+        normalized["barcode_source"] = NOMENCLATURE_BARCODE_SOURCE_ERROR
+    return normalized, {"status": status, "reason": sync_reason, "save_item": True}
+
+
+def _safe_barcode_error(error: Exception) -> str:
+    text = str(error or "")
+    text = re.sub(r"(?i)(authorization|token|cookie|password|secret)([\"'=:\s]+)([^\\s\"'<>;,]+)", r"\1\2<redacted>", text)
+    return re.sub(r"\s+", " ", text).strip()[:420]
+
+
+def _nomenclature_barcode_summary(items: list[Mapping[str, Any]]) -> dict[str, Any]:
+    active_rows = [item for item in items if bool(item.get("is_active"))]
+    active_with_barcode = [item for item in active_rows if str(item.get("barcode") or "").strip()]
+    return {
+        "total_rows": len(items),
+        "active_rows": len(active_rows),
+        "active_rows_with_barcode": len(active_with_barcode),
+        "active_rows_missing_barcode": len(active_rows) - len(active_with_barcode),
+        "manual_barcode_count": sum(
+            1
+            for item in items
+            if str(item.get("barcode_source") or "") == NOMENCLATURE_BARCODE_SOURCE_MANUAL
+            and str(item.get("barcode") or "").strip()
+        ),
+        "wb_content_barcode_count": sum(
+            1
+            for item in items
+            if str(item.get("barcode_source") or "") == NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT
+            and str(item.get("barcode") or "").strip()
+        ),
+        "sync_error_count": sum(
+            1
+            for item in items
+            if str(item.get("barcode_status") or "") in {NOMENCLATURE_BARCODE_STATUS_SYNC_ERROR, NOMENCLATURE_BARCODE_STATUS_TOKEN_MISSING}
+        ),
+        "multiple_barcode_count": sum(
+            1 for item in items if str(item.get("barcode_status") or "") == NOMENCLATURE_BARCODE_STATUS_MULTIPLE
+        ),
     }
 
 
@@ -2274,6 +2703,19 @@ def _nomenclature_import_header_keys(header_row: tuple[Any, ...]) -> list[str]:
         "nmid": "nm_id",
         "nm id": "nm_id",
         "nm_id": "nm_id",
+        "шк": "barcode",
+        "штрихкод": "barcode",
+        "штрихкод wb": "barcode",
+        "шк / barcode": "barcode",
+        "barcode": "barcode",
+        "primary_barcode": "barcode",
+        "все шк": "barcodes",
+        "barcodes": "barcodes",
+        "barcode_list": "barcodes",
+        "источник шк": "barcode_source",
+        "barcode_source": "barcode_source",
+        "статус шк": "barcode_status",
+        "barcode_status": "barcode_status",
         "номенклатура": "nomenclature_name",
         "nomenclature": "nomenclature_name",
         "nomenclature_name": "nomenclature_name",
@@ -2349,6 +2791,26 @@ def _normalize_nomenclature_import_row(
     )
     match_key = raw_match_key if "match_key" in row_values else str(base.get("match_key") or "")
     nm_id = _parse_nomenclature_nm_id(row_values.get("nm_id"), row_number=row_number) if "nm_id" in row_values else base.get("nm_id")
+    if "barcode" in row_values:
+        barcode = _normalize_barcode(row_values.get("barcode"))
+        barcode_payload = _prepare_nomenclature_barcode_payload(
+            existing=base,
+            payload={
+                "barcode": barcode,
+                "barcodes": _cell_text(row_values.get("barcodes")) if "barcodes" in row_values else base.get("barcodes") or [],
+            },
+            updated_at=now,
+        )
+    else:
+        barcode_payload = {
+            "barcode": base.get("barcode") or "",
+            "barcodes": base.get("barcodes") or [],
+            "barcode_source": base.get("barcode_source") or "",
+            "barcode_status": base.get("barcode_status") or "",
+            "barcode_synced_at": base.get("barcode_synced_at") or "",
+            "barcode_updated_at": base.get("barcode_updated_at") or "",
+            "barcode_evidence": base.get("barcode_evidence") or {},
+        }
     compatible_models_text = (
         _cell_text(row_values.get("compatible_models_text"))
         if "compatible_models_text" in row_values
@@ -2378,6 +2840,7 @@ def _normalize_nomenclature_import_row(
             **base,
             "is_active": is_active,
             "nm_id": nm_id,
+            **barcode_payload,
             "nomenclature_name": nomenclature_name,
             "product_type": product_type,
             "match_key": match_key,
@@ -2458,6 +2921,12 @@ def _nomenclature_item_changed(existing: Mapping[str, Any], item: Mapping[str, A
         "is_active",
         "our_sku",
         "nm_id",
+        "barcode",
+        "barcodes",
+        "barcode_source",
+        "barcode_status",
+        "barcode_synced_at",
+        "barcode_updated_at",
         "nomenclature_name",
         "product_type",
         "match_key",
@@ -3604,6 +4073,14 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        normalized = int(default)
+    return min(max(normalized, minimum), maximum)
 
 
 def _sum_numeric(values: Any) -> float:
