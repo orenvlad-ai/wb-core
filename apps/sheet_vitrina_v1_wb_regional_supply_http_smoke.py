@@ -30,6 +30,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+    DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
     DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     build_registry_upload_http_server,
@@ -40,6 +41,10 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
+from packages.contracts.supplier_shipments import (
+    NOMENCLATURE_BARCODE_SOURCE_MANUAL,
+    NOMENCLATURE_BARCODE_STATUS_MANUAL,
+)
 from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSuccess
 from packages.contracts.wb_regional_supply import (
     DISTRICT_CENTRAL,
@@ -87,6 +92,30 @@ class NoopSalesHistoryBlock:
         raise AssertionError("runtime coverage is fully seeded; live fetch must not be called in HTTP smoke")
 
 
+class FakePlanningSource:
+    def __init__(self) -> None:
+        self.acceptance_requests = []
+
+    def fetch_acceptance_options(self, *, products, warehouse_id=None):
+        self.acceptance_requests.append({"products": list(products), "warehouse_id": warehouse_id})
+        return {"result": {"warehouses": [{"warehouseID": 101, "warehouseName": "Коледино", "canBox": True}]}}
+
+    def fetch_warehouses(self):
+        return [{"warehouseID": 101, "warehouseName": "Коледино"}]
+
+    def fetch_marketplace_offices(self):
+        return [{"name": "Коледино", "federalDistrict": "Центральный федеральный округ"}]
+
+    def fetch_box_tariffs(self, *, tariff_date=None):
+        return [{"warehouseName": "Коледино", "geoName": "Центральный федеральный округ", "boxDeliveryBase": "5"}]
+
+    def fetch_transit_tariffs(self):
+        return []
+
+    def fetch_acceptance_coefficients(self, *, warehouse_ids=None):
+        return [{"warehouseID": 101, "warehouseName": "Коледино", "date": "2026-07-01", "coefficient": 1, "allowUnload": True}]
+
+
 def main() -> None:
     bundle = json.loads(INPUT_BUNDLE_FIXTURE.read_text(encoding="utf-8"))
     with TemporaryDirectory(prefix="sheet-vitrina-wb-regional-http-") as tmp:
@@ -125,6 +154,8 @@ def main() -> None:
             entrypoint.wb_regional_supply_block.stocks_block = FakeStocksBlock(active_nm_ids)
             entrypoint.wb_regional_supply_block.sales_funnel_history_block = NoopSalesHistoryBlock()
             entrypoint.wb_regional_supply_block.sales_history.sales_funnel_history_block = NoopSalesHistoryBlock()
+            planning_source = FakePlanningSource()
+            entrypoint.wb_regional_supply_planning_block.source = planning_source
 
             operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=factory-order")
             if operator_status != 200:
@@ -144,7 +175,13 @@ def main() -> None:
                 "<th>Рекомендовано / к поставке</th>",
                 "<th>Дефицит</th>",
                 "<th>Скачать XLSX</th>",
+                "<th>Подбор WB</th>",
+                "Подобрать склады WB",
+                "regionalPlanningPanel",
+                "copyRegionalPlanningPayloadButton",
+                "wb_regional_planning_options_path",
                 "data-regional-district-download",
+                "data-regional-planning-district",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
@@ -232,6 +269,24 @@ def main() -> None:
                 raise AssertionError("main SKU must use 14 selected stock-depletion days")
             if abs(float(central_main_row.get("daily_demand_total", 0.0)) - 60.0) > 1e-9:
                 raise AssertionError("main SKU total daily demand must remain based on orderCount")
+
+            _seed_planning_nomenclature(runtime, active_nm_ids=active_nm_ids)
+            planning_status, planning_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH}",
+                {
+                    "district_key": DISTRICT_CENTRAL,
+                    "calculation_id": calc_payload["calculation_id"],
+                    "package_type": "box",
+                },
+            )
+            if planning_status != 200:
+                raise AssertionError(f"planning-options route must return 200, got {planning_status} {planning_payload}")
+            if planning_payload.get("status") != "ready":
+                raise AssertionError(f"planning-options must return ready payload, got {planning_payload}")
+            if planning_payload.get("options", [{}])[0].get("warehouse_scope") != "same_district":
+                raise AssertionError(f"planning-options must map warehouse to selected district, got {planning_payload}")
+            if planning_source.acceptance_requests[0]["products"][0].get("barcode") != f"46{active_nm_ids[0]}":
+                raise AssertionError(f"planning-options must call acceptance/options with barcode evidence, got {planning_source.acceptance_requests}")
 
             _seed_wb_regional_overlay_fixture(
                 runtime,
@@ -575,6 +630,30 @@ def _seed_wb_regional_overlay_fixture(
         warehouses=[{"warehouse_id": supply_id, "warehouse_name": warehouse_name}],
         synced_at=ACTIVATED_AT,
     )
+
+
+def _seed_planning_nomenclature(runtime: RegistryUploadDbBackedRuntime, *, active_nm_ids: list[int]) -> None:
+    rows: list[dict[str, object]] = []
+    for nm_id in active_nm_ids:
+        barcode = f"46{int(nm_id)}"
+        rows.append(
+            {
+                "item_id": f"planning-item-{int(nm_id)}",
+                "is_active": True,
+                "nm_id": int(nm_id),
+                "barcode": barcode,
+                "barcodes": [barcode],
+                "barcode_source": NOMENCLATURE_BARCODE_SOURCE_MANUAL,
+                "barcode_status": NOMENCLATURE_BARCODE_STATUS_MANUAL,
+                "barcode_updated_at": ACTIVATED_AT,
+                "nomenclature_name": f"Planning SKU {int(nm_id)}",
+                "product_type": "clear",
+                "match_key": f"planning-{int(nm_id)}",
+                "created_at": ACTIVATED_AT,
+                "updated_at": ACTIVATED_AT,
+            }
+        )
+    runtime.save_nomenclature_items_atomic(rows)
 
 
 def _reserve_free_port() -> int:

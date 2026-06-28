@@ -1904,6 +1904,94 @@
       border-bottom: 0;
     }
 
+    .regional-planning-panel {
+      margin-top: 12px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+
+    .regional-planning-panel[hidden] {
+      display: none;
+    }
+
+    .regional-planning-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .regional-planning-title {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .regional-planning-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 8px 0;
+    }
+
+    .regional-planning-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      padding: 3px 7px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .regional-planning-blockers {
+      margin: 8px 0;
+      padding-left: 18px;
+      color: var(--warning-text);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .regional-planning-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      margin-top: 8px;
+    }
+
+    .regional-planning-table {
+      width: 1280px;
+      min-width: 1280px;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    .regional-planning-table th,
+    .regional-planning-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .regional-planning-table th {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      background: var(--panel-subtle);
+    }
+
+    .regional-planning-table .muted {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
     /* Dark embedded operator UI: reports and supply tabs share the unified vitrina surface tokens. */
     .tab-strip {
       border: 1px solid var(--border);
@@ -3799,15 +3887,50 @@
                       <th>Рекомендовано / к поставке</th>
                       <th>Дефицит</th>
                       <th>Скачать XLSX</th>
+                      <th>Подбор WB</th>
                     </tr>
                   </thead>
                   <tbody id="regionalDistrictTableBody">
                     <tr>
-                      <td colspan="4">Результат ещё не подготовлен.</td>
+                      <td colspan="5">Результат ещё не подготовлен.</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
+              <section id="regionalPlanningPanel" class="regional-planning-panel" hidden>
+                <div class="regional-planning-head">
+                  <div>
+                    <h3 id="regionalPlanningTitle" class="regional-planning-title">Подбор складов WB</h3>
+                    <p id="regionalPlanningMessage" class="section-message">Выберите округ для подбора.</p>
+                  </div>
+                  <button id="copyRegionalPlanningPayloadButton" class="action-button secondary-button" type="button" disabled>Скопировать JSON</button>
+                </div>
+                <div id="regionalPlanningSummary" class="regional-planning-summary"></div>
+                <ul id="regionalPlanningBlockers" class="regional-planning-blockers" hidden></ul>
+                <div class="regional-planning-table-wrap">
+                  <table class="regional-planning-table" aria-label="Варианты складов WB">
+                    <thead>
+                      <tr>
+                        <th>Ранг</th>
+                        <th>Дата</th>
+                        <th>Склад</th>
+                        <th>Округ</th>
+                        <th>Маршрут</th>
+                        <th>Транзит</th>
+                        <th>Коэф.</th>
+                        <th>allowUnload</th>
+                        <th>Тариф/evidence</th>
+                        <th>Действие</th>
+                      </tr>
+                    </thead>
+                    <tbody id="regionalPlanningTableBody">
+                      <tr>
+                        <td colspan="10">Варианты ещё не запрошены.</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
               <p id="regionalMessage" class="section-message"></p>
               <p id="regionalWbSupplyOverlayNote" class="field-note">WB-поставки не выбраны.</p>
               <p id="regionalDiagnosticsNote" class="field-note">Диагностика методологии появится после расчёта.</p>
@@ -4230,6 +4353,13 @@
       const regionalDiagnosticsBody = document.getElementById("regionalDiagnosticsBody");
       const regionalWbSupplyOverlayNote = document.getElementById("regionalWbSupplyOverlayNote");
       const regionalDistrictTableBody = document.getElementById("regionalDistrictTableBody");
+      const regionalPlanningPanel = document.getElementById("regionalPlanningPanel");
+      const regionalPlanningTitle = document.getElementById("regionalPlanningTitle");
+      const regionalPlanningMessage = document.getElementById("regionalPlanningMessage");
+      const regionalPlanningSummary = document.getElementById("regionalPlanningSummary");
+      const regionalPlanningBlockers = document.getElementById("regionalPlanningBlockers");
+      const regionalPlanningTableBody = document.getElementById("regionalPlanningTableBody");
+      const copyRegionalPlanningPayloadButton = document.getElementById("copyRegionalPlanningPayloadButton");
       const downloadRegionalRecommendationsZipButton = document.getElementById("downloadRegionalRecommendationsZipButton");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
       const supplierShipmentsFrame = document.getElementById("supplierShipmentsFrame");
@@ -4410,6 +4540,8 @@
         persistedOperatorUiState.wb_regional_included_district_keys,
         { fallbackToAll: true }
       );
+      let regionalLastResultPayload = null;
+      let regionalPlanningPayload = null;
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
@@ -7015,19 +7147,22 @@
       function renderRegionalDistricts(districts, result) {
         const items = filterRegionalDistrictsForResult(districts, result);
         if (!items.length) {
-          regionalDistrictTableBody.innerHTML = "<tr><td colspan=\"4\">Результат ещё не подготовлен.</td></tr>";
+          regionalDistrictTableBody.innerHTML = "<tr><td colspan=\"5\">Результат ещё не подготовлен.</td></tr>";
           return;
         }
         regionalDistrictTableBody.innerHTML = items.map((item) => {
           const downloadPath = valueOrDash(item.download_path) === "-" ? "" : String(item.download_path || "");
           const disabled = downloadPath ? "" : " disabled";
           const filename = valueOrDash(item.filename);
+          const districtKey = valueOrDash(item.district_key);
+          const planningDisabled = Number(item.total_qty || 0) > 0 ? "" : " disabled";
           return [
             "<tr>",
             "<td>" + valueOrDash(item.district_name_ru) + "</td>",
             "<td>" + valueOrDash(item.total_qty) + "</td>",
             "<td>" + valueOrDash(item.deficit_qty) + "</td>",
-            "<td><button class=\"action-button secondary-button regional-download-button\" type=\"button\" data-regional-district-download=\"" + escapeHtml(valueOrDash(item.district_key)) + "\" data-download-path=\"" + escapeHtml(downloadPath) + "\" data-download-filename=\"" + escapeHtml(filename) + "\"" + disabled + ">Скачать Excel</button></td>",
+            "<td><button class=\"action-button secondary-button regional-download-button\" type=\"button\" data-regional-district-download=\"" + escapeHtml(districtKey) + "\" data-download-path=\"" + escapeHtml(downloadPath) + "\" data-download-filename=\"" + escapeHtml(filename) + "\"" + disabled + ">Скачать Excel</button></td>",
+            "<td><button class=\"action-button secondary-button regional-planning-button\" type=\"button\" data-regional-planning-district=\"" + escapeHtml(districtKey) + "\"" + planningDisabled + ">Подобрать склады WB</button></td>",
             "</tr>"
           ].join("");
         }).join("");
@@ -7045,6 +7180,288 @@
             );
           });
         });
+        Array.from(regionalDistrictTableBody.querySelectorAll(".regional-planning-button")).forEach((button) => {
+          button.addEventListener("click", async () => {
+            await requestRegionalPlanningOptions(button.dataset.regionalPlanningDistrict || "", button);
+          });
+        });
+      }
+
+      async function requestRegionalPlanningOptions(districtKey, button) {
+        const normalizedDistrictKey = String(districtKey || "").trim();
+        if (!normalizedDistrictKey) {
+          setRegionalMessage("Не выбран округ для подбора складов WB.", "error");
+          return;
+        }
+        const previousText = button ? button.textContent : "";
+        if (button) {
+          button.disabled = true;
+          button.textContent = "Подбираем...";
+        }
+        renderRegionalPlanningLoading(normalizedDistrictKey);
+        try {
+          const response = await fetch(config.wb_regional_planning_options_path, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json; charset=utf-8"
+            },
+            body: JSON.stringify({
+              district_key: normalizedDistrictKey,
+              calculation_id: regionalLastResultPayload && regionalLastResultPayload.calculation_id || "",
+              package_type: "box",
+              include_transit: true
+            })
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderRegionalPlanningPayload(payload);
+        } catch (error) {
+          regionalPlanningPayload = null;
+          if (regionalPlanningPanel) {
+            regionalPlanningPanel.hidden = false;
+          }
+          if (regionalPlanningTitle) {
+            regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictLabel(normalizedDistrictKey);
+          }
+          setRegionalPlanningMessage("Подбор завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)), "error");
+          if (regionalPlanningTableBody) {
+            regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Варианты не получены.</td></tr>";
+          }
+          if (copyRegionalPlanningPayloadButton) {
+            copyRegionalPlanningPayloadButton.disabled = true;
+          }
+        } finally {
+          if (button) {
+            button.disabled = false;
+            button.textContent = previousText || "Подобрать склады WB";
+          }
+        }
+      }
+
+      function renderRegionalPlanningLoading(districtKey) {
+        regionalPlanningPayload = null;
+        if (regionalPlanningPanel) {
+          regionalPlanningPanel.hidden = false;
+        }
+        if (regionalPlanningTitle) {
+          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictLabel(districtKey);
+        }
+        setRegionalPlanningMessage("Запрашиваем WB acceptance/options и тарифную evidence...", "");
+        if (regionalPlanningSummary) {
+          regionalPlanningSummary.innerHTML = "";
+        }
+        if (regionalPlanningBlockers) {
+          regionalPlanningBlockers.hidden = true;
+          regionalPlanningBlockers.innerHTML = "";
+        }
+        if (regionalPlanningTableBody) {
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Загрузка вариантов...</td></tr>";
+        }
+        if (copyRegionalPlanningPayloadButton) {
+          copyRegionalPlanningPayloadButton.disabled = true;
+        }
+      }
+
+      function renderRegionalPlanningPayload(payload) {
+        regionalPlanningPayload = payload || null;
+        if (regionalPlanningPanel) {
+          regionalPlanningPanel.hidden = false;
+        }
+        if (regionalPlanningTitle) {
+          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictLabel(payload && payload.district_key);
+        }
+        const status = String(payload && payload.status || "");
+        const blockers = Array.isArray(payload && payload.blockers) ? payload.blockers : [];
+        const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings.filter(Boolean) : [];
+        const options = Array.isArray(payload && payload.options) ? payload.options : [];
+        if (copyRegionalPlanningPayloadButton) {
+          copyRegionalPlanningPayloadButton.disabled = !payload;
+        }
+        setRegionalPlanningMessage(regionalPlanningStatusText(status, options.length, blockers.length), regionalPlanningStatusTone(status, blockers.length));
+        renderRegionalPlanningSummary(payload);
+        renderRegionalPlanningBlockers(blockers);
+        renderRegionalPlanningOptions(options);
+        if (warnings.length) {
+          setRegionalMessage("Подбор WB выполнен с предупреждениями: " + warnings.join(" "), "warning");
+        }
+      }
+
+      function renderRegionalPlanningSummary(payload) {
+        if (!regionalPlanningSummary) {
+          return;
+        }
+        const summary = payload && payload.summary || {};
+        const barcode = payload && payload.barcode_summary || {};
+        const chips = [
+          "SKU: " + valueOrDash(summary.planned_product_count),
+          "Штук: " + valueOrDash(summary.planned_qty_total),
+          "ШК готово: " + valueOrDash(barcode.ready) + "/" + valueOrDash(barcode.total),
+          "Вариантов: " + valueOrDash(summary.option_count),
+          "В округе: " + valueOrDash(summary.same_district_option_count || 0),
+          "Транзит: " + valueOrDash(summary.transit_option_count || 0)
+        ];
+        regionalPlanningSummary.innerHTML = chips.map((item) => "<span class=\"regional-planning-chip\">" + escapeHtml(item) + "</span>").join("");
+      }
+
+      function renderRegionalPlanningBlockers(blockers) {
+        if (!regionalPlanningBlockers) {
+          return;
+        }
+        if (!blockers.length) {
+          regionalPlanningBlockers.hidden = true;
+          regionalPlanningBlockers.innerHTML = "";
+          return;
+        }
+        regionalPlanningBlockers.hidden = false;
+        regionalPlanningBlockers.innerHTML = blockers.map((item) => {
+          const nmId = item && item.nm_id ? "nmId " + item.nm_id + ": " : "";
+          return "<li>" + escapeHtml(nmId + valueOrDash(item && item.message)) + "</li>";
+        }).join("");
+      }
+
+      function renderRegionalPlanningOptions(options) {
+        if (!regionalPlanningTableBody) {
+          return;
+        }
+        if (!options.length) {
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Доступные варианты не найдены или есть blockers.</td></tr>";
+          return;
+        }
+        regionalPlanningTableBody.innerHTML = options.map((item) => {
+          const routeLabel = item.route_type === "transit" ? "Транзит" : "Прямо";
+          const scopeLabel = regionalPlanningScopeLabel(item.warehouse_scope);
+          const tariff = item.tariff_evidence || {};
+          const tariffText = [
+            tariff.box ? "box" : "",
+            tariff.transit ? "transit" : ""
+          ].filter(Boolean).join(" + ") || "—";
+          const warnings = Array.isArray(item.warnings) && item.warnings.length
+            ? "<div class=\"muted\">" + escapeHtml(item.warnings.join(" ")) + "</div>"
+            : "";
+          return [
+            "<tr>",
+            "<td><strong>#" + escapeHtml(valueOrDash(item.rank)) + "</strong><div class=\"muted\">" + escapeHtml(valueOrDash(item.recommendation)) + "</div></td>",
+            "<td>" + escapeHtml(valueOrDash(item.date || "дата не указана")) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.warehouse_name)) + "<div class=\"muted\">" + escapeHtml(valueOrDash(item.warehouse_id)) + "</div></td>",
+            "<td>" + escapeHtml(valueOrDash(item.warehouse_district_short_label_ru || item.warehouse_district_label_ru || scopeLabel)) + "<div class=\"muted\">" + escapeHtml(scopeLabel) + "</div></td>",
+            "<td>" + escapeHtml(routeLabel) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.transit_warehouse_name)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(item.coefficient_display)) + "</td>",
+            "<td>" + escapeHtml(regionalPlanningBoolLabel(item.allow_unload)) + "</td>",
+            "<td>" + escapeHtml(tariffText) + warnings + "</td>",
+            "<td><button class=\"action-button secondary-button\" type=\"button\" data-regional-planning-copy=\"" + escapeHtml(String(item.option_id || "")) + "\">Скопировать</button></td>",
+            "</tr>"
+          ].join("");
+        }).join("");
+        Array.from(regionalPlanningTableBody.querySelectorAll("[data-regional-planning-copy]")).forEach((button) => {
+          button.addEventListener("click", async () => {
+            const optionId = button.getAttribute("data-regional-planning-copy") || "";
+            const option = options.find((item) => String(item.option_id || "") === optionId);
+            await copyRegionalPlanningOption(option || null);
+          });
+        });
+      }
+
+      function regionalPlanningStatusText(status, optionCount, blockerCount) {
+        if (status === "ready") {
+          return "Найдено вариантов: " + optionCount + ".";
+        }
+        if (status === "blocked") {
+          return "Подбор заблокирован: " + blockerCount + " проблем.";
+        }
+        if (status === "empty") {
+          return "В округе нет количества к поставке.";
+        }
+        if (status === "no_last_calculation") {
+          return "Сначала выполните региональный расчёт.";
+        }
+        if (status === "upstream_error") {
+          return "WB API вернул controlled error.";
+        }
+        if (status === "no_options") {
+          return "WB не вернул доступных вариантов.";
+        }
+        return valueOrDash(status);
+      }
+
+      function regionalPlanningStatusTone(status, blockerCount) {
+        if (status === "ready") {
+          return "success";
+        }
+        if (status === "blocked" || status === "upstream_error" || blockerCount > 0) {
+          return "warning";
+        }
+        return "";
+      }
+
+      function regionalPlanningScopeLabel(scope) {
+        if (scope === "same_district") {
+          return "в выбранном округе";
+        }
+        if (scope === "outside_district") {
+          return "вне округа";
+        }
+        if (scope === "unmapped") {
+          return "не сопоставлен";
+        }
+        return "—";
+      }
+
+      function regionalPlanningBoolLabel(value) {
+        if (value === true) {
+          return "да";
+        }
+        if (value === false) {
+          return "нет";
+        }
+        return "—";
+      }
+
+      function setRegionalPlanningMessage(message, tone) {
+        if (!regionalPlanningMessage) {
+          return;
+        }
+        regionalPlanningMessage.textContent = message || "";
+        regionalPlanningMessage.className = "section-message" + (tone ? " is-" + tone : "");
+      }
+
+      async function copyRegionalPlanningOption(option) {
+        if (!option) {
+          setRegionalPlanningMessage("Вариант для копирования не найден.", "error");
+          return;
+        }
+        const payload = option.operator_handoff || option;
+        await copyText(JSON.stringify(payload, null, 2));
+        setRegionalPlanningMessage("Вариант скопирован для ручного создания поставки в кабинете WB.", "success");
+      }
+
+      async function copyRegionalPlanningPayload() {
+        if (!regionalPlanningPayload) {
+          setRegionalPlanningMessage("Payload подбора ещё не получен.", "error");
+          return;
+        }
+        await copyText(JSON.stringify(regionalPlanningPayload, null, 2));
+        setRegionalPlanningMessage("JSON подбора скопирован.", "success");
+      }
+
+      async function copyText(text) {
+        const value = String(text || "");
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+        const textarea = document.createElement("textarea");
+        textarea.value = value;
+        textarea.setAttribute("readonly", "readonly");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
       }
 
       function filterRegionalDistrictsForResult(districts, result) {
@@ -7315,6 +7732,7 @@
       }
 
       function renderRegionalResult(result, fallbackActiveSkuCount) {
+        regionalLastResultPayload = result || null;
         if (!result) {
           regionalResultStatus.textContent = "ещё не рассчитывался";
           regionalResultReportDate.textContent = "-";
@@ -7330,6 +7748,13 @@
           renderWbSupplyOverlayResultNote(regionalWbSupplyOverlayNote, null, "regional");
           renderRegionalDiagnostics(null);
           renderRegionalDistricts([], null);
+          regionalPlanningPayload = null;
+          if (regionalPlanningPanel) {
+            regionalPlanningPanel.hidden = true;
+          }
+          if (copyRegionalPlanningPayloadButton) {
+            copyRegionalPlanningPayloadButton.disabled = true;
+          }
           return;
         }
         regionalResultStatus.textContent = result.status === "success" ? "выполнен" : valueOrDash(result.status);
@@ -9587,6 +10012,9 @@
       sellerRecoveryStopButton.addEventListener("click", stopSellerRecovery);
       if (downloadRegionalRecommendationsZipButton) {
         downloadRegionalRecommendationsZipButton.addEventListener("click", downloadRegionalRecommendationsZip);
+      }
+      if (copyRegionalPlanningPayloadButton) {
+        copyRegionalPlanningPayloadButton.addEventListener("click", copyRegionalPlanningPayload);
       }
       if (shipmentRegistryRefreshButton) {
         shipmentRegistryRefreshButton.addEventListener("click", () => {

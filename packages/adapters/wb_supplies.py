@@ -214,6 +214,68 @@ class HttpBackedWbSuppliesSource:
         )
         return _extract_list_rows(payload, row_name="warehouses")
 
+    def fetch_acceptance_options(
+        self,
+        *,
+        products: list[Mapping[str, Any]],
+        warehouse_id: int | str | None = None,
+    ) -> Mapping[str, Any]:
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=self._default_base_url,
+            base_url_env_var=self._base_url_env_var,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        body: dict[str, Any] = {
+            "products": [
+                {
+                    "barcode": str(item.get("barcode") or "").strip(),
+                    "quantity": _bounded_int(item.get("quantity"), default=0, minimum=0, maximum=1_000_000),
+                }
+                for item in products
+                if str(item.get("barcode") or "").strip()
+                and _bounded_int(item.get("quantity"), default=0, minimum=0, maximum=1_000_000) > 0
+            ]
+        }
+        if warehouse_id not in (None, ""):
+            body["warehouseID"] = int(warehouse_id) if str(warehouse_id).strip().isdigit() else str(warehouse_id).strip()
+        payload = self._request_json(
+            method="POST",
+            url=f"{runtime.base_url}/api/v1/acceptance/options",
+            token=runtime.token,
+            timeout_seconds=runtime.timeout_seconds,
+            body=body,
+        )
+        if not isinstance(payload, Mapping):
+            raise WbSuppliesTransportError("WB acceptance options endpoint returned invalid JSON shape")
+        return payload
+
+    def fetch_acceptance_coefficients(
+        self,
+        *,
+        warehouse_ids: list[int | str] | None = None,
+    ) -> list[Mapping[str, Any]]:
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=DEFAULT_WB_TARIFFS_API_BASE_URL,
+            base_url_env_var=DEFAULT_WB_TARIFFS_API_BASE_URL_ENV,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        normalized_ids = [
+            str(item).strip()
+            for item in warehouse_ids or []
+            if str(item or "").strip()
+        ]
+        query = urllib_parse.urlencode({"warehouseIDs": ",".join(normalized_ids)}) if normalized_ids else ""
+        suffix = f"?{query}" if query else ""
+        payload = self._request_json(
+            method="GET",
+            url=f"{runtime.base_url}/api/tariffs/v1/acceptance/coefficients{suffix}",
+            token=runtime.token,
+            timeout_seconds=runtime.timeout_seconds,
+        )
+        return _extract_list_rows(payload, row_name="coefficients")
+
     def fetch_marketplace_offices(self) -> list[Mapping[str, Any]]:
         runtime = load_runtime_config(
             token_env_var=self._token_env_var,

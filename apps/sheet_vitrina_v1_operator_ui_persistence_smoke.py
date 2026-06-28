@@ -37,6 +37,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_STOCK_REPORT_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+    DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     _render_sheet_vitrina_operator_ui,
 )
@@ -500,6 +501,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "subsection_persistence": persistence_result["subsection_persistence"],
         "supplier_registry_refresh": persistence_result["supplier_registry_refresh"],
         "factory_source_persistence": persistence_result["factory_source_persistence"],
+        "regional_planning": persistence_result["regional_planning"],
         "sku_persistence": persistence_result["sku_persistence"],
         "plan_input_defaults": persistence_result["plan_input_defaults"],
         "plan_input_persistence": persistence_result["plan_input_persistence"],
@@ -664,6 +666,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         arg=STORAGE_KEY,
     )
     regional_requests: list[dict[str, object]] = []
+    regional_planning_requests: list[dict[str, object]] = []
     regional_result_payload: dict[str, object] = {}
 
     def _capture_regional_status(route) -> None:
@@ -687,6 +690,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         regional_requests.append(json.loads(body))
         regional_result_payload = {
             "status": "success",
+            "calculation_id": "calc-browser-regional",
             "report_date": "2026-04-20",
             "horizon_days": 7,
             "active_sku_count": 33,
@@ -809,8 +813,84 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             body=json.dumps(regional_result_payload, ensure_ascii=False),
         )
 
+    def _capture_regional_planning(route) -> None:
+        body = route.request.post_data or "{}"
+        regional_planning_requests.append(json.loads(body))
+        route.fulfill(
+            status=200,
+            content_type="application/json; charset=utf-8",
+            body=json.dumps(
+                {
+                    "contract_name": "sheet_vitrina_v1_wb_regional_supply_planning",
+                    "contract_version": "v1",
+                    "status": "ready",
+                    "calculation_id": "calc-browser-regional",
+                    "district_key": "central",
+                    "district_name_ru": "Центральный федеральный округ",
+                    "package_type": "box",
+                    "products": [
+                        {
+                            "nm_id": 1001,
+                            "sku_label": "SKU Alpha",
+                            "quantity": 100,
+                            "barcode": "4600000000001",
+                            "barcodes": ["4600000000001"],
+                            "barcode_source": "manual",
+                            "barcode_status": "manual",
+                            "barcode_ready": True,
+                        }
+                    ],
+                    "barcode_summary": {"total": 1, "ready": 1, "missing": 0, "manual": 1, "wb_content": 0, "multiple": 0},
+                    "summary": {
+                        "planned_product_count": 1,
+                        "planned_qty_total": 100,
+                        "option_count": 1,
+                        "same_district_option_count": 1,
+                        "outside_district_option_count": 0,
+                        "unmapped_option_count": 0,
+                        "transit_option_count": 0,
+                    },
+                    "warnings": [],
+                    "blockers": [],
+                    "options": [
+                        {
+                            "option_id": "browser-option-1",
+                            "rank": 1,
+                            "recommendation": "Рекомендуемый вариант",
+                            "date": "2026-07-01",
+                            "warehouse_id": 101,
+                            "warehouse_name": "Коледино",
+                            "warehouse_district_key": "central",
+                            "warehouse_district_label_ru": "Центральный федеральный округ",
+                            "warehouse_district_short_label_ru": "ЦФО",
+                            "warehouse_scope": "same_district",
+                            "route_type": "direct",
+                            "transit_warehouse_id": "",
+                            "transit_warehouse_name": "",
+                            "coefficient": 1,
+                            "coefficient_display": "1",
+                            "allow_unload": True,
+                            "tariff_evidence": {"box": {"warehouseName": "Коледино"}, "transit": None},
+                            "warnings": [],
+                            "operator_handoff": {
+                                "copy_format": "json",
+                                "district_key": "central",
+                                "warehouse_name": "Коледино",
+                                "date": "2026-07-01",
+                                "products": [{"nm_id": 1001, "barcode": "4600000000001", "quantity": 100}],
+                            },
+                        }
+                    ],
+                    "cache": {"enabled": False},
+                    "evidence": {"wb_api_read_only": True, "no_wb_mutations": True},
+                },
+                ensure_ascii=False,
+            ),
+        )
+
     page.route("**" + DEFAULT_WB_REGIONAL_STATUS_PATH, _capture_regional_status)
     page.route("**" + DEFAULT_WB_REGIONAL_CALCULATE_PATH, _capture_regional_calculate)
+    page.route("**" + DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH, _capture_regional_planning)
     page.click("#calculateRegionalSupplyButton")
     page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('Расчёт выполнен')")
     if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central", "northwest", "volga", "ural", "south_caucasus"]:
@@ -878,6 +958,28 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     for technical in ("partial_district_observations", "district_zero_zero_no_signal", "district_restock_or_upward_correction", "seed_floor"):
         if technical in details_text:
             raise AssertionError(f"technical code {technical!r} must be translated in visible diagnostics details")
+    if page.locator('[data-regional-planning-district="central"]').is_disabled():
+        raise AssertionError("regional planning button must be enabled for a district with positive quantity")
+    page.click('[data-regional-planning-district="central"]')
+    page.wait_for_function(
+        "() => document.getElementById('regionalPlanningMessage') && document.getElementById('regionalPlanningMessage').textContent.includes('Найдено вариантов: 1')"
+    )
+    if not regional_planning_requests:
+        raise AssertionError("regional planning button must call planning-options route")
+    latest_planning_request = regional_planning_requests[-1]
+    if latest_planning_request.get("district_key") != "central" or latest_planning_request.get("calculation_id") != "calc-browser-regional":
+        raise AssertionError(f"regional planning payload must include district and calculation id, got {regional_planning_requests}")
+    if page.locator("#regionalPlanningPanel").is_hidden():
+        raise AssertionError("regional planning panel must render after successful planning response")
+    regional_planning_text = page.locator("#regionalPlanningPanel").inner_text()
+    for expected in ("Подбор складов WB", "SKU: 1", "ШК готово: 1/1", "Вариантов: 1", "Коледино", "ЦФО", "Прямо", "Скопировать JSON", "Скопировать"):
+        if expected not in regional_planning_text:
+            raise AssertionError(f"regional planning panel must include {expected!r}, got {regional_planning_text!r}")
+    regional_planning_state = {
+        "request": latest_planning_request,
+        "summary": page.locator("#regionalPlanningSummary").inner_text(),
+        "first_option": page.locator("#regionalPlanningTableBody tr").first.inner_text(),
+    }
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():
         raise AssertionError("factory-order inbound source selection must survive reload")
@@ -1158,6 +1260,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "subsection_persistence": reports_state,
         "supplier_registry_refresh": supplier_refresh_state,
         "factory_source_persistence": factory_source_state,
+        "regional_planning": regional_planning_state,
         "sku_persistence": {
             "kept_label": kept_label,
             "selected_labels_after_reload": selected_labels_after_reload,
@@ -1445,6 +1548,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("operator_ui_supplier_registry_refresh: ok ->", result["supplier_registry_refresh"])
     print("operator_ui_sku_restore: ok ->", result["sku_persistence"])
     print("operator_ui_factory_source_restore: ok ->", result["factory_source_persistence"])
+    print("operator_ui_regional_planning: ok ->", result["regional_planning"])
     print("operator_ui_plan_input_defaults: ok ->", result["plan_input_defaults"])
     print("operator_ui_plan_input_restore: ok ->", result["plan_input_persistence"])
     print("operator_ui_zero_guard: ok ->", result["zero_selection_guard"])

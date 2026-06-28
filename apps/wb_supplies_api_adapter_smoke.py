@@ -134,6 +134,49 @@ def main() -> None:
         if box_req.get_method() != "GET" or box_req.full_url != "https://common-api.example.test/api/v1/tariffs/box?date=2026-06-11":
             raise AssertionError(f"box tariffs URL changed unexpectedly: {box_req.full_url}")
 
+        opener.next_payload = json.dumps(
+            {"result": {"warehouses": [{"warehouseID": 101, "warehouseName": "Коледино", "canBox": True}]}}
+        ).encode("utf-8")
+        acceptance_options = source.fetch_acceptance_options(
+            products=[
+                {"barcode": "4600000000001", "quantity": 50},
+                {"barcode": "", "quantity": 10},
+                {"barcode": "4600000000002", "quantity": "25"},
+            ],
+            warehouse_id=101,
+        )
+        if acceptance_options.get("result", {}).get("warehouses", [])[0].get("warehouseID") != 101:
+            raise AssertionError(f"acceptance/options must parse JSON object, got {acceptance_options}")
+        acceptance_req, _ = opener.requests[-1]
+        if acceptance_req.get_method() != "POST" or acceptance_req.full_url != "https://supplies-api.example.test/api/v1/acceptance/options":
+            raise AssertionError(f"acceptance/options URL changed unexpectedly: {acceptance_req.full_url}")
+        acceptance_body = json.loads(acceptance_req.data.decode("utf-8"))
+        if acceptance_body != {
+            "products": [
+                {"barcode": "4600000000001", "quantity": 50},
+                {"barcode": "4600000000002", "quantity": 25},
+            ],
+            "warehouseID": 101,
+        }:
+            raise AssertionError(f"acceptance/options body must use barcode+quantity only, got {acceptance_body}")
+
+        opener.next_payload = json.dumps(
+            {
+                "response": {
+                    "data": [
+                        {"warehouseID": 101, "warehouseName": "Коледино", "date": "2026-07-01", "coefficient": 1}
+                    ]
+                }
+            }
+        ).encode("utf-8")
+        coefficients = source.fetch_acceptance_coefficients(warehouse_ids=[101, "202"])
+        if coefficients[0].get("coefficient") != 1:
+            raise AssertionError(f"acceptance coefficients endpoint must parse rows, got {coefficients}")
+        coefficients_req, _ = opener.requests[-1]
+        expected_coefficients_url = "https://common-api.example.test/api/tariffs/v1/acceptance/coefficients?warehouseIDs=101%2C202"
+        if coefficients_req.get_method() != "GET" or coefficients_req.full_url != expected_coefficients_url:
+            raise AssertionError(f"acceptance coefficients URL changed unexpectedly: {coefficients_req.full_url}")
+
         opener.next_error = urllib_error.HTTPError(
             "https://supplies-api.example.test/api/v1/supplies",
             401,

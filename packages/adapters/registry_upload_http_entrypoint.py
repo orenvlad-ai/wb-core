@@ -206,6 +206,7 @@ DEFAULT_FACTORY_ORDER_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/factory-orde
 DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH = "/v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
 DEFAULT_WB_REGIONAL_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/status"
 DEFAULT_WB_REGIONAL_CALCULATE_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/calculate"
+DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/planning-options"
 DEFAULT_WB_REGIONAL_DISTRICT_DOWNLOAD_PREFIX = "/v1/sheet-vitrina-v1/supply/wb-regional/district"
 DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH = "/v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
 DEFAULT_WB_SUPPLIES_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies"
@@ -1427,6 +1428,27 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, _with_wb_regional_urls(result))
+                return
+
+            if parsed.path == DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_wb_regional_planning_options_request(payload)
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc)},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"wb regional planning runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
                 return
 
             if parsed.path == DEFAULT_WB_SUPPLIES_SYNC_PATH:
@@ -5414,6 +5436,7 @@ def _with_factory_order_dataset_urls(payload: Mapping[str, Any]) -> dict[str, An
 def _with_wb_regional_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     normalized["recommendations_zip_path"] = DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH
+    normalized["planning_options_path"] = DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH
     normalized["shared_datasets"] = _map_dataset_urls(normalized.get("shared_datasets"))
     if isinstance(normalized.get("districts"), list):
         normalized["districts"] = _map_wb_regional_districts(_filter_wb_regional_districts(normalized))
@@ -5421,6 +5444,7 @@ def _with_wb_regional_urls(payload: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(last_result, Mapping):
         nested = dict(last_result)
         nested["recommendations_zip_path"] = DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH
+        nested["planning_options_path"] = DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH
         nested["shared_datasets"] = _map_dataset_urls(nested.get("shared_datasets"))
         if isinstance(nested.get("districts"), list):
             nested["districts"] = _map_wb_regional_districts(_filter_wb_regional_districts(nested))
@@ -5579,6 +5603,7 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
         "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
         "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+        "wb_regional_planning_options_path": DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
         "wb_regional_recommendations_zip_path": DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
         "wb_regional_district_options": [
             {
