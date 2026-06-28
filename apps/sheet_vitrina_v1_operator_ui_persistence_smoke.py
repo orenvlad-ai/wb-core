@@ -975,10 +975,36 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     for expected in ("Подбор складов WB", "SKU: 1", "ШК готово: 1/1", "Вариантов: 1", "Коледино", "ЦФО", "Прямо", "Скопировать JSON", "Скопировать"):
         if expected not in regional_planning_text:
             raise AssertionError(f"regional planning panel must include {expected!r}, got {regional_planning_text!r}")
+    regional_planning_overflow = page.evaluate(
+        """() => {
+            const root = document.scrollingElement || document.documentElement;
+            const panel = document.getElementById('regionalPlanningPanel');
+            const wrap = document.querySelector('.regional-planning-table-wrap');
+            const table = document.querySelector('.regional-planning-table');
+            const copy = document.getElementById('copyRegionalPlanningPayloadButton');
+            return {
+                pageOverflow: root ? root.scrollWidth > root.clientWidth + 2 : true,
+                panelOverflow: panel ? panel.scrollWidth > panel.clientWidth + 2 : true,
+                wrapLocalScrollReady: wrap ? ['auto', 'scroll'].includes(window.getComputedStyle(wrap).overflowX) : false,
+                copyVisible: copy ? copy.getBoundingClientRect().width > 0 && copy.getBoundingClientRect().height > 0 : false,
+                rootWidth: root ? root.scrollWidth : 0,
+                rootClientWidth: root ? root.clientWidth : 0,
+                panelWidth: panel ? panel.scrollWidth : 0,
+                panelClientWidth: panel ? panel.clientWidth : 0,
+                wrapWidth: wrap ? wrap.clientWidth : 0,
+                tableWidth: table ? table.scrollWidth : 0
+            };
+        }"""
+    )
+    if regional_planning_overflow["pageOverflow"] or regional_planning_overflow["panelOverflow"] or not regional_planning_overflow["copyVisible"]:
+        raise AssertionError(f"regional planning panel must not expand the page and copy button must stay visible, got {regional_planning_overflow}")
+    if not regional_planning_overflow["wrapLocalScrollReady"]:
+        raise AssertionError(f"regional planning table must be contained in local scroll wrapper, got {regional_planning_overflow}")
     regional_planning_state = {
         "request": latest_planning_request,
         "summary": page.locator("#regionalPlanningSummary").inner_text(),
         "first_option": page.locator("#regionalPlanningTableBody tr").first.inner_text(),
+        "overflow": regional_planning_overflow,
     }
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():

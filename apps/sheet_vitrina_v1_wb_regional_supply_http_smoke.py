@@ -98,7 +98,14 @@ class FakePlanningSource:
 
     def fetch_acceptance_options(self, *, products, warehouse_id=None):
         self.acceptance_requests.append({"products": list(products), "warehouse_id": warehouse_id})
-        return {"result": {"warehouses": [{"warehouseID": 101, "warehouseName": "Коледино", "canBox": True}]}}
+        return {
+            "result": [
+                {
+                    "barcode": str((products or [{}])[0].get("barcode") or ""),
+                    "warehouses": [{"warehouseID": 101, "warehouseName": "Коледино", "canBox": True}],
+                }
+            ]
+        }
 
     def fetch_warehouses(self):
         return [{"warehouseID": 101, "warehouseName": "Коледино"}]

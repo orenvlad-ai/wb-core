@@ -226,22 +226,25 @@ class HttpBackedWbSuppliesSource:
             base_url_env_var=self._base_url_env_var,
             default_timeout_seconds=self._default_timeout_seconds,
         )
-        body: dict[str, Any] = {
-            "products": [
-                {
-                    "barcode": str(item.get("barcode") or "").strip(),
-                    "quantity": _bounded_int(item.get("quantity"), default=0, minimum=0, maximum=1_000_000),
-                }
-                for item in products
-                if str(item.get("barcode") or "").strip()
-                and _bounded_int(item.get("quantity"), default=0, minimum=0, maximum=1_000_000) > 0
-            ]
-        }
+        body: list[dict[str, Any]] = [
+            {
+                "barcode": str(item.get("barcode") or "").strip(),
+                "quantity": _bounded_int(item.get("quantity"), default=0, minimum=1, maximum=999_999),
+            }
+            for item in products
+            if str(item.get("barcode") or "").strip()
+            and _bounded_int(item.get("quantity"), default=0, minimum=0, maximum=999_999) > 0
+        ]
+        if not body:
+            raise ValueError("acceptance/options requires at least one product with barcode and positive quantity")
+        query = ""
         if warehouse_id not in (None, ""):
-            body["warehouseID"] = int(warehouse_id) if str(warehouse_id).strip().isdigit() else str(warehouse_id).strip()
+            normalized_warehouse_id = str(warehouse_id).strip()
+            if normalized_warehouse_id:
+                query = "?" + urllib_parse.urlencode({"warehouseID": normalized_warehouse_id})
         payload = self._request_json(
             method="POST",
-            url=f"{runtime.base_url}/api/v1/acceptance/options",
+            url=f"{runtime.base_url}/api/v1/acceptance/options{query}",
             token=runtime.token,
             timeout_seconds=runtime.timeout_seconds,
             body=body,
@@ -315,12 +318,12 @@ class HttpBackedWbSuppliesSource:
         url: str,
         token: str,
         timeout_seconds: float,
-        body: Mapping[str, Any] | None = None,
+        body: Any | None = None,
     ) -> Any:
         data = None
         headers = {"Authorization": token, "Accept": "application/json"}
         if body is not None:
-            data = json.dumps(dict(body), ensure_ascii=False).encode("utf-8")
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
         req = urllib_request.Request(url=url, data=data, headers=headers, method=method)
         try:
@@ -437,6 +440,11 @@ def _headers_content_type(headers: Any) -> str:
 
 def _sanitize_body_prefix(body: str, *, limit: int = 420) -> str:
     text = str(body or "").replace("\x00", "")
-    text = re.sub(r"(?i)(authorization|token|cookie|password|secret)([\"'=:\s]+)([^\\s\"'<>;,]+)", r"\1\2<redacted>", text)
+    text = re.sub(
+        r"(?i)([\"']?(?:authorization|token|cookie|password|secret|api[-_ ]?key)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^,\s}]+)",
+        r'\1"<redacted>"',
+        text,
+    )
+    text = re.sub(r"\b\d{8,}\b", lambda match: "***" + match.group(0)[-4:], text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit]

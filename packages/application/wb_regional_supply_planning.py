@@ -196,13 +196,37 @@ class WbRegionalSupplyPlanningBlock:
             for item in products
             if item.get("barcode") and _positive_int(item.get("quantity")) > 0
         ]
+        request_diagnostics = _acceptance_request_diagnostics(
+            product_count=len(request_products),
+            warehouse_id=request["warehouse_id"],
+        )
+        if not request_products:
+            return {
+                **payload_without_options,
+                "status": STATUS_BLOCKED,
+                "blockers": [
+                    {
+                        "code": "no_acceptance_products",
+                        "message": "Нет товаров с barcode и положительным количеством для WB acceptance/options.",
+                        "diagnostics": request_diagnostics,
+                    }
+                ],
+                "warnings": ["WB acceptance/options не вызван: нет товаров для запроса."],
+                "evidence": {
+                    **payload_without_options["evidence"],
+                    "acceptance_options": {
+                        **request_diagnostics,
+                        "status": "not_called",
+                    },
+                },
+            }
         try:
             acceptance_payload = self.source.fetch_acceptance_options(
                 products=request_products,
                 warehouse_id=request["warehouse_id"],
             )
         except (OfficialApiRuntimeError, WbSuppliesHttpStatusError, WbSuppliesTransportError, OSError) as exc:
-            error_payload = _upstream_error_payload(exc)
+            error_payload = _upstream_error_payload(exc, request_diagnostics=request_diagnostics)
             return {
                 **payload_without_options,
                 "status": STATUS_UPSTREAM_ERROR,
@@ -210,33 +234,38 @@ class WbRegionalSupplyPlanningBlock:
                     {
                         "code": error_payload["code"],
                         "message": error_payload["message"],
+                        "diagnostics": error_payload.get("diagnostics", {}),
                     }
                 ],
                 "warnings": [error_payload["message"]],
                 "evidence": {
                     **payload_without_options["evidence"],
                     "acceptance_options": {
-                        "endpoint": "POST /api/v1/acceptance/options",
-                        "read_only": True,
+                        **request_diagnostics,
                         "status": "failed",
                         "error_code": error_payload["code"],
+                        "diagnostics": error_payload.get("diagnostics", {}),
                     },
                 },
             }
 
         warnings: list[str] = []
+        acceptance_warnings, acceptance_blockers = _acceptance_payload_diagnostics(acceptance_payload, products)
+        warnings.extend(acceptance_warnings)
         enrichment = self._fetch_enrichment(warnings=warnings)
         raw_option_rows = _extract_acceptance_option_rows(acceptance_payload)
         if not raw_option_rows:
             return {
                 **payload_without_options,
                 "status": STATUS_NO_OPTIONS,
+                "blockers": acceptance_blockers,
                 "warnings": warnings + ["WB acceptance/options не вернул доступных вариантов."],
                 "evidence": {
                     **payload_without_options["evidence"],
                     "acceptance_options": {
-                        "endpoint": "POST /api/v1/acceptance/options",
-                        "read_only": True,
+                        **request_diagnostics,
+                        "http_status": 200,
+                        "status": "ok",
                         "raw_option_count": 0,
                     },
                 },
@@ -261,6 +290,7 @@ class WbRegionalSupplyPlanningBlock:
             "status": status,
             "options": options,
             "warnings": warnings,
+            "blockers": [] if options else acceptance_blockers,
             "summary": {
                 **payload_without_options["summary"],
                 "option_count": len(options),
@@ -278,8 +308,9 @@ class WbRegionalSupplyPlanningBlock:
             "evidence": {
                 **payload_without_options["evidence"],
                 "acceptance_options": {
-                    "endpoint": "POST /api/v1/acceptance/options",
-                    "read_only": True,
+                    **request_diagnostics,
+                    "http_status": 200,
+                    "status": "ok",
                     "raw_option_count": len(raw_option_rows),
                 },
                 "enrichment": enrichment["evidence"],
@@ -610,7 +641,7 @@ def _extract_acceptance_option_rows(payload: Any) -> list[Mapping[str, Any]]:
         return [item for item in payload if isinstance(item, Mapping)]
     if not isinstance(payload, Mapping):
         return []
-    for key in ("warehouses", "options", "items", "rows", "result", "response", "data"):
+    for key in ("result", "warehouses", "options", "items", "rows", "response", "data"):
         value = payload.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, Mapping)]
@@ -629,6 +660,7 @@ def _normalize_acceptance_option_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "warehouse_id": warehouse_id,
         "warehouse_name": warehouse_name,
+        "barcode": _first_string(row, "barcode", "Barcode"),
         "date": _first_string(
             row,
             "date",
@@ -667,6 +699,8 @@ def _normalize_acceptance_option_row(row: Mapping[str, Any]) -> dict[str, Any]:
         },
         "evidence": {
             "source": "acceptance_options",
+            "barcode": _first_string(row, "barcode", "Barcode"),
+            "barcode_row_has_warehouses": bool(row.get("_barcode_row_had_warehouses")),
             "raw_keys": sorted(str(key) for key in row.keys()),
         },
     }
@@ -674,16 +708,19 @@ def _normalize_acceptance_option_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _flatten_acceptance_option_rows(rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     result: list[Mapping[str, Any]] = []
-    nested_keys = ("dates", "dateList", "acceptanceDates", "acceptance_dates", "options")
+    nested_keys = ("warehouses", "dates", "dateList", "acceptanceDates", "acceptance_dates", "options")
     for row in rows:
         nested_value: Any = None
+        nested_key = ""
         for key in nested_keys:
             if isinstance(row.get(key), list):
                 nested_value = row.get(key)
+                nested_key = key
                 break
         if not isinstance(nested_value, list):
             result.append(row)
             continue
+        barcode = _first_string(row, "barcode", "Barcode")
         for item in nested_value:
             merged = dict(row)
             for key in nested_keys:
@@ -692,6 +729,10 @@ def _flatten_acceptance_option_rows(rows: list[Mapping[str, Any]]) -> list[Mappi
                 merged.update(dict(item))
             else:
                 merged["date"] = str(item or "").strip()
+            if barcode and not _first_string(merged, "barcode", "Barcode"):
+                merged["barcode"] = barcode
+            if nested_key == "warehouses":
+                merged["_barcode_row_had_warehouses"] = True
             result.append(merged)
     return result
 
@@ -757,6 +798,100 @@ def _match_transit_tariff(option: Mapping[str, Any], rows: list[Mapping[str, Any
         if target and destination and target == destination and (not transit or not source or transit == source):
             return row
     return None
+
+
+def _acceptance_request_diagnostics(*, product_count: int, warehouse_id: str | int | None) -> dict[str, Any]:
+    return {
+        "endpoint": "POST /api/v1/acceptance/options",
+        "read_only": True,
+        "request_shape": "json_array",
+        "body_schema": "[{barcode, quantity}]",
+        "product_count": max(0, int(product_count or 0)),
+        "warehouse_id": str(warehouse_id or "").strip(),
+        "warehouse_id_location": "query_parameter",
+    }
+
+
+def _acceptance_payload_diagnostics(
+    payload: Mapping[str, Any],
+    products: list[Mapping[str, Any]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    product_by_barcode = {
+        str(item.get("barcode") or "").strip(): item
+        for item in products
+        if str(item.get("barcode") or "").strip()
+    }
+    warnings: list[str] = []
+    blockers: list[dict[str, Any]] = []
+    for row in _extract_acceptance_option_rows(payload):
+        messages = _row_error_messages(row)
+        if not messages:
+            continue
+        barcode = _first_string(row, "barcode", "Barcode")
+        product = product_by_barcode.get(barcode, {})
+        nm_id = _positive_int(product.get("nm_id"))
+        sku_label = str(product.get("sku_label") or "").strip()
+        detail = "; ".join(messages)[:260]
+        subject = f"SKU {nm_id}" if nm_id > 0 else "barcode " + _masked_barcode(barcode)
+        if sku_label:
+            subject += f" ({sku_label})"
+        message = f"WB acceptance/options вернул предупреждение по {subject}: {detail}."
+        warnings.append(message)
+        blockers.append(
+            {
+                "code": "acceptance_options_barcode_error",
+                "nm_id": nm_id,
+                "sku_label": sku_label,
+                "barcode_masked": _masked_barcode(barcode),
+                "message": message,
+            }
+        )
+    return warnings, blockers
+
+
+def _row_error_messages(row: Mapping[str, Any]) -> list[str]:
+    result: list[str] = []
+    for key in ("errors", "error", "errorText", "message", "messages", "warnings", "warning"):
+        if key not in row:
+            continue
+        result.extend(_error_value_messages(row.get(key)))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in result:
+        normalized = _safe_plain_text(item, limit=220)
+        if normalized and normalized not in seen and normalized.casefold() not in {"false", "none", "null", "0"}:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
+
+
+def _error_value_messages(value: Any) -> list[str]:
+    if value in (None, "", False, 0):
+        return []
+    if value is True:
+        return ["upstream row error"]
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            result.extend(_error_value_messages(item))
+        return result
+    if isinstance(value, Mapping):
+        for key in ("message", "errorText", "error", "description", "detail", "text"):
+            if key in value:
+                nested = _error_value_messages(value.get(key))
+                if nested:
+                    return nested
+        return [_safe_plain_text(json.dumps(dict(value), ensure_ascii=False, sort_keys=True), limit=220)]
+    return [_safe_plain_text(value, limit=220)]
+
+
+def _masked_barcode(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 4:
+        return "***" + text
+    return "***" + text[-4:]
 
 
 def _known_tariff_value(box_tariff: Mapping[str, Any] | None, transit_tariff: Mapping[str, Any] | None) -> float | None:
@@ -923,39 +1058,75 @@ def _safe_fetch_list(fetcher: Any, *, warnings: list[str], label: str, warning_r
     return [item for item in rows if isinstance(item, Mapping)]
 
 
-def _upstream_error_payload(exc: Exception) -> dict[str, str]:
+def _upstream_error_payload(
+    exc: Exception,
+    *,
+    request_diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     message = _safe_error_message(exc)
+    diagnostics = dict(request_diagnostics or {})
+    if isinstance(exc, WbSuppliesHttpStatusError):
+        diagnostics.update(
+            {
+                "http_status": exc.status_code,
+                "content_type": exc.content_type,
+                "wb_body_prefix": exc.body_prefix,
+            }
+        )
+    elif isinstance(exc, WbSuppliesTransportError):
+        if exc.status_code is not None:
+            diagnostics["http_status"] = exc.status_code
+        if exc.content_type:
+            diagnostics["content_type"] = exc.content_type
+        if exc.body_prefix:
+            diagnostics["wb_body_prefix"] = exc.body_prefix
     if isinstance(exc, OfficialApiRuntimeError) and "WB_API_TOKEN" in str(exc):
         return {
             "code": "token_missing",
             "message": "WB_API_TOKEN не настроен для read-only WB planning request.",
+            "diagnostics": diagnostics,
         }
     if isinstance(exc, WbSuppliesHttpStatusError):
         if exc.status_code in {401, 403}:
             return {
                 "code": "token_permission_error",
                 "message": "WB API token не имеет нужных прав или недействителен для acceptance/options.",
+                "diagnostics": diagnostics,
             }
         if exc.status_code == 429:
             return {
                 "code": "rate_limited",
                 "message": "WB API вернул rate limit для acceptance/options.",
+                "diagnostics": diagnostics,
             }
         return {
             "code": f"wb_http_{exc.status_code}",
             "message": f"WB API вернул HTTP {exc.status_code} для read-only planning request.",
+            "diagnostics": diagnostics,
         }
-    return {"code": "upstream_error", "message": message}
+    return {"code": "upstream_error", "message": message, "diagnostics": diagnostics}
 
 
 def _safe_error_message(exc: Exception) -> str:
-    text = str(exc)
+    text = _safe_plain_text(str(exc), limit=420)
     text = re.sub(
         r"(?i)(token|authorization|api[-_ ]?key)([\"']?\s*[:=]\s*[\"']?)[^\"'\s;,&}]+",
         r"\1\2***",
         text,
     )
     return text.replace("\n", " ").replace("\r", " ")[:420]
+
+
+def _safe_plain_text(value: Any, *, limit: int = 420) -> str:
+    text = str(value or "").replace("\x00", "")
+    text = re.sub(
+        r"(?i)([\"']?(?:token|authorization|api[-_ ]?key|cookie|password|secret)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^,\s}]+)",
+        r'\1"***"',
+        text,
+    )
+    text = re.sub(r"\b\d{8,}\b", lambda match: "***" + match.group(0)[-4:], text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
 
 
 def _first_string(mapping: Mapping[str, Any], *keys: str) -> str:

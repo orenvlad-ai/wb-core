@@ -135,7 +135,14 @@ def main() -> None:
             raise AssertionError(f"box tariffs URL changed unexpectedly: {box_req.full_url}")
 
         opener.next_payload = json.dumps(
-            {"result": {"warehouses": [{"warehouseID": 101, "warehouseName": "Коледино", "canBox": True}]}}
+            {
+                "result": [
+                    {
+                        "barcode": "4600000000001",
+                        "warehouses": [{"warehouseID": 101, "warehouseName": "Коледино", "canBox": True}],
+                    }
+                ]
+            }
         ).encode("utf-8")
         acceptance_options = source.fetch_acceptance_options(
             products=[
@@ -145,20 +152,29 @@ def main() -> None:
             ],
             warehouse_id=101,
         )
-        if acceptance_options.get("result", {}).get("warehouses", [])[0].get("warehouseID") != 101:
+        if acceptance_options.get("result", [{}])[0].get("warehouses", [])[0].get("warehouseID") != 101:
             raise AssertionError(f"acceptance/options must parse JSON object, got {acceptance_options}")
         acceptance_req, _ = opener.requests[-1]
-        if acceptance_req.get_method() != "POST" or acceptance_req.full_url != "https://supplies-api.example.test/api/v1/acceptance/options":
+        expected_acceptance_url = "https://supplies-api.example.test/api/v1/acceptance/options?warehouseID=101"
+        if acceptance_req.get_method() != "POST" or acceptance_req.full_url != expected_acceptance_url:
             raise AssertionError(f"acceptance/options URL changed unexpectedly: {acceptance_req.full_url}")
         acceptance_body = json.loads(acceptance_req.data.decode("utf-8"))
-        if acceptance_body != {
-            "products": [
-                {"barcode": "4600000000001", "quantity": 50},
-                {"barcode": "4600000000002", "quantity": 25},
-            ],
-            "warehouseID": 101,
-        }:
-            raise AssertionError(f"acceptance/options body must use barcode+quantity only, got {acceptance_body}")
+        if acceptance_body != [
+            {"barcode": "4600000000001", "quantity": 50},
+            {"barcode": "4600000000002", "quantity": 25},
+        ]:
+            raise AssertionError(f"acceptance/options body must be official JSON array, got {acceptance_body}")
+
+        acceptance_request_count = len(opener.requests)
+        try:
+            source.fetch_acceptance_options(products=[{"barcode": "", "quantity": 10}, {"barcode": " ", "quantity": 0}])
+        except ValueError as exc:
+            if "at least one product" not in str(exc):
+                raise AssertionError(f"empty acceptance/options validation message changed: {exc}")
+        else:
+            raise AssertionError("empty acceptance/options product list must fail before upstream")
+        if len(opener.requests) != acceptance_request_count:
+            raise AssertionError("empty acceptance/options product list must not call upstream")
 
         opener.next_payload = json.dumps(
             {
