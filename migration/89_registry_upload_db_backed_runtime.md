@@ -14,6 +14,7 @@
 - сохранить accepted version в DB-backed runtime storage;
 - выставить current/active state для server-side truth;
 - сохранить и вернуть upload result в канонической форме.
+- current supplier shipment runtime additionally stores nullable `approx_yuan_rate` in `sheet_vitrina_v1_supplier_shipments`; idempotent schema migration adds the column to existing SQLite DBs without rewriting legacy shipment rows.
 
 ## 3. Runtime Storage Shape
 

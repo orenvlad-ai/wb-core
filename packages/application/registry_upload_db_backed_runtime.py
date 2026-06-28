@@ -2622,6 +2622,7 @@ class RegistryUploadDbBackedRuntime:
                     supplier_name,
                     customer_name,
                     currency,
+                    approx_yuan_rate,
                     product_qty_total,
                     product_amount_total,
                     extras_amount_total,
@@ -2636,7 +2637,7 @@ class RegistryUploadDbBackedRuntime:
                     warnings_json,
                     errors_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     shipment_date = excluded.shipment_date,
@@ -2650,6 +2651,7 @@ class RegistryUploadDbBackedRuntime:
                     supplier_name = excluded.supplier_name,
                     customer_name = excluded.customer_name,
                     currency = excluded.currency,
+                    approx_yuan_rate = excluded.approx_yuan_rate,
                     product_qty_total = excluded.product_qty_total,
                     product_amount_total = excluded.product_amount_total,
                     extras_amount_total = excluded.extras_amount_total,
@@ -2679,6 +2681,7 @@ class RegistryUploadDbBackedRuntime:
                     header.get("supplier_name") or "",
                     header.get("customer_name") or "",
                     header.get("currency") or "",
+                    header.get("approx_yuan_rate"),
                     header.get("product_qty_total"),
                     header.get("product_amount_total"),
                     header.get("extras_amount_total"),
@@ -2790,6 +2793,7 @@ class RegistryUploadDbBackedRuntime:
                        contract_date,
                        supplier_name,
                        currency,
+                       approx_yuan_rate,
                        product_qty_total,
                        product_amount_total,
                        extras_amount_total,
@@ -5024,6 +5028,7 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "contract_date": row["contract_date"] or "",
         "supplier_name": row["supplier_name"] or "",
         "currency": row["currency"] or "",
+        "approx_yuan_rate": row["approx_yuan_rate"],
         "product_qty_total": row["product_qty_total"],
         "product_amount_total": row["product_amount_total"],
         "extras_amount_total": row["extras_amount_total"],
@@ -5053,6 +5058,7 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "supplier_name": row["supplier_name"] or "",
         "customer_name": row["customer_name"] or "",
         "currency": row["currency"] or "",
+        "approx_yuan_rate": row["approx_yuan_rate"],
         "product_qty_total": row["product_qty_total"],
         "product_amount_total": row["product_amount_total"],
         "extras_amount_total": row["extras_amount_total"],
@@ -5929,6 +5935,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             supplier_name TEXT,
             customer_name TEXT,
             currency TEXT,
+            approx_yuan_rate REAL,
             product_qty_total REAL,
             product_amount_total REAL,
             extras_amount_total REAL,
@@ -6243,6 +6250,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipments",
         column_name="actual_ff_acceptance_date",
         column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="approx_yuan_rate",
+        column_sql="REAL",
     )
     _ensure_column(
         conn,

@@ -349,6 +349,7 @@ def main() -> None:
                 expect(frame.get_by_label("Плановая дата отгрузки")).to_be_visible()
                 expect(frame.get_by_label("Фактическая дата отгрузки")).to_be_visible()
                 expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_be_visible()
+                expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_be_visible()
                 expect(frame.get_by_text("Supplier", exact=True)).to_have_count(0)
                 expect(frame.get_by_text("Customer", exact=True)).to_have_count(0)
                 expect(frame.get_by_text("Наш SKU")).to_have_count(0)
@@ -395,9 +396,11 @@ def main() -> None:
                 frame.get_by_label("Плановая дата отгрузки").fill("2026-05-14")
                 frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-16")
                 frame.get_by_label("Фактическая дата приёмки на ФФ").fill("2026-05-28")
+                frame.get_by_label("Примерный курс юаня, ₽/¥").fill("13.2")
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_enabled()
                 frame.get_by_role("button", name="Сохранить").click()
                 expect(frame.get_by_text("Заказ сохранён.")).to_be_visible(timeout=5000)
+                _seed_first_supplier_factual_expense(runtime, amount_rub=48.0)
                 expect(frame.locator("#supplyCompositionPanel #documentInvoiceDownloadLink")).to_have_count(0)
                 expect(frame.locator("#supplyCompositionPanel #contractManageControls")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
@@ -423,6 +426,8 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows").get_by_text("HanShang Technology")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("Проверить")).to_be_visible()
                 frame.get_by_role("button", name="Закрыть").click()
+                expect(frame.locator(".registry-wrap thead")).to_contain_text("Ориент. себестоимость, ₽/шт")
+                expect(frame.locator("#shipmentRows")).to_contain_text("25,45", timeout=5000)
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
                 _seed_accepted_ff_supplier_order(entrypoint, invoice_path)
                 frame.locator("body").evaluate("() => window.location.reload()")
@@ -468,6 +473,7 @@ def main() -> None:
                 active_row.click()
                 expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-16")
                 expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("2026-05-28")
+                expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("13.2")
                 expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
                 frame.get_by_role("tab", name="Документы").click()
@@ -487,6 +493,8 @@ def main() -> None:
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Плановая дата отгрузки", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Фактическая дата отгрузки", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Фактическая дата приёмки на ФФ", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Ориентировочная себестоимость на ФФ, ₽/шт", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("25.45 ₽", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Фактический срок поставки", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("12 дн.", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Срок до ДТ", timeout=5000)
@@ -548,7 +556,9 @@ def main() -> None:
                 expect(supplier_page.get_by_role("link", name="Открыть отдельно")).to_have_count(0)
                 expect(supplier_page.locator("#priceCheckButton")).to_have_count(0)
                 expect(supplier_page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+                expect(supplier_page.locator(".registry-wrap thead")).to_contain_text("预估成本 / Est. cost / Ориент. себестоимость, ₽/шт")
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
+                expect(supplier_page.locator("#shipmentRows")).to_contain_text("25,45", timeout=5000)
                 expect(supplier_page.locator("[data-order-status-shipment]")).to_have_count(0)
                 frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first.locator("[data-delete-shipment]").click()
                 expect(frame.locator("[data-delete-confirmation]")).to_be_visible()
@@ -624,6 +634,8 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки")).to_be_visible()
             expect(page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_be_visible()
             expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_be_visible()
+            expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_be_visible()
+            expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_have_value("")
             expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
             page.locator("#invoiceFileInput").set_input_files(str(invoice_path))
             expect(page.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
@@ -632,10 +644,13 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             page.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки").fill("2026-05-14")
             page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки").fill("2026-05-16")
             page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ").fill("2026-05-28")
+            expect(page.get_by_role("button", name="保存 / Save / Сохранить")).to_be_enabled()
             page.get_by_role("button", name="保存 / Save / Сохранить").click()
             expect(page.get_by_text("订单已保存 / Order saved / Заказ сохранён.")).to_be_visible(timeout=5000)
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+            expect(page.locator(".registry-wrap thead")).to_contain_text("预估成本 / Est. cost / Ориент. себестоимость, ₽/шт")
+            expect(page.locator("#shipmentRows tr[data-row]").first).to_contain_text("—")
             shipment_id = page.locator("#shipmentRows tr[data-row]").first.get_attribute("data-row") or ""
             if not shipment_id:
                 raise AssertionError("supplier browser smoke must create a shipment row before price-check probe")
@@ -645,6 +660,7 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.locator("#shipmentCard")).to_be_visible()
             expect(page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_have_value("2026-05-16")
             expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("2026-05-28")
+            expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_have_value("")
             expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
@@ -691,6 +707,61 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+def _seed_first_supplier_factual_expense(runtime: RegistryUploadDbBackedRuntime, *, amount_rub: float) -> None:
+    shipments = runtime.list_supplier_shipments()
+    if not shipments:
+        raise AssertionError("cannot seed factual expense without a supplier shipment")
+    shipment_id = str(shipments[0].get("shipment_id") or "")
+    if not shipment_id:
+        raise AssertionError(f"cannot seed factual expense for shipment without id: {shipments[0]}")
+    runtime.save_supplier_financial_document(
+        document={
+            "document_id": f"fdoc_{shipment_id}_browser_logistics",
+            "supplier_order_id": shipment_id,
+            "document_type": "logistics_invoice",
+            "original_filename": "browser-factual-logistics.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": "",
+            "uploaded_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+            "parse_status": "parsed",
+            "vendor": "Browser Logistics",
+            "document_number": "BROWSER-EXPENSE",
+            "document_date": "2026-05-20",
+            "currency": "RUB",
+            "total_amount": amount_rub,
+            "total_amount_rub": amount_rub,
+            "normalized_parse": {"document_type": "logistics_invoice", "amount_rub": amount_rub},
+            "raw_parse": {},
+            "parser_version": "browser-smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        expense_lines=[
+            {
+                "line_id": f"fline_{shipment_id}_browser_logistics",
+                "financial_document_id": f"fdoc_{shipment_id}_browser_logistics",
+                "supplier_order_id": shipment_id,
+                "sort_order": 1,
+                "category": "domestic_transport",
+                "stage": "fact",
+                "description": "Browser smoke factual logistics expense",
+                "amount": amount_rub,
+                "currency": "RUB",
+                "amount_rub": amount_rub,
+                "vat_rate": None,
+                "vat_amount_rub": None,
+                "included_in_logistics_efficiency": True,
+                "included_in_customs_total": False,
+                "status": "parsed",
+                "confidence": 1.0,
+                "raw": {},
+            }
+        ],
+    )
 
 
 def _seed_accepted_ff_supplier_order(

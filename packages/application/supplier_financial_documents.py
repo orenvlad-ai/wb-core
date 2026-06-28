@@ -222,6 +222,23 @@ class StaticUsdRateProvider:
 TextExtractor = Callable[[bytes, str], tuple[str, dict[str, Any], list[str]]]
 
 
+def calculate_factual_supply_expenses_rub(
+    documents: list[Mapping[str, Any]],
+    expense_lines: list[Mapping[str, Any]],
+) -> Decimal:
+    active_documents = [
+        dict(document)
+        for document in documents
+        if str(document.get("parse_status") or "") != FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+    ]
+    active_lines = [
+        dict(line)
+        for line in expense_lines
+        if any(str(document.get("document_id") or "") == str(line.get("financial_document_id") or "") for document in active_documents)
+    ]
+    return _factual_supply_expenses_rub(active_documents, active_lines) or Decimal("0")
+
+
 class SupplierFinancialDocumentsBlock:
     def __init__(
         self,
@@ -951,6 +968,7 @@ def build_financial_summary(
     customs_total_rub = _sum_decimal(line.get("amount_rub") for line in customs_lines if bool(line.get("included_in_customs_total")))
     customs_without_vat_rub = _sum_required(customs_fee_rub, import_duty_rub)
     delivery_customs_total_rub = _sum_required(invoice_fact_rub, customs_total_rub)
+    factual_supply_expenses_rub = _factual_supply_expenses_rub(active_documents, active_lines)
 
     customs_metas = [dict(doc.get("normalized_parse") or {}) for doc in customs_docs]
     quote_gross_weight = _positive_decimal(quote_meta.get("gross_weight_kg"))
@@ -1020,6 +1038,21 @@ def build_financial_summary(
         quote_base_status="parsed" if quote_required_complete else ("missing_required_amounts" if quote_docs else ""),
     )
     total_units = _shipment_total_units(shipment)
+    shipment_header = shipment.get("header") if isinstance(shipment, Mapping) and isinstance(shipment.get("header"), Mapping) else shipment
+    shipment_header = shipment_header if isinstance(shipment_header, Mapping) else {}
+    approx_yuan_rate = _positive_decimal(shipment_header.get("approx_yuan_rate"))
+    invoice_amount_total = _positive_decimal(shipment_header.get("invoice_amount_total"))
+    approx_invoice_cost_rub = (
+        invoice_amount_total * approx_yuan_rate
+        if invoice_amount_total is not None and approx_yuan_rate is not None
+        else None
+    )
+    approx_landed_cost_per_unit_rub = _safe_div(
+        approx_invoice_cost_rub + factual_supply_expenses_rub
+        if approx_invoice_cost_rub is not None and factual_supply_expenses_rub is not None
+        else None,
+        total_units,
+    )
     estimated_bank_rate = _estimate_bank_rate_on_quote_date(
         quote_doc=quote_doc,
         invoice_docs=invoice_docs,
@@ -1090,6 +1123,9 @@ def build_financial_summary(
             "fact_delivery_customs_rub_per_unit": _decimal_to_float(fact_delivery_customs_rub_per_unit),
             "quote_total_rub_equivalent": _decimal_to_float(quote_total_rub_equivalent),
             "fact_delivery_customs_total_rub": _decimal_to_float(delivery_customs_total_rub),
+            "factual_supply_expenses_rub": _decimal_to_float(factual_supply_expenses_rub),
+            "approx_invoice_cost_rub": _decimal_to_float(approx_invoice_cost_rub),
+            "approx_landed_cost_per_unit_rub": _decimal_to_float(approx_landed_cost_per_unit_rub),
         },
         "percent_of_value": {
             "quote_cargo_value": quote_percent_of_cargo_value,
@@ -1573,6 +1609,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("customs_value_rub", "таможенная стоимость ₽ из ДТ", lambda item: _registry_money(_summary_path(item, "customs_declaration", "total_customs_value_rub"), "₽")),
                 ("goods_value_rub", "стоимость товара ₽ по курсу/ДТ", lambda item: _registry_blank()),
                 ("goods_value_rub_per_unit", "стоимость товара ₽/шт", lambda item: _registry_money(_safe_div(_dec(_summary_path(item, "customs_declaration", "total_customs_value_rub")), _dec(_summary_path(item, "per_unit", "total_units"))), "₽")),
+                ("approx_landed_cost_per_unit_rub", "Ориентировочная себестоимость на ФФ, ₽/шт", lambda item: _registry_money(_summary_path(item, "per_unit", "approx_landed_cost_per_unit_rub"), "₽")),
             ],
         ),
         (
@@ -3510,6 +3547,25 @@ def _line_document_type(line: Mapping[str, Any], documents: list[Mapping[str, An
             return str(document.get("document_type") or "")
     return ""
 
+
+def _factual_supply_expenses_rub(documents: list[Mapping[str, Any]], expense_lines: list[Mapping[str, Any]]) -> Decimal | None:
+    amounts = [
+        amount
+        for line in expense_lines
+        if (amount := _factual_supply_expense_line_amount(line, documents)) is not None
+    ]
+    if not amounts:
+        return None
+    return sum(amounts, Decimal("0"))
+
+
+def _factual_supply_expense_line_amount(line: Mapping[str, Any], documents: list[Mapping[str, Any]]) -> Decimal | None:
+    document_type = _line_document_type(line, documents)
+    if document_type == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE:
+        return _parse_decimal(line.get("amount_rub"))
+    if document_type == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION and bool(line.get("included_in_customs_total")):
+        return _parse_decimal(line.get("amount_rub"))
+    return None
 
 def _apply_usd_rate_to_parse(
     normalized: dict[str, Any],

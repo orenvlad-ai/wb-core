@@ -545,6 +545,7 @@ def _assert_parser_smoke() -> None:
     _assert_missing_customs_data_summary_smoke()
     _assert_new_quote_parser_smoke()
     _assert_registry_lead_time_rows_smoke()
+    _assert_approx_landed_cost_summary_smoke()
     _assert_incomplete_quote_summary_smoke()
 
 
@@ -779,6 +780,85 @@ def _assert_order_document_verification_smoke(bank_transfer_payload: dict[str, A
             raise AssertionError(f"upload must match via linked contract when header contract is empty: {linked_upload}")
 
 
+def _assert_approx_landed_cost_summary_smoke() -> None:
+    documents = [
+        {"document_id": "quote", "document_type": "logistics_quote", "parse_status": "parsed", "normalized_parse": {}},
+        {"document_id": "invoice", "document_type": "logistics_invoice", "parse_status": "parsed", "normalized_parse": {}},
+        {"document_id": "customs", "document_type": "customs_declaration", "parse_status": "parsed", "normalized_parse": {}},
+    ]
+    lines = [
+        {
+            "line_id": "quote_line",
+            "financial_document_id": "quote",
+            "category": "delivery_cost",
+            "currency": "USD",
+            "amount": 999999.0,
+            "amount_rub": 999999.0,
+            "included_in_logistics_efficiency": True,
+            "included_in_customs_total": False,
+        },
+        {
+            "line_id": "invoice_line",
+            "financial_document_id": "invoice",
+            "category": "domestic_transport",
+            "currency": "RUB",
+            "amount": 20000.0,
+            "amount_rub": 20000.0,
+            "included_in_logistics_efficiency": True,
+            "included_in_customs_total": False,
+        },
+        {
+            "line_id": "customs_line",
+            "financial_document_id": "customs",
+            "category": "customs_payments_and_fees",
+            "currency": "RUB",
+            "amount": 28000.0,
+            "amount_rub": 28000.0,
+            "included_in_logistics_efficiency": False,
+            "included_in_customs_total": True,
+        },
+    ]
+    shipment = {
+        "header": {
+            "shipment_id": "approx_formula",
+            "invoice_amount_total": 10000,
+            "approx_yuan_rate": 13.2,
+            "product_qty_total": 600,
+        },
+        "lines": [],
+    }
+    quote_only_summary = build_financial_summary([documents[0]], [lines[0]], shipment=shipment)
+    quote_only_per_unit = quote_only_summary.get("per_unit") or {}
+    if (
+        quote_only_per_unit.get("factual_supply_expenses_rub") is not None
+        or quote_only_per_unit.get("approx_invoice_cost_rub") != 132000.0
+        or quote_only_per_unit.get("approx_landed_cost_per_unit_rub") is not None
+    ):
+        raise AssertionError(f"quote-only expenses must not produce approximate landed cost: {quote_only_summary}")
+    summary = build_financial_summary(documents, lines, shipment=shipment)
+    per_unit = summary.get("per_unit") or {}
+    if (
+        per_unit.get("factual_supply_expenses_rub") != 48000.0
+        or per_unit.get("approx_invoice_cost_rub") != 132000.0
+        or per_unit.get("approx_landed_cost_per_unit_rub") != 300.0
+    ):
+        raise AssertionError(f"approx landed formula must use invoice CNY, manual CNY rate, fact expenses and qty only: {summary}")
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "approx_formula",
+                "header": shipment["header"],
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": summary,
+            }
+        ]
+    )
+    if _registry_cell_display(registry, "cargo_value", "approx_landed_cost_per_unit_rub", "approx_formula") != "300.00 ₽":
+        raise AssertionError(f"registry matrix must expose approximate landed cost row: {registry}")
+
+
 def _assert_summary_metrics_smoke() -> None:
     quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
     documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=True)
@@ -896,6 +976,8 @@ def _assert_registry_lead_time_rows_smoke() -> None:
         raise AssertionError(f"missing fact shipment dates must render actual delivery days as unavailable: {registry}")
     if _registry_cell_display(registry, "lead_times", "days_to_customs_declaration", "missing_dates") != "—":
         raise AssertionError(f"missing lead-time dates must render as unavailable: {registry}")
+    if _registry_cell_display(registry, "cargo_value", "approx_landed_cost_per_unit_rub", "missing_dates") != "—":
+        raise AssertionError(f"missing approx_yuan_rate must render approximate landed cost as unavailable: {registry}")
     if (
         _registry_cell_display(registry, "passport", "shipment_date", "invalid_fact_dates") != "—"
         or _registry_cell_display(registry, "passport", "actual_shipment_date", "invalid_fact_dates") != "—"
@@ -927,6 +1009,7 @@ def _assert_current_financial_metrics(summary: dict[str, Any]) -> None:
         (per_unit.get("quote_total_rub_equivalent"), 4088263.64, "quote total RUB equivalent", 100.0),
         (per_unit.get("quote_delivery_customs_rub_per_unit"), 35.17, "quote delivery+customs RUB/unit"),
         (per_unit.get("fact_delivery_customs_rub_per_unit"), 35.34, "fact delivery+customs RUB/unit"),
+        (per_unit.get("factual_supply_expenses_rub"), 4108486.6, "factual supply expenses RUB"),
         (fact_percent.get("logistics_pct"), 14.63, "fact logistics percent"),
         (fact_percent.get("customs_without_vat_pct"), 10.59, "fact customs without VAT percent"),
         (fact_percent.get("customs_with_vat_pct"), 34.79, "fact customs with VAT percent"),
@@ -1087,6 +1170,8 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"registry quote ₽/шт mismatch: {registry}")
             if _registry_cell_display(registry, "fact_expenses", "fact_total_rub_per_unit", "sup_financial") != "35.34 ₽":
                 raise AssertionError(f"registry fact ₽/шт mismatch: {registry}")
+            if _registry_cell_display(registry, "cargo_value", "approx_landed_cost_per_unit_rub", "sup_financial") != "36.48 ₽":
+                raise AssertionError(f"registry approximate landed cost mismatch: {registry}")
             if _registry_cell_display(registry, "cargo_physics", "customs_weight", "sup_financial") != "9 784.60 кг":
                 raise AssertionError(f"registry customs weight mismatch: {registry}")
             compare_status, compare_payload = _post_multipart(
@@ -1362,11 +1447,12 @@ def _seed_supplier_order(runtime: RegistryUploadDbBackedRuntime) -> None:
             "supplier_name": "HanShang Technology",
             "customer_name": "",
             "currency": "CNY",
+            "approx_yuan_rate": 13.2,
             "product_qty_total": 116250,
             "product_amount_total": 0,
             "extras_amount_total": 0,
-            "invoice_amount_total": 0,
-            "declared_invoice_total": 0,
+            "invoice_amount_total": 10000,
+            "declared_invoice_total": 10000,
             "match_status": "all_matched",
             "source_filename": "safe.xlsx",
             "source_file_sha256": "",
