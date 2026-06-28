@@ -833,11 +833,16 @@ def _major_warehouse_diagnostics(
         ]
         option_matches = [item for item in all_options if _warehouse_name_matches(item.get("warehouse_name"), expected)]
         visible_matches = [item for item in visible_options if _warehouse_name_matches(item.get("warehouse_name"), expected)]
-        accepted_barcodes = {
-            str(row.get("barcode") or "").strip()
-            for row in acceptance_matches
-            if str(row.get("barcode") or "").strip()
-        }
+        accepted_barcodes: set[str] = set()
+        for row in acceptance_matches:
+            row_barcodes = list(row.get("accepted_barcodes") or [])
+            barcode = str(row.get("barcode") or "").strip()
+            if barcode:
+                row_barcodes.append(barcode)
+            for item in row_barcodes:
+                normalized_barcode = str(item or "").strip()
+                if normalized_barcode:
+                    accepted_barcodes.add(normalized_barcode)
         coeff_values = [_first_nested_number(row.get("coefficient")) for row in coefficient_matches]
         numeric_coefficients = [value for value in coeff_values if isinstance(value, (int, float))]
         non_negative_coefficients = [value for value in numeric_coefficients if value >= 0]

@@ -250,6 +250,13 @@ def main() -> None:
             raise AssertionError(f"coefficient dates must be nested under the warehouse, got {grouped_options[0]}")
         if grouped_options[0].get("barcode_coverage", {}).get("accepts_all_barcodes") is not True:
             raise AssertionError(f"warehouse that appears for both barcodes must accept all barcodes, got {grouped_options[0]}")
+        grouped_diagnostics = {
+            item.get("expected_warehouse_name"): item
+            for item in grouped.get("major_warehouse_diagnostics", [])
+            if isinstance(item, dict)
+        }
+        if grouped_diagnostics.get("Коледино", {}).get("accepted_barcode_count") != 2:
+            raise AssertionError(f"major diagnostics must count all deduped barcode evidence, got {grouped_diagnostics.get('Коледино')}")
         if grouped_options[1].get("coefficient") != -1 or not grouped_options[1].get("is_sgt"):
             raise AssertionError(f"coefficient=-1 SGT option must stay visible but lower-ranked, got {grouped_options[1]}")
 
