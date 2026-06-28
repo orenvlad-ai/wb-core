@@ -984,8 +984,77 @@
     }
 
     .plan-report-metric-label {
+      position: relative;
       font-weight: 700;
       color: var(--text);
+    }
+
+    .plan-report-metric-label-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      min-width: 0;
+    }
+
+    .plan-report-metric-label-text {
+      min-width: 0;
+      overflow-wrap: normal;
+      word-break: normal;
+    }
+
+    .plan-report-metric-tooltip-wrap {
+      position: relative;
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .plan-report-metric-tooltip-anchor {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 1;
+      cursor: help;
+    }
+
+    .plan-report-metric-tooltip {
+      position: absolute;
+      z-index: 20;
+      left: 0;
+      top: calc(100% + 6px);
+      width: min(320px, calc(100vw - 48px));
+      padding: 9px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--panel-bg);
+      color: var(--text);
+      box-shadow: var(--shadow);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.45;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      overflow-wrap: normal;
+      word-break: normal;
+      white-space: normal;
+      transition: opacity 120ms ease, visibility 120ms ease;
+    }
+
+    .plan-report-metric-tooltip-wrap:hover .plan-report-metric-tooltip,
+    .plan-report-metric-tooltip-wrap:focus-within .plan-report-metric-tooltip {
+      opacity: 1;
+      visibility: visible;
     }
 
     .plan-report-status-badge {
@@ -3250,6 +3319,15 @@
               <p id="planReportStatus" class="section-message">Заполните параметры и нажмите «Рассчитать».</p>
               <div id="planReportContent" class="daily-report" hidden>
                 <div class="plan-report-grid">
+                  <section class="plan-report-card plan-report-projection-card">
+                    <div class="plan-report-card-head">
+                      <div>
+                        <h3>Прогноз к концу договорного периода при текущем темпе</h3>
+                        <p id="planReportProjectionRange">-</p>
+                      </div>
+                    </div>
+                    <div id="planReportProjectionTable" class="plan-report-table-wrap"></div>
+                  </section>
                   <section class="plan-report-card">
                     <div class="plan-report-card-head">
                       <div>
@@ -3285,15 +3363,6 @@
                       </div>
                     </div>
                     <div id="planReportYtdTable" class="plan-report-table-wrap"></div>
-                  </section>
-                  <section class="plan-report-card plan-report-projection-card">
-                    <div class="plan-report-card-head">
-                      <div>
-                        <h3>Прогноз к концу договорного периода при текущем темпе</h3>
-                        <p id="planReportProjectionRange">-</p>
-                      </div>
-                    </div>
-                    <div id="planReportProjectionTable" class="plan-report-table-wrap"></div>
                   </section>
                 </div>
               </div>
@@ -5934,20 +6003,31 @@
         return parts.join(" ");
       }
 
-      function renderPlanMetricLabel(metric) {
-        const baseLabel = escapeHtml(metric.label || "-");
+      function planMetricTooltipText(metric) {
         if (metric.entity_key !== "ads_sum_rub" || !metric.ads_plan_base_label) {
-          return baseLabel;
+          return "";
         }
         if (metric.ads_plan_base_mode === "fact_turnover_overperformance_base") {
-          return [
-            baseLabel,
-            "<br><span class=\"field-note\">Рекламный план пересчитан от фактического оборота, так как оборот выше плана.</span>"
-          ].join("");
+          return "Рекламный план пересчитан от фактического оборота, так как оборот выше плана.";
         }
+        return "План: " + String(metric.ads_plan_base_label) + ".";
+      }
+
+      function renderPlanMetricLabel(metric) {
+        const baseLabel = escapeHtml(metric.label || "-");
+        const tooltipText = planMetricTooltipText(metric);
+        if (!tooltipText) {
+          return "<span class=\"plan-report-metric-label-line\"><span class=\"plan-report-metric-label-text\">" + baseLabel + "</span></span>";
+        }
+        const escapedTooltip = escapeHtml(tooltipText);
         return [
-          baseLabel,
-          "<br><span class=\"field-note\">План: " + escapeHtml(metric.ads_plan_base_label) + ".</span>"
+          "<span class=\"plan-report-metric-label-line\">",
+          "<span class=\"plan-report-metric-label-text\">" + baseLabel + "</span>",
+          "<span class=\"plan-report-metric-tooltip-wrap\">",
+          "<span class=\"plan-report-metric-tooltip-anchor\" tabindex=\"0\" aria-label=\"" + escapedTooltip + "\" title=\"" + escapedTooltip + "\">?</span>",
+          "<span class=\"plan-report-metric-tooltip\" role=\"tooltip\">" + escapedTooltip + "</span>",
+          "</span>",
+          "</span>"
         ].join("");
       }
 

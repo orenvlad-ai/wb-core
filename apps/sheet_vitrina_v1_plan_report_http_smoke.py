@@ -125,6 +125,18 @@ def main() -> None:
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose plan-report token {expected!r}")
+            ads_note = "Рекламный план пересчитан от фактического оборота, так как оборот выше плана."
+            if (
+                ads_note not in operator_html
+                or "plan-report-metric-tooltip-anchor" not in operator_html
+                or "plan-report-metric-tooltip" not in operator_html
+                or '<br><span class="field-note">' + ads_note in operator_html
+            ):
+                raise AssertionError("operator HTML must keep long ads plan explanation behind a metric tooltip")
+            projection_index = operator_html.find('<section class="plan-report-card plan-report-projection-card">')
+            selected_index = operator_html.find('<h3 id="planReportSelectedTitle">Основной период</h3>')
+            if projection_index < 0 or selected_index < 0 or projection_index > selected_index:
+                raise AssertionError("operator HTML must render plan-report projection before selected/MTD/QTD/YTD cards")
             for forbidden in (
                 'id="planReportContractStartCheckbox"',
                 'id="planReportContractStartDateInput"',

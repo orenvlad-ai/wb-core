@@ -1010,6 +1010,54 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.wait_for_function(
         "() => document.getElementById('planReportContent') && !document.getElementById('planReportContent').hidden"
     )
+    result_card_titles = page.evaluate(
+        """() => Array.from(document.querySelectorAll('#planReportContent .plan-report-card h3'))
+            .map((item) => item.textContent.trim())
+            .filter(Boolean)"""
+    )
+    if not result_card_titles or result_card_titles[0] != "Прогноз к концу договорного периода при текущем темпе":
+        raise AssertionError(f"projection block must render first, got {result_card_titles}")
+    ads_metric_state = page.evaluate(
+        """() => {
+            const rows = Array.from(document.querySelectorAll('#planReportSelectedTable tbody tr'));
+            const row = rows.find((item) => {
+                const labelCell = item.querySelector('td');
+                return labelCell && labelCell.textContent.includes('Рекламные расходы, руб.');
+            });
+            if (!row) return null;
+            const labelCell = row.querySelector('td');
+            const icon = labelCell.querySelector('.plan-report-metric-tooltip-anchor');
+            const tooltip = labelCell.querySelector('.plan-report-metric-tooltip');
+            return {
+                visibleText: labelCell.innerText.replace(/\\s+/g, ' ').trim(),
+                textContent: labelCell.textContent.replace(/\\s+/g, ' ').trim(),
+                iconText: icon ? icon.textContent.trim() : '',
+                iconAriaLabel: icon ? icon.getAttribute('aria-label') : '',
+                iconTitle: icon ? icon.getAttribute('title') : '',
+                tooltipText: tooltip ? tooltip.textContent.replace(/\\s+/g, ' ').trim() : '',
+                tooltipVisibility: tooltip ? window.getComputedStyle(tooltip).visibility : ''
+            };
+        }"""
+    )
+    expected_ads_note = "Рекламный план пересчитан от фактического оборота, так как оборот выше плана."
+    if not ads_metric_state:
+        raise AssertionError("ads metric row must render in plan-report selected table")
+    if expected_ads_note in ads_metric_state["visibleText"]:
+        raise AssertionError(f"ads explanatory note must not be visible inline, got {ads_metric_state}")
+    if ads_metric_state["iconText"] != "?" or expected_ads_note not in ads_metric_state["tooltipText"]:
+        raise AssertionError(f"ads explanatory note must move behind a question tooltip, got {ads_metric_state}")
+    if expected_ads_note not in ads_metric_state["iconAriaLabel"] or expected_ads_note not in ads_metric_state["iconTitle"]:
+        raise AssertionError(f"ads tooltip must be accessible through aria/title, got {ads_metric_state}")
+    page.focus("#planReportSelectedTable .plan-report-metric-tooltip-anchor")
+    page.wait_for_timeout(160)
+    metric_tooltip_visible = page.locator("#planReportSelectedTable .plan-report-metric-tooltip").evaluate(
+        """(element) => {
+            const style = window.getComputedStyle(element);
+            return style.visibility === "visible" && Number(style.opacity) > 0;
+        }"""
+    )
+    if not metric_tooltip_visible:
+        raise AssertionError("ads metric tooltip must be visible on keyboard focus")
     default_plan_report_url = plan_report_request_urls[-1] if plan_report_request_urls else ""
     for expected_query_part in (
         "period=first_half",
@@ -1218,6 +1266,44 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
 
 
 def _plan_report_payload() -> dict[str, object]:
+    metrics = {
+        "buyout_rub": {
+            "entity_key": "buyout_rub",
+            "label": "Выкуп, руб.",
+            "fact": 20000.0,
+            "plan": 15000.0,
+            "completion_pct": 133.33333333333331,
+            "delta_abs": 5000.0,
+            "delta_pct": 33.33333333333333,
+            "status": "ok",
+            "status_label": "выполнен",
+        },
+        "drr_pct": {
+            "entity_key": "drr_pct",
+            "label": "DRR, %",
+            "fact": 10.0,
+            "plan": 6.0,
+            "completion_pct": None,
+            "delta_pp": 4.0,
+            "delta_pct": 66.66666666666666,
+            "status": "alert",
+            "status_label": "выше плана",
+        },
+        "ads_sum_rub": {
+            "entity_key": "ads_sum_rub",
+            "label": "Рекламные расходы, руб.",
+            "fact": 2000.0,
+            "plan": 1200.0,
+            "completion_pct": 166.66666666666669,
+            "delta_abs": 800.0,
+            "delta_pct": 66.66666666666666,
+            "status": "ok",
+            "status_label": "выполнен",
+            "ads_plan_base_label": "фактический оборот 20 000",
+            "ads_plan_base_rub": 20000.0,
+            "ads_plan_base_mode": "fact_turnover_overperformance_base",
+        },
+    }
     block = {
         "label": "За первое полугодие",
         "date_from": "2026-02-01",
@@ -1225,7 +1311,7 @@ def _plan_report_payload() -> dict[str, object]:
         "day_count": 79,
         "status": "available",
         "reason": "Период обрезан по дате подписания: 2026-02-01.",
-        "metrics": {},
+        "metrics": metrics,
         "coverage": {},
         "source_breakdown": {},
     }
