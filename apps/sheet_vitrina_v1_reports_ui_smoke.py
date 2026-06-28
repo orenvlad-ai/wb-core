@@ -101,12 +101,18 @@ def main() -> None:
         'id="planReportH1Input"',
         'id="planReportH2Input"',
         'id="planReportDrrInput"',
+        'id="planReportAnnualEvenCheckbox"',
+        'id="planReportAnnualEvenTooltip"',
         'id="planReportApplyButton"',
         'id="planReportBaselineTemplateButton"',
         'id="planReportBaselineFileInput"',
         'id="planReportBaselineStatus"',
         'id="planReportBaselineDetails"',
-        "Расчёт по WB/VB: договор с 01.02.2026, H1/H2 модель",
+        "Равномерный годовой план",
+        "альтернативная оценка темпа",
+        "Прогноз к концу договорного периода при текущем темпе",
+        'id="planReportProjectionTable"',
+        "Расчёт по WB/VB: formal H1/H2 по умолчанию",
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
         DEFAULT_SHEET_PLAN_REPORT_PATH,
@@ -121,17 +127,14 @@ def main() -> None:
         raise AssertionError("legacy reports accordion contract must be removed from the operator page")
     for token in (
         'id="planReportContractStartCheckbox"',
-        'id="planReportAnnualEvenCheckbox"',
         'id="planReportContractStartDateInput"',
         "С учётом даты подписания",
-        "Равномерный годовой план",
         "Дата подписания",
         "planReportContractStartCheckbox",
-        "planReportAnnualEvenCheckbox",
         "planReportContractStartDateInput",
     ):
         if token in html:
-            raise AssertionError(f"ordinary plan-report UI must not expose legacy mode control {token!r}")
+            raise AssertionError(f"ordinary plan-report UI must not expose contract-start control {token!r}")
     initial_status = '<p id="stockReportStatus" class="section-message">Настройте SKU, период и столбцы, затем нажмите «Рассчитать».</p>'
     if initial_status not in html:
         raise AssertionError("stock-report initial state must be idle/manual, not loading")
@@ -172,8 +175,8 @@ def main() -> None:
         'plan_drr_pct: "6"',
         'const PLAN_REPORT_CANONICAL_INPUTS = {',
         'use_contract_start_date: true',
-        'annual_plan_evenly_distributed: false',
         'contract_start_date: "2026-02-01"',
+        'annual_plan_evenly_distributed: false',
         'return currentBusinessDate >= "2026-07-01" ? "second_half" : "first_half";',
         "resolvePlanReportInputs(inputs)",
         "WB/VB defaults: H1 = 155 379 879; H2 = 294 620 121",
@@ -182,14 +185,16 @@ def main() -> None:
             raise AssertionError(f"plan-report UI must expose WB/VB defaults token {token!r}")
     if "writePersistedOperatorUiState({ plan_report_inputs: inputs });" not in html:
         raise AssertionError("plan-report H1/H2/DRR inputs must persist into namespaced browser storage")
-    if "annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked)" in html:
-        raise AssertionError("ordinary plan-report UI must not persist removed annual-even checkbox state")
+    if "annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked)" not in html:
+        raise AssertionError("ordinary plan-report UI must persist the restored annual-even checkbox state")
     if 'params.set("annual_plan_evenly_distributed", request.annual_plan_evenly_distributed ? "true" : "false");' not in html:
         raise AssertionError("plan-report canonical annual-even mode must be sent through an explicit query param")
     if 'params.set("use_contract_start_date", "true");' not in html or 'params.set("contract_start_date", request.contract_start_date);' not in html:
         raise AssertionError("plan-report contract start mode must be sent through explicit query params")
     if "Рекламный план пересчитан от фактического оборота, так как оборот выше плана." not in html:
         raise AssertionError("plan-report UI must explain ads plan base when turnover overperforms")
+    if "payload.contract_period_projection" not in html or "projected_buyout_pct_of_annual_plan" not in html:
+        raise AssertionError("plan-report UI must render the contract-period projection block")
     if ".stock-report-sku-field" not in html or "width: min(320px, 100%);" not in html:
         raise AssertionError("stock-report SKU selector must stay compact instead of flexing across the row")
     if ".stock-report-period-field" not in html or "width: 150px;" not in html:

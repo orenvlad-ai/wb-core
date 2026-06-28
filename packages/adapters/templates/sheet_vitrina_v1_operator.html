@@ -855,9 +855,10 @@
     }
 
     .plan-report-checkbox-field {
-      flex: 0 1 220px;
-      min-width: 200px;
+      flex: 0 1 260px;
+      min-width: 220px;
       align-self: center;
+      position: relative;
     }
 
     .plan-report-checkbox-label {
@@ -875,6 +876,47 @@
       margin: 0;
     }
 
+    .plan-report-tooltip-anchor {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      color: var(--muted-strong);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1;
+      cursor: help;
+    }
+
+    .plan-report-tooltip {
+      position: absolute;
+      z-index: 8;
+      left: 0;
+      top: calc(100% + 6px);
+      width: min(440px, calc(100vw - 48px));
+      padding: 10px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--panel-bg);
+      color: var(--text);
+      box-shadow: var(--shadow);
+      font-size: 12px;
+      line-height: 1.5;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 120ms ease, visibility 120ms ease;
+    }
+
+    .plan-report-checkbox-field:hover .plan-report-tooltip,
+    .plan-report-checkbox-field:focus-within .plan-report-tooltip {
+      opacity: 1;
+      visibility: visible;
+    }
+
     .plan-report-grid {
       display: grid;
       gap: 16px;
@@ -886,6 +928,10 @@
       border-radius: 14px;
       background: #ffffff;
       padding: 18px;
+    }
+
+    .plan-report-projection-card {
+      grid-column: 1 / -1;
     }
 
     .plan-report-card-head {
@@ -3138,7 +3184,7 @@
                 WB/VB defaults: H1 = 155 379 879; H2 = 294 620 121 как annual remainder до 450 000 000 при расхождении Q3+Q4 на 1 руб.; договор с 01.02.2026; ставка 6%.
               </p>
               <p class="field-note">
-                Расчёт по WB/VB: договор с 01.02.2026, H1/H2 модель, H1 denominator 181 день, реклама 6% от max(план оборота, факт оборота).
+                Расчёт по WB/VB: formal H1/H2 по умолчанию, договор fixed 01.02.2026, реклама 6% от max(план оборота, факт оборота); равномерный годовой план это альтернативная оценка темпа.
               </p>
               <div class="plan-report-toolbar">
                 <div class="plan-report-controls">
@@ -3170,6 +3216,16 @@
                   <div class="field plan-report-field">
                     <label for="planReportDrrInput">Плановый DRR, %</label>
                     <input id="planReportDrrInput" type="number" min="0" step="0.01" inputmode="decimal">
+                  </div>
+                  <div class="field plan-report-checkbox-field">
+                    <label class="plan-report-checkbox-label" for="planReportAnnualEvenCheckbox">
+                      <input id="planReportAnnualEvenCheckbox" type="checkbox" aria-describedby="planReportAnnualEvenTooltip">
+                      <span>Равномерный годовой план</span>
+                      <span class="plan-report-tooltip-anchor" tabindex="0" aria-describedby="planReportAnnualEvenTooltip">?</span>
+                    </label>
+                    <span id="planReportAnnualEvenTooltip" class="plan-report-tooltip" role="tooltip">
+                      Формальный план WB/VB распределён неравномерно: H1 меньше H2. Включите этот режим, чтобы распределить годовой план 450 млн равномерно по договорному периоду 01.02-31.12 и оценить темп закрытия года. По умолчанию выключено: обычный режим показывает формальное выполнение WB/VB по H1/H2.
+                    </span>
                   </div>
                 </div>
                 <div class="block-actions">
@@ -3229,6 +3285,15 @@
                       </div>
                     </div>
                     <div id="planReportYtdTable" class="plan-report-table-wrap"></div>
+                  </section>
+                  <section class="plan-report-card plan-report-projection-card">
+                    <div class="plan-report-card-head">
+                      <div>
+                        <h3>Прогноз к концу договорного периода при текущем темпе</h3>
+                        <p id="planReportProjectionRange">-</p>
+                      </div>
+                    </div>
+                    <div id="planReportProjectionTable" class="plan-report-table-wrap"></div>
                   </section>
                 </div>
               </div>
@@ -3968,6 +4033,7 @@
       const planReportH1Input = document.getElementById("planReportH1Input");
       const planReportH2Input = document.getElementById("planReportH2Input");
       const planReportDrrInput = document.getElementById("planReportDrrInput");
+      const planReportAnnualEvenCheckbox = document.getElementById("planReportAnnualEvenCheckbox");
       const planReportApplyButton = document.getElementById("planReportApplyButton");
       const planReportValidation = document.getElementById("planReportValidation");
       const planReportSelectedTitle = document.getElementById("planReportSelectedTitle");
@@ -3979,6 +4045,8 @@
       const planReportQtdTable = document.getElementById("planReportQtdTable");
       const planReportYtdRange = document.getElementById("planReportYtdRange");
       const planReportYtdTable = document.getElementById("planReportYtdTable");
+      const planReportProjectionRange = document.getElementById("planReportProjectionRange");
+      const planReportProjectionTable = document.getElementById("planReportProjectionTable");
       const planReportNotes = document.getElementById("planReportNotes");
       const planReportBaselineStatus = document.getElementById("planReportBaselineStatus");
       const planReportBaselineDetails = document.getElementById("planReportBaselineDetails");
@@ -4243,7 +4311,6 @@
       ]);
       const PLAN_REPORT_CANONICAL_INPUTS = {
         use_contract_start_date: true,
-        annual_plan_evenly_distributed: false,
         contract_start_date: "2026-02-01"
       };
       const PLAN_REPORT_DEFAULT_INPUTS = {
@@ -4251,6 +4318,7 @@
         h1_buyout_plan_rub: "155379879",
         h2_buyout_plan_rub: "294620121",
         plan_drr_pct: "6",
+        annual_plan_evenly_distributed: false,
         ...PLAN_REPORT_CANONICAL_INPUTS
       };
       const isEmbeddedMode = Boolean(config.embedded);
@@ -4731,6 +4799,7 @@
         const h1Plan = sanitizePersistedPlanInputValue(rawInputs.h1_buyout_plan_rub);
         const h2Plan = sanitizePersistedPlanInputValue(rawInputs.h2_buyout_plan_rub);
         const planDrr = sanitizePersistedPlanInputValue(rawInputs.plan_drr_pct);
+        const annualEven = rawInputs.annual_plan_evenly_distributed === true;
         const valid = (
           VALID_PLAN_REPORT_PERIODS.has(period) &&
           Boolean(h1Plan) &&
@@ -4745,6 +4814,7 @@
           h1_buyout_plan_rub: h1Plan,
           h2_buyout_plan_rub: h2Plan,
           plan_drr_pct: planDrr,
+          annual_plan_evenly_distributed: annualEven,
           ...PLAN_REPORT_CANONICAL_INPUTS
         };
       }
@@ -4759,6 +4829,7 @@
         planReportH1Input.value = resolved.h1_buyout_plan_rub;
         planReportH2Input.value = resolved.h2_buyout_plan_rub;
         planReportDrrInput.value = resolved.plan_drr_pct;
+        planReportAnnualEvenCheckbox.checked = Boolean(resolved.annual_plan_evenly_distributed);
       }
 
       function persistPlanReportInputs(request) {
@@ -4769,7 +4840,8 @@
           period: String(planReportPeriodSelect.value || "").trim(),
           h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
-          plan_drr_pct: String(planReportDrrInput.value || "").trim()
+          plan_drr_pct: String(planReportDrrInput.value || "").trim(),
+          annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked)
         };
         if (!VALID_PLAN_REPORT_PERIODS.has(inputs.period)) {
           return;
@@ -5910,6 +5982,75 @@
         ].join("");
       }
 
+      function formatPlanProjectionRange(projection) {
+        if (!projection || !projection.period_date_from || !projection.period_date_to || !projection.elapsed_date_to) {
+          return "-";
+        }
+        const elapsedFrom = projection.elapsed_date_from || projection.period_date_from;
+        const elapsedTo = projection.elapsed_date_to || projection.effective_as_of_date;
+        const elapsedDays = isFiniteNumber(projection.elapsed_day_count)
+          ? integerFormatter.format(projection.elapsed_day_count) + " дн."
+          : "-";
+        const totalDays = isFiniteNumber(projection.total_contract_day_count)
+          ? integerFormatter.format(projection.total_contract_day_count) + " дн."
+          : "-";
+        return "Факт: " + formatHumanDate(elapsedFrom) + " - " + formatHumanDate(elapsedTo)
+          + " · " + elapsedDays
+          + " · Цель: " + formatHumanDate(projection.period_date_from) + " - " + formatHumanDate(projection.period_date_to)
+          + " · " + totalDays;
+      }
+
+      function renderPlanProjectionTable(projection) {
+        if (!projection || projection.status === "unavailable") {
+          return "<p class=\"report-empty\">" + escapeHtml(valueOrDash(projection && projection.reason)) + "</p>";
+        }
+        const notes = [];
+        if (projection.status && projection.status !== "available") {
+          notes.push("Статус прогноза: " + projection.status + ".");
+        }
+        if (projection.fact_is_partial) {
+          notes.push("Факт для прогноза частичный.");
+        }
+        if (projection.reason) {
+          notes.push(String(projection.reason));
+        }
+        const annualBuyoutPlanLabel = "годовой план " + formatNumber(projection.annual_buyout_plan_rub);
+        const annualAdsPlanLabel = "годовой рекламный ориентир " + formatNumber(projection.annual_ads_plan_rub);
+        const rows = [
+          {
+            label: "Оборот при текущем темпе к 31.12.2026",
+            amount: projection.projected_buyout_rub,
+            plan: annualBuyoutPlanLabel,
+            pct: projection.projected_buyout_pct_of_annual_plan,
+            drr: null
+          },
+          {
+            label: "Реклама при текущем темпе к 31.12.2026",
+            amount: projection.projected_ads_sum_rub,
+            plan: annualAdsPlanLabel,
+            pct: projection.projected_ads_pct_of_annual_ads_plan,
+            drr: projection.projected_drr_pct
+          }
+        ];
+        return [
+          notes.length ? "<p class=\"field-note\">" + escapeHtml(notes.join(" ")) + "</p>" : "",
+          "<table class=\"plan-report-table\">",
+          "<thead><tr><th>Показатель</th><th>Прогноз</th><th>Ориентир</th><th>Выполнение</th><th>DRR</th></tr></thead>",
+          "<tbody>",
+          rows.map((row) => [
+            "<tr>",
+            "<td class=\"plan-report-metric-label\">" + escapeHtml(row.label) + "</td>",
+            "<td>" + escapeHtml(formatNumber(row.amount)) + "</td>",
+            "<td>" + escapeHtml(row.plan) + "</td>",
+            "<td>" + escapeHtml(formatPercentValue(row.pct)) + "</td>",
+            "<td>" + escapeHtml(row.drr === null ? "-" : formatPercentValue(row.drr)) + "</td>",
+            "</tr>"
+          ].join("")).join(""),
+          "</tbody>",
+          "</table>"
+        ].join("");
+      }
+
       function renderPlanReportUnavailable(payload, fallbackMessage) {
         planReportPayload = payload || null;
         planReportPeriod.textContent = "Выберите период и задайте планы H1/H2.";
@@ -5926,6 +6067,8 @@
         planReportMtdTable.innerHTML = "";
         planReportQtdTable.innerHTML = "";
         planReportYtdTable.innerHTML = "";
+        planReportProjectionRange.textContent = "-";
+        planReportProjectionTable.innerHTML = "";
         renderPlanReportNotes(payload && payload.notes);
       }
 
@@ -5940,6 +6083,7 @@
         const mtd = periods.month_to_date || {};
         const qtd = periods.quarter_to_date || {};
         const ytd = periods.year_to_date || {};
+        const projection = payload.contract_period_projection || {};
         const effectiveAsOfDate = payload.effective_as_of_date || payload.reference_date;
         const inputs = payload.inputs && typeof payload.inputs === "object" ? payload.inputs : {};
         const contractNote = inputs.use_contract_start_date && inputs.contract_start_date
@@ -5963,10 +6107,12 @@
         planReportMtdRange.textContent = formatPlanPeriodRange(mtd);
         planReportQtdRange.textContent = formatPlanPeriodRange(qtd);
         planReportYtdRange.textContent = formatPlanPeriodRange(ytd);
+        planReportProjectionRange.textContent = formatPlanProjectionRange(projection);
         planReportSelectedTable.innerHTML = renderPlanMetricTable(selectedPeriod);
         planReportMtdTable.innerHTML = renderPlanMetricTable(mtd);
         planReportQtdTable.innerHTML = renderPlanMetricTable(qtd);
         planReportYtdTable.innerHTML = renderPlanMetricTable(ytd);
+        planReportProjectionTable.innerHTML = renderPlanProjectionTable(projection);
         renderPlanReportBaselineStatus(payload.baseline);
         renderPlanReportNotes(payload.notes);
       }
@@ -5977,6 +6123,7 @@
           h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
           plan_drr_pct: String(planReportDrrInput.value || "").trim(),
+          annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked),
           ...PLAN_REPORT_CANONICAL_INPUTS
         };
         const missing = Object.entries(request).find(([key, value]) => (
@@ -9701,7 +9848,8 @@
         planReportPeriodSelect,
         planReportH1Input,
         planReportH2Input,
-        planReportDrrInput
+        planReportDrrInput,
+        planReportAnnualEvenCheckbox
       ].forEach((input) => {
         input.addEventListener("input", () => {
           if (planReportValidation.hidden) {

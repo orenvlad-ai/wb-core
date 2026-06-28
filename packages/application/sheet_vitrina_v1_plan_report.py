@@ -63,7 +63,10 @@ REPORT_NOTES = (
     "План по выкупу считается посуточно: для fixed target periods используется полный целевой период, обрезанный по дате подписания; rolling/to-date blocks используют закрытое фактическое окно.",
     "Факт DRR считается как `ads_sum / fin_buyout_rub * 100` и остаётся диагностикой, а не статусом выполнения рекламы.",
     "План рекламы по WB/VB = `max(плановый выкуп, фактический выкуп) * плановый DRR / 100`; при перевыполнении оборота рекламный план пересчитывается от факта.",
+    "Отдельный прогноз к концу договорного периода использует факт за 2026-02-01..as_of_date и экстраполирует текущий дневной темп до 2026-12-31.",
 )
+CONTRACT_PERIOD_START = date(2026, 2, 1)
+CONTRACT_PERIOD_END = date(2026, 12, 31)
 
 
 @dataclass(frozen=True)
@@ -227,7 +230,10 @@ class SheetVitrinaV1PlanReportBlock:
         all_windows = [selected_window, *fixed_windows]
         effective_windows = [window for window in all_windows if window.day_count > 0]
         source_windows = effective_windows or all_windows
-        date_from = min(date.fromisoformat(window.date_from) for window in source_windows).isoformat()
+        source_date_starts = [date.fromisoformat(window.date_from) for window in source_windows]
+        if reference_date >= CONTRACT_PERIOD_START:
+            source_date_starts.append(CONTRACT_PERIOD_START)
+        date_from = min(source_date_starts).isoformat()
         date_to = reference_date.isoformat()
         base_payload = {
             "status": "unavailable",
@@ -363,6 +369,16 @@ class SheetVitrinaV1PlanReportBlock:
                 plan_calculation=plan_calculation,
                 plan_drr_pct=normalized_plan_drr_pct,
             )
+        contract_period_projection = _build_contract_period_projection(
+            reference_date=reference_date,
+            daily_buyout_facts=daily_buyout_facts,
+            daily_ads_facts=daily_ads_facts,
+            baseline_by_month=baseline_by_month,
+            missing_dates_by_source=missing_dates_by_source,
+            invalid_dates_by_source=invalid_dates_by_source,
+            plan_calculation=plan_calculation,
+            plan_drr_pct=normalized_plan_drr_pct,
+        )
 
         period_statuses = [str(block.get("status") or "unavailable") for block in period_blocks.values()]
         if all(status == "available" for status in period_statuses):
@@ -471,6 +487,7 @@ class SheetVitrinaV1PlanReportBlock:
                 "fact_is_partial": bool(global_missing_dates),
             },
             "periods": period_blocks,
+            "contract_period_projection": contract_period_projection,
         }
 
 
@@ -1088,6 +1105,186 @@ def _build_period_block(
                 ads_plan_base_mode=ads_plan_base_mode,
             ),
         },
+    }
+
+
+def _build_contract_period_projection(
+    *,
+    reference_date: date,
+    daily_buyout_facts: Mapping[str, float],
+    daily_ads_facts: Mapping[str, float],
+    baseline_by_month: Mapping[str, Mapping[str, Any]],
+    missing_dates_by_source: Mapping[str, list[str]],
+    invalid_dates_by_source: Mapping[str, Mapping[str, str]],
+    plan_calculation: BuyoutPlanCalculation,
+    plan_drr_pct: float,
+) -> dict[str, Any]:
+    total_day_count = (CONTRACT_PERIOD_END - CONTRACT_PERIOD_START).days + 1
+    annual_buyout_plan_rub = float(plan_calculation.annual_buyout_plan_rub)
+    annual_ads_plan_rub = annual_buyout_plan_rub * (plan_drr_pct / 100.0)
+    base_payload: dict[str, Any] = {
+        "label": "Прогноз к концу договорного периода при текущем темпе",
+        "status": "unavailable",
+        "reason": "",
+        "period_date_from": CONTRACT_PERIOD_START.isoformat(),
+        "period_date_to": CONTRACT_PERIOD_END.isoformat(),
+        "total_contract_day_count": total_day_count,
+        "elapsed_date_from": CONTRACT_PERIOD_START.isoformat(),
+        "elapsed_date_to": None,
+        "elapsed_day_count": 0,
+        "effective_as_of_date": reference_date.isoformat(),
+        "annual_buyout_plan_rub": annual_buyout_plan_rub,
+        "annual_ads_plan_rub": annual_ads_plan_rub,
+        "plan_drr_pct": plan_drr_pct,
+        "fact_buyout_elapsed_rub": None,
+        "fact_ads_elapsed_rub": None,
+        "projected_buyout_rub": None,
+        "projected_buyout_pct_of_annual_plan": None,
+        "projected_ads_sum_rub": None,
+        "projected_ads_pct_of_annual_ads_plan": None,
+        "projected_drr_pct": None,
+        "fact_is_partial": False,
+        "source_of_truth": {
+            "daily_sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+            "daily_snapshot_role": TEMPORAL_ROLE_ACCEPTED_CLOSED,
+            "manual_monthly_source": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            "formula": "elapsed_fact / elapsed_days * total_contract_days",
+        },
+        "source_mix": {
+            "daily_accepted_snapshots": {
+                "dates": [],
+                "day_count": 0,
+                "source_keys": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
+                "available_dates_before_monthly_baseline_precedence": [],
+                "excluded_by_monthly_baseline_dates": [],
+                "buyout_dates": [],
+                "ads_dates": [],
+            },
+            "manual_monthly_plan_report_baseline": {
+                "months": [],
+                "day_count": 0,
+                "source_kind": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
+            },
+        },
+        "coverage": {
+            "expected_day_count": 0,
+            "covered_day_count": 0,
+            "covered_calendar_days": 0,
+            "missing_day_count": 0,
+            "missing_dates": [],
+            "fact_is_partial": False,
+        },
+    }
+    if reference_date < CONTRACT_PERIOD_START:
+        return {
+            **base_payload,
+            "reason": (
+                "Прогноз недоступен: последний закрытый день раньше начала договорного периода "
+                f"{CONTRACT_PERIOD_START.isoformat()}."
+            ),
+        }
+
+    elapsed_end = min(reference_date, CONTRACT_PERIOD_END)
+    elapsed_day_count = (elapsed_end - CONTRACT_PERIOD_START).days + 1
+    if elapsed_day_count <= 0:
+        return {
+            **base_payload,
+            "reason": "Прогноз недоступен: нет закрытых дней договорного периода.",
+        }
+
+    elapsed_window = PeriodWindow(
+        key="contract_period_projection",
+        label="Прогноз к концу договорного периода при текущем темпе",
+        date_from=CONTRACT_PERIOD_START.isoformat(),
+        date_to=elapsed_end.isoformat(),
+        day_count=elapsed_day_count,
+        effective_as_of_date=reference_date.isoformat(),
+        period_state="completed" if elapsed_end == CONTRACT_PERIOD_END else "in_progress",
+        requested_date_from=CONTRACT_PERIOD_START.isoformat(),
+        requested_date_to=CONTRACT_PERIOD_END.isoformat(),
+        target_date_from=CONTRACT_PERIOD_START.isoformat(),
+        target_date_to=CONTRACT_PERIOD_END.isoformat(),
+        target_day_count=total_day_count,
+        fact_date_from=CONTRACT_PERIOD_START.isoformat(),
+        fact_date_to=elapsed_end.isoformat(),
+        fact_day_count=elapsed_day_count,
+        is_target_period=True,
+    )
+    fact_block = _build_period_block(
+        window=elapsed_window,
+        daily_buyout_facts=daily_buyout_facts,
+        daily_ads_facts=daily_ads_facts,
+        baseline_by_month=baseline_by_month,
+        missing_dates_by_source=missing_dates_by_source,
+        invalid_dates_by_source=invalid_dates_by_source,
+        plan_calculation=plan_calculation,
+        plan_drr_pct=plan_drr_pct,
+    )
+    metrics = fact_block.get("metrics") or {}
+    buyout_metric = metrics.get("buyout_rub") or {}
+    ads_metric = metrics.get("ads_sum_rub") or {}
+    fact_buyout_rub = buyout_metric.get("fact")
+    fact_ads_sum_rub = ads_metric.get("fact")
+    projected_buyout_rub = (
+        float(fact_buyout_rub) / float(elapsed_day_count) * float(total_day_count)
+        if fact_buyout_rub is not None
+        else None
+    )
+    projected_ads_sum_rub = (
+        float(fact_ads_sum_rub) / float(elapsed_day_count) * float(total_day_count)
+        if fact_ads_sum_rub is not None
+        else None
+    )
+    coverage = fact_block.get("coverage") or {}
+    source_status = str(fact_block.get("status") or "unavailable")
+    has_any_fact = fact_buyout_rub is not None or fact_ads_sum_rub is not None
+    if not has_any_fact:
+        status = "unavailable"
+    elif source_status == "available" and fact_buyout_rub is not None and fact_ads_sum_rub is not None:
+        status = "available"
+    else:
+        status = "partial"
+
+    source_reason = str(fact_block.get("reason") or "").strip()
+    if status == "available":
+        reason = source_reason
+    elif status == "partial":
+        reason = (
+            "Прогноз рассчитан частично: часть дат elapsed window не имеет usable facts. "
+            + source_reason
+        ).strip()
+    else:
+        reason = source_reason or "Прогноз недоступен: за elapsed window нет usable facts."
+
+    return {
+        **base_payload,
+        "status": status,
+        "reason": reason,
+        "elapsed_date_to": elapsed_end.isoformat(),
+        "elapsed_day_count": elapsed_day_count,
+        "fact_buyout_elapsed_rub": fact_buyout_rub,
+        "fact_ads_elapsed_rub": fact_ads_sum_rub,
+        "projected_buyout_rub": projected_buyout_rub,
+        "projected_buyout_pct_of_annual_plan": _safe_completion_pct(
+            fact=projected_buyout_rub,
+            plan=annual_buyout_plan_rub,
+        ),
+        "projected_ads_sum_rub": projected_ads_sum_rub,
+        "projected_ads_pct_of_annual_ads_plan": _safe_completion_pct(
+            fact=projected_ads_sum_rub,
+            plan=annual_ads_plan_rub,
+        ),
+        "projected_drr_pct": _compute_drr_pct(
+            ads_sum_rub=projected_ads_sum_rub,
+            buyout_rub=projected_buyout_rub,
+        ),
+        "fact_is_partial": bool(coverage.get("fact_is_partial")) or status == "partial",
+        "source_mix": fact_block.get("source_mix") or base_payload["source_mix"],
+        "coverage": {
+            **coverage,
+            "fact_is_partial": bool(coverage.get("fact_is_partial")) or status == "partial",
+        },
+        "source_breakdown": fact_block.get("source_breakdown") or {},
     }
 
 
