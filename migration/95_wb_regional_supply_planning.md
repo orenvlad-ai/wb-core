@@ -15,13 +15,13 @@
 
 ## Persistence
 
-No new database table or schema migration is required for the MVP.
-
-The endpoint is stateless and reads existing runtime truth:
+The planning endpoint is stateless and reads existing runtime truth:
 
 - `sheet_vitrina_v1_wb_regional_supply_result_state`
 - `sheet_vitrina_v1_nomenclature_items`
 - existing WB supplies warehouse/district mapping evidence when available
+
+Regional calculate also maintains `sheet_vitrina_v1_wb_regional_supply_calculation_audit` as a bounded metadata-only ring-buffer for operator diagnostics. This audit is not a planning source of truth and must not contain WB supply ids, barcodes or row-level recommendation payloads.
 
 The planning response includes `cache.enabled=false`; selected options are not persisted as fact.
 

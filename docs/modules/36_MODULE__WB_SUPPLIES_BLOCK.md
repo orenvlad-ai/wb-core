@@ -478,7 +478,7 @@ Targeted smokes:
 Regression/protection smokes include:
 - `python3 apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py`;
 - `python3 apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py`;
-- `python3 apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py`;
+- `python3 apps/sheet_vitrina_v1_operator_ui_persistence_smoke.py` (external `--base-url` is blocked by default because this smoke clicks refresh/calculate flows; use only loopback/isolated runtime unless explicitly acknowledging `--allow-live-mutations`);
 - `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_smoke.py`;
 - `git diff --check`.

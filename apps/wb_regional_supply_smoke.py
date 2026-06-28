@@ -221,6 +221,16 @@ def main() -> None:
             raise AssertionError("other districts must not receive selected central WB qty")
         if overlay_central_row.projected_stock_on_eta <= central_main_row.projected_stock_on_eta:
             raise AssertionError("selected WB supply must improve projected stock only in the mapped district")
+        audit_rows = runtime.list_wb_regional_supply_calculation_audit(limit=5)
+        if not audit_rows or audit_rows[0].get("calculation_id") != regional_overlay_result.calculation_id:
+            raise AssertionError(f"latest regional audit row must track the last calculation, got {audit_rows}")
+        latest_audit = audit_rows[0]
+        if latest_audit.get("central_total_qty") != overlay_districts[DISTRICT_CENTRAL].total_qty:
+            raise AssertionError(f"regional audit must expose central aggregate totals, got {latest_audit}")
+        if latest_audit.get("settings", {}).get("selected_wb_supply_ids_count") != 1:
+            raise AssertionError(f"regional audit must store selected supply count, got {latest_audit}")
+        if "wb-regional-central" in json.dumps(latest_audit, ensure_ascii=False):
+            raise AssertionError(f"regional audit must not persist selected WB supply ids, got {latest_audit}")
 
         _seed_wb_regional_overlay_fixture(
             runtime,
@@ -458,6 +468,7 @@ def main() -> None:
         print(f"central_deficit: ok -> {districts['central'].deficit_qty}")
         print(f"northwest_deficit: ok -> {districts['northwest'].deficit_qty}")
         print(f"seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
+        print(f"regional_audit: ok -> {latest_audit.get('calculation_id')}")
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
         print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
         print(f"recommendations_zip: ok -> {archive_names}")

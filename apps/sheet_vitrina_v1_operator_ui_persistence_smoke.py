@@ -58,10 +58,25 @@ def main() -> None:
         action="store_true",
         help="Ignore TLS validation errors in the browser context.",
     )
+    parser.add_argument(
+        "--allow-live-mutations",
+        action="store_true",
+        help=(
+            "Allow this non-read-only smoke against a non-loopback --base-url. "
+            "Use only for an isolated runtime; the scenario clicks refresh/calculate flows."
+        ),
+    )
     args = parser.parse_args()
 
     if args.base_url:
-        result = run_browser_checks(args.base_url.rstrip("/"), ignore_https_errors=args.ignore_https_errors)
+        base_url = args.base_url.rstrip("/")
+        if not args.allow_live_mutations and not _is_loopback_base_url(base_url):
+            raise SystemExit(
+                "Refusing to run operator UI persistence smoke against a non-loopback --base-url "
+                "without --allow-live-mutations. This smoke clicks refresh/calculate flows and "
+                "can overwrite live operator result state."
+            )
+        result = run_browser_checks(base_url, ignore_https_errors=args.ignore_https_errors)
         _print_summary(result)
         return
 
@@ -1734,6 +1749,12 @@ def _reserve_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _is_loopback_base_url(base_url: str) -> bool:
+    parsed = urllib_parse.urlparse(base_url)
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"127.0.0.1", "::1", "localhost"}
 
 
 def _print_summary(result: dict[str, object]) -> None:

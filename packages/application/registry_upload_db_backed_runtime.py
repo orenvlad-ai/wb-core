@@ -3983,6 +3983,40 @@ class RegistryUploadDbBackedRuntime:
                     json.dumps(dict(payload), ensure_ascii=False),
                 ),
             )
+            audit_row = _build_wb_regional_supply_calculation_audit_row(
+                calculated_at=calculated_at,
+                payload=payload,
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_regional_supply_calculation_audit(
+                    saved_at,
+                    calculated_at,
+                    calculation_id,
+                    report_date,
+                    metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    calculated_at,
+                    audit_row["calculated_at"],
+                    audit_row["calculation_id"],
+                    audit_row["report_date"],
+                    json.dumps(audit_row, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_wb_regional_supply_calculation_audit
+                WHERE id NOT IN (
+                    SELECT id
+                    FROM sheet_vitrina_v1_wb_regional_supply_calculation_audit
+                    ORDER BY id DESC
+                    LIMIT 200
+                )
+                """
+            )
             conn.commit()
 
     def load_wb_regional_supply_result_state(self) -> dict[str, Any] | None:
@@ -4001,6 +4035,35 @@ class RegistryUploadDbBackedRuntime:
             if isinstance(payload, dict):
                 payload.setdefault("calculated_at", row["calculated_at"])
             return payload
+
+    def list_wb_regional_supply_calculation_audit(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        normalized_limit = min(max(int(limit), 1), 200)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT id, saved_at, calculated_at, calculation_id, report_date, metadata_json
+                FROM sheet_vitrina_v1_wb_regional_supply_calculation_audit
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"])
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.setdefault("id", row["id"])
+            metadata.setdefault("saved_at", row["saved_at"])
+            metadata.setdefault("calculated_at", row["calculated_at"])
+            metadata.setdefault("calculation_id", row["calculation_id"])
+            metadata.setdefault("report_date", row["report_date"])
+            result.append(metadata)
+        return result
 
     def _collect_validation_errors(self, bundle: RegistryUploadBundleV1, activated_at: str) -> list[str]:
         errors: list[str] = []
@@ -5438,6 +5501,138 @@ def _loads_json_object(value: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _build_wb_regional_supply_calculation_audit_row(
+    *,
+    calculated_at: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    settings = _mapping_or_empty(payload.get("settings"))
+    summary = _mapping_or_empty(payload.get("summary"))
+    diagnostics = _mapping_or_empty(payload.get("diagnostics"))
+    overlay = _mapping_or_empty(payload.get("wb_supply_overlay"))
+    overlay_regional = _mapping_or_empty(overlay.get("wb_regional"))
+    overlay_stock_ff = _mapping_or_empty(overlay.get("stock_ff"))
+    districts_payload = payload.get("districts")
+    districts = [item for item in districts_payload if isinstance(item, Mapping)] if isinstance(districts_payload, list) else []
+    district_totals = {
+        str(item.get("district_key", "")): {
+            "total_qty": _audit_int(item.get("total_qty")),
+            "deficit_qty": _audit_int(item.get("deficit_qty")),
+            "row_count": len(item.get("rows") or []) if isinstance(item.get("rows"), list) else 0,
+        }
+        for item in districts
+        if str(item.get("district_key", "")).strip()
+    }
+    included_district_keys = [
+        str(item)
+        for item in settings.get("included_district_keys", [])
+        if str(item or "").strip()
+    ]
+    selected_wb_supply_ids = settings.get("selected_wb_supply_ids", [])
+    selected_wb_supply_ids_count = (
+        len(selected_wb_supply_ids)
+        if isinstance(selected_wb_supply_ids, (list, tuple))
+        else 0
+    )
+    added_by_district = overlay_regional.get("added_qty_by_district") or overlay.get(
+        "regional_added_qty_by_district"
+    )
+    if not isinstance(added_by_district, Mapping):
+        added_by_district = {}
+    selected_supplies = overlay.get("selected_supplies")
+    skipped_supplies = overlay_regional.get("skipped_supplies") or overlay.get("skipped_supplies")
+    unmapped_events = overlay_regional.get("unmapped_events")
+    return {
+        "calculation_id": str(payload.get("calculation_id", "")),
+        "calculated_at": str(payload.get("calculated_at") or calculated_at),
+        "report_date": str(payload.get("report_date", "")),
+        "status": str(payload.get("status", "")),
+        "stock_ff_source": str(payload.get("stock_ff_source") or settings.get("stock_ff_source") or ""),
+        "settings": {
+            "sales_avg_period_days": _audit_int(settings.get("sales_avg_period_days")),
+            "cycle_supply_days": _audit_int(
+                settings.get("cycle_supply_days", settings.get("supply_horizon_days"))
+            ),
+            "lead_time_to_region_days": _audit_int(settings.get("lead_time_to_region_days")),
+            "safety_days": _audit_int(settings.get("safety_days")),
+            "order_batch_qty": _audit_int(settings.get("order_batch_qty")),
+            "included_district_keys": included_district_keys,
+            "included_district_count": len(included_district_keys),
+            "selected_wb_supply_ids_count": selected_wb_supply_ids_count,
+        },
+        "summary": {
+            "total_qty": _audit_int(summary.get("total_qty")),
+            "estimated_weight": _audit_float(summary.get("estimated_weight")),
+            "estimated_volume": _audit_float(summary.get("estimated_volume")),
+        },
+        "district_totals_by_key": district_totals,
+        "central_total_qty": _audit_int(district_totals.get("central", {}).get("total_qty")),
+        "central_deficit_qty": _audit_int(district_totals.get("central", {}).get("deficit_qty")),
+        "diagnostics_summary": {
+            "district_selection_mode": str(diagnostics.get("district_selection_mode", "")),
+            "fallback_sku_count": _audit_int(diagnostics.get("fallback_sku_count")),
+            "seed_allocated_qty_total": _audit_int(diagnostics.get("seed_allocated_qty_total")),
+            "seed_unfulfilled_qty_total": _audit_int(diagnostics.get("seed_unfulfilled_qty_total")),
+            "excluded_missing_current_stock_snapshot": _audit_int(
+                diagnostics.get("excluded_missing_current_stock_snapshot")
+            ),
+            "excluded_missing_previous_stock_snapshot": _audit_int(
+                diagnostics.get("excluded_missing_previous_stock_snapshot")
+            ),
+        },
+        "wb_supply_overlay_summary": {
+            "status": str(overlay.get("status", "")),
+            "selected_supply_count": _audit_int(
+                overlay.get("selected_supply_count", overlay.get("selected_supplies_count"))
+            )
+            or (len(selected_supplies) if isinstance(selected_supplies, list) else 0),
+            "events_count": _audit_int(overlay_regional.get("events_count", overlay.get("events_count"))),
+            "skipped_count": _audit_int(overlay_regional.get("skipped_count", overlay.get("skipped_count")))
+            or (len(skipped_supplies) if isinstance(skipped_supplies, list) else 0),
+            "warnings_count": _audit_int(overlay.get("warnings_count")),
+            "stock_ff_total_base": _audit_float(
+                overlay_stock_ff.get("total_base_stock_ff", overlay.get("stock_ff_total_base"))
+            ),
+            "stock_ff_total_selected": _audit_float(
+                overlay_stock_ff.get("total_selected_qty", overlay.get("stock_ff_total_selected"))
+            ),
+            "stock_ff_total_effective": _audit_float(
+                overlay_stock_ff.get("total_effective_stock_ff", overlay.get("stock_ff_total_effective"))
+            ),
+            "regional_added_qty_by_district": {
+                str(key): _audit_float(value)
+                for key, value in added_by_district.items()
+                if str(key or "").strip()
+            },
+            "regional_added_qty_total": _audit_float(
+                overlay_regional.get("added_qty_total", overlay.get("regional_added_qty_total"))
+            ),
+            "regional_unmapped_events_count": _audit_int(overlay_regional.get("unmapped_events_count"))
+            or (len(unmapped_events) if isinstance(unmapped_events, list) else 0),
+        },
+    }
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _audit_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _audit_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _wb_supply_record_from_row(row: sqlite3.Row) -> dict[str, Any]:
     normalized = _loads_json_object(row["normalized_row_json"])
     raw_list = _loads_json_object(row["raw_list_json"]) if row["raw_list_json"] else None
@@ -5783,6 +5978,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             calculated_at TEXT NOT NULL,
             result_json TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_regional_supply_calculation_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            saved_at TEXT NOT NULL,
+            calculated_at TEXT NOT NULL,
+            calculation_id TEXT NOT NULL,
+            report_date TEXT NOT NULL,
+            metadata_json TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_regional_supply_calculation_audit_recent
+        ON sheet_vitrina_v1_wb_regional_supply_calculation_audit(id DESC);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supplies (
             supply_id TEXT PRIMARY KEY,
