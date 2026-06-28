@@ -146,7 +146,7 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
-- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is a WebCore Data MCP artifact for the separate read-only MCP boundary. It is installed/enabled on the active EU host only as a private loopback service on `127.0.0.1:8766`. The repo-owned nginx allowlist may publish exact `/.well-known/oauth-protected-resource` and `/mcp` locations to that loopback upstream only while the MCP server remains bearer-auth fail-closed; this staged public route is not a completed ChatGPT custom connector auth boundary until OAuth 2.1/PKCE or another approved ChatGPT-compatible auth path is configured and verified.
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is a WebCore Data MCP artifact for the separate read-only MCP boundary. It is installed/enabled on the active EU host only as a private loopback service on `127.0.0.1:8766`. The repo-owned nginx allowlist may publish only exact OAuth/MCP locations to that loopback upstream; ChatGPT connector auth is owner-only OAuth 2.1 auth-code + PKCE S256, while bearer auth remains a server/admin diagnostic path.
 
 `wb-core-sheet-vitrina-refresh.timer` is a due-check ticker, not the business-time source of truth: it runs every 10 minutes and starts `apps/sheet_vitrina_v1_auto_refresh_tick.py`; the runner reads runtime JSON schedules (`11:00`/`20:00 Asia/Yekaterinburg` by default, editable through the web-vitrina auto-schedules API), builds an in-memory WebCore session cookie from hosted env, and then calls the protected refresh route with `auto_refresh=true`. The timer itself is non-persistent; catch-up is owned by the runner's schedule state so a deploy/restart does not immediately fire a stale systemd event while the app process is restarting.
 
@@ -260,7 +260,7 @@ Hosted service должна предоставлять current repo entrypoint e
 
 Production WebCore auth is app-level session auth, not nginx basic auth. The password hash uses the entrypoint PBKDF2-HMAC format `pbkdf2_sha256$iterations$salt_b64$digest_b64`; plaintext credentials must stay outside Git/docs/logs and are handed to the owner separately. `WB_CORE_WEB_AUTH_REQUIRED=1` may be set to fail closed when auth env is incomplete. The env web principal is the bootstrap/fallback `admin`; runtime users are stored server-side in SQLite `sheet_vitrina_v1_users` and may have legacy technical roles `admin`, `operator`, `supply_operator` or `supplier`, but shell/API authorization is section-based through `allowed_sections` plus internal `manage_users`. Supplier env credentials are optional and remain backward-compatible supplier-only; when absent, supplier login is unavailable, but users with the `supply` section can access `Поставки -> От поставщика` through the shell.
 
-WebCore Data MCP is a separate read-only data gateway and must not reuse browser session cookies as its production auth boundary. Its repo-owned runner is `apps/webcore_data_mcp_server.py`, defaulting to loopback `127.0.0.1:8766` and `POST /mcp`. The public nginx allowlist can route only exact `/.well-known/oauth-protected-resource` and `/mcp` paths to that loopback upstream; no prefix/static/runtime-file exposure is part of the MCP route contract. Relevant env names are:
+WebCore Data MCP is a separate read-only data gateway and must not expose browser session cookies as its MCP auth boundary. Its repo-owned runner is `apps/webcore_data_mcp_server.py`, defaulting to loopback `127.0.0.1:8766` and `POST /mcp`. The public nginx allowlist can route only exact OAuth/MCP paths to that loopback upstream: `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token` and `/mcp`; no prefix/static/runtime-file exposure is part of the MCP route contract. Relevant env names are:
 - `WEBCORE_DATA_MCP_HOST`
 - `WEBCORE_DATA_MCP_PORT`
 - `WEBCORE_DATA_MCP_PATH`
@@ -273,19 +273,30 @@ WebCore Data MCP is a separate read-only data gateway and must not reuse browser
 - `WEBCORE_DATA_MCP_RESOURCE_DOCUMENTATION_URL`
 - `WEBCORE_DATA_MCP_AUTHORIZATION_SERVERS`
 - `WEBCORE_DATA_MCP_SCOPES`
+- `WEBCORE_DATA_MCP_OAUTH_ISSUER`
+- `WEBCORE_DATA_MCP_OAUTH_SIGNING_SECRET`
+- `WEBCORE_DATA_MCP_OAUTH_OWNER_USERNAME` or `WB_CORE_WEB_AUTH_USERNAME`
+- `WEBCORE_DATA_MCP_OAUTH_OWNER_PASSWORD_HASH` or `WB_CORE_WEB_AUTH_PASSWORD_HASH`
+- `WEBCORE_DATA_MCP_OAUTH_SESSION_SECRET` or `WB_CORE_WEB_AUTH_SESSION_SECRET` (optional session-cookie auto-consent)
+- `WEBCORE_DATA_MCP_OAUTH_CODE_STORE_PATH`
+- `WEBCORE_DATA_MCP_OAUTH_ALLOWED_REDIRECT_PREFIXES`
+- `WEBCORE_DATA_MCP_OAUTH_ALLOWED_CLIENT_ID_PREFIXES`
+- `WEBCORE_DATA_MCP_OAUTH_CODE_TTL_SECONDS`
+- `WEBCORE_DATA_MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS`
 
 Active EU private MCP live state:
 - `wb-core-data-mcp.service` is installed and enabled as a loopback-only private service;
 - the generated bearer secret is stored outside Git in root-only `/etc/wb-core-data-mcp.env`;
 - `/etc/wb-core-data-mcp.env` is consumed by the MCP unit and must not be printed, committed, copied into docs or placed in `/opt/wb-ai/.env`;
-- when `https://api.selleros.pro/mcp` is published, unauthenticated access must be auth-blocked with no business data; bearer-only public access is an interim protected route, not a final ChatGPT custom connector setup.
+- when `https://api.selleros.pro/mcp` is published, unauthenticated access must be auth-blocked with no business data; ChatGPT connector access uses owner-only OAuth 2.1 auth-code + PKCE S256. Bearer auth may remain enabled only as a server/admin diagnostic path and must not be documented as the final ChatGPT auth mode.
 
 MCP publication gate:
 - unauthenticated `POST /mcp` must return `401` with no business data;
 - every exposed tool must be allowlisted and marked `readOnlyHint: true`;
+- every exposed tool must carry an OAuth `securitySchemes` scope in the `webcore.*.read` namespace;
 - the DB read path must use SQLite `mode=ro` and `PRAGMA query_only=ON`;
 - no MCP tool may expose arbitrary SQL, shell/SSH, upstream sync/backfill/refresh/load, supplier write/upload/rematch/price-check, runtime file download, secrets, storage-state content or raw payload dumps;
-- normal ChatGPT custom connector use requires OAuth 2.1 / PKCE through an established identity provider or another approved ChatGPT-compatible auth path. Bearer auth alone is acceptable only as a bounded protected route/probe where unauthenticated public requests remain no-data and the bearer secret is server-side only.
+- OAuth authorization codes are one-time, short-lived and stored outside Git under runtime state; access tokens are short-lived, HMAC-signed, audience-bound to `WEBCORE_DATA_MCP_RESOURCE_URL`, scope-bound and never logged or printed.
 
 Current required upstream secret contract stays:
 - `WB_API_TOKEN`

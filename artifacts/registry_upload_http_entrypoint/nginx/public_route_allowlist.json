@@ -410,6 +410,34 @@
       "proxy_pass_url": "http://127.0.0.1:8766"
     },
     {
+      "name": "webcore_data_mcp_oauth_authorization_server",
+      "match": "exact",
+      "path": "/.well-known/oauth-authorization-server",
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8766"
+    },
+    {
+      "name": "webcore_data_mcp_openid_configuration",
+      "match": "exact",
+      "path": "/.well-known/openid-configuration",
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8766"
+    },
+    {
+      "name": "webcore_data_mcp_oauth_authorize",
+      "match": "exact",
+      "path": "/oauth/authorize",
+      "methods": ["GET", "POST"],
+      "proxy_pass_url": "http://127.0.0.1:8766"
+    },
+    {
+      "name": "webcore_data_mcp_oauth_token",
+      "match": "exact",
+      "path": "/oauth/token",
+      "methods": ["POST"],
+      "proxy_pass_url": "http://127.0.0.1:8766"
+    },
+    {
       "name": "webcore_data_mcp",
       "match": "exact",
       "path": "/mcp",
