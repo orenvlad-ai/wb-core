@@ -2,7 +2,7 @@
 title: "Модуль: webcore_data_mcp_block"
 doc_id: "WB-CORE-MODULE-38-WEBCORE-DATA-MCP-BLOCK"
 doc_type: "module"
-status: "repo_implemented_live_gated"
+status: "repo_implemented_private_loopback_live_gated"
 purpose: "Зафиксировать отдельный read-only MCP gateway для безопасного доступа ChatGPT Project/custom app к business data `wb-core`."
 scope: "Standalone HTTP MCP server over allowlisted read-only business tools: freshness, search, metric source explanation, cached WB supplies, supplier shipments, factory-order state, persisted stock/SKU snapshots and explicit revenue ambiguity handling. No arbitrary SQL, shell, SSH, upstream sync/backfill, runtime file downloads, secrets or raw payload dumps."
 source_basis:
@@ -47,7 +47,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Initial repo implementation of a separate read-only WebCore Data MCP gateway. Public/live exposure remains gated until a ChatGPT-compatible OAuth/Secure MCP Tunnel production auth path is configured."
+update_note: "Private EU loopback service is installed and enabled on 127.0.0.1:8766 with bearer fail-closed auth. Public /mcp exposure remains gated until a ChatGPT-compatible OAuth/Secure MCP Tunnel production auth path is configured."
 ---
 
 # 1. Identifier and Status
@@ -55,8 +55,8 @@ update_note: "Initial repo implementation of a separate read-only WebCore Data M
 - `module_id`: `webcore_data_mcp_block`
 - `family`: `production-facing-integration/read-only-data-gateway`
 - `status_repo`: implemented
-- `status_live`: gated, not part of current public nginx route allowlist
-- `status_auth`: bearer-auth MVP for private/local/Responses-style probes; production ChatGPT Project exposure requires OAuth 2.1 or Secure MCP Tunnel setup
+- `status_live`: private loopback service installed/enabled on the active EU host; not part of current public nginx route allowlist
+- `status_auth`: bearer-auth MVP for private/local probes; production ChatGPT Project exposure requires OAuth 2.1 or Secure MCP Tunnel setup
 
 This module is intentionally separate from DevControl MCP and from the main WebCore operator HTTP handler.
 
@@ -83,9 +83,17 @@ Server runner:
 
 `apps/webcore_data_mcp_server.py`
 
-Optional gated systemd artifact:
+Systemd artifact:
 
 `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service`
+
+Current active EU live state:
+
+- installed as `wb-core-data-mcp.service`;
+- enabled and running;
+- listens only on `127.0.0.1:8766`;
+- uses root-only `/etc/wb-core-data-mcp.env` for the bearer secret;
+- is not published through nginx and does not create a public `/mcp` route.
 
 Default local listener:
 
@@ -139,6 +147,7 @@ Implemented MVP auth:
 
 - `WEBCORE_DATA_MCP_AUTH_MODE=bearer` by default;
 - requires `WEBCORE_DATA_MCP_BEARER_TOKEN` or `WEBCORE_DATA_MCP_BEARER_TOKEN_SHA256`;
+- active EU host stores the generated bearer token only in root-readable `/etc/wb-core-data-mcp.env`;
 - unauthenticated MCP POST returns `401` with no business data;
 - health check returns only `{"status":"ok","server":"webcore-data-mcp"}`;
 - protected-resource metadata is available at `/.well-known/oauth-protected-resource`.
@@ -239,9 +248,17 @@ The smoke proves:
 
 # 10. Live Publication Gate
 
-This module is repo-implemented but not live-published by default.
+This module is repo-implemented and private-live on the active EU host, but not public-live.
 
-Before adding `/mcp` to the public nginx allowlist or deploying a systemd service:
+Current verified state:
+
+- local MCP URL on the host: `http://127.0.0.1:8766/mcp`;
+- public `https://api.selleros.pro/mcp` returns nginx `404`;
+- no public nginx `/mcp` allowlist entry exists;
+- no Secure MCP Tunnel client is configured yet;
+- ChatGPT Project connection still requires a Platform tunnel or OAuth setup step.
+
+Before adding `/mcp` to the public nginx allowlist or treating this as a ChatGPT Project-ready app:
 
 1. Confirm the target ChatGPT Project/custom app can use OAuth 2.1 or a private Secure MCP Tunnel path.
 2. Configure env-only secrets on the host.

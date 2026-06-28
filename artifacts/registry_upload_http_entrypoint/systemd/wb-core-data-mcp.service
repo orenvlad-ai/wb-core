@@ -7,6 +7,7 @@ Wants=network.target
 Type=simple
 WorkingDirectory=/opt/wb-core-runtime/app
 EnvironmentFile=/opt/wb-ai/.env
+EnvironmentFile=-/etc/wb-core-data-mcp.env
 ExecStart=/usr/bin/env PYTHONUNBUFFERED=1 WEBCORE_DATA_MCP_HOST=127.0.0.1 WEBCORE_DATA_MCP_PORT=8766 WEBCORE_DATA_MCP_PATH=/mcp WEBCORE_DATA_MCP_HEALTH_PATH=/healthz WEBCORE_DATA_MCP_AUTH_MODE=bearer REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state WEBCORE_DATA_MCP_AUDIT_LOG_PATH=/opt/wb-core-runtime/state/webcore_data_mcp_audit.jsonl /usr/bin/python3 /opt/wb-core-runtime/app/apps/webcore_data_mcp_server.py
 Restart=on-failure
 RestartSec=5s
