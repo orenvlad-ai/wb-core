@@ -175,12 +175,21 @@ def main() -> None:
             buyout_metric = (selected.get("metrics") or {}).get("buyout_rub") or {}
             if buyout_metric.get("plan") != 45000.0 or buyout_metric.get("fact") != 45000.0:
                 raise AssertionError(f"plan report buyout contract must keep server-side plan/fact math, got {report_payload}")
+            if buyout_metric.get("completion_pct") != 100.0:
+                raise AssertionError(f"plan report buyout metric must expose fact/plan completion_pct, got {report_payload}")
             drr_metric = (selected.get("metrics") or {}).get("drr_pct") or {}
             if drr_metric.get("fact") != 12.0 or drr_metric.get("delta_pp") != 2.0:
                 raise AssertionError(f"plan report drr block must stay percentage-based, got {report_payload}")
             ads_metric = (selected.get("metrics") or {}).get("ads_sum_rub") or {}
             if ads_metric.get("plan") != 4500.0 or ads_metric.get("fact") != 5400.0:
                 raise AssertionError(f"ads spend plan must derive from buyout plan * planned DRR, got {report_payload}")
+            if (
+                ads_metric.get("completion_pct") != 120.0
+                or ads_metric.get("ads_plan_base_rub") != 45000.0
+                or ads_metric.get("ads_plan_base_mode") != "plan_turnover_base"
+                or ads_metric.get("status") != "ok"
+            ):
+                raise AssertionError(f"ads metric must expose execution completion and plan-base diagnostics, got {report_payload}")
             if not selected.get("source_breakdown"):
                 raise AssertionError(f"plan report must expose per-block source breakdown, got {report_payload}")
             if "month_to_date" not in report_payload.get("periods", {}) or "quarter_to_date" not in report_payload.get("periods", {}) or "year_to_date" not in report_payload.get("periods", {}):
@@ -194,7 +203,7 @@ def main() -> None:
                 "last_30_days": ("За последние 30 дней", "2026-03-22", "2026-04-20", 30, "closed_day_window"),
                 "current_month": ("За текущий месяц", "2026-04-01", "2026-04-20", 20, "closed_day_window"),
                 "current_quarter": ("За текущий квартал", "2026-04-01", "2026-04-20", 20, "closed_day_window"),
-                "current_year": ("За текущий год", "2026-01-01", "2026-04-20", 110, "closed_day_window"),
+                "current_year": ("За текущий год", "2026-01-01", "2026-04-20", 110, "in_progress"),
                 "first_quarter": ("За первый квартал", "2026-01-01", "2026-03-31", 90, "completed"),
                 "second_quarter": ("За второй квартал", "2026-04-01", "2026-04-20", 20, "in_progress"),
                 "third_quarter": ("За третий квартал", "2026-07-01", "2026-09-30", 0, "not_started"),
@@ -227,11 +236,26 @@ def main() -> None:
                     raise AssertionError(f"period {period_key} selected block is wrong, got {period_payload}")
                 if period_state == "not_started" and period_selected.get("metrics", {}).get("buyout_rub", {}).get("plan") is not None:
                     raise AssertionError(f"future period {period_key} must not fabricate a plan, got {period_payload}")
+                if period_key == "first_half":
+                    first_half_buyout = (period_selected.get("metrics") or {}).get("buyout_rub") or {}
+                    first_half_missing = (period_selected.get("coverage") or {}).get("missing_dates") or []
+                    if (
+                        period_selected.get("fact_day_count") != 110
+                        or period_selected.get("target_date_from") != "2026-01-01"
+                        or period_selected.get("target_date_to") != "2026-06-30"
+                        or period_selected.get("target_day_count") != 181
+                        or first_half_buyout.get("plan") != 271500.0
+                        or first_half_buyout.get("to_date_plan") != 165000.0
+                        or "2026-06-30" in first_half_missing
+                    ):
+                        raise AssertionError(
+                            f"first_half must use full target plan without treating future dates as missing, got {period_payload}"
+                        )
             contract_query = urllib_parse.urlencode(
                 {
                     "period": "first_quarter",
                     "h1_buyout_plan_rub": "155379879",
-                    "h2_buyout_plan_rub": "294620120",
+                    "h2_buyout_plan_rub": "294620121",
                     "plan_drr_pct": "6",
                     "as_of_date": "2026-04-24",
                     "use_contract_start_date": "true",
@@ -258,7 +282,7 @@ def main() -> None:
                 {
                     "period": "current_year",
                     "h1_buyout_plan_rub": "155379879",
-                    "h2_buyout_plan_rub": "294620120",
+                    "h2_buyout_plan_rub": "294620121",
                     "plan_drr_pct": "6",
                     "as_of_date": "2026-04-24",
                 }
@@ -273,7 +297,7 @@ def main() -> None:
                 {
                     "period": "current_year",
                     "h1_buyout_plan_rub": "155379879",
-                    "h2_buyout_plan_rub": "294620120",
+                    "h2_buyout_plan_rub": "294620121",
                     "plan_drr_pct": "6",
                     "as_of_date": "2026-04-24",
                     "annual_plan_evenly_distributed": "true",
@@ -283,12 +307,12 @@ def main() -> None:
             annual_inputs = annual_payload.get("inputs") or {}
             annual_ytd = (annual_payload.get("periods") or {}).get("year_to_date") or {}
             annual_ytd_buyout = (annual_ytd.get("metrics") or {}).get("buyout_rub") or {}
-            expected_annual_ytd_plan = 449999999.0 / 365.0 * 114.0
+            expected_annual_ytd_plan = 450000000.0 / 365.0 * 114.0
             if (
                 annual_status != 200
                 or old_for_annual_status != 200
                 or annual_inputs.get("plan_model") != "annual_evenly_distributed"
-                or annual_inputs.get("annual_buyout_plan_rub") != 449999999.0
+                or annual_inputs.get("annual_buyout_plan_rub") != 450000000.0
                 or annual_ytd_buyout.get("fact") != old_for_annual_ytd_buyout.get("fact")
                 or annual_ytd_buyout.get("plan") is None
                 or abs(float(annual_ytd_buyout.get("plan")) - expected_annual_ytd_plan) > 1e-3
@@ -298,7 +322,7 @@ def main() -> None:
                 {
                     "period": "first_quarter",
                     "h1_buyout_plan_rub": "155379879",
-                    "h2_buyout_plan_rub": "294620120",
+                    "h2_buyout_plan_rub": "294620121",
                     "plan_drr_pct": "6",
                     "as_of_date": "2026-04-24",
                     "use_contract_start_date": "true",
@@ -311,7 +335,7 @@ def main() -> None:
             )
             annual_contract_selected = (annual_contract_payload.get("periods") or {}).get("selected_period") or {}
             annual_contract_plan = (annual_contract_selected.get("metrics") or {}).get("buyout_rub", {}).get("plan")
-            expected_annual_contract_plan = 449999999.0 / 334.0 * 59.0
+            expected_annual_contract_plan = 450000000.0 / 334.0 * 59.0
             if (
                 annual_contract_status != 200
                 or annual_contract_plan is None
@@ -324,7 +348,7 @@ def main() -> None:
                 {
                     "period": "first_quarter",
                     "h1_buyout_plan_rub": "155379879",
-                    "h2_buyout_plan_rub": "294620120",
+                    "h2_buyout_plan_rub": "294620121",
                     "plan_drr_pct": "6",
                     "use_contract_start_date": "true",
                     "contract_start_date": "not-a-date",

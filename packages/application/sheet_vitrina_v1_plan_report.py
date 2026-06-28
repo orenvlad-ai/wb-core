@@ -60,9 +60,9 @@ PERSISTENT_BLOCKS = (
 REPORT_NOTES = (
     "Отчёт остаётся server-side read-only path и не триггерит refresh/upstream fetch.",
     "Факт читается из persisted accepted closed-day runtime snapshots `fin_report_daily` + `ads_compact` по current active `config_v2`; manual monthly baseline используется только для plan-report aggregate blocks и не подменяет daily snapshots.",
-    "План по выкупу считается посуточно: план H1/H2 делится на количество календарных дней соответствующего полугодия, затем дневные доли суммируются по полному календарному диапазону блока.",
-    "Факт DRR считается как `ads_sum / fin_buyout_rub * 100`; плановый DRR сравнивается именно как процент, без подмены на рекламный бюджет.",
-    "План рекламных расходов = `план выкупа за период * плановый DRR / 100`.",
+    "План по выкупу считается посуточно: для fixed target periods используется полный целевой период, обрезанный по дате подписания; rolling/to-date blocks используют закрытое фактическое окно.",
+    "Факт DRR считается как `ads_sum / fin_buyout_rub * 100` и остаётся диагностикой, а не статусом выполнения рекламы.",
+    "План рекламы по WB/VB = `max(плановый выкуп, фактический выкуп) * плановый DRR / 100`; при перевыполнении оборота рекламный план пересчитывается от факта.",
 )
 
 
@@ -82,6 +82,13 @@ class PeriodWindow:
     contract_start_date: str | None = None
     contract_start_applied: bool = False
     contract_start_note: str | None = None
+    target_date_from: str | None = None
+    target_date_to: str | None = None
+    target_day_count: int | None = None
+    fact_date_from: str | None = None
+    fact_date_to: str | None = None
+    fact_day_count: int | None = None
+    is_target_period: bool = False
 
 
 @dataclass(frozen=True)
@@ -573,7 +580,8 @@ def _report_notes_for_plan_mode(plan_mode: str) -> list[str]:
     if plan_mode == "annual_evenly_distributed":
         notes[2] = (
             "План по выкупу считается посуточно: общий годовой план H1+H2 распределяется "
-            "равномерно по календарным дням года или contract-start расчётного окна."
+            "равномерно по календарным дням года или contract-start расчётного окна; "
+            "fixed target periods используют полный целевой период."
         )
     return notes
 
@@ -581,30 +589,46 @@ def _report_notes_for_plan_mode(plan_mode: str) -> list[str]:
 def _build_selected_window(*, reference_date: date, period_key: str) -> PeriodWindow:
     if period_key in FIXED_PERIOD_BOUNDS:
         return _build_fixed_period_window(reference_date=reference_date, period_key=period_key)
+    if period_key == "current_year":
+        return _build_current_year_target_window(reference_date=reference_date)
     start_date = _period_start_for_key(reference_date=reference_date, period_key=period_key)
+    day_count = (reference_date - start_date).days + 1
     return PeriodWindow(
         key=period_key,
         label=PERIOD_LABELS[period_key],
         date_from=start_date.isoformat(),
         date_to=reference_date.isoformat(),
-        day_count=(reference_date - start_date).days + 1,
+        day_count=day_count,
         effective_as_of_date=reference_date.isoformat(),
         requested_date_from=start_date.isoformat(),
         requested_date_to=reference_date.isoformat(),
+        target_date_from=start_date.isoformat(),
+        target_date_to=reference_date.isoformat(),
+        target_day_count=day_count,
+        fact_date_from=start_date.isoformat(),
+        fact_date_to=reference_date.isoformat(),
+        fact_day_count=day_count,
     )
 
 
 def _build_to_date_window(*, reference_date: date, period_key: str, label: str) -> PeriodWindow:
     start_date = _period_start_for_key(reference_date=reference_date, period_key=period_key)
+    day_count = (reference_date - start_date).days + 1
     return PeriodWindow(
         key=period_key,
         label=label,
         date_from=start_date.isoformat(),
         date_to=reference_date.isoformat(),
-        day_count=(reference_date - start_date).days + 1,
+        day_count=day_count,
         effective_as_of_date=reference_date.isoformat(),
         requested_date_from=start_date.isoformat(),
         requested_date_to=reference_date.isoformat(),
+        target_date_from=start_date.isoformat(),
+        target_date_to=reference_date.isoformat(),
+        target_day_count=day_count,
+        fact_date_from=start_date.isoformat(),
+        fact_date_to=reference_date.isoformat(),
+        fact_day_count=day_count,
     )
 
 
@@ -612,6 +636,7 @@ def _build_fixed_period_window(*, reference_date: date, period_key: str) -> Peri
     start_month, start_day, end_month, end_day = FIXED_PERIOD_BOUNDS[period_key]
     requested_start = reference_date.replace(month=start_month, day=start_day)
     requested_end = reference_date.replace(month=end_month, day=end_day)
+    target_day_count = (requested_end - requested_start).days + 1
     if reference_date < requested_start:
         return PeriodWindow(
             key=period_key,
@@ -623,44 +648,79 @@ def _build_fixed_period_window(*, reference_date: date, period_key: str) -> Peri
             period_state="not_started",
             requested_date_from=requested_start.isoformat(),
             requested_date_to=requested_end.isoformat(),
+            target_date_from=requested_start.isoformat(),
+            target_date_to=requested_end.isoformat(),
+            target_day_count=target_day_count,
+            fact_date_from=requested_start.isoformat(),
+            fact_date_to=requested_start.isoformat(),
+            fact_day_count=0,
+            is_target_period=True,
         )
     effective_end = min(reference_date, requested_end)
+    fact_day_count = (effective_end - requested_start).days + 1
     period_state = "completed" if effective_end == requested_end else "in_progress"
     return PeriodWindow(
         key=period_key,
         label=PERIOD_LABELS[period_key],
         date_from=requested_start.isoformat(),
         date_to=effective_end.isoformat(),
-        day_count=(effective_end - requested_start).days + 1,
+        day_count=fact_day_count,
         effective_as_of_date=reference_date.isoformat(),
         period_state=period_state,
         requested_date_from=requested_start.isoformat(),
         requested_date_to=requested_end.isoformat(),
+        target_date_from=requested_start.isoformat(),
+        target_date_to=requested_end.isoformat(),
+        target_day_count=target_day_count,
+        fact_date_from=requested_start.isoformat(),
+        fact_date_to=effective_end.isoformat(),
+        fact_day_count=fact_day_count,
+        is_target_period=True,
+    )
+
+
+def _build_current_year_target_window(*, reference_date: date) -> PeriodWindow:
+    requested_start = reference_date.replace(month=1, day=1)
+    requested_end = reference_date.replace(month=12, day=31)
+    target_day_count = (requested_end - requested_start).days + 1
+    fact_day_count = (reference_date - requested_start).days + 1
+    return PeriodWindow(
+        key="current_year",
+        label=PERIOD_LABELS["current_year"],
+        date_from=requested_start.isoformat(),
+        date_to=reference_date.isoformat(),
+        day_count=fact_day_count,
+        effective_as_of_date=reference_date.isoformat(),
+        period_state="completed" if reference_date == requested_end else "in_progress",
+        requested_date_from=requested_start.isoformat(),
+        requested_date_to=requested_end.isoformat(),
+        target_date_from=requested_start.isoformat(),
+        target_date_to=requested_end.isoformat(),
+        target_day_count=target_day_count,
+        fact_date_from=requested_start.isoformat(),
+        fact_date_to=reference_date.isoformat(),
+        fact_day_count=fact_day_count,
+        is_target_period=True,
     )
 
 
 def _apply_contract_start_date(*, window: PeriodWindow, contract_start_date: date) -> PeriodWindow:
     original_date_from = window.original_date_from or window.date_from
     original_date_to = window.original_date_to or window.date_to
-    original_start = date.fromisoformat(window.date_from)
-    original_end = date.fromisoformat(window.date_to)
-    effective_start = max(original_start, contract_start_date)
+    fact_start = date.fromisoformat(window.fact_date_from or window.date_from)
+    fact_end = date.fromisoformat(window.fact_date_to or window.date_to)
+    target_start = date.fromisoformat(window.target_date_from or window.requested_date_from or window.date_from)
+    target_end = date.fromisoformat(window.target_date_to or window.requested_date_to or window.date_to)
+    effective_fact_start = max(fact_start, contract_start_date)
+    effective_target_start = max(target_start, contract_start_date)
+    target_day_count = max(0, (target_end - effective_target_start).days + 1)
     contract_note = f"Период обрезан по дате подписания: {contract_start_date.isoformat()}."
-    if window.period_state == "not_started":
+    contract_start_applied = contract_start_date > target_start
+    if effective_target_start > target_end:
         return replace(
             window,
-            date_from=effective_start.isoformat(),
-            day_count=0,
-            original_date_from=original_date_from,
-            original_date_to=original_date_to,
-            contract_start_date=contract_start_date.isoformat(),
-            contract_start_applied=contract_start_date > original_start,
-            contract_start_note=contract_note if contract_start_date > original_start else None,
-        )
-    if effective_start > original_end:
-        return replace(
-            window,
-            date_from=effective_start.isoformat(),
+            date_from=effective_target_start.isoformat(),
+            date_to=target_end.isoformat(),
             day_count=0,
             period_state="not_started",
             original_date_from=original_date_from,
@@ -668,19 +728,55 @@ def _apply_contract_start_date(*, window: PeriodWindow, contract_start_date: dat
             contract_start_date=contract_start_date.isoformat(),
             contract_start_applied=True,
             contract_start_note=(
-                f"Период {original_date_from}..{original_date_to} полностью раньше даты подписания "
+                f"Период {target_start.isoformat()}..{target_end.isoformat()} полностью раньше даты подписания "
                 f"{contract_start_date.isoformat()}."
             ),
+            target_date_from=effective_target_start.isoformat(),
+            target_date_to=target_end.isoformat(),
+            target_day_count=0,
+            fact_date_from=effective_target_start.isoformat(),
+            fact_date_to=target_end.isoformat(),
+            fact_day_count=0,
         )
+    if window.period_state == "not_started":
+        return replace(
+            window,
+            date_from=effective_fact_start.isoformat(),
+            day_count=0,
+            original_date_from=original_date_from,
+            original_date_to=original_date_to,
+            contract_start_date=contract_start_date.isoformat(),
+            contract_start_applied=contract_start_applied,
+            contract_start_note=contract_note if contract_start_applied else None,
+            target_date_from=effective_target_start.isoformat(),
+            target_date_to=target_end.isoformat(),
+            target_day_count=target_day_count,
+            fact_date_from=effective_fact_start.isoformat(),
+            fact_date_to=fact_end.isoformat(),
+            fact_day_count=0,
+        )
+    if effective_fact_start > fact_end:
+        fact_day_count = 0
+        period_state = "not_started"
+    else:
+        fact_day_count = (fact_end - effective_fact_start).days + 1
+        period_state = window.period_state
     return replace(
         window,
-        date_from=effective_start.isoformat(),
-        day_count=(original_end - effective_start).days + 1,
+        date_from=effective_fact_start.isoformat(),
+        day_count=fact_day_count,
+        period_state=period_state,
         original_date_from=original_date_from,
         original_date_to=original_date_to,
         contract_start_date=contract_start_date.isoformat(),
-        contract_start_applied=contract_start_date > original_start,
-        contract_start_note=contract_note if contract_start_date > original_start else None,
+        contract_start_applied=contract_start_applied,
+        contract_start_note=contract_note if contract_start_applied else None,
+        target_date_from=effective_target_start.isoformat(),
+        target_date_to=target_end.isoformat(),
+        target_day_count=target_day_count,
+        fact_date_from=effective_fact_start.isoformat(),
+        fact_date_to=fact_end.isoformat(),
+        fact_day_count=fact_day_count,
     )
 
 
@@ -790,7 +886,15 @@ def _build_period_block(
 ) -> dict[str, Any]:
     if window.period_state == "not_started":
         return _build_not_started_period_block(window=window)
-    dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(window.date_from), date.fromisoformat(window.date_to))]
+    fact_date_from = window.fact_date_from or window.date_from
+    fact_date_to = window.fact_date_to or window.date_to
+    target_date_from = window.target_date_from or window.date_from
+    target_date_to = window.target_date_to or window.date_to
+    dates = [item.isoformat() for item in _iter_dates(date.fromisoformat(fact_date_from), date.fromisoformat(fact_date_to))]
+    target_dates = [
+        item.isoformat()
+        for item in _iter_dates(date.fromisoformat(target_date_from), date.fromisoformat(target_date_to))
+    ]
     buyout_available_dates = [item for item in dates if item in daily_buyout_facts]
     ads_available_dates = [item for item in dates if item in daily_ads_facts]
     buyout_available_set = set(buyout_available_dates)
@@ -833,13 +937,24 @@ def _build_period_block(
         else None
     )
     fact_drr_pct = _compute_drr_pct(ads_sum_rub=fact_ads_sum_rub, buyout_rub=fact_buyout_rub)
-    full_plan_buyout_rub = sum(_daily_buyout_plan_for_date(date.fromisoformat(item), plan_calculation) for item in dates)
+    target_plan_buyout_rub = sum(
+        _daily_buyout_plan_for_date(date.fromisoformat(item), plan_calculation)
+        for item in target_dates
+    )
+    to_date_plan_buyout_rub = sum(
+        _daily_buyout_plan_for_date(date.fromisoformat(item), plan_calculation)
+        for item in dates
+    )
     covered_plan_buyout_rub = (
         sum(_daily_buyout_plan_for_date(date.fromisoformat(item), plan_calculation) for item in covered_dates)
         if covered_dates
         else None
     )
-    plan_ads_sum_rub = full_plan_buyout_rub * (plan_drr_pct / 100.0)
+    ads_plan_base_rub, ads_plan_base_mode = _resolve_ads_plan_base(
+        plan_buyout_rub=target_plan_buyout_rub,
+        fact_buyout_rub=fact_buyout_rub,
+    )
+    plan_ads_sum_rub = ads_plan_base_rub * (plan_drr_pct / 100.0)
     status = "available" if not missing_dates else "partial" if covered_dates else "unavailable"
     block_missing_by_source = _filter_missing_dates_by_source(
         missing_dates_by_source=missing_dates_by_source,
@@ -854,7 +969,7 @@ def _build_period_block(
     if status == "partial":
         reason = (
             "Часть дат периода не имеет usable accepted closed-day snapshots или full-month baseline; "
-            "факт частичный, план рассчитан по полному календарному периоду."
+            "факт частичный, основной план рассчитан по целевому периоду."
         )
     elif status == "unavailable":
         reason = "Для периода нет usable accepted closed-day snapshots или применимой full-month baseline; факт не рассчитывается."
@@ -867,8 +982,15 @@ def _build_period_block(
         "date_from": window.date_from,
         "date_to": window.date_to,
         "day_count": window.day_count,
+        "fact_date_from": fact_date_from,
+        "fact_date_to": fact_date_to,
+        "fact_day_count": window.fact_day_count if window.fact_day_count is not None else window.day_count,
+        "target_date_from": target_date_from,
+        "target_date_to": target_date_to,
+        "target_day_count": window.target_day_count if window.target_day_count is not None else len(target_dates),
         "effective_as_of_date": window.effective_as_of_date,
         "period_state": window.period_state,
+        "is_target_period": window.is_target_period,
         "requested_date_from": window.requested_date_from or window.date_from,
         "requested_date_to": window.requested_date_to or window.date_to,
         "original_date_from": window.original_date_from or window.date_from,
@@ -948,16 +1070,22 @@ def _build_period_block(
         "metrics": {
             "buyout_rub": _build_buyout_metric(
                 fact=fact_buyout_rub,
-                plan=full_plan_buyout_rub,
-                full_period_plan=full_plan_buyout_rub,
+                plan=target_plan_buyout_rub,
+                full_period_plan=target_plan_buyout_rub,
+                target_period_plan=target_plan_buyout_rub,
+                to_date_plan=to_date_plan_buyout_rub,
                 covered_period_plan=covered_plan_buyout_rub,
             ),
             "drr_pct": _build_drr_metric(fact=fact_drr_pct, plan=plan_drr_pct),
             "ads_sum_rub": _build_ads_metric(
                 fact=fact_ads_sum_rub,
                 plan=plan_ads_sum_rub,
-                full_period_plan=full_plan_buyout_rub * (plan_drr_pct / 100.0),
+                full_period_plan=plan_ads_sum_rub,
+                target_period_plan=plan_ads_sum_rub,
+                to_date_plan=to_date_plan_buyout_rub * (plan_drr_pct / 100.0),
                 covered_period_plan=None if covered_plan_buyout_rub is None else covered_plan_buyout_rub * (plan_drr_pct / 100.0),
+                ads_plan_base_rub=ads_plan_base_rub,
+                ads_plan_base_mode=ads_plan_base_mode,
             ),
         },
     }
@@ -973,8 +1101,15 @@ def _build_not_started_period_block(*, window: PeriodWindow) -> dict[str, Any]:
         "date_from": window.date_from,
         "date_to": window.date_to,
         "day_count": 0,
+        "fact_date_from": window.fact_date_from or window.date_from,
+        "fact_date_to": window.fact_date_to or window.date_to,
+        "fact_day_count": 0,
+        "target_date_from": window.target_date_from or window.date_from,
+        "target_date_to": window.target_date_to or window.date_to,
+        "target_day_count": window.target_day_count or 0,
         "effective_as_of_date": window.effective_as_of_date,
         "period_state": "not_started",
+        "is_target_period": window.is_target_period,
         "requested_date_from": window.requested_date_from or window.date_from,
         "requested_date_to": window.requested_date_to or window.date_to,
         "original_date_from": window.original_date_from or window.date_from,
@@ -1055,6 +1190,8 @@ def _build_not_started_period_block(*, window: PeriodWindow) -> dict[str, Any]:
                 fact=None,
                 plan=None,
                 full_period_plan=None,
+                target_period_plan=None,
+                to_date_plan=None,
                 covered_period_plan=None,
             ),
             "drr_pct": _build_drr_metric(fact=None, plan=None),
@@ -1062,7 +1199,11 @@ def _build_not_started_period_block(*, window: PeriodWindow) -> dict[str, Any]:
                 fact=None,
                 plan=None,
                 full_period_plan=None,
+                target_period_plan=None,
+                to_date_plan=None,
                 covered_period_plan=None,
+                ads_plan_base_rub=None,
+                ads_plan_base_mode=None,
             ),
         },
     }
@@ -1073,6 +1214,8 @@ def _build_buyout_metric(
     fact: float | None,
     plan: float | None,
     full_period_plan: float | None,
+    target_period_plan: float | None = None,
+    to_date_plan: float | None = None,
     covered_period_plan: float | None = None,
 ) -> dict[str, Any]:
     delta_abs = _safe_delta(fact=fact, plan=plan)
@@ -1082,9 +1225,12 @@ def _build_buyout_metric(
         "fact": fact,
         "plan": plan,
         "full_period_plan": full_period_plan,
+        "target_period_plan": target_period_plan,
+        "to_date_plan": to_date_plan,
         "covered_period_plan": covered_period_plan,
         "delta_abs": delta_abs,
         "delta_pct": _safe_relative_delta(fact=fact, plan=plan),
+        "completion_pct": _safe_completion_pct(fact=fact, plan=plan),
         **_status_payload(
             success=bool(fact is not None and plan is not None and fact >= plan - EPS),
             success_label="выполнен",
@@ -1116,7 +1262,11 @@ def _build_ads_metric(
     fact: float | None,
     plan: float | None,
     full_period_plan: float | None,
+    target_period_plan: float | None = None,
+    to_date_plan: float | None = None,
     covered_period_plan: float | None = None,
+    ads_plan_base_rub: float | None = None,
+    ads_plan_base_mode: str | None = None,
 ) -> dict[str, Any]:
     delta_abs = _safe_delta(fact=fact, plan=plan)
     return {
@@ -1125,13 +1275,19 @@ def _build_ads_metric(
         "fact": fact,
         "plan": plan,
         "full_period_plan": full_period_plan,
+        "target_period_plan": target_period_plan,
+        "to_date_plan": to_date_plan,
         "covered_period_plan": covered_period_plan,
+        "ads_plan_base_rub": ads_plan_base_rub,
+        "ads_plan_base_mode": ads_plan_base_mode,
+        "ads_plan_base_label": _ads_plan_base_label(ads_plan_base_mode),
         "delta_abs": delta_abs,
         "delta_pct": _safe_relative_delta(fact=fact, plan=plan),
+        "completion_pct": _safe_completion_pct(fact=fact, plan=plan),
         **_status_payload(
-            success=bool(fact is not None and plan is not None and fact <= plan + EPS),
-            success_label="в пределах плана",
-            alert_label="выше плана",
+            success=bool(fact is not None and plan is not None and fact >= plan - EPS),
+            success_label="выполнен",
+            alert_label="ниже плана",
             unknown=bool(fact is None or plan is None),
         ),
     }
@@ -1214,6 +1370,20 @@ def _get_numeric_attr(value: Any, field_name: str, *, default: float) -> float:
         raise ValueError(f"{field_name} must be numeric, got {raw_value!r}") from exc
 
 
+def _resolve_ads_plan_base(*, plan_buyout_rub: float, fact_buyout_rub: float | None) -> tuple[float, str]:
+    if fact_buyout_rub is not None and fact_buyout_rub > plan_buyout_rub + EPS:
+        return float(fact_buyout_rub), "fact_turnover_overperformance_base"
+    return float(plan_buyout_rub), "plan_turnover_base"
+
+
+def _ads_plan_base_label(mode: str | None) -> str | None:
+    if mode == "fact_turnover_overperformance_base":
+        return "от фактического оборота при перевыполнении"
+    if mode == "plan_turnover_base":
+        return "от планового оборота"
+    return None
+
+
 def _safe_delta(*, fact: float | None, plan: float | None) -> float | None:
     if fact is None or plan is None:
         return None
@@ -1226,6 +1396,14 @@ def _safe_relative_delta(*, fact: float | None, plan: float | None) -> float | N
     if abs(plan) <= EPS:
         return 0.0 if abs(fact) <= EPS else None
     return ((float(fact) - float(plan)) / abs(float(plan))) * 100.0
+
+
+def _safe_completion_pct(*, fact: float | None, plan: float | None) -> float | None:
+    if fact is None or plan is None:
+        return None
+    if abs(plan) <= EPS:
+        return 100.0 if abs(fact) <= EPS else None
+    return (float(fact) / float(plan)) * 100.0
 
 
 def _compute_drr_pct(*, ads_sum_rub: float | None, buyout_rub: float | None) -> float | None:

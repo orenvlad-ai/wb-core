@@ -500,6 +500,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "supplier_registry_refresh": persistence_result["supplier_registry_refresh"],
         "factory_source_persistence": persistence_result["factory_source_persistence"],
         "sku_persistence": persistence_result["sku_persistence"],
+        "plan_input_defaults": persistence_result["plan_input_defaults"],
         "plan_input_persistence": persistence_result["plan_input_persistence"],
         "zero_selection_guard": persistence_result["zero_selection_guard"],
         "invalid_storage_fallback": fallback_result["invalid_storage_fallback"],
@@ -953,15 +954,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if "Выберите хотя бы один SKU" not in validation_text:
         raise AssertionError(f"zero-selection validation must stay active, got {validation_text!r}")
 
-    page.click('[data-report-section-button="plan"]')
-    page.select_option("#planReportPeriodSelect", "first_half")
-    page.fill("#planReportH1Input", "155379879")
-    page.fill("#planReportH2Input", "294620120")
-    page.fill("#planReportDrrInput", "6")
-    page.check("#planReportContractStartCheckbox")
-    page.fill("#planReportContractStartDateInput", "2026-02-01")
-    page.check("#planReportAnnualEvenCheckbox")
     plan_report_request_urls: list[str] = []
+
     def _capture_plan_report_request(route) -> None:
         plan_report_request_urls.append(route.request.url)
         route.fulfill(
@@ -974,6 +968,56 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "**/v1/sheet-vitrina-v1/plan-report?**",
         _capture_plan_report_request,
     )
+
+    page.click('[data-report-section-button="plan"]')
+    default_plan_inputs = {
+        "period": page.locator("#planReportPeriodSelect").input_value(),
+        "h1": page.locator("#planReportH1Input").input_value(),
+        "h2": page.locator("#planReportH2Input").input_value(),
+        "drr": page.locator("#planReportDrrInput").input_value(),
+        "use_contract_start_date": page.locator("#planReportContractStartCheckbox").is_checked(),
+        "annual_plan_evenly_distributed": page.locator("#planReportAnnualEvenCheckbox").is_checked(),
+        "contract_start_date": page.locator("#planReportContractStartDateInput").input_value(),
+        "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
+    }
+    expected_default_plan_inputs = {
+        "period": "first_half",
+        "h1": "155379879",
+        "h2": "294620121",
+        "drr": "6",
+        "use_contract_start_date": True,
+        "annual_plan_evenly_distributed": False,
+        "contract_start_date": "2026-02-01",
+        "contract_date_disabled": False,
+    }
+    if default_plan_inputs != expected_default_plan_inputs:
+        raise AssertionError(f"clean plan-report storage must restore WB/VB defaults, got {default_plan_inputs}")
+    page.click("#planReportApplyButton")
+    page.wait_for_function(
+        "() => document.getElementById('planReportContent') && !document.getElementById('planReportContent').hidden"
+    )
+    default_plan_report_url = plan_report_request_urls[-1] if plan_report_request_urls else ""
+    for expected_query_part in (
+        "period=first_half",
+        "h1_buyout_plan_rub=155379879",
+        "h2_buyout_plan_rub=294620121",
+        "plan_drr_pct=6",
+        "use_contract_start_date=true",
+        "contract_start_date=2026-02-01",
+        "annual_plan_evenly_distributed=false",
+    ):
+        if expected_query_part not in default_plan_report_url:
+            raise AssertionError(
+                f"default plan-report request must include {expected_query_part}, got {plan_report_request_urls}"
+            )
+
+    page.select_option("#planReportPeriodSelect", "current_month")
+    page.fill("#planReportH1Input", "123456789")
+    page.fill("#planReportH2Input", "234567890")
+    page.fill("#planReportDrrInput", "7.5")
+    page.check("#planReportContractStartCheckbox")
+    page.fill("#planReportContractStartDateInput", "2026-03-15")
+    page.check("#planReportAnnualEvenCheckbox")
     page.click("#planReportApplyButton")
     page.wait_for_function(
         """(storageKey) => {
@@ -981,20 +1025,20 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             if (!raw) return false;
             const parsed = JSON.parse(raw);
             return parsed.plan_report_inputs &&
-                parsed.plan_report_inputs.period === "first_half" &&
-                parsed.plan_report_inputs.h1_buyout_plan_rub === "155379879" &&
-                parsed.plan_report_inputs.h2_buyout_plan_rub === "294620120" &&
-                parsed.plan_report_inputs.plan_drr_pct === "6" &&
+                parsed.plan_report_inputs.period === "current_month" &&
+                parsed.plan_report_inputs.h1_buyout_plan_rub === "123456789" &&
+                parsed.plan_report_inputs.h2_buyout_plan_rub === "234567890" &&
+                parsed.plan_report_inputs.plan_drr_pct === "7.5" &&
                 parsed.plan_report_inputs.use_contract_start_date === true &&
                 parsed.plan_report_inputs.annual_plan_evenly_distributed === true &&
-                parsed.plan_report_inputs.contract_start_date === "2026-02-01";
+                parsed.plan_report_inputs.contract_start_date === "2026-03-15";
         }""",
         arg=STORAGE_KEY,
     )
     latest_plan_report_url = plan_report_request_urls[-1] if plan_report_request_urls else ""
     if (
         "use_contract_start_date=true" not in latest_plan_report_url
-        or "contract_start_date=2026-02-01" not in latest_plan_report_url
+        or "contract_start_date=2026-03-15" not in latest_plan_report_url
         or "annual_plan_evenly_distributed=true" not in latest_plan_report_url
     ):
         raise AssertionError(f"plan-report request must include contract start and annual-even params when enabled, got {plan_report_request_urls}")
@@ -1011,13 +1055,13 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
     }
     expected_restored_inputs = {
-        "period": "first_half",
-        "h1": "155379879",
-        "h2": "294620120",
-        "drr": "6",
+        "period": "current_month",
+        "h1": "123456789",
+        "h2": "234567890",
+        "drr": "7.5",
         "use_contract_start_date": True,
         "annual_plan_evenly_distributed": True,
-        "contract_start_date": "2026-02-01",
+        "contract_start_date": "2026-03-15",
         "contract_date_disabled": False,
     }
     if restored_plan_inputs != expected_restored_inputs:
@@ -1046,6 +1090,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             "storage_state": persisted_state,
         },
         "zero_selection_guard": validation_text.strip(),
+        "plan_input_defaults": default_plan_inputs,
         "plan_input_persistence": restored_plan_inputs,
     }
 
@@ -1127,16 +1172,16 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
         "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
     }
     if invalid_plan_restore != {
-        "period": "current_month",
-        "h1": "",
-        "h2": "",
-        "drr": "",
-        "use_contract_start_date": False,
+        "period": "first_half",
+        "h1": "155379879",
+        "h2": "294620121",
+        "drr": "6",
+        "use_contract_start_date": True,
         "annual_plan_evenly_distributed": False,
-        "contract_start_date": "",
-        "contract_date_disabled": True,
+        "contract_start_date": "2026-02-01",
+        "contract_date_disabled": False,
     }:
-        raise AssertionError(f"invalid persisted plan inputs must be ignored safely, got {invalid_plan_restore}")
+        raise AssertionError(f"invalid persisted plan inputs must fall back to WB/VB defaults, got {invalid_plan_restore}")
 
     context.close()
     return {
@@ -1254,6 +1299,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("operator_ui_supplier_registry_refresh: ok ->", result["supplier_registry_refresh"])
     print("operator_ui_sku_restore: ok ->", result["sku_persistence"])
     print("operator_ui_factory_source_restore: ok ->", result["factory_source_persistence"])
+    print("operator_ui_plan_input_defaults: ok ->", result["plan_input_defaults"])
     print("operator_ui_plan_input_restore: ok ->", result["plan_input_persistence"])
     print("operator_ui_zero_guard: ok ->", result["zero_selection_guard"])
     print(
