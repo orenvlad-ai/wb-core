@@ -19,6 +19,7 @@ related_modules:
   - "packages/contracts/registry_upload_file_backed_service.py"
   - "packages/contracts/registry_upload_db_backed_runtime.py"
   - "packages/contracts/registry_upload_http_entrypoint.py"
+  - "packages/contracts/wb_regional_supply_planning.py"
   - "packages/contracts/web_vitrina_contract.py"
   - "packages/contracts/web_vitrina_gravity_table_adapter.py"
   - "packages/application/cost_price_upload.py"
@@ -27,6 +28,7 @@ related_modules:
   - "packages/application/stock_ff_onec_source.py"
   - "packages/application/supplier_invoice_parser.py"
   - "packages/application/supplier_shipments.py"
+  - "packages/application/wb_regional_supply_planning.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/simple_xlsx.py"
@@ -104,6 +106,7 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/status"
   - "POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate"
+  - "POST /v1/sheet-vitrina-v1/supply/wb-regional/planning-options"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx"
   - "GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
@@ -157,6 +160,7 @@ related_runners:
   - "apps/wb_supply_overlay_smoke.py"
   - "apps/sheet_vitrina_v1_factory_order_http_smoke.py"
   - "apps/wb_regional_supply_smoke.py"
+  - "apps/wb_regional_supply_planning_smoke.py"
   - "apps/sheet_vitrina_v1_wb_regional_supply_http_smoke.py"
   - "apps/wb_regional_demand_diagnostics.py"
   - "apps/supplier_invoice_parser_smoke.py"
@@ -366,6 +370,7 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - `GET /v1/sheet-vitrina-v1/supply/factory-order/recommendation.xlsx` = operator-facing recommendation download
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/status` = cheap JSON status surface для bounded WB regional supply flow
   - `POST /v1/sheet-vitrina-v1/supply/wb-regional/calculate` = server-side district allocation calculation
+  - `POST /v1/sheet-vitrina-v1/supply/wb-regional/planning-options` = protected read-only planning assistant for one district of the latest regional calculation; it resolves `nmId -> barcode` from server-owned nomenclature, calls official WB `POST /api/v1/acceptance/options` only when all planned rows have barcode, enriches options with warehouse district mapping, acceptance coefficients, box tariffs and transit tariffs, ranks visible options deterministically and returns operator handoff JSON for manual WB cabinet work without creating/drafting a WB supply
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` = отдельный operator-facing XLSX download по федеральному округу
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` = ZIP download всех included district XLSX recommendations из последнего расчёта
   - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options` = read-only selector options for calculation-only WB supplies overlay; it reads server cache, validates eligible status/date/composition/active SKU evidence and performs no WB mutation
@@ -458,6 +463,7 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - operator can choose federal districts participating in regional share validation/normalization. Default is all repo-owned districts. Excluded districts remain available in selector/options and are listed in diagnostics text, but they are hidden from result summary/download tables, excluded from ZIP content, blocked for direct district XLSX download with controlled `422 {"error": "Округ не участвовал в последнем расчёте: ..."}`, do not invalidate days and receive `0` share/demand inside the methodology. `calculate` rejects empty/unknown district selections with controlled validation errors;
   - for the full-clean level, per-day district shares are `district_depletion / total_depletion` across selected districts and average shares are normalized across selected districts. For partial/prior levels, final scores are normalized across selected districts after own/prior selection or blending. A selected district with clean zero depletion remains present with `0` own score; the Far/Siberia merged district is never removed from the system;
   - result and row diagnostics expose `regional_share_method_counts`, `share_source_counts`, `fallback_sku_count`, `primary_sku_count`, low-confidence and partial/group/global/seed SKU-district counts, per-SKU `district_share_sources`, observation counts, `group_prior_key`, peer counts, final shares, confidence, seed reasons, and row-level `share_source`, `share_confidence`, `demand_recommendation_qty`, `seed_qty`, `allocation_reason`;
+  - after a regional result exists, each district result row exposes `Подобрать склады WB`. The button calls `POST /v1/sheet-vitrina-v1/supply/wb-regional/planning-options` with the latest `calculation_id` and selected `district_key`; missing barcode rows are returned as controlled blockers and do not call WB. Ready rows are sent to WB FBW `acceptance/options` as `products[].barcode + quantity`, then enriched from read-only Warehouses, Marketplace offices, acceptance coefficients, box tariffs and transit tariffs. The panel shows date, warehouse, calculation-district scope, direct/transit route, coefficient, `allowUnload`, raw tariff evidence, warnings, deterministic recommendation and copyable JSON for manual cabinet creation. It does not create FBW/FBS supplies, does not automate Seller Portal and does not persist selected options as fact.
   - limited `stock_ff` box allocation now chooses the next demand-based box by `marginal_saved_units = min(order_batch_qty, remaining_raw_shortage_units_for_district)` before coverage-days, district-demand and stable-order tie-breaks. Full demand recommendation, truthful deficit and box multiple semantics stay unchanged;
   - exploratory seed allocation is separate from demand allocation and is last-resort only: a selected SKU/district may receive one `order_batch_qty` box only when own observations, SKU group prior and global prior cannot recover a usable share, current district stock is zero/no usable stock (`current_stock < order_batch_qty`), total SKU demand is positive and remaining `stock_ff` allows. The seed consumes `stock_ff`, is exposed as `seed_qty`/`demand_qty` diagnostics, can be unfulfilled when FF stock is insufficient, and is explicitly labeled as a test shipment for future signal, not proven demand;
   - regional block не materialize-ит upload contract `Товары в пути от ФФ на Wildberries`: этот input остаётся вне текущего bounded scope;

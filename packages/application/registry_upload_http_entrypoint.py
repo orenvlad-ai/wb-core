@@ -87,6 +87,7 @@ from packages.application.web_vitrina_page_composition import (
 )
 from packages.application.web_vitrina_view_model import build_web_vitrina_view_model
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
+from packages.application.wb_regional_supply_planning import WbRegionalSupplyPlanningBlock
 from packages.application.wb_supplies import WbSuppliesBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
@@ -692,6 +693,12 @@ class RegistryUploadHttpEntrypoint:
         )
         self.wb_supplies_block = WbSuppliesBlock(
             runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.wb_regional_supply_planning_block = WbRegionalSupplyPlanningBlock(
+            runtime=self.runtime,
+            source=self.wb_supplies_block.source,
+            now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
         )
         self.factory_order_supply_block.wb_supply_district_mapping_provider = (
@@ -1800,6 +1807,9 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_regional_recommendations_zip_request(self) -> tuple[bytes, str]:
         return self.wb_regional_supply_block.download_all_recommendations_archive()
+
+    def handle_wb_regional_planning_options_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.wb_regional_supply_planning_block.build_options(payload)
 
     def handle_supplier_shipments_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_shipments()

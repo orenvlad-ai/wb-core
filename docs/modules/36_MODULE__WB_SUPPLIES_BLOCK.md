@@ -87,6 +87,9 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - `GET /api/v1/supplies/{ID}/package` exists in adapter as optional evidence and is not fatal for MVP table;
   - `GET /api/v1/transit-tariffs` exists in adapter/diagnostics as read-only tariff evidence; the UI does not calculate transit cabinet cost from it without a proven formula;
   - `GET /api/v1/warehouses`.
+- Additional read-only methods reused by `Поставки -> Расчёты -> Подобрать склады WB`:
+  - `POST /api/v1/acceptance/options` is a FBW planning information request, not a mutation; it is called only with planned `products[].barcode + quantity` from the latest regional calculation and server-owned nomenclature barcodes;
+  - `GET /api/tariffs/v1/acceptance/coefficients` is read from the Common/Tariffs API base (`WB_TARIFFS_API_BASE_URL` override) as coefficient/date/allowUnload evidence for ranking.
 - Additional read-only district mapping evidence:
   - district source is the planned/target supply warehouse (`warehouseName`, exposed as `planned_warehouse_name` / `target_warehouse_name` / `district_source_warehouse_name`);
   - `actualWarehouseName` and `transitWarehouseName` remain route/display/evidence only and must not decide the calculation district;
@@ -94,7 +97,7 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - tariffs `GET /api/v1/tariffs/box` (`WB_TARIFFS_API_BASE_URL` override) is fallback; match is by normalized planned/target `warehouseName` and raw `geoName`;
   - bounded manual known-warehouse fallback covers live/cache warehouses missing from external references and publishes `source/confidence/evidence` as `manual_known_wb_warehouse`;
   - Supplies `warehouse_id` is not treated as Marketplace office id.
-- `POST /api/v1/acceptance/options`, transit create/update methods and all WB mutations stay outside scope.
+- FBW/FBS supply creation, transit create/update methods and all WB mutations stay outside scope of this module and of the regional planning assistant.
 - Adapter errors are sanitized:
   - missing `WB_API_TOKEN` returns controlled app-level error;
   - upstream `401/403` maps to `WB API token has no Supplies permission or is invalid`;
