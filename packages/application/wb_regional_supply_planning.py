@@ -1669,7 +1669,8 @@ def _rank_tuple(option: Mapping[str, Any]) -> tuple[Any, ...]:
         WAREHOUSE_SCOPE_OUTSIDE_DISTRICT: 1,
         WAREHOUSE_SCOPE_UNMAPPED: 2,
     }.get(str(option.get("warehouse_scope") or ""), 3)
-    warehouse_kind_rank = 0 if option.get("is_major_expected") else 2 if option.get("is_sgt") else 1
+    is_sgt = bool(option.get("is_sgt"))
+    warehouse_kind_rank = 0 if option.get("is_major_expected") and not is_sgt else 2 if is_sgt else 1
     coverage_rank = 0 if option.get("accepts_all_barcodes") else 1
     coefficient_rank = _coefficient_sort_rank(option.get("coefficient"))
     allow_rank = 0 if option.get("allow_unload") is True else 1 if option.get("allow_unload") is None else 2
