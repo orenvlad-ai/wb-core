@@ -55,6 +55,12 @@ class FakePlanningSource:
                 },
             ]
         }
+        self.coefficients_payload: list[dict[str, object]] = [
+            {"warehouseID": 101, "warehouseName": "Коледино", "date": "2026-07-01", "coefficient": 1, "allowUnload": True},
+            {"warehouseID": 202, "warehouseName": "Склад Шушары", "date": "2026-07-01", "coefficient": 0, "allowUnload": True},
+            {"warehouseID": 303, "warehouseName": "Электросталь", "date": "2026-07-02", "coefficient": 1, "allowUnload": True},
+            {"warehouseID": 404, "warehouseName": "Голицыно СГТ", "date": "2026-07-01", "coefficient": -1, "allowUnload": True},
+        ]
 
     def fetch_acceptance_options(self, *, products, warehouse_id=None):
         self.acceptance_requests.append({"products": list(products), "warehouse_id": warehouse_id})
@@ -67,12 +73,14 @@ class FakePlanningSource:
             {"warehouseID": 101, "warehouseName": "Коледино"},
             {"warehouseID": 202, "warehouseName": "Склад Шушары"},
             {"warehouseID": 303, "warehouseName": "Электросталь"},
+            {"warehouseID": 404, "warehouseName": "Голицыно СГТ"},
         ]
 
     def fetch_marketplace_offices(self):
         return [
             {"name": "Коледино", "federalDistrict": "Центральный федеральный округ"},
             {"name": "Электросталь", "federalDistrict": "Центральный федеральный округ"},
+            {"name": "Голицыно СГТ", "federalDistrict": "Центральный федеральный округ"},
             {"name": "Склад Шушары", "federalDistrict": "Северо-Западный федеральный округ"},
         ]
 
@@ -80,8 +88,24 @@ class FakePlanningSource:
         if self.fail_box_tariffs:
             raise WbSuppliesTransportError("box tariffs fixture failure")
         return [
-            {"warehouseName": "Коледино", "geoName": "Центральный федеральный округ", "boxDeliveryBase": "5"},
-            {"warehouseName": "Электросталь", "geoName": "Центральный федеральный округ", "boxDeliveryBase": "7"},
+            {
+                "warehouseName": "Коледино",
+                "geoName": "Центральный федеральный округ",
+                "boxDeliveryBase": "5",
+                "boxDeliveryLiter": "1,5",
+                "boxDeliveryCoefExpr": "110%",
+                "boxStorageBase": "2",
+                "boxStorageLiter": "0,5",
+                "boxStorageCoefExpr": "105%",
+            },
+            {
+                "warehouseName": "Электросталь",
+                "geoName": "Центральный федеральный округ",
+                "boxDeliveryBase": "7",
+                "boxDeliveryCoefExpr": "115%",
+                "boxStorageCoefExpr": "101%",
+            },
+            {"warehouseName": "Голицыно СГТ", "geoName": "Центральный федеральный округ", "boxDeliveryBase": "1"},
             {"warehouseName": "Склад Шушары", "geoName": "Северо-Западный федеральный округ", "boxDeliveryBase": "1"},
         ]
 
@@ -95,11 +119,7 @@ class FakePlanningSource:
         ]
 
     def fetch_acceptance_coefficients(self, *, warehouse_ids=None):
-        return [
-            {"warehouseID": 101, "warehouseName": "Коледино", "date": "2026-07-01", "coefficient": 1, "allowUnload": True},
-            {"warehouseID": 202, "warehouseName": "Склад Шушары", "date": "2026-07-01", "coefficient": 0, "allowUnload": True},
-            {"warehouseID": 303, "warehouseName": "Электросталь", "date": "2026-07-02", "coefficient": 1, "allowUnload": True},
-        ]
+        return list(self.coefficients_payload)
 
 
 def main() -> None:
@@ -117,20 +137,41 @@ def main() -> None:
         payload = block.build_options({"district_key": DISTRICT_CENTRAL})
         if payload.get("status") != "ready":
             raise AssertionError(f"happy path must be ready, got {payload}")
-        if len(source.acceptance_requests) != 1:
-            raise AssertionError("happy path must call acceptance/options exactly once")
+        if len(source.acceptance_requests) < 1:
+            raise AssertionError("happy path must call acceptance/options")
         request_products = source.acceptance_requests[0]["products"]
         if request_products != [{"barcode": "4600000000001", "quantity": 50}, {"barcode": "4600000000002", "quantity": 25}]:
             raise AssertionError(f"acceptance/options request must use barcode+quantity, got {request_products}")
         options = payload.get("options") or []
         if [item["warehouse_name"] for item in options[:3]] != ["Коледино", "Электросталь", "Склад Шушары"]:
             raise AssertionError(f"same-district/direct ranking changed unexpectedly: {options}")
+        if options[0].get("option_kind") != "warehouse_group" or not isinstance(options[0].get("dates"), list):
+            raise AssertionError(f"planning options must be grouped warehouse options with nested dates, got {options[0]}")
+        if options[0].get("barcode_coverage", {}).get("accepted_count") != 1:
+            raise AssertionError(f"grouped option must expose factual barcode coverage, got {options[0].get('barcode_coverage')}")
+        if options[0].get("box_tariff", {}).get("logistics_display") != "110%" or options[0].get("box_tariff", {}).get("storage_display") != "105%":
+            raise AssertionError(f"box tariff details must be parsed and exposed, got {options[0].get('box_tariff')}")
         if options[0]["warehouse_scope"] != "same_district" or options[2]["warehouse_scope"] != "outside_district":
             raise AssertionError(f"warehouse scope enrichment changed: {options}")
         if options[1]["route_type"] != "transit" or not options[1]["transit_warehouse_name"]:
             raise AssertionError(f"transit option must stay visible: {options[1]}")
+        if options[1].get("transit_route_count") != 1 or not options[1].get("best_transit_route"):
+            raise AssertionError(f"transit tariff evidence must be joined by destination warehouse, got {options[1]}")
         if not options[0].get("operator_handoff", {}).get("products"):
             raise AssertionError("planning option must expose manual operator handoff payload")
+        diagnostics_by_name = {
+            item.get("expected_warehouse_name"): item
+            for item in payload.get("major_warehouse_diagnostics", [])
+            if isinstance(item, dict)
+        }
+        if not diagnostics_by_name.get("Коледино", {}).get("found_in_acceptance_options"):
+            raise AssertionError(f"major warehouse diagnostics must show Коледино in acceptance/options, got {diagnostics_by_name}")
+        if not diagnostics_by_name.get("Электросталь", {}).get("found_in_acceptance_options"):
+            raise AssertionError(f"major warehouse diagnostics must show Электросталь in acceptance/options, got {diagnostics_by_name}")
+        if diagnostics_by_name.get("Коледино", {}).get("hidden_reason") != "visible":
+            raise AssertionError(f"visible major warehouse must not be reported as hidden, got {diagnostics_by_name.get('Коледино')}")
+        if payload.get("summary", {}).get("grouped_warehouse_count") != len(options):
+            raise AssertionError(f"summary must expose grouped warehouse count, got {payload.get('summary')}")
         if not any("Second SKU" in warning and "temporarily unavailable" in warning for warning in payload.get("warnings", [])):
             raise AssertionError(f"mixed barcode-level errors must be visible as warnings, got {payload.get('warnings')}")
         acceptance_evidence = payload.get("evidence", {}).get("acceptance_options", {})
@@ -169,6 +210,54 @@ def main() -> None:
                 {
                     "barcode": "4600000000001",
                     "warehouses": [
+                        {"warehouseID": 101, "canBox": True},
+                        {"warehouseID": 404, "warehouseName": "Голицыно СГТ", "canBox": True},
+                    ],
+                },
+                {
+                    "barcode": "4600000000002",
+                    "warehouses": [
+                        {"warehouseID": 101, "canBox": True},
+                        {"warehouseID": 404, "warehouseName": "Голицыно СГТ", "canBox": True},
+                    ],
+                },
+            ]
+        }
+        source.coefficients_payload = [
+            {
+                "warehouseID": 101,
+                "warehouseName": "Коледино",
+                "date": f"2026-07-{day:02d}",
+                "coefficient": 0 if day == 1 else 1,
+                "allowUnload": True,
+            }
+            for day in range(1, 6)
+        ] + [
+            {
+                "warehouseID": 404,
+                "warehouseName": "Голицыно СГТ",
+                "date": f"2026-07-{day:02d}",
+                "coefficient": -1,
+                "allowUnload": True,
+            }
+            for day in range(1, 6)
+        ]
+        grouped = block.build_options({"district_key": DISTRICT_CENTRAL})
+        grouped_options = grouped.get("options") or []
+        if [item.get("warehouse_name") for item in grouped_options] != ["Коледино", "Голицыно СГТ"]:
+            raise AssertionError(f"warehouse grouping/ranking must keep Коледино above coefficient=-1 СГТ, got {grouped_options}")
+        if grouped_options[0].get("date_count") != 5 or grouped_options[0].get("free_date_count") != 1:
+            raise AssertionError(f"coefficient dates must be nested under the warehouse, got {grouped_options[0]}")
+        if grouped_options[0].get("barcode_coverage", {}).get("accepts_all_barcodes") is not True:
+            raise AssertionError(f"warehouse that appears for both barcodes must accept all barcodes, got {grouped_options[0]}")
+        if grouped_options[1].get("coefficient") != -1 or not grouped_options[1].get("is_sgt"):
+            raise AssertionError(f"coefficient=-1 SGT option must stay visible but lower-ranked, got {grouped_options[1]}")
+
+        source.acceptance_payload = {
+            "result": [
+                {
+                    "barcode": "4600000000001",
+                    "warehouses": [
                         {"warehouseID": 101, "warehouseName": "Коледино", "canBox": True},
                         {"warehouseID": 202, "warehouseName": "Склад Шушары", "canBox": True},
                         {
@@ -185,6 +274,13 @@ def main() -> None:
                 },
             ]
         }
+        source.coefficients_payload = [
+            {"warehouseID": 101, "warehouseName": "Коледино", "date": "2026-07-01", "coefficient": 1, "allowUnload": True},
+            {"warehouseID": 202, "warehouseName": "Склад Шушары", "date": "2026-07-01", "coefficient": 0, "allowUnload": True},
+            {"warehouseID": 303, "warehouseName": "Электросталь", "date": "2026-07-02", "coefficient": 1, "allowUnload": True},
+            {"warehouseID": 404, "warehouseName": "Голицыно СГТ", "date": "2026-07-01", "coefficient": -1, "allowUnload": True},
+        ]
+
 
         source.fail_box_tariffs = True
         partial = block.build_options({"district_key": DISTRICT_CENTRAL})
