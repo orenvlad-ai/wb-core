@@ -8,7 +8,7 @@
 - Plans one selected calculation district at a time.
 - Resolves `nmId -> barcode` from server-owned nomenclature.
 - Calls official WB FBW `POST /api/v1/acceptance/options` only as a read-only information request with the official JSON array body `[{barcode, quantity}]`; optional `warehouseID` is query-only.
-- Normalizes official `result[]` as barcode-level evidence and flattens nested `result[].warehouses[]` into visible option rows; per-barcode upstream errors are controlled warnings/blockers and mixed success/error can still produce partial options.
+- Normalizes official `result[]` as barcode-level evidence, flattens nested `result[].warehouses[]` into option candidates, deduplicates repeated warehouse candidates across successful barcode rows, and returns a bounded top-ranked visible set; per-barcode upstream errors are controlled warnings/blockers and mixed success/error can still produce partial options.
 - Enriches returned options with read-only warehouses, Marketplace offices, acceptance coefficients, box tariff and transit tariff evidence.
 - Ranks options deterministically and exposes copyable manual handoff JSON for the operator.
 

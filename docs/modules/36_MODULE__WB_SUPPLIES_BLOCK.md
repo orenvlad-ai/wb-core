@@ -89,7 +89,7 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - `GET /api/v1/warehouses`.
 - Additional read-only methods reused by `Поставки -> Расчёты -> Подобрать склады WB`:
   - `POST /api/v1/acceptance/options` is a FBW planning information request, not a mutation; it is called only with the official JSON array body `[{barcode, quantity}]` from the latest regional calculation and server-owned nomenclature barcodes, while optional `warehouseID` is sent as a query parameter;
-  - acceptance/options normalization treats official `result[]` rows as barcode-level evidence and flattens nested `result[].warehouses[]` into visible planning option rows; per-barcode upstream errors become controlled warnings/blockers, so mixed success/error can still return partial options;
+  - acceptance/options normalization treats official `result[]` rows as barcode-level evidence, flattens nested `result[].warehouses[]` into planning candidates, deduplicates repeated warehouse/route/date rows across successful barcode results, and returns a bounded top-ranked visible set for the operator UI; per-barcode upstream errors become controlled warnings/blockers, so mixed success/error can still return partial options;
   - `GET /api/tariffs/v1/acceptance/coefficients` is read from the Common/Tariffs API base (`WB_TARIFFS_API_BASE_URL` override) as coefficient/date/allowUnload evidence for ranking.
 - Additional read-only district mapping evidence:
   - district source is the planned/target supply warehouse (`warehouseName`, exposed as `planned_warehouse_name` / `target_warehouse_name` / `district_source_warehouse_name`);
