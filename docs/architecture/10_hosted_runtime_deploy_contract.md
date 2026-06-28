@@ -146,6 +146,7 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` exists as a gated optional artifact only; it is not part of active managed units until MCP auth/route publication is explicitly approved and verified.
 
 `wb-core-sheet-vitrina-refresh.timer` is a due-check ticker, not the business-time source of truth: it runs every 10 minutes and starts `apps/sheet_vitrina_v1_auto_refresh_tick.py`; the runner reads runtime JSON schedules (`11:00`/`20:00 Asia/Yekaterinburg` by default, editable through the web-vitrina auto-schedules API), builds an in-memory WebCore session cookie from hosted env, and then calls the protected refresh route with `auto_refresh=true`. The timer itself is non-persistent; catch-up is owned by the runner's schedule state so a deploy/restart does not immediately fire a stale systemd event while the app process is restarting.
 
@@ -258,6 +259,27 @@ Hosted service должна предоставлять current repo entrypoint e
 - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME` (optional)
 
 Production WebCore auth is app-level session auth, not nginx basic auth. The password hash uses the entrypoint PBKDF2-HMAC format `pbkdf2_sha256$iterations$salt_b64$digest_b64`; plaintext credentials must stay outside Git/docs/logs and are handed to the owner separately. `WB_CORE_WEB_AUTH_REQUIRED=1` may be set to fail closed when auth env is incomplete. The env web principal is the bootstrap/fallback `admin`; runtime users are stored server-side in SQLite `sheet_vitrina_v1_users` and may have legacy technical roles `admin`, `operator`, `supply_operator` or `supplier`, but shell/API authorization is section-based through `allowed_sections` plus internal `manage_users`. Supplier env credentials are optional and remain backward-compatible supplier-only; when absent, supplier login is unavailable, but users with the `supply` section can access `Поставки -> От поставщика` through the shell.
+
+WebCore Data MCP is a separate read-only data gateway and must not reuse browser session cookies as its production auth boundary. Its repo-owned runner is `apps/webcore_data_mcp_server.py`, defaulting to loopback `127.0.0.1:8766` and `POST /mcp`, but it is not part of the current public nginx allowlist until a ChatGPT-compatible auth path is explicitly configured and verified. Relevant env names are:
+- `WEBCORE_DATA_MCP_HOST`
+- `WEBCORE_DATA_MCP_PORT`
+- `WEBCORE_DATA_MCP_PATH`
+- `WEBCORE_DATA_MCP_HEALTH_PATH`
+- `WEBCORE_DATA_MCP_AUTH_MODE`
+- `WEBCORE_DATA_MCP_BEARER_TOKEN` or `WEBCORE_DATA_MCP_BEARER_TOKEN_SHA256`
+- `WEBCORE_DATA_MCP_DB_PATH` (optional override; default is `REGISTRY_UPLOAD_RUNTIME_DIR/registry_upload_runtime.sqlite3`)
+- `WEBCORE_DATA_MCP_AUDIT_LOG_PATH`
+- `WEBCORE_DATA_MCP_RESOURCE_URL`
+- `WEBCORE_DATA_MCP_RESOURCE_DOCUMENTATION_URL`
+- `WEBCORE_DATA_MCP_AUTHORIZATION_SERVERS`
+- `WEBCORE_DATA_MCP_SCOPES`
+
+MCP publication gate:
+- unauthenticated `POST /mcp` must return `401` with no business data;
+- every exposed tool must be allowlisted and marked `readOnlyHint: true`;
+- the DB read path must use SQLite `mode=ro` and `PRAGMA query_only=ON`;
+- no MCP tool may expose arbitrary SQL, shell/SSH, upstream sync/backfill/refresh/load, supplier write/upload/rematch/price-check, runtime file download, secrets, storage-state content or raw payload dumps;
+- public `/mcp` publication requires OAuth 2.1 / PKCE through an established identity provider or a private Secure MCP Tunnel route plus an approved auth policy. Bearer auth alone is acceptable only for local/private bounded probes where the caller can safely provide the token and the endpoint is not opened as an unauthenticated public business-data surface.
 
 Current required upstream secret contract stays:
 - `WB_API_TOKEN`
