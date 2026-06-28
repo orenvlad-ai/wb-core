@@ -40,6 +40,10 @@ related_endpoints:
   - "POST /mcp"
   - "GET /healthz"
   - "GET /.well-known/oauth-protected-resource"
+  - "GET /.well-known/oauth-authorization-server"
+  - "GET /.well-known/openid-configuration"
+  - "GET/POST /oauth/authorize"
+  - "POST /oauth/token"
 related_runners:
   - "apps/webcore_data_mcp_server.py"
   - "apps/webcore_data_mcp_smoke.py"
@@ -47,7 +51,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766 with bearer fail-closed auth. Public exact /mcp and protected-resource metadata routes may proxy to that loopback service, but bearer-only publication is not a completed ChatGPT custom connector auth path; OAuth 2.1/PKCE or another approved ChatGPT-compatible auth setup remains required."
+update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path."
 ---
 
 # 1. Identifier and Status
@@ -56,7 +60,7 @@ update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766 wit
 - `family`: `production-facing-integration/read-only-data-gateway`
 - `status_repo`: implemented
 - `status_live`: loopback service installed/enabled on the active EU host; exact public `/mcp` route is allowed only as bearer-auth fail-closed proxy to `127.0.0.1:8766`
-- `status_auth`: bearer-auth MVP for protected probes; normal ChatGPT Project connector exposure requires OAuth 2.1/PKCE or another approved ChatGPT-compatible auth setup
+- `status_auth`: owner-only OAuth 2.1 auth-code + PKCE S256 for ChatGPT connector use; bearer auth retained only for protected server/admin diagnostics
 
 This module is intentionally separate from DevControl MCP and from the main WebCore operator HTTP handler.
 
@@ -93,7 +97,7 @@ Current active EU live state:
 - enabled and running;
 - listens only on `127.0.0.1:8766`;
 - uses root-only `/etc/wb-core-data-mcp.env` for the bearer secret;
-- may be published through nginx only as exact `/.well-known/oauth-protected-resource` and `/mcp` locations that proxy to `127.0.0.1:8766` and fail closed without bearer auth.
+- may be published through nginx only as exact OAuth metadata/authorize/token and `/mcp` locations that proxy to `127.0.0.1:8766` and fail closed without OAuth/bearer auth.
 
 Default local listener:
 
@@ -145,23 +149,37 @@ Production data must not be exposed unauthenticated.
 
 Implemented MVP auth:
 
-- `WEBCORE_DATA_MCP_AUTH_MODE=bearer` by default;
-- requires `WEBCORE_DATA_MCP_BEARER_TOKEN` or `WEBCORE_DATA_MCP_BEARER_TOKEN_SHA256`;
-- active EU host stores the generated bearer token only in root-readable `/etc/wb-core-data-mcp.env`;
+- `WEBCORE_DATA_MCP_AUTH_MODE=bearer_oauth` on live when ChatGPT connector auth is enabled;
+- OAuth 2.1 authorization-code flow with PKCE `S256`;
+- public client token endpoint auth method `none`;
+- exact `resource`/audience binding to the configured HTTPS resource URL;
+- one-time short-lived authorization codes under runtime state;
+- short-lived HMAC-signed access tokens;
+- owner login uses env-only WebCore owner credentials or dedicated MCP owner hash;
+- existing WebCore owner session cookie can auto-consent when the session secret is provided to the MCP service;
+- optional bearer auth requires `WEBCORE_DATA_MCP_BEARER_TOKEN` or `WEBCORE_DATA_MCP_BEARER_TOKEN_SHA256` and is only a server/admin diagnostic path;
 - unauthenticated MCP POST returns `401` with no business data;
 - health check returns only `{"status":"ok","server":"webcore-data-mcp"}`;
-- protected-resource metadata is available at `/.well-known/oauth-protected-resource`.
+- protected-resource metadata is available at `/.well-known/oauth-protected-resource`;
+- authorization-server metadata is available at `/.well-known/oauth-authorization-server` and `/.well-known/openid-configuration`;
+- authorize/token endpoints are `/oauth/authorize` and `/oauth/token`.
 
-OAuth metadata config:
+OAuth/env config:
 
 - `WEBCORE_DATA_MCP_RESOURCE_URL`
 - `WEBCORE_DATA_MCP_RESOURCE_DOCUMENTATION_URL`
 - `WEBCORE_DATA_MCP_AUTHORIZATION_SERVERS`
 - `WEBCORE_DATA_MCP_SCOPES`
-
-Current production gating rule:
-
-Do not publish this MCP route publicly with only local bearer-token auth unless the target ChatGPT surface can safely supply that token or the route is private behind Secure MCP Tunnel. For native ChatGPT Project connector use, prefer OAuth 2.1 / PKCE through an established identity provider or Secure MCP Tunnel plus an approved auth policy.
+- `WEBCORE_DATA_MCP_OAUTH_ISSUER`
+- `WEBCORE_DATA_MCP_OAUTH_SIGNING_SECRET`
+- `WEBCORE_DATA_MCP_OAUTH_OWNER_USERNAME` or `WB_CORE_WEB_AUTH_USERNAME`
+- `WEBCORE_DATA_MCP_OAUTH_OWNER_PASSWORD_HASH` or `WB_CORE_WEB_AUTH_PASSWORD_HASH`
+- `WEBCORE_DATA_MCP_OAUTH_SESSION_SECRET` or `WB_CORE_WEB_AUTH_SESSION_SECRET`
+- `WEBCORE_DATA_MCP_OAUTH_CODE_STORE_PATH`
+- `WEBCORE_DATA_MCP_OAUTH_ALLOWED_REDIRECT_PREFIXES`
+- `WEBCORE_DATA_MCP_OAUTH_ALLOWED_CLIENT_ID_PREFIXES`
+- `WEBCORE_DATA_MCP_OAUTH_CODE_TTL_SECONDS`
+- `WEBCORE_DATA_MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS`
 
 # 6. Redaction and Limits
 
@@ -248,7 +266,7 @@ The smoke proves:
 
 # 10. Live Publication Gate
 
-This module is repo-implemented and private-live on the active EU host. Public HTTPS publication is staged and auth-gated, not ChatGPT-final.
+This module is repo-implemented and private-live on the active EU host. Public HTTPS publication is auth-gated and ChatGPT-ready after OAuth env is configured on the live service.
 
 Current verified state:
 
@@ -256,11 +274,11 @@ Current verified state:
 - public `https://api.selleros.pro/mcp` may be routed by nginx to the loopback MCP service;
 - public no-token/no-bearer requests must return auth-required/no business data;
 - no Secure MCP Tunnel client is configured yet;
-- normal ChatGPT Project connector use still requires OAuth 2.1/PKCE or another approved ChatGPT-compatible auth setup step.
+- normal ChatGPT Project connector use selects OAuth and signs in through `/oauth/authorize`.
 
-Before treating `/mcp` as a ChatGPT Project-ready app:
+Before treating `/mcp` as live-verified ChatGPT-ready:
 
-1. Configure OAuth 2.1/PKCE through an established IdP or another approved ChatGPT-compatible auth path.
+1. Configure env-only OAuth signing secret and owner auth material on the host.
 2. Keep all secrets env-only/server-side.
 3. Prove unauthenticated public probe returns 401 and no data.
 4. Prove authenticated MCP `initialize`, `tools/list` and a safe tool call.

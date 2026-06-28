@@ -83,6 +83,10 @@ def main() -> None:
         "/login",
         "/logout",
         "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration",
+        "/oauth/authorize",
+        "/oauth/token",
         "/mcp",
     }
     missing = sorted(required_paths - route_paths)
@@ -115,12 +119,28 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include WebCore auth routes exactly once")
     if rendered.count("location = /.well-known/oauth-protected-resource {") != 1:
         raise AssertionError("rendered nginx block must include MCP protected-resource metadata exactly once")
+    if rendered.count("location = /.well-known/oauth-authorization-server {") != 1:
+        raise AssertionError("rendered nginx block must include MCP authorization-server metadata exactly once")
+    if rendered.count("location = /.well-known/openid-configuration {") != 1:
+        raise AssertionError("rendered nginx block must include MCP OpenID metadata exactly once")
+    if rendered.count("location = /oauth/authorize {") != 1:
+        raise AssertionError("rendered nginx block must include MCP OAuth authorize endpoint exactly once")
+    if rendered.count("location = /oauth/token {") != 1:
+        raise AssertionError("rendered nginx block must include MCP OAuth token endpoint exactly once")
     if rendered.count("location = /mcp {") != 1:
         raise AssertionError("rendered nginx block must include MCP endpoint exactly once")
     if "location = /mcp {\n        proxy_pass http://127.0.0.1:8766;" not in rendered:
         raise AssertionError("rendered MCP route must proxy to the private MCP loopback upstream")
     if "location = /.well-known/oauth-protected-resource {\n        proxy_pass http://127.0.0.1:8766;" not in rendered:
         raise AssertionError("rendered MCP metadata route must proxy to the private MCP loopback upstream")
+    for oauth_path in (
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration",
+        "/oauth/authorize",
+        "/oauth/token",
+    ):
+        if f"location = {oauth_path} {{\n        proxy_pass http://127.0.0.1:8766;" not in rendered:
+            raise AssertionError(f"rendered {oauth_path} route must proxy to the private MCP loopback upstream")
     if "proxy_set_header X-Forwarded-Proto $scheme;" not in rendered:
         raise AssertionError("rendered nginx block must forward the original public scheme")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/factory-order/ {") != 1:
@@ -304,6 +324,14 @@ def main() -> None:
             != "http://127.0.0.1:8766"
         ):
             raise AssertionError("print-plan must expose MCP metadata route-specific loopback upstream")
+        for oauth_path in (
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration",
+            "/oauth/authorize",
+            "/oauth/token",
+        ):
+            if plan_routes_by_path[oauth_path].get("proxy_pass_url") != "http://127.0.0.1:8766":
+                raise AssertionError(f"print-plan must expose {oauth_path} route-specific loopback upstream")
         plan_server_names = print_plan["deploy_plan"]["nginx_public_routes"]["server_names"]
         if plan_server_names != ["127.0.0.1", "89.191.226.88"]:
             raise AssertionError(f"print-plan must expose configured nginx server_names, got {plan_server_names}")

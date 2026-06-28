@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 from contextlib import closing
+import hashlib
 import json
 import sqlite3
 import sys
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib import parse as urllib_parse
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -17,13 +20,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.webcore_data_mcp_server import (  # noqa: E402
+    DEFAULT_AUTHORIZATION_SERVER_METADATA_PATH,
     DEFAULT_HEALTH_PATH,
     DEFAULT_MCP_PATH,
+    DEFAULT_OAUTH_AUTHORIZE_PATH,
+    DEFAULT_OAUTH_TOKEN_PATH,
+    DEFAULT_OPENID_CONFIGURATION_PATH,
+    DEFAULT_PROTECTED_RESOURCE_PATH,
     WebCoreDataMcpServerConfig,
     build_server,
 )
 from packages.application.webcore_data_mcp import (  # noqa: E402
     APPROVED_TOOL_NAMES,
+    SCOPE_ANALYTICS_READ,
+    SCOPE_FINANCE_READ,
+    SCOPE_SUPPLY_READ,
     WebCoreDataMcpGateway,
 )
 
@@ -93,21 +104,36 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
 
 def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
     token = "smoke-mcp-token"
+    owner_password = "owner-password"
+    verifier = "A" * 64
+    challenge = _pkce_challenge(verifier)
+    resource_url = "https://mcp.example.test"
+    owner_hash = _password_hash(owner_password)
     config = WebCoreDataMcpServerConfig(
         host="127.0.0.1",
         port=0,
         mcp_path=DEFAULT_MCP_PATH,
         health_path=DEFAULT_HEALTH_PATH,
-        auth_mode="bearer",
+        auth_mode="bearer_oauth",
         bearer_token=token,
         bearer_token_sha256="",
         runtime_dir=None,
         db_path=db_path,
         audit_log_path=audit_log_path,
-        resource_url="https://mcp.example.test",
+        resource_url=resource_url,
         resource_documentation_url="",
-        authorization_servers=("https://auth.example.test",),
-        scopes=("wbcore.analytics.read", "wbcore.supply.read", "wbcore.finance.read"),
+        authorization_servers=(resource_url,),
+        scopes=(SCOPE_ANALYTICS_READ, SCOPE_SUPPLY_READ, SCOPE_FINANCE_READ),
+        oauth_signing_secret="x" * 48,
+        oauth_owner_username="owner",
+        oauth_owner_password_hash=owner_hash,
+        oauth_session_secret="session-secret-for-smoke",
+        oauth_code_store_path=audit_log_path.parent / "oauth_codes.json",
+        oauth_allowed_redirect_prefixes=("http://127.0.0.1/callback",),
+        oauth_allowed_client_id_prefixes=("https://chatgpt.com/oauth/",),
+        oauth_code_ttl_seconds=300,
+        oauth_access_token_ttl_seconds=3600,
+        oauth_issuer=resource_url,
     )
     server = build_server(config)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -117,6 +143,25 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         health = _get_json(f"{base_url}{DEFAULT_HEALTH_PATH}")
         if health.get("status") != "ok":
             raise AssertionError(f"health failed: {health}")
+        protected = _get_json(f"{base_url}{DEFAULT_PROTECTED_RESOURCE_PATH}")
+        if protected.get("resource") != resource_url or protected.get("authorization_servers") != [resource_url]:
+            raise AssertionError(f"protected resource metadata mismatch: {protected}")
+        auth_metadata = _get_json(f"{base_url}{DEFAULT_AUTHORIZATION_SERVER_METADATA_PATH}")
+        if auth_metadata.get("token_endpoint_auth_methods_supported") != ["none"]:
+            raise AssertionError(f"OAuth metadata must support public PKCE client: {auth_metadata}")
+        if auth_metadata.get("code_challenge_methods_supported") != ["S256"]:
+            raise AssertionError(f"OAuth metadata must require S256 PKCE: {auth_metadata}")
+        openid_metadata = _get_json(f"{base_url}{DEFAULT_OPENID_CONFIGURATION_PATH}")
+        if openid_metadata.get("authorization_endpoint") != auth_metadata.get("authorization_endpoint"):
+            raise AssertionError("OpenID metadata compatibility endpoint must match OAuth metadata")
+        try:
+            _get_json(f"{base_url}{DEFAULT_OAUTH_AUTHORIZE_PATH}")
+        except urllib_error.HTTPError as exc:
+            if exc.code != 400:
+                raise AssertionError(f"invalid authorize request must fail with 400, got {exc.code}") from exc
+            exc.read()
+        else:
+            raise AssertionError("invalid authorize request must fail")
         try:
             _post_json(f"{base_url}{DEFAULT_MCP_PATH}", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         except urllib_error.HTTPError as exc:
@@ -141,6 +186,10 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         names = tuple(tool["name"] for tool in tools["result"]["tools"])
         if names != APPROVED_TOOL_NAMES:
             raise AssertionError(f"HTTP tool list mismatch: {names}")
+        for tool in tools["result"]["tools"]:
+            schemes = tool.get("securitySchemes") or []
+            if not schemes or not str((schemes[0].get("scopes") or [""])[0]).startswith("webcore."):
+                raise AssertionError(f"tool OAuth scope must use webcore.* namespace: {tool}")
         call = _post_json(
             f"{base_url}{DEFAULT_MCP_PATH}",
             {
@@ -153,6 +202,95 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         )
         if call.get("result", {}).get("structuredContent", {}).get("status") != "ok":
             raise AssertionError(f"tool call failed: {call}")
+        code = _oauth_authorize_code(
+            base_url,
+            owner_password=owner_password,
+            verifier_challenge=challenge,
+            resource_url=resource_url,
+        )
+        try:
+            _post_form(
+                f"{base_url}{DEFAULT_OAUTH_TOKEN_PATH}",
+                {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": "http://127.0.0.1/callback",
+                    "client_id": "https://chatgpt.com/oauth/webcore-smoke/client.json",
+                    "code_verifier": "wrong" * 16,
+                    "resource": resource_url,
+                },
+            )
+        except urllib_error.HTTPError as exc:
+            if exc.code != 400:
+                raise AssertionError(f"bad PKCE verifier must fail with 400, got {exc.code}") from exc
+            exc.read()
+        else:
+            raise AssertionError("bad PKCE verifier must fail")
+        code = _oauth_authorize_code(
+            base_url,
+            owner_password=owner_password,
+            verifier_challenge=challenge,
+            resource_url=resource_url,
+        )
+        token_payload = _post_form(
+            f"{base_url}{DEFAULT_OAUTH_TOKEN_PATH}",
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": "http://127.0.0.1/callback",
+                "client_id": "https://chatgpt.com/oauth/webcore-smoke/client.json",
+                "code_verifier": verifier,
+                "resource": resource_url,
+            },
+        )
+        access_token = str(token_payload.get("access_token") or "")
+        if not access_token or token_payload.get("token_type") != "Bearer":
+            raise AssertionError(f"OAuth token endpoint failed: {token_payload}")
+        try:
+            _post_form(
+                f"{base_url}{DEFAULT_OAUTH_TOKEN_PATH}",
+                {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": "http://127.0.0.1/callback",
+                    "client_id": "https://chatgpt.com/oauth/webcore-smoke/client.json",
+                    "code_verifier": verifier,
+                    "resource": resource_url,
+                },
+            )
+        except urllib_error.HTTPError as exc:
+            if exc.code != 400:
+                raise AssertionError(f"authorization code reuse must fail with 400, got {exc.code}") from exc
+            exc.read()
+        else:
+            raise AssertionError("authorization code reuse must fail")
+        oauth_headers = {"Authorization": f"Bearer {access_token}"}
+        oauth_init = _post_json(
+            f"{base_url}{DEFAULT_MCP_PATH}",
+            {"jsonrpc": "2.0", "id": 10, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+            headers=oauth_headers,
+        )
+        if oauth_init.get("result", {}).get("serverInfo", {}).get("name") != "webcore-data-mcp":
+            raise AssertionError(f"OAuth initialize failed: {oauth_init}")
+        oauth_tools = _post_json(
+            f"{base_url}{DEFAULT_MCP_PATH}",
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/list"},
+            headers=oauth_headers,
+        )
+        if len(oauth_tools.get("result", {}).get("tools", [])) != len(APPROVED_TOOL_NAMES):
+            raise AssertionError(f"OAuth tools/list failed: {oauth_tools}")
+        oauth_call = _post_json(
+            f"{base_url}{DEFAULT_MCP_PATH}",
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {"name": "get_data_freshness_status", "arguments": {}},
+            },
+            headers=oauth_headers,
+        )
+        if oauth_call.get("result", {}).get("structuredContent", {}).get("status") != "ok":
+            raise AssertionError(f"OAuth tool call failed: {oauth_call}")
     finally:
         server.shutdown()
         server.server_close()
@@ -163,7 +301,7 @@ def _assert_audit(audit_log_path: Path) -> None:
     if not audit_log_path.exists():
         raise AssertionError("audit log was not written")
     text = audit_log_path.read_text(encoding="utf-8")
-    if "smoke-mcp-token" in text or "orders_revenue_rub" in text:
+    if "smoke-mcp-token" in text or "orders_revenue_rub" in text or "wc1." in text or "owner-password" in text:
         raise AssertionError(f"audit log leaked sensitive/raw args: {text}")
 
 
@@ -182,6 +320,79 @@ def _post_json(url: str, payload: dict[str, object], headers: dict[str, str] | N
 def _get_json(url: str) -> dict[str, object]:
     with urllib_request.urlopen(url, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _post_form(url: str, payload: dict[str, str]) -> dict[str, object]:
+    raw = urllib_parse.urlencode(payload).encode("utf-8")
+    req = urllib_request.Request(
+        url,
+        data=raw,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib_request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _oauth_authorize_code(
+    base_url: str,
+    *,
+    owner_password: str,
+    verifier_challenge: str,
+    resource_url: str,
+) -> str:
+    payload = {
+        "response_type": "code",
+        "client_id": "https://chatgpt.com/oauth/webcore-smoke/client.json",
+        "redirect_uri": "http://127.0.0.1/callback",
+        "code_challenge": verifier_challenge,
+        "code_challenge_method": "S256",
+        "state": "smoke-state",
+        "resource": resource_url,
+        "scope": f"{SCOPE_ANALYTICS_READ} {SCOPE_SUPPLY_READ} {SCOPE_FINANCE_READ}",
+        "username": "owner",
+        "password": owner_password,
+    }
+    raw = urllib_parse.urlencode(payload).encode("utf-8")
+    req = urllib_request.Request(
+        f"{base_url}{DEFAULT_OAUTH_AUTHORIZE_PATH}",
+        data=raw,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    opener = urllib_request.build_opener(_NoRedirectHandler)
+    try:
+        opener.open(req, timeout=10)
+    except urllib_error.HTTPError as exc:
+        if exc.code != 303:
+            raise
+        location = exc.headers.get("Location", "")
+        parsed = urllib_parse.urlparse(location)
+        values = urllib_parse.parse_qs(parsed.query)
+        code = (values.get("code") or [""])[0]
+        if not code or (values.get("state") or [""])[0] != "smoke-state":
+            raise AssertionError(f"OAuth authorize redirect missing code/state: {location}")
+        return code
+    raise AssertionError("OAuth authorize must redirect with code")
+
+
+class _NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _pkce_challenge(verifier: str) -> str:
+    return _b64(hashlib.sha256(verifier.encode("ascii")).digest())
+
+
+def _password_hash(password: str) -> str:
+    salt = b"webcore-data-mcp-smoke"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 260_000)
+    return "pbkdf2_sha256$260000$" + _b64(salt) + "$" + _b64(digest)
+
+
+def _b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
 def _create_fixture_db(db_path: Path) -> None:

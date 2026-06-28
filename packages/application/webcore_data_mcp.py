@@ -19,6 +19,9 @@ DEFAULT_MAX_LIMIT = 50
 MAX_LIMIT = 100
 MAX_DATE_RANGE_DAYS = 62
 AUDIT_SCHEMA_VERSION = "webcore_data_mcp_audit_v1"
+SCOPE_ANALYTICS_READ = "webcore.analytics.read"
+SCOPE_SUPPLY_READ = "webcore.supply.read"
+SCOPE_FINANCE_READ = "webcore.finance.read"
 
 APPROVED_TOOL_NAMES = (
     "get_data_freshness_status",
@@ -74,7 +77,7 @@ class ToolDefinition:
     description: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any] | None = None
-    scope: str = "wbcore.analytics.read"
+    scope: str = SCOPE_ANALYTICS_READ
 
 
 class WebCoreDataMcpError(RuntimeError):
@@ -106,6 +109,7 @@ class WebCoreDataMcpGateway:
     def list_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
         for definition in _tool_definitions():
+            security_schemes = [{"type": "oauth2", "scopes": [definition.scope]}]
             tools.append(
                 {
                     "name": definition.name,
@@ -113,7 +117,8 @@ class WebCoreDataMcpGateway:
                     "inputSchema": definition.input_schema,
                     "outputSchema": definition.output_schema or _object_schema(),
                     "annotations": {"readOnlyHint": True},
-                    "securitySchemes": [{"type": "oauth2", "scopes": [definition.scope]}],
+                    "securitySchemes": security_schemes,
+                    "_meta": {"securitySchemes": security_schemes},
                 }
             )
         return tools
@@ -1116,14 +1121,21 @@ def _tool_definitions() -> list[ToolDefinition]:
         ToolDefinition("explain_metric_source", "Use this to explain where a metric comes from, its formula/reference and accepted freshness caveats.", _schema({"metric_key": _string_schema(1, 160)}, required=["metric_key"])),
         ToolDefinition("get_wb_supplies_summary", "Use this for cached-only WB supplies summaries. Never syncs or backfills upstream data.", _schema({"status_filter": _string_schema(0, 40), "date_from": _date_schema(), "date_to": _date_schema(), "limit": _int_schema(1, MAX_LIMIT)})),
         ToolDefinition("get_wb_supply_details", "Use this for one cached WB supply. Never fetches WB upstream and never exposes raw payload blobs.", _schema({"supply_id": _string_schema(1, 120)}, required=["supply_id"])),
-        ToolDefinition("rank_supplier_shipments_by_unit_cost", "Use this to rank supplier shipments by available quantity/cost evidence with completeness flags.", _schema({"limit": _int_schema(1, MAX_LIMIT), "status_filter": _string_schema(0, 80)}), scope="wbcore.supply.read"),
-        ToolDefinition("get_supplier_shipment_details", "Use this for supplier shipment metadata, totals, document statuses and expense summaries. No raw files or paths.", _schema({"shipment_id": _string_schema(1, 120)}, required=["shipment_id"]), scope="wbcore.supply.read"),
-        ToolDefinition("get_latest_factory_order_calculation", "Use this for the latest factory-order and WB regional calculation state. Does not recalculate.", _schema({}), scope="wbcore.supply.read"),
+        ToolDefinition("rank_supplier_shipments_by_unit_cost", "Use this to rank supplier shipments by available quantity/cost evidence with completeness flags.", _schema({"limit": _int_schema(1, MAX_LIMIT), "status_filter": _string_schema(0, 80)}), scope=SCOPE_SUPPLY_READ),
+        ToolDefinition("get_supplier_shipment_details", "Use this for supplier shipment metadata, totals, document statuses and expense summaries. No raw files or paths.", _schema({"shipment_id": _string_schema(1, 120)}, required=["shipment_id"]), scope=SCOPE_SUPPLY_READ),
+        ToolDefinition("get_latest_factory_order_calculation", "Use this for the latest factory-order and WB regional calculation state. Does not recalculate.", _schema({}), scope=SCOPE_SUPPLY_READ),
         ToolDefinition("get_stock_report", "Use this for persisted ready-side stock metrics for a date/SKU. Does not refresh data.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120)})),
         ToolDefinition("get_sku_snapshot", "Use this for SKU identity plus persisted ready snapshot metrics and freshness flags.", _schema({"sku_or_nm_id": _string_schema(1, 120), "date": _date_schema()}, required=["sku_or_nm_id"])),
-        ToolDefinition("get_revenue_by_date", "Use this for date/SKU revenue only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "revenue_metric": _string_schema(0, 160)}, required=["date"]), scope="wbcore.finance.read"),
-        ToolDefinition("get_revenue_range", "Use this for bounded revenue ranges only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date_from": _date_schema(), "date_to": _date_schema(), "group_by": _enum_schema(["date", "sku", "total"]), "revenue_metric": _string_schema(0, 160)}, required=["date_from", "date_to"]), scope="wbcore.finance.read"),
+        ToolDefinition("get_revenue_by_date", "Use this for date/SKU revenue only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "revenue_metric": _string_schema(0, 160)}, required=["date"]), scope=SCOPE_FINANCE_READ),
+        ToolDefinition("get_revenue_range", "Use this for bounded revenue ranges only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date_from": _date_schema(), "date_to": _date_schema(), "group_by": _enum_schema(["date", "sku", "total"]), "revenue_metric": _string_schema(0, 160)}, required=["date_from", "date_to"]), scope=SCOPE_FINANCE_READ),
     ]
+
+
+def tool_required_scope(name: str) -> str:
+    for definition in _tool_definitions():
+        if definition.name == name:
+            return definition.scope
+    return SCOPE_ANALYTICS_READ
 
 
 def _schema(properties: dict[str, Any], *, required: Iterable[str] = ()) -> dict[str, Any]:
