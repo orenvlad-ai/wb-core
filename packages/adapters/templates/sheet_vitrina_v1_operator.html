@@ -4574,6 +4574,8 @@
       );
       let regionalLastResultPayload = null;
       let regionalPlanningPayload = null;
+      let regionalCalculationInFlight = false;
+      let regionalPlanningInFlightDistrictKey = "";
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
@@ -7187,14 +7189,21 @@
           const disabled = downloadPath ? "" : " disabled";
           const filename = valueOrDash(item.filename);
           const districtKey = valueOrDash(item.district_key);
-          const planningDisabled = Number(item.total_qty || 0) > 0 ? "" : " disabled";
+          const districtName = valueOrDash(item.district_name_ru);
+          const planningQty = regionalDistrictPlanningQty(item);
+          const isPlanningInFlight = regionalPlanningInFlightDistrictKey && regionalPlanningInFlightDistrictKey === districtKey;
+          const planningDisabledReason = regionalPlanningDisabledReason(planningQty, isPlanningInFlight);
+          const planningDisabled = planningDisabledReason ? " disabled" : "";
+          const planningTitle = planningDisabledReason || "Подобрать доступные склады и даты WB";
+          const planningLabel = isPlanningInFlight ? "Подбираем..." : "Подобрать склады WB";
+          const planningReason = planningQty > 0 ? "" : "<div class=\"field-note regional-planning-disabled-reason\">Нет количества к поставке</div>";
           return [
             "<tr>",
-            "<td>" + valueOrDash(item.district_name_ru) + "</td>",
+            "<td>" + districtName + "</td>",
             "<td>" + valueOrDash(item.total_qty) + "</td>",
             "<td>" + valueOrDash(item.deficit_qty) + "</td>",
             "<td><button class=\"action-button secondary-button regional-download-button\" type=\"button\" data-regional-district-download=\"" + escapeHtml(districtKey) + "\" data-download-path=\"" + escapeHtml(downloadPath) + "\" data-download-filename=\"" + escapeHtml(filename) + "\"" + disabled + ">Скачать Excel</button></td>",
-            "<td><button class=\"action-button secondary-button regional-planning-button\" type=\"button\" data-regional-planning-district=\"" + escapeHtml(districtKey) + "\"" + planningDisabled + ">Подобрать склады WB</button></td>",
+            "<td><button class=\"action-button secondary-button regional-planning-button\" type=\"button\" data-regional-planning-district=\"" + escapeHtml(districtKey) + "\" title=\"" + escapeHtml(planningTitle) + "\" aria-label=\"" + escapeHtml(districtName + ": " + planningTitle) + "\"" + planningDisabled + ">" + planningLabel + "</button>" + planningReason + "</td>",
             "</tr>"
           ].join("");
         }).join("");
@@ -7214,9 +7223,41 @@
         });
         Array.from(regionalDistrictTableBody.querySelectorAll(".regional-planning-button")).forEach((button) => {
           button.addEventListener("click", async () => {
+            if (button.disabled) {
+              return;
+            }
             await requestRegionalPlanningOptions(button.dataset.regionalPlanningDistrict || "", button);
           });
         });
+      }
+
+      function regionalDistrictPlanningQty(item) {
+        return Number(
+          (item && item.total_qty) ||
+          (item && item.allocated_qty) ||
+          (item && item.recommended_qty) ||
+          0
+        );
+      }
+
+      function regionalPlanningDisabledReason(planningQty, isPlanningInFlight) {
+        if (regionalCalculationInFlight) {
+          return "Идёт расчёт поставки";
+        }
+        if (isPlanningInFlight) {
+          return "Подбор складов WB выполняется";
+        }
+        if (!(Number(planningQty) > 0)) {
+          return "Нет количества к поставке";
+        }
+        return "";
+      }
+
+      function rerenderRegionalDistrictButtons() {
+        if (!regionalLastResultPayload) {
+          return;
+        }
+        renderRegionalDistricts(regionalLastResultPayload.districts || [], regionalLastResultPayload);
       }
 
       async function requestRegionalPlanningOptions(districtKey, button) {
@@ -7225,29 +7266,23 @@
           setRegionalMessage("Не выбран округ для подбора складов WB.", "error");
           return;
         }
-        const previousText = button ? button.textContent : "";
-        if (button) {
-          button.disabled = true;
-          button.textContent = "Подбираем...";
+        if (!regionalLastResultPayload) {
+          setRegionalMessage("Сначала выполните региональный расчёт.", "error");
+          return;
         }
+        regionalPlanningInFlightDistrictKey = normalizedDistrictKey;
+        rerenderRegionalDistrictButtons();
         renderRegionalPlanningLoading(normalizedDistrictKey);
         try {
-          const response = await fetch(config.wb_regional_planning_options_path, {
-            method: "POST",
-            headers: {
-              "Accept": "application/json",
-              "Content-Type": "application/json; charset=utf-8"
-            },
-            body: JSON.stringify({
-              district_key: normalizedDistrictKey,
-              calculation_id: regionalLastResultPayload && regionalLastResultPayload.calculation_id || "",
-              package_type: "box",
-              include_transit: true
-            })
-          });
-          const payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          let payload = await fetchRegionalPlanningPayload(normalizedDistrictKey, {});
+          const mismatchBlocker = regionalPlanningCalculationMismatchBlocker(payload);
+          if (mismatchBlocker) {
+            const actualCalculationId = String(mismatchBlocker.actual_calculation_id || "").trim();
+            setRegionalPlanningMessage("Расчёт обновлён, повторяем подбор по актуальному результату...", "warning");
+            await loadRegionalStatus({ preserveCurrentRegionalResult: true });
+            payload = await fetchRegionalPlanningPayload(normalizedDistrictKey, {
+              calculationId: actualCalculationId || currentRegionalCalculationId()
+            });
           }
           renderRegionalPlanningPayload(payload);
         } catch (error) {
@@ -7266,11 +7301,42 @@
             copyRegionalPlanningPayloadButton.disabled = true;
           }
         } finally {
-          if (button) {
-            button.disabled = false;
-            button.textContent = previousText || "Подобрать склады WB";
+          if (regionalPlanningInFlightDistrictKey === normalizedDistrictKey) {
+            regionalPlanningInFlightDistrictKey = "";
           }
+          rerenderRegionalDistrictButtons();
         }
+      }
+
+      async function fetchRegionalPlanningPayload(districtKey, options) {
+        const calculationId = String(
+          (options && Object.prototype.hasOwnProperty.call(options, "calculationId"))
+            ? options.calculationId
+            : currentRegionalCalculationId()
+        ).trim();
+        const response = await fetch(config.wb_regional_planning_options_path, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8"
+          },
+          body: JSON.stringify({
+            district_key: districtKey,
+            calculation_id: calculationId,
+            package_type: "box",
+            include_transit: true
+          })
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+          throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+        }
+        return payload;
+      }
+
+      function regionalPlanningCalculationMismatchBlocker(payload) {
+        const blockers = Array.isArray(payload && payload.blockers) ? payload.blockers : [];
+        return blockers.find((item) => item && item.code === "calculation_id_mismatch") || null;
       }
 
       function renderRegionalPlanningLoading(districtKey) {
@@ -7763,7 +7829,74 @@
         return labels[String(key || "")] || String(key || "");
       }
 
-      function renderRegionalResult(result, fallbackActiveSkuCount) {
+      function currentRegionalCalculationId() {
+        return regionalCalculationId(regionalLastResultPayload);
+      }
+
+      function regionalCalculationId(result) {
+        return String(result && result.calculation_id || "").trim();
+      }
+
+      function regionalResultTimestamp(result) {
+        const parsed = Date.parse(String(result && result.calculated_at || ""));
+        return Number.isFinite(parsed) ? parsed : 0;
+      }
+
+      function shouldKeepCurrentRegionalResult(candidate, options) {
+        if (!options || !options.preserveCurrentRegionalResult || !regionalLastResultPayload) {
+          return false;
+        }
+        const currentId = regionalCalculationId(regionalLastResultPayload);
+        const candidateId = regionalCalculationId(candidate);
+        if (!currentId) {
+          return false;
+        }
+        if (!candidateId) {
+          return true;
+        }
+        if (candidateId === currentId) {
+          return false;
+        }
+        const currentTimestamp = regionalResultTimestamp(regionalLastResultPayload);
+        const candidateTimestamp = regionalResultTimestamp(candidate);
+        if (currentTimestamp && candidateTimestamp) {
+          return candidateTimestamp < currentTimestamp;
+        }
+        return true;
+      }
+
+      function resetRegionalPlanningPanel() {
+        regionalPlanningPayload = null;
+        regionalPlanningInFlightDistrictKey = "";
+        if (regionalPlanningPanel) {
+          regionalPlanningPanel.hidden = true;
+        }
+        if (regionalPlanningSummary) {
+          regionalPlanningSummary.innerHTML = "";
+        }
+        if (regionalPlanningBlockers) {
+          regionalPlanningBlockers.hidden = true;
+          regionalPlanningBlockers.innerHTML = "";
+        }
+        if (regionalPlanningTableBody) {
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Выберите округ для подбора.</td></tr>";
+        }
+        if (copyRegionalPlanningPayloadButton) {
+          copyRegionalPlanningPayloadButton.disabled = true;
+        }
+        setRegionalPlanningMessage("", "");
+      }
+
+      function renderRegionalResult(result, fallbackActiveSkuCount, options) {
+        if (shouldKeepCurrentRegionalResult(result, options || {})) {
+          regionalActiveSkuCount.textContent = valueOrDash(
+            (regionalLastResultPayload && regionalLastResultPayload.active_sku_count) || fallbackActiveSkuCount
+          );
+          return;
+        }
+        const previousCalculationId = regionalCalculationId(regionalLastResultPayload);
+        const nextCalculationId = regionalCalculationId(result);
+        const calculationChanged = Boolean(previousCalculationId && nextCalculationId && previousCalculationId !== nextCalculationId);
         regionalLastResultPayload = result || null;
         if (!result) {
           regionalResultStatus.textContent = "ещё не рассчитывался";
@@ -7780,14 +7913,11 @@
           renderWbSupplyOverlayResultNote(regionalWbSupplyOverlayNote, null, "regional");
           renderRegionalDiagnostics(null);
           renderRegionalDistricts([], null);
-          regionalPlanningPayload = null;
-          if (regionalPlanningPanel) {
-            regionalPlanningPanel.hidden = true;
-          }
-          if (copyRegionalPlanningPayloadButton) {
-            copyRegionalPlanningPayloadButton.disabled = true;
-          }
+          resetRegionalPlanningPanel();
           return;
+        }
+        if (calculationChanged && !regionalPlanningInFlightDistrictKey) {
+          resetRegionalPlanningPanel();
         }
         regionalResultStatus.textContent = result.status === "success" ? "выполнен" : valueOrDash(result.status);
         regionalResultReportDate.textContent = valueOrDash(result.report_date);
@@ -7850,14 +7980,14 @@
         );
       }
 
-      function renderRegionalStatus(payload) {
+      function renderRegionalStatus(payload, options) {
         const sharedDatasets = payload && payload.shared_datasets ? payload.shared_datasets : {};
         regionalMethodologyNote.textContent = valueOrDash(payload && payload.methodology_note);
         regionalActiveSkuCount.textContent = valueOrDash(payload && payload.active_sku_count);
         if (sharedDatasets.stock_ff) {
           renderSharedStockState(sharedDatasets.stock_ff);
         }
-        renderRegionalResult(payload ? payload.last_result : null, payload && payload.active_sku_count);
+        renderRegionalResult(payload ? payload.last_result : null, payload && payload.active_sku_count, options || {});
       }
 
       function setShipmentRegistryMessage(message, tone) {
@@ -9339,7 +9469,7 @@
         }
       }
 
-      async function loadRegionalStatus() {
+      async function loadRegionalStatus(options) {
         try {
           const response = await fetch(config.wb_regional_status_path, {
             method: "GET",
@@ -9349,7 +9479,7 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          renderRegionalStatus(payload);
+          renderRegionalStatus(payload, options || {});
         } catch (error) {
           setRegionalMessage(
             "Не удалось прочитать состояние расчёта по округам: " + (error instanceof Error ? error.message : String(error)),
@@ -9980,6 +10110,10 @@
         }
         calculateRegionalSupplyButton.disabled = true;
         calculateRegionalSupplyButton.textContent = "Считаем...";
+        regionalCalculationInFlight = true;
+        regionalPlanningInFlightDistrictKey = "";
+        resetRegionalPlanningPanel();
+        rerenderRegionalDistrictButtons();
         setRegionalMessage("Выполняем расчёт по федеральным округам на сервере...", "");
         try {
           const response = await fetch(config.wb_regional_calculate_path, {
@@ -9994,15 +10128,17 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
-          renderRegionalResult(payload, payload.active_sku_count);
+          renderRegionalResult(payload, payload.active_sku_count, { source: "calculate" });
           regionalMethodologyNote.textContent = valueOrDash(payload.methodology_note);
-          await loadRegionalStatus();
+          await loadRegionalStatus({ preserveCurrentRegionalResult: true });
         } catch (error) {
           setRegionalMessage(
             "Расчёт завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
         } finally {
+          regionalCalculationInFlight = false;
+          rerenderRegionalDistrictButtons();
           calculateRegionalSupplyButton.disabled = false;
           calculateRegionalSupplyButton.textContent = "Рассчитать поставку на Wildberries";
         }

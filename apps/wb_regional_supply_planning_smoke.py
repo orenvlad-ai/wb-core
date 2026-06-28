@@ -137,6 +137,17 @@ def main() -> None:
         if acceptance_evidence.get("http_status") != 200 or acceptance_evidence.get("request_shape") != "json_array":
             raise AssertionError(f"successful acceptance/options evidence must expose official request shape, got {acceptance_evidence}")
 
+        acceptance_request_count_before_mismatch = len(source.acceptance_requests)
+        mismatch = block.build_options({"district_key": DISTRICT_CENTRAL, "calculation_id": "stale-calc-id"})
+        if mismatch.get("status") != "blocked" or not any(
+            item.get("code") == "calculation_id_mismatch" for item in mismatch.get("blockers", [])
+        ):
+            raise AssertionError(f"stale calculation id must return controlled blocker, got {mismatch}")
+        if mismatch.get("calculation_id") != "calc-planning-smoke":
+            raise AssertionError(f"mismatch response must expose actual latest calculation id, got {mismatch}")
+        if len(source.acceptance_requests) != acceptance_request_count_before_mismatch:
+            raise AssertionError("stale calculation id path must not call acceptance/options")
+
         repeated_warehouses = [
             {"warehouseID": 10_000 + index, "warehouseName": f"Склад {index}", "canBox": True}
             for index in range(360)
