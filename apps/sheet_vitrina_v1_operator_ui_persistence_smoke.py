@@ -910,6 +910,9 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                         "planned_product_count": 1,
                         "planned_qty_total": 100,
                         "option_count": 1,
+                        "grouped_warehouse_count": 1,
+                        "accepts_all_barcode_option_count": 1,
+                        "sgt_option_count": 0,
                         "same_district_option_count": 1,
                         "outside_district_option_count": 0,
                         "unmapped_option_count": 0,
@@ -922,7 +925,14 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                             "option_id": "browser-option-1",
                             "rank": 1,
                             "recommendation": "Рекомендуемый вариант",
+                            "recommendation_explanation": "склад внутри выбранного округа; принимает все ШК; логистика 110%; хранение 105%.",
+                            "option_kind": "warehouse_group",
                             "date": "2026-07-01",
+                            "best_date": {"date": "2026-07-01", "coefficient": 1, "allow_unload": True, "is_good_date": True},
+                            "dates": [{"date": "2026-07-01", "coefficient": 1, "allow_unload": True, "is_good_date": True}],
+                            "date_count": 1,
+                            "good_date_count": 1,
+                            "free_date_count": 0,
                             "warehouse_id": 101,
                             "warehouse_name": "Коледино",
                             "warehouse_district_key": "central",
@@ -935,6 +945,26 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                             "coefficient": 1,
                             "coefficient_display": "1",
                             "allow_unload": True,
+                            "barcode_coverage": {"accepted_count": 1, "total_count": 1, "accepts_all_barcodes": True},
+                            "accepts_all_barcodes": True,
+                            "is_sgt": False,
+                            "is_major_expected": True,
+                            "box_tariff": {
+                                "warehouseName": "Коледино",
+                                "boxDeliveryCoefExpr": "110%",
+                                "boxStorageCoefExpr": "105%",
+                                "boxDeliveryBase": "5",
+                                "boxDeliveryLiter": "1,5",
+                                "logistics_display": "110%",
+                                "storage_display": "105%",
+                            },
+                            "transit_route_count": 1,
+                            "best_transit_route": {
+                                "transitWarehouseName": "Обухово",
+                                "destinationWarehouseName": "Коледино",
+                                "best_box_tariff_value": 4.7,
+                                "palletTariff": 5700,
+                            },
                             "tariff_evidence": {"box": {"warehouseName": "Коледино"}, "transit": None},
                             "warnings": [],
                             "operator_handoff": {
@@ -945,6 +975,36 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                                 "products": [{"nm_id": 1001, "barcode": "4600000000001", "quantity": 100}],
                             },
                         }
+                    ],
+                    "major_warehouse_diagnostics": [
+                        {
+                            "expected_warehouse_name": "Коледино",
+                            "found_in_acceptance_options": True,
+                            "found_in_warehouses_catalog": True,
+                            "found_in_box_tariffs": True,
+                            "found_in_acceptance_coefficients": True,
+                            "accepted_barcode_count": 1,
+                            "total_barcode_count": 1,
+                            "accepts_all_barcodes": True,
+                            "min_coefficient": 1,
+                            "has_free_date": False,
+                            "visible_in_main_list": True,
+                            "hidden_reason": "visible",
+                            "mapped_district_label_ru": "Центральный федеральный округ",
+                        },
+                        {
+                            "expected_warehouse_name": "Электросталь",
+                            "found_in_acceptance_options": False,
+                            "found_in_warehouses_catalog": True,
+                            "found_in_box_tariffs": True,
+                            "found_in_acceptance_coefficients": True,
+                            "accepted_barcode_count": 0,
+                            "total_barcode_count": 1,
+                            "accepts_all_barcodes": False,
+                            "visible_in_main_list": False,
+                            "hidden_reason": "not_returned_by_acceptance_options",
+                            "mapped_district_label_ru": "Центральный федеральный округ",
+                        },
                     ],
                     "cache": {"enabled": False},
                     "evidence": {"wb_api_read_only": True, "no_wb_mutations": True},
@@ -1051,7 +1111,26 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if page.locator("#regionalPlanningPanel").is_hidden():
         raise AssertionError("regional planning panel must render after successful planning response")
     regional_planning_text = page.locator("#regionalPlanningPanel").inner_text()
-    for expected in ("Подбор складов WB", "SKU: 1", "ШК готово: 1/1", "Вариантов: 1", "Коледино", "ЦФО", "Прямо", "Скопировать JSON", "Скопировать"):
+    for expected in (
+        "Подбор складов WB",
+        "SKU: 1",
+        "ШК готово: 1/1",
+        "Вариантов: 1",
+        "Складов: 1",
+        "Все ШК: 1",
+        "Коледино",
+        "ЦФО",
+        "Прямо",
+        "Примут все ШК",
+        "Логистика: 110%",
+        "Хранение: 105%",
+        "Транзит доступен: 1 маршрутов",
+        "Проверка ключевых складов округа",
+        "Электросталь",
+        "not_returned_by_acceptance_options",
+        "Скопировать JSON",
+        "Скопировать",
+    ):
         if expected not in regional_planning_text:
             raise AssertionError(f"regional planning panel must include {expected!r}, got {regional_planning_text!r}")
     regional_planning_overflow = page.evaluate(
@@ -1079,6 +1158,14 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError(f"regional planning panel must not expand the page and copy button must stay visible, got {regional_planning_overflow}")
     if not regional_planning_overflow["wrapLocalScrollReady"]:
         raise AssertionError(f"regional planning table must be contained in local scroll wrapper, got {regional_planning_overflow}")
+    if page.locator("#regionalPlanningFilters").is_hidden():
+        raise AssertionError("regional planning grouped filters must be visible when options exist")
+    page.check('input[data-regional-planning-filter="freeDates"]')
+    if "По текущим фильтрам складов не найдено" not in page.locator("#regionalPlanningTableBody").inner_text():
+        raise AssertionError("free-date filter must hide paid-only warehouse options")
+    page.uncheck('input[data-regional-planning-filter="freeDates"]')
+    if "Коледино" not in page.locator("#regionalPlanningTableBody").inner_text():
+        raise AssertionError("unchecking free-date filter must restore grouped warehouse option")
     regional_planning_state = {
         "request": latest_planning_request,
         "summary": page.locator("#regionalPlanningSummary").inner_text(),

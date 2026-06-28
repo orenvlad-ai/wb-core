@@ -43,6 +43,20 @@ from packages.contracts.wb_regional_supply_planning import (
 
 
 MAX_PLANNING_OPTIONS = 300
+MAX_MAJOR_WAREHOUSE_PROBE_CALLS = 4
+
+MAJOR_WAREHOUSE_PROBES_BY_DISTRICT = {
+    "central": [
+        "Коледино",
+        "Электросталь",
+        "Обухово",
+        "Подольск",
+        "Тула",
+        "Голицыно СГТ",
+        "Софьино СГТ",
+        "Радумля СГТ",
+    ],
+}
 
 
 class WbRegionalSupplyPlanningSource(Protocol):
@@ -274,7 +288,15 @@ class WbRegionalSupplyPlanningBlock:
                 },
             }
 
-        options = _build_options(
+        warehouse_specific_probes = _fetch_missing_major_warehouse_probes(
+            source=self.source,
+            district_key=district_key,
+            request_products=request_products,
+            raw_option_rows=raw_option_rows,
+            warehouses=list(enrichment.get("warehouses") or []),
+            warnings=warnings,
+        )
+        planning_result = _build_options(
             raw_option_rows=raw_option_rows,
             acceptance_payload=acceptance_payload,
             district_key=district_key,
@@ -285,7 +307,9 @@ class WbRegionalSupplyPlanningBlock:
             date_filter=request["date"],
             enrichment=enrichment,
             warnings=warnings,
+            warehouse_specific_probes=warehouse_specific_probes,
         )
+        options = list(planning_result.get("options") or [])
         status = STATUS_READY if options else STATUS_NO_OPTIONS
         if not options:
             warnings.append("После фильтров не осталось доступных вариантов WB.")
@@ -293,10 +317,13 @@ class WbRegionalSupplyPlanningBlock:
             **payload_without_options,
             "status": status,
             "options": options,
+            "major_warehouse_diagnostics": list(planning_result.get("major_warehouse_diagnostics") or []),
+            "diagnostics": dict(planning_result.get("diagnostics") or {}),
             "warnings": warnings,
             "blockers": [] if options else acceptance_blockers,
             "summary": {
                 **payload_without_options["summary"],
+                **dict(planning_result.get("summary") or {}),
                 "option_count": len(options),
                 "same_district_option_count": sum(
                     1 for item in options if item.get("warehouse_scope") == WAREHOUSE_SCOPE_SAME_DISTRICT
@@ -316,6 +343,8 @@ class WbRegionalSupplyPlanningBlock:
                     "http_status": 200,
                     "status": "ok",
                     "raw_option_count": len(raw_option_rows),
+                    "raw_flat_row_count": planning_result.get("raw_flat_row_count", 0),
+                    "grouped_warehouse_count": planning_result.get("grouped_warehouse_count", 0),
                 },
                 "enrichment": enrichment["evidence"],
             },
@@ -491,25 +520,23 @@ def _build_options(
     date_filter: str,
     enrichment: Mapping[str, Any],
     warnings: list[str],
-) -> list[dict[str, Any]]:
-    base_rows = [_normalize_acceptance_option_row(row) for row in _flatten_acceptance_option_rows(raw_option_rows)]
+    warehouse_specific_probes: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    flat_rows = _flatten_acceptance_option_rows(raw_option_rows)
+    base_rows = [_normalize_acceptance_option_row(row) for row in flat_rows]
     base_rows = [row for row in base_rows if row.get("warehouse_id") or row.get("warehouse_name")]
-    base_rows = _dedupe_acceptance_option_rows(base_rows)
     warehouse_name_by_id = _warehouse_name_by_id(enrichment.get("warehouses") or [])
     base_rows = [_fill_acceptance_warehouse_name(row, warehouse_name_by_id) for row in base_rows]
     if not include_transit:
         base_rows = [row for row in base_rows if row.get("route_type") != ROUTE_TRANSIT]
-    coefficients = _coefficient_rows_by_warehouse(enrichment.get("coefficients") or [])
-    expanded_rows = _expand_with_coefficients(base_rows, coefficients)
-    if date_filter:
-        expanded_rows = [row for row in expanded_rows if str(row.get("date") or "") == date_filter]
+    base_rows = _dedupe_acceptance_option_rows(base_rows)
 
     fake_supply_rows = [
         {
             "warehouse_id": row.get("warehouse_id") or "",
             "warehouse_name": row.get("warehouse_name") or "",
         }
-        for row in expanded_rows
+        for row in base_rows
     ]
     mapping = build_warehouse_district_mapping(
         warehouse_rows=list(enrichment.get("warehouses") or []),
@@ -519,14 +546,21 @@ def _build_options(
     )
     box_tariff_by_name = _tariff_by_warehouse_name(enrichment.get("box_tariffs") or [])
     transit_tariff_rows = list(enrichment.get("transit_tariffs") or [])
+    coefficients = _coefficient_rows_by_warehouse(enrichment.get("coefficients") or [])
+    product_barcodes = {
+        str(item.get("barcode") or "").strip()
+        for item in products
+        if str(item.get("barcode") or "").strip()
+    }
+    grouped_rows = _group_acceptance_rows_by_warehouse(base_rows)
     options: list[dict[str, Any]] = []
-    for row in expanded_rows:
+    for group in grouped_rows:
         district_row = augment_supply_row_with_district(
             {
-                "warehouse_id": row.get("warehouse_id") or "",
-                "warehouse_name": row.get("warehouse_name") or "",
-                "district_source_warehouse_id": row.get("warehouse_id") or "",
-                "district_source_warehouse_name": row.get("warehouse_name") or "",
+                "warehouse_id": group.get("warehouse_id") or "",
+                "warehouse_name": group.get("warehouse_name") or "",
+                "district_source_warehouse_id": group.get("warehouse_id") or "",
+                "district_source_warehouse_name": group.get("warehouse_name") or "",
                 "district_source_warehouse_role": "acceptance_option",
                 "district_source_warehouse_evidence": "acceptance_options.warehouseName",
             },
@@ -536,44 +570,77 @@ def _build_options(
         warehouse_scope = _warehouse_scope(warehouse_district_key, district_key)
         if only_same_district and warehouse_scope != WAREHOUSE_SCOPE_SAME_DISTRICT:
             continue
-        box_tariff = box_tariff_by_name.get(_normalize_name(row.get("warehouse_name")))
-        transit_tariff = _match_transit_tariff(row, transit_tariff_rows)
-        tariff_value = _known_tariff_value(box_tariff, transit_tariff)
+        dates = _warehouse_acceptance_dates(group, coefficients, date_filter=date_filter)
+        if date_filter and not dates:
+            continue
+        best_date = _best_date_entry(dates)
+        box_tariff = box_tariff_by_name.get(_normalize_name(group.get("warehouse_name")))
+        transit_routes = _transit_tariffs_for_destination(group.get("warehouse_name"), transit_tariff_rows)
+        best_transit = _best_transit_tariff(transit_routes)
+        tariff_value = _known_tariff_value(box_tariff, best_transit)
+        barcode_coverage = _barcode_coverage(group, product_barcodes)
+        route_type = ROUTE_TRANSIT if group.get("route_type") == ROUTE_TRANSIT else ROUTE_DIRECT
         option = {
             "option_id": _stable_hash(
                 {
-                    "warehouse_id": row.get("warehouse_id"),
-                    "warehouse_name": row.get("warehouse_name"),
-                    "date": row.get("date"),
-                    "transit_warehouse_id": row.get("transit_warehouse_id"),
-                    "transit_warehouse_name": row.get("transit_warehouse_name"),
+                    "warehouse_id": group.get("warehouse_id"),
+                    "warehouse_name": group.get("warehouse_name"),
+                    "route_type": route_type,
                 }
             )[:16],
+            "option_kind": "warehouse_group",
+            "warehouse_group_key": group.get("group_key") or "",
             "rank": 0,
             "recommendation": "",
             "recommendation_explanation": "",
-            "date": row.get("date") or "",
-            "warehouse_id": row.get("warehouse_id") or "",
-            "warehouse_name": row.get("warehouse_name") or "",
+            "date": best_date.get("date") or "",
+            "best_date": best_date,
+            "dates": dates,
+            "date_count": len(dates),
+            "good_date_count": sum(1 for item in dates if item.get("is_good_date")),
+            "free_date_count": sum(1 for item in dates if item.get("is_free_date")),
+            "warehouse_id": group.get("warehouse_id") or "",
+            "warehouse_name": group.get("warehouse_name") or "",
             "warehouse_district_key": warehouse_district_key,
             "warehouse_district_label_ru": DISTRICT_LABELS_RU.get(warehouse_district_key, ""),
             "warehouse_district_short_label_ru": DISTRICT_SHORT_LABELS_RU.get(warehouse_district_key, ""),
             "warehouse_scope": warehouse_scope,
-            "route_type": row.get("route_type") or ROUTE_DIRECT,
-            "transit_warehouse_id": row.get("transit_warehouse_id") or "",
-            "transit_warehouse_name": row.get("transit_warehouse_name") or "",
-            "coefficient": row.get("coefficient"),
-            "coefficient_display": _format_number(row.get("coefficient")),
-            "allow_unload": row.get("allow_unload"),
-            "dropoff_allowed": row.get("dropoff_allowed"),
-            "pickup_allowed": row.get("pickup_allowed"),
+            "route_type": route_type,
+            "transit_warehouse_id": group.get("transit_warehouse_id") or "",
+            "transit_warehouse_name": group.get("transit_warehouse_name") or "",
+            "coefficient": best_date.get("coefficient"),
+            "coefficient_display": _format_number(best_date.get("coefficient")),
+            "min_coefficient": _best_numeric_coefficient(dates),
+            "allow_unload": best_date.get("allow_unload"),
+            "dropoff_allowed": group.get("dropoff_allowed"),
+            "pickup_allowed": group.get("pickup_allowed"),
             "package_type": package_type,
-            "raw_flags": row.get("raw_flags") or {},
-            "tariff_evidence": _tariff_evidence(box_tariff, transit_tariff),
+            "raw_flags": group.get("raw_flags") or {},
+            "barcode_coverage": barcode_coverage,
+            "accepts_all_barcodes": bool(barcode_coverage.get("accepts_all_barcodes")),
+            "is_sgt": _is_sgt_warehouse(group.get("warehouse_name")),
+            "is_major_expected": _is_major_expected_warehouse(district_key, group.get("warehouse_name")),
+            "tariff_evidence": _tariff_evidence(box_tariff, best_transit),
+            "box_tariff": _compact_box_tariff_row(box_tariff),
+            "transit_route_count": len(transit_routes),
+            "best_transit_route": _compact_transit_tariff_row(best_transit),
+            "transit_routes": [_compact_transit_tariff_row(item) for item in transit_routes[:20]],
             "known_tariff_value": tariff_value,
-            "warnings": _option_warnings(row, warehouse_scope, box_tariff, transit_tariff),
+            "warnings": _group_option_warnings(
+                group=group,
+                dates=dates,
+                warehouse_scope=warehouse_scope,
+                box_tariff=box_tariff,
+                transit_routes=transit_routes,
+                barcode_coverage=barcode_coverage,
+            ),
             "evidence": {
-                "acceptance_option": row.get("evidence") or {},
+                "acceptance_option": {
+                    "source": "acceptance_options",
+                    "raw_row_count": group.get("raw_row_count") or 0,
+                    "barcode_coverage_source": "acceptance_options.result[].warehouses[]",
+                    "coefficient_source": "acceptance_coefficients" if dates else "",
+                },
                 "district_mapping_source": district_row.get("district_mapping_source") or "",
                 "district_mapping_evidence": district_row.get("district_mapping_evidence") or "",
                 "district_mapping_confidence": district_row.get("district_mapping_confidence") or "",
@@ -590,18 +657,282 @@ def _build_options(
         )
         options.append(option)
     options.sort(key=lambda item: item["_rank_tuple"])
-    total_option_count = len(options)
-    if total_option_count > MAX_PLANNING_OPTIONS:
+    grouped_warehouse_count = len(options)
+    visible_options = list(options)
+    if grouped_warehouse_count > MAX_PLANNING_OPTIONS:
         warnings.append(
-            f"WB вернул {total_option_count} вариантов; в UI показаны первые {MAX_PLANNING_OPTIONS} по ранжированию."
+            f"WB вернул {grouped_warehouse_count} складов после группировки; в UI показаны первые {MAX_PLANNING_OPTIONS} по ранжированию."
         )
-        options = options[:MAX_PLANNING_OPTIONS]
-    for index, option in enumerate(options, start=1):
+        visible_options = visible_options[:MAX_PLANNING_OPTIONS]
+    for index, option in enumerate(visible_options, start=1):
         option["rank"] = index
         option["recommendation"] = "Рекомендуемый вариант" if index == 1 else f"Вариант #{index}"
         option["recommendation_explanation"] = _recommendation_explanation(option)
         option.pop("_rank_tuple", None)
-    return options
+    major_diagnostics = _major_warehouse_diagnostics(
+        district_key=district_key,
+        base_rows=base_rows,
+        all_options=options,
+        visible_options=visible_options,
+        warehouses=list(enrichment.get("warehouses") or []),
+        box_tariffs=list(enrichment.get("box_tariffs") or []),
+        coefficients=list(enrichment.get("coefficients") or []),
+        offices=list(enrichment.get("offices") or []),
+        mapping=mapping,
+        product_barcode_count=len(product_barcodes),
+        warehouse_specific_probes=warehouse_specific_probes or {},
+    )
+    sgt_count = sum(1 for item in options if item.get("is_sgt"))
+    return {
+        "options": visible_options,
+        "major_warehouse_diagnostics": major_diagnostics,
+        "raw_flat_row_count": len(flat_rows),
+        "grouped_warehouse_count": grouped_warehouse_count,
+        "summary": {
+            "raw_acceptance_result_count": len(raw_option_rows),
+            "raw_acceptance_flat_row_count": len(flat_rows),
+            "grouped_warehouse_count": grouped_warehouse_count,
+            "visible_grouped_warehouse_count": len(visible_options),
+            "accepts_all_barcode_option_count": sum(1 for item in visible_options if item.get("accepts_all_barcodes")),
+            "sgt_option_count": sgt_count,
+            "non_sgt_option_count": grouped_warehouse_count - sgt_count,
+            "major_warehouse_diagnostic_count": len(major_diagnostics),
+        },
+        "diagnostics": {
+            "raw_acceptance_result_count": len(raw_option_rows),
+            "raw_acceptance_flat_row_count": len(flat_rows),
+            "grouped_warehouse_count": grouped_warehouse_count,
+            "cap_applied_after_grouping": True,
+            "max_planning_options": MAX_PLANNING_OPTIONS,
+            "major_warehouses": major_diagnostics,
+        },
+    }
+
+
+def _fetch_missing_major_warehouse_probes(
+    *,
+    source: WbRegionalSupplyPlanningSource,
+    district_key: str,
+    request_products: list[Mapping[str, Any]],
+    raw_option_rows: list[Mapping[str, Any]],
+    warehouses: list[Mapping[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    expected_names = MAJOR_WAREHOUSE_PROBES_BY_DISTRICT.get(district_key, [])
+    if not expected_names:
+        return {}
+    warehouse_name_by_id = _warehouse_name_by_id(warehouses)
+    acceptance_rows = [
+        _fill_acceptance_warehouse_name(_normalize_acceptance_option_row(row), warehouse_name_by_id)
+        for row in _flatten_acceptance_option_rows(raw_option_rows)
+    ]
+    result: dict[str, Any] = {}
+    probe_calls = 0
+    for expected in expected_names:
+        if any(_warehouse_name_matches(row.get("warehouse_name"), expected) for row in acceptance_rows):
+            continue
+        candidates = [
+            row
+            for row in warehouses
+            if _warehouse_name_matches(_first_string(row, "warehouseName", "warehouse_name", "name"), expected)
+        ]
+        probes: list[dict[str, Any]] = []
+        for candidate in candidates[:2]:
+            if probe_calls >= MAX_MAJOR_WAREHOUSE_PROBE_CALLS:
+                break
+            warehouse_id = _first_string(candidate, "warehouseID", "warehouseId", "warehouse_id", "ID", "id")
+            if not warehouse_id:
+                continue
+            probe_calls += 1
+            try:
+                payload = source.fetch_acceptance_options(products=request_products, warehouse_id=warehouse_id)
+                flat_rows = [
+                    _fill_acceptance_warehouse_name(_normalize_acceptance_option_row(row), warehouse_name_by_id)
+                    for row in _flatten_acceptance_option_rows(_extract_acceptance_option_rows(payload))
+                ]
+                matching = [row for row in flat_rows if _warehouse_name_matches(row.get("warehouse_name"), expected)]
+                probes.append(
+                    {
+                        "warehouse_id": warehouse_id,
+                        "warehouse_name": _first_string(candidate, "warehouseName", "warehouse_name", "name"),
+                        "status": "ok",
+                        "http_status": 200,
+                        "top_result_count": len(_extract_acceptance_option_rows(payload)),
+                        "flat_row_count": len(flat_rows),
+                        "matching_row_count": len(matching),
+                        "matching_barcode_count": len(
+                            {
+                                str(row.get("barcode") or "").strip()
+                                for row in matching
+                                if str(row.get("barcode") or "").strip()
+                            }
+                        ),
+                        "returned_names": sorted({str(row.get("warehouse_name") or "") for row in flat_rows if row.get("warehouse_name")})[:10],
+                    }
+                )
+            except (OfficialApiRuntimeError, WbSuppliesHttpStatusError, WbSuppliesTransportError, OSError, ValueError) as exc:
+                probes.append(
+                    {
+                        "warehouse_id": warehouse_id,
+                        "warehouse_name": _first_string(candidate, "warehouseName", "warehouse_name", "name"),
+                        "status": "error",
+                        "error": _safe_error_message(exc),
+                    }
+                )
+        if probes:
+            result[expected] = {
+                "expected_warehouse_name": expected,
+                "reason": "not_returned_by_general_acceptance_options",
+                "probes": probes,
+            }
+    if probe_calls >= MAX_MAJOR_WAREHOUSE_PROBE_CALLS:
+        warnings.append("Диагностические warehouseID-probes ограничены безопасным лимитом.")
+    return result
+
+
+def _major_warehouse_diagnostics(
+    *,
+    district_key: str,
+    base_rows: list[Mapping[str, Any]],
+    all_options: list[Mapping[str, Any]],
+    visible_options: list[Mapping[str, Any]],
+    warehouses: list[Mapping[str, Any]],
+    box_tariffs: list[Mapping[str, Any]],
+    coefficients: list[Mapping[str, Any]],
+    offices: list[Mapping[str, Any]],
+    mapping: Mapping[str, Any],
+    product_barcode_count: int,
+    warehouse_specific_probes: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    expected_names = MAJOR_WAREHOUSE_PROBES_BY_DISTRICT.get(district_key, [])
+    if not expected_names:
+        return []
+    visible_keys = {str(item.get("warehouse_group_key") or "") for item in visible_options}
+    diagnostics: list[dict[str, Any]] = []
+    for expected in expected_names:
+        acceptance_matches = [row for row in base_rows if _warehouse_name_matches(row.get("warehouse_name"), expected)]
+        catalog_matches = [
+            row
+            for row in warehouses
+            if _warehouse_name_matches(_first_string(row, "warehouseName", "warehouse_name", "name"), expected)
+        ]
+        box_matches = [
+            row
+            for row in box_tariffs
+            if _warehouse_name_matches(_first_string(row, "warehouseName", "warehouse_name", "name"), expected)
+        ]
+        coefficient_matches = [
+            row
+            for row in coefficients
+            if _warehouse_name_matches(_first_string(row, "warehouseName", "warehouse_name", "name"), expected)
+        ]
+        office_matches = [
+            row
+            for row in offices
+            if _warehouse_name_matches(_first_string(row, "name", "warehouseName", "warehouse_name"), expected)
+        ]
+        option_matches = [item for item in all_options if _warehouse_name_matches(item.get("warehouse_name"), expected)]
+        visible_matches = [item for item in visible_options if _warehouse_name_matches(item.get("warehouse_name"), expected)]
+        accepted_barcodes = {
+            str(row.get("barcode") or "").strip()
+            for row in acceptance_matches
+            if str(row.get("barcode") or "").strip()
+        }
+        coeff_values = [_first_nested_number(row.get("coefficient")) for row in coefficient_matches]
+        numeric_coefficients = [value for value in coeff_values if isinstance(value, (int, float))]
+        non_negative_coefficients = [value for value in numeric_coefficients if value >= 0]
+        probe = dict(warehouse_specific_probes.get(expected) or {})
+        hidden_reason = _major_hidden_reason(
+            acceptance_matches=acceptance_matches,
+            option_matches=option_matches,
+            visible_matches=visible_matches,
+            visible_keys=visible_keys,
+            probe=probe,
+        )
+        mapping_row = _major_mapping_row(expected, acceptance_matches, catalog_matches, box_matches)
+        mapped = augment_supply_row_with_district(mapping_row, mapping) if mapping_row else {}
+        diagnostics.append(
+            {
+                "expected_warehouse_name": expected,
+                "found_in_acceptance_options": bool(acceptance_matches),
+                "found_in_warehouses_catalog": bool(catalog_matches),
+                "found_in_box_tariffs": bool(box_matches),
+                "found_in_acceptance_coefficients": bool(coefficient_matches),
+                "found_in_marketplace_offices": bool(office_matches),
+                "matched_acceptance_names": sorted({str(row.get("warehouse_name") or "") for row in acceptance_matches if row.get("warehouse_name")})[:10],
+                "catalog_warehouse_ids": [
+                    _first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id")
+                    for row in catalog_matches[:10]
+                ],
+                "mapped_district_key": str(mapped.get("district_key") or DISTRICT_UNMAPPED),
+                "mapped_district_label_ru": DISTRICT_LABELS_RU.get(str(mapped.get("district_key") or ""), ""),
+                "mapped_district_source": mapped.get("district_mapping_source") or "",
+                "accepted_barcode_count": len(accepted_barcodes),
+                "total_barcode_count": product_barcode_count,
+                "accepts_all_barcodes": bool(product_barcode_count) and len(accepted_barcodes) >= product_barcode_count,
+                "min_coefficient": min(numeric_coefficients) if numeric_coefficients else None,
+                "best_available_coefficient": min(non_negative_coefficients) if non_negative_coefficients else None,
+                "has_free_date": 0 in numeric_coefficients,
+                "allow_unload": any(_first_bool(row, "allowUnload", "allow_unload", "canUnload", "can_unload") is True for row in coefficient_matches),
+                "visible_in_main_list": bool(visible_matches),
+                "visible_option_ids": [str(item.get("option_id") or "") for item in visible_matches[:10]],
+                "hidden_reason": hidden_reason,
+                "warehouse_specific_probe": probe,
+            }
+        )
+    return diagnostics
+
+
+def _major_mapping_row(
+    expected: str,
+    acceptance_matches: list[Mapping[str, Any]],
+    catalog_matches: list[Mapping[str, Any]],
+    box_matches: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if acceptance_matches:
+        row = acceptance_matches[0]
+        return {
+            "warehouse_id": row.get("warehouse_id") or "",
+            "warehouse_name": row.get("warehouse_name") or expected,
+        }
+    if catalog_matches:
+        row = catalog_matches[0]
+        return {
+            "warehouse_id": _first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id"),
+            "warehouse_name": _first_string(row, "warehouseName", "warehouse_name", "name") or expected,
+        }
+    if box_matches:
+        row = box_matches[0]
+        return {
+            "warehouse_id": "",
+            "warehouse_name": _first_string(row, "warehouseName", "warehouse_name", "name") or expected,
+        }
+    return {"warehouse_id": "", "warehouse_name": expected}
+
+
+def _major_hidden_reason(
+    *,
+    acceptance_matches: list[Mapping[str, Any]],
+    option_matches: list[Mapping[str, Any]],
+    visible_matches: list[Mapping[str, Any]],
+    visible_keys: set[str],
+    probe: Mapping[str, Any],
+) -> str:
+    if visible_matches:
+        return "visible"
+    if not acceptance_matches:
+        probe_rows = 0
+        for item in probe.get("probes") or []:
+            if isinstance(item, Mapping):
+                probe_rows += _positive_int(item.get("matching_row_count"))
+        if probe_rows > 0:
+            return "not_returned_in_general_batch_returned_by_warehouse_specific_probe"
+        return "not_returned_by_acceptance_options"
+    if not option_matches:
+        return "hidden_by_filter"
+    if not any(str(item.get("warehouse_group_key") or "") in visible_keys for item in option_matches):
+        return "hidden_by_cap"
+    return "other"
 
 
 def _parse_request(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -773,19 +1104,8 @@ def _dedupe_acceptance_option_rows(rows: list[dict[str, Any]]) -> list[dict[str,
         barcode = str(row.get("barcode") or "").strip()
         if barcode:
             grouped_barcodes[key].add(barcode)
-    if len(barcode_values) <= 1:
-        result = list(grouped.values())
-    else:
-        result = [
-            row
-            for key, row in grouped.items()
-            if len(grouped_barcodes.get(key) or set()) >= required_barcode_count
-        ]
-        if not result:
-            # If WB returned only partial barcode-level success, keep the visible partial options
-            # with warnings from _acceptance_payload_diagnostics instead of hiding everything.
-            result = list(grouped.values())
     for key, row in grouped.items():
+        row["accepted_barcodes"] = sorted(grouped_barcodes.get(key) or set())
         row.setdefault("evidence", {})
         if isinstance(row.get("evidence"), dict):
             row["evidence"] = {
@@ -793,7 +1113,218 @@ def _dedupe_acceptance_option_rows(rows: list[dict[str, Any]]) -> list[dict[str,
                 "available_barcode_count": len(grouped_barcodes.get(key) or set()),
                 "required_success_barcode_count": required_barcode_count,
             }
+    return list(grouped.values())
+
+
+def _group_acceptance_rows_by_warehouse(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = _warehouse_group_key(row)
+        if not key:
+            continue
+        group = grouped.setdefault(
+            key,
+            {
+                "group_key": key,
+                "warehouse_id": row.get("warehouse_id") or "",
+                "warehouse_name": row.get("warehouse_name") or "",
+                "route_type": row.get("route_type") or ROUTE_DIRECT,
+                "transit_warehouse_id": row.get("transit_warehouse_id") or "",
+                "transit_warehouse_name": row.get("transit_warehouse_name") or "",
+                "dropoff_allowed": row.get("dropoff_allowed"),
+                "pickup_allowed": row.get("pickup_allowed"),
+                "raw_flags": {},
+                "raw_rows": [],
+                "accepted_barcodes": set(),
+                "raw_row_count": 0,
+            },
+        )
+        if not group.get("warehouse_name") and row.get("warehouse_name"):
+            group["warehouse_name"] = row.get("warehouse_name") or ""
+        if not group.get("warehouse_id") and row.get("warehouse_id"):
+            group["warehouse_id"] = row.get("warehouse_id") or ""
+        if row.get("route_type") == ROUTE_DIRECT:
+            group["route_type"] = ROUTE_DIRECT
+        elif group.get("route_type") != ROUTE_DIRECT and row.get("route_type") == ROUTE_TRANSIT:
+            group["route_type"] = ROUTE_TRANSIT
+        if not group.get("transit_warehouse_name") and row.get("transit_warehouse_name"):
+            group["transit_warehouse_name"] = row.get("transit_warehouse_name") or ""
+        if not group.get("transit_warehouse_id") and row.get("transit_warehouse_id"):
+            group["transit_warehouse_id"] = row.get("transit_warehouse_id") or ""
+        for flag_key, flag_value in dict(row.get("raw_flags") or {}).items():
+            group["raw_flags"].setdefault(flag_key, flag_value)
+        row_barcodes = list(row.get("accepted_barcodes") or [])
+        barcode = str(row.get("barcode") or "").strip()
+        if barcode:
+            row_barcodes.append(barcode)
+        for item in row_barcodes:
+            normalized_barcode = str(item or "").strip()
+            if normalized_barcode:
+                group["accepted_barcodes"].add(normalized_barcode)
+        group["raw_rows"].append(row)
+        group["raw_row_count"] += 1
+    return list(grouped.values())
+
+
+def _warehouse_group_key(row: Mapping[str, Any]) -> str:
+    warehouse_id = _warehouse_key(row.get("warehouse_id"))
+    if warehouse_id:
+        return warehouse_id
+    name = _normalize_name(row.get("warehouse_name"))
+    return f"name:{name}" if name else ""
+
+
+def _barcode_coverage(group: Mapping[str, Any], product_barcodes: set[str]) -> dict[str, Any]:
+    accepted = {
+        str(item or "").strip()
+        for item in (group.get("accepted_barcodes") or set())
+        if str(item or "").strip()
+    }
+    missing = sorted(product_barcodes - accepted)
+    return {
+        "accepted_count": len(accepted),
+        "total_count": len(product_barcodes),
+        "missing_count": len(missing),
+        "accepts_all_barcodes": bool(product_barcodes) and len(accepted) >= len(product_barcodes),
+        "partial": bool(product_barcodes) and 0 < len(accepted) < len(product_barcodes),
+        "accepted_barcode_count": len(accepted),
+        "required_barcode_count": len(product_barcodes),
+        "missing_barcodes_masked": [_masked_barcode(item) for item in missing[:10]],
+        "source": "acceptance_options.result[].warehouses[]",
+    }
+
+
+def _warehouse_acceptance_dates(
+    group: Mapping[str, Any],
+    coefficients: Mapping[str, list[dict[str, Any]]],
+    *,
+    date_filter: str,
+) -> list[dict[str, Any]]:
+    matches = coefficients.get(_warehouse_key(group.get("warehouse_id"))) or coefficients.get(
+        _normalize_name(group.get("warehouse_name"))
+    ) or []
+    rows = matches or list(group.get("raw_rows") or [])
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        date_value = _first_string(row, "date", "dt", "day", "supplyDate", "acceptanceDate", "unloadingDate", "availableDate")
+        normalized_date = _normalize_date_value(date_value)
+        if date_filter and not _date_matches_filter(normalized_date or date_value, date_filter):
+            continue
+        coefficient = row.get("coefficient")
+        if coefficient is None:
+            coefficient = _first_number(row, "coefficient", "coef", "acceptanceCoefficient", "acceptance_coefficient")
+        allow_unload = row.get("allow_unload")
+        if allow_unload is None and isinstance(row, Mapping):
+            allow_unload = _first_bool(row, "allowUnload", "allow_unload", "canUnload", "can_unload")
+        key = (normalized_date, _format_number(coefficient), str(allow_unload))
+        if key in seen:
+            continue
+        seen.add(key)
+        coefficient_value = coefficient if isinstance(coefficient, (int, float)) else _first_nested_number(coefficient)
+        is_free = coefficient_value == 0
+        is_good = bool(allow_unload is True and coefficient_value in (0, 1))
+        result.append(
+            {
+                "date": normalized_date,
+                "raw_date": date_value,
+                "coefficient": coefficient_value,
+                "coefficient_display": _format_number(coefficient_value),
+                "allow_unload": allow_unload,
+                "is_free_date": is_free,
+                "is_good_date": is_good,
+                "status": _date_status(coefficient_value, allow_unload),
+                "source": "acceptance_coefficients" if matches else "acceptance_options",
+            }
+        )
+    result.sort(key=_date_sort_tuple)
     return result
+
+
+def _best_date_entry(dates: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if not dates:
+        return {}
+    return dict(dates[0])
+
+
+def _date_sort_tuple(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    coefficient = row.get("coefficient")
+    return (
+        _coefficient_sort_rank(coefficient),
+        0 if row.get("allow_unload") is True else 1 if row.get("allow_unload") is None else 2,
+        str(row.get("date") or "9999-99-99"),
+    )
+
+
+def _date_status(coefficient: Any, allow_unload: Any) -> str:
+    if coefficient == -1:
+        return "unavailable"
+    if allow_unload is False:
+        return "unavailable"
+    if coefficient == 0:
+        return "free"
+    if coefficient == 1:
+        return "good"
+    if coefficient is None:
+        return "unknown"
+    return "paid"
+
+
+def _normalize_date_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
+    return match.group(1) if match else text
+
+
+def _date_matches_filter(value: Any, date_filter: str) -> bool:
+    expected = _normalize_date_value(date_filter)
+    actual = _normalize_date_value(value)
+    return bool(expected and actual == expected)
+
+
+def _best_numeric_coefficient(dates: list[Mapping[str, Any]]) -> float | None:
+    for row in dates:
+        value = row.get("coefficient")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            return float(value)
+    for row in dates:
+        value = row.get("coefficient")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _coefficient_sort_rank(value: Any) -> tuple[int, float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric = float(value)
+        if numeric == 0:
+            return (0, 0.0)
+        if numeric == 1:
+            return (1, 1.0)
+        if numeric > 1:
+            return (2, numeric)
+        return (5, abs(numeric))
+    return (4, 999_999.0)
+
+
+def _is_sgt_warehouse(value: Any) -> bool:
+    return "сгт" in _normalize_name(value).split()
+
+
+def _is_major_expected_warehouse(district_key: str, warehouse_name: Any) -> bool:
+    return any(_warehouse_name_matches(warehouse_name, expected) for expected in MAJOR_WAREHOUSE_PROBES_BY_DISTRICT.get(district_key, []))
+
+
+def _warehouse_name_matches(candidate: Any, expected: Any) -> bool:
+    candidate_name = _normalize_name(candidate)
+    expected_name = _normalize_name(expected)
+    if not candidate_name or not expected_name:
+        return False
+    if candidate_name == expected_name:
+        return True
+    return candidate_name.startswith(expected_name + " ") or candidate_name.startswith(expected_name + ":") or expected_name in candidate_name
 
 
 def _warehouse_name_by_id(rows: list[Mapping[str, Any]]) -> dict[str, str]:
@@ -880,6 +1411,25 @@ def _match_transit_tariff(option: Mapping[str, Any], rows: list[Mapping[str, Any
         if target and destination and target == destination and (not transit or not source or transit == source):
             return row
     return None
+
+
+def _transit_tariffs_for_destination(warehouse_name: Any, rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    target = _normalize_name(warehouse_name)
+    if not target:
+        return []
+    result: list[Mapping[str, Any]] = []
+    for row in rows:
+        destination = _normalize_name(
+            _first_string(row, "destinationWarehouseName", "warehouseName", "warehouse_name", "toWarehouseName")
+        )
+        if destination and (destination == target or _warehouse_name_matches(destination, target)):
+            result.append(row)
+    result.sort(key=lambda item: (_first_nested_number(item.get("boxTariff")) or 999_999.0, _first_nested_number(item.get("palletTariff")) or 999_999.0))
+    return result
+
+
+def _best_transit_tariff(rows: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    return rows[0] if rows else None
 
 
 def _acceptance_request_diagnostics(*, product_count: int, warehouse_id: str | int | None) -> dict[str, Any]:
@@ -998,8 +1548,8 @@ def _known_tariff_value(box_tariff: Mapping[str, Any] | None, transit_tariff: Ma
 
 def _tariff_evidence(box_tariff: Mapping[str, Any] | None, transit_tariff: Mapping[str, Any] | None) -> dict[str, Any]:
     return {
-        "box": _compact_tariff_row(box_tariff),
-        "transit": _compact_tariff_row(transit_tariff),
+        "box": _compact_box_tariff_row(box_tariff),
+        "transit": _compact_transit_tariff_row(transit_tariff),
         "cost_is_estimate": True,
         "note": "Raw upstream tariff evidence only; full WB acceptance/transit cost is not calculated.",
     }
@@ -1008,34 +1558,108 @@ def _tariff_evidence(box_tariff: Mapping[str, Any] | None, transit_tariff: Mappi
 def _compact_tariff_row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(row, Mapping):
         return None
+    if any(key in row for key in ("destinationWarehouseName", "transitWarehouseName", "boxTariff", "palletTariff")):
+        return _compact_transit_tariff_row(row)
+    return _compact_box_tariff_row(row)
+
+
+def _compact_box_tariff_row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+    delivery_coef = _first_string(row, "boxDeliveryCoefExpr", "boxDeliveryMarketplaceCoefExpr")
+    storage_coef = _first_string(row, "boxStorageCoefExpr")
     return {
         "warehouseName": _first_string(row, "warehouseName", "warehouse_name", "name", "destinationWarehouseName"),
         "geoName": _first_string(row, "geoName", "geo_name", "federalDistrict"),
         "activeFrom": _first_string(row, "activeFrom", "date", "dt"),
+        "boxDeliveryBase": _first_string(row, "boxDeliveryBase"),
+        "boxDeliveryLiter": _first_string(row, "boxDeliveryLiter"),
+        "boxDeliveryCoefExpr": delivery_coef,
+        "boxDeliveryMarketplaceBase": _first_string(row, "boxDeliveryMarketplaceBase"),
+        "boxDeliveryMarketplaceLiter": _first_string(row, "boxDeliveryMarketplaceLiter"),
+        "boxDeliveryMarketplaceCoefExpr": _first_string(row, "boxDeliveryMarketplaceCoefExpr"),
+        "boxStorageBase": _first_string(row, "boxStorageBase"),
+        "boxStorageLiter": _first_string(row, "boxStorageLiter"),
+        "boxStorageCoefExpr": storage_coef,
+        "logistics_percent": _first_nested_number(delivery_coef),
+        "storage_percent": _first_nested_number(storage_coef),
+        "delivery_base_value": _first_nested_number(row.get("boxDeliveryBase")),
+        "delivery_liter_value": _first_nested_number(row.get("boxDeliveryLiter")),
+        "storage_base_value": _first_nested_number(row.get("boxStorageBase")),
+        "storage_liter_value": _first_nested_number(row.get("boxStorageLiter")),
+        "logistics_display": delivery_coef or "нет tariff evidence",
+        "storage_display": storage_coef or "нет tariff evidence",
         "known_value": _first_nested_number(row),
         "raw_keys": sorted(str(key) for key in row.keys()),
     }
 
 
-def _option_warnings(
-    row: Mapping[str, Any],
+def _compact_transit_tariff_row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+    intervals: list[dict[str, Any]] = []
+    for item in row.get("boxTariff") or []:
+        if isinstance(item, Mapping):
+            intervals.append(
+                {
+                    "from": item.get("from"),
+                    "to": item.get("to"),
+                    "value": item.get("value"),
+                    "value_numeric": _first_nested_number(item.get("value")),
+                }
+            )
+    best_box_value = None
+    for item in intervals:
+        value = item.get("value_numeric")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            best_box_value = float(value) if best_box_value is None else min(best_box_value, float(value))
+    return {
+        "transitWarehouseName": _first_string(row, "transitWarehouseName", "fromWarehouseName", "warehouseFromName"),
+        "destinationWarehouseName": _first_string(row, "destinationWarehouseName", "warehouseName", "warehouse_name", "toWarehouseName"),
+        "activeFrom": _first_string(row, "activeFrom", "date", "dt"),
+        "boxTariff": intervals,
+        "best_box_tariff_value": best_box_value,
+        "palletTariff": row.get("palletTariff"),
+        "pallet_tariff_value": _first_nested_number(row.get("palletTariff")),
+        "known_value": _first_nested_number(row),
+        "raw_keys": sorted(str(key) for key in row.keys()),
+    }
+
+
+def _group_option_warnings(
+    *,
+    group: Mapping[str, Any],
+    dates: list[Mapping[str, Any]],
     warehouse_scope: str,
     box_tariff: Mapping[str, Any] | None,
-    transit_tariff: Mapping[str, Any] | None,
+    transit_routes: list[Mapping[str, Any]],
+    barcode_coverage: Mapping[str, Any],
 ) -> list[str]:
     warnings: list[str] = []
     if warehouse_scope == WAREHOUSE_SCOPE_OUTSIDE_DISTRICT:
         warnings.append("Склад вне выбранного расчётного округа.")
     if warehouse_scope == WAREHOUSE_SCOPE_UNMAPPED:
         warnings.append("Склад не сопоставлен с расчётным округом.")
-    if row.get("allow_unload") is False:
-        warnings.append("WB вернул allowUnload=false.")
-    if row.get("coefficient") is None:
-        warnings.append("Нет coefficient evidence.")
+    if barcode_coverage.get("partial"):
+        warnings.append(
+            f"Склад принимает часть ШК: {barcode_coverage.get('accepted_count')}/{barcode_coverage.get('total_count')}."
+        )
+    if not barcode_coverage.get("accepts_all_barcodes"):
+        warnings.append("Склад не подтвердил приёмку всех barcode из партии.")
+    if not dates:
+        warnings.append("Нет date/coefficient evidence.")
+    elif not any(item.get("is_good_date") for item in dates):
+        warnings.append("Нет хороших дат с coefficient 0/1 и allowUnload=true.")
+    if dates and dates[0].get("coefficient") == -1:
+        warnings.append("Лучший доступный coefficient=-1; считаем дату проблемной/недоступной.")
+    if dates and dates[0].get("allow_unload") is False:
+        warnings.append("WB вернул allowUnload=false для лучшей даты.")
     if not isinstance(box_tariff, Mapping):
         warnings.append("Нет box tariff evidence.")
-    if row.get("route_type") == ROUTE_TRANSIT and not isinstance(transit_tariff, Mapping):
+    if not transit_routes:
         warnings.append("Нет transit tariff evidence.")
+    if group.get("route_type") == ROUTE_TRANSIT and not transit_routes:
+        warnings.append("Acceptance option выглядит транзитным, но transit tariff evidence не найден.")
     return warnings
 
 
@@ -1045,15 +1669,30 @@ def _rank_tuple(option: Mapping[str, Any]) -> tuple[Any, ...]:
         WAREHOUSE_SCOPE_OUTSIDE_DISTRICT: 1,
         WAREHOUSE_SCOPE_UNMAPPED: 2,
     }.get(str(option.get("warehouse_scope") or ""), 3)
+    warehouse_kind_rank = 0 if option.get("is_major_expected") else 2 if option.get("is_sgt") else 1
+    coverage_rank = 0 if option.get("accepts_all_barcodes") else 1
+    coefficient_rank = _coefficient_sort_rank(option.get("coefficient"))
     allow_rank = 0 if option.get("allow_unload") is True else 1 if option.get("allow_unload") is None else 2
-    coefficient = option.get("coefficient")
-    coefficient_rank = float(coefficient) if isinstance(coefficient, (int, float)) else 999_999.0
     route_rank = 1 if option.get("route_type") == ROUTE_TRANSIT else 0
-    tariff = option.get("known_tariff_value")
-    tariff_rank = float(tariff) if isinstance(tariff, (int, float)) else 999_999.0
+    box_tariff = option.get("box_tariff") if isinstance(option.get("box_tariff"), Mapping) else {}
+    logistics_rank = _first_nested_number((box_tariff or {}).get("boxDeliveryCoefExpr"))
+    storage_rank = _first_nested_number((box_tariff or {}).get("boxStorageCoefExpr"))
+    tariff_rank = float(option.get("known_tariff_value")) if isinstance(option.get("known_tariff_value"), (int, float)) else 999_999.0
     date_rank = str(option.get("date") or "9999-99-99")
     missing_evidence_rank = len(option.get("warnings") or [])
-    return (scope_rank, allow_rank, coefficient_rank, route_rank, tariff_rank, date_rank, missing_evidence_rank)
+    return (
+        scope_rank,
+        warehouse_kind_rank,
+        coverage_rank,
+        coefficient_rank,
+        allow_rank,
+        logistics_rank if logistics_rank is not None else 999_999.0,
+        storage_rank if storage_rank is not None else 999_999.0,
+        route_rank,
+        tariff_rank,
+        date_rank,
+        missing_evidence_rank,
+    )
 
 
 def _recommendation_explanation(option: Mapping[str, Any]) -> str:
@@ -1065,6 +1704,19 @@ def _recommendation_explanation(option: Mapping[str, Any]) -> str:
         parts.append("склад вне выбранного округа")
     else:
         parts.append("округ склада не сопоставлен")
+    coverage = option.get("barcode_coverage") if isinstance(option.get("barcode_coverage"), Mapping) else {}
+    if option.get("accepts_all_barcodes"):
+        parts.append(
+            f"принимает все ШК ({coverage.get('accepted_count', 0)}/{coverage.get('total_count', 0)})"
+        )
+    elif coverage:
+        parts.append(
+            f"принимает часть ШК ({coverage.get('accepted_count', 0)}/{coverage.get('total_count', 0)})"
+        )
+    if option.get("is_major_expected"):
+        parts.append("ключевой склад округа")
+    elif option.get("is_sgt"):
+        parts.append("СГТ")
     if option.get("allow_unload") is True:
         parts.append("allowUnload=true")
     elif option.get("allow_unload") is False:
@@ -1080,6 +1732,13 @@ def _recommendation_explanation(option: Mapping[str, Any]) -> str:
         parts.append("есть raw tariff evidence")
     else:
         parts.append("tariff evidence неполная")
+    box_tariff = option.get("box_tariff") if isinstance(option.get("box_tariff"), Mapping) else {}
+    if box_tariff and box_tariff.get("logistics_display"):
+        parts.append("логистика " + str(box_tariff.get("logistics_display")))
+    if box_tariff and box_tariff.get("storage_display"):
+        parts.append("хранение " + str(box_tariff.get("storage_display")))
+    if option.get("transit_route_count"):
+        parts.append(f"транзитных маршрутов: {option.get('transit_route_count')}")
     if option.get("date"):
         parts.append("дата " + str(option.get("date")))
     return "; ".join(parts) + "."
@@ -1238,7 +1897,10 @@ def _first_nested_number(value: Any) -> float | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     if isinstance(value, str):
-        normalized = value.replace(" ", "").replace(",", ".")
+        normalized = value.replace(" ", "").replace("\u00a0", "").replace(",", ".").replace("%", "")
+        match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+        if match:
+            normalized = match.group(0)
         try:
             return float(normalized)
         except ValueError:

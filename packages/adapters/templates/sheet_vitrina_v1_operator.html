@@ -1981,6 +1981,38 @@
       overflow-wrap: anywhere;
     }
 
+    .regional-planning-filters {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin: 10px 0;
+      max-width: 100%;
+      min-width: 0;
+      font-size: 11px;
+      color: var(--muted-strong);
+    }
+
+    .regional-planning-filters label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      white-space: nowrap;
+    }
+
+    .regional-planning-search {
+      flex: 1 1 180px;
+      min-width: 140px;
+      max-width: 260px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      background: var(--panel);
+      color: var(--text);
+    }
+
     .regional-planning-table-wrap {
       width: 100%;
       max-width: 100%;
@@ -1991,8 +2023,8 @@
     }
 
     .regional-planning-table {
-      width: 1120px;
-      min-width: 1120px;
+      width: 1280px;
+      min-width: 1280px;
       max-width: none;
       border-collapse: collapse;
       font-size: 11px;
@@ -2006,6 +2038,77 @@
       text-align: left;
       vertical-align: top;
       overflow-wrap: anywhere;
+    }
+
+    .regional-planning-table .cell-main {
+      font-weight: 800;
+    }
+
+    .regional-planning-table .cell-subline {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
+    .regional-planning-table .status-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 6px;
+      margin: 0 3px 3px 0;
+      border: 1px solid var(--border);
+      background: var(--panel-subtle);
+      font-size: 10px;
+      font-weight: 800;
+      color: var(--muted-strong);
+    }
+
+    .regional-planning-table .status-badge.is-good {
+      color: var(--success-text);
+      border-color: var(--success-text);
+      background: var(--success-bg);
+    }
+
+    .regional-planning-table .status-badge.is-warning {
+      color: var(--warning-text);
+      border-color: var(--warning-text);
+      background: var(--warning-bg);
+    }
+
+    .regional-planning-diagnostics {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      max-width: 100%;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .regional-planning-diagnostics h4 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .regional-planning-diagnostics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px;
+    }
+
+    .regional-planning-diagnostic-card {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px;
+      background: var(--panel-subtle);
+      min-width: 0;
+    }
+
+    .regional-planning-diagnostic-card strong {
+      display: block;
+      margin-bottom: 4px;
     }
 
     .regional-planning-table th {
@@ -3939,29 +4042,38 @@
                 </div>
                 <div id="regionalPlanningSummary" class="regional-planning-summary"></div>
                 <ul id="regionalPlanningBlockers" class="regional-planning-blockers" hidden></ul>
+                <div id="regionalPlanningFilters" class="regional-planning-filters" hidden>
+                  <label><input type="checkbox" data-regional-planning-filter="sameDistrict"> Только выбранный округ</label>
+                  <label><input type="checkbox" data-regional-planning-filter="allBarcodes"> Примут все ШК</label>
+                  <label><input type="checkbox" data-regional-planning-filter="goodDates"> Хорошие даты</label>
+                  <label><input type="checkbox" data-regional-planning-filter="freeDates"> Бесплатные даты</label>
+                  <label><input type="checkbox" data-regional-planning-filter="hideSgt"> Скрыть СГТ</label>
+                  <label><input type="checkbox" data-regional-planning-filter="showPartial" checked> Показывать partial</label>
+                  <input id="regionalPlanningSearch" class="regional-planning-search" type="search" placeholder="Поиск склада">
+                </div>
                 <div class="regional-planning-table-wrap">
                   <table class="regional-planning-table" aria-label="Варианты складов WB">
                     <thead>
                       <tr>
                         <th>Ранг</th>
-                        <th>Дата</th>
                         <th>Склад</th>
+                        <th>ШК</th>
+                        <th>Приёмка</th>
                         <th>Округ</th>
-                        <th>Маршрут</th>
-                        <th>Транзит</th>
-                        <th>Коэф.</th>
-                        <th>allowUnload</th>
-                        <th>Тариф/evidence</th>
+                        <th>Логистика / хранение</th>
+                        <th>Маршрут / транзит</th>
+                        <th>Статус</th>
                         <th>Действие</th>
                       </tr>
                     </thead>
                     <tbody id="regionalPlanningTableBody">
                       <tr>
-                        <td colspan="10">Варианты ещё не запрошены.</td>
+                        <td colspan="9">Варианты ещё не запрошены.</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
+                <div id="regionalPlanningDiagnostics" class="regional-planning-diagnostics" hidden></div>
               </section>
               <p id="regionalMessage" class="section-message"></p>
               <p id="regionalWbSupplyOverlayNote" class="field-note">WB-поставки не выбраны.</p>
@@ -4390,7 +4502,10 @@
       const regionalPlanningMessage = document.getElementById("regionalPlanningMessage");
       const regionalPlanningSummary = document.getElementById("regionalPlanningSummary");
       const regionalPlanningBlockers = document.getElementById("regionalPlanningBlockers");
+      const regionalPlanningFilters = document.getElementById("regionalPlanningFilters");
+      const regionalPlanningSearch = document.getElementById("regionalPlanningSearch");
       const regionalPlanningTableBody = document.getElementById("regionalPlanningTableBody");
+      const regionalPlanningDiagnostics = document.getElementById("regionalPlanningDiagnostics");
       const copyRegionalPlanningPayloadButton = document.getElementById("copyRegionalPlanningPayloadButton");
       const downloadRegionalRecommendationsZipButton = document.getElementById("downloadRegionalRecommendationsZipButton");
       const calculateRegionalSupplyButton = document.getElementById("calculateRegionalSupplyButton");
@@ -4576,6 +4691,15 @@
       let regionalPlanningPayload = null;
       let regionalCalculationInFlight = false;
       let regionalPlanningInFlightDistrictKey = "";
+      let regionalPlanningFilterState = {
+        sameDistrict: false,
+        allBarcodes: false,
+        goodDates: false,
+        freeDates: false,
+        hideSgt: false,
+        showPartial: true,
+        search: ""
+      };
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
@@ -7295,7 +7419,7 @@
           }
           setRegionalPlanningMessage("Подбор завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)), "error");
           if (regionalPlanningTableBody) {
-            regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Варианты не получены.</td></tr>";
+            regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Варианты не получены.</td></tr>";
           }
           if (copyRegionalPlanningPayloadButton) {
             copyRegionalPlanningPayloadButton.disabled = true;
@@ -7356,7 +7480,14 @@
           regionalPlanningBlockers.innerHTML = "";
         }
         if (regionalPlanningTableBody) {
-          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Загрузка вариантов...</td></tr>";
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Загрузка вариантов...</td></tr>";
+        }
+        if (regionalPlanningFilters) {
+          regionalPlanningFilters.hidden = true;
+        }
+        if (regionalPlanningDiagnostics) {
+          regionalPlanningDiagnostics.hidden = true;
+          regionalPlanningDiagnostics.innerHTML = "";
         }
         if (copyRegionalPlanningPayloadButton) {
           copyRegionalPlanningPayloadButton.disabled = true;
@@ -7381,7 +7512,9 @@
         setRegionalPlanningMessage(regionalPlanningStatusText(status, options.length, blockers.length), regionalPlanningStatusTone(status, blockers.length));
         renderRegionalPlanningSummary(payload);
         renderRegionalPlanningBlockers(blockers);
+        renderRegionalPlanningFilters(options);
         renderRegionalPlanningOptions(options);
+        renderRegionalPlanningDiagnostics(payload);
         if (warnings.length) {
           setRegionalMessage("Подбор WB выполнен с предупреждениями: " + warnings.join(" "), "warning");
         }
@@ -7398,6 +7531,9 @@
           "Штук: " + valueOrDash(summary.planned_qty_total),
           "ШК готово: " + valueOrDash(barcode.ready) + "/" + valueOrDash(barcode.total),
           "Вариантов: " + valueOrDash(summary.option_count),
+          "Складов: " + valueOrDash(summary.grouped_warehouse_count || summary.option_count),
+          "Все ШК: " + valueOrDash(summary.accepts_all_barcode_option_count || 0),
+          "СГТ: " + valueOrDash(summary.sgt_option_count || 0),
           "В округе: " + valueOrDash(summary.same_district_option_count || 0),
           "Транзит: " + valueOrDash(summary.transit_option_count || 0)
         ];
@@ -7424,32 +7560,61 @@
         if (!regionalPlanningTableBody) {
           return;
         }
+        const filteredOptions = filterRegionalPlanningOptions(options || []);
         if (!options.length) {
-          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Доступные варианты не найдены или есть blockers.</td></tr>";
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Доступные варианты не найдены или есть blockers.</td></tr>";
           return;
         }
-        regionalPlanningTableBody.innerHTML = options.map((item) => {
-          const routeLabel = item.route_type === "transit" ? "Транзит" : "Прямо";
+        if (!filteredOptions.length) {
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">По текущим фильтрам складов не найдено.</td></tr>";
+          return;
+        }
+        regionalPlanningTableBody.innerHTML = filteredOptions.map((item) => {
           const scopeLabel = regionalPlanningScopeLabel(item.warehouse_scope);
-          const tariff = item.tariff_evidence || {};
-          const tariffText = [
-            tariff.box ? "box" : "",
-            tariff.transit ? "transit" : ""
-          ].filter(Boolean).join(" + ") || "—";
+          const coverage = item.barcode_coverage || {};
+          const boxTariff = item.box_tariff || (item.tariff_evidence && item.tariff_evidence.box) || {};
+          const bestTransit = item.best_transit_route || {};
+          const routeLabel = item.route_type === "transit" ? "Транзит" : "Прямо";
+          const coverageBadge = item.accepts_all_barcodes
+            ? "<span class=\"status-badge is-good\">Примут все ШК</span>"
+            : "<span class=\"status-badge is-warning\">Примут часть ШК</span>";
+          const dateBadge = item.free_date_count > 0
+            ? "<span class=\"status-badge is-good\">есть бесплатные даты</span>"
+            : (item.good_date_count > 0 ? "<span class=\"status-badge is-good\">есть хорошие даты</span>" : "<span class=\"status-badge is-warning\">нет хороших дат</span>");
+          const warehouseBadges = [
+            item.is_major_expected ? "<span class=\"status-badge is-good\">ключевой</span>" : "",
+            item.is_sgt ? "<span class=\"status-badge is-warning\">СГТ</span>" : ""
+          ].filter(Boolean).join("");
+          const tariffLines = [
+            "Логистика: " + valueOrDash(boxTariff.logistics_display || boxTariff.boxDeliveryCoefExpr),
+            "Хранение: " + valueOrDash(boxTariff.storage_display || boxTariff.boxStorageCoefExpr),
+            "База: " + valueOrDash(boxTariff.boxDeliveryBase),
+            "Литр: " + valueOrDash(boxTariff.boxDeliveryLiter)
+          ];
+          const transitText = item.transit_route_count
+            ? [
+                "Транзит доступен: " + item.transit_route_count + " маршрутов",
+                valueOrDash(bestTransit.transitWarehouseName) + " → " + valueOrDash(bestTransit.destinationWarehouseName),
+                "box: " + valueOrDash(bestTransit.best_box_tariff_value),
+                "pallet: " + valueOrDash(bestTransit.palletTariff)
+              ].join("; ")
+            : "Транзитных тарифов нет";
           const warnings = Array.isArray(item.warnings) && item.warnings.length
-            ? "<div class=\"muted\">" + escapeHtml(item.warnings.join(" ")) + "</div>"
+            ? "<span class=\"cell-subline\">" + escapeHtml(item.warnings.join(" ")) + "</span>"
+            : "";
+          const recommendation = item.recommendation_explanation
+            ? "<span class=\"cell-subline\">" + escapeHtml(item.recommendation_explanation) + "</span>"
             : "";
           return [
             "<tr>",
             "<td><strong>#" + escapeHtml(valueOrDash(item.rank)) + "</strong><div class=\"muted\">" + escapeHtml(valueOrDash(item.recommendation)) + "</div></td>",
-            "<td>" + escapeHtml(valueOrDash(item.date || "дата не указана")) + "</td>",
-            "<td>" + escapeHtml(valueOrDash(item.warehouse_name)) + "<div class=\"muted\">" + escapeHtml(valueOrDash(item.warehouse_id)) + "</div></td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(valueOrDash(item.warehouse_name)) + "</span><span class=\"cell-subline\">" + escapeHtml(valueOrDash(item.warehouse_id)) + "</span>" + warehouseBadges + recommendation + "</td>",
+            "<td>" + coverageBadge + "<span class=\"cell-subline\">" + escapeHtml(valueOrDash(coverage.accepted_count)) + "/" + escapeHtml(valueOrDash(coverage.total_count)) + " barcode</span></td>",
+            "<td>" + dateBadge + "<span class=\"cell-subline\">Дата: " + escapeHtml(valueOrDash(item.date || "не указана")) + "</span><span class=\"cell-subline\">Коэф.: " + escapeHtml(valueOrDash(item.coefficient_display)) + "; allowUnload: " + escapeHtml(regionalPlanningBoolLabel(item.allow_unload)) + "</span><span class=\"cell-subline\">Дат: " + escapeHtml(valueOrDash(item.date_count || 0)) + "; хороших: " + escapeHtml(valueOrDash(item.good_date_count || 0)) + "; бесплатных: " + escapeHtml(valueOrDash(item.free_date_count || 0)) + "</span></td>",
             "<td>" + escapeHtml(valueOrDash(item.warehouse_district_short_label_ru || item.warehouse_district_label_ru || scopeLabel)) + "<div class=\"muted\">" + escapeHtml(scopeLabel) + "</div></td>",
-            "<td>" + escapeHtml(routeLabel) + "</td>",
-            "<td>" + escapeHtml(valueOrDash(item.transit_warehouse_name)) + "</td>",
-            "<td>" + escapeHtml(valueOrDash(item.coefficient_display)) + "</td>",
-            "<td>" + escapeHtml(regionalPlanningBoolLabel(item.allow_unload)) + "</td>",
-            "<td>" + escapeHtml(tariffText) + warnings + "</td>",
+            "<td>" + tariffLines.map((line) => "<span class=\"cell-subline\">" + escapeHtml(line) + "</span>").join("") + "</td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(routeLabel) + "</span><span class=\"cell-subline\">" + escapeHtml(transitText) + "</span></td>",
+            "<td>" + warnings + "</td>",
             "<td><button class=\"action-button secondary-button\" type=\"button\" data-regional-planning-copy=\"" + escapeHtml(String(item.option_id || "")) + "\">Скопировать</button></td>",
             "</tr>"
           ].join("");
@@ -7457,10 +7622,91 @@
         Array.from(regionalPlanningTableBody.querySelectorAll("[data-regional-planning-copy]")).forEach((button) => {
           button.addEventListener("click", async () => {
             const optionId = button.getAttribute("data-regional-planning-copy") || "";
-            const option = options.find((item) => String(item.option_id || "") === optionId);
+            const option = (options || []).find((item) => String(item.option_id || "") === optionId);
             await copyRegionalPlanningOption(option || null);
           });
         });
+      }
+
+      function renderRegionalPlanningFilters(options) {
+        if (!regionalPlanningFilters) {
+          return;
+        }
+        regionalPlanningFilters.hidden = !(Array.isArray(options) && options.length);
+      }
+
+      function filterRegionalPlanningOptions(options) {
+        const state = regionalPlanningFilterState || {};
+        const search = String(state.search || "").trim().toLowerCase();
+        return (options || []).filter((item) => {
+          if (state.sameDistrict && item.warehouse_scope !== "same_district") {
+            return false;
+          }
+          if (state.allBarcodes && !item.accepts_all_barcodes) {
+            return false;
+          }
+          if (state.goodDates && !(Number(item.good_date_count || 0) > 0)) {
+            return false;
+          }
+          if (state.freeDates && !(Number(item.free_date_count || 0) > 0)) {
+            return false;
+          }
+          if (state.hideSgt && item.is_sgt) {
+            return false;
+          }
+          if (!state.showPartial && item.accepts_all_barcodes === false) {
+            return false;
+          }
+          if (search) {
+            const haystack = [
+              item.warehouse_name,
+              item.warehouse_id,
+              item.warehouse_district_label_ru,
+              item.warehouse_district_short_label_ru
+            ].join(" ").toLowerCase();
+            if (!haystack.includes(search)) {
+              return false;
+            }
+          }
+          return true;
+        });
+      }
+
+      function renderRegionalPlanningDiagnostics(payload) {
+        if (!regionalPlanningDiagnostics) {
+          return;
+        }
+        const diagnostics = Array.isArray(payload && payload.major_warehouse_diagnostics)
+          ? payload.major_warehouse_diagnostics
+          : [];
+        if (!diagnostics.length) {
+          regionalPlanningDiagnostics.hidden = true;
+          regionalPlanningDiagnostics.innerHTML = "";
+          return;
+        }
+        regionalPlanningDiagnostics.hidden = false;
+        regionalPlanningDiagnostics.innerHTML = [
+          "<h4>Проверка ключевых складов округа</h4>",
+          "<div class=\"regional-planning-diagnostics-grid\">",
+          diagnostics.map((item) => regionalPlanningDiagnosticCard(item)).join(""),
+          "</div>"
+        ].join("");
+      }
+
+      function regionalPlanningDiagnosticCard(item) {
+        const found = item && item.found_in_acceptance_options;
+        const visible = item && item.visible_in_main_list;
+        const statusClass = visible ? "is-good" : (found ? "is-warning" : "is-warning");
+        const statusText = visible ? "виден в списке" : (found ? "есть в WB, не виден" : "WB не вернул");
+        return [
+          "<div class=\"regional-planning-diagnostic-card\">",
+          "<strong>" + escapeHtml(valueOrDash(item && item.expected_warehouse_name)) + "</strong>",
+          "<span class=\"status-badge " + statusClass + "\">" + escapeHtml(statusText) + "</span>",
+          "<div class=\"muted\">acceptance/options: " + escapeHtml(regionalPlanningBoolLabel(found)) + "; catalog: " + escapeHtml(regionalPlanningBoolLabel(item && item.found_in_warehouses_catalog)) + "; tariffs: " + escapeHtml(regionalPlanningBoolLabel(item && item.found_in_box_tariffs)) + "; coeff: " + escapeHtml(regionalPlanningBoolLabel(item && item.found_in_acceptance_coefficients)) + "</div>",
+          "<div class=\"muted\">ШК: " + escapeHtml(valueOrDash(item && item.accepted_barcode_count)) + "/" + escapeHtml(valueOrDash(item && item.total_barcode_count)) + "; min coef: " + escapeHtml(valueOrDash(item && item.min_coefficient)) + "; free: " + escapeHtml(regionalPlanningBoolLabel(item && item.has_free_date)) + "</div>",
+          "<div class=\"muted\">Округ: " + escapeHtml(valueOrDash(item && (item.mapped_district_label_ru || item.mapped_district_key))) + "; reason: " + escapeHtml(valueOrDash(item && item.hidden_reason)) + "</div>",
+          "</div>"
+        ].join("");
       }
 
       function regionalPlanningStatusText(status, optionCount, blockerCount) {
@@ -7879,7 +8125,14 @@
           regionalPlanningBlockers.innerHTML = "";
         }
         if (regionalPlanningTableBody) {
-          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"10\">Выберите округ для подбора.</td></tr>";
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Выберите округ для подбора.</td></tr>";
+        }
+        if (regionalPlanningFilters) {
+          regionalPlanningFilters.hidden = true;
+        }
+        if (regionalPlanningDiagnostics) {
+          regionalPlanningDiagnostics.hidden = true;
+          regionalPlanningDiagnostics.innerHTML = "";
         }
         if (copyRegionalPlanningPayloadButton) {
           copyRegionalPlanningPayloadButton.disabled = true;
@@ -10183,6 +10436,25 @@
       }
       if (copyRegionalPlanningPayloadButton) {
         copyRegionalPlanningPayloadButton.addEventListener("click", copyRegionalPlanningPayload);
+      }
+      Array.from(document.querySelectorAll("[data-regional-planning-filter]")).forEach((input) => {
+        input.addEventListener("change", () => {
+          const key = input.getAttribute("data-regional-planning-filter") || "";
+          if (key) {
+            regionalPlanningFilterState[key] = Boolean(input.checked);
+          }
+          if (regionalPlanningPayload) {
+            renderRegionalPlanningOptions(Array.isArray(regionalPlanningPayload.options) ? regionalPlanningPayload.options : []);
+          }
+        });
+      });
+      if (regionalPlanningSearch) {
+        regionalPlanningSearch.addEventListener("input", () => {
+          regionalPlanningFilterState.search = String(regionalPlanningSearch.value || "");
+          if (regionalPlanningPayload) {
+            renderRegionalPlanningOptions(Array.isArray(regionalPlanningPayload.options) ? regionalPlanningPayload.options : []);
+          }
+        });
       }
       if (shipmentRegistryRefreshButton) {
         shipmentRegistryRefreshButton.addEventListener("click", () => {
