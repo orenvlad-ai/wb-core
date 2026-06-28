@@ -47,7 +47,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Private EU loopback service is installed and enabled on 127.0.0.1:8766 with bearer fail-closed auth. Public /mcp exposure remains gated until a ChatGPT-compatible OAuth/Secure MCP Tunnel production auth path is configured."
+update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766 with bearer fail-closed auth. Public exact /mcp and protected-resource metadata routes may proxy to that loopback service, but bearer-only publication is not a completed ChatGPT custom connector auth path; OAuth 2.1/PKCE or another approved ChatGPT-compatible auth setup remains required."
 ---
 
 # 1. Identifier and Status
@@ -55,8 +55,8 @@ update_note: "Private EU loopback service is installed and enabled on 127.0.0.1:
 - `module_id`: `webcore_data_mcp_block`
 - `family`: `production-facing-integration/read-only-data-gateway`
 - `status_repo`: implemented
-- `status_live`: private loopback service installed/enabled on the active EU host; not part of current public nginx route allowlist
-- `status_auth`: bearer-auth MVP for private/local probes; production ChatGPT Project exposure requires OAuth 2.1 or Secure MCP Tunnel setup
+- `status_live`: loopback service installed/enabled on the active EU host; exact public `/mcp` route is allowed only as bearer-auth fail-closed proxy to `127.0.0.1:8766`
+- `status_auth`: bearer-auth MVP for protected probes; normal ChatGPT Project connector exposure requires OAuth 2.1/PKCE or another approved ChatGPT-compatible auth setup
 
 This module is intentionally separate from DevControl MCP and from the main WebCore operator HTTP handler.
 
@@ -93,7 +93,7 @@ Current active EU live state:
 - enabled and running;
 - listens only on `127.0.0.1:8766`;
 - uses root-only `/etc/wb-core-data-mcp.env` for the bearer secret;
-- is not published through nginx and does not create a public `/mcp` route.
+- may be published through nginx only as exact `/.well-known/oauth-protected-resource` and `/mcp` locations that proxy to `127.0.0.1:8766` and fail closed without bearer auth.
 
 Default local listener:
 
@@ -248,20 +248,20 @@ The smoke proves:
 
 # 10. Live Publication Gate
 
-This module is repo-implemented and private-live on the active EU host, but not public-live.
+This module is repo-implemented and private-live on the active EU host. Public HTTPS publication is staged and auth-gated, not ChatGPT-final.
 
 Current verified state:
 
 - local MCP URL on the host: `http://127.0.0.1:8766/mcp`;
-- public `https://api.selleros.pro/mcp` returns nginx `404`;
-- no public nginx `/mcp` allowlist entry exists;
+- public `https://api.selleros.pro/mcp` may be routed by nginx to the loopback MCP service;
+- public no-token/no-bearer requests must return auth-required/no business data;
 - no Secure MCP Tunnel client is configured yet;
-- ChatGPT Project connection still requires a Platform tunnel or OAuth setup step.
+- normal ChatGPT Project connector use still requires OAuth 2.1/PKCE or another approved ChatGPT-compatible auth setup step.
 
-Before adding `/mcp` to the public nginx allowlist or treating this as a ChatGPT Project-ready app:
+Before treating `/mcp` as a ChatGPT Project-ready app:
 
-1. Confirm the target ChatGPT Project/custom app can use OAuth 2.1 or a private Secure MCP Tunnel path.
-2. Configure env-only secrets on the host.
+1. Configure OAuth 2.1/PKCE through an established IdP or another approved ChatGPT-compatible auth path.
+2. Keep all secrets env-only/server-side.
 3. Prove unauthenticated public probe returns 401 and no data.
 4. Prove authenticated MCP `initialize`, `tools/list` and a safe tool call.
 5. Keep DevControl MCP unchanged and separate.

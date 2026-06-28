@@ -82,6 +82,8 @@ def main() -> None:
         "/sheet-vitrina-v1/settings",
         "/login",
         "/logout",
+        "/.well-known/oauth-protected-resource",
+        "/mcp",
     }
     missing = sorted(required_paths - route_paths)
     if missing:
@@ -111,6 +113,16 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include feedbacks complaints submit job exactly once")
     if rendered.count("location = /login {") != 1 or rendered.count("location = /logout {") != 1:
         raise AssertionError("rendered nginx block must include WebCore auth routes exactly once")
+    if rendered.count("location = /.well-known/oauth-protected-resource {") != 1:
+        raise AssertionError("rendered nginx block must include MCP protected-resource metadata exactly once")
+    if rendered.count("location = /mcp {") != 1:
+        raise AssertionError("rendered nginx block must include MCP endpoint exactly once")
+    if "location = /mcp {\n        proxy_pass http://127.0.0.1:8766;" not in rendered:
+        raise AssertionError("rendered MCP route must proxy to the private MCP loopback upstream")
+    if "location = /.well-known/oauth-protected-resource {\n        proxy_pass http://127.0.0.1:8766;" not in rendered:
+        raise AssertionError("rendered MCP metadata route must proxy to the private MCP loopback upstream")
+    if "proxy_set_header X-Forwarded-Proto $scheme;" not in rendered:
+        raise AssertionError("rendered nginx block must forward the original public scheme")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/factory-order/ {") != 1:
         raise AssertionError("rendered nginx block must include factory-order prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/wb-supplies {") != 1:
@@ -284,6 +296,14 @@ def main() -> None:
             raise AssertionError("print-plan must expose feedbacks in nginx public routes")
         if "/v1/sheet-vitrina-v1/feedbacks/export.xlsx" not in {route["path"] for route in plan_routes}:
             raise AssertionError("print-plan must expose feedbacks export in nginx public routes")
+        plan_routes_by_path = {route["path"]: route for route in plan_routes}
+        if plan_routes_by_path["/mcp"].get("proxy_pass_url") != "http://127.0.0.1:8766":
+            raise AssertionError("print-plan must expose MCP route-specific loopback upstream")
+        if (
+            plan_routes_by_path["/.well-known/oauth-protected-resource"].get("proxy_pass_url")
+            != "http://127.0.0.1:8766"
+        ):
+            raise AssertionError("print-plan must expose MCP metadata route-specific loopback upstream")
         plan_server_names = print_plan["deploy_plan"]["nginx_public_routes"]["server_names"]
         if plan_server_names != ["127.0.0.1", "89.191.226.88"]:
             raise AssertionError(f"print-plan must expose configured nginx server_names, got {plan_server_names}")
