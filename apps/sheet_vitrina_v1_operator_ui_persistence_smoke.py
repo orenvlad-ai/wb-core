@@ -668,6 +668,29 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     regional_requests: list[dict[str, object]] = []
     regional_planning_requests: list[dict[str, object]] = []
     regional_result_payload: dict[str, object] = {}
+    regional_status_last_result: dict[str, object] = {
+        "status": "success",
+        "calculation_id": "calc-browser-old",
+        "calculated_at": "2026-04-20T09:00:00Z",
+        "report_date": "2026-04-20",
+        "horizon_days": 7,
+        "active_sku_count": 33,
+        "settings": {
+            "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
+        },
+        "summary": {"total_qty": 100, "estimated_weight": 0.0, "estimated_volume": 0.0},
+        "districts": [
+            {
+                "district_key": "central",
+                "district_name_ru": "Центральный федеральный округ",
+                "total_qty": 100,
+                "deficit_qty": 10,
+                "filename": "wb_regional_central_old.xlsx",
+                "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx",
+                "rows": [],
+            },
+        ],
+    }
 
     def _capture_regional_status(route) -> None:
         route.fulfill(
@@ -678,7 +701,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                     "active_sku_count": len(ACTIVE_SKUS),
                     "methodology_note": "-",
                     "shared_datasets": {},
-                    "last_result": regional_result_payload or None,
+                    "last_result": regional_status_last_result or regional_result_payload or None,
                 },
                 ensure_ascii=False,
             ),
@@ -691,6 +714,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         regional_result_payload = {
             "status": "success",
             "calculation_id": "calc-browser-regional",
+            "calculated_at": "2026-04-20T10:00:00Z",
             "report_date": "2026-04-20",
             "horizon_days": 7,
             "active_sku_count": 33,
@@ -772,7 +796,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 {
                     "district_key": "volga",
                     "district_name_ru": "Приволжский федеральный округ",
-                    "total_qty": 300,
+                    "total_qty": 0,
                     "deficit_qty": 30,
                     "filename": "wb_regional_volga_fo.xlsx",
                     "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/volga.xlsx",
@@ -814,8 +838,49 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         )
 
     def _capture_regional_planning(route) -> None:
+        nonlocal regional_status_last_result
         body = route.request.post_data or "{}"
-        regional_planning_requests.append(json.loads(body))
+        request_payload = json.loads(body)
+        regional_planning_requests.append(request_payload)
+        if len(regional_planning_requests) == 1:
+            regional_status_last_result = {
+                **regional_result_payload,
+                "calculation_id": "calc-browser-regional-retry",
+                "calculated_at": "2026-04-20T10:01:00Z",
+            }
+            route.fulfill(
+                status=200,
+                content_type="application/json; charset=utf-8",
+                body=json.dumps(
+                    {
+                        "contract_name": "sheet_vitrina_v1_wb_regional_supply_planning",
+                        "contract_version": "v1",
+                        "status": "blocked",
+                        "calculation_id": "calc-browser-regional-retry",
+                        "district_key": "central",
+                        "warnings": [],
+                        "blockers": [
+                            {
+                                "code": "calculation_id_mismatch",
+                                "message": "Последний региональный расчёт отличается от запрошенного calculation_id.",
+                                "requested_calculation_id": request_payload.get("calculation_id"),
+                                "actual_calculation_id": "calc-browser-regional-retry",
+                            }
+                        ],
+                        "summary": {"planned_product_count": 0, "planned_qty_total": 0, "option_count": 0},
+                        "options": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            return
+        if len(regional_planning_requests) == 3:
+            route.fulfill(
+                status=500,
+                content_type="application/json; charset=utf-8",
+                body=json.dumps({"error": "planned fixture error"}, ensure_ascii=False),
+            )
+            return
         route.fulfill(
             status=200,
             content_type="application/json; charset=utf-8",
@@ -824,7 +889,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                     "contract_name": "sheet_vitrina_v1_wb_regional_supply_planning",
                     "contract_version": "v1",
                     "status": "ready",
-                    "calculation_id": "calc-browser-regional",
+                    "calculation_id": request_payload.get("calculation_id") or "calc-browser-regional-retry",
                     "district_key": "central",
                     "district_name_ru": "Центральный федеральный округ",
                     "package_type": "box",
@@ -929,6 +994,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("far_siberia selector checkbox must stay unchecked after exclusion")
     if page.locator("#downloadRegionalRecommendationsZipButton").is_disabled():
         raise AssertionError("regional ZIP download button must be enabled after successful result")
+    if not page.locator("#regionalPlanningPanel").is_hidden():
+        raise AssertionError("new regional calculation must clear stale planning panel before a district is selected")
     overflow_state = page.evaluate(
         """() => {
             const card = document.querySelector('[aria-labelledby="regional-summary-title"]');
@@ -960,15 +1027,27 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             raise AssertionError(f"technical code {technical!r} must be translated in visible diagnostics details")
     if page.locator('[data-regional-planning-district="central"]').is_disabled():
         raise AssertionError("regional planning button must be enabled for a district with positive quantity")
+    volga_button = page.locator('[data-regional-planning-district="volga"]')
+    if not volga_button.is_disabled():
+        raise AssertionError("zero-quantity regional planning button must be disabled")
+    if "Нет количества к поставке" not in (volga_button.get_attribute("title") or ""):
+        raise AssertionError("zero-quantity disabled planning button must explain the reason in title")
+    volga_cell_text = volga_button.locator("xpath=ancestor::td[1]").inner_text()
+    if "Нет количества к поставке" not in volga_cell_text:
+        raise AssertionError(f"zero-quantity disabled reason must be visible near the button, got {volga_cell_text!r}")
     page.click('[data-regional-planning-district="central"]')
     page.wait_for_function(
         "() => document.getElementById('regionalPlanningMessage') && document.getElementById('regionalPlanningMessage').textContent.includes('Найдено вариантов: 1')"
     )
-    if not regional_planning_requests:
+    if len(regional_planning_requests) < 2:
         raise AssertionError("regional planning button must call planning-options route")
+    if regional_planning_requests[0].get("calculation_id") != "calc-browser-regional":
+        raise AssertionError(f"regional planning must use fresh calculate result, not stale status result, got {regional_planning_requests}")
     latest_planning_request = regional_planning_requests[-1]
-    if latest_planning_request.get("district_key") != "central" or latest_planning_request.get("calculation_id") != "calc-browser-regional":
-        raise AssertionError(f"regional planning payload must include district and calculation id, got {regional_planning_requests}")
+    if latest_planning_request.get("district_key") != "central" or latest_planning_request.get("calculation_id") != "calc-browser-regional-retry":
+        raise AssertionError(f"regional planning must retry once with actual calculation id after mismatch, got {regional_planning_requests}")
+    if page.locator('[data-regional-planning-district="central"]').is_disabled():
+        raise AssertionError("regional planning button must re-enable after successful planning response")
     if page.locator("#regionalPlanningPanel").is_hidden():
         raise AssertionError("regional planning panel must render after successful planning response")
     regional_planning_text = page.locator("#regionalPlanningPanel").inner_text()
@@ -1006,6 +1085,12 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "first_option": page.locator("#regionalPlanningTableBody tr").first.inner_text(),
         "overflow": regional_planning_overflow,
     }
+    page.click('[data-regional-planning-district="central"]')
+    page.wait_for_function(
+        "() => document.getElementById('regionalPlanningMessage') && document.getElementById('regionalPlanningMessage').textContent.includes('Подбор завершился с ошибкой')"
+    )
+    if page.locator('[data-regional-planning-district="central"]').is_disabled():
+        raise AssertionError("regional planning button must re-enable after planning error")
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():
         raise AssertionError("factory-order inbound source selection must survive reload")

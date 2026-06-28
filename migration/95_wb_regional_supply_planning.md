@@ -24,6 +24,13 @@ The endpoint is stateless and reads existing runtime truth:
 
 The planning response includes `cache.enabled=false`; selected options are not persisted as fact.
 
+## Operator state safety
+
+- The fresh `POST .../wb-regional/calculate` response is the canonical browser state for the visible result; a following lagging status refresh must not overwrite it with an older `last_result`.
+- Starting a new regional calculation clears the previous planning panel and resets old district planning in-flight state.
+- Planning requests send the latest visible `calculation_id`. If the backend returns structured `calculation_id_mismatch`, the UI performs one status refresh and one retry with the backend-provided actual calculation id.
+- `Подобрать склады WB` is disabled only while regional calculation/planning is in-flight or for a district with zero planned quantity. Zero-quantity rows expose the reason `Нет количества к поставке` in the disabled button state.
+
 ## Boundaries
 
 - No FBW supply creation.

@@ -294,6 +294,23 @@ def main() -> None:
                 raise AssertionError(f"planning-options must map warehouse to selected district, got {planning_payload}")
             if planning_source.acceptance_requests[0]["products"][0].get("barcode") != f"46{active_nm_ids[0]}":
                 raise AssertionError(f"planning-options must call acceptance/options with barcode evidence, got {planning_source.acceptance_requests}")
+            acceptance_request_count_before_mismatch = len(planning_source.acceptance_requests)
+            mismatch_status, mismatch_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH}",
+                {
+                    "district_key": DISTRICT_CENTRAL,
+                    "calculation_id": "stale-calculation-id",
+                    "package_type": "box",
+                },
+            )
+            if mismatch_status != 200:
+                raise AssertionError(f"planning-options mismatch path must return 200 controlled payload, got {mismatch_status} {mismatch_payload}")
+            if mismatch_payload.get("status") != "blocked" or not any(
+                item.get("code") == "calculation_id_mismatch" for item in mismatch_payload.get("blockers", [])
+            ):
+                raise AssertionError(f"planning-options mismatch path must be a structured blocker, got {mismatch_payload}")
+            if len(planning_source.acceptance_requests) != acceptance_request_count_before_mismatch:
+                raise AssertionError("planning-options mismatch path must not call acceptance/options")
 
             _seed_wb_regional_overlay_fixture(
                 runtime,
