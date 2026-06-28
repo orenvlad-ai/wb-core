@@ -87,6 +87,7 @@ class LocalOperatorFixtureServer:
             stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
             plan_report_path=DEFAULT_SHEET_PLAN_REPORT_PATH,
             operator_context={
+                "current_business_date": "2026-04-20",
                 "stock_report_active_skus": ACTIVE_SKUS,
                 "stock_report_active_sku_count": len(ACTIVE_SKUS),
                 "stock_report_active_sku_source": "current_registry_config_v2",
@@ -975,20 +976,18 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "h1": page.locator("#planReportH1Input").input_value(),
         "h2": page.locator("#planReportH2Input").input_value(),
         "drr": page.locator("#planReportDrrInput").input_value(),
-        "use_contract_start_date": page.locator("#planReportContractStartCheckbox").is_checked(),
-        "annual_plan_evenly_distributed": page.locator("#planReportAnnualEvenCheckbox").is_checked(),
-        "contract_start_date": page.locator("#planReportContractStartDateInput").input_value(),
-        "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
+        "contract_checkbox_count": page.locator("#planReportContractStartCheckbox").count(),
+        "annual_even_checkbox_count": page.locator("#planReportAnnualEvenCheckbox").count(),
+        "contract_date_input_count": page.locator("#planReportContractStartDateInput").count(),
     }
     expected_default_plan_inputs = {
         "period": "first_half",
         "h1": "155379879",
         "h2": "294620121",
         "drr": "6",
-        "use_contract_start_date": True,
-        "annual_plan_evenly_distributed": False,
-        "contract_start_date": "2026-02-01",
-        "contract_date_disabled": False,
+        "contract_checkbox_count": 0,
+        "annual_even_checkbox_count": 0,
+        "contract_date_input_count": 0,
     }
     if default_plan_inputs != expected_default_plan_inputs:
         raise AssertionError(f"clean plan-report storage must restore WB/VB defaults, got {default_plan_inputs}")
@@ -1015,9 +1014,6 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.fill("#planReportH1Input", "123456789")
     page.fill("#planReportH2Input", "234567890")
     page.fill("#planReportDrrInput", "7.5")
-    page.check("#planReportContractStartCheckbox")
-    page.fill("#planReportContractStartDateInput", "2026-03-15")
-    page.check("#planReportAnnualEvenCheckbox")
     page.click("#planReportApplyButton")
     page.wait_for_function(
         """(storageKey) => {
@@ -1029,19 +1025,19 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 parsed.plan_report_inputs.h1_buyout_plan_rub === "123456789" &&
                 parsed.plan_report_inputs.h2_buyout_plan_rub === "234567890" &&
                 parsed.plan_report_inputs.plan_drr_pct === "7.5" &&
-                parsed.plan_report_inputs.use_contract_start_date === true &&
-                parsed.plan_report_inputs.annual_plan_evenly_distributed === true &&
-                parsed.plan_report_inputs.contract_start_date === "2026-03-15";
+                !("use_contract_start_date" in parsed.plan_report_inputs) &&
+                !("annual_plan_evenly_distributed" in parsed.plan_report_inputs) &&
+                !("contract_start_date" in parsed.plan_report_inputs);
         }""",
         arg=STORAGE_KEY,
     )
     latest_plan_report_url = plan_report_request_urls[-1] if plan_report_request_urls else ""
     if (
         "use_contract_start_date=true" not in latest_plan_report_url
-        or "contract_start_date=2026-03-15" not in latest_plan_report_url
-        or "annual_plan_evenly_distributed=true" not in latest_plan_report_url
+        or "contract_start_date=2026-02-01" not in latest_plan_report_url
+        or "annual_plan_evenly_distributed=false" not in latest_plan_report_url
     ):
-        raise AssertionError(f"plan-report request must include contract start and annual-even params when enabled, got {plan_report_request_urls}")
+        raise AssertionError(f"plan-report request must always include canonical WB/VB params, got {plan_report_request_urls}")
     page.reload(wait_until="domcontentloaded")
     page.click('[data-report-section-button="plan"]')
     restored_plan_inputs = {
@@ -1049,20 +1045,18 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "h1": page.locator("#planReportH1Input").input_value(),
         "h2": page.locator("#planReportH2Input").input_value(),
         "drr": page.locator("#planReportDrrInput").input_value(),
-        "use_contract_start_date": page.locator("#planReportContractStartCheckbox").is_checked(),
-        "annual_plan_evenly_distributed": page.locator("#planReportAnnualEvenCheckbox").is_checked(),
-        "contract_start_date": page.locator("#planReportContractStartDateInput").input_value(),
-        "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
+        "contract_checkbox_count": page.locator("#planReportContractStartCheckbox").count(),
+        "annual_even_checkbox_count": page.locator("#planReportAnnualEvenCheckbox").count(),
+        "contract_date_input_count": page.locator("#planReportContractStartDateInput").count(),
     }
     expected_restored_inputs = {
         "period": "current_month",
         "h1": "123456789",
         "h2": "234567890",
         "drr": "7.5",
-        "use_contract_start_date": True,
-        "annual_plan_evenly_distributed": True,
-        "contract_start_date": "2026-03-15",
-        "contract_date_disabled": False,
+        "contract_checkbox_count": 0,
+        "annual_even_checkbox_count": 0,
+        "contract_date_input_count": 0,
     }
     if restored_plan_inputs != expected_restored_inputs:
         raise AssertionError(f"plan-report H1/H2/DRR/contract inputs must survive reload, got {restored_plan_inputs}")
@@ -1166,20 +1160,18 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
         "h1": page.locator("#planReportH1Input").input_value(),
         "h2": page.locator("#planReportH2Input").input_value(),
         "drr": page.locator("#planReportDrrInput").input_value(),
-        "use_contract_start_date": page.locator("#planReportContractStartCheckbox").is_checked(),
-        "annual_plan_evenly_distributed": page.locator("#planReportAnnualEvenCheckbox").is_checked(),
-        "contract_start_date": page.locator("#planReportContractStartDateInput").input_value(),
-        "contract_date_disabled": page.locator("#planReportContractStartDateInput").is_disabled(),
+        "contract_checkbox_count": page.locator("#planReportContractStartCheckbox").count(),
+        "annual_even_checkbox_count": page.locator("#planReportAnnualEvenCheckbox").count(),
+        "contract_date_input_count": page.locator("#planReportContractStartDateInput").count(),
     }
     if invalid_plan_restore != {
         "period": "first_half",
         "h1": "155379879",
         "h2": "294620121",
         "drr": "6",
-        "use_contract_start_date": True,
-        "annual_plan_evenly_distributed": False,
-        "contract_start_date": "2026-02-01",
-        "contract_date_disabled": False,
+        "contract_checkbox_count": 0,
+        "annual_even_checkbox_count": 0,
+        "contract_date_input_count": 0,
     }:
         raise AssertionError(f"invalid persisted plan inputs must fall back to WB/VB defaults, got {invalid_plan_restore}")
 

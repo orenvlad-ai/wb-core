@@ -38,6 +38,7 @@ def main() -> None:
         stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
         plan_report_path=DEFAULT_SHEET_PLAN_REPORT_PATH,
         operator_context={
+            "current_business_date": "2026-04-20",
             "stock_report_active_skus": active_skus,
             "stock_report_active_sku_count": len(active_skus),
             "stock_report_active_sku_source": "current_registry_config_v2",
@@ -100,17 +101,12 @@ def main() -> None:
         'id="planReportH1Input"',
         'id="planReportH2Input"',
         'id="planReportDrrInput"',
-        'id="planReportContractStartCheckbox"',
-        'id="planReportAnnualEvenCheckbox"',
-        'id="planReportContractStartDateInput"',
-        "С учётом даты подписания",
-        "Равномерный годовой план",
-        "Дата подписания",
         'id="planReportApplyButton"',
         'id="planReportBaselineTemplateButton"',
         'id="planReportBaselineFileInput"',
         'id="planReportBaselineStatus"',
         'id="planReportBaselineDetails"',
+        "Расчёт по WB/VB: договор с 01.02.2026, H1/H2 модель",
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
         DEFAULT_SHEET_PLAN_REPORT_PATH,
@@ -123,6 +119,19 @@ def main() -> None:
 
     if "dailyReportToggle" in html or "stockReportToggle" in html or "report-accordion" in html:
         raise AssertionError("legacy reports accordion contract must be removed from the operator page")
+    for token in (
+        'id="planReportContractStartCheckbox"',
+        'id="planReportAnnualEvenCheckbox"',
+        'id="planReportContractStartDateInput"',
+        "С учётом даты подписания",
+        "Равномерный годовой план",
+        "Дата подписания",
+        "planReportContractStartCheckbox",
+        "planReportAnnualEvenCheckbox",
+        "planReportContractStartDateInput",
+    ):
+        if token in html:
+            raise AssertionError(f"ordinary plan-report UI must not expose legacy mode control {token!r}")
     initial_status = '<p id="stockReportStatus" class="section-message">Настройте SKU, период и столбцы, затем нажмите «Рассчитать».</p>'
     if initial_status not in html:
         raise AssertionError("stock-report initial state must be idle/manual, not loading")
@@ -155,14 +164,17 @@ def main() -> None:
     if "restorePlanReportInputs(persistedOperatorUiState);" not in html:
         raise AssertionError("plan-report H1/H2/DRR inputs must restore from namespaced browser storage")
     for token in (
+        '"current_business_date"',
         'const PLAN_REPORT_DEFAULT_INPUTS = {',
-        'period: "first_half"',
+        "period: defaultPlanReportPeriod()",
         'h1_buyout_plan_rub: "155379879"',
         'h2_buyout_plan_rub: "294620121"',
         'plan_drr_pct: "6"',
+        'const PLAN_REPORT_CANONICAL_INPUTS = {',
         'use_contract_start_date: true',
         'annual_plan_evenly_distributed: false',
         'contract_start_date: "2026-02-01"',
+        'return currentBusinessDate >= "2026-07-01" ? "second_half" : "first_half";',
         "resolvePlanReportInputs(inputs)",
         "WB/VB defaults: H1 = 155 379 879; H2 = 294 620 121",
     ):
@@ -170,14 +182,14 @@ def main() -> None:
             raise AssertionError(f"plan-report UI must expose WB/VB defaults token {token!r}")
     if "writePersistedOperatorUiState({ plan_report_inputs: inputs });" not in html:
         raise AssertionError("plan-report H1/H2/DRR inputs must persist into namespaced browser storage")
-    if "annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked)" not in html:
-        raise AssertionError("plan-report annual-even checkbox state must persist into namespaced browser storage")
+    if "annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked)" in html:
+        raise AssertionError("ordinary plan-report UI must not persist removed annual-even checkbox state")
     if 'params.set("annual_plan_evenly_distributed", request.annual_plan_evenly_distributed ? "true" : "false");' not in html:
-        raise AssertionError("plan-report annual-even mode must be sent through an explicit query param")
+        raise AssertionError("plan-report canonical annual-even mode must be sent through an explicit query param")
     if 'params.set("use_contract_start_date", "true");' not in html or 'params.set("contract_start_date", request.contract_start_date);' not in html:
         raise AssertionError("plan-report contract start mode must be sent through explicit query params")
-    if "setContractStartInputEnabled(planReportContractStartCheckbox.checked);" not in html:
-        raise AssertionError("plan-report contract date input must be enabled only when the checkbox is active")
+    if "Рекламный план пересчитан от фактического оборота, так как оборот выше плана." not in html:
+        raise AssertionError("plan-report UI must explain ads plan base when turnover overperforms")
     if ".stock-report-sku-field" not in html or "width: min(320px, 100%);" not in html:
         raise AssertionError("stock-report SKU selector must stay compact instead of flexing across the row")
     if ".stock-report-period-field" not in html or "width: 150px;" not in html:
