@@ -191,10 +191,17 @@ def main() -> None:
         raise AssertionError("plan-report canonical annual-even mode must be sent through an explicit query param")
     if 'params.set("use_contract_start_date", "true");' not in html or 'params.set("contract_start_date", request.contract_start_date);' not in html:
         raise AssertionError("plan-report contract start mode must be sent through explicit query params")
-    if "Рекламный план пересчитан от фактического оборота, так как оборот выше плана." not in html:
-        raise AssertionError("plan-report UI must explain ads plan base when turnover overperforms")
+    ads_note = "Рекламный план пересчитан от фактического оборота, так как оборот выше плана."
+    if ads_note not in html or "plan-report-metric-tooltip-anchor" not in html or "plan-report-metric-tooltip" not in html:
+        raise AssertionError("plan-report UI must expose ads plan base explanation through a compact tooltip")
+    if '<br><span class="field-note">' + ads_note in html:
+        raise AssertionError("plan-report metric labels must not render long ads explanations inline")
     if "payload.contract_period_projection" not in html or "projected_buyout_pct_of_annual_plan" not in html:
         raise AssertionError("plan-report UI must render the contract-period projection block")
+    projection_index = html.find('<section class="plan-report-card plan-report-projection-card">')
+    selected_index = html.find('<h3 id="planReportSelectedTitle">Основной период</h3>')
+    if projection_index < 0 or selected_index < 0 or projection_index > selected_index:
+        raise AssertionError("plan-report projection card must be the first result block before the selected period")
     if ".stock-report-sku-field" not in html or "width: min(320px, 100%);" not in html:
         raise AssertionError("stock-report SKU selector must stay compact instead of flexing across the row")
     if ".stock-report-period-field" not in html or "width: 150px;" not in html:
