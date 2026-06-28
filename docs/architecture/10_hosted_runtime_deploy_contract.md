@@ -146,7 +146,7 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
-- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` exists as a gated optional artifact only; it is not part of active managed units until MCP auth/route publication is explicitly approved and verified.
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is a WebCore Data MCP artifact for the separate read-only MCP boundary. It is installed/enabled on the active EU host only as a private loopback service on `127.0.0.1:8766`; it remains outside the public nginx route allowlist and outside broad public route publication until MCP tunnel/OAuth auth is explicitly approved and verified.
 
 `wb-core-sheet-vitrina-refresh.timer` is a due-check ticker, not the business-time source of truth: it runs every 10 minutes and starts `apps/sheet_vitrina_v1_auto_refresh_tick.py`; the runner reads runtime JSON schedules (`11:00`/`20:00 Asia/Yekaterinburg` by default, editable through the web-vitrina auto-schedules API), builds an in-memory WebCore session cookie from hosted env, and then calls the protected refresh route with `auto_refresh=true`. The timer itself is non-persistent; catch-up is owned by the runner's schedule state so a deploy/restart does not immediately fire a stale systemd event while the app process is restarting.
 
@@ -273,6 +273,12 @@ WebCore Data MCP is a separate read-only data gateway and must not reuse browser
 - `WEBCORE_DATA_MCP_RESOURCE_DOCUMENTATION_URL`
 - `WEBCORE_DATA_MCP_AUTHORIZATION_SERVERS`
 - `WEBCORE_DATA_MCP_SCOPES`
+
+Active EU private MCP live state:
+- `wb-core-data-mcp.service` is installed and enabled as a loopback-only private service;
+- the generated bearer secret is stored outside Git in root-only `/etc/wb-core-data-mcp.env`;
+- `/etc/wb-core-data-mcp.env` is consumed by the MCP unit and must not be printed, committed, copied into docs or placed in `/opt/wb-ai/.env`;
+- `https://api.selleros.pro/mcp` must remain `404` or auth-blocked until a ChatGPT-compatible Secure MCP Tunnel or OAuth path is configured.
 
 MCP publication gate:
 - unauthenticated `POST /mcp` must return `401` with no business data;
