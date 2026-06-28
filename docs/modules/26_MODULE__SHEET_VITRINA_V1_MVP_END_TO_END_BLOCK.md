@@ -239,12 +239,15 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
   - plan-report block `Выполнение плана` остаётся read-only и server-owned:
     - route = `GET /v1/sheet-vitrina-v1/plan-report`
-    - primary input params = half-year buyout plans `H1/H2`, planned DRR percent and selected period (`yesterday`, `last_7_days`, `last_30_days`, `current_month`, `current_quarter`, `current_year`); optional `annual_plan_evenly_distributed=true|false` switches plan calculation to an even annual `H1+H2` daily load; legacy complete `Q1..Q4` params may be accepted transitionally by summing Q1+Q2 into H1 and Q3+Q4 into H2
+    - primary input params = half-year buyout plans `H1/H2`, planned DRR percent and selected period (`yesterday`, `last_7_days`, `last_30_days`, `current_month`, `current_quarter`, `current_year`, fixed quarters/halves); optional `annual_plan_evenly_distributed=true|false` switches plan calculation to an even annual `H1+H2` daily load; legacy complete `Q1..Q4` params may be accepted transitionally by summing Q1+Q2 into H1 and Q3+Q4 into H2
+    - operator UI defaults are WB/VB-specific when persisted plan inputs are absent/invalid: `H1=155379879`, `H2=294620121`, `DRR=6`, `period=first_half`, contract start enabled with `2026-02-01`, annual-even disabled; `H2=294620121` is the annual remainder to `450000000`, while Q3+Q4 source figures total `294620120`, so the 1 rub discrepancy is explicit
     - daily facts use persisted accepted closed-day snapshots for `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum` over current active `config_v2` SKU
     - optional manual monthly facts come only from the separate runtime source `manual_monthly_plan_report_baseline`, uploaded through the plan-report baseline XLSX routes and used only for full baseline months inside aggregate plan-report periods
     - if a baseline month has incomplete daily precision, the monthly aggregate covers that month and overlapping daily rows are excluded from the block to prevent double-count; a fully daily-covered month uses daily facts and skips baseline
-    - default buyout plan is distributed by calendar day and crosses 30 Jun / 1 Jul by using the H1/H2 plan for each individual date; annual-even mode uses the same daily annual load for H1 and H2 dates and does not rewrite persisted H1/H2 inputs
-    - DRR fact = `ads_sum / fin_buyout_rub * 100`; ads plan = full-calendar buyout plan multiplied by planned DRR
+    - default buyout plan is distributed by calendar day and crosses 30 Jun / 1 Jul by using the H1/H2 plan for each individual date; fixed target periods use full target-period plan clipped by contract start for the main `plan`/`completion_pct`, while facts and coverage use only closed dates through `as_of_date`
+    - annual-even mode uses the same daily annual load for H1 and H2 dates and does not rewrite persisted H1/H2 inputs
+    - `completion_pct = fact / plan * 100` is the visible execution percentage for buyout and ads; legacy `delta_pct` remains diagnostic
+    - DRR fact = `ads_sum / fin_buyout_rub * 100` and is diagnostic; ads plan follows WB/VB semantics `max(buyout_plan, buyout_fact) * plan_drr_pct / 100`, with payload diagnostics showing whether the base was plan turnover or fact turnover due to overperformance
     - response always includes selected block plus MTD/QTD/YTD blocks when active SKU truth is available
     - each block carries its own `available / partial / unavailable` status, coverage details, reason, source mix and metrics; missing YTD must not hide an available selected period
     - incomplete temporal snapshot/baseline coverage is surfaced as `partial`/`unavailable` with missing/covered dates and never as fabricated zero fact
@@ -339,6 +342,8 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - response body always contains per-block `periods.selected_period`, `periods.month_to_date`, `periods.quarter_to_date`, `periods.year_to_date`
   - root status is aggregate; UI must render available/partial blocks even when another block is unavailable
   - primary required params = `period`, `h1_buyout_plan_rub`, `h2_buyout_plan_rub`, `plan_drr_pct`; optional `annual_plan_evenly_distributed=true|false` enables even annual `H1+H2` plan distribution; legacy complete `q1_buyout_plan_rub`..`q4_buyout_plan_rub` remains a transitional fallback only
+  - fixed target period payload separates `target_date_from`/`target_date_to`/`target_day_count` from `fact_date_from`/`fact_date_to`/`fact_day_count`; main `plan` is target-period plan, and `to_date_plan` is diagnostic
+  - buyout/ads metrics expose `completion_pct = fact / plan * 100`; ads metrics also expose `ads_plan_base_rub` and `ads_plan_base_mode`
   - `fin_report_daily.fin_buyout_rub` and `ads_compact.ads_sum` facts come from the shared accepted temporal source slot layer; metric-specific daily coverage is transparent, so a missing ads day does not erase an available buyout day, and the block stays `partial` with source-specific missing dates
   - sibling baseline routes:
     - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`

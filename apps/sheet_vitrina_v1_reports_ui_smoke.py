@@ -154,6 +154,20 @@ def main() -> None:
         raise AssertionError("operator page must persist tab/subsection/SKU state into browser storage")
     if "restorePlanReportInputs(persistedOperatorUiState);" not in html:
         raise AssertionError("plan-report H1/H2/DRR inputs must restore from namespaced browser storage")
+    for token in (
+        'const PLAN_REPORT_DEFAULT_INPUTS = {',
+        'period: "first_half"',
+        'h1_buyout_plan_rub: "155379879"',
+        'h2_buyout_plan_rub: "294620121"',
+        'plan_drr_pct: "6"',
+        'use_contract_start_date: true',
+        'annual_plan_evenly_distributed: false',
+        'contract_start_date: "2026-02-01"',
+        "resolvePlanReportInputs(inputs)",
+        "WB/VB defaults: H1 = 155 379 879; H2 = 294 620 121",
+    ):
+        if token not in html:
+            raise AssertionError(f"plan-report UI must expose WB/VB defaults token {token!r}")
     if "writePersistedOperatorUiState({ plan_report_inputs: inputs });" not in html:
         raise AssertionError("plan-report H1/H2/DRR inputs must persist into namespaced browser storage")
     if "annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked)" not in html:
@@ -186,8 +200,10 @@ def main() -> None:
         raise AssertionError("stock-report manual load hook must remain present")
     if "loadDailyReport(), loadStockReport()" in html or "loadStockReport();\n      loadPlanReportBaselineStatus" in html:
         raise AssertionError("stock-report must not auto-load on init or refresh completion")
-    if '<th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение %</th>' not in html:
-        raise AssertionError("plan-report tables must use the compact five-column layout")
+    if '<th>Показатель</th><th>Факт</th><th>План</th><th>Выполнение</th><th>Отклонение</th><th>Отклонение %</th>' not in html:
+        raise AssertionError("plan-report tables must expose completion_pct in the six-column layout")
+    if "metric.completion_pct" not in html:
+        raise AssertionError("plan-report UI must render completion_pct as the execution percentage")
     if '<table class="plan-report-table"' in html and "<th>Статус</th>" in html.split('<table class="plan-report-table"', 1)[1].split("</table>", 1)[0]:
         raise AssertionError("plan-report metric tables must not expose a separate Status column")
     if 'class="plan-report-card is-primary"' in html or ".plan-report-card.is-primary" in html:

@@ -146,6 +146,7 @@ def main() -> None:
         _assert_close(selected["metrics"]["buyout_rub"]["plan"], 45000.0, "selected buyout plan")
         _assert_close(selected["metrics"]["buyout_rub"]["delta_abs"], 0.0, "selected buyout delta")
         _assert_close(selected["metrics"]["buyout_rub"]["delta_pct"], 0.0, "selected buyout delta_pct")
+        _assert_close(selected["metrics"]["buyout_rub"]["completion_pct"], 100.0, "selected buyout completion_pct")
         if selected["metrics"]["buyout_rub"]["status_label"] != "выполнен":
             raise AssertionError(f"buyout status must be fulfilled when fact equals plan, got {selected}")
         _assert_close(selected["metrics"]["drr_pct"]["fact"], 12.0, "selected drr fact")
@@ -158,6 +159,9 @@ def main() -> None:
         _assert_close(selected["metrics"]["ads_sum_rub"]["plan"], 4500.0, "selected ads plan")
         _assert_close(selected["metrics"]["ads_sum_rub"]["delta_abs"], 900.0, "selected ads delta")
         _assert_close(selected["metrics"]["ads_sum_rub"]["delta_pct"], 20.0, "selected ads delta_pct")
+        _assert_close(selected["metrics"]["ads_sum_rub"]["completion_pct"], 120.0, "selected ads completion_pct")
+        if selected["metrics"]["ads_sum_rub"]["status"] != "ok":
+            raise AssertionError(f"ads must be an execution metric, not a cost-limit alert, got {selected}")
 
         mtd = payload["periods"]["month_to_date"]
         if mtd["date_from"] != "2026-04-01" or mtd["day_count"] != 20:
@@ -190,10 +194,10 @@ def main() -> None:
 
         fixed_expectations = {
             "first_quarter": ("2026-01-01", "2026-03-31", 90, "completed", "available", 135000.0),
-            "second_quarter": ("2026-04-01", "2026-04-20", 20, "in_progress", "available", 30000.0),
+            "second_quarter": ("2026-04-01", "2026-04-20", 20, "in_progress", "available", 136500.0),
             "third_quarter": ("2026-07-01", "2026-09-30", 0, "not_started", "unavailable", None),
             "fourth_quarter": ("2026-10-01", "2026-12-31", 0, "not_started", "unavailable", None),
-            "first_half": ("2026-01-01", "2026-04-20", 110, "in_progress", "available", 165000.0),
+            "first_half": ("2026-01-01", "2026-04-20", 110, "in_progress", "available", 271500.0),
             "second_half": ("2026-07-01", "2026-12-31", 0, "not_started", "unavailable", None),
         }
         for period_key, (date_from, date_to, day_count, period_state, status, expected_plan) in fixed_expectations.items():
@@ -226,7 +230,7 @@ def main() -> None:
         contract_payload = block.build(
             period="first_quarter",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
             use_contract_start_date=True,
@@ -260,7 +264,7 @@ def main() -> None:
         before_contract_payload = block.build(
             period="first_quarter",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
             use_contract_start_date=True,
@@ -275,6 +279,97 @@ def main() -> None:
             raise AssertionError(
                 f"period fully before contract start must be unavailable without fake plan, got {before_contract_selected}"
             )
+
+        wb_h1_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "wb-h1-2026-03-02")
+        wb_h1_result = wb_h1_runtime.ingest_bundle(bundle, activated_at="2026-03-03T01:00:00Z")
+        if wb_h1_result.status != "accepted":
+            raise AssertionError(f"WB H1 runtime bundle ingest must be accepted, got {wb_h1_result}")
+        _seed_daily_snapshots(
+            wb_h1_runtime,
+            primary_nm_id=primary_nm_id,
+            date_from=date(2026, 2, 1),
+            date_to=date(2026, 3, 2),
+            buyout_rub=43977453.0 / 30.0,
+            ads_sum=4204693.0 / 30.0,
+        )
+        wb_h1_payload = SheetVitrinaV1PlanReportBlock(
+            runtime=wb_h1_runtime,
+            now_factory=lambda: datetime(2026, 3, 3, 1, 0, tzinfo=timezone.utc),
+        ).build(
+            period="first_half",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620121.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-03-02",
+            use_contract_start_date=True,
+            contract_start_date="2026-02-01",
+            annual_plan_evenly_distributed=False,
+        )
+        wb_h1_selected = wb_h1_payload["periods"]["selected_period"]
+        wb_h1_buyout = wb_h1_selected["metrics"]["buyout_rub"]
+        wb_h1_ads = wb_h1_selected["metrics"]["ads_sum_rub"]
+        expected_wb_h1_plan = 155379879.0 / 181.0 * 150.0
+        if (
+            wb_h1_selected["date_from"] != "2026-02-01"
+            or wb_h1_selected["date_to"] != "2026-03-02"
+            or wb_h1_selected["fact_day_count"] != 30
+            or wb_h1_selected["target_date_from"] != "2026-02-01"
+            or wb_h1_selected["target_date_to"] != "2026-06-30"
+            or wb_h1_selected["target_day_count"] != 150
+            or wb_h1_selected["coverage"]["missing_dates"]
+        ):
+            raise AssertionError(f"WB H1 fixed target must separate fact and target windows, got {wb_h1_selected}")
+        _assert_close(wb_h1_buyout["fact"], 43977453.0, "WB H1 02.03 buyout fact")
+        _assert_close(wb_h1_buyout["plan"], expected_wb_h1_plan, "WB H1 clipped target plan")
+        _assert_close(
+            wb_h1_buyout["to_date_plan"],
+            155379879.0 / 181.0 * 30.0,
+            "WB H1 diagnostic to-date plan",
+        )
+        _assert_close(wb_h1_buyout["completion_pct"], 34.15, "WB H1 buyout completion", tolerance=0.01)
+        _assert_close(wb_h1_ads["fact"], 4204693.0, "WB H1 02.03 ads fact")
+        _assert_close(wb_h1_ads["plan"], expected_wb_h1_plan * 0.06, "WB H1 ads plan")
+        _assert_close(wb_h1_ads["completion_pct"], 54.42, "WB H1 ads completion", tolerance=0.01)
+        if wb_h1_ads["ads_plan_base_mode"] != "plan_turnover_base" or wb_h1_ads["status"] != "alert":
+            raise AssertionError(f"WB H1 under-plan ads must use plan base and execution alert, got {wb_h1_ads}")
+
+        over_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "wb-h1-overperformance")
+        over_result = over_runtime.ingest_bundle(bundle, activated_at="2026-03-03T01:00:00Z")
+        if over_result.status != "accepted":
+            raise AssertionError(f"WB H1 overperformance runtime bundle ingest must be accepted, got {over_result}")
+        _seed_daily_snapshots(
+            over_runtime,
+            primary_nm_id=primary_nm_id,
+            date_from=date(2026, 2, 1),
+            date_to=date(2026, 3, 2),
+            buyout_rub=190134276.0 / 30.0,
+            ads_sum=19039703.0 / 30.0,
+        )
+        over_payload = SheetVitrinaV1PlanReportBlock(
+            runtime=over_runtime,
+            now_factory=lambda: datetime(2026, 3, 3, 1, 0, tzinfo=timezone.utc),
+        ).build(
+            period="first_half",
+            h1_buyout_plan_rub=155379879.0,
+            h2_buyout_plan_rub=294620121.0,
+            plan_drr_pct=6.0,
+            as_of_date="2026-03-02",
+            use_contract_start_date=True,
+            contract_start_date="2026-02-01",
+            annual_plan_evenly_distributed=False,
+        )
+        over_selected = over_payload["periods"]["selected_period"]
+        over_buyout = over_selected["metrics"]["buyout_rub"]
+        over_ads = over_selected["metrics"]["ads_sum_rub"]
+        _assert_close(over_buyout["plan"], expected_wb_h1_plan, "overperformance keeps WB H1 target plan")
+        _assert_close(over_buyout["fact"], 190134276.0, "overperformance buyout fact")
+        _assert_close(over_buyout["completion_pct"], 147.66, "overperformance buyout completion", tolerance=0.01)
+        _assert_close(over_ads["plan"], 190134276.0 * 0.06, "overperformance ads plan uses fact buyout")
+        _assert_close(over_ads["completion_pct"], 166.90, "overperformance ads completion", tolerance=0.01)
+        if over_ads["ads_plan_base_mode"] != "fact_turnover_overperformance_base":
+            raise AssertionError(f"overperformance ads plan must use fact turnover base, got {over_ads}")
+        if over_ads["status"] != "ok" or over_ads["status_label"] != "выполнен":
+            raise AssertionError(f"overperformance ads must be execution-ok, not cost-limit alert, got {over_ads}")
 
         missing_day = "2026-04-10"
         runtime.delete_temporal_source_slot_snapshots(
@@ -379,7 +474,7 @@ def main() -> None:
         wb_plan_payload = block.build(
             period="current_year",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
         )
@@ -395,7 +490,7 @@ def main() -> None:
         explicit_false_payload = block.build(
             period="current_year",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
             annual_plan_evenly_distributed=False,
@@ -411,7 +506,7 @@ def main() -> None:
         annual_payload = block.build(
             period="current_year",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
             annual_plan_evenly_distributed=True,
@@ -419,14 +514,14 @@ def main() -> None:
         annual_inputs = annual_payload["inputs"]
         if annual_inputs.get("plan_model") != "annual_evenly_distributed":
             raise AssertionError(f"annual-even mode must be disclosed in inputs, got {annual_inputs}")
-        _assert_close(annual_inputs.get("annual_buyout_plan_rub"), 449999999.0, "annual H1+H2 plan")
+        _assert_close(annual_inputs.get("annual_buyout_plan_rub"), 450000000.0, "annual H1+H2 plan")
         if annual_inputs.get("annual_plan_denominator_day_count") != 365:
             raise AssertionError(f"annual-even default denominator must be full year, got {annual_inputs}")
         annual_ytd = annual_payload["periods"]["year_to_date"]
         annual_mtd = annual_payload["periods"]["month_to_date"]
         annual_qtd = annual_payload["periods"]["quarter_to_date"]
-        expected_annual_ytd_plan = 449999999.0 / 365.0 * 114.0
-        expected_annual_mtd_qtd_plan = 449999999.0 / 365.0 * 24.0
+        expected_annual_ytd_plan = 450000000.0 / 365.0 * 114.0
+        expected_annual_mtd_qtd_plan = 450000000.0 / 365.0 * 24.0
         _assert_close(annual_ytd["metrics"]["buyout_rub"]["plan"], expected_annual_ytd_plan, "annual-even ytd plan")
         _assert_close(annual_mtd["metrics"]["buyout_rub"]["plan"], expected_annual_mtd_qtd_plan, "annual-even mtd plan")
         _assert_close(annual_qtd["metrics"]["buyout_rub"]["plan"], expected_annual_mtd_qtd_plan, "annual-even qtd plan")
@@ -439,14 +534,14 @@ def main() -> None:
         h1_old_payload = block.build(
             period="first_quarter",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
         )
         h1_annual_payload = block.build(
             period="first_quarter",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
             annual_plan_evenly_distributed=True,
@@ -454,22 +549,22 @@ def main() -> None:
         h1_old_selected = h1_old_payload["periods"]["selected_period"]
         h1_annual_selected = h1_annual_payload["periods"]["selected_period"]
         if (
-            h1_annual_selected["metrics"]["buyout_rub"]["plan"] / h1_annual_selected["day_count"]
-            <= h1_old_selected["metrics"]["buyout_rub"]["plan"] / h1_old_selected["day_count"]
+            h1_annual_selected["metrics"]["buyout_rub"]["plan"] / h1_annual_selected["target_day_count"]
+            <= h1_old_selected["metrics"]["buyout_rub"]["plan"] / h1_old_selected["target_day_count"]
         ):
             raise AssertionError("annual-even daily plan must be higher than H1-only daily load in H1")
 
         h2_old_payload = block.build(
             period="second_half",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-07-10",
         )
         h2_annual_payload = block.build(
             period="second_half",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-07-10",
             annual_plan_evenly_distributed=True,
@@ -477,15 +572,15 @@ def main() -> None:
         h2_old_selected = h2_old_payload["periods"]["selected_period"]
         h2_annual_selected = h2_annual_payload["periods"]["selected_period"]
         if (
-            h2_annual_selected["metrics"]["buyout_rub"]["plan"] / h2_annual_selected["day_count"]
-            >= h2_old_selected["metrics"]["buyout_rub"]["plan"] / h2_old_selected["day_count"]
+            h2_annual_selected["metrics"]["buyout_rub"]["plan"] / h2_annual_selected["target_day_count"]
+            >= h2_old_selected["metrics"]["buyout_rub"]["plan"] / h2_old_selected["target_day_count"]
         ):
             raise AssertionError("annual-even daily plan must be lower than H2-only daily load in H2")
 
         annual_contract_payload = block.build(
             period="first_quarter",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
             use_contract_start_date=True,
@@ -498,7 +593,7 @@ def main() -> None:
             raise AssertionError(f"annual-even contract denominator must use the contract-start window, got {annual_contract_inputs}")
         _assert_close(
             annual_contract_selected["metrics"]["buyout_rub"]["plan"],
-            449999999.0 / 334.0 * 59.0,
+            450000000.0 / 334.0 * 59.0,
             "annual-even contract-trimmed q1 buyout plan",
         )
         _assert_close(
@@ -556,7 +651,7 @@ def main() -> None:
         q1_payload = reconcile_block.build(
             period="current_year",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-03-31",
         )
@@ -566,7 +661,7 @@ def main() -> None:
         april_payload = reconcile_block.build(
             period="current_month",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
         )
@@ -576,7 +671,7 @@ def main() -> None:
         contract_control_payload = reconcile_block.build(
             period="first_quarter",
             h1_buyout_plan_rub=155379879.0,
-            h2_buyout_plan_rub=294620120.0,
+            h2_buyout_plan_rub=294620121.0,
             plan_drr_pct=6.0,
             as_of_date="2026-04-24",
             use_contract_start_date=True,
@@ -728,6 +823,8 @@ def main() -> None:
         print("plan_report_partial_overlap_baseline: ok ->", partial_overlap_source["baseline_months"])
         print("plan_report_reconciliation_controls: ok ->", q1_ytd["metrics"]["buyout_rub"]["fact"], april_mtd["metrics"]["buyout_rub"]["fact"])
         print("plan_report_contract_start: ok ->", contract_selected["date_from"], contract_selected["date_to"])
+        print("plan_report_wb_h1_2026_03_02: ok ->", wb_h1_buyout["plan"], wb_h1_buyout["completion_pct"], wb_h1_ads["plan"], wb_h1_ads["completion_pct"])
+        print("plan_report_wb_h1_overperformance: ok ->", over_ads["ads_plan_base_mode"], over_ads["plan"], over_ads["completion_pct"])
         print("plan_report_annual_even_mode: ok ->", annual_inputs["annual_buyout_plan_rub"], annual_ytd["metrics"]["buyout_rub"]["plan"])
         print("plan_report_baseline_xlsx: ok ->", upload_payload["accepted_months"])
 
@@ -794,8 +891,8 @@ def _seed_daily_snapshots(
         )
 
 
-def _assert_close(actual: float | None, expected: float, label: str) -> None:
-    if actual is None or abs(actual - expected) > 1e-3:
+def _assert_close(actual: float | None, expected: float, label: str, *, tolerance: float = 1e-3) -> None:
+    if actual is None or abs(actual - expected) > tolerance:
         raise AssertionError(f"{label} must be {expected}, got {actual}")
 
 

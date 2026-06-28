@@ -3132,7 +3132,10 @@
               <h2 class="block-title">Выполнение плана</h2>
               <p id="planReportPeriod" class="report-period">Выберите период и задайте планы H1/H2.</p>
               <p id="planReportLead" class="field-note">
-                Факт считается server-side из accepted closed-day snapshots <code>fin_buyout_rub</code> и <code>ads_sum</code>; план распределяется по всем календарным дням H1/H2.
+                Факт считается server-side из accepted closed-day snapshots <code>fin_buyout_rub</code> и <code>ads_sum</code>; выполнение считается как факт / план.
+              </p>
+              <p class="field-note">
+                WB/VB defaults: H1 = 155 379 879; H2 = 294 620 121 как annual remainder до 450 000 000 при расхождении Q3+Q4 на 1 руб.; договор с 01.02.2026; ставка 6%.
               </p>
               <div class="plan-report-toolbar">
                 <div class="plan-report-controls">
@@ -3142,14 +3145,14 @@
                       <option value="yesterday">За вчера</option>
                       <option value="last_7_days">За последние 7 дней</option>
                       <option value="last_30_days">За последние 30 дней</option>
-                      <option value="current_month" selected>За текущий месяц</option>
+                      <option value="current_month">За текущий месяц</option>
                       <option value="current_quarter">За текущий квартал</option>
                       <option value="current_year">За текущий год</option>
                       <option value="first_quarter">За первый квартал</option>
                       <option value="second_quarter">За второй квартал</option>
                       <option value="third_quarter">За третий квартал</option>
                       <option value="fourth_quarter">За четвертый квартал</option>
-                      <option value="first_half">За первое полугодие</option>
+                      <option value="first_half" selected>За первое полугодие</option>
                       <option value="second_half">За второе полугодие</option>
                     </select>
                   </div>
@@ -4254,6 +4257,15 @@
         "first_half",
         "second_half"
       ]);
+      const PLAN_REPORT_DEFAULT_INPUTS = {
+        period: "first_half",
+        h1_buyout_plan_rub: "155379879",
+        h2_buyout_plan_rub: "294620121",
+        plan_drr_pct: "6",
+        use_contract_start_date: true,
+        annual_plan_evenly_distributed: false,
+        contract_start_date: "2026-02-01"
+      };
       const isEmbeddedMode = Boolean(config.embedded);
       const configuredInitialTab = normalizePersistedSectionName(config.initial_tab, VALID_TABS, DEFAULT_ACTIVE_TAB);
       let activeJobId = null;
@@ -4725,33 +4737,49 @@
         planReportContractStartDateInput.disabled = !enabled;
       }
 
+      function resolvePlanReportInputs(inputs) {
+        const rawInputs = inputs && typeof inputs === "object" ? inputs : {};
+        const period = String(rawInputs.period || "").trim();
+        const h1Plan = sanitizePersistedPlanInputValue(rawInputs.h1_buyout_plan_rub);
+        const h2Plan = sanitizePersistedPlanInputValue(rawInputs.h2_buyout_plan_rub);
+        const planDrr = sanitizePersistedPlanInputValue(rawInputs.plan_drr_pct);
+        const useContractStart = rawInputs.use_contract_start_date === true;
+        const contractStartDate = sanitizePersistedPlanDateValue(rawInputs.contract_start_date);
+        const annualEven = rawInputs.annual_plan_evenly_distributed === true;
+        const valid = (
+          VALID_PLAN_REPORT_PERIODS.has(period) &&
+          Boolean(h1Plan) &&
+          Boolean(h2Plan) &&
+          Boolean(planDrr) &&
+          (!useContractStart || Boolean(contractStartDate))
+        );
+        if (!valid) {
+          return { ...PLAN_REPORT_DEFAULT_INPUTS };
+        }
+        return {
+          period,
+          h1_buyout_plan_rub: h1Plan,
+          h2_buyout_plan_rub: h2Plan,
+          plan_drr_pct: planDrr,
+          use_contract_start_date: useContractStart,
+          annual_plan_evenly_distributed: annualEven,
+          contract_start_date: contractStartDate
+        };
+      }
+
       function restorePlanReportInputs(storageState) {
         const rawState = storageState && typeof storageState === "object" ? storageState : {};
         const inputs = rawState.plan_report_inputs && typeof rawState.plan_report_inputs === "object"
           ? rawState.plan_report_inputs
           : {};
-        const period = String(inputs.period || "").trim();
-        if (VALID_PLAN_REPORT_PERIODS.has(period)) {
-          planReportPeriodSelect.value = period;
-        }
-        const h1Plan = sanitizePersistedPlanInputValue(inputs.h1_buyout_plan_rub);
-        const h2Plan = sanitizePersistedPlanInputValue(inputs.h2_buyout_plan_rub);
-        const planDrr = sanitizePersistedPlanInputValue(inputs.plan_drr_pct);
-        if (h1Plan) {
-          planReportH1Input.value = h1Plan;
-        }
-        if (h2Plan) {
-          planReportH2Input.value = h2Plan;
-        }
-        if (planDrr) {
-          planReportDrrInput.value = planDrr;
-        }
-        const contractStartDate = sanitizePersistedPlanDateValue(inputs.contract_start_date);
-        planReportContractStartCheckbox.checked = inputs.use_contract_start_date === true && Boolean(contractStartDate);
-        if (contractStartDate) {
-          planReportContractStartDateInput.value = contractStartDate;
-        }
-        planReportAnnualEvenCheckbox.checked = inputs.annual_plan_evenly_distributed === true;
+        const resolved = resolvePlanReportInputs(inputs);
+        planReportPeriodSelect.value = resolved.period;
+        planReportH1Input.value = resolved.h1_buyout_plan_rub;
+        planReportH2Input.value = resolved.h2_buyout_plan_rub;
+        planReportDrrInput.value = resolved.plan_drr_pct;
+        planReportContractStartCheckbox.checked = resolved.use_contract_start_date === true;
+        planReportContractStartDateInput.value = resolved.contract_start_date || PLAN_REPORT_DEFAULT_INPUTS.contract_start_date;
+        planReportAnnualEvenCheckbox.checked = resolved.annual_plan_evenly_distributed === true;
         setContractStartInputEnabled(planReportContractStartCheckbox.checked);
       }
 
@@ -5824,6 +5852,19 @@
         return [start + " - " + end, days].filter(Boolean).join(" · ");
       }
 
+      function formatPlanPeriodRange(periodBlock) {
+        if (!periodBlock || !periodBlock.is_target_period) {
+          return formatDateRange(
+            periodBlock && periodBlock.date_from,
+            periodBlock && periodBlock.date_to,
+            periodBlock && periodBlock.day_count
+          );
+        }
+        const factRange = formatDateRange(periodBlock.fact_date_from, periodBlock.fact_date_to, periodBlock.fact_day_count);
+        const targetRange = formatDateRange(periodBlock.target_date_from, periodBlock.target_date_to, periodBlock.target_day_count);
+        return "Факт: " + factRange + " · Цель: " + targetRange;
+      }
+
       function planStatusBadgeClass(status) {
         if (status === "ok" || status === "alert" || status === "unknown" || status === "partial") {
           return "plan-report-status-badge is-" + status;
@@ -5849,6 +5890,17 @@
         return parts.join(" ");
       }
 
+      function renderPlanMetricLabel(metric) {
+        const baseLabel = escapeHtml(metric.label || "-");
+        if (metric.entity_key !== "ads_sum_rub" || !metric.ads_plan_base_label) {
+          return baseLabel;
+        }
+        return [
+          baseLabel,
+          "<br><span class=\"field-note\">План: " + escapeHtml(metric.ads_plan_base_label) + ".</span>"
+        ].join("");
+      }
+
       function renderPlanMetricTable(periodBlock) {
         const metrics = periodBlock && periodBlock.metrics ? periodBlock.metrics : {};
         const rows = [
@@ -5863,13 +5915,14 @@
         return [
           note ? "<p class=\"field-note\">" + escapeHtml(note) + "</p>" : "",
           "<table class=\"plan-report-table\">",
-          "<thead><tr><th>Показатель</th><th>Факт</th><th>План</th><th>Отклонение</th><th>Отклонение %</th></tr></thead>",
+          "<thead><tr><th>Показатель</th><th>Факт</th><th>План</th><th>Выполнение</th><th>Отклонение</th><th>Отклонение %</th></tr></thead>",
           "<tbody>",
           rows.map((metric) => [
             "<tr>",
-            "<td class=\"plan-report-metric-label\">" + escapeHtml(metric.label || "-") + "</td>",
+            "<td class=\"plan-report-metric-label\">" + renderPlanMetricLabel(metric) + "</td>",
             "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatPercentValue(metric.fact) : formatNumber(metric.fact)) + "</td>",
             "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatPercentValue(metric.plan) : formatNumber(metric.plan)) + "</td>",
+            "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? "-" : formatPercentValue(metric.completion_pct)) + "</td>",
             "<td>" + escapeHtml(metric.entity_key === "drr_pct" ? formatSignedPercentPoint(metric.delta_pp) : formatSignedNumber(metric.delta_abs)) + "</td>",
             "<td>" + escapeHtml(formatPctChange(metric.delta_pct)) + "</td>",
             "</tr>"
@@ -5882,7 +5935,7 @@
       function renderPlanReportUnavailable(payload, fallbackMessage) {
         planReportPayload = payload || null;
         planReportPeriod.textContent = "Выберите период и задайте планы H1/H2.";
-        planReportLead.textContent = "Факт считается server-side из accepted closed-day snapshots fin_buyout_rub и ads_sum; план распределяется по выбранному режиму расчёта.";
+        planReportLead.textContent = "Факт считается server-side из accepted closed-day snapshots fin_buyout_rub и ads_sum; выполнение считается как факт / план, а рекламный план берёт больший из планового и фактического оборота.";
         planReportStatus.textContent = valueOrDash((payload && payload.reason) || fallbackMessage || "Отчёт выполнения плана пока недоступен.");
         planReportStatus.className = "section-message is-error";
         planReportContent.hidden = true;
@@ -5918,7 +5971,7 @@
           ? " План распределяется равномерно по годовому плану H1+H2."
           : " План распределяется по календарным дням H1/H2.";
         planReportPeriod.textContent = "Последний закрытый день: " + formatHumanDate(effectiveAsOfDate) + ". Основной период: " + valueOrDash(payload.selected_period_label) + ".";
-        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". Текущий незакрытый день не входит в расчёт." + planModeNote + contractNote;
+        planReportLead.textContent = "Active SKU в current config: " + valueOrDash(payload.active_sku_count) + ". Текущий незакрытый день не входит в расчёт. Выполнение оборота и рекламы считается как факт / план. План рекламы = DRR от большего из планового и фактического оборота." + planModeNote + contractNote;
         if (payload.status === "available") {
           planReportStatus.textContent = "Source of truth: accepted closed-day runtime snapshots fin_report_daily + ads_compact.";
           planReportStatus.className = "section-message";
@@ -5928,10 +5981,10 @@
         }
         planReportContent.hidden = false;
         planReportSelectedTitle.textContent = valueOrDash(selectedPeriod.label) === "-" ? "Основной период" : String(selectedPeriod.label);
-        planReportSelectedRange.textContent = formatDateRange(selectedPeriod.date_from, selectedPeriod.date_to, selectedPeriod.day_count);
-        planReportMtdRange.textContent = formatDateRange(mtd.date_from, mtd.date_to, mtd.day_count);
-        planReportQtdRange.textContent = formatDateRange(qtd.date_from, qtd.date_to, qtd.day_count);
-        planReportYtdRange.textContent = formatDateRange(ytd.date_from, ytd.date_to, ytd.day_count);
+        planReportSelectedRange.textContent = formatPlanPeriodRange(selectedPeriod);
+        planReportMtdRange.textContent = formatPlanPeriodRange(mtd);
+        planReportQtdRange.textContent = formatPlanPeriodRange(qtd);
+        planReportYtdRange.textContent = formatPlanPeriodRange(ytd);
         planReportSelectedTable.innerHTML = renderPlanMetricTable(selectedPeriod);
         planReportMtdTable.innerHTML = renderPlanMetricTable(mtd);
         planReportQtdTable.innerHTML = renderPlanMetricTable(qtd);
