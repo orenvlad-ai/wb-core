@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-38-WEBCORE-DATA-MCP-BLOCK"
 doc_type: "module"
 status: "repo_implemented_private_loopback_live_gated"
 purpose: "Зафиксировать отдельный read-only MCP gateway для безопасного доступа ChatGPT Project/custom app к business data `wb-core`."
-scope: "Standalone HTTP MCP server over allowlisted read-only business tools: freshness, search, metric source explanation, cached WB supplies, supplier shipments, factory-order state, persisted stock/SKU snapshots and explicit revenue ambiguity handling. No arbitrary SQL, shell, SSH, upstream sync/backfill, runtime file downloads, secrets or raw payload dumps."
+scope: "Standalone HTTP MCP server over allowlisted read-only business tools: freshness, search, universal persisted ready-snapshot metrics by key/label/date/SKU, metric source explanation, cached WB supplies, supplier shipments, factory-order state, persisted stock/SKU snapshots and explicit revenue ambiguity handling. No arbitrary SQL, shell, SSH, upstream sync/backfill, runtime file downloads, secrets or raw payload dumps."
 source_basis:
   - "packages/application/webcore_data_mcp.py"
   - "apps/webcore_data_mcp_server.py"
@@ -51,7 +51,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path."
+update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. Metric tools project bounded values from persisted DATA_VITRINA ready snapshots, including TOTAL|total_* and SKU:<nm_id>|* rows, without exposing raw plan_json."
 ---
 
 # 1. Identifier and Status
@@ -132,6 +132,10 @@ P0:
 P1:
 
 - `get_latest_factory_order_calculation`
+- `list_metrics`
+- `get_metric_values`
+- `get_snapshot_metrics`
+- `get_available_metric_dates`
 - `get_stock_report`
 - `get_sku_snapshot`
 - `get_revenue_by_date`
@@ -243,9 +247,26 @@ Stock/SKU snapshots:
 
 Reads persisted ready snapshots and metric/config/nomenclature identity. It never triggers refresh.
 
+Universal metrics:
+
+Reads only `sheet_vitrina_v1_ready_snapshots.plan_json` through bounded projections. The supported current ready-snapshot layout is `sheets[].sheet_name = DATA_VITRINA` with header columns `label`, `key` and date columns such as `YYYY-MM-DD`; metric rows use projection keys such as:
+
+- `TOTAL|total_orderSum` for total-level metrics;
+- `SKU:<nm_id>|orderSum` for SKU/nmId-level metrics;
+- `GROUP:<group>|...` if group-like rows are present.
+
+The MCP returns rows with date, metric key, Russian label, level/scope, SKU/group identity when present, scalar value, format/unit, source snapshot id, refreshed timestamp, source table and a safe projection label. It never returns raw `plan_json`, raw `STATUS` sheet payloads, arbitrary JSON blobs, file paths, secrets or unbounded row dumps.
+
+Universal metric tools:
+
+- `list_metrics(query?, section?, scope?, limit?)`: combines `registry_upload_metrics_v2` with latest ready-snapshot coverage hints and Russian labels.
+- `get_metric_values(metric_key_or_label, date?, date_from?, date_to?, sku_or_nm_id?, group_by?, limit?)`: primary tool for any known metric by key or Russian label over a bounded date/date-range.
+- `get_snapshot_metrics(date, sku_or_nm_id?, metric_query?, limit?)`: bounded list of metric values for one ready-snapshot date.
+- `get_available_metric_dates(metric_key_or_label?)`: ready-snapshot date coverage, optionally filtered by metric.
+
 Revenue:
 
-There is no canonical MCP-level revenue metric yet. Without explicit `revenue_metric`, revenue tools return `ambiguous_revenue_metric` with candidate metric keys and no fabricated totals.
+There is no canonical MCP-level revenue metric yet. Without explicit `revenue_metric`, revenue tools return `ambiguous_revenue_metric` with candidate metric keys and no fabricated totals. When the caller passes an explicit persisted metric such as `total_orderSum`, revenue tools use the universal ready-snapshot metric extractor and can answer total order-sum questions for dates covered by `DATA_VITRINA`.
 
 # 9. Smokes
 
@@ -262,6 +283,8 @@ The smoke proves:
 - all P0/P1 tools work on a fixture DB;
 - redaction removes paths/storage-state markers;
 - revenue ambiguity is explicit;
+- universal metric projection reads the `DATA_VITRINA` layout and returns `total_orderSum`;
+- OAuth-auth MCP can call `get_metric_values(total_orderSum, date)`;
 - no sync/backfill/refresh/write tools are reachable.
 
 # 10. Live Publication Gate

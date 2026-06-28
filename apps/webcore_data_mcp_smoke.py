@@ -83,11 +83,16 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("rank_supplier_shipments_by_unit_cost", {"limit": 5}),
         ("get_supplier_shipment_details", {"shipment_id": "SHIP-1"}),
         ("get_latest_factory_order_calculation", {}),
+        ("list_metrics", {"query": "Сумма заказов", "limit": 10}),
+        ("list_metrics", {"query": "total_orderSum", "limit": 10}),
+        ("get_available_metric_dates", {"metric_key_or_label": "total_orderSum"}),
+        ("get_snapshot_metrics", {"date": "2026-06-26", "metric_query": "Сумма заказов", "limit": 10}),
+        ("get_metric_values", {"metric_key_or_label": "total_orderSum", "date": "2026-06-26", "limit": 10}),
         ("get_stock_report", {"date": "2026-06-26", "sku_or_nm_id": "210183142"}),
         ("get_sku_snapshot", {"sku_or_nm_id": "210183142", "date": "2026-06-26"}),
         ("get_revenue_by_date", {"date": "2026-06-26"}),
-        ("get_revenue_by_date", {"date": "2026-06-26", "sku_or_nm_id": "210183142", "revenue_metric": "orders_revenue_rub"}),
-        ("get_revenue_range", {"date_from": "2026-06-25", "date_to": "2026-06-26", "group_by": "date", "revenue_metric": "orders_revenue_rub"}),
+        ("get_revenue_by_date", {"date": "2026-06-26", "revenue_metric": "total_orderSum"}),
+        ("get_revenue_range", {"date_from": "2026-06-25", "date_to": "2026-06-26", "group_by": "date", "revenue_metric": "total_orderSum"}),
     ]
     for name, args in calls:
         result = gateway.call_tool(name, args, identity="smoke")
@@ -97,6 +102,13 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         if name == "get_revenue_by_date" and not args.get("revenue_metric"):
             if result.get("status") != "ambiguous_revenue_metric":
                 raise AssertionError(f"revenue ambiguity not explicit: {result}")
+        if name in {"get_metric_values", "get_revenue_by_date"} and args.get("metric_key_or_label") == "total_orderSum":
+            rows = result.get("rows") or result.get("values") or []
+            if not rows or rows[0].get("value") != 1000.0:
+                raise AssertionError(f"total_orderSum projection failed: {result}")
+        if name == "get_revenue_by_date" and args.get("revenue_metric") == "total_orderSum":
+            if result.get("status") != "ok" or not result.get("values"):
+                raise AssertionError(f"total_orderSum revenue projection failed: {result}")
     unknown = gateway.call_tool("explain_metric_source", {"metric_key": "not_real_metric"}, identity="smoke")
     if unknown.get("status") != "metric_not_found":
         raise AssertionError(f"metric_not_found expected: {unknown}")
@@ -291,6 +303,22 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         )
         if oauth_call.get("result", {}).get("structuredContent", {}).get("status") != "ok":
             raise AssertionError(f"OAuth tool call failed: {oauth_call}")
+        oauth_metric_call = _post_json(
+            f"{base_url}{DEFAULT_MCP_PATH}",
+            {
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_metric_values",
+                    "arguments": {"metric_key_or_label": "total_orderSum", "date": "2026-06-26", "limit": 10},
+                },
+            },
+            headers=oauth_headers,
+        )
+        metric_content = oauth_metric_call.get("result", {}).get("structuredContent", {})
+        if metric_content.get("status") != "ok" or not metric_content.get("rows"):
+            raise AssertionError(f"OAuth metric projection failed: {oauth_metric_call}")
     finally:
         server.shutdown()
         server.server_close()
@@ -579,18 +607,26 @@ def _create_fixture_db(db_path: Path) -> None:
         )
         plan_json = json.dumps(
             {
-                "sku_snapshots": [
+                "as_of_date": "2026-06-26",
+                "date_columns": ["2026-06-26", "2026-06-27"],
+                "metadata": {"fixture": "webcore_data_mcp_smoke"},
+                "sheets": [
                     {
-                        "nm_id": "210183142",
-                        "sku": "SKU-1",
-                        "metrics": {
-                            "orders_revenue_rub": 1000.0,
-                            "fin_buyout_rub": 820.0,
-                            "stock_qty": 42,
-                        },
-                    }
+                        "sheet_name": "DATA_VITRINA",
+                        "header": ["label", "key", "2026-06-26", "2026-06-27"],
+                        "rows": [
+                            ["Итого: Сумма заказов всего", "TOTAL|total_orderSum", 1000.0, 1200.0],
+                            ["SKU-1: Сумма заказов", "SKU:210183142|orderSum", 1000.0, 1200.0],
+                            ["SKU-1: Выкуп", "SKU:210183142|fin_buyout_rub", 820.0, 900.0],
+                            ["SKU-1: Остатки", "SKU:210183142|stock_qty", 42, 41],
+                        ],
+                    },
+                    {
+                        "sheet_name": "STATUS",
+                        "header": ["source_key", "kind", "freshness", "snapshot_date", "note"],
+                        "rows": [["stocks", "source", "ok", "2026-06-26", "fixture"]],
+                    },
                 ],
-                "totals": {"metrics": {"orders_revenue_rub": 1000.0, "stock_qty": 42}},
             },
             ensure_ascii=False,
         )
@@ -601,6 +637,8 @@ def _create_fixture_db(db_path: Path) -> None:
         conn.executemany(
             "INSERT INTO registry_upload_metrics_v2 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
+                ("bundle-v1", "total_orderSum", 1, "total", "Сумма заказов всего", "source", "sales_funnel_history.orders", 1, "rub", 0, "sales"),
+                ("bundle-v1", "orderSum", 1, "sku", "Сумма заказов", "source", "sales_funnel_history.orders", 1, "rub", 1, "sales"),
                 ("bundle-v1", "orders_revenue_rub", 1, "sku", "Orders revenue", "source", "sales_funnel_history.orders", 1, "rub", 1, "sales"),
                 ("bundle-v1", "fin_buyout_rub", 1, "sku", "Buyout revenue", "source", "fin_report_daily.buyout", 1, "rub", 2, "finance"),
                 ("bundle-v1", "stock_qty", 1, "sku", "Stock qty", "source", "stocks.qty", 1, "number", 3, "stock"),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -32,6 +32,10 @@ APPROVED_TOOL_NAMES = (
     "rank_supplier_shipments_by_unit_cost",
     "get_supplier_shipment_details",
     "get_latest_factory_order_calculation",
+    "list_metrics",
+    "get_metric_values",
+    "get_snapshot_metrics",
+    "get_available_metric_dates",
     "get_stock_report",
     "get_sku_snapshot",
     "get_revenue_by_date",
@@ -202,6 +206,34 @@ class WebCoreDataMcpGateway:
             return self.get_supplier_shipment_details(shipment_id=_required_str(args, "shipment_id", max_length=120))
         if name == "get_latest_factory_order_calculation":
             return self.get_latest_factory_order_calculation()
+        if name == "list_metrics":
+            return self.list_metrics(
+                query=_optional_str(args.get("query"), max_length=160),
+                section=_optional_str(args.get("section"), max_length=120),
+                scope=_optional_str(args.get("scope"), max_length=60),
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+            )
+        if name == "get_metric_values":
+            return self.get_metric_values(
+                metric_key_or_label=_required_str(args, "metric_key_or_label", max_length=180),
+                date_value=_optional_date(args.get("date")),
+                date_from=_optional_date(args.get("date_from")),
+                date_to=_optional_date(args.get("date_to")),
+                sku_or_nm_id=_optional_str(args.get("sku_or_nm_id"), max_length=120),
+                group_by=_optional_str(args.get("group_by"), max_length=40),
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+            )
+        if name == "get_snapshot_metrics":
+            return self.get_snapshot_metrics(
+                date_value=_required_date(args, "date"),
+                sku_or_nm_id=_optional_str(args.get("sku_or_nm_id"), max_length=120),
+                metric_query=_optional_str(args.get("metric_query"), max_length=160),
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+            )
+        if name == "get_available_metric_dates":
+            return self.get_available_metric_dates(
+                metric_key_or_label=_optional_str(args.get("metric_key_or_label"), max_length=180),
+            )
         if name == "get_stock_report":
             return self.get_stock_report(
                 date_value=_optional_date(args.get("date")),
@@ -539,6 +571,248 @@ class WebCoreDataMcpGateway:
                 "no_recalculation": True,
             }
 
+    def list_metrics(
+        self,
+        *,
+        query: str | None = None,
+        section: str | None = None,
+        scope: str | None = None,
+        limit: int,
+    ) -> dict[str, Any]:
+        query_text = (query or "").strip()
+        section_text = (section or "").strip()
+        scope_text = (scope or "").strip()
+        with self._connect() as conn:
+            registry = self._metric_catalog(conn)
+            latest_snapshot = self._ready_snapshot(conn, None)
+            snapshot_catalog = (
+                _snapshot_metric_catalog(_safe_json_loads(latest_snapshot.get("plan_json")))
+                if latest_snapshot
+                else {}
+            )
+            merged: dict[str, dict[str, Any]] = {}
+            for metric_key, meta in registry.items():
+                item = {
+                    "metric_key": metric_key,
+                    "label_ru": meta.get("label_ru") or metric_key,
+                    "scope": meta.get("scope") or "",
+                    "section_name": meta.get("section_name") or "",
+                    "format_name": meta.get("format_name") or "",
+                    "enabled": meta.get("enabled"),
+                    "source": "registry_upload_metrics_v2",
+                    "coverage_levels": [],
+                    "latest_snapshot_date": latest_snapshot.get("as_of_date") if latest_snapshot else None,
+                    "latest_value_present": False,
+                }
+                if metric_key in snapshot_catalog:
+                    coverage = snapshot_catalog[metric_key]
+                    item["coverage_levels"] = coverage.get("levels", [])
+                    item["latest_value_present"] = bool(coverage.get("value_count"))
+                    item["sample_projection_keys"] = coverage.get("sample_projection_keys", [])
+                    item["sample_labels"] = coverage.get("sample_labels", [])
+                merged[metric_key] = item
+            for metric_key, coverage in snapshot_catalog.items():
+                if metric_key in merged:
+                    continue
+                labels = coverage.get("sample_labels") or []
+                merged[metric_key] = {
+                    "metric_key": metric_key,
+                    "label_ru": labels[0] if labels else metric_key,
+                    "scope": ",".join(coverage.get("levels", [])),
+                    "section_name": "",
+                    "format_name": "",
+                    "enabled": None,
+                    "source": "sheet_vitrina_v1_ready_snapshots",
+                    "coverage_levels": coverage.get("levels", []),
+                    "latest_snapshot_date": latest_snapshot.get("as_of_date") if latest_snapshot else None,
+                    "latest_value_present": bool(coverage.get("value_count")),
+                    "sample_projection_keys": coverage.get("sample_projection_keys", []),
+                    "sample_labels": labels[:5],
+                }
+            rows = [
+                item
+                for item in merged.values()
+                if _matches_metric_filter(item, query=query_text, section=section_text, scope=scope_text)
+            ]
+            rows.sort(key=lambda item: (_enabled_sort_value(item.get("enabled")), str(item.get("section_name") or ""), str(item.get("metric_key") or "")))
+            truncated = len(rows) > limit
+            return {
+                "status": "ok",
+                "source_tables": ["registry_upload_metrics_v2", "sheet_vitrina_v1_ready_snapshots"],
+                "query": query,
+                "section": section,
+                "scope": scope,
+                "latest_ready_snapshot": _snapshot_meta(latest_snapshot),
+                "limit": limit,
+                "truncated": truncated,
+                "rows": rows[:limit],
+            }
+
+    def get_metric_values(
+        self,
+        *,
+        metric_key_or_label: str,
+        date_value: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        sku_or_nm_id: str | None = None,
+        group_by: str | None = None,
+        limit: int,
+    ) -> dict[str, Any]:
+        if date_value and (date_from or date_to):
+            raise WebCoreDataMcpError("pass either date or date_from/date_to, not both", code="invalid_date_range")
+        if date_value:
+            effective_from = effective_to = date_value
+        elif date_from or date_to:
+            if not date_from or not date_to:
+                raise WebCoreDataMcpError("date_from and date_to must be provided together", code="invalid_date_range")
+            effective_from, effective_to = date_from, date_to
+        else:
+            with self._connect() as conn:
+                effective_from = effective_to = self._latest_metric_default_date(conn)
+        _validate_date_range(effective_from, effective_to, max_days=MAX_DATE_RANGE_DAYS)
+        normalized_group_by = group_by or ""
+        if normalized_group_by and normalized_group_by not in {"date", "metric", "sku", "total"}:
+            raise WebCoreDataMcpError("group_by must be one of: date, metric, sku, total", code="invalid_group_by")
+        with self._connect() as conn:
+            metric_keys, metric_query, candidates = self._resolve_metric_selector(conn, metric_key_or_label)
+            rows, source_snapshots, truncated = self._metric_rows_for_range(
+                conn,
+                date_from=effective_from,
+                date_to=effective_to,
+                metric_keys=metric_keys,
+                metric_query=metric_query,
+                sku_or_nm_id=sku_or_nm_id,
+                limit=limit,
+            )
+        if rows:
+            status = "ok"
+        elif candidates:
+            status = "projection_unavailable"
+        else:
+            status = "metric_not_found"
+        result: dict[str, Any] = {
+            "status": status,
+            "metric_key_or_label": metric_key_or_label,
+            "resolved_metric_keys": sorted({str(row.get("metric_key")) for row in rows if row.get("metric_key")})[:50],
+            "candidate_metrics": candidates[:20],
+            "date_from": effective_from,
+            "date_to": effective_to,
+            "sku_or_nm_id": sku_or_nm_id,
+            "source_table": "sheet_vitrina_v1_ready_snapshots",
+            "source_snapshots": source_snapshots[:20],
+            "limit": limit,
+            "truncated": truncated,
+            "rows": rows,
+            "row_count": len(rows),
+            "caveat": "" if rows else "Metric dictionary/ready snapshot evidence exists, but no bounded projected values matched the requested date/SKU.",
+        }
+        if normalized_group_by:
+            result["group_by"] = normalized_group_by
+            result["buckets"] = _group_metric_rows(rows, normalized_group_by)
+        return result
+
+    def get_snapshot_metrics(
+        self,
+        *,
+        date_value: str,
+        sku_or_nm_id: str | None = None,
+        metric_query: str | None = None,
+        limit: int,
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            rows, source_snapshots, truncated = self._metric_rows_for_range(
+                conn,
+                date_from=date_value,
+                date_to=date_value,
+                metric_keys=set(),
+                metric_query=metric_query,
+                sku_or_nm_id=sku_or_nm_id,
+                limit=limit,
+            )
+        return {
+            "status": "ok" if rows else "date_not_found_or_no_metric_values",
+            "date": date_value,
+            "sku_or_nm_id": sku_or_nm_id,
+            "metric_query": metric_query,
+            "source_table": "sheet_vitrina_v1_ready_snapshots",
+            "source_snapshots": source_snapshots[:20],
+            "limit": limit,
+            "truncated": truncated,
+            "rows": rows,
+            "row_count": len(rows),
+        }
+
+    def get_available_metric_dates(self, *, metric_key_or_label: str | None = None) -> dict[str, Any]:
+        with self._connect() as conn:
+            if not _table_exists(conn, "sheet_vitrina_v1_ready_snapshots"):
+                return _missing_table_result("sheet_vitrina_v1_ready_snapshots")
+            metric_keys: set[str] = set()
+            metric_query: str | None = None
+            candidates: list[dict[str, Any]] = []
+            if metric_key_or_label:
+                metric_keys, metric_query, candidates = self._resolve_metric_selector(conn, metric_key_or_label)
+            rows = conn.execute(
+                """
+                SELECT as_of_date, snapshot_id, refreshed_at, plan_json
+                FROM sheet_vitrina_v1_ready_snapshots
+                ORDER BY as_of_date DESC, refreshed_at DESC
+                """
+            ).fetchall()
+            metric_meta = self._metric_catalog(conn)
+            sku_meta = self._sku_catalog(conn)
+            dates: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                snapshot = _row_dict(row)
+                payload = _safe_json_loads(snapshot.get("plan_json"))
+                if metric_key_or_label:
+                    metric_rows = _extract_ready_snapshot_metric_rows(
+                        payload,
+                        metric_keys=metric_keys,
+                        metric_query=metric_query,
+                        sku_or_nm_id=None,
+                        date_from=None,
+                        date_to=None,
+                        metric_meta=metric_meta,
+                        sku_meta=sku_meta,
+                        snapshot=snapshot,
+                        limit=1000,
+                    )
+                    for metric_row in metric_rows:
+                        date_key = str(metric_row.get("date") or "")
+                        if date_key:
+                            dates.setdefault(
+                                date_key,
+                                {
+                                    "date": date_key,
+                                    "source_snapshot_id": metric_row.get("source_snapshot_id"),
+                                    "refreshed_at": metric_row.get("refreshed_at"),
+                                    "source_as_of_date": metric_row.get("source_as_of_date"),
+                                },
+                            )
+                else:
+                    for date_key in _snapshot_date_columns(payload, fallback=snapshot.get("as_of_date")):
+                        dates.setdefault(
+                            date_key,
+                            {
+                                "date": date_key,
+                                "source_snapshot_id": snapshot.get("snapshot_id"),
+                                "refreshed_at": snapshot.get("refreshed_at"),
+                                "source_as_of_date": snapshot.get("as_of_date"),
+                            },
+                        )
+            sorted_dates = [dates[key] for key in sorted(dates.keys(), reverse=True)]
+            truncated = len(sorted_dates) > 200
+            return {
+                "status": "ok" if sorted_dates else ("projection_unavailable" if candidates else "metric_not_found"),
+                "metric_key_or_label": metric_key_or_label,
+                "candidate_metrics": candidates[:20],
+                "source_table": "sheet_vitrina_v1_ready_snapshots",
+                "dates": sorted_dates[:200],
+                "date_count": len(sorted_dates),
+                "truncated": truncated,
+            }
+
     def get_stock_report(self, *, date_value: str | None = None, sku_or_nm_id: str | None = None) -> dict[str, Any]:
         with self._connect() as conn:
             snapshot = self._ready_snapshot(conn, date_value)
@@ -550,8 +824,19 @@ class WebCoreDataMcpGateway:
                     "source": "sheet_vitrina_v1_ready_snapshots",
                     "stocks_freshness": stocks_freshness,
                 }
-            payload = _safe_json_loads(snapshot.get("plan_json"))
-            stock_metrics = _extract_named_metrics(payload, sku_or_nm_id, name_markers=("stock", "остат", "qty"))
+            target_date = date_value or str(snapshot.get("as_of_date") or "")
+            stock_metrics, _, _ = self._metric_rows_for_range(
+                conn,
+                date_from=target_date,
+                date_to=target_date,
+                metric_keys=set(),
+                metric_query="stock",
+                sku_or_nm_id=sku_or_nm_id,
+                limit=50,
+            )
+            if not stock_metrics:
+                payload = _safe_json_loads(snapshot.get("plan_json"))
+                stock_metrics = _extract_named_metrics(payload, sku_or_nm_id, name_markers=("stock", "остат", "qty"))
             return {
                 "status": "ok" if stock_metrics else "structured_stock_projection_unavailable",
                 "date": snapshot.get("as_of_date"),
@@ -569,7 +854,18 @@ class WebCoreDataMcpGateway:
             snapshot = self._ready_snapshot(conn, date_value)
             metrics: list[dict[str, Any]] = []
             if snapshot is not None:
-                metrics = _extract_named_metrics(_safe_json_loads(snapshot.get("plan_json")), sku_or_nm_id, name_markers=())
+                target_date = date_value or str(snapshot.get("as_of_date") or "")
+                metrics, _, _ = self._metric_rows_for_range(
+                    conn,
+                    date_from=target_date,
+                    date_to=target_date,
+                    metric_keys=set(),
+                    metric_query=None,
+                    sku_or_nm_id=sku_or_nm_id,
+                    limit=80,
+                )
+                if not metrics:
+                    metrics = _extract_named_metrics(_safe_json_loads(snapshot.get("plan_json")), sku_or_nm_id, name_markers=())
             return {
                 "status": "ok" if identity or metrics else "not_found",
                 "sku_or_nm_id": sku_or_nm_id,
@@ -591,15 +887,27 @@ class WebCoreDataMcpGateway:
         if not revenue_metric:
             return self._ambiguous_revenue_metric(date_from=date_value, date_to=date_value)
         with self._connect() as conn:
-            values = self._metric_values_for_date(conn, date_value, revenue_metric, sku_or_nm_id)
+            metric_keys, metric_query, candidates = self._resolve_metric_selector(conn, revenue_metric)
+            values, source_snapshots, truncated = self._metric_rows_for_range(
+                conn,
+                date_from=date_value,
+                date_to=date_value,
+                metric_keys=metric_keys,
+                metric_query=metric_query,
+                sku_or_nm_id=sku_or_nm_id,
+                limit=100,
+            )
             return {
-                "status": "ok" if values else "metric_projection_unavailable",
+                "status": "ok" if values else ("metric_projection_unavailable" if candidates else "metric_not_found"),
                 "date": date_value,
                 "sku_or_nm_id": sku_or_nm_id,
                 "revenue_metric": revenue_metric,
+                "candidate_metrics": candidates[:20],
+                "source_snapshots": source_snapshots[:20],
+                "truncated": truncated,
                 "values": values,
                 "source": "sheet_vitrina_v1_ready_snapshots",
-                "caveat": "" if values else "Metric was requested explicitly, but the MVP extractor could not find it in persisted ready snapshots without raw payload exposure.",
+                "caveat": "" if values else "Metric was requested explicitly, but no bounded projected value matched the requested date/SKU in persisted ready snapshots.",
             }
 
     def get_revenue_range(
@@ -615,43 +923,33 @@ class WebCoreDataMcpGateway:
             raise WebCoreDataMcpError("group_by must be one of: date, sku, total", code="invalid_group_by")
         if not revenue_metric:
             return self._ambiguous_revenue_metric(date_from=date_from, date_to=date_to)
-        buckets: dict[str, float] = {}
-        values: list[dict[str, Any]] = []
         with self._connect() as conn:
             if not _table_exists(conn, "sheet_vitrina_v1_ready_snapshots"):
                 return _missing_table_result("sheet_vitrina_v1_ready_snapshots")
-            for row in conn.execute(
-                """
-                SELECT as_of_date, snapshot_id, refreshed_at, plan_json
-                FROM sheet_vitrina_v1_ready_snapshots
-                WHERE as_of_date >= ? AND as_of_date <= ?
-                ORDER BY as_of_date
-                """,
-                (date_from, date_to),
-            ).fetchall():
-                date_key = str(row["as_of_date"])
-                extracted = _extract_metric_values(_safe_json_loads(row["plan_json"]), revenue_metric, sku_or_nm_id=None)
-                for item in extracted:
-                    metric_value = item.get("value")
-                    if not isinstance(metric_value, (int, float)):
-                        continue
-                    bucket = "total"
-                    if group_by == "date":
-                        bucket = date_key
-                    elif group_by == "sku":
-                        bucket = str(item.get("nm_id") or item.get("sku") or "unknown")
-                    buckets[bucket] = buckets.get(bucket, 0.0) + float(metric_value)
-                values.extend({"date": date_key, **item} for item in extracted[:50])
+            metric_keys, metric_query, candidates = self._resolve_metric_selector(conn, revenue_metric)
+            values, source_snapshots, truncated = self._metric_rows_for_range(
+                conn,
+                date_from=date_from,
+                date_to=date_to,
+                metric_keys=metric_keys,
+                metric_query=metric_query,
+                sku_or_nm_id=None,
+                limit=100,
+            )
+        buckets = _group_metric_rows(values, group_by)
         return {
-            "status": "ok" if buckets else "metric_projection_unavailable",
+            "status": "ok" if buckets else ("metric_projection_unavailable" if candidates else "metric_not_found"),
             "date_from": date_from,
             "date_to": date_to,
             "group_by": group_by,
             "revenue_metric": revenue_metric,
-            "buckets": [{"key": key, "value": value} for key, value in sorted(buckets.items())],
+            "candidate_metrics": candidates[:20],
+            "source_snapshots": source_snapshots[:20],
+            "buckets": buckets,
             "sample_values": values[:50],
+            "truncated": truncated,
             "range_limit_days": MAX_DATE_RANGE_DAYS,
-            "caveat": "" if buckets else "Metric was requested explicitly, but the MVP extractor could not find it in persisted ready snapshots without raw payload exposure.",
+            "caveat": "" if buckets else "Metric was requested explicitly, but no bounded projected value matched the requested date range in persisted ready snapshots.",
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -1063,6 +1361,146 @@ class WebCoreDataMcpGateway:
                 identity["nomenclature"] = _row_dict(row)
         return identity
 
+    def _metric_catalog(self, conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+        if not _table_exists(conn, "registry_upload_metrics_v2"):
+            return {}
+        rows = conn.execute(
+            """
+            SELECT metric_key, enabled, scope, label_ru, calc_type, calc_ref, show_in_data,
+                   format_name, display_order, section_name
+            FROM registry_upload_metrics_v2
+            ORDER BY enabled DESC, display_order, metric_key
+            """
+        ).fetchall()
+        catalog: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = _row_dict(row)
+            metric_key = str(item.get("metric_key") or "")
+            if metric_key and metric_key not in catalog:
+                catalog[metric_key] = item
+        return catalog
+
+    def _sku_catalog(self, conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+        if not _table_exists(conn, "registry_upload_config_v2"):
+            return {}
+        rows = conn.execute(
+            """
+            SELECT nm_id, enabled, display_name, group_name, display_order
+            FROM registry_upload_config_v2
+            ORDER BY enabled DESC, display_order, nm_id
+            """
+        ).fetchall()
+        catalog: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = _row_dict(row)
+            nm_id = str(item.get("nm_id") or "")
+            if nm_id and nm_id not in catalog:
+                catalog[nm_id] = item
+        return catalog
+
+    def _resolve_metric_selector(
+        self,
+        conn: sqlite3.Connection,
+        metric_key_or_label: str,
+    ) -> tuple[set[str], str | None, list[dict[str, Any]]]:
+        selector = metric_key_or_label.strip()
+        if not selector:
+            return set(), None, []
+        registry = self._metric_catalog(conn)
+        latest_snapshot = self._ready_snapshot(conn, None)
+        snapshot_catalog = (
+            _snapshot_metric_catalog(_safe_json_loads(latest_snapshot.get("plan_json")))
+            if latest_snapshot
+            else {}
+        )
+        candidates = _metric_selector_candidates(selector, registry, snapshot_catalog)
+        exact_keys = {
+            key
+            for key in (registry.keys() | snapshot_catalog.keys())
+            if key == selector
+        }
+        if exact_keys:
+            return exact_keys, None, candidates
+        label_exact_keys = {
+            str(item.get("metric_key") or "")
+            for item in candidates
+            if str(item.get("label_ru") or "").casefold() == selector.casefold()
+        }
+        label_exact_keys.discard("")
+        if len(label_exact_keys) == 1:
+            return label_exact_keys, None, candidates
+        return set(), selector, candidates
+
+    def _latest_metric_default_date(self, conn: sqlite3.Connection) -> str:
+        snapshot = self._ready_snapshot(conn, None)
+        if not snapshot:
+            return _utc_now()[:10]
+        return str(snapshot.get("as_of_date") or _utc_now()[:10])
+
+    def _ready_snapshots_covering_range(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        date_from: str,
+        date_to: str,
+    ) -> list[dict[str, Any]]:
+        if not _table_exists(conn, "sheet_vitrina_v1_ready_snapshots"):
+            return []
+        snapshot_from = _date_shift(date_from, -1)
+        rows = conn.execute(
+            """
+            SELECT as_of_date, snapshot_id, refreshed_at, plan_json
+            FROM sheet_vitrina_v1_ready_snapshots
+            WHERE as_of_date >= ? AND as_of_date <= ?
+            ORDER BY as_of_date ASC, refreshed_at ASC
+            """,
+            (snapshot_from, date_to),
+        ).fetchall()
+        return [_row_dict(row) for row in rows]
+
+    def _metric_rows_for_range(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        date_from: str,
+        date_to: str,
+        metric_keys: set[str],
+        metric_query: str | None,
+        sku_or_nm_id: str | None,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        metric_meta = self._metric_catalog(conn)
+        sku_meta = self._sku_catalog(conn)
+        source_snapshots: list[dict[str, Any]] = []
+        collected: list[dict[str, Any]] = []
+        for snapshot in self._ready_snapshots_covering_range(conn, date_from=date_from, date_to=date_to):
+            source_snapshots.append(_snapshot_meta(snapshot))
+            collected.extend(
+                _extract_ready_snapshot_metric_rows(
+                    _safe_json_loads(snapshot.get("plan_json")),
+                    metric_keys=metric_keys,
+                    metric_query=metric_query,
+                    sku_or_nm_id=sku_or_nm_id,
+                    date_from=date_from,
+                    date_to=date_to,
+                    metric_meta=metric_meta,
+                    sku_meta=sku_meta,
+                    snapshot=snapshot,
+                    limit=limit + 1,
+                )
+            )
+        deduped = _dedupe_metric_rows(collected)
+        deduped.sort(
+            key=lambda item: (
+                str(item.get("date") or ""),
+                str(item.get("level") or ""),
+                str(item.get("sku_or_nm_id") or ""),
+                str(item.get("metric_key") or ""),
+            )
+        )
+        truncated = len(deduped) > limit
+        return deduped[:limit], source_snapshots, truncated
+
     def _metric_values_for_date(
         self,
         conn: sqlite3.Connection,
@@ -1070,13 +1508,16 @@ class WebCoreDataMcpGateway:
         metric_key: str,
         sku_or_nm_id: str | None,
     ) -> list[dict[str, Any]]:
-        snapshot = self._ready_snapshot(conn, date_value)
-        if not snapshot:
-            return []
-        values = _extract_metric_values(_safe_json_loads(snapshot.get("plan_json")), metric_key, sku_or_nm_id)
-        for value in values:
-            value["snapshot_id"] = snapshot.get("snapshot_id")
-            value["refreshed_at"] = snapshot.get("refreshed_at")
+        metric_keys, metric_query, _ = self._resolve_metric_selector(conn, metric_key)
+        values, _, _ = self._metric_rows_for_range(
+            conn,
+            date_from=date_value,
+            date_to=date_value,
+            metric_keys=metric_keys,
+            metric_query=metric_query,
+            sku_or_nm_id=sku_or_nm_id,
+            limit=100,
+        )
         return values[:100]
 
     def _ambiguous_revenue_metric(self, *, date_from: str, date_to: str) -> dict[str, Any]:
@@ -1124,6 +1565,10 @@ def _tool_definitions() -> list[ToolDefinition]:
         ToolDefinition("rank_supplier_shipments_by_unit_cost", "Use this to rank supplier shipments by available quantity/cost evidence with completeness flags.", _schema({"limit": _int_schema(1, MAX_LIMIT), "status_filter": _string_schema(0, 80)}), scope=SCOPE_SUPPLY_READ),
         ToolDefinition("get_supplier_shipment_details", "Use this for supplier shipment metadata, totals, document statuses and expense summaries. No raw files or paths.", _schema({"shipment_id": _string_schema(1, 120)}, required=["shipment_id"]), scope=SCOPE_SUPPLY_READ),
         ToolDefinition("get_latest_factory_order_calculation", "Use this for the latest factory-order and WB regional calculation state. Does not recalculate.", _schema({}), scope=SCOPE_SUPPLY_READ),
+        ToolDefinition("list_metrics", "Use this when the user asks what business metrics are available by key or Russian label. Returns registry metrics plus ready-snapshot coverage hints.", _schema({"query": _string_schema(0, 160), "section": _string_schema(0, 120), "scope": _string_schema(0, 60), "limit": _int_schema(1, MAX_LIMIT)})),
+        ToolDefinition("get_metric_values", "Use this when the user asks for any metric value by name/key/date/range/SKU, including Russian requests like total order sum for yesterday. Reads persisted ready snapshots only.", _schema({"metric_key_or_label": _string_schema(1, 180), "date": _date_schema(), "date_from": _date_schema(), "date_to": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "group_by": _enum_schema(["date", "metric", "sku", "total"]), "limit": _int_schema(1, MAX_LIMIT)}, required=["metric_key_or_label"])),
+        ToolDefinition("get_snapshot_metrics", "Use this to inspect a bounded list of all projected metric values in a ready snapshot date, optionally filtered by SKU or metric text. Never returns raw snapshot JSON.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "metric_query": _string_schema(0, 160), "limit": _int_schema(1, MAX_LIMIT)}, required=["date"])),
+        ToolDefinition("get_available_metric_dates", "Use this to discover dates available in persisted ready snapshots, optionally for one metric key or Russian label.", _schema({"metric_key_or_label": _string_schema(0, 180)})),
         ToolDefinition("get_stock_report", "Use this for persisted ready-side stock metrics for a date/SKU. Does not refresh data.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120)})),
         ToolDefinition("get_sku_snapshot", "Use this for SKU identity plus persisted ready snapshot metrics and freshness flags.", _schema({"sku_or_nm_id": _string_schema(1, 120), "date": _date_schema()}, required=["sku_or_nm_id"])),
         ToolDefinition("get_revenue_by_date", "Use this for date/SKU revenue only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "revenue_metric": _string_schema(0, 160)}, required=["date"]), scope=SCOPE_FINANCE_READ),
@@ -1455,6 +1900,385 @@ def _extract_metric_values(value: Any, metric_key: str, sku_or_nm_id: str | None
 
     visit(value, {})
     return _redact(results)
+
+
+def _extract_ready_snapshot_metric_rows(
+    value: Any,
+    *,
+    metric_keys: set[str],
+    metric_query: str | None,
+    sku_or_nm_id: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    metric_meta: Mapping[str, Mapping[str, Any]],
+    sku_meta: Mapping[str, Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    lowered_query = (metric_query or "").casefold().strip()
+    for table in _data_vitrina_tables(value):
+        header = table.get("header") or []
+        body = table.get("rows") or []
+        if not isinstance(header, list) or not isinstance(body, list):
+            continue
+        try:
+            label_idx = header.index("label")
+            key_idx = header.index("key")
+        except ValueError:
+            continue
+        date_columns = [
+            (idx, str(name))
+            for idx, name in enumerate(header)
+            if isinstance(name, str) and _is_date_value(name)
+        ]
+        for row in body:
+            if len(rows) > limit:
+                return rows
+            if not isinstance(row, list) or key_idx >= len(row):
+                continue
+            label = str(row[label_idx] if label_idx < len(row) and row[label_idx] is not None else "")
+            projection_key = str(row[key_idx] or "").strip()
+            if not projection_key:
+                continue
+            parsed = _parse_projection_key(projection_key)
+            metric_key = str(parsed.get("metric_key") or "")
+            if not metric_key:
+                continue
+            if metric_keys and metric_key not in metric_keys and projection_key not in metric_keys:
+                continue
+            meta = metric_meta.get(metric_key) or {}
+            label_ru = str(meta.get("label_ru") or label or metric_key)
+            if lowered_query and not _metric_text_matches(lowered_query, metric_key, projection_key, label_ru, meta):
+                continue
+            row_sku = str(parsed.get("sku_or_nm_id") or "")
+            if sku_or_nm_id and row_sku != str(sku_or_nm_id):
+                continue
+            row_sku_meta = sku_meta.get(row_sku) if row_sku else {}
+            for date_idx, date_key in date_columns:
+                if date_from and date_key < date_from:
+                    continue
+                if date_to and date_key > date_to:
+                    continue
+                if date_idx >= len(row):
+                    continue
+                cell_value = _safe_metric_scalar(row[date_idx])
+                if cell_value is None:
+                    continue
+                rows.append(
+                    {
+                        "date": date_key,
+                        "metric_key": metric_key,
+                        "label_ru": label_ru,
+                        "scope": str(meta.get("scope") or parsed.get("scope") or ""),
+                        "level": str(parsed.get("level") or "unknown"),
+                        "sku_or_nm_id": row_sku or None,
+                        "group_name": parsed.get("group_name") or row_sku_meta.get("group_name"),
+                        "display_name": row_sku_meta.get("display_name") if row_sku_meta else None,
+                        "value": cell_value,
+                        "unit": str(meta.get("format_name") or ""),
+                        "format_name": str(meta.get("format_name") or ""),
+                        "section_name": str(meta.get("section_name") or ""),
+                        "source_snapshot_id": snapshot.get("snapshot_id"),
+                        "source_as_of_date": snapshot.get("as_of_date"),
+                        "refreshed_at": snapshot.get("refreshed_at"),
+                        "source_table": "sheet_vitrina_v1_ready_snapshots",
+                        "projection_label": f"DATA_VITRINA[{projection_key}][{date_key}]",
+                    }
+                )
+        if rows:
+            return rows
+    if not rows and metric_keys:
+        for metric_key in metric_keys:
+            legacy_rows = _extract_metric_values(value, metric_key, sku_or_nm_id)
+            for legacy_row in legacy_rows:
+                if len(rows) > limit:
+                    break
+                metric_value = _safe_metric_scalar(legacy_row.get("value"))
+                if metric_value is None:
+                    continue
+                rows.append(
+                    {
+                        "date": str(snapshot.get("as_of_date") or ""),
+                        "metric_key": metric_key,
+                        "label_ru": str((metric_meta.get(metric_key) or {}).get("label_ru") or metric_key),
+                        "scope": str((metric_meta.get(metric_key) or {}).get("scope") or ""),
+                        "level": "legacy",
+                        "sku_or_nm_id": legacy_row.get("nm_id") or legacy_row.get("sku"),
+                        "group_name": None,
+                        "value": metric_value,
+                        "unit": str((metric_meta.get(metric_key) or {}).get("format_name") or ""),
+                        "format_name": str((metric_meta.get(metric_key) or {}).get("format_name") or ""),
+                        "section_name": str((metric_meta.get(metric_key) or {}).get("section_name") or ""),
+                        "source_snapshot_id": snapshot.get("snapshot_id"),
+                        "source_as_of_date": snapshot.get("as_of_date"),
+                        "refreshed_at": snapshot.get("refreshed_at"),
+                        "source_table": "sheet_vitrina_v1_ready_snapshots",
+                        "projection_label": f"legacy_metrics[{metric_key}]",
+                    }
+                )
+    return rows
+
+
+def _data_vitrina_tables(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return []
+    result: list[dict[str, Any]] = []
+    sheets = value.get("sheets")
+    if isinstance(sheets, list):
+        for sheet in sheets:
+            if not isinstance(sheet, dict):
+                continue
+            name = str(sheet.get("sheet_name") or sheet.get("name") or sheet.get("title") or "")
+            if name != "DATA_VITRINA":
+                continue
+            result.append(
+                {
+                    "header": sheet.get("header") or sheet.get("headers") or sheet.get("columns"),
+                    "rows": sheet.get("rows") or sheet.get("data") or [],
+                }
+            )
+    table = value.get("DATA_VITRINA")
+    if isinstance(table, dict):
+        result.append({"header": table.get("header") or table.get("headers") or table.get("columns"), "rows": table.get("rows") or []})
+    return result
+
+
+def _snapshot_metric_catalog(value: Any) -> dict[str, dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    for table in _data_vitrina_tables(value):
+        header = table.get("header") or []
+        body = table.get("rows") or []
+        if not isinstance(header, list) or not isinstance(body, list):
+            continue
+        try:
+            label_idx = header.index("label")
+            key_idx = header.index("key")
+        except ValueError:
+            continue
+        date_indices = [idx for idx, name in enumerate(header) if isinstance(name, str) and _is_date_value(name)]
+        for row in body:
+            if not isinstance(row, list) or key_idx >= len(row):
+                continue
+            projection_key = str(row[key_idx] or "").strip()
+            if not projection_key:
+                continue
+            parsed = _parse_projection_key(projection_key)
+            metric_key = str(parsed.get("metric_key") or "")
+            if not metric_key:
+                continue
+            item = catalog.setdefault(
+                metric_key,
+                {
+                    "metric_key": metric_key,
+                    "levels": [],
+                    "sample_projection_keys": [],
+                    "sample_labels": [],
+                    "value_count": 0,
+                },
+            )
+            level = str(parsed.get("level") or "unknown")
+            if level not in item["levels"]:
+                item["levels"].append(level)
+            if projection_key not in item["sample_projection_keys"] and len(item["sample_projection_keys"]) < 5:
+                item["sample_projection_keys"].append(projection_key)
+            label = str(row[label_idx] if label_idx < len(row) and row[label_idx] is not None else "")
+            if label and label not in item["sample_labels"] and len(item["sample_labels"]) < 5:
+                item["sample_labels"].append(label)
+            for idx in date_indices:
+                if idx < len(row) and _safe_metric_scalar(row[idx]) is not None:
+                    item["value_count"] += 1
+    return catalog
+
+
+def _snapshot_date_columns(value: Any, *, fallback: Any = None) -> list[str]:
+    dates: list[str] = []
+    if isinstance(value, dict):
+        date_columns = value.get("date_columns")
+        if isinstance(date_columns, list):
+            for item in date_columns:
+                text = str(item)
+                if _is_date_value(text) and text not in dates:
+                    dates.append(text)
+        for table in _data_vitrina_tables(value):
+            header = table.get("header") or []
+            if isinstance(header, list):
+                for item in header:
+                    text = str(item)
+                    if _is_date_value(text) and text not in dates:
+                        dates.append(text)
+    fallback_text = str(fallback or "")
+    if not dates and _is_date_value(fallback_text):
+        dates.append(fallback_text)
+    return sorted(dates)
+
+
+def _parse_projection_key(value: str) -> dict[str, Any]:
+    context, sep, metric_key = value.partition("|")
+    if not sep:
+        return {"metric_key": value, "level": "unknown", "scope": "", "group_name": None, "sku_or_nm_id": None}
+    if context == "TOTAL":
+        return {"metric_key": metric_key, "level": "total", "scope": "total", "group_name": None, "sku_or_nm_id": None}
+    if context.startswith("SKU:"):
+        return {"metric_key": metric_key, "level": "sku", "scope": "sku", "group_name": None, "sku_or_nm_id": context.split(":", 1)[1]}
+    if context.startswith("GROUP:"):
+        return {"metric_key": metric_key, "level": "group", "scope": "group", "group_name": context.split(":", 1)[1], "sku_or_nm_id": None}
+    return {"metric_key": metric_key, "level": context.lower() or "unknown", "scope": context.lower(), "group_name": None, "sku_or_nm_id": None}
+
+
+def _safe_metric_scalar(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if len(text) > 240:
+            return text[:240] + "...[truncated]"
+        return _redact_string(text)
+    return None
+
+
+def _metric_text_matches(
+    lowered_query: str,
+    metric_key: str,
+    projection_key: str,
+    label_ru: str,
+    meta: Mapping[str, Any],
+) -> bool:
+    haystack = " ".join(
+        [
+            metric_key,
+            projection_key,
+            label_ru,
+            str(meta.get("section_name") or ""),
+            str(meta.get("calc_ref") or ""),
+        ]
+    ).casefold()
+    return lowered_query in haystack
+
+
+def _dedupe_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            str(row.get("date") or ""),
+            str(row.get("metric_key") or ""),
+            str(row.get("level") or ""),
+            str(row.get("sku_or_nm_id") or ""),
+            str(row.get("group_name") or ""),
+            str(row.get("projection_label") or ""),
+        )
+        current = latest.get(key)
+        if current is None or str(row.get("refreshed_at") or "") >= str(current.get("refreshed_at") or ""):
+            latest[key] = row
+    return list(latest.values())
+
+
+def _group_metric_rows(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        value = row.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if group_by == "date":
+            key = str(row.get("date") or "")
+        elif group_by == "metric":
+            key = str(row.get("metric_key") or "")
+        elif group_by == "sku":
+            key = str(row.get("sku_or_nm_id") or "total")
+        elif group_by == "total":
+            key = "total"
+        else:
+            key = "unknown"
+        item = buckets.setdefault(key, {"key": key, "value": 0.0, "row_count": 0})
+        item["value"] = float(item["value"]) + float(value)
+        item["row_count"] = int(item["row_count"]) + 1
+    return [buckets[key] for key in sorted(buckets.keys())]
+
+
+def _snapshot_meta(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not snapshot:
+        return {}
+    return {
+        "as_of_date": snapshot.get("as_of_date"),
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "refreshed_at": snapshot.get("refreshed_at"),
+    }
+
+
+def _metric_selector_candidates(
+    selector: str,
+    registry: Mapping[str, Mapping[str, Any]],
+    snapshot_catalog: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    lowered = selector.casefold()
+    candidates: dict[str, dict[str, Any]] = {}
+    for metric_key, meta in registry.items():
+        if lowered in str(metric_key).casefold() or lowered in str(meta.get("label_ru") or "").casefold() or lowered in str(meta.get("section_name") or "").casefold():
+            candidates[metric_key] = {
+                "metric_key": metric_key,
+                "label_ru": meta.get("label_ru") or metric_key,
+                "scope": meta.get("scope") or "",
+                "section_name": meta.get("section_name") or "",
+                "format_name": meta.get("format_name") or "",
+                "source": "registry_upload_metrics_v2",
+            }
+    for metric_key, coverage in snapshot_catalog.items():
+        labels = coverage.get("sample_labels") or []
+        if lowered in metric_key.casefold() or any(lowered in str(label).casefold() for label in labels):
+            candidates.setdefault(
+                metric_key,
+                {
+                    "metric_key": metric_key,
+                    "label_ru": labels[0] if labels else metric_key,
+                    "scope": ",".join(coverage.get("levels", [])),
+                    "section_name": "",
+                    "format_name": "",
+                    "source": "sheet_vitrina_v1_ready_snapshots",
+                },
+            )
+    return sorted(candidates.values(), key=lambda item: str(item.get("metric_key") or ""))[:50]
+
+
+def _matches_metric_filter(item: Mapping[str, Any], *, query: str, section: str, scope: str) -> bool:
+    if query:
+        lowered = query.casefold()
+        text = " ".join(
+            [
+                str(item.get("metric_key") or ""),
+                str(item.get("label_ru") or ""),
+                str(item.get("section_name") or ""),
+                " ".join(str(key) for key in item.get("sample_projection_keys") or []),
+                " ".join(str(label) for label in item.get("sample_labels") or []),
+            ]
+        ).casefold()
+        if lowered not in text:
+            return False
+    if section and section.casefold() not in str(item.get("section_name") or "").casefold():
+        return False
+    if scope:
+        scope_text = " ".join([str(item.get("scope") or ""), " ".join(str(level) for level in item.get("coverage_levels") or [])]).casefold()
+        if scope.casefold() not in scope_text:
+            return False
+    return True
+
+
+def _enabled_sort_value(value: Any) -> int:
+    return 0 if str(value) in {"1", "True", "true"} else 1
+
+
+def _is_date_value(value: str) -> bool:
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", value))
+
+
+def _date_shift(value: str, days: int) -> str:
+    parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    return (parsed + timedelta(days=days)).isoformat()
 
 
 def _metric_name_matches(metric_key: str, markers: tuple[str, ...]) -> bool:
