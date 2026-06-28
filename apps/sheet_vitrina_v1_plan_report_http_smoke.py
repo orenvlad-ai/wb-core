@@ -107,12 +107,7 @@ def main() -> None:
                 'id="planReportH1Input"',
                 'id="planReportH2Input"',
                 'id="planReportDrrInput"',
-                'id="planReportContractStartCheckbox"',
-                'id="planReportAnnualEvenCheckbox"',
-                'id="planReportContractStartDateInput"',
-                "С учётом даты подписания",
-                "Равномерный годовой план",
-                "Дата подписания",
+                "Расчёт по WB/VB: договор с 01.02.2026, H1/H2 модель",
                 'id="planReportApplyButton"',
                 'id="planReportBaselineTemplateButton"',
                 'id="planReportBaselineFileInput"',
@@ -124,6 +119,16 @@ def main() -> None:
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose plan-report token {expected!r}")
+            for forbidden in (
+                'id="planReportContractStartCheckbox"',
+                'id="planReportAnnualEvenCheckbox"',
+                'id="planReportContractStartDateInput"',
+                "С учётом даты подписания",
+                "Равномерный годовой план",
+                "Дата подписания",
+            ):
+                if forbidden in operator_html:
+                    raise AssertionError(f"ordinary operator HTML must not expose plan-report mode control {forbidden!r}")
 
             missing_query_status, missing_query_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}")
             if missing_query_status != 400 or "period query parameter is required" not in str(missing_query_payload.get("error", "")):

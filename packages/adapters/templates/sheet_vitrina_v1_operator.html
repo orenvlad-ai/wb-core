@@ -3137,6 +3137,9 @@
               <p class="field-note">
                 WB/VB defaults: H1 = 155 379 879; H2 = 294 620 121 как annual remainder до 450 000 000 при расхождении Q3+Q4 на 1 руб.; договор с 01.02.2026; ставка 6%.
               </p>
+              <p class="field-note">
+                Расчёт по WB/VB: договор с 01.02.2026, H1/H2 модель, H1 denominator 181 день, реклама 6% от max(план оборота, факт оборота).
+              </p>
               <div class="plan-report-toolbar">
                 <div class="plan-report-controls">
                   <div class="field plan-report-field">
@@ -3167,22 +3170,6 @@
                   <div class="field plan-report-field">
                     <label for="planReportDrrInput">Плановый DRR, %</label>
                     <input id="planReportDrrInput" type="number" min="0" step="0.01" inputmode="decimal">
-                  </div>
-                  <div class="field plan-report-checkbox-field">
-                    <label class="plan-report-checkbox-label" for="planReportContractStartCheckbox">
-                      <input id="planReportContractStartCheckbox" type="checkbox">
-                      <span>С учётом даты подписания</span>
-                    </label>
-                  </div>
-                  <div class="field plan-report-checkbox-field">
-                    <label class="plan-report-checkbox-label" for="planReportAnnualEvenCheckbox">
-                      <input id="planReportAnnualEvenCheckbox" type="checkbox">
-                      <span>Равномерный годовой план</span>
-                    </label>
-                  </div>
-                  <div class="field plan-report-field">
-                    <label for="planReportContractStartDateInput">Дата подписания</label>
-                    <input id="planReportContractStartDateInput" type="date" disabled>
                   </div>
                 </div>
                 <div class="block-actions">
@@ -3981,9 +3968,6 @@
       const planReportH1Input = document.getElementById("planReportH1Input");
       const planReportH2Input = document.getElementById("planReportH2Input");
       const planReportDrrInput = document.getElementById("planReportDrrInput");
-      const planReportContractStartCheckbox = document.getElementById("planReportContractStartCheckbox");
-      const planReportAnnualEvenCheckbox = document.getElementById("planReportAnnualEvenCheckbox");
-      const planReportContractStartDateInput = document.getElementById("planReportContractStartDateInput");
       const planReportApplyButton = document.getElementById("planReportApplyButton");
       const planReportValidation = document.getElementById("planReportValidation");
       const planReportSelectedTitle = document.getElementById("planReportSelectedTitle");
@@ -4257,14 +4241,17 @@
         "first_half",
         "second_half"
       ]);
-      const PLAN_REPORT_DEFAULT_INPUTS = {
-        period: "first_half",
-        h1_buyout_plan_rub: "155379879",
-        h2_buyout_plan_rub: "294620121",
-        plan_drr_pct: "6",
+      const PLAN_REPORT_CANONICAL_INPUTS = {
         use_contract_start_date: true,
         annual_plan_evenly_distributed: false,
         contract_start_date: "2026-02-01"
+      };
+      const PLAN_REPORT_DEFAULT_INPUTS = {
+        period: defaultPlanReportPeriod(),
+        h1_buyout_plan_rub: "155379879",
+        h2_buyout_plan_rub: "294620121",
+        plan_drr_pct: "6",
+        ...PLAN_REPORT_CANONICAL_INPUTS
       };
       const isEmbeddedMode = Boolean(config.embedded);
       const configuredInitialTab = normalizePersistedSectionName(config.initial_tab, VALID_TABS, DEFAULT_ACTIVE_TAB);
@@ -4733,8 +4720,9 @@
         return isValidIsoDate(normalized) ? normalized : "";
       }
 
-      function setContractStartInputEnabled(enabled) {
-        planReportContractStartDateInput.disabled = !enabled;
+      function defaultPlanReportPeriod() {
+        const currentBusinessDate = String(config.current_business_date || "").trim();
+        return currentBusinessDate >= "2026-07-01" ? "second_half" : "first_half";
       }
 
       function resolvePlanReportInputs(inputs) {
@@ -4743,15 +4731,11 @@
         const h1Plan = sanitizePersistedPlanInputValue(rawInputs.h1_buyout_plan_rub);
         const h2Plan = sanitizePersistedPlanInputValue(rawInputs.h2_buyout_plan_rub);
         const planDrr = sanitizePersistedPlanInputValue(rawInputs.plan_drr_pct);
-        const useContractStart = rawInputs.use_contract_start_date === true;
-        const contractStartDate = sanitizePersistedPlanDateValue(rawInputs.contract_start_date);
-        const annualEven = rawInputs.annual_plan_evenly_distributed === true;
         const valid = (
           VALID_PLAN_REPORT_PERIODS.has(period) &&
           Boolean(h1Plan) &&
           Boolean(h2Plan) &&
-          Boolean(planDrr) &&
-          (!useContractStart || Boolean(contractStartDate))
+          Boolean(planDrr)
         );
         if (!valid) {
           return { ...PLAN_REPORT_DEFAULT_INPUTS };
@@ -4761,9 +4745,7 @@
           h1_buyout_plan_rub: h1Plan,
           h2_buyout_plan_rub: h2Plan,
           plan_drr_pct: planDrr,
-          use_contract_start_date: useContractStart,
-          annual_plan_evenly_distributed: annualEven,
-          contract_start_date: contractStartDate
+          ...PLAN_REPORT_CANONICAL_INPUTS
         };
       }
 
@@ -4777,10 +4759,6 @@
         planReportH1Input.value = resolved.h1_buyout_plan_rub;
         planReportH2Input.value = resolved.h2_buyout_plan_rub;
         planReportDrrInput.value = resolved.plan_drr_pct;
-        planReportContractStartCheckbox.checked = resolved.use_contract_start_date === true;
-        planReportContractStartDateInput.value = resolved.contract_start_date || PLAN_REPORT_DEFAULT_INPUTS.contract_start_date;
-        planReportAnnualEvenCheckbox.checked = resolved.annual_plan_evenly_distributed === true;
-        setContractStartInputEnabled(planReportContractStartCheckbox.checked);
       }
 
       function persistPlanReportInputs(request) {
@@ -4791,10 +4769,7 @@
           period: String(planReportPeriodSelect.value || "").trim(),
           h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
-          plan_drr_pct: String(planReportDrrInput.value || "").trim(),
-          use_contract_start_date: Boolean(planReportContractStartCheckbox.checked),
-          annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked),
-          contract_start_date: sanitizePersistedPlanDateValue(planReportContractStartDateInput.value)
+          plan_drr_pct: String(planReportDrrInput.value || "").trim()
         };
         if (!VALID_PLAN_REPORT_PERIODS.has(inputs.period)) {
           return;
@@ -4804,9 +4779,6 @@
           !sanitizePersistedPlanInputValue(inputs.h2_buyout_plan_rub) ||
           !sanitizePersistedPlanInputValue(inputs.plan_drr_pct)
         ) {
-          return;
-        }
-        if (inputs.use_contract_start_date && !inputs.contract_start_date) {
           return;
         }
         writePersistedOperatorUiState({ plan_report_inputs: inputs });
@@ -5895,6 +5867,12 @@
         if (metric.entity_key !== "ads_sum_rub" || !metric.ads_plan_base_label) {
           return baseLabel;
         }
+        if (metric.ads_plan_base_mode === "fact_turnover_overperformance_base") {
+          return [
+            baseLabel,
+            "<br><span class=\"field-note\">Рекламный план пересчитан от фактического оборота, так как оборот выше плана.</span>"
+          ].join("");
+        }
         return [
           baseLabel,
           "<br><span class=\"field-note\">План: " + escapeHtml(metric.ads_plan_base_label) + ".</span>"
@@ -5999,9 +5977,7 @@
           h1_buyout_plan_rub: String(planReportH1Input.value || "").trim(),
           h2_buyout_plan_rub: String(planReportH2Input.value || "").trim(),
           plan_drr_pct: String(planReportDrrInput.value || "").trim(),
-          use_contract_start_date: Boolean(planReportContractStartCheckbox.checked),
-          annual_plan_evenly_distributed: Boolean(planReportAnnualEvenCheckbox.checked),
-          contract_start_date: String(planReportContractStartDateInput.value || "").trim(),
+          ...PLAN_REPORT_CANONICAL_INPUTS
         };
         const missing = Object.entries(request).find(([key, value]) => (
           !["period", "use_contract_start_date", "annual_plan_evenly_distributed", "contract_start_date"].includes(key) && !value
@@ -6024,13 +6000,11 @@
           }
           params.set(key, String(numericValue));
         }
-        if (request.use_contract_start_date) {
-          if (!isValidIsoDate(request.contract_start_date)) {
-            return { error: "Укажите дату подписания в формате ГГГГ-ММ-ДД." };
-          }
-          params.set("use_contract_start_date", "true");
-          params.set("contract_start_date", request.contract_start_date);
+        if (!isValidIsoDate(request.contract_start_date)) {
+          return { error: "Canonical дата договора настроена некорректно." };
         }
+        params.set("use_contract_start_date", "true");
+        params.set("contract_start_date", request.contract_start_date);
         return { query: params.toString() };
       }
 
@@ -9727,8 +9701,7 @@
         planReportPeriodSelect,
         planReportH1Input,
         planReportH2Input,
-        planReportDrrInput,
-        planReportContractStartDateInput
+        planReportDrrInput
       ].forEach((input) => {
         input.addEventListener("input", () => {
           if (planReportValidation.hidden) {
@@ -9739,25 +9712,6 @@
             setPlanReportValidation("");
           }
         });
-      });
-      planReportContractStartCheckbox.addEventListener("change", () => {
-        setContractStartInputEnabled(planReportContractStartCheckbox.checked);
-        if (planReportValidation.hidden) {
-          return;
-        }
-        const request = readPlanReportRequest();
-        if (!request.error) {
-          setPlanReportValidation("");
-        }
-      });
-      planReportAnnualEvenCheckbox.addEventListener("change", () => {
-        if (planReportValidation.hidden) {
-          return;
-        }
-        const request = readPlanReportRequest();
-        if (!request.error) {
-          setPlanReportValidation("");
-        }
       });
 
       setupOperatorFloatingControlListeners();

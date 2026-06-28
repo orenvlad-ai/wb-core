@@ -3318,6 +3318,7 @@ class RegistryUploadHttpEntrypoint:
         else:
             active_skus = list_active_sku_options(current_state.config_v2)
         return {
+            "current_business_date": current_business_date_iso(self.now_factory()),
             "stock_report_active_skus": active_skus,
             "stock_report_active_sku_count": len(active_skus),
             "stock_report_active_sku_source": "current_registry_config_v2",

@@ -68,11 +68,14 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
     DEFAULT_WB_SUPPLIES_SYNC_PATH,
+    DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+    DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
     build_registry_upload_http_server,
 )
 from packages.application.registry_upload_bundle_v1 import RegistryUploadBundleV1Block
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.business_time import current_business_date_iso
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
 
@@ -280,7 +283,7 @@ def main() -> None:
                 if bool(item["enabled"])
             ]
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
-            if operator_ui_config != {
+            expected_operator_ui_config = {
                 "page_title": "Операторский сайт",
                 "embedded": True,
                 "initial_tab": "vitrina",
@@ -325,6 +328,8 @@ def main() -> None:
                 "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
                 "wb_supplies_backfill_path": "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
                 "wb_supplies_sync_status_path": "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
+                "wb_supplies_transit_cost_enrich_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
+                "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
                 "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
                 "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
                 "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
@@ -332,6 +337,7 @@ def main() -> None:
                 "supplier_shipment_registry_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
                 "supplier_shipment_registry_compare_quote_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH,
                 "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
+                "current_business_date": current_business_date_iso(),
                 "stock_report_active_skus": expected_active_skus,
                 "stock_report_active_sku_count": len(expected_active_skus),
                 "stock_report_active_sku_source": "current_registry_config_v2",
@@ -346,9 +352,11 @@ def main() -> None:
                         "Use the website/operator web-vitrina surface instead."
                     ),
                 },
-            }:
+            }
+            if operator_ui_config != expected_operator_ui_config:
                 raise AssertionError(
-                    "operator UI config must expose refresh/status paths, reports, supply blocks and the full active SKU selector source"
+                    "operator UI config must expose refresh/status paths, reports, supply blocks and the full active SKU selector source; "
+                    f"got {operator_ui_config!r}, expected {expected_operator_ui_config!r}"
                 )
 
             missing_plan_status, missing_plan_payload = _get_json(plan_url)

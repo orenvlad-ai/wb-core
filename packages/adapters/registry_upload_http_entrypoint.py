@@ -5601,6 +5601,7 @@ def _render_sheet_vitrina_operator_ui(
         "supplier_shipment_registry_compare_quote_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
+        "current_business_date": str(operator_ui_context.get("current_business_date") or ""),
         "stock_report_active_skus": list(operator_ui_context.get("stock_report_active_skus") or []),
         "stock_report_active_sku_count": int(operator_ui_context.get("stock_report_active_sku_count") or 0),
         "stock_report_active_sku_source": str(
