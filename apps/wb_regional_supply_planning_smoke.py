@@ -137,6 +137,44 @@ def main() -> None:
         if acceptance_evidence.get("http_status") != 200 or acceptance_evidence.get("request_shape") != "json_array":
             raise AssertionError(f"successful acceptance/options evidence must expose official request shape, got {acceptance_evidence}")
 
+        repeated_warehouses = [
+            {"warehouseID": 10_000 + index, "warehouseName": f"Склад {index}", "canBox": True}
+            for index in range(360)
+        ]
+        source.acceptance_payload = {
+            "result": [
+                {"barcode": "4600000000001", "warehouses": repeated_warehouses},
+                {"barcode": "4600000000002", "warehouses": repeated_warehouses},
+            ]
+        }
+        capped = block.build_options({"district_key": DISTRICT_CENTRAL})
+        if capped.get("status") != "ready" or len(capped.get("options") or []) != 300:
+            raise AssertionError(f"large duplicate acceptance/options response must be capped for UI, got {capped.get('summary')}")
+        if not any("показаны первые 300" in warning for warning in capped.get("warnings", [])):
+            raise AssertionError(f"large acceptance/options response must warn about visible cap, got {capped.get('warnings')}")
+
+        source.acceptance_payload = {
+            "result": [
+                {
+                    "barcode": "4600000000001",
+                    "warehouses": [
+                        {"warehouseID": 101, "warehouseName": "Коледино", "canBox": True},
+                        {"warehouseID": 202, "warehouseName": "Склад Шушары", "canBox": True},
+                        {
+                            "warehouseID": 303,
+                            "warehouseName": "Электросталь",
+                            "transitWarehouseName": "Обухово",
+                            "isTransit": True,
+                        },
+                    ],
+                },
+                {
+                    "barcode": "4600000000002",
+                    "errors": [{"message": "barcode is temporarily unavailable"}],
+                },
+            ]
+        }
+
         source.fail_box_tariffs = True
         partial = block.build_options({"district_key": DISTRICT_CENTRAL})
         if partial.get("status") != "ready" or not any("box tariffs" in warning for warning in partial.get("warnings", [])):
@@ -150,10 +188,11 @@ def main() -> None:
 
         _seed_last_result(runtime)
         _seed_nomenclature(runtime, include_second=False)
+        acceptance_request_count_before_missing = len(source.acceptance_requests)
         missing = block.build_options({"district_key": DISTRICT_CENTRAL})
         if missing.get("status") != "blocked" or not missing.get("blockers"):
             raise AssertionError(f"missing barcode must block safely, got {missing}")
-        if len(source.acceptance_requests) != 2:
+        if len(source.acceptance_requests) != acceptance_request_count_before_missing:
             raise AssertionError("missing barcode path must not call acceptance/options")
 
         _seed_nomenclature(runtime, include_second=True)

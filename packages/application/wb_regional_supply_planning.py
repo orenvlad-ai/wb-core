@@ -42,6 +42,9 @@ from packages.contracts.wb_regional_supply_planning import (
 )
 
 
+MAX_PLANNING_OPTIONS = 300
+
+
 class WbRegionalSupplyPlanningSource(Protocol):
     def fetch_acceptance_options(
         self,
@@ -281,6 +284,7 @@ class WbRegionalSupplyPlanningBlock:
             include_transit=bool(request["include_transit"]),
             date_filter=request["date"],
             enrichment=enrichment,
+            warnings=warnings,
         )
         status = STATUS_READY if options else STATUS_NO_OPTIONS
         if not options:
@@ -486,9 +490,13 @@ def _build_options(
     include_transit: bool,
     date_filter: str,
     enrichment: Mapping[str, Any],
+    warnings: list[str],
 ) -> list[dict[str, Any]]:
     base_rows = [_normalize_acceptance_option_row(row) for row in _flatten_acceptance_option_rows(raw_option_rows)]
     base_rows = [row for row in base_rows if row.get("warehouse_id") or row.get("warehouse_name")]
+    base_rows = _dedupe_acceptance_option_rows(base_rows)
+    warehouse_name_by_id = _warehouse_name_by_id(enrichment.get("warehouses") or [])
+    base_rows = [_fill_acceptance_warehouse_name(row, warehouse_name_by_id) for row in base_rows]
     if not include_transit:
         base_rows = [row for row in base_rows if row.get("route_type") != ROUTE_TRANSIT]
     coefficients = _coefficient_rows_by_warehouse(enrichment.get("coefficients") or [])
@@ -582,6 +590,12 @@ def _build_options(
         )
         options.append(option)
     options.sort(key=lambda item: item["_rank_tuple"])
+    total_option_count = len(options)
+    if total_option_count > MAX_PLANNING_OPTIONS:
+        warnings.append(
+            f"WB вернул {total_option_count} вариантов; в UI показаны первые {MAX_PLANNING_OPTIONS} по ранжированию."
+        )
+        options = options[:MAX_PLANNING_OPTIONS]
     for index, option in enumerate(options, start=1):
         option["rank"] = index
         option["recommendation"] = "Рекомендуемый вариант" if index == 1 else f"Вариант #{index}"
@@ -652,7 +666,7 @@ def _extract_acceptance_option_rows(payload: Any) -> list[Mapping[str, Any]]:
 
 
 def _normalize_acceptance_option_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    warehouse_id = _first_string(row, "warehouseID", "warehouseId", "warehouse_id", "id")
+    warehouse_id = _first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id")
     warehouse_name = _first_string(row, "warehouseName", "warehouse_name", "name")
     transit_warehouse_id = _first_string(row, "transitWarehouseID", "transitWarehouseId", "transit_warehouse_id")
     transit_warehouse_name = _first_string(row, "transitWarehouseName", "transit_warehouse_name")
@@ -734,6 +748,74 @@ def _flatten_acceptance_option_rows(rows: list[Mapping[str, Any]]) -> list[Mappi
             if nested_key == "warehouses":
                 merged["_barcode_row_had_warehouses"] = True
             result.append(merged)
+    return result
+
+
+def _dedupe_acceptance_option_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    barcode_values = {str(row.get("barcode") or "").strip() for row in rows if str(row.get("barcode") or "").strip()}
+    required_barcode_count = max(1, len(barcode_values))
+    grouped: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    grouped_barcodes: dict[tuple[str, str, str, str, str, str], set[str]] = {}
+    for row in rows:
+        key = (
+            _warehouse_key(row.get("warehouse_id")),
+            _normalize_name(row.get("warehouse_name")),
+            str(row.get("date") or ""),
+            str(row.get("route_type") or ROUTE_DIRECT),
+            _warehouse_key(row.get("transit_warehouse_id")),
+            _normalize_name(row.get("transit_warehouse_name")),
+        )
+        if key not in grouped:
+            grouped[key] = dict(row)
+            grouped_barcodes[key] = set()
+        barcode = str(row.get("barcode") or "").strip()
+        if barcode:
+            grouped_barcodes[key].add(barcode)
+    if len(barcode_values) <= 1:
+        result = list(grouped.values())
+    else:
+        result = [
+            row
+            for key, row in grouped.items()
+            if len(grouped_barcodes.get(key) or set()) >= required_barcode_count
+        ]
+        if not result:
+            # If WB returned only partial barcode-level success, keep the visible partial options
+            # with warnings from _acceptance_payload_diagnostics instead of hiding everything.
+            result = list(grouped.values())
+    for key, row in grouped.items():
+        row.setdefault("evidence", {})
+        if isinstance(row.get("evidence"), dict):
+            row["evidence"] = {
+                **dict(row.get("evidence") or {}),
+                "available_barcode_count": len(grouped_barcodes.get(key) or set()),
+                "required_success_barcode_count": required_barcode_count,
+            }
+    return result
+
+
+def _warehouse_name_by_id(rows: list[Mapping[str, Any]]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for row in rows:
+        warehouse_id = _warehouse_key(_first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id"))
+        warehouse_name = _first_string(row, "warehouseName", "warehouse_name", "name")
+        if warehouse_id and warehouse_name and warehouse_id not in result:
+            result[warehouse_id] = warehouse_name
+    return result
+
+
+def _fill_acceptance_warehouse_name(row: Mapping[str, Any], warehouse_name_by_id: Mapping[str, str]) -> dict[str, Any]:
+    result = dict(row)
+    if not result.get("warehouse_name"):
+        warehouse_name = warehouse_name_by_id.get(_warehouse_key(result.get("warehouse_id")))
+        if warehouse_name:
+            result["warehouse_name"] = warehouse_name
+            result["evidence"] = {
+                **dict(result.get("evidence") or {}),
+                "warehouse_name_source": "warehouses_by_id",
+            }
     return result
 
 
