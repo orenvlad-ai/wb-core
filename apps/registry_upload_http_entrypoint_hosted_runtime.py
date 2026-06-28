@@ -1098,14 +1098,16 @@ def render_nginx_public_route_block(
     for route in routes:
         modifier = "=" if route["match"] == "exact" else "^~"
         methods = ", ".join(route.get("methods") or [])
+        route_proxy_pass_url = str(route.get("proxy_pass_url") or proxy_pass_url)
         lines.extend(
             [
                 f"    # {route['name']} ({methods})",
                 f"    location {modifier} {route['path']} {{",
-                f"        proxy_pass {proxy_pass_url};",
+                f"        proxy_pass {route_proxy_pass_url};",
                 "        proxy_set_header Host $host;",
                 "        proxy_set_header X-Real-IP $remote_addr;",
                 "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+                "        proxy_set_header X-Forwarded-Proto $scheme;",
                 f"        client_max_body_size {client_max_body_size};",
                 f"        proxy_read_timeout {read_timeout};",
                 f"        proxy_send_timeout {send_timeout};",
@@ -1222,6 +1224,7 @@ def _describe_nginx_public_routes(target: HostedRuntimeTarget) -> dict[str, Any]
                 "match": route["match"],
                 "path": route["path"],
                 "methods": route.get("methods") or [],
+                **({"proxy_pass_url": route["proxy_pass_url"]} if route.get("proxy_pass_url") else {}),
             }
             for route in routes
         ],
@@ -1265,6 +1268,9 @@ def _validated_public_routes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             if not re.fullmatch(r"[A-Z]+", normalized_method):
                 raise ValueError(f"public route {name} has invalid method {method!r}")
             normalized_methods.append(normalized_method)
+        route_proxy_pass_url = str(raw_route.get("proxy_pass_url") or "").strip()
+        if route_proxy_pass_url:
+            _safe_proxy_pass_url(route_proxy_pass_url)
         key = (match, path)
         if key in seen:
             raise ValueError(f"duplicate public route location for {match} {path}")
@@ -1275,6 +1281,7 @@ def _validated_public_routes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 "match": match,
                 "path": path,
                 "methods": normalized_methods,
+                **({"proxy_pass_url": route_proxy_pass_url} if route_proxy_pass_url else {}),
             }
         )
     return routes
@@ -1298,6 +1305,13 @@ def _nginx_scalar(value: str) -> str:
     normalized = value.strip()
     if not re.fullmatch(r"[A-Za-z0-9_.:-]+", normalized):
         raise ValueError(f"invalid nginx scalar value {value!r}")
+    return normalized
+
+
+def _safe_proxy_pass_url(value: str) -> str:
+    normalized = value.strip()
+    if not re.fullmatch(r"https?://[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_./:-]*)?", normalized):
+        raise ValueError(f"invalid proxy_pass_url {value!r}")
     return normalized
 
 
