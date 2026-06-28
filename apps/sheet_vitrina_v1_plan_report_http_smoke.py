@@ -107,7 +107,13 @@ def main() -> None:
                 'id="planReportH1Input"',
                 'id="planReportH2Input"',
                 'id="planReportDrrInput"',
-                "Расчёт по WB/VB: договор с 01.02.2026, H1/H2 модель",
+                'id="planReportAnnualEvenCheckbox"',
+                'id="planReportAnnualEvenTooltip"',
+                "Равномерный годовой план",
+                "альтернативная оценка темпа",
+                "Прогноз к концу договорного периода при текущем темпе",
+                'id="planReportProjectionTable"',
+                "Расчёт по WB/VB: formal H1/H2 по умолчанию",
                 'id="planReportApplyButton"',
                 'id="planReportBaselineTemplateButton"',
                 'id="planReportBaselineFileInput"',
@@ -121,14 +127,12 @@ def main() -> None:
                     raise AssertionError(f"operator HTML must expose plan-report token {expected!r}")
             for forbidden in (
                 'id="planReportContractStartCheckbox"',
-                'id="planReportAnnualEvenCheckbox"',
                 'id="planReportContractStartDateInput"',
                 "С учётом даты подписания",
-                "Равномерный годовой план",
                 "Дата подписания",
             ):
                 if forbidden in operator_html:
-                    raise AssertionError(f"ordinary operator HTML must not expose plan-report mode control {forbidden!r}")
+                    raise AssertionError(f"ordinary operator HTML must not expose contract-start control {forbidden!r}")
 
             missing_query_status, missing_query_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}")
             if missing_query_status != 400 or "period query parameter is required" not in str(missing_query_payload.get("error", "")):
@@ -199,6 +203,21 @@ def main() -> None:
                 raise AssertionError(f"plan report must expose per-block source breakdown, got {report_payload}")
             if "month_to_date" not in report_payload.get("periods", {}) or "quarter_to_date" not in report_payload.get("periods", {}) or "year_to_date" not in report_payload.get("periods", {}):
                 raise AssertionError(f"plan report must always expose MTD/QTD/YTD blocks, got {report_payload}")
+            projection = report_payload.get("contract_period_projection") or {}
+            if (
+                projection.get("status") != "partial"
+                or projection.get("period_date_from") != "2026-02-01"
+                or projection.get("period_date_to") != "2026-12-31"
+                or projection.get("total_contract_day_count") != 334
+                or projection.get("elapsed_day_count") != 79
+                or projection.get("fact_buyout_elapsed_rub") != 76500.0
+                or "2026-02-01" not in (projection.get("coverage") or {}).get("missing_dates", [])
+                or "2026-12-31" in (projection.get("coverage") or {}).get("missing_dates", [])
+            ):
+                raise AssertionError(f"plan report must expose partial contract-period projection without future gaps, got {report_payload}")
+            expected_projected_buyout = 76500.0 / 79.0 * 334.0
+            if abs(float(projection.get("projected_buyout_rub") or 0.0) - expected_projected_buyout) > 1e-3:
+                raise AssertionError(f"projection buyout formula must be elapsed_fact / elapsed_days * total_days, got {projection}")
             ytd = (report_payload.get("periods") or {}).get("year_to_date") or {}
             if ytd.get("status") != "partial":
                 raise AssertionError(f"YTD must stay local partial before baseline, got {report_payload}")

@@ -978,6 +978,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "drr": page.locator("#planReportDrrInput").input_value(),
         "contract_checkbox_count": page.locator("#planReportContractStartCheckbox").count(),
         "annual_even_checkbox_count": page.locator("#planReportAnnualEvenCheckbox").count(),
+        "annual_even_checked": page.locator("#planReportAnnualEvenCheckbox").is_checked(),
         "contract_date_input_count": page.locator("#planReportContractStartDateInput").count(),
     }
     expected_default_plan_inputs = {
@@ -986,11 +987,25 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "h2": "294620121",
         "drr": "6",
         "contract_checkbox_count": 0,
-        "annual_even_checkbox_count": 0,
+        "annual_even_checkbox_count": 1,
+        "annual_even_checked": False,
         "contract_date_input_count": 0,
     }
     if default_plan_inputs != expected_default_plan_inputs:
         raise AssertionError(f"clean plan-report storage must restore WB/VB defaults, got {default_plan_inputs}")
+    tooltip_text = page.locator("#planReportAnnualEvenTooltip").text_content() or ""
+    if "альтернативная оценка темпа" not in tooltip_text and "оценить темп закрытия года" not in tooltip_text:
+        raise AssertionError(f"annual-even tooltip must explain alternative pace mode, got {tooltip_text!r}")
+    page.focus("#planReportAnnualEvenCheckbox")
+    page.wait_for_timeout(160)
+    tooltip_visible_on_focus = page.locator("#planReportAnnualEvenTooltip").evaluate(
+        """(element) => {
+            const style = window.getComputedStyle(element);
+            return style.visibility === "visible" && Number(style.opacity) > 0;
+        }"""
+    )
+    if not tooltip_visible_on_focus:
+        raise AssertionError("annual-even tooltip must be visible on keyboard focus")
     page.click("#planReportApplyButton")
     page.wait_for_function(
         "() => document.getElementById('planReportContent') && !document.getElementById('planReportContent').hidden"
@@ -1010,6 +1025,21 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 f"default plan-report request must include {expected_query_part}, got {plan_report_request_urls}"
             )
 
+    request_count_before_toggle = len(plan_report_request_urls)
+    page.check("#planReportAnnualEvenCheckbox")
+    page.click("#planReportApplyButton")
+    _wait_for_request_count(plan_report_request_urls, request_count_before_toggle + 1)
+    annual_plan_report_url = plan_report_request_urls[-1] if plan_report_request_urls else ""
+    for expected_query_part in (
+        "use_contract_start_date=true",
+        "contract_start_date=2026-02-01",
+        "annual_plan_evenly_distributed=true",
+    ):
+        if expected_query_part not in annual_plan_report_url:
+            raise AssertionError(
+                f"checked annual-even request must include {expected_query_part}, got {plan_report_request_urls}"
+            )
+
     page.select_option("#planReportPeriodSelect", "current_month")
     page.fill("#planReportH1Input", "123456789")
     page.fill("#planReportH2Input", "234567890")
@@ -1025,8 +1055,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 parsed.plan_report_inputs.h1_buyout_plan_rub === "123456789" &&
                 parsed.plan_report_inputs.h2_buyout_plan_rub === "234567890" &&
                 parsed.plan_report_inputs.plan_drr_pct === "7.5" &&
+                parsed.plan_report_inputs.annual_plan_evenly_distributed === true &&
                 !("use_contract_start_date" in parsed.plan_report_inputs) &&
-                !("annual_plan_evenly_distributed" in parsed.plan_report_inputs) &&
                 !("contract_start_date" in parsed.plan_report_inputs);
         }""",
         arg=STORAGE_KEY,
@@ -1035,7 +1065,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if (
         "use_contract_start_date=true" not in latest_plan_report_url
         or "contract_start_date=2026-02-01" not in latest_plan_report_url
-        or "annual_plan_evenly_distributed=false" not in latest_plan_report_url
+        or "annual_plan_evenly_distributed=true" not in latest_plan_report_url
     ):
         raise AssertionError(f"plan-report request must always include canonical WB/VB params, got {plan_report_request_urls}")
     page.reload(wait_until="domcontentloaded")
@@ -1047,6 +1077,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "drr": page.locator("#planReportDrrInput").input_value(),
         "contract_checkbox_count": page.locator("#planReportContractStartCheckbox").count(),
         "annual_even_checkbox_count": page.locator("#planReportAnnualEvenCheckbox").count(),
+        "annual_even_checked": page.locator("#planReportAnnualEvenCheckbox").is_checked(),
         "contract_date_input_count": page.locator("#planReportContractStartDateInput").count(),
     }
     expected_restored_inputs = {
@@ -1055,7 +1086,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "h2": "234567890",
         "drr": "7.5",
         "contract_checkbox_count": 0,
-        "annual_even_checkbox_count": 0,
+        "annual_even_checkbox_count": 1,
+        "annual_even_checked": True,
         "contract_date_input_count": 0,
     }
     if restored_plan_inputs != expected_restored_inputs:
@@ -1162,6 +1194,7 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
         "drr": page.locator("#planReportDrrInput").input_value(),
         "contract_checkbox_count": page.locator("#planReportContractStartCheckbox").count(),
         "annual_even_checkbox_count": page.locator("#planReportAnnualEvenCheckbox").count(),
+        "annual_even_checked": page.locator("#planReportAnnualEvenCheckbox").is_checked(),
         "contract_date_input_count": page.locator("#planReportContractStartDateInput").count(),
     }
     if invalid_plan_restore != {
@@ -1170,7 +1203,8 @@ def _run_fallback_scenario(context, base_url: str) -> dict[str, object]:
         "h2": "294620121",
         "drr": "6",
         "contract_checkbox_count": 0,
-        "annual_even_checkbox_count": 0,
+        "annual_even_checkbox_count": 1,
+        "annual_even_checked": False,
         "contract_date_input_count": 0,
     }:
         raise AssertionError(f"invalid persisted plan inputs must fall back to WB/VB defaults, got {invalid_plan_restore}")
@@ -1203,12 +1237,37 @@ def _plan_report_payload() -> dict[str, object]:
         "inputs": {
             "use_contract_start_date": True,
             "contract_start_date": "2026-02-01",
+            "annual_plan_evenly_distributed": False,
         },
         "periods": {
             "selected_period": block,
             "month_to_date": {**block, "label": "С начала месяца", "date_from": "2026-04-01", "day_count": 20},
             "quarter_to_date": {**block, "label": "С начала квартала", "date_from": "2026-04-01", "day_count": 20},
             "year_to_date": {**block, "label": "С начала года", "date_from": "2026-02-01", "day_count": 79},
+        },
+        "contract_period_projection": {
+            "label": "Прогноз к концу договорного периода при текущем темпе",
+            "status": "available",
+            "reason": "",
+            "period_date_from": "2026-02-01",
+            "period_date_to": "2026-12-31",
+            "total_contract_day_count": 334,
+            "elapsed_date_from": "2026-02-01",
+            "elapsed_date_to": "2026-04-20",
+            "elapsed_day_count": 79,
+            "annual_buyout_plan_rub": 450000000.0,
+            "annual_ads_plan_rub": 27000000.0,
+            "fact_buyout_elapsed_rub": 100000000.0,
+            "fact_ads_elapsed_rub": 6000000.0,
+            "projected_buyout_rub": 422784810.12658226,
+            "projected_buyout_pct_of_annual_plan": 93.95218002812939,
+            "projected_ads_sum_rub": 25367088.607594937,
+            "projected_ads_pct_of_annual_ads_plan": 93.95218002812939,
+            "projected_drr_pct": 6.0,
+            "fact_is_partial": False,
+            "coverage": {"fact_is_partial": False, "missing_dates": []},
+            "source_mix": {},
+            "source_breakdown": {},
         },
         "baseline": {"status": "missing", "months": []},
         "notes": [],
@@ -1256,6 +1315,15 @@ def _wait_for_row_titles(page, expected_titles: list[str]) -> None:
             return
         time.sleep(0.1)
     raise AssertionError(f"expected stock-report titles {expected_titles}, got {_visible_stock_report_titles(page)}")
+
+
+def _wait_for_request_count(request_urls: list[str], expected_count: int) -> None:
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if len(request_urls) >= expected_count:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"expected at least {expected_count} plan-report requests, got {request_urls}")
 
 
 def _selected_data_attr(page, selector: str, attribute_name: str) -> str:

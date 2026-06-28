@@ -162,6 +162,31 @@ def main() -> None:
         _assert_close(selected["metrics"]["ads_sum_rub"]["completion_pct"], 120.0, "selected ads completion_pct")
         if selected["metrics"]["ads_sum_rub"]["status"] != "ok":
             raise AssertionError(f"ads must be an execution metric, not a cost-limit alert, got {selected}")
+        projection = payload["contract_period_projection"]
+        if (
+            projection.get("status") != "available"
+            or projection.get("period_date_from") != "2026-02-01"
+            or projection.get("period_date_to") != "2026-12-31"
+            or projection.get("total_contract_day_count") != 334
+            or projection.get("elapsed_day_count") != 79
+            or "2026-12-31" in (projection.get("coverage") or {}).get("missing_dates", [])
+        ):
+            raise AssertionError(f"contract-period projection must use elapsed contract days only, got {projection}")
+        _assert_close(projection["fact_buyout_elapsed_rub"], 1500.0 * 79.0, "projection elapsed buyout fact")
+        _assert_close(projection["fact_ads_elapsed_rub"], 180.0 * 79.0, "projection elapsed ads fact")
+        _assert_close(projection["projected_buyout_rub"], 1500.0 * 334.0, "projection buyout")
+        _assert_close(projection["projected_ads_sum_rub"], 180.0 * 334.0, "projection ads")
+        _assert_close(
+            projection["projected_buyout_pct_of_annual_plan"],
+            (1500.0 * 334.0) / (H1_PLAN_RUB + H2_PLAN_RUB) * 100.0,
+            "projection buyout percent",
+        )
+        _assert_close(
+            projection["projected_ads_pct_of_annual_ads_plan"],
+            (180.0 * 334.0) / ((H1_PLAN_RUB + H2_PLAN_RUB) * 0.10) * 100.0,
+            "projection ads percent",
+        )
+        _assert_close(projection["projected_drr_pct"], 12.0, "projection DRR")
 
         mtd = payload["periods"]["month_to_date"]
         if mtd["date_from"] != "2026-04-01" or mtd["day_count"] != 20:
@@ -411,6 +436,9 @@ def main() -> None:
         )
         if empty_payload.get("status") != "unavailable":
             raise AssertionError(f"plan report must be unavailable when no usable snapshots exist, got {empty_payload}")
+        empty_projection = empty_payload["contract_period_projection"]
+        if empty_projection.get("status") != "unavailable" or empty_projection.get("projected_buyout_rub") is not None:
+            raise AssertionError(f"projection must be unavailable without usable facts, got {empty_projection}")
 
         partial_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "daily-from-march")
         partial_result = partial_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
@@ -439,6 +467,13 @@ def main() -> None:
         if partial_ytd.get("status") != "partial":
             raise AssertionError(f"YTD must disclose missing Jan/Feb without baseline, got {partial_payload}")
         _assert_close(partial_selected["metrics"]["buyout_rub"]["fact"], 45000.0, "partial selected buyout fact")
+        partial_projection = partial_payload["contract_period_projection"]
+        if (
+            partial_projection.get("status") != "partial"
+            or not partial_projection.get("fact_is_partial")
+            or "2026-02-01" not in (partial_projection.get("coverage") or {}).get("missing_dates", [])
+        ):
+            raise AssertionError(f"projection must disclose partial elapsed coverage, got {partial_projection}")
 
         partial_runtime.save_plan_report_monthly_baseline(
             rows=[
@@ -470,6 +505,19 @@ def main() -> None:
         _assert_close(mixed_ytd["metrics"]["ads_sum_rub"]["fact"], 15080.0, "mixed ytd ads fact")
         _assert_close(mixed_ytd["metrics"]["ads_sum_rub"]["plan"], 16500.0, "mixed ytd ads plan")
         _assert_close(mixed_ytd["metrics"]["drr_pct"]["fact"], 15080.0 / 135500.0 * 100.0, "mixed ytd drr fact")
+        mixed_projection = mixed_payload["contract_period_projection"]
+        if mixed_projection.get("status") != "available":
+            raise AssertionError(f"projection must become available after Feb baseline plus March+ daily, got {mixed_projection}")
+        _assert_close(
+            mixed_projection["fact_buyout_elapsed_rub"],
+            28000.0 + (51.0 * 1500.0),
+            "mixed projection elapsed buyout fact",
+        )
+        _assert_close(
+            mixed_projection["projected_buyout_rub"],
+            (28000.0 + (51.0 * 1500.0)) / 79.0 * 334.0,
+            "mixed projection buyout",
+        )
 
         wb_plan_payload = block.build(
             period="current_year",
@@ -819,6 +867,7 @@ def main() -> None:
         print("plan_report_unavailable_coverage_guard: ok ->", empty_payload["status"])
         print("plan_report_selected_independent_from_ytd: ok ->", partial_selected["status"], partial_ytd["status"])
         print("plan_report_mixed_baseline_ytd: ok ->", mixed_ytd["status"], baseline_mix["months"])
+        print("plan_report_contract_period_projection: ok ->", projection["projected_buyout_rub"], projection["projected_ads_sum_rub"])
         print("plan_report_no_double_count: ok ->", no_double_ytd["metrics"]["buyout_rub"]["fact"])
         print("plan_report_partial_overlap_baseline: ok ->", partial_overlap_source["baseline_months"])
         print("plan_report_reconciliation_controls: ok ->", q1_ytd["metrics"]["buyout_rub"]["fact"], april_mtd["metrics"]["buyout_rub"]["fact"])
