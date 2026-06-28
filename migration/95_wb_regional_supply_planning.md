@@ -7,7 +7,8 @@
 - Uses the latest persisted `wb_regional_supply` result.
 - Plans one selected calculation district at a time.
 - Resolves `nmId -> barcode` from server-owned nomenclature.
-- Calls official WB FBW `POST /api/v1/acceptance/options` only as a read-only information request with `barcode + quantity`.
+- Calls official WB FBW `POST /api/v1/acceptance/options` only as a read-only information request with the official JSON array body `[{barcode, quantity}]`; optional `warehouseID` is query-only.
+- Normalizes official `result[]` as barcode-level evidence and flattens nested `result[].warehouses[]` into visible option rows; per-barcode upstream errors are controlled warnings/blockers and mixed success/error can still produce partial options.
 - Enriches returned options with read-only warehouses, Marketplace offices, acceptance coefficients, box tariff and transit tariff evidence.
 - Ranks options deterministically and exposes copyable manual handoff JSON for the operator.
 
@@ -31,3 +32,4 @@ The planning response includes `cache.enabled=false`; selected options are not p
 - No WB mutations.
 - No Google Sheets/GAS/localStorage truth.
 - Missing barcode and upstream/token/rate-limit failures are controlled response states, not crashes.
+- HTTP diagnostics include endpoint, request shape, product count, optional `warehouseID` and sanitized body prefix without tokens or full barcode lists.

@@ -1908,6 +1908,9 @@
       margin-top: 12px;
       border-top: 1px solid var(--border);
       padding-top: 12px;
+      max-width: 100%;
+      min-width: 0;
+      overflow: hidden;
     }
 
     .regional-planning-panel[hidden] {
@@ -1918,8 +1921,27 @@
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 10px;
       margin-bottom: 8px;
+      max-width: 100%;
+      min-width: 0;
+    }
+
+    .regional-planning-head > div {
+      flex: 1 1 280px;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    #regionalPlanningMessage {
+      overflow-wrap: anywhere;
+    }
+
+    #copyRegionalPlanningPayloadButton {
+      flex: 0 1 auto;
+      max-width: 100%;
+      white-space: normal;
     }
 
     .regional-planning-title {
@@ -1933,6 +1955,8 @@
       flex-wrap: wrap;
       gap: 6px;
       margin: 8px 0;
+      max-width: 100%;
+      min-width: 0;
     }
 
     .regional-planning-chip {
@@ -1954,19 +1978,25 @@
       color: var(--warning-text);
       font-size: 12px;
       line-height: 1.45;
+      overflow-wrap: anywhere;
     }
 
     .regional-planning-table-wrap {
       width: 100%;
+      max-width: 100%;
+      min-width: 0;
       overflow-x: auto;
+      overflow-y: hidden;
       margin-top: 8px;
     }
 
     .regional-planning-table {
-      width: 1280px;
-      min-width: 1280px;
+      width: 1120px;
+      min-width: 1120px;
+      max-width: none;
       border-collapse: collapse;
       font-size: 11px;
+      table-layout: fixed;
     }
 
     .regional-planning-table th,
@@ -1975,6 +2005,7 @@
       padding: 8px;
       text-align: left;
       vertical-align: top;
+      overflow-wrap: anywhere;
     }
 
     .regional-planning-table th {
@@ -1990,6 +2021,7 @@
       color: var(--muted);
       font-size: 10px;
       line-height: 1.35;
+      overflow-wrap: anywhere;
     }
 
     /* Dark embedded operator UI: reports and supply tabs share the unified vitrina surface tokens. */

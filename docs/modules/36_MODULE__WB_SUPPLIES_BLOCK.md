@@ -88,7 +88,8 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
   - `GET /api/v1/transit-tariffs` exists in adapter/diagnostics as read-only tariff evidence; the UI does not calculate transit cabinet cost from it without a proven formula;
   - `GET /api/v1/warehouses`.
 - Additional read-only methods reused by `Поставки -> Расчёты -> Подобрать склады WB`:
-  - `POST /api/v1/acceptance/options` is a FBW planning information request, not a mutation; it is called only with planned `products[].barcode + quantity` from the latest regional calculation and server-owned nomenclature barcodes;
+  - `POST /api/v1/acceptance/options` is a FBW planning information request, not a mutation; it is called only with the official JSON array body `[{barcode, quantity}]` from the latest regional calculation and server-owned nomenclature barcodes, while optional `warehouseID` is sent as a query parameter;
+  - acceptance/options normalization treats official `result[]` rows as barcode-level evidence and flattens nested `result[].warehouses[]` into visible planning option rows; per-barcode upstream errors become controlled warnings/blockers, so mixed success/error can still return partial options;
   - `GET /api/tariffs/v1/acceptance/coefficients` is read from the Common/Tariffs API base (`WB_TARIFFS_API_BASE_URL` override) as coefficient/date/allowUnload evidence for ranking.
 - Additional read-only district mapping evidence:
   - district source is the planned/target supply warehouse (`warehouseName`, exposed as `planned_warehouse_name` / `target_warehouse_name` / `district_source_warehouse_name`);
@@ -101,6 +102,7 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
 - Adapter errors are sanitized:
   - missing `WB_API_TOKEN` returns controlled app-level error;
   - upstream `401/403` maps to `WB API token has no Supplies permission or is invalid`;
+  - acceptance/options HTTP diagnostics include endpoint, request shape, product count, optional `warehouseID` and sanitized WB body prefix, without token values or full barcode lists;
   - non-JSON and transport failures map to controlled transport errors;
   - token values are not printed.
 

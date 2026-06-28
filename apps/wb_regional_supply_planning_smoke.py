@@ -34,25 +34,33 @@ class FakePlanningSource:
         self.acceptance_requests: list[dict[str, object]] = []
         self.fail_acceptance: Exception | None = None
         self.fail_box_tariffs = False
+        self.acceptance_payload: dict[str, object] = {
+            "result": [
+                {
+                    "barcode": "4600000000001",
+                    "warehouses": [
+                        {"warehouseID": 101, "warehouseName": "Коледино", "canBox": True},
+                        {"warehouseID": 202, "warehouseName": "Склад Шушары", "canBox": True},
+                        {
+                            "warehouseID": 303,
+                            "warehouseName": "Электросталь",
+                            "transitWarehouseName": "Обухово",
+                            "isTransit": True,
+                        },
+                    ],
+                },
+                {
+                    "barcode": "4600000000002",
+                    "errors": [{"message": "barcode is temporarily unavailable"}],
+                },
+            ]
+        }
 
     def fetch_acceptance_options(self, *, products, warehouse_id=None):
         self.acceptance_requests.append({"products": list(products), "warehouse_id": warehouse_id})
         if self.fail_acceptance is not None:
             raise self.fail_acceptance
-        return {
-            "result": {
-                "warehouses": [
-                    {"warehouseID": 101, "warehouseName": "Коледино", "canBox": True},
-                    {"warehouseID": 202, "warehouseName": "Склад Шушары", "canBox": True},
-                    {
-                        "warehouseID": 303,
-                        "warehouseName": "Электросталь",
-                        "transitWarehouseName": "Обухово",
-                        "isTransit": True,
-                    },
-                ]
-            }
-        }
+        return self.acceptance_payload
 
     def fetch_warehouses(self):
         return [
@@ -123,6 +131,11 @@ def main() -> None:
             raise AssertionError(f"transit option must stay visible: {options[1]}")
         if not options[0].get("operator_handoff", {}).get("products"):
             raise AssertionError("planning option must expose manual operator handoff payload")
+        if not any("Second SKU" in warning and "temporarily unavailable" in warning for warning in payload.get("warnings", [])):
+            raise AssertionError(f"mixed barcode-level errors must be visible as warnings, got {payload.get('warnings')}")
+        acceptance_evidence = payload.get("evidence", {}).get("acceptance_options", {})
+        if acceptance_evidence.get("http_status") != 200 or acceptance_evidence.get("request_shape") != "json_array":
+            raise AssertionError(f"successful acceptance/options evidence must expose official request shape, got {acceptance_evidence}")
 
         source.fail_box_tariffs = True
         partial = block.build_options({"district_key": DISTRICT_CENTRAL})
@@ -144,6 +157,18 @@ def main() -> None:
             raise AssertionError("missing barcode path must not call acceptance/options")
 
         _seed_nomenclature(runtime, include_second=True)
+        source.acceptance_payload = {
+            "result": [
+                {"barcode": "4600000000001", "warehouses": []},
+                {"barcode": "4600000000002", "error": "no warehouses available"},
+            ]
+        }
+        no_options = block.build_options({"district_key": DISTRICT_CENTRAL})
+        if no_options.get("status") != "no_options" or no_options.get("options"):
+            raise AssertionError(f"no warehouses must be controlled no-options, got {no_options}")
+        if not no_options.get("blockers") or not any("no warehouses available" in item.get("message", "") for item in no_options.get("blockers", [])):
+            raise AssertionError(f"no-options barcode errors must be exposed as blockers, got {no_options.get('blockers')}")
+
         source.fail_acceptance = WbSuppliesHttpStatusError(429, '{"token":"secret-token"}')
         rate_limited = block.build_options({"district_key": DISTRICT_CENTRAL})
         if rate_limited.get("status") != "upstream_error":
@@ -152,13 +177,24 @@ def main() -> None:
         if "secret-token" in serialized:
             raise AssertionError("upstream error payload must not leak body/token values")
 
-        source.fail_acceptance = WbSuppliesHttpStatusError(500, '{"token":"secret-token"}')
-        server_error = block.build_options({"district_key": DISTRICT_CENTRAL})
-        if server_error.get("status") != "upstream_error":
-            raise AssertionError(f"HTTP 500 errors must be controlled, got {server_error}")
-        serialized_server_error = json.dumps(server_error, ensure_ascii=False)
-        if "secret-token" in serialized_server_error or "body_prefix" in serialized_server_error:
-            raise AssertionError("generic HTTP upstream errors must not leak sanitized body prefixes")
+        source.fail_acceptance = WbSuppliesHttpStatusError(
+            400,
+            '{"error":"bad request","token":"secret-token","barcode":"4600000000001"}',
+        )
+        bad_request = block.build_options({"district_key": DISTRICT_CENTRAL})
+        if bad_request.get("status") != "upstream_error":
+            raise AssertionError(f"HTTP 400 errors must be controlled, got {bad_request}")
+        diagnostics = bad_request.get("blockers", [{}])[0].get("diagnostics", {})
+        serialized_diagnostics = json.dumps(diagnostics, ensure_ascii=False)
+        if "secret-token" in serialized_diagnostics or "4600000000001" in serialized_diagnostics:
+            raise AssertionError(f"HTTP 400 diagnostics must not leak secrets or full barcodes, got {diagnostics}")
+        if (
+            diagnostics.get("http_status") != 400
+            or diagnostics.get("request_shape") != "json_array"
+            or diagnostics.get("product_count") != 2
+            or "wb_body_prefix" not in diagnostics
+        ):
+            raise AssertionError(f"HTTP 400 diagnostics must include safe request evidence, got {diagnostics}")
 
     print("wb_regional_supply_planning_smoke: OK")
 
