@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from http import HTTPStatus
+from io import BytesIO
 import json
 from pathlib import Path
 import socket
@@ -13,6 +14,8 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from urllib import request as urllib_request
 import zipfile
+
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -37,6 +40,7 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
     apply_supplier_order_document_match,
     build_financial_summary,
     build_supplier_shipment_registry,
+    parse_financial_document_upload,
     parse_financial_document_text,
 )
 
@@ -471,6 +475,25 @@ TEXT_BY_FILENAME = {
 }
 
 
+def _packing_list_workbook_bytes() -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Packing"
+    rows = [
+        ["26GN462 装箱单"],
+        ["箱号", "名称&规格", "型号", "外箱数量", "数量/箱", "总数量", "毛重/箱", "总毛重", "纸箱尺寸", "体积"],
+        ["1", "大猩猩除尘仓\n\n丝印高清膜\n带包装", "iPhone 14 / 13 / 13Pro", 1, 250, 250, 19.2, 19.2, "51*39*49", 21.538881],
+        ["2--4", "", "iPhone 14 Pro", 3, 250, 750, 19.65, 58.95, "", ""],
+        ["5--221", "", "iPhone 14 Pro Max", 217, 250, 54250, 21.22, 4602.3, "", ""],
+        ["Total: 221 CTNS", "", "", 221, "", 55250, "", 4680.45, "", 21.538881],
+    ]
+    for row in rows:
+        worksheet.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 def main() -> None:
     _assert_parser_smoke()
     _assert_http_api_smoke()
@@ -540,6 +563,7 @@ def _assert_parser_smoke() -> None:
         filename="bank-transfer-pdftotext-layout.txt",
     )
     _assert_bank_transfer_payload(bank_transfer_pdftotext_payload, label="bank transfer pdftotext-layout")
+    _assert_packing_list_parser_smoke()
     _assert_order_document_verification_smoke(bank_transfer_payload)
     _assert_summary_metrics_smoke()
     _assert_missing_customs_data_summary_smoke()
@@ -580,6 +604,27 @@ def _assert_bank_transfer_payload(payload: dict[str, Any], *, label: str) -> Non
         or payload.get("warnings")
     ):
         raise AssertionError(f"{label} parser fields mismatch: {payload}")
+
+
+def _assert_packing_list_parser_smoke() -> None:
+    payload = parse_financial_document_upload(_packing_list_workbook_bytes(), filename="packing-list.xlsx")
+    normalized = payload["normalized_parse"]
+    if (
+        normalized.get("document_type") != "packing_list"
+        or normalized.get("document_title") != "26GN462 装箱单"
+        or normalized.get("document_number") != "26GN462"
+        or normalized.get("total_cartons") != 221.0
+        or normalized.get("total_quantity") != 55250.0
+        or normalized.get("total_gross_weight_kg") != 4680.45
+        or normalized.get("total_volume_m3") != 21.538881
+        or normalized.get("carton_size") != "51*39*49"
+        or normalized.get("line_item_count") != 3
+        or payload.get("errors")
+    ):
+        raise AssertionError(f"packing list parser fields mismatch: {payload}")
+    first_line = (normalized.get("line_items") or [{}])[0]
+    if first_line.get("carton_range") != "1" or first_line.get("model") != "iPhone 14 / 13 / 13Pro":
+        raise AssertionError(f"packing list line item mismatch: {first_line}")
 
 
 def _assert_transitplus_quote_payload(quote_payload: dict[str, Any]) -> None:
@@ -1304,6 +1349,30 @@ def _assert_http_api_smoke() -> None:
                 or not _approx(final_summary.get("quote_invoice_match", {}).get("implied_rate"), 75.29, tolerance=0.01)
             ):
                 raise AssertionError(f"financial re-upload summary mismatch: {final_status} {final_list}")
+            packing_status, packing_payload = _post_multipart(
+                collection_url,
+                _packing_list_workbook_bytes(),
+                filename="packing-list.xlsx",
+            )
+            if (
+                packing_status != 200
+                or packing_payload.get("document_type") != "packing_list"
+                or packing_payload.get("parse_status") != "parsed"
+                or (packing_payload.get("normalized_parse") or {}).get("total_cartons") != 221.0
+            ):
+                raise AssertionError(f"packing list upload failed: {packing_status} {packing_payload}")
+            packed_status, packed_list = _get_json(collection_url)
+            packing_summary = (packed_list.get("summary") or {}).get("packing_list") or {}
+            if (
+                packed_status != 200
+                or len(packed_list.get("documents", [])) != 5
+                or len(packed_list.get("expense_lines", [])) != 14
+                or packing_summary.get("total_cartons") != 221.0
+                or packing_summary.get("total_quantity") != 55250.0
+                or packing_summary.get("total_gross_weight_kg") != 4680.45
+                or packing_summary.get("total_volume_m3") != 21.538881
+            ):
+                raise AssertionError(f"packing list summary mismatch: {packed_status} {packed_list}")
             documents_url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_financial/documents"
             documents_status, order_documents = _get_json(documents_url)
             if documents_status != 200 or order_documents.get("contract_name") != "sheet_vitrina_v1_supplier_order_documents":
@@ -1317,11 +1386,15 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"missing bank control statement must be shown: {order_documents}")
             if _required_document_status(required_rows, "bank_transfer_application") != "Не загружен":
                 raise AssertionError(f"missing bank transfer application must be shown: {order_documents}")
+            if _required_document_status(required_rows, "bank_fee_statement") != "Не загружен":
+                raise AssertionError(f"missing bank fees must be shown: {order_documents}")
+            if _required_document_status(required_rows, "packing_list") != "Загружен":
+                raise AssertionError(f"uploaded packing list must be shown: {order_documents}")
             archive_status, archive_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
             if archive_status != 200:
                 raise AssertionError(f"all-documents archive route failed: {archive_status}")
             archive_manifest = _zip_manifest(archive_bytes)
-            if not set(archive_manifest.get("missing_required_types", [])) >= {"bank_control_statement", "bank_transfer_application"}:
+            if not set(archive_manifest.get("missing_required_types", [])) >= {"bank_control_statement", "bank_transfer_application", "bank_fee_statement"}:
                 raise AssertionError(f"all-documents archive must warn about missing bank docs: {archive_manifest}")
 
             for filename in ("bank-control.pdf", "bank-transfer.pdf"):
@@ -1338,6 +1411,14 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"uploaded bank control statement must be shown: {bank_order_documents}")
             if _required_document_status(bank_rows, "bank_transfer_application") != "Проверить":
                 raise AssertionError(f"uploaded bank transfer application must be shown: {bank_order_documents}")
+            if _required_document_status(bank_rows, "bank_fee_statement") != "Не загружен":
+                raise AssertionError(f"missing bank fee import must still be shown: {bank_order_documents}")
+            if _required_document_status(bank_rows, "packing_list") != "Загружен":
+                raise AssertionError(f"packing list checklist status changed: {bank_order_documents}")
+            document_rows = bank_order_documents.get("documents", [])
+            payment_rows = [item for item in document_rows if item.get("document_type") == "bank_transfer_application"]
+            if len(payment_rows) != 1:
+                raise AssertionError(f"linked CNY supplier payment must not duplicate order document rows: {bank_order_documents}")
             logistics_status, logistics_bytes, _ = _get_bytes(f"{documents_url}/logistics-package.zip")
             if logistics_status != 200:
                 raise AssertionError(f"logistics package route failed: {logistics_status}")
@@ -1352,9 +1433,9 @@ def _assert_http_api_smoke() -> None:
             all_status, all_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
             all_manifest = _zip_manifest(all_bytes)
             all_types = [item.get("document_type") for item in all_manifest.get("included", [])]
-            if all_status != 200 or len(all_manifest.get("included", [])) != 8:
+            if all_status != 200 or len(all_manifest.get("included", [])) != 9:
                 raise AssertionError(f"all-documents archive must include all uploaded docs: {all_status} {all_manifest}")
-            for expected_type in ("invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application"):
+            for expected_type in ("invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "packing_list"):
                 if expected_type not in all_types:
                     raise AssertionError(f"all-documents archive missing {expected_type}: {all_manifest}")
         finally:

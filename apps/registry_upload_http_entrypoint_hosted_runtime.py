@@ -150,6 +150,7 @@ OPTIONAL_RUNTIME_CONTRACT = [
 ]
 RUNTIME_PIP_PACKAGES = [
     "openpyxl==3.1.5",
+    "xlrd==2.0.1",
     "playwright==1.58.0",
     "pypdf==6.4.1",
 ]
@@ -872,7 +873,7 @@ def deploy_current_checkout(
 
 def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]:
     package_names = " ".join(shlex.quote(item) for item in RUNTIME_PIP_PACKAGES)
-    python_check = "python3 -c 'import openpyxl, playwright, pypdf' >/dev/null 2>&1"
+    python_check = "python3 -c 'import openpyxl, xlrd, playwright, pypdf' >/dev/null 2>&1"
     pip_install = f"python3 -m pip install --break-system-packages {package_names}"
     command = f"{python_check} || {pip_install}"
     return _remote_shell_command(target, command)

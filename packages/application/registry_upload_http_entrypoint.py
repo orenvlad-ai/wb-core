@@ -125,6 +125,7 @@ from packages.contracts.supplier_financial_documents import (
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE,
+    FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
 )
 from packages.contracts.cny_ledger import (
     CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
@@ -167,6 +168,8 @@ SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES = (
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
+    FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
 )
 SUPPLIER_ORDER_LOGISTICS_PACKAGE_DOCUMENT_TYPES = (
     TRADE_DOCUMENT_TYPE_CONTRACT,
@@ -181,7 +184,8 @@ SUPPLIER_ORDER_DOCUMENT_LABELS_RU = {
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION: "ДТ",
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT: "Ведомость банковского контроля",
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: "Заявление на перевод ВТБ / платёжка",
-    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT: "Банковская выписка для комиссий",
+    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT: "Комиссии банка",
+    FINANCIAL_DOCUMENT_TYPE_PACKING_LIST: "Packing list / Упаковочный лист",
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE: "Документ конвертации RUB -> CNY",
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT: "Оплата поставщику CNY",
     CNY_DOCUMENT_TYPE_BANK_FEE: "Комиссия банка CNY",
@@ -1917,11 +1921,13 @@ class RegistryUploadHttpEntrypoint:
             apply_supplier_order_document_match(dict(item), shipment)
             for item in financial_payload.get("documents") or []
         ]
+        financial_document_ids = {str(item.get("document_id") or "") for item in financial_documents if str(item.get("document_id") or "")}
         cny_status = self.cny_ledger_block.get_status()
         cny_documents = [
             self._supplier_order_cny_document_row(item)
             for item in cny_status.get("documents") or []
             if str(item.get("source_order_id") or "") == str(shipment_id or "")
+            and str(item.get("linked_financial_document_id") or "").strip() not in financial_document_ids
         ]
         checklist = _build_supplier_order_documents_checklist(
             shipment=shipment,
@@ -1993,21 +1999,23 @@ class RegistryUploadHttpEntrypoint:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
     ) -> dict[str, Any]:
-        preview = self.cny_ledger_block.parse_document_preview(
-            file_bytes,
-            uploaded_filename=uploaded_filename,
-        )
-        preview_type = str((preview.get("normalized_parse") or {}).get("document_type") or "")
-        if preview_type in {CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT}:
-            return self.cny_ledger_block.upload_document(
-                file_bytes=file_bytes,
+        suffix = Path(str(uploaded_filename or "")).suffix.lower()
+        if suffix == ".pdf":
+            preview = self.cny_ledger_block.parse_document_preview(
+                file_bytes,
                 uploaded_filename=uploaded_filename,
-                uploaded_content_type=uploaded_content_type,
-                source=CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
-                source_order_id=shipment_id,
-                context_order_id=shipment_id,
-                reject_unsupported=True,
             )
+            preview_type = str((preview.get("normalized_parse") or {}).get("document_type") or "")
+            if preview_type in {CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT}:
+                return self.cny_ledger_block.upload_document(
+                    file_bytes=file_bytes,
+                    uploaded_filename=uploaded_filename,
+                    uploaded_content_type=uploaded_content_type,
+                    source=CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+                    source_order_id=shipment_id,
+                    context_order_id=shipment_id,
+                    reject_unsupported=True,
+                )
         financial_preview = self.supplier_financial_documents_block.parse_document_preview(
             file_bytes,
             uploaded_filename=uploaded_filename,
@@ -2094,7 +2102,11 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_supplier_financial_document_delete_request(self, shipment_id: str, document_id: str) -> dict[str, Any]:
-        return self.supplier_financial_documents_block.delete_document(shipment_id, document_id)
+        payload = self.supplier_financial_documents_block.delete_document(shipment_id, document_id)
+        if payload.get("cny_documents_deleted"):
+            replay = self.cny_ledger_block.replay_ledger(reason="supplier_financial_document_delete")
+            payload["cny_replay"] = replay.get("replay") or replay
+        return payload
 
     def handle_supplier_financial_document_file_request(self, shipment_id: str, document_id: str) -> tuple[bytes, str, str]:
         return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
@@ -4856,6 +4868,11 @@ def _supplier_order_financial_document_row(
     if row["order_match_status"] in {"needs_review", "mismatch"} and row["status"] == "uploaded":
         row["status"] = "needs_review"
         row["status_label"] = _supplier_order_document_status_label(row["status"])
+    if document_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
+        statement_import = dict(normalized.get("statement_import") or {})
+        if str(statement_import.get("import_status") or "") != "confirmed":
+            row["status"] = "needs_review"
+            row["status_label"] = _supplier_order_document_status_label(row["status"])
     return row
 
 
