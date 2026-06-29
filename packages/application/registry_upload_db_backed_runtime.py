@@ -51,6 +51,14 @@ from packages.contracts.supplier_financial_documents import (
     FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED,
     FINANCIAL_DOCUMENT_PARSE_STATUSES,
 )
+from packages.contracts.cny_ledger import (
+    CNY_DOCUMENT_STATUS_POSTED,
+    CNY_DOCUMENT_STATUSES,
+    CNY_DOCUMENT_TYPES,
+    CNY_LEDGER_OPERATION_STATUS_POSTED,
+    CNY_LEDGER_OPERATION_STATUSES,
+    CNY_LEDGER_OPERATION_TYPES,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
@@ -2794,6 +2802,13 @@ class RegistryUploadDbBackedRuntime:
                        supplier_name,
                        currency,
                        approx_yuan_rate,
+                       cny_ledger_effective_rate,
+                       cny_payment_currency_rub_cost,
+                       cny_paid_amount,
+                       cny_bank_fee_rub,
+                       cny_calculation_status,
+                       cny_calculation_error,
+                       cny_calculated_at,
                        product_qty_total,
                        product_amount_total,
                        extras_amount_total,
@@ -3209,6 +3224,410 @@ class RegistryUploadDbBackedRuntime:
         if loaded is None:
             raise ValueError(f"financial document not found: {document_id}")
         return loaded
+
+    def list_supplier_financial_documents_all(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_supplier_financial_documents
+                ORDER BY supplier_order_id ASC, document_date ASC, uploaded_at ASC, document_id ASC
+                """
+            ).fetchall()
+            return [_supplier_financial_document_to_dict(row) for row in rows]
+
+    def save_cny_document(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        document_id = str(document.get("document_id") or "").strip()
+        if not document_id:
+            raise ValueError("CNY document_id is required")
+        document_type = str(document.get("document_type") or "").strip()
+        if document_type not in CNY_DOCUMENT_TYPES:
+            raise ValueError(f"unsupported CNY document_type: {document_type}")
+        status = str(document.get("status") or CNY_DOCUMENT_STATUS_POSTED).strip()
+        if status not in CNY_DOCUMENT_STATUSES:
+            raise ValueError(f"unsupported CNY document status: {status}")
+        uploaded_at = str(document.get("uploaded_at") or document.get("created_at") or "").strip()
+        created_at = str(document.get("created_at") or uploaded_at).strip()
+        updated_at = str(document.get("updated_at") or uploaded_at).strip()
+        _validate_timestamp(uploaded_at, field_name="uploaded_at")
+        _validate_timestamp(created_at, field_name="created_at")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        operation_date = str(document.get("operation_date") or "").strip()
+        if operation_date:
+            _validate_iso_date(operation_date, field_name="operation_date")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_cny_documents(
+                    document_id,
+                    document_type,
+                    source,
+                    source_order_id,
+                    context_order_id,
+                    linked_financial_document_id,
+                    original_filename,
+                    stored_file_path,
+                    file_content_type,
+                    file_sha256,
+                    natural_key,
+                    uploaded_at,
+                    created_at,
+                    updated_at,
+                    operation_date,
+                    operation_datetime,
+                    status,
+                    document_number,
+                    currency,
+                    rub_amount,
+                    cny_amount,
+                    bank_rate,
+                    parsed_payload_json,
+                    raw_parse_json,
+                    parser_version,
+                    warnings_json,
+                    errors_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    document_type = excluded.document_type,
+                    source = excluded.source,
+                    source_order_id = excluded.source_order_id,
+                    context_order_id = excluded.context_order_id,
+                    linked_financial_document_id = excluded.linked_financial_document_id,
+                    original_filename = excluded.original_filename,
+                    stored_file_path = excluded.stored_file_path,
+                    file_content_type = excluded.file_content_type,
+                    file_sha256 = excluded.file_sha256,
+                    natural_key = excluded.natural_key,
+                    updated_at = excluded.updated_at,
+                    operation_date = excluded.operation_date,
+                    operation_datetime = excluded.operation_datetime,
+                    status = excluded.status,
+                    document_number = excluded.document_number,
+                    currency = excluded.currency,
+                    rub_amount = excluded.rub_amount,
+                    cny_amount = excluded.cny_amount,
+                    bank_rate = excluded.bank_rate,
+                    parsed_payload_json = excluded.parsed_payload_json,
+                    raw_parse_json = excluded.raw_parse_json,
+                    parser_version = excluded.parser_version,
+                    warnings_json = excluded.warnings_json,
+                    errors_json = excluded.errors_json
+                """,
+                (
+                    document_id,
+                    document_type,
+                    str(document.get("source") or ""),
+                    str(document.get("source_order_id") or ""),
+                    str(document.get("context_order_id") or ""),
+                    str(document.get("linked_financial_document_id") or ""),
+                    str(document.get("original_filename") or ""),
+                    str(document.get("stored_file_path") or ""),
+                    str(document.get("file_content_type") or ""),
+                    str(document.get("file_sha256") or ""),
+                    str(document.get("natural_key") or ""),
+                    uploaded_at,
+                    created_at,
+                    updated_at,
+                    operation_date,
+                    str(document.get("operation_datetime") or ""),
+                    status,
+                    str(document.get("document_number") or ""),
+                    str(document.get("currency") or ""),
+                    str(document.get("rub_amount") or ""),
+                    str(document.get("cny_amount") or ""),
+                    str(document.get("bank_rate") or ""),
+                    json.dumps(dict(document.get("parsed_payload") or {}), ensure_ascii=False),
+                    json.dumps(dict(document.get("raw_parse") or {}), ensure_ascii=False),
+                    str(document.get("parser_version") or ""),
+                    json.dumps(list(document.get("warnings") or []), ensure_ascii=False),
+                    json.dumps(list(document.get("errors") or []), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        loaded = self.load_cny_document(document_id)
+        if loaded is None:
+            raise ValueError(f"CNY document was not saved: {document_id}")
+        return loaded
+
+    def update_cny_document_context(
+        self,
+        *,
+        document_id: str,
+        source_order_id: str,
+        context_order_id: str,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        _validate_timestamp(updated_at, field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_cny_documents
+                SET source_order_id = ?,
+                    context_order_id = ?,
+                    updated_at = ?
+                WHERE document_id = ?
+                """,
+                (
+                    str(source_order_id or "").strip(),
+                    str(context_order_id or "").strip(),
+                    updated_at,
+                    str(document_id or "").strip(),
+                ),
+            )
+            conn.commit()
+            if cursor.rowcount <= 0:
+                raise ValueError(f"CNY document not found: {document_id}")
+        loaded = self.load_cny_document(document_id)
+        if loaded is None:
+            raise ValueError(f"CNY document not found: {document_id}")
+        return loaded
+
+    def load_cny_document(self, document_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_cny_documents
+                WHERE document_id = ?
+                """,
+                (str(document_id or "").strip(),),
+            ).fetchone()
+            return _cny_document_to_dict(row) if row else None
+
+    def load_cny_document_by_natural_key(self, natural_key: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_cny_documents
+                WHERE natural_key = ?
+                """,
+                (str(natural_key or "").strip(),),
+            ).fetchone()
+            return _cny_document_to_dict(row) if row else None
+
+    def delete_cny_document(self, document_id: str) -> dict[str, Any]:
+        normalized_id = str(document_id or "").strip()
+        if not normalized_id:
+            raise ValueError("CNY document_id is required")
+        existing = self.load_cny_document(normalized_id)
+        if existing is None:
+            raise ValueError(f"CNY document not found: {normalized_id}")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_cny_documents
+                WHERE document_id = ?
+                """,
+                (normalized_id,),
+            )
+            conn.commit()
+        return existing
+
+    def list_cny_documents(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_cny_documents
+                ORDER BY COALESCE(NULLIF(operation_datetime, ''), NULLIF(operation_date, ''), uploaded_at) ASC,
+                         uploaded_at ASC,
+                         document_id ASC
+                """
+            ).fetchall()
+            return [_cny_document_to_dict(row) for row in rows]
+
+    def replace_cny_ledger_operations(self, operations: list[Mapping[str, Any]]) -> None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("DELETE FROM sheet_vitrina_v1_cny_ledger_operations")
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_cny_ledger_operations(
+                    operation_id,
+                    operation_type,
+                    source_document_id,
+                    source_order_id,
+                    operation_date,
+                    operation_datetime,
+                    sequence_key,
+                    cny_delta,
+                    rub_value_delta,
+                    effective_rate_before,
+                    balance_cny_after,
+                    balance_rub_value_after,
+                    average_rate_after,
+                    status,
+                    error_reason,
+                    created_at,
+                    updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(item.get("operation_id") or ""),
+                        _validated_choice(
+                            str(item.get("operation_type") or ""),
+                            CNY_LEDGER_OPERATION_TYPES,
+                            field_name="CNY ledger operation_type",
+                        ),
+                        str(item.get("source_document_id") or ""),
+                        str(item.get("source_order_id") or ""),
+                        str(item.get("operation_date") or ""),
+                        str(item.get("operation_datetime") or ""),
+                        str(item.get("sequence_key") or ""),
+                        str(item.get("cny_delta") or ""),
+                        str(item.get("rub_value_delta") or ""),
+                        str(item.get("effective_rate_before") or ""),
+                        str(item.get("balance_cny_after") or ""),
+                        str(item.get("balance_rub_value_after") or ""),
+                        str(item.get("average_rate_after") or ""),
+                        _validated_choice(
+                            str(item.get("status") or CNY_LEDGER_OPERATION_STATUS_POSTED),
+                            CNY_LEDGER_OPERATION_STATUSES,
+                            field_name="CNY ledger operation status",
+                        ),
+                        str(item.get("error_reason") or ""),
+                        str(item.get("created_at") or ""),
+                        str(item.get("updated_at") or ""),
+                    )
+                    for item in operations
+                ],
+            )
+            conn.commit()
+
+    def list_cny_ledger_operations(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_cny_ledger_operations
+                ORDER BY sequence_key ASC, operation_id ASC
+                """
+            ).fetchall()
+            return [_cny_ledger_operation_to_dict(row) for row in rows]
+
+    def save_cny_ledger_replay_state(self, state: Mapping[str, Any]) -> None:
+        replayed_at = str(state.get("replayed_at") or "").strip()
+        _validate_timestamp(replayed_at, field_name="replayed_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_cny_ledger_replay_state(
+                    slot,
+                    status,
+                    reason,
+                    replayed_at,
+                    operation_count,
+                    document_count,
+                    balance_cny,
+                    balance_rub_value,
+                    average_rate,
+                    diagnostics_json
+                )
+                VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    status = excluded.status,
+                    reason = excluded.reason,
+                    replayed_at = excluded.replayed_at,
+                    operation_count = excluded.operation_count,
+                    document_count = excluded.document_count,
+                    balance_cny = excluded.balance_cny,
+                    balance_rub_value = excluded.balance_rub_value,
+                    average_rate = excluded.average_rate,
+                    diagnostics_json = excluded.diagnostics_json
+                """,
+                (
+                    str(state.get("status") or ""),
+                    str(state.get("reason") or ""),
+                    replayed_at,
+                    int(state.get("operation_count") or 0),
+                    int(state.get("document_count") or 0),
+                    str(state.get("balance_cny") or ""),
+                    str(state.get("balance_rub_value") or ""),
+                    str(state.get("average_rate") or ""),
+                    json.dumps(list(state.get("diagnostics") or []), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
+    def load_cny_ledger_replay_state(self) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_cny_ledger_replay_state
+                WHERE slot = 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "status": row["status"] or "",
+                "reason": row["reason"] or "",
+                "replayed_at": row["replayed_at"] or "",
+                "operation_count": row["operation_count"] or 0,
+                "document_count": row["document_count"] or 0,
+                "balance_cny": row["balance_cny"] or "",
+                "balance_rub_value": row["balance_rub_value"] or "",
+                "average_rate": row["average_rate"] or "",
+                "diagnostics": _loads_json_list(row["diagnostics_json"]),
+            }
+
+    def update_supplier_shipments_cny_calculations(self, updates: list[Mapping[str, Any]]) -> None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.executemany(
+                """
+                UPDATE sheet_vitrina_v1_supplier_shipments
+                SET cny_ledger_effective_rate = ?,
+                    cny_payment_currency_rub_cost = ?,
+                    cny_paid_amount = ?,
+                    cny_bank_fee_rub = ?,
+                    cny_calculation_status = ?,
+                    cny_calculation_error = ?,
+                    cny_calculated_at = ?
+                WHERE shipment_id = ?
+                """,
+                [
+                    (
+                        str(item.get("cny_ledger_effective_rate") or ""),
+                        str(item.get("cny_payment_currency_rub_cost") or ""),
+                        str(item.get("cny_paid_amount") or ""),
+                        str(item.get("cny_bank_fee_rub") or ""),
+                        str(item.get("cny_calculation_status") or ""),
+                        str(item.get("cny_calculation_error") or ""),
+                        str(item.get("cny_calculated_at") or ""),
+                        str(item.get("shipment_id") or ""),
+                    )
+                    for item in updates
+                ],
+            )
+            conn.commit()
 
     def save_trade_document(self, document: Mapping[str, Any]) -> dict[str, Any]:
         document_id = str(document.get("document_id") or "").strip()
@@ -4463,6 +4882,13 @@ def _validate_optional_iso_date(value: Any, field_name: str) -> None:
     _validate_iso_date(normalized, field_name=field_name)
 
 
+def _validated_choice(value: str, allowed: set[str], *, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized not in allowed:
+        raise ValueError(f"unsupported {field_name}: {normalized}")
+    return normalized
+
+
 def _validate_month(value: str, field_name: str) -> None:
     try:
         date.fromisoformat(f"{value}-01")
@@ -5092,6 +5518,13 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "supplier_name": row["supplier_name"] or "",
         "currency": row["currency"] or "",
         "approx_yuan_rate": row["approx_yuan_rate"],
+        "cny_ledger_effective_rate": row["cny_ledger_effective_rate"] or "",
+        "cny_payment_currency_rub_cost": row["cny_payment_currency_rub_cost"] or "",
+        "cny_paid_amount": row["cny_paid_amount"] or "",
+        "cny_bank_fee_rub": row["cny_bank_fee_rub"] or "",
+        "cny_calculation_status": row["cny_calculation_status"] or "",
+        "cny_calculation_error": row["cny_calculation_error"] or "",
+        "cny_calculated_at": row["cny_calculated_at"] or "",
         "product_qty_total": row["product_qty_total"],
         "product_amount_total": row["product_amount_total"],
         "extras_amount_total": row["extras_amount_total"],
@@ -5122,6 +5555,13 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "customer_name": row["customer_name"] or "",
         "currency": row["currency"] or "",
         "approx_yuan_rate": row["approx_yuan_rate"],
+        "cny_ledger_effective_rate": row["cny_ledger_effective_rate"] or "",
+        "cny_payment_currency_rub_cost": row["cny_payment_currency_rub_cost"] or "",
+        "cny_paid_amount": row["cny_paid_amount"] or "",
+        "cny_bank_fee_rub": row["cny_bank_fee_rub"] or "",
+        "cny_calculation_status": row["cny_calculation_status"] or "",
+        "cny_calculation_error": row["cny_calculation_error"] or "",
+        "cny_calculated_at": row["cny_calculated_at"] or "",
         "product_qty_total": row["product_qty_total"],
         "product_amount_total": row["product_amount_total"],
         "extras_amount_total": row["extras_amount_total"],
@@ -5227,6 +5667,63 @@ def _supplier_financial_expense_line_to_dict(row: sqlite3.Row) -> dict[str, Any]
         "status": row["status"] or "",
         "confidence": row["confidence"],
         "raw": _loads_json_object(row["raw_json"]),
+    }
+
+
+def _cny_document_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "document_id": row["document_id"],
+        "id": row["document_id"],
+        "document_type": row["document_type"] or "",
+        "source": row["source"] or "",
+        "source_order_id": row["source_order_id"] or "",
+        "context_order_id": row["context_order_id"] or "",
+        "linked_financial_document_id": row["linked_financial_document_id"] or "",
+        "original_filename": row["original_filename"] or "",
+        "stored_file_path": row["stored_file_path"] or "",
+        "file_content_type": row["file_content_type"] or "",
+        "file_sha256": row["file_sha256"] or "",
+        "natural_key": row["natural_key"] or "",
+        "uploaded_at": row["uploaded_at"] or "",
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
+        "operation_date": row["operation_date"] or "",
+        "operation_datetime": row["operation_datetime"] or "",
+        "status": row["status"] or "",
+        "parse_status": row["status"] or "",
+        "document_number": row["document_number"] or "",
+        "currency": row["currency"] or "",
+        "rub_amount": row["rub_amount"] or "",
+        "cny_amount": row["cny_amount"] or "",
+        "bank_rate": row["bank_rate"] or "",
+        "parsed_payload": _loads_json_object(row["parsed_payload_json"]),
+        "raw_parse": _loads_json_object(row["raw_parse_json"]),
+        "parser_version": row["parser_version"] or "",
+        "warnings": _loads_json_list(row["warnings_json"]),
+        "errors": _loads_json_list(row["errors_json"]),
+    }
+
+
+def _cny_ledger_operation_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "operation_id": row["operation_id"],
+        "id": row["operation_id"],
+        "operation_type": row["operation_type"] or "",
+        "source_document_id": row["source_document_id"] or "",
+        "source_order_id": row["source_order_id"] or "",
+        "operation_date": row["operation_date"] or "",
+        "operation_datetime": row["operation_datetime"] or "",
+        "sequence_key": row["sequence_key"] or "",
+        "cny_delta": row["cny_delta"] or "",
+        "rub_value_delta": row["rub_value_delta"] or "",
+        "effective_rate_before": row["effective_rate_before"] or "",
+        "balance_cny_after": row["balance_cny_after"] or "",
+        "balance_rub_value_after": row["balance_rub_value_after"] or "",
+        "average_rate_after": row["average_rate_after"] or "",
+        "status": row["status"] or "",
+        "error_reason": row["error_reason"] or "",
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
     }
 
 
@@ -6143,6 +6640,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             customer_name TEXT,
             currency TEXT,
             approx_yuan_rate REAL,
+            cny_ledger_effective_rate TEXT,
+            cny_payment_currency_rub_cost TEXT,
+            cny_paid_amount TEXT,
+            cny_bank_fee_rub TEXT,
+            cny_calculation_status TEXT,
+            cny_calculation_error TEXT,
+            cny_calculated_at TEXT,
             product_qty_total REAL,
             product_amount_total REAL,
             extras_amount_total REAL,
@@ -6302,6 +6806,81 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_financial_expense_lines_by_order
         ON sheet_vitrina_v1_supplier_financial_expense_lines(supplier_order_id, financial_document_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_cny_documents (
+            document_id TEXT PRIMARY KEY,
+            document_type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_order_id TEXT,
+            context_order_id TEXT,
+            linked_financial_document_id TEXT,
+            original_filename TEXT,
+            stored_file_path TEXT,
+            file_content_type TEXT,
+            file_sha256 TEXT,
+            natural_key TEXT NOT NULL UNIQUE,
+            uploaded_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            operation_date TEXT,
+            operation_datetime TEXT,
+            status TEXT NOT NULL,
+            document_number TEXT,
+            currency TEXT,
+            rub_amount TEXT,
+            cny_amount TEXT,
+            bank_rate TEXT,
+            parsed_payload_json TEXT NOT NULL DEFAULT '{}',
+            raw_parse_json TEXT NOT NULL DEFAULT '{}',
+            parser_version TEXT,
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            errors_json TEXT NOT NULL DEFAULT '[]'
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_cny_documents_by_type_date
+        ON sheet_vitrina_v1_cny_documents(document_type, operation_date, operation_datetime, document_id);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_cny_documents_by_order
+        ON sheet_vitrina_v1_cny_documents(source_order_id, document_type, operation_date);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_cny_ledger_operations (
+            operation_id TEXT PRIMARY KEY,
+            operation_type TEXT NOT NULL,
+            source_document_id TEXT,
+            source_order_id TEXT,
+            operation_date TEXT,
+            operation_datetime TEXT,
+            sequence_key TEXT NOT NULL,
+            cny_delta TEXT,
+            rub_value_delta TEXT,
+            effective_rate_before TEXT,
+            balance_cny_after TEXT,
+            balance_rub_value_after TEXT,
+            average_rate_after TEXT,
+            status TEXT NOT NULL,
+            error_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_cny_ledger_operations_by_sequence
+        ON sheet_vitrina_v1_cny_ledger_operations(sequence_key, operation_id);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_cny_ledger_operations_by_order
+        ON sheet_vitrina_v1_cny_ledger_operations(source_order_id, operation_date, sequence_key);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_cny_ledger_replay_state (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            status TEXT NOT NULL,
+            reason TEXT,
+            replayed_at TEXT NOT NULL,
+            operation_count INTEGER NOT NULL DEFAULT 0,
+            document_count INTEGER NOT NULL DEFAULT 0,
+            balance_cny TEXT,
+            balance_rub_value TEXT,
+            average_rate TEXT,
+            diagnostics_json TEXT NOT NULL DEFAULT '[]'
+        );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_nomenclature_items (
             item_id TEXT PRIMARY KEY,
@@ -6470,6 +7049,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         column_name="invoice_document_id",
         column_sql="TEXT",
     )
+    for column_name in (
+        "cny_ledger_effective_rate",
+        "cny_payment_currency_rub_cost",
+        "cny_paid_amount",
+        "cny_bank_fee_rub",
+        "cny_calculation_status",
+        "cny_calculation_error",
+        "cny_calculated_at",
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_supplier_shipments",
+            column_name=column_name,
+            column_sql="TEXT",
+        )
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_supplier_shipment_lines",

@@ -468,6 +468,10 @@
           <div class="total"><span>商品金额 / Product amount / Сумма товаров</span><strong id="totalProducts">0</strong></div>
           <div class="total"><span>其他费用 / Extras amount / Прочие позиции</span><strong id="totalExtras">0</strong></div>
           <div class="total"><span>发票总额 / Invoice total / Итого invoice</span><strong id="totalInvoice">0</strong></div>
+          <div class="total"><span>Курс CNY по счёту</span><strong id="cnyLedgerRate">-</strong></div>
+          <div class="total"><span>Валютная стоимость оплаты, RUB</span><strong id="cnyPaymentRubCost">-</strong></div>
+          <div class="total"><span>Комиссии банка, RUB</span><strong id="cnyBankFeeRub">-</strong></div>
+          <div class="total"><span>Статус CNY-расчёта</span><strong id="cnyCalculationStatus">-</strong></div>
         </div>
 
         <h3 style="margin-top: 18px;">商品明细 / Product lines / Товарные строки</h3>
@@ -625,6 +629,10 @@
       const totalProducts = document.getElementById("totalProducts");
       const totalExtras = document.getElementById("totalExtras");
       const totalInvoice = document.getElementById("totalInvoice");
+      const cnyLedgerRate = document.getElementById("cnyLedgerRate");
+      const cnyPaymentRubCost = document.getElementById("cnyPaymentRubCost");
+      const cnyBankFeeRub = document.getElementById("cnyBankFeeRub");
+      const cnyCalculationStatus = document.getElementById("cnyCalculationStatus");
       const logoutLink = document.getElementById("logoutLink");
       const openStandaloneLink = document.getElementById("openStandaloneLink");
       const supplierPageTitle = document.getElementById("supplierPageTitle");
@@ -777,6 +785,13 @@
       function formatMoney(value) {
         const number = Number(value);
         return Number.isFinite(number) ? moneyFormatter.format(number) : "-";
+      }
+
+      function formatRate(value) {
+        const number = Number(value);
+        return Number.isFinite(number)
+          ? new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(number)
+          : "-";
       }
 
       function formatRegistryMoney(value) {
@@ -2054,6 +2069,11 @@
         totalProducts.textContent = formatNumber(productAmount);
         totalExtras.textContent = formatNumber(extraAmount);
         totalInvoice.textContent = formatNumber(invoiceAmount);
+        const shipment = currentShipment || {};
+        cnyLedgerRate.textContent = shipment.cny_ledger_effective_rate ? formatRate(shipment.cny_ledger_effective_rate) : "-";
+        cnyPaymentRubCost.textContent = shipment.cny_payment_currency_rub_cost ? formatAmount(shipment.cny_payment_currency_rub_cost, "RUB") : "-";
+        cnyBankFeeRub.textContent = shipment.cny_bank_fee_rub ? formatAmount(shipment.cny_bank_fee_rub, "RUB") : "-";
+        cnyCalculationStatus.textContent = cnyCalculationStatusLabel(shipment.cny_calculation_status, shipment.cny_calculation_error);
         const hasDate = Boolean(shipmentDateInput.value);
         shipmentDateField.classList.toggle("required-missing", !hasDate);
         saveShipmentButton.disabled = !hasDate || (isNewShipment && !currentUploadId);
@@ -2063,6 +2083,23 @@
         const status = resolveStatus(lines, currentShipment && currentShipment.match_status);
         matchStatusBadge.textContent = statusLabels[status] || status;
         matchStatusBadge.className = "badge " + (status === "all_matched" ? "success" : status === "checksum_error" ? "error" : "warning");
+      }
+
+      function cnyCalculationStatusLabel(status, error) {
+        const labels = {
+          ok: "Рассчитан",
+          no_supplier_payment_yet: "Нет оплаты CNY",
+          missing_opening_balance: "Нужен opening balance",
+          insufficient_cny_balance: "Недостаточно CNY",
+          payment_document_not_linked_to_order: "Платёж не связан",
+          parse_error: "Ошибка парсинга",
+          ambiguous_allocation: "Неоднозначная allocation",
+          document_date_missing: "Нет даты документа",
+          needs_review: "Проверить"
+        };
+        const normalized = String(status || "").trim();
+        const label = labels[normalized] || (normalized || "-");
+        return error ? label + ": " + String(error) : label;
       }
 
       function resolveStatus(lines, fallback) {

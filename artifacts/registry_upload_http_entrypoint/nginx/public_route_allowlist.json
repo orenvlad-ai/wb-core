@@ -325,6 +325,48 @@
       "methods": ["GET", "POST", "PATCH", "DELETE"]
     },
     {
+      "name": "sheet_vitrina_supply_cny_account",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/cny-account",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supply_cny_account_documents",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/cny-account/documents",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_supply_cny_account_conversions",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/cny-account/conversions",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supply_cny_account_ledger",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/cny-account/ledger",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supply_cny_account_opening_balance",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/cny-account/opening-balance",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_supply_cny_account_replay",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/cny-account/replay",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_supply_cny_account_document_files",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/cny-account/documents/",
+      "methods": ["GET", "DELETE"]
+    },
+    {
       "name": "sheet_vitrina_settings_nomenclature",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/settings/nomenclature",

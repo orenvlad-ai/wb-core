@@ -49,6 +49,7 @@ from packages.application.supplier_financial_documents import (
     SupplierFinancialDocumentsBlock,
     apply_supplier_order_document_match,
 )
+from packages.application.cny_ledger import CnyLedgerBlock
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
@@ -124,6 +125,12 @@ from packages.contracts.supplier_financial_documents import (
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE,
 )
+from packages.contracts.cny_ledger import (
+    CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
+    CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+    CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE,
+    CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+)
 from packages.contracts.supplier_shipments import (
     TRADE_DOCUMENT_TYPE_CONTRACT,
     TRADE_DOCUMENT_TYPE_INVOICE,
@@ -172,6 +179,8 @@ SUPPLIER_ORDER_DOCUMENT_LABELS_RU = {
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION: "ДТ",
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT: "Ведомость банковского контроля",
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: "Заявление на перевод ВТБ / платёжка",
+    CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE: "Документ конвертации RUB -> CNY",
+    CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT: "Оплата поставщику CNY",
 }
 SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
     f"Ежедневно в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}: "
@@ -688,6 +697,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.supplier_financial_documents_block = SupplierFinancialDocumentsBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.cny_ledger_block = CnyLedgerBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -1900,6 +1913,12 @@ class RegistryUploadHttpEntrypoint:
             apply_supplier_order_document_match(dict(item), shipment)
             for item in financial_payload.get("documents") or []
         ]
+        cny_status = self.cny_ledger_block.get_status()
+        cny_documents = [
+            self._supplier_order_cny_document_row(item)
+            for item in cny_status.get("documents") or []
+            if str(item.get("source_order_id") or "") == str(shipment_id or "")
+        ]
         checklist = _build_supplier_order_documents_checklist(
             shipment=shipment,
             financial_documents=financial_documents,
@@ -1910,8 +1929,8 @@ class RegistryUploadHttpEntrypoint:
             "supplier_order_id": shipment_id,
             "shipment": shipment,
             "required_document_types": list(SUPPLIER_ORDER_REQUIRED_DOCUMENT_TYPES),
-            "required_documents": checklist,
-            "documents": financial_documents,
+            "required_documents": [*checklist, *cny_documents],
+            "documents": [*financial_documents, *cny_documents],
             "expense_lines": list(financial_payload.get("expense_lines") or []),
             "summary": financial_payload.get("summary") or {},
             "package_downloads": {
@@ -1956,6 +1975,8 @@ class RegistryUploadHttpEntrypoint:
             return self.supplier_shipments_block.download_invoice(shipment_id)
         if document_type == TRADE_DOCUMENT_TYPE_CONTRACT:
             return self.supplier_shipments_block.download_shipment_contract(shipment_id)
+        if str(item.get("source") or "") == "cny_document" and document_id:
+            return self.cny_ledger_block.download_document_file(document_id)
         if document_id:
             return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
         raise ValueError(f"document file is missing: {document_type}")
@@ -1968,12 +1989,53 @@ class RegistryUploadHttpEntrypoint:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
     ) -> dict[str, Any]:
+        preview = self.cny_ledger_block.parse_document_preview(
+            file_bytes,
+            uploaded_filename=uploaded_filename,
+        )
+        preview_type = str((preview.get("normalized_parse") or {}).get("document_type") or "")
+        if preview_type in {CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT}:
+            return self.cny_ledger_block.upload_document(
+                file_bytes=file_bytes,
+                uploaded_filename=uploaded_filename,
+                uploaded_content_type=uploaded_content_type,
+                source=CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+                source_order_id=shipment_id,
+                context_order_id=shipment_id,
+                reject_unsupported=True,
+            )
         return self.supplier_financial_documents_block.upload_document(
             shipment_id,
             file_bytes=file_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
         )
+
+    def _supplier_order_cny_document_row(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        parsed = dict(document.get("parsed_payload") or {})
+        document_type = str(document.get("document_type") or "")
+        amount = document.get("rub_amount") if document_type == CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE else document.get("cny_amount")
+        currency = "RUB" if document_type == CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE else "CNY"
+        return {
+            **_supplier_order_base_document_row(
+                document_type,
+                required=False,
+                is_uploaded=True,
+                parse_status=str(document.get("parse_status") or document.get("status") or ""),
+            ),
+            "source": "cny_document",
+            "document_id": str(document.get("document_id") or ""),
+            "document_number": str(document.get("document_number") or parsed.get("document_number") or ""),
+            "document_date": str(document.get("operation_date") or parsed.get("document_date") or ""),
+            "counterparty": str(parsed.get("bank") or parsed.get("vendor") or ""),
+            "amount": amount,
+            "currency": currency,
+            "download_path": str(document.get("download_path") or ""),
+            "parse_status": str(document.get("parse_status") or document.get("status") or ""),
+            "warnings": list(document.get("warnings") or []),
+            "errors": list(document.get("errors") or []),
+            "normalized_parse": parsed,
+        }
 
     def handle_supplier_financial_document_detail_request(self, shipment_id: str, document_id: str) -> dict[str, Any]:
         return self.supplier_financial_documents_block.get_document(shipment_id, document_id)
@@ -1995,6 +2057,42 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_supplier_financial_document_file_request(self, shipment_id: str, document_id: str) -> tuple[bytes, str, str]:
         return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
+
+    def handle_cny_account_status_request(self) -> dict[str, Any]:
+        return self.cny_ledger_block.get_status()
+
+    def handle_cny_account_conversions_request(self) -> dict[str, Any]:
+        return self.cny_ledger_block.list_conversions()
+
+    def handle_cny_account_ledger_request(self) -> dict[str, Any]:
+        return self.cny_ledger_block.list_ledger_operations()
+
+    def handle_cny_account_upload_request(
+        self,
+        file_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return self.cny_ledger_block.upload_document(
+            file_bytes=file_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+            source=CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
+            reject_unsupported=True,
+        )
+
+    def handle_cny_account_opening_balance_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.cny_ledger_block.create_opening_balance(payload)
+
+    def handle_cny_account_replay_request(self) -> dict[str, Any]:
+        return self.cny_ledger_block.replay_ledger(reason="manual_api")
+
+    def handle_cny_account_document_file_request(self, document_id: str) -> tuple[bytes, str, str]:
+        return self.cny_ledger_block.download_document_file(document_id)
+
+    def handle_cny_account_document_delete_request(self, document_id: str) -> dict[str, Any]:
+        return self.cny_ledger_block.delete_document(document_id)
 
     def handle_supplier_shipments_contract_patch_request(
         self,

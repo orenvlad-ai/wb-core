@@ -2757,6 +2757,92 @@
       margin-top: 18px;
     }
 
+    .cny-account-block {
+      margin-top: 18px;
+    }
+
+    .cny-account-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .cny-account-title {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+      color: var(--text);
+    }
+
+    .cny-account-lead,
+    .cny-account-state {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .cny-account-actions,
+    .cny-opening-form {
+      display: flex;
+      align-items: end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .cny-opening-form {
+      margin-top: 16px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--control-bg);
+    }
+
+    .cny-account-table-wrap {
+      margin-top: 14px;
+      max-width: 100%;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--control-bg);
+    }
+
+    .cny-account-table {
+      width: 100%;
+      min-width: 960px;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 12px;
+    }
+
+    .cny-account-table th,
+    .cny-account-table td {
+      padding: 9px 10px;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    .cny-account-table th {
+      background: #1b1e26;
+      color: var(--text);
+      font-weight: 750;
+    }
+
+    .cny-account-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .cny-account-empty {
+      padding: 18px;
+      color: var(--muted);
+      text-align: center;
+    }
+
     .wb-supplies-header {
       display: flex;
       align-items: flex-start;
@@ -3606,6 +3692,7 @@
           <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
           <button class="subsection-button" type="button" data-supply-mode-button="wildberries" aria-selected="false">Wildberries</button>
           <button class="subsection-button" type="button" data-supply-mode-button="shipment-registry" aria-selected="false">Реестр поставок</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="cny-account" aria-selected="false">Счёт CNY</button>
           <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
         </div>
 
@@ -4154,6 +4241,101 @@
           <iframe id="supplierShipmentsFrame" class="supplier-shipments-frame" title="От поставщика"></iframe>
         </section>
 
+        <section class="supply-mode-panel" data-supply-mode-panel="cny-account" hidden>
+          <section class="block cny-account-block" aria-labelledby="cnyAccountTitle">
+            <div class="cny-account-head">
+              <div>
+                <h2 id="cnyAccountTitle" class="cny-account-title">Счёт CNY</h2>
+                <p class="cny-account-lead">Управленческий ledger валютного счёта для конвертаций RUB → CNY и оплат поставщику.</p>
+                <p id="cnyAccountState" class="cny-account-state">Данные ещё не загружены.</p>
+              </div>
+              <div class="cny-account-actions">
+                <button id="cnyAccountUploadButton" class="action-button primary-button" type="button">Загрузить PDF</button>
+                <input id="cnyAccountFileInput" type="file" accept="application/pdf,.pdf" hidden>
+                <button id="cnyAccountReplayButton" class="action-button secondary-button" type="button">Пересчитать ledger</button>
+              </div>
+            </div>
+            <dl class="summary-grid">
+              <div>
+                <dt>Остаток CNY</dt>
+                <dd id="cnyBalanceCny">-</dd>
+              </div>
+              <div>
+                <dt>Рублёвая стоимость остатка</dt>
+                <dd id="cnyBalanceRub">-</dd>
+              </div>
+              <div>
+                <dt>Средний курс CNY на счёте</dt>
+                <dd id="cnyAverageRate">-</dd>
+              </div>
+              <div>
+                <dt>Последний replay</dt>
+                <dd id="cnyReplayStatus">-</dd>
+              </div>
+            </dl>
+            <div class="cny-opening-form" aria-label="Opening balance">
+              <div class="field">
+                <label for="cnyOpeningDateInput">Дата opening balance</label>
+                <input id="cnyOpeningDateInput" type="date">
+              </div>
+              <div class="field">
+                <label for="cnyOpeningCnyInput">Opening CNY</label>
+                <input id="cnyOpeningCnyInput" type="number" min="0" step="0.01" inputmode="decimal">
+              </div>
+              <div class="field">
+                <label for="cnyOpeningRubInput">Opening RUB value</label>
+                <input id="cnyOpeningRubInput" type="number" min="0" step="0.01" inputmode="decimal">
+              </div>
+              <button id="cnyOpeningSaveButton" class="action-button secondary-button" type="button">Сохранить opening</button>
+            </div>
+            <p id="cnyAccountMessage" class="section-message"></p>
+            <h3 class="block-title" style="margin-top: 18px;">Конвертации RUB → CNY</h3>
+            <div class="cny-account-table-wrap">
+              <table class="cny-account-table" aria-label="Конвертации CNY">
+                <thead>
+                  <tr>
+                    <th>Дата/время</th>
+                    <th>Документ</th>
+                    <th>RUB списано</th>
+                    <th>CNY зачислено</th>
+                    <th>Курс банка</th>
+                    <th>Средний курс после</th>
+                    <th>Источник</th>
+                    <th>Заказ</th>
+                    <th>Статус</th>
+                    <th>Файл</th>
+                  </tr>
+                </thead>
+                <tbody id="cnyConversionsBody">
+                  <tr><td class="cny-account-empty" colspan="10">Загрузите документы конвертации или задайте opening balance.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h3 class="block-title" style="margin-top: 18px;">Ledger operations</h3>
+            <div class="cny-account-table-wrap">
+              <table class="cny-account-table" aria-label="CNY ledger operations">
+                <thead>
+                  <tr>
+                    <th>Sequence</th>
+                    <th>Тип</th>
+                    <th>Дата</th>
+                    <th>CNY delta</th>
+                    <th>RUB value delta</th>
+                    <th>Курс до</th>
+                    <th>Balance CNY</th>
+                    <th>Balance RUB</th>
+                    <th>Avg rate</th>
+                    <th>Статус</th>
+                  </tr>
+                </thead>
+                <tbody id="cnyLedgerBody">
+                  <tr><td class="cny-account-empty" colspan="10">Операции ещё не рассчитаны.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section class="supply-mode-panel" data-supply-mode-panel="wildberries" hidden>
           <section class="block wb-supplies-block" aria-labelledby="wbSuppliesTitle">
             <div class="wb-supplies-header">
@@ -4550,6 +4732,21 @@
       const wbSuppliesDetailSummary = document.getElementById("wbSuppliesDetailSummary");
       const wbSuppliesDetailMessage = document.getElementById("wbSuppliesDetailMessage");
       const wbSuppliesGoodsTableBody = document.getElementById("wbSuppliesGoodsTableBody");
+      const cnyAccountState = document.getElementById("cnyAccountState");
+      const cnyAccountUploadButton = document.getElementById("cnyAccountUploadButton");
+      const cnyAccountFileInput = document.getElementById("cnyAccountFileInput");
+      const cnyAccountReplayButton = document.getElementById("cnyAccountReplayButton");
+      const cnyBalanceCny = document.getElementById("cnyBalanceCny");
+      const cnyBalanceRub = document.getElementById("cnyBalanceRub");
+      const cnyAverageRate = document.getElementById("cnyAverageRate");
+      const cnyReplayStatus = document.getElementById("cnyReplayStatus");
+      const cnyOpeningDateInput = document.getElementById("cnyOpeningDateInput");
+      const cnyOpeningCnyInput = document.getElementById("cnyOpeningCnyInput");
+      const cnyOpeningRubInput = document.getElementById("cnyOpeningRubInput");
+      const cnyOpeningSaveButton = document.getElementById("cnyOpeningSaveButton");
+      const cnyAccountMessage = document.getElementById("cnyAccountMessage");
+      const cnyConversionsBody = document.getElementById("cnyConversionsBody");
+      const cnyLedgerBody = document.getElementById("cnyLedgerBody");
 
       const actionLabels = {
         refresh: {
@@ -4571,7 +4768,7 @@
       const DEFAULT_SUPPLY_SECTION = "factory";
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
-      const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "shipment-registry", "supplier"]);
+      const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "shipment-registry", "cny-account", "supplier"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
@@ -4713,6 +4910,11 @@
       let shipmentRegistryQuoteFile = null;
       let shipmentRegistrySelectedShipmentId = "";
       let shipmentRegistryComparisonPayload = null;
+      let cnyAccountInitialized = false;
+      let cnyAccountLoading = false;
+      let cnyAccountUploading = false;
+      let cnyAccountReplayLoading = false;
+      let cnyAccountOpeningSaving = false;
       let wbSuppliesPayload = null;
       let wbSuppliesInitialized = false;
       let wbSuppliesLoading = false;
@@ -5257,6 +5459,9 @@
         }
         if (activeModeName === "shipment-registry") {
           ensureShipmentRegistryLoaded();
+        }
+        if (activeModeName === "cny-account") {
+          ensureCnyAccountLoaded();
         }
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ supply_mode: activeModeName });
@@ -8561,6 +8766,387 @@
         }
       }
 
+      function setCnyAccountMessage(message, tone) {
+        if (!cnyAccountMessage) {
+          return;
+        }
+        cnyAccountMessage.textContent = message || "";
+        cnyAccountMessage.className = "section-message" + (tone ? " is-" + tone : "");
+      }
+
+      function updateCnyAccountBusyState() {
+        if (cnyAccountUploadButton) {
+          cnyAccountUploadButton.disabled = cnyAccountLoading || cnyAccountUploading;
+          cnyAccountUploadButton.textContent = cnyAccountUploading ? "Загружаем..." : "Загрузить PDF";
+        }
+        if (cnyAccountReplayButton) {
+          cnyAccountReplayButton.disabled = cnyAccountLoading || cnyAccountReplayLoading;
+          cnyAccountReplayButton.textContent = cnyAccountReplayLoading ? "Пересчитываем..." : "Пересчитать ledger";
+        }
+        if (cnyOpeningSaveButton) {
+          cnyOpeningSaveButton.disabled = cnyAccountLoading || cnyAccountOpeningSaving;
+          cnyOpeningSaveButton.textContent = cnyAccountOpeningSaving ? "Сохраняем..." : "Сохранить opening";
+        }
+      }
+
+      function ensureCnyAccountLoaded() {
+        if (cnyAccountInitialized || cnyAccountLoading) {
+          return;
+        }
+        cnyAccountInitialized = true;
+        loadCnyAccount();
+      }
+
+      async function loadCnyAccount(options) {
+        if (!config.cny_account_path) {
+          setCnyAccountMessage("Route CNY account не настроен.", "error");
+          renderCnyAccount(null);
+          return;
+        }
+        cnyAccountLoading = true;
+        updateCnyAccountBusyState();
+        if (!(options && options.preserveMessage)) {
+          setCnyAccountMessage("Читаем CNY ledger...", "");
+        }
+        try {
+          const response = await fetch(config.cny_account_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" },
+            cache: "no-store"
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderCnyAccount(payload);
+          const diagnostics = payload && payload.diagnostics ? payload.diagnostics : {};
+          const blocked = Number(diagnostics.blocked_operations || 0);
+          const parseErrors = Number(diagnostics.parse_errors || 0);
+          if (blocked || parseErrors) {
+            setCnyAccountMessage("Есть CNY diagnostics: blocked=" + blocked + ", parse_error=" + parseErrors + ".", "warning");
+          } else if (!(options && options.preserveMessage)) {
+            setCnyAccountMessage("", "");
+          }
+        } catch (error) {
+          renderCnyAccount(null);
+          setCnyAccountMessage(
+            "Не удалось прочитать CNY ledger: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          cnyAccountLoading = false;
+          updateCnyAccountBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      function renderCnyAccount(payload) {
+        const summary = payload && payload.summary ? payload.summary : {};
+        const replay = payload && payload.replay ? payload.replay : {};
+        const diagnostics = payload && payload.diagnostics ? payload.diagnostics : {};
+        if (cnyBalanceCny) {
+          cnyBalanceCny.textContent = formatCnyAmount(summary.balance_cny);
+        }
+        if (cnyBalanceRub) {
+          cnyBalanceRub.textContent = formatCnyRub(summary.balance_rub_value);
+        }
+        if (cnyAverageRate) {
+          cnyAverageRate.textContent = formatCnyRate(summary.average_rate);
+        }
+        if (cnyReplayStatus) {
+          cnyReplayStatus.textContent = cnyReplayDisplay(replay, diagnostics);
+        }
+        if (cnyAccountState) {
+          cnyAccountState.textContent = cnyAccountStateDisplay(summary, replay, diagnostics);
+        }
+        const operations = Array.isArray(payload && payload.ledger_operations) ? payload.ledger_operations : [];
+        renderCnyConversions(Array.isArray(payload && payload.conversions) ? payload.conversions : [], operations);
+        renderCnyLedgerOperations(operations);
+      }
+
+      function renderCnyConversions(documents, operations) {
+        if (!cnyConversionsBody) {
+          return;
+        }
+        if (!documents.length) {
+          cnyConversionsBody.innerHTML = "<tr><td class=\"cny-account-empty\" colspan=\"10\">Загрузите документы конвертации или задайте opening balance.</td></tr>";
+          return;
+        }
+        const conversionOps = new Map();
+        operations.forEach((operation) => {
+          if (String(operation.operation_type || "") === "conversion_in" && operation.source_document_id) {
+            conversionOps.set(String(operation.source_document_id), operation);
+          }
+        });
+        cnyConversionsBody.innerHTML = documents.map((document) => {
+          const payload = document.parsed_payload && typeof document.parsed_payload === "object" ? document.parsed_payload : {};
+          const operation = conversionOps.get(String(document.document_id || "")) || {};
+          const documentNumber = payload.document_number || document.document_number || document.document_id;
+          const sourceOrderId = document.source_order_id || document.context_order_id || "";
+          const fileName = document.original_filename || document.file_name || "";
+          const fileCell = document.download_path
+            ? "<a href=\"" + escapeHtml(document.download_path) + "\" target=\"_blank\" rel=\"noopener\">" + escapeHtml(fileName || "PDF") + "</a>"
+            : escapeHtml(fileName || "—");
+          return [
+            "<tr>",
+            "<td>" + escapeHtml(formatCnyDateTime(document.operation_datetime || document.operation_date || payload.order_date)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(documentNumber)) + "</td>",
+            "<td>" + escapeHtml(formatCnyRub(payload.rub_amount || document.rub_amount)) + "</td>",
+            "<td>" + escapeHtml(formatCnyAmount(payload.cny_amount || document.cny_amount)) + "</td>",
+            "<td>" + escapeHtml(formatCnyRate(payload.bank_rate || document.bank_rate)) + "</td>",
+            "<td>" + escapeHtml(formatCnyRate(operation.average_rate_after)) + "</td>",
+            "<td>" + escapeHtml(cnyDocumentSourceLabel(document.source)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(sourceOrderId)) + "</td>",
+            "<td>" + escapeHtml(cnyStatusLabel(document.status || operation.status)) + "</td>",
+            "<td>" + fileCell + "</td>",
+            "</tr>"
+          ].join("");
+        }).join("");
+      }
+
+      function renderCnyLedgerOperations(operations) {
+        if (!cnyLedgerBody) {
+          return;
+        }
+        if (!operations.length) {
+          cnyLedgerBody.innerHTML = "<tr><td class=\"cny-account-empty\" colspan=\"10\">Операции ещё не рассчитаны.</td></tr>";
+          return;
+        }
+        cnyLedgerBody.innerHTML = operations.slice(-80).map((operation) => [
+          "<tr>",
+          "<td>" + escapeHtml(valueOrDash(operation.sequence_key)) + "</td>",
+          "<td>" + escapeHtml(cnyOperationTypeLabel(operation.operation_type)) + "</td>",
+          "<td>" + escapeHtml(formatCnyDateTime(operation.operation_datetime || operation.operation_date)) + "</td>",
+          "<td>" + escapeHtml(formatCnySignedAmount(operation.cny_delta)) + "</td>",
+          "<td>" + escapeHtml(formatCnySignedRub(operation.rub_value_delta)) + "</td>",
+          "<td>" + escapeHtml(formatCnyRate(operation.effective_rate_before)) + "</td>",
+          "<td>" + escapeHtml(formatCnyAmount(operation.balance_cny_after)) + "</td>",
+          "<td>" + escapeHtml(formatCnyRub(operation.balance_rub_value_after)) + "</td>",
+          "<td>" + escapeHtml(formatCnyRate(operation.average_rate_after)) + "</td>",
+          "<td>" + escapeHtml(cnyStatusLabel(operation.status) + (operation.error_reason ? ": " + operation.error_reason : "")) + "</td>",
+          "</tr>"
+        ].join("")).join("");
+      }
+
+      async function uploadCnyAccountDocument() {
+        const file = cnyAccountFileInput && cnyAccountFileInput.files ? cnyAccountFileInput.files[0] : null;
+        if (!file || cnyAccountUploading) {
+          setCnyAccountMessage("Сначала выберите PDF-файл конвертации.", "error");
+          return;
+        }
+        cnyAccountUploading = true;
+        updateCnyAccountBusyState();
+        setCnyAccountMessage("Загружаем PDF и пересчитываем ledger...", "");
+        try {
+          const formData = new FormData();
+          formData.append("file", file, file.name || "cny-document.pdf");
+          const response = await fetch(config.cny_account_documents_path, {
+            method: "POST",
+            headers: { "Accept": "application/json" },
+            body: formData
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (cnyAccountFileInput) {
+            cnyAccountFileInput.value = "";
+          }
+          setCnyAccountMessage(valueOrDash(payload.message || "Документ CNY сохранён и ledger пересчитан."), "success");
+          await loadCnyAccount({ preserveMessage: true });
+        } catch (error) {
+          setCnyAccountMessage(
+            "Не удалось загрузить CNY документ: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          cnyAccountUploading = false;
+          updateCnyAccountBusyState();
+        }
+      }
+
+      async function saveCnyOpeningBalance() {
+        if (cnyAccountOpeningSaving) {
+          return;
+        }
+        const payload = {
+          operation_date: cnyOpeningDateInput ? cnyOpeningDateInput.value : "",
+          cny_amount: cnyOpeningCnyInput ? cnyOpeningCnyInput.value : "",
+          rub_value: cnyOpeningRubInput ? cnyOpeningRubInput.value : ""
+        };
+        if (!payload.operation_date || !payload.cny_amount || !payload.rub_value) {
+          setCnyAccountMessage("Укажите дату, CNY и RUB value для opening balance.", "error");
+          return;
+        }
+        cnyAccountOpeningSaving = true;
+        updateCnyAccountBusyState();
+        setCnyAccountMessage("Сохраняем opening balance и пересчитываем ledger...", "");
+        try {
+          const response = await fetch(config.cny_account_opening_balance_path, {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          const responsePayload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(responsePayload.error) + " (HTTP " + response.status + ")");
+          }
+          setCnyAccountMessage("Opening balance сохранён, ledger пересчитан.", "success");
+          await loadCnyAccount({ preserveMessage: true });
+        } catch (error) {
+          setCnyAccountMessage(
+            "Не удалось сохранить opening balance: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          cnyAccountOpeningSaving = false;
+          updateCnyAccountBusyState();
+        }
+      }
+
+      async function replayCnyLedger() {
+        if (cnyAccountReplayLoading) {
+          return;
+        }
+        cnyAccountReplayLoading = true;
+        updateCnyAccountBusyState();
+        setCnyAccountMessage("Пересчитываем CNY ledger...", "");
+        try {
+          const response = await fetch(config.cny_account_replay_path, {
+            method: "POST",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          setCnyAccountMessage("CNY ledger пересчитан.", "success");
+          await loadCnyAccount({ preserveMessage: true });
+        } catch (error) {
+          setCnyAccountMessage(
+            "Не удалось пересчитать CNY ledger: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          cnyAccountReplayLoading = false;
+          updateCnyAccountBusyState();
+        }
+      }
+
+      function cnyAccountStateDisplay(summary, replay, diagnostics) {
+        const docCount = Number(summary && summary.document_count || 0);
+        const blocked = Number(diagnostics && diagnostics.blocked_operations || 0);
+        const lastReplay = replay && replay.replayed_at ? formatCnyDateTime(replay.replayed_at) : "ещё не было";
+        if (!docCount) {
+          return "Загрузите документы конвертации или задайте opening balance.";
+        }
+        return "Документов: " + docCount + " · blocked: " + blocked + " · replay: " + lastReplay + ".";
+      }
+
+      function cnyReplayDisplay(replay, diagnostics) {
+        const status = replay && replay.status ? cnyStatusLabel(replay.status) : "не запускался";
+        const blocked = Number(diagnostics && diagnostics.blocked_operations || 0);
+        const suffix = replay && replay.replayed_at ? " · " + formatCnyDateTime(replay.replayed_at) : "";
+        return status + " · blocked " + blocked + suffix;
+      }
+
+      function cnyDocumentSourceLabel(source) {
+        const value = String(source || "");
+        if (value === "supplier_order") {
+          return "заказ поставщика";
+        }
+        if (value === "cny_account") {
+          return "Счёт CNY";
+        }
+        return valueOrDash(source);
+      }
+
+      function cnyOperationTypeLabel(value) {
+        const labels = {
+          opening_balance: "opening balance",
+          conversion_in: "конвертация",
+          supplier_payment_out: "оплата поставщику",
+          conversion_fee: "комиссия конвертации",
+          transfer_fee: "комиссия перевода",
+          adjustment: "adjustment"
+        };
+        return labels[String(value || "")] || valueOrDash(value);
+      }
+
+      function cnyStatusLabel(value) {
+        const labels = {
+          pending_parse: "парсинг",
+          parsed: "распознан",
+          posted: "проведён",
+          parse_error: "ошибка парсинга",
+          replayed: "пересчитан",
+          blocked: "blocked",
+          needs_review: "нужна проверка",
+          success: "success",
+          warning: "warning",
+          failed: "failed"
+        };
+        return labels[String(value || "")] || valueOrDash(value);
+      }
+
+      function formatCnyDateTime(value) {
+        const raw = String(value || "").trim();
+        if (!raw) {
+          return "—";
+        }
+        return raw.replace("T", " ").replace(/Z$/, "").slice(0, 19);
+      }
+
+      function formatCnyAmount(value) {
+        const formatted = formatCnyNumeric(value, 2);
+        return formatted === "—" ? formatted : formatted + " CNY";
+      }
+
+      function formatCnySignedAmount(value) {
+        const formatted = formatCnySignedNumeric(value, 2);
+        return formatted === "—" ? formatted : formatted + " CNY";
+      }
+
+      function formatCnyRub(value) {
+        const formatted = formatCnyNumeric(value, 2);
+        return formatted === "—" ? formatted : formatted + " ₽";
+      }
+
+      function formatCnySignedRub(value) {
+        const formatted = formatCnySignedNumeric(value, 2);
+        return formatted === "—" ? formatted : formatted + " ₽";
+      }
+
+      function formatCnyRate(value) {
+        return formatCnyNumeric(value, 4);
+      }
+
+      function formatCnyNumeric(value, maximumFractionDigits) {
+        if (value === null || value === undefined || value === "") {
+          return "—";
+        }
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return "—";
+        }
+        return new Intl.NumberFormat("ru-RU", {
+          minimumFractionDigits: 0,
+          maximumFractionDigits
+        }).format(numeric);
+      }
+
+      function formatCnySignedNumeric(value, maximumFractionDigits) {
+        if (value === null || value === undefined || value === "") {
+          return "—";
+        }
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return "—";
+        }
+        const prefix = numeric > 0 ? "+" : "";
+        return prefix + formatCnyNumeric(value, maximumFractionDigits);
+      }
+
       function registryCellDisplay(cell) {
         if (!cell || typeof cell !== "object") {
           return "—";
@@ -10473,6 +11059,17 @@
         shipmentRegistryHead.addEventListener("change", handleShipmentRegistrySelectionChange);
       }
       updateShipmentRegistryCompareState();
+      updateCnyAccountBusyState();
+      if (cnyAccountUploadButton && cnyAccountFileInput) {
+        cnyAccountUploadButton.addEventListener("click", () => cnyAccountFileInput.click());
+        cnyAccountFileInput.addEventListener("change", uploadCnyAccountDocument);
+      }
+      if (cnyAccountReplayButton) {
+        cnyAccountReplayButton.addEventListener("click", replayCnyLedger);
+      }
+      if (cnyOpeningSaveButton) {
+        cnyOpeningSaveButton.addEventListener("click", saveCnyOpeningBalance);
+      }
 
       downloadStockFfTemplateButton.addEventListener("click", () => downloadBinary(
         config.factory_order_template_stock_ff_path,

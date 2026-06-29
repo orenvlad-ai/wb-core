@@ -14,6 +14,7 @@ source_basis:
 related_modules:
   - "packages/contracts/cost_price_upload.py"
   - "packages/contracts/factory_order_supply.py"
+  - "packages/contracts/cny_ledger.py"
   - "packages/contracts/supplier_shipments.py"
   - "packages/contracts/registry_upload_bundle_v1.py"
   - "packages/contracts/registry_upload_file_backed_service.py"
@@ -28,6 +29,7 @@ related_modules:
   - "packages/application/stock_ff_onec_source.py"
   - "packages/application/supplier_invoice_parser.py"
   - "packages/application/supplier_shipments.py"
+  - "packages/application/cny_ledger.py"
   - "packages/application/wb_regional_supply_planning.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
@@ -122,6 +124,14 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
   - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
   - "POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/contract"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account"
+  - "POST /v1/sheet-vitrina-v1/supply/cny-account/documents"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account/conversions"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account/ledger"
+  - "POST /v1/sheet-vitrina-v1/supply/cny-account/opening-balance"
+  - "POST /v1/sheet-vitrina-v1/supply/cny-account/replay"
+  - "DELETE /v1/sheet-vitrina-v1/supply/cny-account/documents/{document_id}"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account/documents/{document_id}/file"
   - "GET /sheet-vitrina-v1/settings"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
@@ -167,6 +177,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_trade_documents_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py"
+  - "apps/cny_ledger_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_smoke.py"
   - "apps/sheet_vitrina_v1_daily_report_http_smoke.py"
   - "apps/sheet_vitrina_v1_plan_report_smoke.py"
@@ -198,7 +209,7 @@ related_docs:
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
 update_note: "Обновлён под simple role-aware WebCore auth, supplier `Реестр заказов`, settings/nomenclature API/UI and settings trade document registry. `Поставки -> От поставщика` exposes protected supplier invoice parse/create/list/detail/patch/delete/rematch/manual-price-check/invoice-download routes plus shipment-linked contract link/upload/download routes; optional supplier-only login role can read/create/edit shipment data and download shipment-linked documents, but cannot mutate order status, rematch, price-check, delete, access settings document CRUD or fetch arbitrary document ids. `Настройки` uses inner tabs `Номенклатура`, `Договоры` and `Инвойсы`; contract and invoice rows are separate UI subsections over the same operator-only document API. Document upload/patch persists canonical default supplier when manual/parser supplier is absent. Contract upload attempts bounded number/date parsing with text-layer extraction and first-page OCR fallback when runtime tools exist, returns parsed metadata/warnings/diagnostics, and settings invoice upload never creates supplier shipments."
-current_update_note: "`Настройки` встроены в общий WebCore shell как right-side action рядом с `Выйти`, а не как main tab; внутри есть группы `Справочники` (`Номенклатура`, `Договоры`, `Инвойсы`) и `Пользователи` только для `settings + manage_users`. Runtime users live in SQLite `sheet_vitrina_v1_users` with server-owned `allowed_sections`; env operator is bootstrap admin, env supplier stays backward-compatible supplier-only, and `supply_operator` maps to `Поставки`."
+current_update_note: "`Настройки` встроены в общий WebCore shell как right-side action рядом с `Выйти`, а не как main tab; внутри есть группы `Справочники` (`Номенклатура`, `Договоры`, `Инвойсы`) и `Пользователи` только для `settings + manage_users`. Runtime users live in SQLite `sheet_vitrina_v1_users` with server-owned `allowed_sections`; env operator is bootstrap admin, env supplier stays backward-compatible supplier-only, and `supply_operator` maps to `Поставки`. `Поставки -> Счёт CNY` adds protected server-side CNY account status/upload/list/replay routes plus public-route allowlist entries under `/v1/sheet-vitrina-v1/supply/cny-account...`."
 ---
 
 # 1. Идентификатор и статус
@@ -374,6 +385,14 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/district/{district_key}.xlsx` = отдельный operator-facing XLSX download по федеральному округу
   - `GET /v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip` = ZIP download всех included district XLSX recommendations из последнего расчёта
   - `GET /v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options` = read-only selector options for calculation-only WB supplies overlay; it reads server cache, validates eligible status/date/composition/active SKU evidence and performs no WB mutation
+  - `GET /v1/sheet-vitrina-v1/supply/cny-account` = protected CNY account status/read model with balance, RUB value, average account rate, replay status, conversions and ledger operation drilldown
+  - `POST /v1/sheet-vitrina-v1/supply/cny-account/documents` = idempotent PDF upload for canonical CNY currency documents from the CNY account context; upload stores one runtime document, parses VTB-like conversion purchase PDFs and triggers replay
+  - `GET /v1/sheet-vitrina-v1/supply/cny-account/conversions` and `GET /v1/sheet-vitrina-v1/supply/cny-account/ledger` = compact read APIs for conversion table and ledger operation table
+  - `POST /v1/sheet-vitrina-v1/supply/cny-account/opening-balance` = server-side opening CNY balance/RUB value input when historical conversion history is incomplete
+  - `POST /v1/sheet-vitrina-v1/supply/cny-account/replay` = explicit deterministic replay/backfill action; automatic replay still runs after CNY document mutations
+  - `DELETE /v1/sheet-vitrina-v1/supply/cny-account/documents/{document_id}` = delete one canonical CNY document and replay ledger; source-owned supplier financial documents must be deleted through their source route
+  - `GET /v1/sheet-vitrina-v1/supply/cny-account/documents/{document_id}/file` = runtime file download for a canonical CNY document
+  - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents` also detects CNY conversion purchase and supplier CNY payment PDFs, stores them once in the CNY account ledger with `source_order_id`, and triggers order CNY calculation replay instead of duplicating them as separate financial-document truth
 - Для compact daily-report compare basis current live rule остаётся fully server-side:
   - `current_business_date` = now in `Asia/Yekaterinburg`
   - `newer_closed_day` читается как `yesterday_closed` из latest persisted ready snapshot `<= default_business_as_of_date(now)`

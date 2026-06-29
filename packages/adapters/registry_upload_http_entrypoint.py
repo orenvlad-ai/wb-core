@@ -222,6 +222,12 @@ DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH = f"{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}/compare-quote"
 DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT = "documents"
 DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT = "financial-documents"
+DEFAULT_CNY_ACCOUNT_PATH = "/v1/sheet-vitrina-v1/supply/cny-account"
+DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/documents"
+DEFAULT_CNY_ACCOUNT_CONVERSIONS_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/conversions"
+DEFAULT_CNY_ACCOUNT_LEDGER_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/ledger"
+DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/opening-balance"
+DEFAULT_CNY_ACCOUNT_REPLAY_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/replay"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
@@ -1136,6 +1142,63 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    payload = entrypoint.handle_cny_account_upload_request(
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY account document upload failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_cny_account_opening_balance_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY opening balance save failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_CNY_ACCOUNT_REPLAY_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    result = entrypoint.handle_cny_account_replay_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY ledger replay failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
                 return
 
             if _is_supplier_shipment_contract_path(parsed.path):
@@ -2230,6 +2293,77 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_CNY_ACCOUNT_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_cny_account_status_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY account status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_CNY_ACCOUNT_CONVERSIONS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_cny_account_conversions_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY account conversions failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_CNY_ACCOUNT_LEDGER_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_cny_account_ledger_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY account ledger failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_cny_account_document_file_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    document_id = _resolve_cny_account_document_id(parsed.path)
+                    file_bytes, filename, content_type = entrypoint.handle_cny_account_document_file_request(document_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY account document download failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    file_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
             if parsed.path == DEFAULT_WB_SUPPLIES_PATH:
                 try:
                     payload = entrypoint.handle_wb_supplies_list_request(_flatten_query_params(parsed.query))
@@ -3125,6 +3259,25 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_cny_account_document_detail_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    document_id = _resolve_cny_account_document_id(parsed.path)
+                    payload = entrypoint.handle_cny_account_document_delete_request(document_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"CNY account document delete failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_trade_document_contract_link_path(parsed.path):
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -3779,6 +3932,22 @@ def _is_trade_document_contract_link_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "contract"
 
 
+def _is_cny_account_document_file_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "file"
+
+
+def _is_cny_account_document_detail_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 1 and bool(parts[0])
+
+
 def _is_settings_user_item_path(path: str) -> bool:
     if not path.startswith(DEFAULT_SETTINGS_USERS_PATH + "/"):
         return False
@@ -3854,6 +4023,13 @@ def _resolve_wb_supply_id_from_detail_path(path: str) -> str:
     if not _is_wb_supply_detail_path(path):
         raise ValueError(f"unsupported WB supply detail path: {path}")
     return urllib_parse.unquote(path[len(DEFAULT_WB_SUPPLIES_PATH) + 1 :])
+
+
+def _resolve_cny_account_document_id(path: str) -> str:
+    if not (_is_cny_account_document_file_path(path) or _is_cny_account_document_detail_path(path)):
+        raise ValueError(f"unsupported CNY account document path: {path}")
+    suffix = path[len(DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH) + 1 :]
+    return urllib_parse.unquote(suffix.split("/", 1)[0])
 
 
 def _resolve_nomenclature_item_id(path: str) -> str:
@@ -5624,6 +5800,12 @@ def _render_sheet_vitrina_operator_ui(
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_shipment_registry_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
         "supplier_shipment_registry_compare_quote_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH,
+        "cny_account_path": DEFAULT_CNY_ACCOUNT_PATH,
+        "cny_account_documents_path": DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
+        "cny_account_conversions_path": DEFAULT_CNY_ACCOUNT_CONVERSIONS_PATH,
+        "cny_account_ledger_path": DEFAULT_CNY_ACCOUNT_LEDGER_PATH,
+        "cny_account_opening_balance_path": DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH,
+        "cny_account_replay_path": DEFAULT_CNY_ACCOUNT_REPLAY_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "current_business_date": str(operator_ui_context.get("current_business_date") or ""),
