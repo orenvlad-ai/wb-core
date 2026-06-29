@@ -338,7 +338,10 @@ def _handle_json_rpc(payload: Any, gateway: WebCoreDataMcpGateway, identity: Aut
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                     "instructions": (
                         "WebCore Data MCP exposes read-only, allowlisted business analytics tools only. "
-                        "No SQL, shell, sync/backfill, raw files, secrets or unbounded payloads are available."
+                        "Call get_webcore_data_map for orientation and resolve_webcore_data_request when unsure which "
+                        "business-data tool to use. Use list_supply_artifacts/get_supply_artifact only for server-owned "
+                        "opaque artifact refs. No arbitrary SQL, filesystem browsing, shell, sync/backfill, writes, "
+                        "secrets or unbounded payloads are available."
                     ),
                 },
             )

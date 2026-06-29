@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-38-WEBCORE-DATA-MCP-BLOCK"
 doc_type: "module"
 status: "repo_implemented_private_loopback_live_gated"
 purpose: "Зафиксировать отдельный read-only MCP gateway для безопасного доступа ChatGPT Project/custom app к business data `wb-core`."
-scope: "Standalone HTTP MCP server over allowlisted read-only business tools: freshness, search, universal persisted ready-snapshot metrics by key/label/date/SKU, metric source explanation, cached WB supplies, supplier shipments, factory-order state, persisted stock/SKU snapshots and explicit revenue ambiguity handling. No arbitrary SQL, shell, SSH, upstream sync/backfill, runtime file downloads, secrets or raw payload dumps."
+scope: "Standalone HTTP MCP server over allowlisted read-only business tools: navigation/data-map resolver, freshness, search, universal persisted ready-snapshot metrics by key/label/date/SKU, metric source explanation, allowlisted runtime business table reads, cached WB supplies registry/detail, supplier shipments registry/full details, server-owned supply artifact metadata/chunk access, CNY document/ledger table projections, factory-order state, persisted stock/SKU snapshots and explicit revenue ambiguity handling. No arbitrary SQL, shell, SSH, upstream sync/backfill, arbitrary filesystem browsing, secrets, auth/session material or unbounded payload dumps."
 source_basis:
   - "packages/application/webcore_data_mcp.py"
   - "apps/webcore_data_mcp_server.py"
@@ -26,13 +26,22 @@ related_tables:
   - "registry_upload_metrics_v2"
   - "registry_upload_formulas_v2"
   - "sheet_vitrina_v1_wb_supplies"
+  - "sheet_vitrina_v1_wb_supplies_sync_state"
   - "sheet_vitrina_v1_wb_supplies_sync_runs"
+  - "sheet_vitrina_v1_wb_supplies_warehouses"
+  - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment"
+  - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs"
   - "sheet_vitrina_v1_supplier_shipments"
   - "sheet_vitrina_v1_supplier_shipment_lines"
+  - "sheet_vitrina_v1_supplier_shipment_uploads"
   - "sheet_vitrina_v1_supplier_financial_documents"
   - "sheet_vitrina_v1_supplier_financial_expense_lines"
   - "sheet_vitrina_v1_trade_documents"
+  - "sheet_vitrina_v1_invoice_contract_links"
   - "sheet_vitrina_v1_nomenclature_items"
+  - "sheet_vitrina_v1_cny_documents"
+  - "sheet_vitrina_v1_cny_ledger_operations"
+  - "sheet_vitrina_v1_cny_ledger_replay_state"
   - "sheet_vitrina_v1_factory_order_dataset_state"
   - "sheet_vitrina_v1_factory_order_result_state"
   - "sheet_vitrina_v1_wb_regional_supply_result_state"
@@ -51,7 +60,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. Metric tools project bounded values from persisted DATA_VITRINA ready snapshots, including TOTAL|total_* and SKU:<nm_id>|* rows, without exposing raw plan_json."
+update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. MCP now exposes a metadata-only navigation layer (`get_webcore_data_map`, `resolve_webcore_data_request`), allowlisted runtime business table catalog/schema/row reads, expanded supplier/WB supply read tools and server-owned artifact access by opaque refs with bounded metadata/parsed/text/base64 modes. Metric tools project bounded values from persisted DATA_VITRINA ready snapshots, including TOTAL|total_* and SKU:<nm_id>|* rows, without exposing raw plan_json unless a raw business payload column is explicitly requested through the allowlisted scrubbed table-reader path."
 ---
 
 # 1. Identifier and Status
@@ -119,6 +128,23 @@ The gateway is data-only. It does not expose UI resources/components.
 
 # 4. Tool Allowlist
 
+Navigation / catalog:
+
+- `get_webcore_data_map`
+- `resolve_webcore_data_request`
+- `list_webcore_business_tables`
+- `get_webcore_business_table_schema`
+- `get_webcore_business_table_rows`
+
+Supply / artifacts:
+
+- `get_supplier_shipments_registry`
+- `get_supplier_shipment_full_details`
+- `get_wb_supplies_registry`
+- `get_wb_supply_full_details`
+- `list_supply_artifacts`
+- `get_supply_artifact`
+
 P0:
 
 - `get_data_freshness_status`
@@ -145,7 +171,7 @@ Every tool is emitted with MCP annotations:
 
 `{"readOnlyHint": true}`
 
-No write-like tool names are exposed. There is no SQL, shell, SSH, file browser, invoice download, sync, backfill, upload, refresh or mutation tool.
+No write-like tool names are exposed. There is no arbitrary SQL, shell, SSH, arbitrary filesystem browser, sync, backfill, upload, refresh, replay, delete, patch or mutation tool. Artifact access is not a filesystem browser: callers must first obtain an opaque `artifact_ref` from allowlisted runtime DB rows, and reads are bounded/scrubbed.
 
 # 5. Auth Model
 
@@ -193,8 +219,9 @@ The gateway redacts:
 - `storage_state`;
 - file paths;
 - hashes;
-- raw parse JSON;
-- raw upstream payload blobs;
+- auth/session/OAuth/env/private-key material;
+- raw parse JSON unless requested through explicit scrubbed business payload tools;
+- raw upstream payload blobs unless requested through explicit scrubbed business payload tools;
 - workbook blobs.
 
 Boundaries:
@@ -203,6 +230,7 @@ Boundaries:
 - tool output lists are bounded;
 - default limit: 50;
 - max limit: 100;
+- artifact chunks are bounded by server-side `max_bytes` caps;
 - revenue range max: 62 days;
 - audit log stores argument keys and hashes, not raw payloads.
 
@@ -231,13 +259,29 @@ Freshness:
 
 Reads ready snapshot max dates, temporal source slot max dates/captured timestamps, WB supplies sync run state, supplier shipment/doc freshness, factory-order result timestamps and DB mtime.
 
+Navigation:
+
+`get_webcore_data_map` is a derived guide over current tool definitions, scope constants, allowlisted runtime tables, artifact kinds and canonical module docs. It is not a new source of truth. `resolve_webcore_data_request` accepts natural-language intent and optional hints, recognizes Russian business aliases such as `реестр поставок`, `инвойс`, `договор`, `БТТ`, `ВТБ`, `ВБК`, `ДТ`, `КП логистов`, `счёт CNY`, `номенклатура`, `метрика`, `остатки` and `свежесть данных`, and returns recommended MCP calls without executing them.
+
+Business table access:
+
+`list_webcore_business_tables`, `get_webcore_business_table_schema` and `get_webcore_business_table_rows` expose only allowlisted runtime business tables. The caller cannot submit SQL text. Table name, filter columns and order columns must exist in the allowlist/current schema. Generated `SELECT` statements use bounded `limit/offset` pagination, safe date filters and scrubbed payload columns. Auth/session/audit/secrets tables are not part of the catalog. Sensitive path/hash/auth columns are omitted or redacted; raw business JSON columns are returned only when `include_raw_business_payloads=true`, and even then as scrubbed/bounded payloads.
+
 WB supplies:
 
-Reads cached rows only from `sheet_vitrina_v1_wb_supplies` and related sync/enrichment tables. It never calls WB sync/backfill/detail lazy fetch.
+Reads cached rows only from `sheet_vitrina_v1_wb_supplies` and related sync/enrichment tables. It never calls WB sync/backfill/detail lazy fetch. `get_wb_supplies_registry` is the broader cached registry/list surface. `get_wb_supply_full_details` returns one cached row plus scrubbed normalized/detail/goods/package business payloads when explicitly requested.
 
 Supplier shipments:
 
-Reads shipment metadata, line aggregates, financial document status aggregates, expense summaries and trade document status counts. It never exposes raw invoice/contract/PDF contents or paths.
+Legacy `get_supplier_shipment_details` reads shipment metadata, line aggregates, financial document status aggregates, expense summaries and trade document status counts. `get_supplier_shipments_registry` exposes a read-only registry/list with shipment dates/statuses/totals and completeness flags. `get_supplier_shipment_full_details` expands one shipment to safe header, line rows, price conformity fields when present, financial documents, expense lines, trade documents, CNY-linked rows and artifact refs. It never exposes absolute paths, hashes, secrets or unbounded raw payloads.
+
+Artifacts:
+
+`list_supply_artifacts` returns metadata and opaque refs for server-owned runtime artifacts from allowlisted rows in `sheet_vitrina_v1_trade_documents`, `sheet_vitrina_v1_supplier_financial_documents` and `sheet_vitrina_v1_cny_documents`. Supported kinds include `invoice`, `contract`, `logistics_quote`, `logistics_invoice`, `customs_declaration`, `bank_control_statement`, `bank_transfer_application`, `bank_fee_statement`, `cny_conversion_purchase`, `supplier_cny_payment`, `document_package` and `unknown_business_document`. `get_supply_artifact` accepts only an `artifact_ref`; it never accepts a filesystem path. Modes are `metadata`, `parsed`, `text`, `text_chunk` and `base64_chunk`. File reads require the registered path to resolve inside the WebCore runtime root, enforce size/chunk caps and redact secret-like text. PDF/text extraction is intentionally conservative; parsed metadata is preferred where available.
+
+CNY:
+
+CNY rows are readable through the allowlisted table tools and shipment full details/artifact refs. MCP exposes CNY account documents and ledger state as read-only runtime evidence only; it does not replay, upload, delete or recalculate the ledger.
 
 Factory order:
 

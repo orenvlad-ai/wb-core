@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -24,6 +25,17 @@ SCOPE_SUPPLY_READ = "webcore.supply.read"
 SCOPE_FINANCE_READ = "webcore.finance.read"
 
 APPROVED_TOOL_NAMES = (
+    "get_webcore_data_map",
+    "resolve_webcore_data_request",
+    "list_webcore_business_tables",
+    "get_webcore_business_table_schema",
+    "get_webcore_business_table_rows",
+    "get_supplier_shipments_registry",
+    "get_supplier_shipment_full_details",
+    "get_wb_supplies_registry",
+    "get_wb_supply_full_details",
+    "list_supply_artifacts",
+    "get_supply_artifact",
     "get_data_freshness_status",
     "search_business_objects",
     "explain_metric_source",
@@ -64,6 +76,18 @@ FORBIDDEN_OUTPUT_KEY_MARKERS = (
     "workbook_blob",
 )
 
+SECRET_TEXT_MARKERS = (
+    "storage_state",
+    "authorization:",
+    "bearer ",
+    "password=",
+    "token=",
+    "cookie=",
+    "client_secret",
+    "oauth_signing_secret",
+    "private key",
+)
+
 REVENUE_CANDIDATE_MARKERS = (
     "revenue",
     "выруч",
@@ -101,11 +125,15 @@ class WebCoreDataMcpGateway:
         audit_log_path: Path | None = None,
         max_limit: int = DEFAULT_MAX_LIMIT,
     ) -> None:
+        resolved_runtime_dir: Path | None = runtime_dir
         if db_path is None:
             resolved_runtime_dir = runtime_dir or Path(
                 os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", ".runtime/registry_upload")
             )
             db_path = resolved_runtime_dir / DB_FILENAME
+        elif resolved_runtime_dir is None:
+            resolved_runtime_dir = Path(db_path).expanduser().parent
+        self.runtime_dir = Path(resolved_runtime_dir).expanduser() if resolved_runtime_dir else Path(db_path).expanduser().parent
         self.db_path = Path(db_path).expanduser()
         self.audit_log_path = Path(audit_log_path).expanduser() if audit_log_path else None
         self.max_limit = max(1, min(int(max_limit or DEFAULT_MAX_LIMIT), MAX_LIMIT))
@@ -179,6 +207,106 @@ class WebCoreDataMcpGateway:
             }
 
     def _call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name == "get_webcore_data_map":
+            return self.get_webcore_data_map(
+                domain=_optional_str(args.get("domain"), max_length=40) or "all",
+                include_examples=_optional_bool(args.get("include_examples"), default=True),
+                include_limitations=_optional_bool(args.get("include_limitations"), default=True),
+            )
+        if name == "resolve_webcore_data_request":
+            return self.resolve_webcore_data_request(
+                intent=_required_str(args, "intent", max_length=500),
+                domain=_optional_str(args.get("domain"), max_length=40) or "auto",
+                object_id=_optional_str(args.get("object_id"), max_length=160),
+                shipment_id=_optional_str(args.get("shipment_id"), max_length=160),
+                supply_id=_optional_str(args.get("supply_id"), max_length=160),
+                invoice_no=_optional_str(args.get("invoice_no"), max_length=160),
+                supplier_name=_optional_str(args.get("supplier_name"), max_length=160),
+                sku_or_nm_id=_optional_str(args.get("sku_or_nm_id"), max_length=120),
+                metric_key_or_label=_optional_str(args.get("metric_key_or_label"), max_length=180),
+                date_value=_optional_date(args.get("date")),
+                date_from=_optional_date(args.get("date_from")),
+                date_to=_optional_date(args.get("date_to")),
+                artifact_kind=_optional_str(args.get("artifact_kind"), max_length=80) or "auto",
+                mode=_optional_str(args.get("mode"), max_length=40) or "metadata_only",
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+            )
+        if name == "list_webcore_business_tables":
+            return self.list_webcore_business_tables(
+                domain=_optional_str(args.get("domain"), max_length=60),
+                include_missing=_optional_bool(args.get("include_missing"), default=True),
+            )
+        if name == "get_webcore_business_table_schema":
+            return self.get_webcore_business_table_schema(table=_required_str(args, "table", max_length=120))
+        if name == "get_webcore_business_table_rows":
+            return self.get_webcore_business_table_rows(
+                table=_required_str(args, "table", max_length=120),
+                filters=_optional_mapping(args.get("filters")),
+                date_from=_optional_date(args.get("date_from")),
+                date_to=_optional_date(args.get("date_to")),
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+                cursor=_optional_str(args.get("cursor"), max_length=40),
+                offset=_optional_int(args.get("offset"), default=0, minimum=0, maximum=100000),
+                order_by=_optional_str(args.get("order_by"), max_length=80),
+                include_raw_business_payloads=_optional_bool(args.get("include_raw_business_payloads"), default=False),
+            )
+        if name == "get_supplier_shipments_registry":
+            return self.get_supplier_shipments_registry(
+                shipment_id=_optional_str(args.get("shipment_id"), max_length=120),
+                invoice_no=_optional_str(args.get("invoice_no"), max_length=160),
+                supplier_name=_optional_str(args.get("supplier_name"), max_length=160),
+                order_status=_optional_str(args.get("order_status"), max_length=80),
+                match_status=_optional_str(args.get("match_status"), max_length=80),
+                document_status=_optional_str(args.get("document_status"), max_length=80),
+                date_from=_optional_date(args.get("date_from")),
+                date_to=_optional_date(args.get("date_to")),
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+                cursor=_optional_str(args.get("cursor"), max_length=40),
+                offset=_optional_int(args.get("offset"), default=0, minimum=0, maximum=100000),
+            )
+        if name == "get_supplier_shipment_full_details":
+            return self.get_supplier_shipment_full_details(
+                shipment_id=_required_str(args, "shipment_id", max_length=120),
+                include_raw_business_payloads=_optional_bool(args.get("include_raw_business_payloads"), default=False),
+                line_limit=_bounded_limit(args.get("line_limit"), MAX_LIMIT),
+                document_limit=_bounded_limit(args.get("document_limit"), MAX_LIMIT),
+            )
+        if name == "get_wb_supplies_registry":
+            return self.get_wb_supplies_registry(
+                status_filter=_optional_str(args.get("status_filter"), max_length=80),
+                warehouse=_optional_str(args.get("warehouse"), max_length=160),
+                supply_id=_optional_str(args.get("supply_id"), max_length=120),
+                wb_supply_id=_optional_str(args.get("wb_supply_id"), max_length=120),
+                preorder_id=_optional_str(args.get("preorder_id"), max_length=120),
+                date_from=_optional_date(args.get("date_from")),
+                date_to=_optional_date(args.get("date_to")),
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+                cursor=_optional_str(args.get("cursor"), max_length=40),
+                offset=_optional_int(args.get("offset"), default=0, minimum=0, maximum=100000),
+            )
+        if name == "get_wb_supply_full_details":
+            return self.get_wb_supply_full_details(
+                supply_id=_required_str(args, "supply_id", max_length=120),
+                include_raw_business_payloads=_optional_bool(args.get("include_raw_business_payloads"), default=True),
+            )
+        if name == "list_supply_artifacts":
+            return self.list_supply_artifacts(
+                shipment_id=_optional_str(args.get("shipment_id"), max_length=120),
+                supplier_order_id=_optional_str(args.get("supplier_order_id"), max_length=120),
+                artifact_kind=_optional_str(args.get("artifact_kind"), max_length=80),
+                source_domain=_optional_str(args.get("source_domain"), max_length=80),
+                limit=_bounded_limit(args.get("limit"), self.max_limit),
+                cursor=_optional_str(args.get("cursor"), max_length=40),
+                offset=_optional_int(args.get("offset"), default=0, minimum=0, maximum=100000),
+            )
+        if name == "get_supply_artifact":
+            return self.get_supply_artifact(
+                artifact_ref=_required_str(args, "artifact_ref", max_length=240),
+                mode=_optional_str(args.get("mode"), max_length=40) or "metadata",
+                chunk=_optional_int(args.get("chunk"), default=0, minimum=0, maximum=100000),
+                offset=_optional_int(args.get("offset"), default=0, minimum=0, maximum=100000000),
+                max_bytes=_optional_int(args.get("max_bytes"), default=16384, minimum=1, maximum=65536),
+            )
         if name == "get_data_freshness_status":
             return self.get_data_freshness_status()
         if name == "search_business_objects":
@@ -952,6 +1080,948 @@ class WebCoreDataMcpGateway:
             "caveat": "" if buckets else "Metric was requested explicitly, but no bounded projected value matched the requested date range in persisted ready snapshots.",
         }
 
+    def get_webcore_data_map(
+        self,
+        *,
+        domain: str,
+        include_examples: bool,
+        include_limitations: bool,
+    ) -> dict[str, Any]:
+        normalized_domain = domain if domain in _data_map_domains() else "all"
+        domains = _domain_catalog()
+        filtered_domains = [
+            item
+            for item in domains
+            if normalized_domain == "all" or item.get("domain") == normalized_domain
+        ]
+        table_catalog = _business_table_catalog()
+        artifact_catalog = _artifact_kind_catalog()
+        return {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_data_map",
+            "contract_version": "v1",
+            "generated_at": _utc_now(),
+            "source": "derived_from_current_mcp_tool_definitions_and_repo_docs",
+            "requested_domain": normalized_domain,
+            "domains": filtered_domains,
+            "tools": [
+                {
+                    "name": definition.name,
+                    "required_scope": definition.scope,
+                    "description": definition.description,
+                    "read_only": True,
+                }
+                for definition in _tool_definitions()
+            ],
+            "scopes": [
+                {"scope": SCOPE_ANALYTICS_READ, "domains": ["navigation", "freshness", "metrics", "sku", "business_tables"]},
+                {"scope": SCOPE_SUPPLY_READ, "domains": ["supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order"]},
+                {"scope": SCOPE_FINANCE_READ, "domains": ["finance", "revenue"]},
+            ],
+            "intent_examples": _intent_examples() if include_examples else [],
+            "business_table_catalog": [
+                _table_spec_public(spec)
+                for spec in table_catalog.values()
+                if normalized_domain == "all" or spec.get("domain") == normalized_domain
+            ],
+            "artifact_catalog": artifact_catalog if normalized_domain in {"all", "artifacts", "supplier_shipments", "cny"} else [],
+            "boundary_rules": _boundary_rules(),
+            "known_limitations": _known_limitations() if include_limitations else [],
+            "not_source_of_truth_note": (
+                "This map is a derived navigation layer over current MCP tools, allowlisted runtime tables "
+                "and authoritative repo docs. It does not define new business truth."
+            ),
+        }
+
+    def resolve_webcore_data_request(
+        self,
+        *,
+        intent: str,
+        domain: str,
+        object_id: str | None,
+        shipment_id: str | None,
+        supply_id: str | None,
+        invoice_no: str | None,
+        supplier_name: str | None,
+        sku_or_nm_id: str | None,
+        metric_key_or_label: str | None,
+        date_value: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        artifact_kind: str,
+        mode: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        inferred = _infer_request_intent(
+            intent,
+            domain=domain,
+            object_id=object_id,
+            shipment_id=shipment_id,
+            supply_id=supply_id,
+            invoice_no=invoice_no,
+            supplier_name=supplier_name,
+            sku_or_nm_id=sku_or_nm_id,
+            metric_key_or_label=metric_key_or_label,
+            artifact_kind=artifact_kind,
+        )
+        calls: list[dict[str, Any]] = []
+        unavailable: list[dict[str, Any]] = []
+        resolved_shipment_id = shipment_id or (object_id if inferred.get("object_type") == "shipment" else None)
+        resolved_supply_id = supply_id or (object_id if inferred.get("object_type") == "wb_supply" else None)
+        action = str(inferred.get("action") or "")
+        resolved_domain = str(inferred.get("domain") or "unknown")
+
+        if resolved_domain == "freshness":
+            calls.append(_recommended_call(1, "get_data_freshness_status", {}, SCOPE_ANALYTICS_READ, "Per-source freshness/readiness status."))
+        elif resolved_domain == "metrics":
+            selector = metric_key_or_label or object_id or ""
+            if not selector:
+                calls.append(_recommended_call(1, "list_metrics", {"query": "", "limit": limit}, SCOPE_ANALYTICS_READ, "Metric catalog with Russian labels and coverage hints."))
+            else:
+                metric_args: dict[str, Any] = {"metric_key_or_label": selector, "limit": limit}
+                if date_value:
+                    metric_args["date"] = date_value
+                if date_from and date_to:
+                    metric_args["date_from"] = date_from
+                    metric_args["date_to"] = date_to
+                if sku_or_nm_id:
+                    metric_args["sku_or_nm_id"] = sku_or_nm_id
+                calls.append(_recommended_call(1, "get_metric_values", metric_args, SCOPE_ANALYTICS_READ, "Persisted ready-snapshot metric values."))
+        elif resolved_domain == "sku":
+            query = sku_or_nm_id or object_id or intent
+            calls.append(_recommended_call(1, "search_business_objects", {"query": query, "object_types": ["sku", "nomenclature"]}, SCOPE_ANALYTICS_READ, "Find SKU/nomenclature identity."))
+            if sku_or_nm_id or object_id:
+                args = {"sku_or_nm_id": sku_or_nm_id or object_id}
+                if date_value:
+                    args["date"] = date_value
+                calls.append(_recommended_call(2, "get_sku_snapshot", args, SCOPE_ANALYTICS_READ, "SKU identity plus persisted ready snapshot metrics."))
+        elif resolved_domain == "wb_supplies":
+            if resolved_supply_id:
+                calls.append(_recommended_call(1, "get_wb_supply_full_details", {"supply_id": resolved_supply_id}, SCOPE_SUPPLY_READ, "Expanded cached WB supply detail and scrubbed cached payloads."))
+            else:
+                args = {"limit": limit}
+                if date_from:
+                    args["date_from"] = date_from
+                if date_to:
+                    args["date_to"] = date_to
+                calls.append(_recommended_call(1, "get_wb_supplies_registry", args, SCOPE_SUPPLY_READ, "Cached WB supplies registry/list; no upstream sync."))
+        elif resolved_domain in {"supplier_shipments", "artifacts", "cny"}:
+            if action == "show_registry":
+                args = {"limit": limit}
+                if invoice_no:
+                    args["invoice_no"] = invoice_no
+                if supplier_name:
+                    args["supplier_name"] = supplier_name
+                if date_from:
+                    args["date_from"] = date_from
+                if date_to:
+                    args["date_to"] = date_to
+                calls.append(_recommended_call(1, "get_supplier_shipments_registry", args, SCOPE_SUPPLY_READ, "Supplier shipment registry rows with financial/document completeness."))
+            elif action in {"show_documents", "open_artifact"}:
+                if not resolved_shipment_id and invoice_no:
+                    calls.append(_recommended_call(1, "search_business_objects", {"query": invoice_no, "object_types": ["shipment"]}, SCOPE_ANALYTICS_READ, "Find shipment id by invoice number before listing artifacts."))
+                artifact_args: dict[str, Any] = {"limit": limit}
+                if resolved_shipment_id:
+                    artifact_args["shipment_id"] = resolved_shipment_id
+                if artifact_kind and artifact_kind != "auto":
+                    artifact_args["artifact_kind"] = artifact_kind
+                calls.append(_recommended_call(2 if not resolved_shipment_id and invoice_no else 1, "list_supply_artifacts", artifact_args, SCOPE_SUPPLY_READ, "Server-owned supply artifact metadata and opaque artifact refs."))
+                if action == "open_artifact":
+                    unavailable.append(
+                        {
+                            "capability": "direct artifact read without artifact_ref",
+                            "reason": "Resolve an artifact_ref with list_supply_artifacts first, then call get_supply_artifact.",
+                        }
+                    )
+            elif resolved_shipment_id:
+                calls.append(_recommended_call(1, "get_supplier_shipment_full_details", {"shipment_id": resolved_shipment_id}, SCOPE_SUPPLY_READ, "Expanded shipment header, lines, documents, expenses, CNY links and artifact refs."))
+            else:
+                search_query = invoice_no or supplier_name or object_id or intent
+                calls.append(_recommended_call(1, "search_business_objects", {"query": search_query, "object_types": ["shipment"]}, SCOPE_ANALYTICS_READ, "Find candidate supplier shipment ids."))
+                calls.append(_recommended_call(2, "get_supplier_shipments_registry", {"limit": limit}, SCOPE_SUPPLY_READ, "Fallback registry listing if search is insufficient."))
+        elif resolved_domain == "business_tables":
+            calls.append(_recommended_call(1, "list_webcore_business_tables", {}, SCOPE_ANALYTICS_READ, "Allowlisted runtime business table catalog."))
+        else:
+            calls.append(_recommended_call(1, "get_webcore_data_map", {"domain": "all"}, SCOPE_ANALYTICS_READ, "Orientation map for current MCP tools and domains."))
+
+        if mode in {"open_or_read", "download_hint"} and action == "open_artifact":
+            unavailable.append(
+                {
+                    "capability": "arbitrary file open/download",
+                    "reason": "MCP only reads server-owned artifacts by opaque artifact_ref with bounded modes.",
+                    "safe_next_tool": "get_supply_artifact",
+                }
+            )
+        return {
+            "status": "ok" if calls else "ambiguous_intent",
+            "contract_name": "webcore_data_mcp_request_resolution",
+            "contract_version": "v1",
+            "interpreted_intent": inferred,
+            "confidence": inferred.get("confidence") or "medium",
+            "recommended_calls": calls,
+            "fallback_path": _fallback_path_for_domain(resolved_domain),
+            "unavailable_capabilities": unavailable,
+            "notes": ["Resolver did not execute the recommended calls.", "All recommended tools are read-only MCP calls."],
+        }
+
+    def list_webcore_business_tables(self, *, domain: str | None = None, include_missing: bool) -> dict[str, Any]:
+        normalized_domain = (domain or "").strip()
+        catalog = _business_table_catalog()
+        with self._connect() as conn:
+            rows = []
+            for table, spec in catalog.items():
+                if normalized_domain and spec.get("domain") != normalized_domain:
+                    continue
+                exists = _table_exists(conn, table)
+                if not exists and not include_missing:
+                    continue
+                item = _table_spec_public(spec)
+                item["exists"] = exists
+                if exists:
+                    item["column_count"] = len(_table_columns(conn, table))
+                rows.append(item)
+        return {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_business_table_catalog",
+            "contract_version": "v1",
+            "source": "allowlisted_runtime_tables",
+            "domain": domain,
+            "tables": rows,
+            "boundary": "Generated SELECT only; no arbitrary SQL or auth/session/secrets tables.",
+        }
+
+    def get_webcore_business_table_schema(self, *, table: str) -> dict[str, Any]:
+        spec = _require_table_spec(table)
+        with self._connect() as conn:
+            if not _table_exists(conn, table):
+                return _missing_table_result(table)
+            columns = _table_columns(conn, table)
+        safe_columns = _safe_table_columns(columns, spec, include_raw_business_payloads=False)
+        raw_columns = [column for column in columns if column in set(spec.get("raw_columns") or [])]
+        redacted_columns = [column for column in columns if column in set(spec.get("sensitive_columns") or [])]
+        return {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_business_table_schema",
+            "contract_version": "v1",
+            "table": table,
+            "domain": spec.get("domain"),
+            "description": spec.get("description"),
+            "primary_id_columns": spec.get("primary_id_columns") or [],
+            "date_columns": spec.get("date_columns") or [],
+            "allowlisted_columns": safe_columns,
+            "raw_business_payload_columns": raw_columns,
+            "sensitive_redacted_columns": redacted_columns,
+            "allowed_filters": safe_columns,
+            "allowed_order_by": _allowed_order_columns(columns, spec),
+            "default_order_by": spec.get("default_order_by") or "",
+            "redaction_policy": "Sensitive/path/hash/auth columns are omitted/redacted. Raw business payloads require explicit include flag and are scrubbed/bounded.",
+        }
+
+    def get_webcore_business_table_rows(
+        self,
+        *,
+        table: str,
+        filters: Mapping[str, Any],
+        date_from: str | None,
+        date_to: str | None,
+        limit: int,
+        cursor: str | None,
+        offset: int,
+        order_by: str | None,
+        include_raw_business_payloads: bool,
+    ) -> dict[str, Any]:
+        spec = _require_table_spec(table)
+        effective_offset = _cursor_to_offset(cursor, offset)
+        with self._connect() as conn:
+            if not _table_exists(conn, table):
+                return _missing_table_result(table)
+            columns = _table_columns(conn, table)
+            selected_columns = _safe_table_columns(columns, spec, include_raw_business_payloads=include_raw_business_payloads)
+            where_sql, params, applied_filters = _build_table_where(
+                columns,
+                spec,
+                filters=filters,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            order_sql = _order_by_sql(columns, spec, order_by)
+            quoted_columns = ", ".join(_quote_ident(column) for column in selected_columns)
+            rows = conn.execute(
+                f"""
+                SELECT {quoted_columns}
+                FROM {_quote_ident(table)}
+                {where_sql}
+                {order_sql}
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit + 1, effective_offset),
+            ).fetchall()
+        raw_columns = set(spec.get("raw_columns") or [])
+        payload_rows = [
+            _business_row_payload(
+                _row_dict(row),
+                raw_columns=raw_columns,
+                include_raw_business_payloads=include_raw_business_payloads,
+            )
+            for row in rows[:limit]
+        ]
+        truncated = len(rows) > limit
+        return {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_business_table_rows",
+            "contract_version": "v1",
+            "source_table": table,
+            "domain": spec.get("domain"),
+            "columns": selected_columns,
+            "applied_filters": applied_filters,
+            "include_raw_business_payloads": include_raw_business_payloads,
+            "rows": payload_rows,
+            "pagination": {
+                "limit": limit,
+                "offset": effective_offset,
+                "next_cursor": str(effective_offset + limit) if truncated else "",
+                "truncated": truncated,
+            },
+            "redaction_notes": [
+                "Sensitive/path/hash/auth columns are not returned.",
+                "Raw business JSON columns are returned only as scrubbed_payload fields when explicitly requested.",
+            ],
+        }
+
+    def get_supplier_shipments_registry(
+        self,
+        *,
+        shipment_id: str | None,
+        invoice_no: str | None,
+        supplier_name: str | None,
+        order_status: str | None,
+        match_status: str | None,
+        document_status: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        limit: int,
+        cursor: str | None,
+        offset: int,
+    ) -> dict[str, Any]:
+        del document_status
+        effective_offset = _cursor_to_offset(cursor, offset)
+        with self._connect() as conn:
+            if not _table_exists(conn, "sheet_vitrina_v1_supplier_shipments"):
+                return _missing_table_result("sheet_vitrina_v1_supplier_shipments")
+            clauses: list[str] = []
+            params: list[Any] = []
+            _append_like_filter(clauses, params, "s.shipment_id", shipment_id)
+            _append_like_filter(clauses, params, "s.invoice_no", invoice_no)
+            _append_like_filter(clauses, params, "s.supplier_name", supplier_name)
+            _append_exact_filter(clauses, params, "s.order_status", order_status)
+            _append_exact_filter(clauses, params, "s.match_status", match_status)
+            if date_from:
+                clauses.append("COALESCE(s.shipment_date, s.invoice_date, s.created_at, '') >= ?")
+                params.append(date_from)
+            if date_to:
+                clauses.append("COALESCE(s.shipment_date, s.invoice_date, s.created_at, '') <= ?")
+                params.append(date_to)
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(
+                f"""
+                SELECT s.shipment_id, s.created_at, s.updated_at, s.shipment_date, s.actual_shipment_date,
+                       s.actual_ff_acceptance_date, s.order_status, s.invoice_no, s.invoice_date, s.contract_no,
+                       s.contract_date, s.supplier_name, s.currency, s.product_qty_total, s.product_amount_total,
+                       s.extras_amount_total, s.invoice_amount_total, s.declared_invoice_total, s.match_status,
+                       COUNT(DISTINCT l.line_id) AS line_count,
+                       COUNT(DISTINCT CASE WHEN l.internal_nm_id IS NOT NULL THEN l.internal_nm_id END) AS matched_nm_id_count,
+                       COALESCE(SUM(CASE WHEN l.qty IS NULL THEN 0 ELSE l.qty END), 0) AS line_qty_total,
+                       COUNT(DISTINCT fd.document_id) AS financial_document_count,
+                       COALESCE(SUM(CASE WHEN fe.amount_rub IS NULL THEN 0 ELSE fe.amount_rub END), 0) AS expense_amount_rub,
+                       COUNT(DISTINCT td.document_id) AS trade_document_count
+                FROM sheet_vitrina_v1_supplier_shipments s
+                LEFT JOIN sheet_vitrina_v1_supplier_shipment_lines l ON l.shipment_id = s.shipment_id
+                LEFT JOIN sheet_vitrina_v1_supplier_financial_documents fd ON fd.supplier_order_id = s.shipment_id
+                LEFT JOIN sheet_vitrina_v1_supplier_financial_expense_lines fe ON fe.supplier_order_id = s.shipment_id
+                LEFT JOIN sheet_vitrina_v1_trade_documents td ON td.source_shipment_id = s.shipment_id
+                {where_sql}
+                GROUP BY s.shipment_id
+                ORDER BY COALESCE(s.invoice_date, s.shipment_date, s.created_at, '') DESC, s.shipment_id
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit + 1, effective_offset),
+            ).fetchall()
+        result_rows = []
+        for row in rows[:limit]:
+            item = _row_dict(row)
+            qty = _first_number(item.get("product_qty_total"), item.get("line_qty_total"))
+            expenses = _number_or_zero(item.get("expense_amount_rub"))
+            invoice_amount = _first_number(item.get("invoice_amount_total"), item.get("product_amount_total"))
+            item["core_metrics"] = {
+                "quantity_evidence": qty,
+                "invoice_amount_evidence": invoice_amount,
+                "expense_amount_rub": expenses,
+                "available_unit_cost_evidence": ((invoice_amount or 0) + expenses) / qty if qty and qty > 0 else None,
+            }
+            item["completeness_flags"] = {
+                "has_lines": bool(item.get("line_count")),
+                "has_matched_nm_id": bool(item.get("matched_nm_id_count")),
+                "has_financial_documents": bool(item.get("financial_document_count")),
+                "has_trade_documents": bool(item.get("trade_document_count")),
+                "has_fact_dates": bool(item.get("actual_shipment_date") and item.get("actual_ff_acceptance_date")),
+            }
+            result_rows.append(item)
+        return {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_supplier_shipments_registry",
+            "contract_version": "v1",
+            "source_tables": [
+                "sheet_vitrina_v1_supplier_shipments",
+                "sheet_vitrina_v1_supplier_shipment_lines",
+                "sheet_vitrina_v1_supplier_financial_documents",
+                "sheet_vitrina_v1_supplier_financial_expense_lines",
+                "sheet_vitrina_v1_trade_documents",
+            ],
+            "filters": {
+                "shipment_id": shipment_id,
+                "invoice_no": invoice_no,
+                "supplier_name": supplier_name,
+                "order_status": order_status,
+                "match_status": match_status,
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+            "rows": result_rows,
+            "pagination": {"limit": limit, "offset": effective_offset, "next_cursor": str(effective_offset + limit) if len(rows) > limit else "", "truncated": len(rows) > limit},
+        }
+
+    def get_supplier_shipment_full_details(
+        self,
+        *,
+        shipment_id: str,
+        include_raw_business_payloads: bool,
+        line_limit: int,
+        document_limit: int,
+    ) -> dict[str, Any]:
+        base = self.get_supplier_shipment_details(shipment_id=shipment_id)
+        if base.get("status") != "ok":
+            return base
+        with self._connect() as conn:
+            lines = _fetch_table_rows_for_owner(
+                conn,
+                table="sheet_vitrina_v1_supplier_shipment_lines",
+                owner_column="shipment_id",
+                owner_id=shipment_id,
+                limit=line_limit,
+                omit_columns={"raw_json"},
+                include_raw_business_payloads=include_raw_business_payloads,
+                order_by="sort_order ASC, line_id ASC",
+            )
+            financial_documents = _fetch_table_rows_for_owner(
+                conn,
+                table="sheet_vitrina_v1_supplier_financial_documents",
+                owner_column="supplier_order_id",
+                owner_id=shipment_id,
+                limit=document_limit,
+                omit_columns={"stored_file_path", "file_sha256", "raw_parse_json"},
+                include_raw_business_payloads=include_raw_business_payloads,
+                order_by="document_date DESC, uploaded_at DESC, document_id ASC",
+            )
+            expense_lines = _fetch_table_rows_for_owner(
+                conn,
+                table="sheet_vitrina_v1_supplier_financial_expense_lines",
+                owner_column="supplier_order_id",
+                owner_id=shipment_id,
+                limit=MAX_LIMIT,
+                omit_columns={"raw_json"},
+                include_raw_business_payloads=include_raw_business_payloads,
+                order_by="financial_document_id ASC, sort_order ASC, line_id ASC",
+            )
+            trade_documents = _fetch_table_rows_for_owner(
+                conn,
+                table="sheet_vitrina_v1_trade_documents",
+                owner_column="source_shipment_id",
+                owner_id=shipment_id,
+                limit=document_limit,
+                omit_columns={"file_path", "file_sha256"},
+                include_raw_business_payloads=include_raw_business_payloads,
+                order_by="updated_at DESC, document_id ASC",
+            )
+            cny_documents = _fetch_table_rows_for_owner(
+                conn,
+                table="sheet_vitrina_v1_cny_documents",
+                owner_column="source_order_id",
+                owner_id=shipment_id,
+                limit=document_limit,
+                omit_columns={"stored_file_path", "file_sha256", "raw_parse_json"},
+                include_raw_business_payloads=include_raw_business_payloads,
+                order_by="operation_date DESC, document_id ASC",
+            )
+            artifact_rows = self._artifact_rows(conn, shipment_id=shipment_id, supplier_order_id=shipment_id, artifact_kind=None, source_domain=None)
+        return {
+            **base,
+            "contract_name": "webcore_data_mcp_supplier_shipment_full_details",
+            "contract_version": "v1",
+            "lines": lines,
+            "financial_documents_metadata": _with_artifact_refs(financial_documents, source_domain="financial_documents"),
+            "financial_expense_lines": expense_lines,
+            "trade_documents_metadata": _with_artifact_refs(trade_documents, source_domain="trade_documents"),
+            "cny_documents_metadata": _with_artifact_refs(cny_documents, source_domain="cny_documents"),
+            "artifact_refs": [_artifact_public(row) for row in artifact_rows[:document_limit]],
+            "redaction": "No absolute paths, hashes, secrets, raw DB payloads or unbounded file contents are exposed.",
+        }
+
+    def get_wb_supplies_registry(
+        self,
+        *,
+        status_filter: str | None,
+        warehouse: str | None,
+        supply_id: str | None,
+        wb_supply_id: str | None,
+        preorder_id: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        limit: int,
+        cursor: str | None,
+        offset: int,
+    ) -> dict[str, Any]:
+        effective_offset = _cursor_to_offset(cursor, offset)
+        with self._connect() as conn:
+            if not _table_exists(conn, "sheet_vitrina_v1_wb_supplies"):
+                return _missing_table_result("sheet_vitrina_v1_wb_supplies")
+            clauses: list[str] = []
+            params: list[Any] = []
+            _append_like_filter(clauses, params, "s.supply_id", supply_id)
+            _append_like_filter(clauses, params, "s.wb_supply_id", wb_supply_id)
+            _append_like_filter(clauses, params, "s.preorder_id", preorder_id)
+            if status_filter:
+                if status_filter.isdigit():
+                    clauses.append("s.status_id = ?")
+                    params.append(int(status_filter))
+                else:
+                    clauses.append("LOWER(s.normalized_row_json) LIKE ?")
+                    params.append(f"%{status_filter.lower()}%")
+            if warehouse:
+                clauses.append("LOWER(s.normalized_row_json) LIKE ?")
+                params.append(f"%{warehouse.lower()}%")
+            if date_from:
+                clauses.append("COALESCE(substr(s.supply_date, 1, 10), substr(s.fact_date, 1, 10), substr(s.updated_date, 1, 10), '') >= ?")
+                params.append(date_from)
+            if date_to:
+                clauses.append("COALESCE(substr(s.supply_date, 1, 10), substr(s.fact_date, 1, 10), substr(s.updated_date, 1, 10), '') <= ?")
+                params.append(date_to)
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(
+                f"""
+                SELECT s.supply_id, s.cache_key, s.wb_supply_id, s.preorder_id, s.normalized_row_json,
+                       s.warehouse_id, s.status_id, s.quantity_for_size_filter, s.source_created_at,
+                       s.supply_date, s.fact_date, s.updated_date, s.synced_at, s.last_list_synced_at,
+                       s.last_enriched_at, s.enrichment_status, s.enrichment_error
+                FROM sheet_vitrina_v1_wb_supplies s
+                {where_sql}
+                ORDER BY COALESCE(s.supply_date, s.fact_date, s.updated_date, s.synced_at, '') DESC, s.supply_id
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit + 1, effective_offset),
+            ).fetchall()
+        result_rows = []
+        for row in rows[:limit]:
+            item = _row_dict(row)
+            normalized = _json_object(item.pop("normalized_row_json", None))
+            item["normalized"] = _scrub_business_payload(
+                _select_keys(
+                    normalized,
+                    (
+                        "supply_id",
+                        "id",
+                        "status",
+                        "status_name",
+                        "warehouse_name",
+                        "planned_warehouse_name",
+                        "target_warehouse_name",
+                        "quantity",
+                        "goods_count",
+                        "route",
+                        "amount",
+                        "currency",
+                        "cost_total",
+                    ),
+                )
+            )
+            item["cache_only"] = True
+            result_rows.append(item)
+        return {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_wb_supplies_registry",
+            "contract_version": "v1",
+            "source_table": "sheet_vitrina_v1_wb_supplies",
+            "cache_only": True,
+            "filters": {
+                "status_filter": status_filter,
+                "warehouse": warehouse,
+                "supply_id": supply_id,
+                "wb_supply_id": wb_supply_id,
+                "preorder_id": preorder_id,
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+            "rows": result_rows,
+            "pagination": {"limit": limit, "offset": effective_offset, "next_cursor": str(effective_offset + limit) if len(rows) > limit else "", "truncated": len(rows) > limit},
+        }
+
+    def get_wb_supply_full_details(self, *, supply_id: str, include_raw_business_payloads: bool) -> dict[str, Any]:
+        with self._connect() as conn:
+            if not _table_exists(conn, "sheet_vitrina_v1_wb_supplies"):
+                return _missing_table_result("sheet_vitrina_v1_wb_supplies")
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_supplies
+                WHERE supply_id = ? OR wb_supply_id = ? OR preorder_id = ?
+                LIMIT 1
+                """,
+                (supply_id, supply_id, supply_id),
+            ).fetchone()
+        if row is None:
+            return {"status": "not_found", "supply_id": supply_id, "cache_only": True}
+        item = _row_dict(row)
+        normalized = _json_object(item.pop("normalized_row_json", None))
+        detail = _safe_json_loads(item.pop("raw_detail_json", None))
+        goods = _safe_json_loads(item.pop("raw_goods_json", None))
+        package = _safe_json_loads(item.pop("raw_package_json", None))
+        item = _omit_keys(item, {"file_path", "stored_file_path", "source_file_path", "file_sha256", "sha256"})
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_wb_supply_full_details",
+            "contract_version": "v1",
+            "source_table": "sheet_vitrina_v1_wb_supplies",
+            "cache_only": True,
+            "no_upstream_fetch": True,
+            "supply": {**item, "normalized": _scrub_business_payload(normalized)},
+            "cached_payloads": {
+                "detail": _scrub_business_payload(detail) if include_raw_business_payloads else _compact_json_summary(detail),
+                "goods": _scrub_business_payload(goods) if include_raw_business_payloads else _compact_json_summary(goods),
+                "package": _scrub_business_payload(package) if include_raw_business_payloads else _compact_json_summary(package),
+            },
+            "redaction": "Cached business payloads are scrubbed and bounded; no upstream fetch is performed.",
+        }
+        return payload
+
+    def list_supply_artifacts(
+        self,
+        *,
+        shipment_id: str | None,
+        supplier_order_id: str | None,
+        artifact_kind: str | None,
+        source_domain: str | None,
+        limit: int,
+        cursor: str | None,
+        offset: int,
+    ) -> dict[str, Any]:
+        effective_offset = _cursor_to_offset(cursor, offset)
+        with self._connect() as conn:
+            rows = self._artifact_rows(
+                conn,
+                shipment_id=shipment_id,
+                supplier_order_id=supplier_order_id,
+                artifact_kind=artifact_kind,
+                source_domain=source_domain,
+            )
+        page = rows[effective_offset : effective_offset + limit]
+        return {
+            "status": "ok",
+            "contract_name": "webcore_data_mcp_supply_artifacts",
+            "contract_version": "v1",
+            "source": "allowlisted_runtime_artifact_registry",
+            "filters": {
+                "shipment_id": shipment_id,
+                "supplier_order_id": supplier_order_id,
+                "artifact_kind": artifact_kind,
+                "source_domain": source_domain,
+            },
+            "artifacts": [_artifact_public(row) for row in page],
+            "pagination": {"limit": limit, "offset": effective_offset, "next_cursor": str(effective_offset + limit) if effective_offset + limit < len(rows) else "", "truncated": effective_offset + limit < len(rows)},
+            "boundary": "artifact_ref is opaque; no absolute server paths are exposed.",
+        }
+
+    def get_supply_artifact(
+        self,
+        *,
+        artifact_ref: str,
+        mode: str,
+        chunk: int,
+        offset: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        normalized_mode = mode if mode in {"metadata", "parsed", "text", "text_chunk", "base64_chunk"} else "metadata"
+        with self._connect() as conn:
+            artifact = self._resolve_artifact_ref(conn, artifact_ref)
+        if artifact is None:
+            return {"status": "not_found", "artifact_ref": artifact_ref}
+        public = _artifact_public(artifact)
+        if normalized_mode == "metadata":
+            path_result = self._resolve_artifact_file_path(artifact)
+            if path_result.get("status") == "ok":
+                public["availability"] = {**(public.get("availability") or {}), "file_available": True}
+                public["size_bytes"] = path_result["path"].stat().st_size
+            else:
+                public["availability"] = {
+                    **(public.get("availability") or {}),
+                    "file_available": False,
+                    "file_status": path_result.get("status"),
+                }
+            return {"status": "ok", "contract_name": "webcore_data_mcp_supply_artifact", "mode": "metadata", "artifact": public}
+        if normalized_mode == "parsed":
+            parsed = artifact.get("parsed_payload")
+            if parsed in (None, "", {}, []):
+                return {"status": "parsed_unavailable", "artifact": public}
+            return {
+                "status": "ok",
+                "contract_name": "webcore_data_mcp_supply_artifact",
+                "mode": "parsed",
+                "artifact": public,
+                "parsed_business_payload": _scrub_business_payload(parsed),
+            }
+        path_result = self._resolve_artifact_file_path(artifact)
+        if path_result.get("status") != "ok":
+            return {"status": path_result.get("status"), "artifact": public, "reason": path_result.get("reason") or ""}
+        file_path = path_result["path"]
+        size = file_path.stat().st_size
+        if normalized_mode in {"text", "text_chunk"}:
+            if not _artifact_text_content_supported(public):
+                return {"status": "text_unavailable", "artifact": public, "reason": "No safe text extractor is exposed for this content type in MCP."}
+            if normalized_mode == "text" and size > max_bytes:
+                return {
+                    "status": "too_large",
+                    "artifact": public,
+                    "reason": "Use mode=text_chunk with offset/chunk for bounded reads.",
+                    "size_bytes": size,
+                    "max_bytes": max_bytes,
+                }
+            start = offset if normalized_mode == "text_chunk" else chunk * max_bytes
+            data = _read_file_chunk(file_path, start=start, max_bytes=max_bytes)
+            text = _safe_decode_bytes(data)
+            return {
+                "status": "ok",
+                "contract_name": "webcore_data_mcp_supply_artifact",
+                "mode": normalized_mode,
+                "artifact": public,
+                "chunk": {"offset": start, "size_bytes": len(data), "next_offset": start + len(data) if start + len(data) < size else None, "total_size_bytes": size},
+                "text": _redact_sensitive_text(text),
+            }
+        if normalized_mode == "base64_chunk":
+            if not _artifact_binary_content_allowed(public):
+                return {"status": "unsupported_content_type", "artifact": public}
+            start = offset or (chunk * max_bytes)
+            data = _read_file_chunk(file_path, start=start, max_bytes=max_bytes)
+            return {
+                "status": "ok",
+                "contract_name": "webcore_data_mcp_supply_artifact",
+                "mode": "base64_chunk",
+                "artifact": public,
+                "chunk": {"offset": start, "size_bytes": len(data), "next_offset": start + len(data) if start + len(data) < size else None, "total_size_bytes": size},
+                "base64": base64.b64encode(data).decode("ascii"),
+            }
+        return {"status": "unsupported_mode", "artifact": public}
+
+    def _artifact_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        shipment_id: str | None,
+        supplier_order_id: str | None,
+        artifact_kind: str | None,
+        source_domain: str | None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        shipment_filter = shipment_id or supplier_order_id
+        if _source_domain_matches(source_domain, "trade_documents") and _table_exists(conn, "sheet_vitrina_v1_trade_documents"):
+            columns = set(_table_columns(conn, "sheet_vitrina_v1_trade_documents"))
+            selected = _select_existing_columns(
+                columns,
+                [
+                    "document_id",
+                    "document_type",
+                    "number",
+                    "document_date",
+                    "supplier_name",
+                    "currency",
+                    "amount_total",
+                    "source_shipment_id",
+                    "file_original_name",
+                    "file_content_type",
+                    "file_path",
+                    "parsed_metadata_json",
+                    "warnings_json",
+                    "errors_json",
+                    "status",
+                    "created_at",
+                    "updated_at",
+                ],
+            )
+            clauses: list[str] = []
+            params: list[Any] = []
+            if shipment_filter and "source_shipment_id" in columns:
+                clauses.append("source_shipment_id = ?")
+                params.append(shipment_filter)
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            for row in conn.execute(
+                f"SELECT {', '.join(_quote_ident(col) for col in selected)} FROM sheet_vitrina_v1_trade_documents {where_sql} ORDER BY updated_at DESC",
+                params,
+            ).fetchall():
+                item = _row_dict(row)
+                parsed = _safe_json_loads(item.pop("parsed_metadata_json", None))
+                rows.append(
+                    _artifact_row(
+                        artifact_ref=f"trade_document:{item.get('document_id')}",
+                        artifact_kind=str(item.get("document_type") or "unknown_business_document"),
+                        source_domain="trade_documents",
+                        source_table="sheet_vitrina_v1_trade_documents",
+                        linked_shipment_id=str(item.get("source_shipment_id") or ""),
+                        linked_document_id=str(item.get("document_id") or ""),
+                        filename=str(item.get("file_original_name") or "document"),
+                        content_type=str(item.get("file_content_type") or "application/octet-stream"),
+                        stored_path=str(item.get("file_path") or ""),
+                        uploaded_at=str(item.get("created_at") or ""),
+                        updated_at=str(item.get("updated_at") or ""),
+                        status=str(item.get("status") or ""),
+                        parse_status=str(item.get("status") or ""),
+                        parsed_payload=parsed,
+                    )
+                )
+        if _source_domain_matches(source_domain, "financial_documents") and _table_exists(conn, "sheet_vitrina_v1_supplier_financial_documents"):
+            columns = set(_table_columns(conn, "sheet_vitrina_v1_supplier_financial_documents"))
+            selected = _select_existing_columns(
+                columns,
+                [
+                    "document_id",
+                    "supplier_order_id",
+                    "document_type",
+                    "original_filename",
+                    "stored_file_path",
+                    "file_content_type",
+                    "uploaded_at",
+                    "updated_at",
+                    "parse_status",
+                    "document_number",
+                    "document_date",
+                    "currency",
+                    "total_amount",
+                    "total_amount_rub",
+                    "normalized_parse_json",
+                    "warnings_json",
+                    "errors_json",
+                ],
+            )
+            clauses = []
+            params = []
+            if shipment_filter and "supplier_order_id" in columns:
+                clauses.append("supplier_order_id = ?")
+                params.append(shipment_filter)
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            for row in conn.execute(
+                f"SELECT {', '.join(_quote_ident(col) for col in selected)} FROM sheet_vitrina_v1_supplier_financial_documents {where_sql} ORDER BY uploaded_at DESC",
+                params,
+            ).fetchall():
+                item = _row_dict(row)
+                parsed = _safe_json_loads(item.pop("normalized_parse_json", None))
+                rows.append(
+                    _artifact_row(
+                        artifact_ref=f"financial_document:{item.get('supplier_order_id')}:{item.get('document_id')}",
+                        artifact_kind=str(item.get("document_type") or "unknown_business_document"),
+                        source_domain="financial_documents",
+                        source_table="sheet_vitrina_v1_supplier_financial_documents",
+                        linked_shipment_id=str(item.get("supplier_order_id") or ""),
+                        linked_document_id=str(item.get("document_id") or ""),
+                        filename=str(item.get("original_filename") or "financial-document.pdf"),
+                        content_type=str(item.get("file_content_type") or "application/pdf"),
+                        stored_path=str(item.get("stored_file_path") or ""),
+                        uploaded_at=str(item.get("uploaded_at") or ""),
+                        updated_at=str(item.get("updated_at") or ""),
+                        status=str(item.get("parse_status") or ""),
+                        parse_status=str(item.get("parse_status") or ""),
+                        parsed_payload=parsed,
+                    )
+                )
+        if _source_domain_matches(source_domain, "cny_documents") and _table_exists(conn, "sheet_vitrina_v1_cny_documents"):
+            columns = set(_table_columns(conn, "sheet_vitrina_v1_cny_documents"))
+            selected = _select_existing_columns(
+                columns,
+                [
+                    "document_id",
+                    "document_type",
+                    "source_order_id",
+                    "context_order_id",
+                    "linked_financial_document_id",
+                    "original_filename",
+                    "stored_file_path",
+                    "file_content_type",
+                    "uploaded_at",
+                    "updated_at",
+                    "operation_date",
+                    "status",
+                    "document_number",
+                    "currency",
+                    "rub_amount",
+                    "cny_amount",
+                    "parsed_payload_json",
+                    "warnings_json",
+                    "errors_json",
+                ],
+            )
+            clauses = []
+            params = []
+            if shipment_filter and "source_order_id" in columns:
+                clauses.append("(source_order_id = ? OR context_order_id = ?)")
+                params.extend([shipment_filter, shipment_filter])
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            for row in conn.execute(
+                f"SELECT {', '.join(_quote_ident(col) for col in selected)} FROM sheet_vitrina_v1_cny_documents {where_sql} ORDER BY operation_date DESC, uploaded_at DESC",
+                params,
+            ).fetchall():
+                item = _row_dict(row)
+                parsed = _safe_json_loads(item.pop("parsed_payload_json", None))
+                rows.append(
+                    _artifact_row(
+                        artifact_ref=f"cny_document:{item.get('document_id')}",
+                        artifact_kind=str(item.get("document_type") or "unknown_business_document"),
+                        source_domain="cny_documents",
+                        source_table="sheet_vitrina_v1_cny_documents",
+                        linked_shipment_id=str(item.get("source_order_id") or item.get("context_order_id") or ""),
+                        linked_document_id=str(item.get("document_id") or ""),
+                        filename=str(item.get("original_filename") or "cny-document.pdf"),
+                        content_type=str(item.get("file_content_type") or "application/pdf"),
+                        stored_path=str(item.get("stored_file_path") or ""),
+                        uploaded_at=str(item.get("uploaded_at") or ""),
+                        updated_at=str(item.get("updated_at") or ""),
+                        status=str(item.get("status") or ""),
+                        parse_status=str(item.get("status") or ""),
+                        parsed_payload=parsed,
+                    )
+                )
+        if artifact_kind:
+            rows = [row for row in rows if str(row.get("artifact_kind") or "") == artifact_kind]
+        rows.sort(key=lambda item: str(item.get("updated_at") or item.get("uploaded_at") or ""), reverse=True)
+        return rows
+
+    def _resolve_artifact_ref(self, conn: sqlite3.Connection, artifact_ref: str) -> dict[str, Any] | None:
+        parts = artifact_ref.split(":")
+        rows = self._artifact_rows(conn, shipment_id=None, supplier_order_id=None, artifact_kind=None, source_domain=None)
+        for row in rows:
+            if row.get("artifact_ref") == artifact_ref:
+                return row
+        if len(parts) >= 2:
+            return None
+        return None
+
+    def _resolve_artifact_file_path(self, artifact: Mapping[str, Any]) -> dict[str, Any]:
+        stored_path = str(artifact.get("_stored_path") or "").strip()
+        if not stored_path:
+            return {"status": "file_missing", "reason": "artifact has no stored runtime file"}
+        root = self.runtime_dir.resolve()
+        raw_path = Path(stored_path)
+        path = raw_path.expanduser().resolve() if raw_path.is_absolute() else (root / raw_path).resolve()
+        if root != path and root not in path.parents:
+            return {"status": "path_outside_runtime_root", "reason": "stored artifact path is outside WebCore runtime root"}
+        if not path.exists() or not path.is_file():
+            return {"status": "file_missing", "reason": "stored artifact file does not exist"}
+        return {"status": "ok", "path": path}
+
     def _connect(self) -> sqlite3.Connection:
         if not self.db_path.exists():
             raise WebCoreDataMcpError(f"runtime DB does not exist: {self.db_path}", code="runtime_db_missing")
@@ -1557,6 +2627,159 @@ class WebCoreDataMcpGateway:
 
 def _tool_definitions() -> list[ToolDefinition]:
     return [
+        ToolDefinition(
+            "get_webcore_data_map",
+            "Use this first for orientation. Returns the WebCore Data MCP guide: domains, tools, scopes, business tables, artifact kinds, Russian intent examples and safety boundaries.",
+            _schema(
+                {
+                    "domain": _enum_schema(["all", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"]),
+                    "include_examples": {"type": "boolean"},
+                    "include_limitations": {"type": "boolean"},
+                }
+            ),
+        ),
+        ToolDefinition(
+            "resolve_webcore_data_request",
+            "Use this when the user intent is ambiguous. It recommends ordered MCP calls without executing them.",
+            _schema(
+                {
+                    "intent": _string_schema(1, 500),
+                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"]),
+                    "object_id": _string_schema(0, 160),
+                    "shipment_id": _string_schema(0, 160),
+                    "supply_id": _string_schema(0, 160),
+                    "invoice_no": _string_schema(0, 160),
+                    "supplier_name": _string_schema(0, 160),
+                    "sku_or_nm_id": _string_schema(0, 120),
+                    "metric_key_or_label": _string_schema(0, 180),
+                    "date": _date_schema(),
+                    "date_from": _date_schema(),
+                    "date_to": _date_schema(),
+                    "artifact_kind": _enum_schema(["auto", "invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "bank_fee_statement", "cny_conversion_purchase", "supplier_cny_payment", "document_package", "unknown_business_document"]),
+                    "mode": _enum_schema(["metadata_only", "open_or_read", "download_hint"]),
+                    "limit": _int_schema(1, MAX_LIMIT),
+                },
+                required=["intent"],
+            ),
+        ),
+        ToolDefinition(
+            "list_webcore_business_tables",
+            "Use this to discover allowlisted runtime business tables. This is not arbitrary SQL.",
+            _schema({"domain": _string_schema(0, 60), "include_missing": {"type": "boolean"}}),
+        ),
+        ToolDefinition(
+            "get_webcore_business_table_schema",
+            "Use this to inspect safe columns, filters and redaction rules for one allowlisted business table.",
+            _schema({"table": _string_schema(1, 120)}, required=["table"]),
+        ),
+        ToolDefinition(
+            "get_webcore_business_table_rows",
+            "Use this to read rows from one allowlisted business table with generated SELECT, safe filters and bounded scrubbed output.",
+            _schema(
+                {
+                    "table": _string_schema(1, 120),
+                    "filters": {"type": "object", "additionalProperties": True},
+                    "date_from": _date_schema(),
+                    "date_to": _date_schema(),
+                    "limit": _int_schema(1, MAX_LIMIT),
+                    "cursor": _string_schema(0, 40),
+                    "offset": _int_schema(0, 100000),
+                    "order_by": _string_schema(0, 80),
+                    "include_raw_business_payloads": {"type": "boolean"},
+                },
+                required=["table"],
+            ),
+        ),
+        ToolDefinition(
+            "get_supplier_shipments_registry",
+            "Use this for the read-only supplier shipment registry/list with core physical, financial and document completeness metrics.",
+            _schema(
+                {
+                    "shipment_id": _string_schema(0, 120),
+                    "invoice_no": _string_schema(0, 160),
+                    "supplier_name": _string_schema(0, 160),
+                    "order_status": _string_schema(0, 80),
+                    "match_status": _string_schema(0, 80),
+                    "document_status": _string_schema(0, 80),
+                    "date_from": _date_schema(),
+                    "date_to": _date_schema(),
+                    "limit": _int_schema(1, MAX_LIMIT),
+                    "cursor": _string_schema(0, 40),
+                    "offset": _int_schema(0, 100000),
+                }
+            ),
+            scope=SCOPE_SUPPLY_READ,
+        ),
+        ToolDefinition(
+            "get_supplier_shipment_full_details",
+            "Use this for expanded safe supplier shipment details: header, lines, price conformity, documents, expenses, CNY links and artifact refs.",
+            _schema(
+                {
+                    "shipment_id": _string_schema(1, 120),
+                    "include_raw_business_payloads": {"type": "boolean"},
+                    "line_limit": _int_schema(1, MAX_LIMIT),
+                    "document_limit": _int_schema(1, MAX_LIMIT),
+                },
+                required=["shipment_id"],
+            ),
+            scope=SCOPE_SUPPLY_READ,
+        ),
+        ToolDefinition(
+            "get_wb_supplies_registry",
+            "Use this for broader cached-only WB supplies registry/list. Never syncs, backfills or calls WB upstream.",
+            _schema(
+                {
+                    "status_filter": _string_schema(0, 80),
+                    "warehouse": _string_schema(0, 160),
+                    "supply_id": _string_schema(0, 120),
+                    "wb_supply_id": _string_schema(0, 120),
+                    "preorder_id": _string_schema(0, 120),
+                    "date_from": _date_schema(),
+                    "date_to": _date_schema(),
+                    "limit": _int_schema(1, MAX_LIMIT),
+                    "cursor": _string_schema(0, 40),
+                    "offset": _int_schema(0, 100000),
+                }
+            ),
+            scope=SCOPE_SUPPLY_READ,
+        ),
+        ToolDefinition(
+            "get_wb_supply_full_details",
+            "Use this for one cached WB supply with scrubbed normalized/detail/goods/package business payloads. Never fetches upstream.",
+            _schema({"supply_id": _string_schema(1, 120), "include_raw_business_payloads": {"type": "boolean"}}, required=["supply_id"]),
+            scope=SCOPE_SUPPLY_READ,
+        ),
+        ToolDefinition(
+            "list_supply_artifacts",
+            "Use this to list server-owned supply/document/CNY artifacts by opaque artifact_ref. No filesystem paths are exposed.",
+            _schema(
+                {
+                    "shipment_id": _string_schema(0, 120),
+                    "supplier_order_id": _string_schema(0, 120),
+                    "artifact_kind": _string_schema(0, 80),
+                    "source_domain": _string_schema(0, 80),
+                    "limit": _int_schema(1, MAX_LIMIT),
+                    "cursor": _string_schema(0, 40),
+                    "offset": _int_schema(0, 100000),
+                }
+            ),
+            scope=SCOPE_SUPPLY_READ,
+        ),
+        ToolDefinition(
+            "get_supply_artifact",
+            "Use this to read metadata, parsed payload, safe text chunks or bounded base64 chunks for one server-owned artifact_ref.",
+            _schema(
+                {
+                    "artifact_ref": _string_schema(1, 240),
+                    "mode": _enum_schema(["metadata", "parsed", "text", "text_chunk", "base64_chunk"]),
+                    "chunk": _int_schema(0, 100000),
+                    "offset": _int_schema(0, 100000000),
+                    "max_bytes": _int_schema(1, 65536),
+                },
+                required=["artifact_ref"],
+            ),
+            scope=SCOPE_SUPPLY_READ,
+        ),
         ToolDefinition("get_data_freshness_status", "Use this when the user asks whether WebCore data is fresh. Returns per-source freshness without triggering refresh/sync.", _schema({})),
         ToolDefinition("search_business_objects", "Use this to find SKU/nmId, nomenclature, shipment ids, WB supply ids, or metric keys by a bounded text query.", _schema({"query": _string_schema(1, 120), "object_types": _array_schema(_enum_schema(["sku", "nomenclature", "shipment", "wb_supply", "metric"]))}, required=["query"])),
         ToolDefinition("explain_metric_source", "Use this to explain where a metric comes from, its formula/reference and accepted freshness caveats.", _schema({"metric_key": _string_schema(1, 160)}, required=["metric_key"])),
@@ -1581,6 +2804,201 @@ def tool_required_scope(name: str) -> str:
         if definition.name == name:
             return definition.scope
     return SCOPE_ANALYTICS_READ
+
+
+def _data_map_domains() -> set[str]:
+    return {"all", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"}
+
+
+def _domain_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "domain": "freshness",
+            "description": "Ready snapshots, temporal source slots, WB supplies sync, supplier docs and factory calculation freshness.",
+            "primary_tools": ["get_data_freshness_status"],
+            "required_scope": SCOPE_ANALYTICS_READ,
+            "recommended_first_call": "get_data_freshness_status",
+        },
+        {
+            "domain": "metrics",
+            "description": "Persisted DATA_VITRINA metrics by key/Russian label/date/SKU from ready snapshots.",
+            "primary_tools": ["list_metrics", "get_metric_values", "get_snapshot_metrics", "get_available_metric_dates"],
+            "required_scope": SCOPE_ANALYTICS_READ,
+            "known_caveat": "Revenue remains ambiguous unless revenue_metric is explicitly selected.",
+        },
+        {
+            "domain": "sku",
+            "description": "SKU identity, registry config, server-owned nomenclature and persisted stock/SKU snapshots.",
+            "primary_tools": ["search_business_objects", "get_sku_snapshot", "get_stock_report"],
+            "required_scope": SCOPE_ANALYTICS_READ,
+        },
+        {
+            "domain": "supplier_shipments",
+            "description": "Supplier shipment registry, shipment cards, line rows, price conformity, financial docs, trade docs and CNY links.",
+            "primary_tools": ["get_supplier_shipments_registry", "get_supplier_shipment_full_details", "list_supply_artifacts"],
+            "legacy_tools": ["rank_supplier_shipments_by_unit_cost", "get_supplier_shipment_details"],
+            "required_scope": SCOPE_SUPPLY_READ,
+        },
+        {
+            "domain": "wb_supplies",
+            "description": "Cached read-only WB FBW supplies registry/detail and cached normalized business payloads.",
+            "primary_tools": ["get_wb_supplies_registry", "get_wb_supply_full_details"],
+            "legacy_tools": ["get_wb_supplies_summary", "get_wb_supply_details"],
+            "required_scope": SCOPE_SUPPLY_READ,
+            "boundary": "cache-only; no WB sync/backfill/lazy fetch.",
+        },
+        {
+            "domain": "artifacts",
+            "description": "Server-owned supplier/trade/financial/CNY artifacts resolved only through opaque artifact_ref.",
+            "primary_tools": ["list_supply_artifacts", "get_supply_artifact"],
+            "required_scope": SCOPE_SUPPLY_READ,
+            "boundary": "no arbitrary filesystem paths; bounded metadata/parsed/text/base64 modes only.",
+        },
+        {
+            "domain": "cny",
+            "description": "CNY currency-account documents, ledger operations and supplier-order CNY payment evidence.",
+            "primary_tools": ["get_supplier_shipment_full_details", "list_supply_artifacts", "get_webcore_business_table_rows"],
+            "required_scope": SCOPE_SUPPLY_READ,
+        },
+        {
+            "domain": "factory_order",
+            "description": "Latest factory-order and WB regional calculation state, without recalculation.",
+            "primary_tools": ["get_latest_factory_order_calculation"],
+            "required_scope": SCOPE_SUPPLY_READ,
+        },
+        {
+            "domain": "business_tables",
+            "description": "Allowlisted runtime business table catalog/schema/rows via generated SELECT only.",
+            "primary_tools": ["list_webcore_business_tables", "get_webcore_business_table_schema", "get_webcore_business_table_rows"],
+            "required_scope": SCOPE_ANALYTICS_READ,
+        },
+    ]
+
+
+def _intent_examples() -> list[dict[str, Any]]:
+    return [
+        {"intent": "покажи реестр поставок", "call": {"tool": "get_supplier_shipments_registry", "arguments": {"limit": 50}}},
+        {"intent": "найди поставку по инвойсу INV-1", "call": {"tool": "search_business_objects", "arguments": {"query": "INV-1", "object_types": ["shipment"]}}},
+        {"intent": "покажи карточку поставки SHIP-1", "call": {"tool": "get_supplier_shipment_full_details", "arguments": {"shipment_id": "SHIP-1"}}},
+        {"intent": "покажи документы по поставке SHIP-1", "call": {"tool": "list_supply_artifacts", "arguments": {"shipment_id": "SHIP-1"}}},
+        {"intent": "открой инвойс", "call": {"tool": "list_supply_artifacts", "arguments": {"artifact_kind": "invoice"}}},
+        {"intent": "покажи WB supply", "call": {"tool": "get_wb_supplies_registry", "arguments": {"limit": 50}}},
+        {"intent": "покажи метрику за дату", "call": {"tool": "get_metric_values", "arguments": {"metric_key_or_label": "total_orderSum", "date": "YYYY-MM-DD"}}},
+        {"intent": "найди SKU", "call": {"tool": "search_business_objects", "arguments": {"query": "nmId or name", "object_types": ["sku", "nomenclature"]}}},
+        {"intent": "проверь свежесть данных", "call": {"tool": "get_data_freshness_status", "arguments": {}}},
+    ]
+
+
+def _boundary_rules() -> list[str]:
+    return [
+        "Auth-gated production access only.",
+        "SQLite is opened mode=ro with PRAGMA query_only=ON.",
+        "No arbitrary SQL; business table access is allowlisted/generated SELECT only.",
+        "No shell, SSH, upstream sync/backfill/refresh/replay, upload, delete or mutation tools.",
+        "No unauthenticated business data.",
+        "No secrets, tokens, passwords, cookies, authorization headers, OAuth/session material or storage_state.",
+        "No absolute server paths; artifacts use opaque artifact_ref only.",
+        "Raw business payloads require explicit tool flags and are scrubbed/bounded.",
+        "Artifact files must resolve through allowlisted DB rows and stay inside the WebCore runtime root.",
+    ]
+
+
+def _known_limitations() -> list[str]:
+    return [
+        "Artifact text extraction is intentionally limited; PDFs may expose parsed metadata or bounded base64 chunks, not automatic full OCR/text.",
+        "WB supplies are cached-only and never trigger upstream sync/backfill/lazy fetch through MCP.",
+        "Business table rows are allowlisted runtime projections, not arbitrary SQL and not a schema migration source.",
+        "Revenue tools still require an explicit revenue_metric when the business definition is ambiguous.",
+        "resources/list remains secondary; tools are the primary navigation layer.",
+    ]
+
+
+def _business_table_catalog() -> dict[str, dict[str, Any]]:
+    return {
+        "sheet_vitrina_v1_ready_snapshots": _table_spec("metrics", "Persisted ready snapshot envelopes.", ["snapshot_id"], ["as_of_date", "refreshed_at"], raw=["plan_json"]),
+        "temporal_source_snapshots": _table_spec("freshness", "Temporal source snapshots.", ["source_key", "snapshot_date"], ["snapshot_date", "captured_at"], raw=["payload_json"]),
+        "temporal_source_slot_snapshots": _table_spec("freshness", "Temporal source slot snapshots.", ["source_key", "snapshot_date", "snapshot_role"], ["snapshot_date", "captured_at"], raw=["payload_json"]),
+        "registry_upload_config_v2": _table_spec("sku", "Active registry SKU configuration.", ["nm_id"], [], order="display_order ASC, nm_id ASC"),
+        "registry_upload_metrics_v2": _table_spec("metrics", "Metric registry with Russian labels and calc references.", ["metric_key"], [], order="display_order ASC, metric_key ASC"),
+        "registry_upload_formulas_v2": _table_spec("metrics", "Metric formula registry.", ["formula_id"], [], order="row_order ASC, formula_id ASC"),
+        "sheet_vitrina_v1_wb_supplies": _table_spec("wb_supplies", "Cached WB FBW supplies rows.", ["supply_id"], ["supply_date", "fact_date", "updated_date", "synced_at"], raw=["normalized_row_json", "raw_detail_json", "raw_goods_json", "raw_package_json"], sensitive=["raw_list_hash", "raw_detail_hash", "raw_goods_hash", "raw_package_hash"]),
+        "sheet_vitrina_v1_wb_supplies_sync_state": _table_spec("wb_supplies", "WB supplies sync state.", ["slot"], ["last_synced_at", "last_successful_sync_at"]),
+        "sheet_vitrina_v1_wb_supplies_sync_runs": _table_spec("wb_supplies", "WB supplies sync/backfill run history.", ["run_id"], ["started_at", "updated_at", "completed_at"]),
+        "sheet_vitrina_v1_wb_supplies_warehouses": _table_spec("wb_supplies", "Cached WB supplies warehouses.", ["warehouse_id"], ["updated_at"], raw=["raw_json"]),
+        "sheet_vitrina_v1_wb_supply_transit_cost_enrichment": _table_spec("wb_supplies", "Supplemental Seller Portal transit-cost facts.", ["supply_id"], ["fetched_at", "created_at", "updated_at"], sensitive=["source_endpoint_path"]),
+        "sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs": _table_spec("wb_supplies", "Transit-cost enrichment run status.", ["run_id"], ["started_at", "updated_at", "completed_at"]),
+        "sheet_vitrina_v1_supplier_shipments": _table_spec("supplier_shipments", "Supplier shipment/order headers.", ["shipment_id"], ["shipment_date", "invoice_date", "created_at", "updated_at"], sensitive=["source_file_path", "source_file_sha256"], raw=["warnings_json", "errors_json"]),
+        "sheet_vitrina_v1_supplier_shipment_lines": _table_spec("supplier_shipments", "Supplier shipment product/extra lines.", ["line_id"], [], raw=["raw_json"], order="sort_order ASC, line_id ASC"),
+        "sheet_vitrina_v1_supplier_shipment_uploads": _table_spec("supplier_shipments", "Supplier invoice staged upload metadata.", ["upload_id"], ["created_at"], sensitive=["source_file_path", "source_file_sha256"], raw=["parsed_payload_json"]),
+        "sheet_vitrina_v1_supplier_financial_documents": _table_spec("supplier_shipments", "Supplier-order financial document metadata.", ["document_id"], ["document_date", "uploaded_at", "updated_at"], sensitive=["stored_file_path", "file_sha256"], raw=["raw_parse_json", "normalized_parse_json", "warnings_json", "errors_json"]),
+        "sheet_vitrina_v1_supplier_financial_expense_lines": _table_spec("supplier_shipments", "Normalized supplier financial expense lines.", ["line_id"], [], raw=["raw_json"], order="financial_document_id ASC, sort_order ASC, line_id ASC"),
+        "sheet_vitrina_v1_trade_documents": _table_spec("artifacts", "Invoice/contract document registry.", ["document_id"], ["document_date", "created_at", "updated_at"], sensitive=["file_path", "file_sha256"], raw=["parsed_metadata_json", "warnings_json", "errors_json"]),
+        "sheet_vitrina_v1_invoice_contract_links": _table_spec("artifacts", "Invoice-to-contract links.", ["invoice_document_id"], ["created_at", "updated_at"]),
+        "sheet_vitrina_v1_nomenclature_items": _table_spec("sku", "Server-owned nomenclature dictionary.", ["item_id"], ["created_at", "updated_at"], raw=["barcodes_json", "barcode_evidence_json", "aliases_json", "compatible_model_keys_json"]),
+        "sheet_vitrina_v1_cny_documents": _table_spec("cny", "CNY account and supplier payment document metadata.", ["document_id"], ["operation_date", "operation_datetime", "uploaded_at", "created_at", "updated_at"], sensitive=["stored_file_path", "file_sha256", "natural_key"], raw=["parsed_payload_json", "raw_parse_json", "warnings_json", "errors_json"]),
+        "sheet_vitrina_v1_cny_ledger_operations": _table_spec("cny", "CNY ledger replay operations.", ["operation_id"], ["operation_date", "operation_datetime", "created_at", "updated_at"]),
+        "sheet_vitrina_v1_cny_ledger_replay_state": _table_spec("cny", "CNY ledger replay state.", ["slot"], ["replayed_at"], raw=["diagnostics_json"]),
+        "sheet_vitrina_v1_factory_order_dataset_state": _table_spec("factory_order", "Factory order dataset state.", ["dataset_type"], ["uploaded_at"], raw=["rows_json"]),
+        "sheet_vitrina_v1_factory_order_result_state": _table_spec("factory_order", "Latest factory-order calculation result.", ["slot"], ["calculated_at"], raw=["result_json"]),
+        "sheet_vitrina_v1_wb_regional_supply_result_state": _table_spec("factory_order", "Latest WB regional supply calculation result.", ["slot"], ["calculated_at"], raw=["result_json"]),
+    }
+
+
+def _table_spec(
+    domain: str,
+    description: str,
+    primary_id_columns: list[str],
+    date_columns: list[str],
+    *,
+    raw: list[str] | None = None,
+    sensitive: list[str] | None = None,
+    order: str = "",
+) -> dict[str, Any]:
+    return {
+        "domain": domain,
+        "description": description,
+        "primary_id_columns": primary_id_columns,
+        "date_columns": date_columns,
+        "raw_columns": raw or [],
+        "sensitive_columns": sensitive or [],
+        "default_order_by": order,
+    }
+
+
+def _table_spec_public(spec: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "domain": spec.get("domain"),
+        "description": spec.get("description"),
+        "primary_id_columns": list(spec.get("primary_id_columns") or []),
+        "date_columns": list(spec.get("date_columns") or []),
+        "raw_business_payload_columns": list(spec.get("raw_columns") or []),
+        "sensitive_redacted_columns": list(spec.get("sensitive_columns") or []),
+        "default_order_by": spec.get("default_order_by") or "",
+    }
+
+
+def _artifact_kind_catalog() -> list[dict[str, Any]]:
+    return [
+        {"artifact_kind": "invoice", "source_domain": "trade_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "contract", "source_domain": "trade_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "logistics_quote", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "logistics_invoice", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "customs_declaration", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "bank_control_statement", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "bank_transfer_application", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "bank_fee_statement", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "cny_conversion_purchase", "source_domain": "cny_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "supplier_cny_payment", "source_domain": "cny_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "document_package", "source_domain": "server_generated", "read_modes": ["metadata"]},
+        {"artifact_kind": "unknown_business_document", "source_domain": "mixed", "read_modes": ["metadata", "base64_chunk"]},
+    ]
+
+
+def _require_table_spec(table: str) -> dict[str, Any]:
+    normalized = str(table or "").strip()
+    if normalized not in _business_table_catalog():
+        raise WebCoreDataMcpError(f"business table is not allowlisted: {normalized}", code="table_not_allowlisted")
+    return _business_table_catalog()[normalized]
 
 
 def _schema(properties: dict[str, Any], *, required: Iterable[str] = ()) -> dict[str, Any]:
@@ -1614,9 +3032,186 @@ def _int_schema(minimum: int, maximum: int) -> dict[str, Any]:
     return {"type": "integer", "minimum": minimum, "maximum": maximum}
 
 
+def _optional_bool(value: Any, *, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "да"}:
+        return True
+    if text in {"0", "false", "no", "n", "нет"}:
+        return False
+    raise WebCoreDataMcpError("boolean argument is invalid", code="invalid_arguments")
+
+
+def _optional_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise WebCoreDataMcpError("integer argument is invalid", code="invalid_arguments") from exc
+    if parsed < minimum or parsed > maximum:
+        raise WebCoreDataMcpError(f"integer argument must be between {minimum} and {maximum}", code="invalid_arguments")
+    return parsed
+
+
+def _optional_mapping(value: Any) -> Mapping[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise WebCoreDataMcpError("filters must be an object", code="invalid_arguments")
+    return value
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
     return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+    return [str(row["name"]) for row in conn.execute(f"PRAGMA table_info({_quote_ident(table_name)})").fetchall()]
+
+
+def _quote_ident(value: str) -> str:
+    text = str(value or "")
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", text):
+        raise WebCoreDataMcpError(f"unsafe SQL identifier: {text}", code="unsafe_identifier")
+    return '"' + text.replace('"', '""') + '"'
+
+
+def _safe_table_columns(columns: list[str], spec: Mapping[str, Any], *, include_raw_business_payloads: bool) -> list[str]:
+    sensitive = set(spec.get("sensitive_columns") or [])
+    raw = set(spec.get("raw_columns") or [])
+    selected = []
+    for column in columns:
+        if column in sensitive:
+            continue
+        if column in raw and not include_raw_business_payloads:
+            continue
+        if _is_sensitive_column_name(column):
+            continue
+        selected.append(column)
+    return selected or [columns[0]]
+
+
+def _allowed_order_columns(columns: list[str], spec: Mapping[str, Any]) -> list[str]:
+    blocked = set(spec.get("sensitive_columns") or []) | set(spec.get("raw_columns") or [])
+    return [column for column in columns if column not in blocked and not _is_sensitive_column_name(column)]
+
+
+def _build_table_where(
+    columns: list[str],
+    spec: Mapping[str, Any],
+    *,
+    filters: Mapping[str, Any],
+    date_from: str | None,
+    date_to: str | None,
+) -> tuple[str, list[Any], dict[str, Any]]:
+    allowed = set(_safe_table_columns(columns, spec, include_raw_business_payloads=False))
+    clauses: list[str] = []
+    params: list[Any] = []
+    applied: dict[str, Any] = {}
+    for key, value in filters.items():
+        column = str(key or "").strip()
+        if column not in allowed:
+            raise WebCoreDataMcpError(f"filter column is not allowed: {column}", code="filter_not_allowed")
+        if isinstance(value, list):
+            bounded = [item for item in value[:20]]
+            if not bounded:
+                continue
+            clauses.append(f"{_quote_ident(column)} IN ({', '.join('?' for _ in bounded)})")
+            params.extend(bounded)
+            applied[column] = bounded
+        else:
+            clauses.append(f"{_quote_ident(column)} = ?")
+            params.append(value)
+            applied[column] = value
+    date_columns = [column for column in spec.get("date_columns") or [] if column in columns]
+    if (date_from or date_to) and not date_columns:
+        raise WebCoreDataMcpError("table has no allowlisted date column for date range filter", code="date_filter_not_supported")
+    if date_columns:
+        date_column = date_columns[0]
+        if date_from:
+            clauses.append(f"substr({_quote_ident(date_column)}, 1, 10) >= ?")
+            params.append(date_from)
+            applied["date_from"] = date_from
+        if date_to:
+            clauses.append(f"substr({_quote_ident(date_column)}, 1, 10) <= ?")
+            params.append(date_to)
+            applied["date_to"] = date_to
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params, applied
+
+
+def _order_by_sql(columns: list[str], spec: Mapping[str, Any], order_by: str | None) -> str:
+    allowed = set(_allowed_order_columns(columns, spec))
+    requested = str(order_by or "").strip()
+    if requested:
+        direction = "ASC"
+        column = requested
+        if requested.startswith("-"):
+            column = requested[1:]
+            direction = "DESC"
+        elif " " in requested:
+            parts = requested.split()
+            column = parts[0]
+            if len(parts) > 1 and parts[1].upper() in {"ASC", "DESC"}:
+                direction = parts[1].upper()
+        if column not in allowed:
+            raise WebCoreDataMcpError(f"order_by column is not allowed: {column}", code="order_by_not_allowed")
+        return f"ORDER BY {_quote_ident(column)} {direction}"
+    default_order = str(spec.get("default_order_by") or "").strip()
+    if default_order:
+        safe_parts = []
+        for part in default_order.split(","):
+            tokens = part.strip().split()
+            if not tokens:
+                continue
+            column = tokens[0]
+            direction = tokens[1].upper() if len(tokens) > 1 and tokens[1].upper() in {"ASC", "DESC"} else "ASC"
+            if column in allowed:
+                safe_parts.append(f"{_quote_ident(column)} {direction}")
+        if safe_parts:
+            return "ORDER BY " + ", ".join(safe_parts)
+    date_columns = [column for column in spec.get("date_columns") or [] if column in allowed]
+    if date_columns:
+        return f"ORDER BY {_quote_ident(date_columns[-1])} DESC"
+    primary = [column for column in spec.get("primary_id_columns") or [] if column in allowed]
+    if primary:
+        return f"ORDER BY {_quote_ident(primary[0])} ASC"
+    return ""
+
+
+def _cursor_to_offset(cursor: str | None, offset: int) -> int:
+    if not cursor:
+        return offset
+    try:
+        parsed = int(cursor)
+    except ValueError as exc:
+        raise WebCoreDataMcpError("cursor must be a numeric offset cursor", code="invalid_cursor") from exc
+    if parsed < 0:
+        raise WebCoreDataMcpError("cursor must be non-negative", code="invalid_cursor")
+    return parsed
+
+
+def _is_sensitive_column_name(column: str) -> bool:
+    lowered = column.lower()
+    return any(marker in lowered for marker in ("password", "secret", "token", "cookie", "authorization", "storage_state", "session", "oauth", "private_key"))
+
+
+def _business_row_payload(row: Mapping[str, Any], *, raw_columns: set[str], include_raw_business_payloads: bool) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in row.items():
+        if key in raw_columns:
+            if include_raw_business_payloads:
+                parsed = _safe_json_loads(value)
+                payload[f"{key}_scrubbed_payload"] = _scrub_business_payload(parsed if parsed is not None else value)
+            else:
+                payload[f"{key}_summary"] = _compact_json_summary(_safe_json_loads(value))
+        else:
+            payload[key] = value
+    return payload
 
 
 def _single_count_min_max(
@@ -1696,6 +3291,366 @@ def _select_keys(payload: Mapping[str, Any], keys: Iterable[str]) -> dict[str, A
     return selected
 
 
+def _scrub_business_payload(value: Any, *, depth: int = 0) -> Any:
+    if depth > 8:
+        return "[truncated_depth]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:200]:
+            text_key = str(key)
+            lowered = text_key.lower()
+            if _is_sensitive_column_name(text_key) or any(marker in lowered for marker in ("file_path", "stored_file_path", "source_file_path", "absolute_path", "sha256", "hash")):
+                result[text_key] = "[redacted]"
+            else:
+                result[text_key] = _scrub_business_payload(item, depth=depth + 1)
+        if len(value) > 200:
+            result["_truncated_keys"] = len(value) - 200
+        return result
+    if isinstance(value, list):
+        result = [_scrub_business_payload(item, depth=depth + 1) for item in value[:200]]
+        if len(value) > 200:
+            result.append({"_truncated_items": len(value) - 200})
+        return result
+    if isinstance(value, str):
+        return _redact_sensitive_text(value)
+    return value
+
+
+def _redact_sensitive_text(value: str) -> str:
+    text = str(value)
+    lowered = text.lower()
+    if any(marker in lowered for marker in SECRET_TEXT_MARKERS):
+        return "[redacted]"
+    text = re.sub(r"(?i)(password|token|secret|authorization|cookie)\s*[:=]\s*\S+", r"\1=[redacted]", text)
+    text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
+    if len(text) > 12000:
+        return text[:12000] + "...[truncated]"
+    return text
+
+
+def _omit_keys(payload: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
+    return {str(key): value for key, value in payload.items() if str(key) not in keys and not _is_sensitive_column_name(str(key))}
+
+
+def _fetch_table_rows_for_owner(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    owner_column: str,
+    owner_id: str,
+    limit: int,
+    omit_columns: set[str],
+    include_raw_business_payloads: bool,
+    order_by: str,
+) -> list[dict[str, Any]]:
+    if not _table_exists(conn, table):
+        return []
+    columns = _table_columns(conn, table)
+    if owner_column not in columns:
+        return []
+    selected = [
+        column
+        for column in columns
+        if column not in omit_columns and not _is_sensitive_column_name(column) and not any(marker in column.lower() for marker in ("file_path", "sha256", "hash"))
+    ]
+    raw_columns = {column for column in columns if column in omit_columns and column.endswith("_json")}
+    if include_raw_business_payloads:
+        selected.extend(column for column in raw_columns if column not in selected)
+    if not selected:
+        selected = [owner_column]
+    safe_order = _safe_order_clause_for_existing_columns(order_by, columns)
+    rows = conn.execute(
+        f"""
+        SELECT {', '.join(_quote_ident(column) for column in selected)}
+        FROM {_quote_ident(table)}
+        WHERE {_quote_ident(owner_column)} = ?
+        {safe_order}
+        LIMIT ?
+        """,
+        (owner_id, limit),
+    ).fetchall()
+    return [
+        _business_row_payload(
+            _row_dict(row),
+            raw_columns={column for column in selected if column.endswith("_json")},
+            include_raw_business_payloads=include_raw_business_payloads,
+        )
+        for row in rows
+    ]
+
+
+def _safe_order_clause_for_existing_columns(order_by: str, columns: list[str]) -> str:
+    parts: list[str] = []
+    for raw_part in str(order_by or "").split(","):
+        tokens = raw_part.strip().split()
+        if not tokens:
+            continue
+        column = tokens[0]
+        direction = tokens[1].upper() if len(tokens) > 1 and tokens[1].upper() in {"ASC", "DESC"} else "ASC"
+        if column in columns:
+            parts.append(f"{_quote_ident(column)} {direction}")
+    return "ORDER BY " + ", ".join(parts) if parts else ""
+
+
+def _select_existing_columns(columns: set[str], requested: list[str]) -> list[str]:
+    return [column for column in requested if column in columns]
+
+
+def _with_artifact_refs(rows: list[dict[str, Any]], *, source_domain: str) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        item = dict(row)
+        document_id = str(item.get("document_id") or "")
+        supplier_order_id = str(item.get("supplier_order_id") or item.get("source_order_id") or "")
+        if source_domain == "financial_documents" and document_id and supplier_order_id:
+            item["artifact_ref"] = f"financial_document:{supplier_order_id}:{document_id}"
+        elif source_domain == "trade_documents" and document_id:
+            item["artifact_ref"] = f"trade_document:{document_id}"
+        elif source_domain == "cny_documents" and document_id:
+            item["artifact_ref"] = f"cny_document:{document_id}"
+        result.append(item)
+    return result
+
+
+def _artifact_row(
+    *,
+    artifact_ref: str,
+    artifact_kind: str,
+    source_domain: str,
+    source_table: str,
+    linked_shipment_id: str,
+    linked_document_id: str,
+    filename: str,
+    content_type: str,
+    stored_path: str,
+    uploaded_at: str,
+    updated_at: str,
+    status: str,
+    parse_status: str,
+    parsed_payload: Any,
+) -> dict[str, Any]:
+    return {
+        "artifact_ref": artifact_ref,
+        "artifact_kind": _normalize_artifact_kind(artifact_kind),
+        "source_domain": source_domain,
+        "source_table": source_table,
+        "linked_shipment_id": linked_shipment_id,
+        "linked_document_id": linked_document_id,
+        "filename": _safe_display_filename(filename),
+        "content_type": content_type or "application/octet-stream",
+        "uploaded_at": uploaded_at,
+        "updated_at": updated_at,
+        "document_status": status,
+        "parse_status": parse_status,
+        "supported_read_modes": _artifact_read_modes(content_type),
+        "availability": {"has_registered_file": bool(stored_path), "server_owned_ref": True},
+        "parsed_payload": parsed_payload,
+        "_stored_path": stored_path,
+    }
+
+
+def _artifact_public(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_ref": row.get("artifact_ref"),
+        "artifact_kind": row.get("artifact_kind"),
+        "source_domain": row.get("source_domain"),
+        "source_table": row.get("source_table"),
+        "linked_shipment_id": row.get("linked_shipment_id"),
+        "linked_document_id": row.get("linked_document_id"),
+        "filename": row.get("filename"),
+        "content_type": row.get("content_type"),
+        "uploaded_at": row.get("uploaded_at"),
+        "updated_at": row.get("updated_at"),
+        "document_status": row.get("document_status"),
+        "parse_status": row.get("parse_status"),
+        "availability": row.get("availability"),
+        "supported_read_modes": row.get("supported_read_modes"),
+    }
+
+
+def _artifact_read_modes(content_type: str) -> list[str]:
+    modes = ["metadata", "parsed"]
+    if _artifact_text_content_supported({"content_type": content_type, "filename": ""}):
+        modes.extend(["text", "text_chunk"])
+    if _artifact_binary_content_allowed({"content_type": content_type}):
+        modes.append("base64_chunk")
+    return modes
+
+
+def _artifact_text_content_supported(artifact: Mapping[str, Any]) -> bool:
+    content_type = str(artifact.get("content_type") or "").lower()
+    filename = str(artifact.get("filename") or "").lower()
+    return content_type.startswith("text/") or content_type in {"application/json", "application/xml"} or filename.endswith((".txt", ".json", ".csv", ".xml"))
+
+
+def _artifact_binary_content_allowed(artifact: Mapping[str, Any]) -> bool:
+    content_type = str(artifact.get("content_type") or "").lower()
+    return content_type in {
+        "application/pdf",
+        "application/octet-stream",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "image/jpeg",
+        "image/png",
+        "text/plain",
+        "application/json",
+    } or content_type.startswith("text/")
+
+
+def _safe_decode_bytes(data: bytes) -> str:
+    for encoding in ("utf-8", "utf-16", "cp1251"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _read_file_chunk(path: Path, *, start: int, max_bytes: int) -> bytes:
+    with path.open("rb") as fh:
+        fh.seek(max(0, start))
+        return fh.read(max(0, max_bytes))
+
+
+def _safe_display_filename(value: str) -> str:
+    name = Path(str(value or "document")).name
+    return name[:180] or "document"
+
+
+def _normalize_artifact_kind(value: str) -> str:
+    text = str(value or "").strip()
+    aliases = {
+        "contract": "contract",
+        "invoice": "invoice",
+        "logistics_quote": "logistics_quote",
+        "logistics_invoice": "logistics_invoice",
+        "customs_declaration": "customs_declaration",
+        "bank_control_statement": "bank_control_statement",
+        "bank_transfer_application": "bank_transfer_application",
+        "bank_fee_statement": "bank_fee_statement",
+        "cny_conversion_purchase": "cny_conversion_purchase",
+        "supplier_cny_payment": "supplier_cny_payment",
+        "bank_fee": "bank_fee_statement",
+    }
+    return aliases.get(text, text or "unknown_business_document")
+
+
+def _source_domain_matches(requested: str | None, current: str) -> bool:
+    return not requested or requested == current or (requested == "supplier_shipments" and current in {"trade_documents", "financial_documents", "cny_documents"})
+
+
+def _append_like_filter(clauses: list[str], params: list[Any], column_sql: str, value: str | None) -> None:
+    if value:
+        clauses.append(f"{column_sql} LIKE ?")
+        params.append(f"%{value}%")
+
+
+def _append_exact_filter(clauses: list[str], params: list[Any], column_sql: str, value: str | None) -> None:
+    if value:
+        clauses.append(f"{column_sql} = ?")
+        params.append(value)
+
+
+def _recommended_call(step: int, tool: str, arguments: dict[str, Any], scope: str, expected_result: str) -> dict[str, Any]:
+    return {
+        "step": step,
+        "tool": tool,
+        "arguments": arguments,
+        "required_scope": scope,
+        "expected_result": expected_result,
+        "fallback_if_empty": _fallback_path_for_tool(tool),
+        "known_limitations": _tool_limitations(tool),
+    }
+
+
+def _fallback_path_for_tool(tool: str) -> str:
+    return {
+        "get_supplier_shipment_full_details": "Use search_business_objects by invoice/supplier, then retry with shipment_id.",
+        "list_supply_artifacts": "Use get_supplier_shipment_full_details to inspect linked document metadata.",
+        "get_wb_supply_full_details": "Use get_wb_supplies_registry or search_business_objects with object_types=['wb_supply'].",
+        "get_metric_values": "Use list_metrics and get_available_metric_dates to resolve metric/date coverage.",
+    }.get(tool, "Call get_webcore_data_map or resolve_webcore_data_request for next-step routing.")
+
+
+def _tool_limitations(tool: str) -> list[str]:
+    if tool in {"get_wb_supplies_registry", "get_wb_supply_full_details"}:
+        return ["Cache-only; no upstream sync/backfill/fetch."]
+    if tool in {"list_supply_artifacts", "get_supply_artifact"}:
+        return ["Server-owned artifacts only; no arbitrary filesystem paths.", "File content is bounded/chunked and scrubbed."]
+    if tool == "get_webcore_business_table_rows":
+        return ["Allowlisted generated SELECT only; raw payloads require explicit flag."]
+    return []
+
+
+def _fallback_path_for_domain(domain: str) -> str:
+    return {
+        "supplier_shipments": "Search shipment by invoice/supplier, then use full details or artifact tools.",
+        "artifacts": "List artifacts first to get artifact_ref, then read metadata/parsed/chunk.",
+        "wb_supplies": "Use cached registry first, then full detail by supply id.",
+        "metrics": "Use list_metrics to resolve key/Russian label.",
+        "sku": "Use search_business_objects for sku/nomenclature.",
+    }.get(domain, "Use get_webcore_data_map for orientation.")
+
+
+def _infer_request_intent(intent: str, **hints: Any) -> dict[str, Any]:
+    text = " ".join(str(item or "") for item in [intent, hints.get("domain"), hints.get("artifact_kind")]).casefold()
+    explicit_domain = str(hints.get("domain") or "auto")
+    action = "lookup"
+    domain = explicit_domain if explicit_domain != "auto" else "unknown"
+    object_type = ""
+    artifact_kind = _artifact_kind_from_text(text, str(hints.get("artifact_kind") or "auto"))
+    if any(marker in text for marker in ("свеж", "freshness")):
+        domain, action = "freshness", "check_freshness"
+    elif any(marker in text for marker in ("метрик", "metric", "остат", "выруч", "заказ")) and not any(marker in text for marker in ("поставк", "инвойс", "договор")):
+        domain, action = "metrics", "get_metric"
+    elif any(marker in text for marker in ("sku", "номенклат", "nmid", "nm_id")):
+        domain, action, object_type = "sku", "find_sku", "sku"
+    elif any(marker in text for marker in ("wb supply", "wildberries", "вб постав", "wb постав")):
+        domain, action, object_type = "wb_supplies", "show_wb_supply", "wb_supply"
+    elif any(marker in text for marker in ("реестр постав", "registry")):
+        domain, action, object_type = "supplier_shipments", "show_registry", "shipment"
+    elif any(marker in text for marker in ("инвойс", "договор", "бтт", "втб", "платёж", "платеж", "заявление на перевод", "вбк", "ведомость банковского", "дт", "тамож", "кп логист", "счёт логист", "счет логист", "документ")):
+        domain, action, object_type = "artifacts", "open_artifact" if any(marker in text for marker in ("открой", "open", "прочитай", "read")) else "show_documents", "artifact"
+    elif any(marker in text for marker in ("счёт cny", "счет cny", "cny", "конвертац")):
+        domain, action = "cny", "lookup_cny"
+    elif any(marker in text for marker in ("поставк", "от поставщика", "shipment")):
+        domain, action, object_type = "supplier_shipments", "show_shipment", "shipment"
+    elif any(marker in text for marker in ("таблиц", "table")):
+        domain, action = "business_tables", "list_tables"
+    if hints.get("shipment_id"):
+        object_type = "shipment"
+    if hints.get("supply_id"):
+        object_type = "wb_supply"
+    return {
+        "domain": domain,
+        "action": action,
+        "object_type": object_type,
+        "object_id": hints.get("shipment_id") or hints.get("supply_id") or hints.get("object_id"),
+        "artifact_kind": artifact_kind,
+        "confidence": "high" if domain != "unknown" else "low",
+    }
+
+
+def _artifact_kind_from_text(text: str, explicit: str) -> str:
+    if explicit and explicit != "auto":
+        return explicit
+    checks = [
+        ("bank_control_statement", ("вбк", "ведомость банковского")),
+        ("bank_transfer_application", ("бтт", "втб", "платёж", "платеж", "заявление на перевод")),
+        ("customs_declaration", ("дт", "тамож")),
+        ("logistics_quote", ("кп логист", "коммерческое предложение")),
+        ("logistics_invoice", ("счёт логист", "счет логист")),
+        ("bank_fee_statement", ("банковская выписка", "комисси")),
+        ("cny_conversion_purchase", ("конвертац", "покупка cny")),
+        ("supplier_cny_payment", ("оплата cny", "платеж cny", "платёж cny")),
+        ("contract", ("договор", "contract")),
+        ("invoice", ("инвойс", "invoice")),
+    ]
+    for kind, markers in checks:
+        if any(marker in text for marker in markers):
+            return kind
+    return "auto"
+
+
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
@@ -1715,7 +3670,7 @@ def _redact(value: Any) -> Any:
 
 def _redact_string(value: str) -> str:
     lowered = value.lower()
-    if any(marker in lowered for marker in ("storage_state", "authorization:", "bearer ", "password=", "token=")):
+    if any(marker in lowered for marker in SECRET_TEXT_MARKERS):
         return "[redacted]"
     if len(value) > 600:
         return value[:600] + "...[truncated]"
