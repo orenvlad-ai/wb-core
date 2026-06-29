@@ -431,6 +431,60 @@ def _assert_same_day_date_only_financial_priority() -> None:
         if _dec(header.get("cny_ledger_effective_rate")) != Decimal("10"):
             raise AssertionError(f"same-day effective rate must use the counted same-day conversion: {header}")
 
+    with TemporaryDirectory(prefix="cny-ledger-same-day-timed-payment-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        _seed_supplier_order(runtime, "same-day-timed-payment", approx_rate=99.0)
+        ledger = CnyLedgerBlock(runtime=runtime, timestamp_factory=Clock())
+        ledger.create_opening_balance({"operation_date": "2026-05-19", "cny_amount": "56317.81", "rub_value": "563178.10"})
+        _save_payment(
+            runtime,
+            "same-day-timed-pay",
+            "same-day-timed-payment",
+            "2026-05-20T16:56:45Z",
+            "345337.5",
+        )
+        _save_date_only_conversion(
+            runtime,
+            document_id="same-day-date-only-conv",
+            operation_date="2026-05-20",
+            cny_amount="345337.5",
+            rub_amount="3453375.00",
+            created_at="2026-05-20T18:00:00Z",
+        )
+
+        replay = ledger.replay_ledger(reason="smoke_same_day_date_only_conversion_covers_timed_payment")
+        if replay["replay"]["status"] != CNY_CALC_STATUS_OK:
+            raise AssertionError(f"date-only conversion must cover same-day timed payment, got {replay}")
+        if _dec(replay["summary"]["balance_cny"]) != Decimal("56317.81"):
+            raise AssertionError(f"timed-payment same-day replay must not overstate CNY balance: {replay['summary']}")
+        operations = runtime.list_cny_ledger_operations()
+        conversion_index = next(
+            index
+            for index, item in enumerate(operations)
+            if item.get("source_document_id") == "same-day-date-only-conv"
+            and item.get("operation_type") == CNY_LEDGER_OPERATION_CONVERSION_IN
+        )
+        payment_index = next(
+            index
+            for index, item in enumerate(operations)
+            if item.get("source_document_id") == "same-day-timed-pay"
+            and item.get("operation_type") == CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT
+        )
+        if conversion_index >= payment_index:
+            raise AssertionError(f"date-only conversion must sort before same-day timed payment: {operations}")
+        payment_operation = operations[payment_index]
+        if payment_operation.get("status") == CNY_LEDGER_OPERATION_STATUS_BLOCKED:
+            raise AssertionError(f"same-day timed payment must not be blocked: {payment_operation}")
+        conversion_operation = operations[conversion_index]
+        if (
+            conversion_operation.get("status") != CNY_LEDGER_OPERATION_STATUS_NEEDS_REVIEW
+            or conversion_operation.get("error_reason") != "date_only_deterministic_sequence"
+        ):
+            raise AssertionError(f"date-only conversion must expose deterministic-order warning: {conversion_operation}")
+        header = runtime.load_supplier_shipment("same-day-timed-payment")["header"]
+        if header.get("cny_calculation_status") != CNY_CALC_STATUS_OK:
+            raise AssertionError(f"same-day timed payment order calculation must be ok: {header}")
+
 
 def _assert_blocked_states() -> None:
     with TemporaryDirectory(prefix="cny-ledger-blocked-") as tmp:
