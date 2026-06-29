@@ -55,6 +55,15 @@ from packages.contracts.supplier_financial_documents import FINANCIAL_DOCUMENT_T
 MONEY_QUANT = Decimal("0.01")
 RATE_QUANT = Decimal("0.000001")
 PUBLIC_CNY_DOCUMENT_FILE_PREFIX = "/v1/sheet-vitrina-v1/supply/cny-account/documents"
+DATE_ONLY_OPERATION_PRIORITY = {
+    CNY_LEDGER_OPERATION_OPENING_BALANCE: 0,
+    CNY_LEDGER_OPERATION_CONVERSION_IN: 1,
+    CNY_LEDGER_OPERATION_CONVERSION_FEE: 2,
+    CNY_LEDGER_OPERATION_TRANSFER_FEE: 3,
+    "bank_fee": 3,
+    CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT: 4,
+    CNY_LEDGER_OPERATION_ADJUSTMENT: 5,
+}
 
 TextExtractor = Callable[[bytes, str], tuple[str, dict[str, Any], list[str]]]
 
@@ -970,8 +979,11 @@ def _operation_sort_key(operation: Mapping[str, Any]) -> str:
     created_at = str(operation.get("created_at") or "")
     source_document_id = str(operation.get("source_document_id") or "")
     operation_type = str(operation.get("operation_type") or "")
-    primary = operation_datetime or f"{operation_date}T23:59:59Z"
-    return "|".join([primary, operation_date, created_at, source_document_id, operation_type])
+    if operation_datetime:
+        return "|".join([operation_datetime, operation_date, "0", created_at, source_document_id, operation_type])
+    priority = DATE_ONLY_OPERATION_PRIORITY.get(operation_type, 99)
+    primary = f"{operation_date}T23:59:59Z"
+    return "|".join([primary, operation_date, "1", f"{priority:02d}", created_at, source_document_id, operation_type])
 
 
 def _ledger_summary(

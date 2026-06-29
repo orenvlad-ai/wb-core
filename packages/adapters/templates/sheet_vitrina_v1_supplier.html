@@ -1577,7 +1577,8 @@
             title: "На штуку",
             items: [
               ["КП: доставка+таможня, ₽/шт", formatAmount(perUnit.quote_delivery_customs_rub_per_unit, "₽")],
-              ["Факт: доставка+таможня, ₽/шт", formatAmount(perUnit.fact_delivery_customs_rub_per_unit, "₽")]
+              ["Факт: доставка+таможня, ₽/шт", formatAmount(perUnit.fact_delivery_customs_rub_per_unit, "₽")],
+              ["Себестоимость на единицу товара", formatAmount(perUnit.exact_landed_cost_per_unit_rub, "₽"), exactCostTooltip(perUnit)]
             ]
           },
           {
@@ -1609,7 +1610,7 @@
             '<h4>' + escapeHtml(group.title) + '</h4>' +
             '<div class="finance-summary-grid">' +
               group.items.map((item) => (
-                '<div class="total"><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(financeValueOrDash(item[1])) + '</strong></div>'
+                '<div class="total"' + (item[2] ? ' title="' + escapeHtml(item[2]) + '"' : '') + '><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(financeValueOrDash(item[1])) + '</strong></div>'
               )).join("") +
             '</div>' +
           '</section>'

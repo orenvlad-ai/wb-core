@@ -8,6 +8,7 @@ import hashlib
 from io import BytesIO
 import os
 from pathlib import Path
+import re
 import socket
 import sys
 from tempfile import TemporaryDirectory
@@ -400,11 +401,25 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_enabled()
                 frame.get_by_role("button", name="Сохранить").click()
                 expect(frame.get_by_text("Заказ сохранён.")).to_be_visible(timeout=5000)
-                _seed_first_supplier_factual_expense(runtime, amount_rub=48.0)
                 expect(frame.locator("#supplyCompositionPanel #documentInvoiceDownloadLink")).to_have_count(0)
                 expect(frame.locator("#supplyCompositionPanel #contractManageControls")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
                 frame.get_by_role("tab", name="Документы").click()
+                exact_cost_tile = frame.locator("#financialSummaryGroups .total", has_text="Себестоимость на единицу товара")
+                expect(exact_cost_tile).to_be_visible(timeout=5000)
+                expect(exact_cost_tile.locator("strong")).to_have_text("—")
+                expect(exact_cost_tile).to_have_attribute("title", "cny_payment_cost_unavailable")
+                _seed_first_supplier_factual_expense(runtime, amount_rub=48.0)
+                _seed_first_supplier_exact_cny_cost(runtime, payment_cost_rub=200000.0)
+                frame.get_by_role("tab", name="Состав поставки").click()
+                frame.get_by_role("tab", name="Документы").click()
+                exact_cost_tile = frame.locator("#financialSummaryGroups .total", has_text="Себестоимость на единицу товара")
+                expect(exact_cost_tile).to_be_visible(timeout=5000)
+                expect(exact_cost_tile.locator("strong")).to_have_text(re.compile(r"10\s*528,84 ₽"), timeout=5000)
+                exact_cost_value = exact_cost_tile.locator("strong").inner_text(timeout=5000).strip()
+                if exact_cost_value in {"—", "-", "0", "0,00 ₽"}:
+                    raise AssertionError(f"documents tab exact cost tile must show money value, got {exact_cost_value!r}")
+                expect(exact_cost_tile).to_have_attribute("title", "по CNY ledger и подтверждённым документам")
                 expect(frame.locator("#documentInvoiceDownloadLink")).to_be_visible()
                 expect(frame.locator("#invoiceDocumentLabel")).to_contain_text("ID документа:")
                 expect(frame.locator("#contractDocumentLabel")).to_contain_text("Контракт: выбрать")
@@ -761,6 +776,29 @@ def _seed_first_supplier_factual_expense(runtime: RegistryUploadDbBackedRuntime,
                 "raw": {},
             }
         ],
+    )
+
+
+def _seed_first_supplier_exact_cny_cost(runtime: RegistryUploadDbBackedRuntime, *, payment_cost_rub: float) -> None:
+    shipments = runtime.list_supplier_shipments()
+    if not shipments:
+        raise AssertionError("cannot seed exact CNY cost without a supplier shipment")
+    shipment_id = str(shipments[0].get("shipment_id") or "")
+    if not shipment_id:
+        raise AssertionError(f"cannot seed exact CNY cost for shipment without id: {shipments[0]}")
+    runtime.update_supplier_shipments_cny_calculations(
+        [
+            {
+                "shipment_id": shipment_id,
+                "cny_ledger_effective_rate": "10",
+                "cny_payment_currency_rub_cost": str(payment_cost_rub),
+                "cny_paid_amount": str(payment_cost_rub / 10),
+                "cny_bank_fee_rub": "0",
+                "cny_calculation_status": "ok",
+                "cny_calculation_error": "",
+                "cny_calculated_at": "2026-05-30T08:00:00Z",
+            }
+        ]
     )
 
 

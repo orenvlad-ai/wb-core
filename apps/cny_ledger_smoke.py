@@ -49,6 +49,10 @@ from packages.contracts.cny_ledger import (  # noqa: E402
     CNY_DOCUMENT_TYPE_BANK_FEE,
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE,
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+    CNY_LEDGER_OPERATION_CONVERSION_IN,
+    CNY_LEDGER_OPERATION_STATUS_BLOCKED,
+    CNY_LEDGER_OPERATION_STATUS_NEEDS_REVIEW,
+    CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
@@ -128,6 +132,7 @@ def main() -> None:
     _assert_bank_fee_statement_parser_and_matching()
     _assert_exact_cost_summary_rules()
     _assert_application_ledger_replay()
+    _assert_same_day_date_only_financial_priority()
     _assert_blocked_states()
     _assert_http_routes_and_order_integration()
 
@@ -363,6 +368,68 @@ def _assert_application_ledger_replay() -> None:
         order_a_deleted = runtime.load_supplier_shipment("order-a")["header"]
         if _dec(order_a_deleted["cny_ledger_effective_rate"]) != before_backfill_rate:
             raise AssertionError(f"delete replay must restore order-a effective rate: {order_a_deleted}")
+
+
+def _assert_same_day_date_only_financial_priority() -> None:
+    with TemporaryDirectory(prefix="cny-ledger-same-day-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        _seed_supplier_order(runtime, "same-day-order", approx_rate=99.0)
+        ledger = CnyLedgerBlock(runtime=runtime, timestamp_factory=Clock())
+        ledger.create_opening_balance({"operation_date": "2026-05-19", "cny_amount": "56317.81", "rub_value": "563178.10"})
+        _save_date_only_payment(
+            runtime,
+            document_id="same-day-pay",
+            source_order_id="same-day-order",
+            operation_date="2026-05-20",
+            cny_amount="345337.5",
+            created_at="2026-05-20T08:00:00Z",
+        )
+        _save_date_only_conversion(
+            runtime,
+            document_id="same-day-conv",
+            operation_date="2026-05-20",
+            cny_amount="345337.5",
+            rub_amount="3453375.00",
+            created_at="2026-05-20T08:01:00Z",
+        )
+
+        replay = ledger.replay_ledger(reason="smoke_same_day_date_only_priority")
+        if replay["replay"]["status"] != CNY_CALC_STATUS_OK:
+            raise AssertionError(f"same-day date-only replay must be counted, got {replay}")
+        if _dec(replay["summary"]["balance_cny"]) != Decimal("56317.81"):
+            raise AssertionError(f"same-day replay must not overstate residual CNY balance: {replay['summary']}")
+
+        operations = runtime.list_cny_ledger_operations()
+        conversion_index = next(
+            index
+            for index, item in enumerate(operations)
+            if item.get("source_document_id") == "same-day-conv"
+            and item.get("operation_type") == CNY_LEDGER_OPERATION_CONVERSION_IN
+        )
+        payment_index = next(
+            index
+            for index, item in enumerate(operations)
+            if item.get("source_document_id") == "same-day-pay"
+            and item.get("operation_type") == CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT
+        )
+        if conversion_index >= payment_index:
+            raise AssertionError(f"date-only conversion must be sequenced before same-day payment: {operations}")
+        payment_operation = operations[payment_index]
+        if payment_operation.get("status") == CNY_LEDGER_OPERATION_STATUS_BLOCKED:
+            raise AssertionError(f"same-day covered payment must not be blocked: {payment_operation}")
+        if (
+            payment_operation.get("status") != CNY_LEDGER_OPERATION_STATUS_NEEDS_REVIEW
+            or payment_operation.get("error_reason") != "date_only_deterministic_sequence"
+        ):
+            raise AssertionError(f"same-day date-only payment must remain counted with review warning: {payment_operation}")
+
+        header = runtime.load_supplier_shipment("same-day-order")["header"]
+        if header.get("cny_calculation_status") != CNY_CALC_STATUS_OK:
+            raise AssertionError(f"same-day order calculation must be ok: {header}")
+        if _dec(header.get("cny_payment_currency_rub_cost")) != Decimal("3453375"):
+            raise AssertionError(f"same-day payment RUB cost changed: {header}")
+        if _dec(header.get("cny_ledger_effective_rate")) != Decimal("10"):
+            raise AssertionError(f"same-day effective rate must use the counted same-day conversion: {header}")
 
 
 def _assert_blocked_states() -> None:
@@ -611,6 +678,70 @@ def _save_payment(
                 "document_number": document_id,
                 "document_date": operation_date,
                 "operation_datetime": operation_datetime,
+                "operation_date": operation_date,
+                "currency": "CNY",
+                "cny_amount": cny_amount,
+                "transfer_amount": cny_amount,
+            },
+        }
+    )
+
+
+def _save_date_only_conversion(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    document_id: str,
+    operation_date: str,
+    cny_amount: str,
+    rub_amount: str,
+    created_at: str,
+) -> None:
+    runtime.save_cny_document(
+        {
+            **_base_cny_document(document_id, CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, operation_date, ""),
+            "created_at": created_at,
+            "uploaded_at": created_at,
+            "updated_at": created_at,
+            "rub_amount": rub_amount,
+            "cny_amount": cny_amount,
+            "bank_rate": str((Decimal(rub_amount) / Decimal(cny_amount)).normalize()),
+            "parsed_payload": {
+                "document_type": CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE,
+                "document_number": document_id,
+                "document_date": operation_date,
+                "operation_date": operation_date,
+                "rub_amount": rub_amount,
+                "cny_amount": cny_amount,
+                "currency": "CNY",
+                "bank_rate": str((Decimal(rub_amount) / Decimal(cny_amount)).normalize()),
+            },
+        }
+    )
+
+
+def _save_date_only_payment(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    document_id: str,
+    source_order_id: str,
+    operation_date: str,
+    cny_amount: str,
+    created_at: str,
+) -> None:
+    runtime.save_cny_document(
+        {
+            **_base_cny_document(document_id, CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT, operation_date, ""),
+            "source": CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+            "source_order_id": source_order_id,
+            "context_order_id": source_order_id,
+            "created_at": created_at,
+            "uploaded_at": created_at,
+            "updated_at": created_at,
+            "cny_amount": cny_amount,
+            "parsed_payload": {
+                "document_type": CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+                "document_number": document_id,
+                "document_date": operation_date,
                 "operation_date": operation_date,
                 "currency": "CNY",
                 "cny_amount": cny_amount,

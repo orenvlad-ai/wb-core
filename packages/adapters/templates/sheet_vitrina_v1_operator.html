@@ -8822,8 +8822,11 @@
           const diagnostics = payload && payload.diagnostics ? payload.diagnostics : {};
           const blocked = Number(diagnostics.blocked_operations || 0);
           const parseErrors = Number(diagnostics.parse_errors || 0);
+          const needsReview = Number(diagnostics.needs_review_operations || 0);
           if (blocked || parseErrors) {
             setCnyAccountMessage("Есть CNY diagnostics: blocked=" + blocked + ", parse_error=" + parseErrors + ".", "warning");
+          } else if (needsReview && !(options && options.preserveMessage)) {
+            setCnyAccountMessage("Есть проведённые CNY операции с предупреждением: " + needsReview + ".", "warning");
           } else if (!(options && options.preserveMessage)) {
             setCnyAccountMessage("", "");
           }
@@ -8923,7 +8926,7 @@
           "<td>" + escapeHtml(formatCnyAmount(operation.balance_cny_after)) + "</td>",
           "<td>" + escapeHtml(formatCnyRub(operation.balance_rub_value_after)) + "</td>",
           "<td>" + escapeHtml(formatCnyRate(operation.average_rate_after)) + "</td>",
-          "<td>" + escapeHtml(cnyStatusLabel(operation.status) + (operation.error_reason ? ": " + operation.error_reason : "")) + "</td>",
+          "<td>" + escapeHtml(cnyOperationStatusDisplay(operation)) + "</td>",
           "</tr>"
         ].join("")).join("");
       }
@@ -9036,18 +9039,20 @@
       function cnyAccountStateDisplay(summary, replay, diagnostics) {
         const docCount = Number(summary && summary.document_count || 0);
         const blocked = Number(diagnostics && diagnostics.blocked_operations || 0);
+        const needsReview = Number(diagnostics && diagnostics.needs_review_operations || 0);
         const lastReplay = replay && replay.replayed_at ? formatCnyDateTime(replay.replayed_at) : "ещё не было";
         if (!docCount) {
           return "Загрузите документы конвертации или задайте opening balance.";
         }
-        return "Документов: " + docCount + " · blocked: " + blocked + " · replay: " + lastReplay + ".";
+        return "Документов: " + docCount + " · blocked: " + blocked + " · warning: " + needsReview + " · replay: " + lastReplay + ".";
       }
 
       function cnyReplayDisplay(replay, diagnostics) {
         const status = replay && replay.status ? cnyStatusLabel(replay.status) : "не запускался";
         const blocked = Number(diagnostics && diagnostics.blocked_operations || 0);
+        const needsReview = Number(diagnostics && diagnostics.needs_review_operations || 0);
         const suffix = replay && replay.replayed_at ? " · " + formatCnyDateTime(replay.replayed_at) : "";
-        return status + " · blocked " + blocked + suffix;
+        return status + " · blocked " + blocked + " · warning " + needsReview + suffix;
       }
 
       function cnyDocumentSourceLabel(source) {
@@ -9080,13 +9085,23 @@
           posted: "проведён",
           parse_error: "ошибка парсинга",
           replayed: "пересчитан",
-          blocked: "blocked",
-          needs_review: "нужна проверка",
+          blocked: "не проведён",
+          needs_review: "проведён, проверить",
           success: "success",
           warning: "warning",
           failed: "failed"
         };
         return labels[String(value || "")] || valueOrDash(value);
+      }
+
+      function cnyOperationStatusDisplay(operation) {
+        const status = String(operation && operation.status || "");
+        const reason = String(operation && operation.error_reason || "");
+        if (status === "needs_review" && reason === "date_only_deterministic_sequence") {
+          return "проведён, порядок по дате";
+        }
+        const label = cnyStatusLabel(status);
+        return reason ? label + ": " + reason : label;
       }
 
       function formatCnyDateTime(value) {
