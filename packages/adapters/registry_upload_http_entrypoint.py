@@ -1253,6 +1253,28 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_supplier_financial_document_confirm_import_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
+                    payload = entrypoint.handle_supplier_financial_document_confirm_import_request(
+                        shipment_id,
+                        document_id,
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier financial document import confirm failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
                 try:
                     payload = _load_request_payload(self)
@@ -3887,6 +3909,17 @@ def _is_supplier_financial_document_file_path(path: str) -> bool:
     )
 
 
+def _is_supplier_financial_document_confirm_import_path(path: str) -> bool:
+    parts = _supplier_financial_path_parts(path)
+    return (
+        len(parts) == 4
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT
+        and bool(parts[2])
+        and parts[3] == "confirm-import"
+    )
+
+
 def _is_wb_supply_detail_path(path: str) -> bool:
     if not path.startswith(DEFAULT_WB_SUPPLIES_PATH + "/"):
         return False
@@ -4013,7 +4046,11 @@ def _resolve_supplier_order_documents_archive_ids(path: str) -> tuple[str, str]:
 
 
 def _resolve_supplier_financial_document_ids(path: str) -> tuple[str, str]:
-    if not (_is_supplier_financial_document_detail_path(path) or _is_supplier_financial_document_file_path(path)):
+    if not (
+        _is_supplier_financial_document_detail_path(path)
+        or _is_supplier_financial_document_file_path(path)
+        or _is_supplier_financial_document_confirm_import_path(path)
+    ):
         raise ValueError(f"unsupported supplier financial document path: {path}")
     parts = _supplier_financial_path_parts(path)
     return parts[0], parts[2]

@@ -26,6 +26,12 @@ from apps.registry_upload_smoke_support import (
     write_runtime_registry_fixture,
 )
 from packages.adapters.registry_upload_http_entrypoint import (
+    DEFAULT_CNY_ACCOUNT_CONVERSIONS_PATH,
+    DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
+    DEFAULT_CNY_ACCOUNT_LEDGER_PATH,
+    DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH,
+    DEFAULT_CNY_ACCOUNT_PATH,
+    DEFAULT_CNY_ACCOUNT_REPLAY_PATH,
     DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
     DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
@@ -63,6 +69,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_TRADE_DOCUMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+    DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
     DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
@@ -315,6 +322,7 @@ def main() -> None:
                 "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
                 "wb_regional_status_path": DEFAULT_WB_REGIONAL_STATUS_PATH,
                 "wb_regional_calculate_path": DEFAULT_WB_REGIONAL_CALCULATE_PATH,
+                "wb_regional_planning_options_path": DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH,
                 "wb_regional_recommendations_zip_path": DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
                 "wb_regional_district_options": [
                     {
@@ -336,6 +344,12 @@ def main() -> None:
                 "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
                 "supplier_shipment_registry_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,
                 "supplier_shipment_registry_compare_quote_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH,
+                "cny_account_path": DEFAULT_CNY_ACCOUNT_PATH,
+                "cny_account_documents_path": DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
+                "cny_account_conversions_path": DEFAULT_CNY_ACCOUNT_CONVERSIONS_PATH,
+                "cny_account_ledger_path": DEFAULT_CNY_ACCOUNT_LEDGER_PATH,
+                "cny_account_opening_balance_path": DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH,
+                "cny_account_replay_path": DEFAULT_CNY_ACCOUNT_REPLAY_PATH,
                 "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
                 "current_business_date": current_business_date_iso(),
                 "stock_report_active_skus": expected_active_skus,

@@ -120,6 +120,7 @@ from packages.contracts.supplier_financial_documents import (
     FINANCIAL_DOCUMENT_PARSE_STATUS_NEEDS_REVIEW,
     FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR,
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT,
+    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
@@ -128,6 +129,7 @@ from packages.contracts.supplier_financial_documents import (
 from packages.contracts.cny_ledger import (
     CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
     CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+    CNY_DOCUMENT_TYPE_BANK_FEE,
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE,
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
 )
@@ -179,8 +181,10 @@ SUPPLIER_ORDER_DOCUMENT_LABELS_RU = {
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION: "ДТ",
     FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT: "Ведомость банковского контроля",
     FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: "Заявление на перевод ВТБ / платёжка",
+    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT: "Банковская выписка для комиссий",
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE: "Документ конвертации RUB -> CNY",
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT: "Оплата поставщику CNY",
+    CNY_DOCUMENT_TYPE_BANK_FEE: "Комиссия банка CNY",
 }
 SHEET_VITRINA_DAILY_AUTO_DESCRIPTION = (
     f"Ежедневно в {SHEET_VITRINA_DAILY_BUSINESS_TIMES} {CANONICAL_BUSINESS_TIMEZONE_NAME}: "
@@ -2004,12 +2008,49 @@ class RegistryUploadHttpEntrypoint:
                 context_order_id=shipment_id,
                 reject_unsupported=True,
             )
+        financial_preview = self.supplier_financial_documents_block.parse_document_preview(
+            file_bytes,
+            uploaded_filename=uploaded_filename,
+        )
+        financial_preview_type = str((financial_preview.get("normalized_parse") or {}).get("document_type") or "")
+        if financial_preview_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
+            return self.supplier_financial_documents_block.upload_bank_fee_statement_preview(
+                shipment_id,
+                file_bytes=file_bytes,
+                uploaded_filename=uploaded_filename,
+                uploaded_content_type=uploaded_content_type,
+            )
         return self.supplier_financial_documents_block.upload_document(
             shipment_id,
             file_bytes=file_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
         )
+
+    def handle_supplier_financial_document_confirm_import_request(
+        self,
+        shipment_id: str,
+        document_id: str,
+    ) -> dict[str, Any]:
+        payload = self.supplier_financial_documents_block.confirm_bank_fee_statement_import(shipment_id, document_id)
+        cny_rows = list(payload.pop("cny_fee_rows_for_ledger", []) or [])
+        for row in cny_rows:
+            self.cny_ledger_block.save_bank_fee_document(
+                source_order_id=shipment_id,
+                linked_financial_document_id=document_id,
+                natural_key=str(row.get("cny_ledger_natural_key") or ""),
+                fee_row=row,
+                original_filename=str(payload.get("original_filename") or ""),
+                stored_file_path=str(payload.get("stored_file_path") or ""),
+                file_content_type=str(payload.get("file_content_type") or ""),
+            )
+        if cny_rows:
+            self.cny_ledger_block.replay_ledger(reason="bank_fee_statement_confirm")
+        result = self.supplier_financial_documents_block.get_document(shipment_id, document_id)
+        for key in ("idempotent", "already_added"):
+            if key in payload:
+                result[key] = payload[key]
+        return result
 
     def _supplier_order_cny_document_row(self, document: Mapping[str, Any]) -> dict[str, Any]:
         parsed = dict(document.get("parsed_payload") or {})

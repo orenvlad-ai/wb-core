@@ -1738,6 +1738,13 @@ class SupplierShipmentsBlock:
         enriched["approx_yuan_rate"] = _read_optional_positive_decimal(enriched.get("approx_yuan_rate"))
         enriched["approx_invoice_cost_rub"] = per_unit.get("approx_invoice_cost_rub")
         enriched["approx_landed_cost_per_unit_rub"] = per_unit.get("approx_landed_cost_per_unit_rub")
+        enriched["exact_bank_fees_rub"] = per_unit.get("exact_bank_fees_rub")
+        enriched["exact_currency_payment_cost_rub"] = per_unit.get("exact_currency_payment_cost_rub")
+        enriched["exact_landed_cost_total_rub"] = per_unit.get("exact_landed_cost_total_rub")
+        enriched["exact_landed_cost_per_unit_rub"] = per_unit.get("exact_landed_cost_per_unit_rub")
+        enriched["exact_cost_status"] = per_unit.get("exact_cost_status") or "unavailable"
+        enriched["exact_cost_blockers"] = list(per_unit.get("exact_cost_blockers") or [])
+        enriched["exact_cost_warnings"] = list(per_unit.get("exact_cost_warnings") or [])
         return enriched
 
     def _with_document_download_path(self, document: Mapping[str, Any] | None) -> dict[str, Any]:

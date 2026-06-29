@@ -277,6 +277,98 @@ class CnyLedgerBlock:
             "replay": replay.get("replay") or replay,
         }
 
+    def save_bank_fee_document(
+        self,
+        *,
+        source_order_id: str,
+        linked_financial_document_id: str,
+        natural_key: str,
+        fee_row: Mapping[str, Any],
+        original_filename: str = "",
+        stored_file_path: str = "",
+        file_content_type: str = "",
+    ) -> dict[str, Any]:
+        normalized_order_id = str(source_order_id or "").strip()
+        normalized_natural_key = str(natural_key or "").strip()
+        if not normalized_order_id:
+            raise ValueError("source_order_id is required for CNY bank fee")
+        if not normalized_natural_key:
+            raise ValueError("natural_key is required for CNY bank fee")
+        existing = self.runtime.load_cny_document_by_natural_key(normalized_natural_key)
+        if existing is not None:
+            replay = self.replay_ledger(reason="idempotent_bank_fee_import")
+            return {
+                **self._with_download_path(existing),
+                "idempotent": True,
+                "replay": replay.get("replay") or replay,
+            }
+        amount = _parse_decimal(fee_row.get("amount") or fee_row.get("debit_cny"))
+        if amount is None or amount <= 0:
+            raise ValueError("CNY bank fee amount must be > 0")
+        now = self.timestamp_factory()
+        operation_datetime = _normalize_datetime(fee_row.get("operation_datetime"))
+        operation_date = (
+            _optional_iso_date(operation_datetime)
+            or _optional_iso_date(fee_row.get("operation_date"))
+            or _optional_iso_date(fee_row.get("document_date"))
+        )
+        row_id = str(fee_row.get("row_id") or "").strip()
+        document_id = "cnydoc_" + uuid4().hex
+        normalized = {
+            "document_type": CNY_DOCUMENT_TYPE_BANK_FEE,
+            "document_number": str(fee_row.get("bank_document_number") or row_id or "bank_fee"),
+            "document_date": operation_date,
+            "operation_date": operation_date,
+            "operation_datetime": operation_datetime,
+            "currency": "CNY",
+            "fee_cny": _decimal_to_storage(amount),
+            "fee_category": str(fee_row.get("fee_category") or ""),
+            "fee_category_label": str(fee_row.get("fee_category_label") or ""),
+            "source_statement_row_id": row_id,
+            "source_statement_document_id": str(linked_financial_document_id or "").strip(),
+            "matched_anchor_document_id": str(fee_row.get("matched_anchor_document_id") or ""),
+            "matched_anchor_operation_number": str(fee_row.get("matched_anchor_operation_number") or ""),
+            "match_confidence": str(fee_row.get("confidence") or ""),
+            "match_reasons": _string_list(fee_row.get("match_reasons")),
+            "payment_purpose": str(fee_row.get("payment_purpose") or ""),
+        }
+        document = {
+            "document_id": document_id,
+            "document_type": CNY_DOCUMENT_TYPE_BANK_FEE,
+            "source": CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+            "source_order_id": normalized_order_id,
+            "context_order_id": normalized_order_id,
+            "linked_financial_document_id": str(linked_financial_document_id or "").strip(),
+            "original_filename": original_filename,
+            "stored_file_path": stored_file_path,
+            "file_content_type": file_content_type,
+            "file_sha256": "",
+            "natural_key": normalized_natural_key,
+            "uploaded_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "operation_date": operation_date,
+            "operation_datetime": operation_datetime,
+            "status": CNY_DOCUMENT_STATUS_POSTED if operation_date else CNY_DOCUMENT_STATUS_NEEDS_REVIEW,
+            "document_number": normalized["document_number"],
+            "currency": "CNY",
+            "rub_amount": "",
+            "cny_amount": _decimal_to_storage(amount),
+            "bank_rate": "",
+            "parsed_payload": normalized,
+            "raw_parse": {"source": "bank_fee_statement", "row": dict(fee_row)},
+            "parser_version": CNY_LEDGER_PARSER_VERSION,
+            "warnings": [] if operation_date else ["Missing bank fee operation date"],
+            "errors": [],
+        }
+        saved = self.runtime.save_cny_document(document)
+        replay = self.replay_ledger(reason="bank_fee_import")
+        return {
+            **self._with_download_path(saved),
+            "idempotent": False,
+            "replay": replay.get("replay") or replay,
+        }
+
     def replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
         now = self.timestamp_factory()
         self._sync_supplier_payment_documents_from_financial_documents(now=now)
