@@ -58,6 +58,7 @@ from packages.contracts.supplier_financial_documents import (
     FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
     FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE,
+    FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
     FX_RATE_SOURCE_CBR,
     FX_RATE_STATUS_MISSING,
     FX_RATE_STATUS_OK,
@@ -128,6 +129,8 @@ BANK_CONTROL_REFRESH_FIELDS = (
     "contract_date",
 )
 BANK_FEE_STATEMENT_PARSER_VERSION = "supplier_vtb_bank_fee_statement_parser_v1"
+PACKING_LIST_PARSER_VERSION = "supplier_packing_list_parser_v1"
+BINARY_FINANCIAL_DOCUMENT_EXTENSIONS = {".xls", ".xlsx"}
 BANK_FEE_CATEGORIES = {
     EXPENSE_CATEGORY_BANK_TRANSFER_FEE,
     EXPENSE_CATEGORY_CURRENCY_CONTROL_FEE,
@@ -316,7 +319,7 @@ class SupplierFinancialDocumentsBlock:
         if not file_bytes:
             raise ValueError("quote comparison upload file is empty")
         filename = _safe_filename(uploaded_filename or "logistics-quote.pdf")
-        if Path(filename).suffix.lower() not in FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS:
+        if Path(filename).suffix.lower() != ".pdf":
             raise ValueError("quote comparison upload must be a PDF file")
         content_type = str(uploaded_content_type or "").split(";", 1)[0].strip().lower() or FINANCIAL_DOCUMENT_CONTENT_TYPE
         parsed = parse_financial_document_pdf(
@@ -408,7 +411,7 @@ class SupplierFinancialDocumentsBlock:
         uploaded_filename: str | None = None,
     ) -> dict[str, Any]:
         filename = _safe_filename(uploaded_filename or "financial-document.pdf")
-        return parse_financial_document_pdf(
+        return parse_financial_document_upload(
             file_bytes,
             filename=filename,
             text_extractor=self.pdf_text_extractor,
@@ -426,7 +429,7 @@ class SupplierFinancialDocumentsBlock:
         if not file_bytes:
             raise ValueError("bank statement upload file is empty")
         filename = _safe_filename(uploaded_filename or "bank-fee-statement.pdf")
-        if Path(filename).suffix.lower() not in FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS:
+        if Path(filename).suffix.lower() != ".pdf":
             raise ValueError("bank statement upload must be a PDF file")
         content_type = str(uploaded_content_type or "").split(";", 1)[0].strip().lower() or FINANCIAL_DOCUMENT_CONTENT_TYPE
         file_sha256 = hashlib.sha256(file_bytes).hexdigest()
@@ -606,8 +609,8 @@ class SupplierFinancialDocumentsBlock:
             raise ValueError("financial document upload file is empty")
         filename = _safe_filename(uploaded_filename or "financial-document.pdf")
         if Path(filename).suffix.lower() not in FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS:
-            raise ValueError("financial document upload must be a PDF file")
-        content_type = str(uploaded_content_type or "").split(";", 1)[0].strip().lower() or FINANCIAL_DOCUMENT_CONTENT_TYPE
+            raise ValueError("financial document upload must be a PDF, XLS or XLSX file")
+        content_type = _financial_document_content_type(filename, uploaded_content_type)
         now = self.timestamp_factory()
         document_id = "fdoc_" + uuid4().hex
         file_sha256 = hashlib.sha256(file_bytes).hexdigest()
@@ -617,7 +620,7 @@ class SupplierFinancialDocumentsBlock:
             filename=filename,
             body=file_bytes,
         )
-        parsed = parse_financial_document_pdf(
+        parsed = parse_financial_document_upload(
             file_bytes,
             filename=filename,
             text_extractor=self.pdf_text_extractor,
@@ -649,7 +652,7 @@ class SupplierFinancialDocumentsBlock:
             "updated_at": now,
             "parse_status": parse_status,
             "vendor": normalized.get("vendor") or "",
-            "document_number": normalized.get("document_number") or normalized.get("invoice_number") or normalized.get("declaration_number") or "",
+            "document_number": normalized.get("document_number") or normalized.get("invoice_number") or normalized.get("declaration_number") or normalized.get("document_title") or "",
             "document_date": normalized.get("document_date") or normalized.get("invoice_date") or normalized.get("quote_date") or normalized.get("declaration_date") or "",
             "currency": normalized.get("currency") or "",
             "total_amount": _decimal_to_float(_parse_decimal(normalized.get("total_amount"))),
@@ -717,6 +720,13 @@ class SupplierFinancialDocumentsBlock:
         )
         if deleted is None:
             raise ValueError(f"financial document not found: {document_id}")
+        deleted_cny_documents: list[str] = []
+        if hasattr(self.runtime, "list_cny_documents") and hasattr(self.runtime, "delete_cny_document"):
+            for cny_document in self.runtime.list_cny_documents():
+                if str(cny_document.get("linked_financial_document_id") or "").strip() != document_id:
+                    continue
+                deleted_cny = self.runtime.delete_cny_document(str(cny_document.get("document_id") or ""))
+                deleted_cny_documents.append(str(deleted_cny.get("document_id") or cny_document.get("document_id") or ""))
         file_result = self._delete_owned_document_file(document)
         return {
             "contract_name": "sheet_vitrina_v1_supplier_financial_documents",
@@ -724,6 +734,7 @@ class SupplierFinancialDocumentsBlock:
             "supplier_order_id": supplier_order_id,
             "document_id": document_id,
             "deleted": True,
+            "cny_documents_deleted": deleted_cny_documents,
             "file_deleted": bool(file_result.get("file_deleted")),
             "warnings": _dedupe_strings(_string_list(file_result.get("warnings"))),
         }
@@ -882,20 +893,52 @@ class SupplierFinancialDocumentsBlock:
 
     def _supplier_order_payment_documents(self, supplier_order_id: str) -> list[dict[str, Any]]:
         payments: list[dict[str, Any]] = []
+        linked_financial_document_ids: set[str] = set()
+        seen_payment_keys: set[str] = set()
         for document in self.runtime.list_supplier_financial_documents(supplier_order_id):
             if str(document.get("document_type") or "") != FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
                 continue
             normalized = dict(document.get("normalized_parse") or {})
             if str(normalized.get("currency") or document.get("currency") or "").upper() != "CNY":
                 continue
-            payments.append(
-                {
-                    "source": "financial_document",
+            payment = {
+                "source": "financial_document",
+                "document_id": str(document.get("document_id") or ""),
+                "document_number": str(document.get("document_number") or normalized.get("document_number") or ""),
+                "document_date": str(document.get("document_date") or normalized.get("document_date") or ""),
+                "operation_datetime": _normalize_datetime(normalized.get("execution_time")),
+                "cny_amount": normalized.get("transfer_amount") or document.get("total_amount"),
+                "payment_details": str(normalized.get("payment_details") or ""),
+                "contract_number": str(normalized.get("contract_number") or ""),
+                "contract_date": str(normalized.get("contract_date") or ""),
+                "invoice_number": str(normalized.get("invoice_number") or ""),
+                "invoice_date": str(normalized.get("invoice_date") or ""),
+                "mt103_ref": str(normalized.get("mt103_ref") or normalized.get("reference") or ""),
+                "beneficiary_account": str(normalized.get("beneficiary_account") or ""),
+            }
+            linked_financial_document_ids.add(str(payment.get("document_id") or ""))
+            seen_payment_keys.add(_supplier_payment_dedupe_key(payment))
+            payments.append(payment)
+        if hasattr(self.runtime, "list_cny_documents"):
+            for document in self.runtime.list_cny_documents():
+                if (
+                    str(document.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+                    or str(document.get("source_order_id") or "").strip() != str(supplier_order_id or "").strip()
+                ):
+                    continue
+                linked_financial_document_id = str(document.get("linked_financial_document_id") or "").strip()
+                if linked_financial_document_id and linked_financial_document_id in linked_financial_document_ids:
+                    continue
+                normalized = dict(document.get("parsed_payload") or {})
+                payment = {
+                    "source": "cny_ledger_document",
                     "document_id": str(document.get("document_id") or ""),
                     "document_number": str(document.get("document_number") or normalized.get("document_number") or ""),
-                    "document_date": str(document.get("document_date") or normalized.get("document_date") or ""),
-                    "operation_datetime": _normalize_datetime(normalized.get("execution_time")),
-                    "cny_amount": normalized.get("transfer_amount") or document.get("total_amount"),
+                    "document_date": str(document.get("operation_date") or normalized.get("document_date") or ""),
+                    "operation_datetime": _normalize_datetime(
+                        document.get("operation_datetime") or normalized.get("operation_datetime") or normalized.get("execution_time")
+                    ),
+                    "cny_amount": normalized.get("cny_amount") or normalized.get("transfer_amount") or document.get("cny_amount"),
                     "payment_details": str(normalized.get("payment_details") or ""),
                     "contract_number": str(normalized.get("contract_number") or ""),
                     "contract_date": str(normalized.get("contract_date") or ""),
@@ -904,34 +947,11 @@ class SupplierFinancialDocumentsBlock:
                     "mt103_ref": str(normalized.get("mt103_ref") or normalized.get("reference") or ""),
                     "beneficiary_account": str(normalized.get("beneficiary_account") or ""),
                 }
-            )
-        if hasattr(self.runtime, "list_cny_documents"):
-            for document in self.runtime.list_cny_documents():
-                if (
-                    str(document.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
-                    or str(document.get("source_order_id") or "").strip() != str(supplier_order_id or "").strip()
-                ):
+                dedupe_key = _supplier_payment_dedupe_key(payment)
+                if dedupe_key in seen_payment_keys:
                     continue
-                normalized = dict(document.get("parsed_payload") or {})
-                payments.append(
-                    {
-                        "source": "cny_ledger_document",
-                        "document_id": str(document.get("document_id") or ""),
-                        "document_number": str(document.get("document_number") or normalized.get("document_number") or ""),
-                        "document_date": str(document.get("operation_date") or normalized.get("document_date") or ""),
-                        "operation_datetime": _normalize_datetime(
-                            document.get("operation_datetime") or normalized.get("operation_datetime") or normalized.get("execution_time")
-                        ),
-                        "cny_amount": normalized.get("cny_amount") or normalized.get("transfer_amount") or document.get("cny_amount"),
-                        "payment_details": str(normalized.get("payment_details") or ""),
-                        "contract_number": str(normalized.get("contract_number") or ""),
-                        "contract_date": str(normalized.get("contract_date") or ""),
-                        "invoice_number": str(normalized.get("invoice_number") or ""),
-                        "invoice_date": str(normalized.get("invoice_date") or ""),
-                        "mt103_ref": str(normalized.get("mt103_ref") or normalized.get("reference") or ""),
-                        "beneficiary_account": str(normalized.get("beneficiary_account") or ""),
-                    }
-                )
+                seen_payment_keys.add(dedupe_key)
+                payments.append(payment)
         return payments
 
     def _bank_fee_statement_preview_response(self, document: Mapping[str, Any], *, idempotent: bool) -> dict[str, Any]:
@@ -1070,6 +1090,18 @@ class SupplierFinancialDocumentsBlock:
         return payload
 
 
+def parse_financial_document_upload(
+    file_bytes: bytes,
+    *,
+    filename: str = "financial-document.pdf",
+    text_extractor: TextExtractor | None = None,
+) -> dict[str, Any]:
+    suffix = Path(filename).suffix.lower()
+    if suffix in BINARY_FINANCIAL_DOCUMENT_EXTENSIONS:
+        return parse_packing_list_workbook(file_bytes, filename=filename)
+    return parse_financial_document_pdf(file_bytes, filename=filename, text_extractor=text_extractor)
+
+
 def parse_financial_document_pdf(
     file_bytes: bytes,
     *,
@@ -1106,6 +1138,268 @@ def parse_financial_document_pdf(
                 fallback["warnings"] = _dedupe_strings(_string_list(fallback.get("warnings")))
                 return fallback
     return parsed
+
+
+def parse_packing_list_workbook(file_bytes: bytes, *, filename: str = "packing-list.xls") -> dict[str, Any]:
+    raw_parse: dict[str, Any] = {
+        "filename": filename,
+        "extraction": {"method": "workbook", "extension": Path(filename).suffix.lower()},
+    }
+    warnings: list[str] = []
+    errors: list[str] = []
+    try:
+        rows, sheet_name = _packing_list_workbook_rows(file_bytes, filename=filename)
+    except Exception as exc:
+        errors.append(f"packing list workbook parser failed: {exc}")
+        payload = _parsed_payload(
+            normalized={},
+            expense_lines=[],
+            raw_parse=raw_parse,
+            warnings=warnings,
+            errors=errors,
+        )
+        payload["parser_version"] = PACKING_LIST_PARSER_VERSION
+        return payload
+    raw_parse["sheet_name"] = sheet_name
+    raw_parse["row_count"] = len(rows)
+    normalized, parser_warnings = _parse_packing_list_rows(rows)
+    warnings.extend(parser_warnings)
+    payload = _parsed_payload(
+        normalized=normalized,
+        expense_lines=[],
+        raw_parse=raw_parse,
+        warnings=warnings,
+        errors=errors,
+    )
+    payload["parser_version"] = PACKING_LIST_PARSER_VERSION
+    return payload
+
+
+def _packing_list_workbook_rows(file_bytes: bytes, *, filename: str) -> tuple[list[list[Any]], str]:
+    if not file_bytes:
+        raise ValueError("packing list workbook is empty")
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".xlsx":
+        try:
+            from openpyxl import load_workbook  # type: ignore
+        except Exception as exc:  # pragma: no cover - dependency availability is runtime-owned
+            raise ValueError("openpyxl is not installed") from exc
+        workbook = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
+        worksheet = next((sheet for sheet in workbook.worksheets if sheet.max_row), workbook.worksheets[0] if workbook.worksheets else None)
+        if worksheet is None:
+            raise ValueError("packing list workbook does not contain worksheets")
+        return [[cell for cell in row] for row in worksheet.iter_rows(values_only=True)], worksheet.title
+    if suffix == ".xls":
+        try:
+            import xlrd  # type: ignore
+        except Exception as exc:  # pragma: no cover - dependency availability is runtime-owned
+            raise ValueError("xlrd is not installed for .xls packing list parsing") from exc
+        workbook = xlrd.open_workbook(file_contents=file_bytes)
+        if workbook.nsheets <= 0:
+            raise ValueError("packing list workbook does not contain worksheets")
+        sheet = next((item for item in workbook.sheets() if item.nrows > 0), workbook.sheet_by_index(0))
+        return [[sheet.cell_value(row_index, col_index) for col_index in range(sheet.ncols)] for row_index in range(sheet.nrows)], sheet.name
+    raise ValueError("packing list upload must be an .xls or .xlsx file")
+
+
+def _parse_packing_list_rows(rows: list[list[Any]]) -> tuple[dict[str, Any], list[str]]:
+    warnings: list[str] = []
+    title = _packing_list_title(rows)
+    header_index, columns = _packing_list_header(rows)
+    if header_index is None:
+        return (
+            {
+                "document_type": FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
+                "document_title": title,
+                "document_number": _packing_list_document_number(title),
+                "line_items": [],
+            },
+            ["Packing list parser did not find a supported table header"],
+        )
+    line_items: list[dict[str, Any]] = []
+    totals: dict[str, Decimal | None] = {
+        "total_cartons": None,
+        "total_quantity": None,
+        "total_gross_weight_kg": None,
+        "total_volume_m3": None,
+    }
+    current_description = ""
+    current_carton_size = ""
+    for row_index, row in enumerate(rows[header_index + 1 :], start=header_index + 2):
+        row_text = " ".join(_packing_cell_text(item) for item in row if _packing_cell_text(item))
+        if not row_text:
+            continue
+        if _packing_is_total_row(row):
+            totals["total_cartons"] = _packing_decimal(row, columns.get("carton_count")) or _packing_first_decimal(row)
+            totals["total_quantity"] = _packing_decimal(row, columns.get("total_qty"))
+            totals["total_gross_weight_kg"] = _packing_decimal(row, columns.get("total_gross_weight_kg"))
+            totals["total_volume_m3"] = _packing_decimal(row, columns.get("volume_m3"))
+            continue
+        carton_range = _normalize_carton_range(_packing_cell(row, columns.get("carton_range")))
+        carton_count = _packing_decimal(row, columns.get("carton_count"))
+        total_qty = _packing_decimal(row, columns.get("total_qty"))
+        gross_total = _packing_decimal(row, columns.get("total_gross_weight_kg"))
+        if not carton_range and carton_count is None and total_qty is None and gross_total is None:
+            continue
+        description = _packing_cell_text(_packing_cell(row, columns.get("description")))
+        if description:
+            current_description = description
+        carton_size = _packing_cell_text(_packing_cell(row, columns.get("carton_size")))
+        if carton_size:
+            current_carton_size = carton_size
+        model = _packing_cell_text(_packing_cell(row, columns.get("model")))
+        volume = _packing_decimal(row, columns.get("volume_m3"))
+        if volume is not None and totals.get("total_volume_m3") is None and len(line_items) == 0:
+            totals["total_volume_m3"] = volume
+            volume = _packing_volume_from_size(current_carton_size, carton_count)
+        elif volume is None:
+            volume = _packing_volume_from_size(current_carton_size, carton_count)
+        line_items.append(
+            {
+                "row_number": row_index,
+                "carton_range": carton_range,
+                "description": current_description,
+                "model": model,
+                "carton_count": _decimal_to_float(carton_count),
+                "qty_per_carton": _decimal_to_float(_packing_decimal(row, columns.get("qty_per_carton"))),
+                "total_qty": _decimal_to_float(total_qty),
+                "gross_weight_per_carton_kg": _decimal_to_float(_packing_decimal(row, columns.get("gross_weight_per_carton_kg"))),
+                "total_gross_weight_kg": _decimal_to_float(gross_total),
+                "carton_size": current_carton_size,
+                "volume_m3": _decimal_to_float_raw(volume),
+            }
+        )
+    if totals["total_cartons"] is None:
+        totals["total_cartons"] = _positive_decimal(_sum_decimal(item.get("carton_count") for item in line_items))
+    if totals["total_quantity"] is None:
+        totals["total_quantity"] = _positive_decimal(_sum_decimal(item.get("total_qty") for item in line_items))
+    if totals["total_gross_weight_kg"] is None:
+        totals["total_gross_weight_kg"] = _positive_decimal(_sum_decimal(item.get("total_gross_weight_kg") for item in line_items))
+    if totals["total_volume_m3"] is None:
+        totals["total_volume_m3"] = _positive_decimal(_sum_decimal(item.get("volume_m3") for item in line_items))
+    model_count = len({str(item.get("model") or "").strip() for item in line_items if str(item.get("model") or "").strip()})
+    carton_size = next((str(item.get("carton_size") or "") for item in line_items if str(item.get("carton_size") or "")), "")
+    normalized = {
+        "document_type": FINANCIAL_DOCUMENT_TYPE_PACKING_LIST,
+        "document_title": title,
+        "document_number": _packing_list_document_number(title),
+        "total_cartons": _decimal_to_float(totals["total_cartons"]),
+        "total_quantity": _decimal_to_float(totals["total_quantity"]),
+        "total_gross_weight_kg": _decimal_to_float(totals["total_gross_weight_kg"]),
+        "total_volume_m3": _decimal_to_float_raw(totals["total_volume_m3"]),
+        "carton_size": carton_size,
+        "model_count": model_count or None,
+        "avg_qty_per_carton": _decimal_to_float(_safe_div(totals["total_quantity"], totals["total_cartons"])),
+        "line_items": line_items,
+        "line_item_count": len(line_items),
+    }
+    missing = [
+        label
+        for key, label in (
+            ("total_cartons", "cartons"),
+            ("total_quantity", "quantity"),
+            ("total_gross_weight_kg", "gross weight"),
+            ("total_volume_m3", "volume"),
+        )
+        if normalized.get(key) is None
+    ]
+    if missing:
+        warnings.append("Packing list parser needs review: missing " + ", ".join(missing))
+    return normalized, warnings
+
+
+def _packing_list_title(rows: list[list[Any]]) -> str:
+    for row in rows[:8]:
+        text = " ".join(_packing_cell_text(item) for item in row if _packing_cell_text(item))
+        if "装箱" in text or "packing" in text.casefold():
+            return text
+    return ""
+
+
+def _packing_list_document_number(title: str) -> str:
+    return _first_match(title, r"\b([A-Z0-9]{3,})\b", flags=re.I)
+
+
+def _packing_list_header(rows: list[list[Any]]) -> tuple[int | None, dict[str, int]]:
+    aliases = {
+        "carton_range": ("箱号", "box", "carton"),
+        "description": ("名称", "name", "specification", "规格"),
+        "model": ("型号", "model"),
+        "carton_count": ("外箱数量", "ctns", "carton qty", "cartons"),
+        "qty_per_carton": ("数量/箱", "qty/ctn", "qty per carton"),
+        "total_qty": ("总数量", "total qty", "quantity"),
+        "gross_weight_per_carton_kg": ("毛重/箱", "g.w/ctn", "gross/ctn"),
+        "total_gross_weight_kg": ("总毛重", "total gross", "gross weight"),
+        "carton_size": ("纸箱尺寸", "carton size", "size"),
+        "volume_m3": ("体积", "volume", "cbm"),
+    }
+    for index, row in enumerate(rows):
+        normalized_cells = [_packing_header_text(item) for item in row]
+        columns: dict[str, int] = {}
+        for key, names in aliases.items():
+            for col_index, value in enumerate(normalized_cells):
+                if value and any(name.casefold() in value for name in names):
+                    columns[key] = col_index
+                    break
+        if {"carton_range", "model", "carton_count", "total_qty"}.issubset(columns):
+            return index, columns
+    return None, {}
+
+
+def _packing_is_total_row(row: list[Any]) -> bool:
+    text = " ".join(_packing_cell_text(item) for item in row if _packing_cell_text(item)).casefold()
+    return "total" in text or "合计" in text
+
+
+def _packing_cell(row: list[Any], index: int | None) -> Any:
+    if index is None or index < 0 or index >= len(row):
+        return None
+    return row[index]
+
+
+def _packing_decimal(row: list[Any], index: int | None) -> Decimal | None:
+    return _parse_decimal(_packing_cell(row, index))
+
+
+def _packing_first_decimal(row: list[Any]) -> Decimal | None:
+    for item in row:
+        value = _parse_decimal(item)
+        if value is not None:
+            return value
+    return None
+
+
+def _packing_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return _clean_value(str(value).replace("\n", " "))
+
+
+def _packing_header_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", _packing_cell_text(value)).casefold()
+
+
+def _normalize_carton_range(value: Any) -> str:
+    text = _packing_cell_text(value)
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("—", "-").replace("–", "-")
+    text = re.sub(r"-{2,}", "-", text)
+    return text
+
+
+def _packing_volume_from_size(carton_size: str, carton_count: Decimal | None) -> Decimal | None:
+    if carton_count is None or carton_count <= 0:
+        return None
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*[*xх×]\s*(\d+(?:[.,]\d+)?)\s*[*xх×]\s*(\d+(?:[.,]\d+)?)", carton_size)
+    if not match:
+        return None
+    dims = [_parse_decimal(item) for item in match.groups()]
+    if any(item is None for item in dims):
+        return None
+    volume_per_carton = dims[0] * dims[1] * dims[2] / Decimal("1000000")  # type: ignore[operator]
+    return volume_per_carton * carton_count
 
 
 def _customs_parse_missing_weight_or_value(parsed: Mapping[str, Any]) -> bool:
@@ -1253,6 +1547,7 @@ def build_financial_summary(
     quote_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE]
     invoice_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE]
     customs_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION]
+    packing_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_PACKING_LIST]
     quote_doc = quote_docs[0] if quote_docs else {}
     quote_meta = dict(quote_doc.get("normalized_parse") or {})
     quote_required_complete = bool(quote_meta.get("quote_required_amounts_complete")) if quote_docs else False
@@ -1429,6 +1724,7 @@ def build_financial_summary(
             "net_weight_kg": _decimal_to_float(customs_net_weight),
             "document_count": len(customs_docs),
         },
+        "packing_list": _packing_list_summary(packing_docs),
         "logistics_efficiency": {
             "rub_per_kg": _decimal_to_float(logistics_rub_per_kg),
             "rub_per_m3": _decimal_to_float(logistics_rub_per_m3),
@@ -1456,6 +1752,37 @@ def build_financial_summary(
         },
         "quote_invoice_match": rate_summary,
         "warnings": _dedupe_strings(warnings),
+    }
+
+
+def _packing_list_summary(documents: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if not documents:
+        return {
+            "document_count": 0,
+            "total_cartons": None,
+            "total_quantity": None,
+            "total_gross_weight_kg": None,
+            "total_volume_m3": None,
+            "carton_size": "",
+            "model_count": None,
+            "avg_qty_per_carton": None,
+        }
+    metas = [dict(document.get("normalized_parse") or {}) for document in documents]
+    primary = metas[0] if metas else {}
+    total_cartons = _positive_decimal(_sum_decimal(meta.get("total_cartons") for meta in metas))
+    total_quantity = _positive_decimal(_sum_decimal(meta.get("total_quantity") for meta in metas))
+    total_gross = _positive_decimal(_sum_decimal(meta.get("total_gross_weight_kg") for meta in metas))
+    total_volume = _positive_decimal(_sum_decimal(meta.get("total_volume_m3") for meta in metas))
+    return {
+        "document_count": len(documents),
+        "document_number": str(primary.get("document_number") or primary.get("document_title") or ""),
+        "total_cartons": _decimal_to_float(total_cartons),
+        "total_quantity": _decimal_to_float(total_quantity),
+        "total_gross_weight_kg": _decimal_to_float(total_gross),
+        "total_volume_m3": _decimal_to_float_raw(total_volume),
+        "carton_size": str(primary.get("carton_size") or ""),
+        "model_count": primary.get("model_count"),
+        "avg_qty_per_carton": _decimal_to_float(_safe_div(total_quantity, total_cartons)),
     }
 
 
@@ -2910,11 +3237,11 @@ def _extract_vtb_statement_rows(text: str, *, account_currency: str) -> list[dic
             return
         segment = " ".join(current_lines)
         lower = segment.casefold()
-        if any(token in lower for token in ("комис", "ндс", "swift", "вк", "валютн", "операц", "платеж", "платёж", "перевод", "зачислен", "покупк", "конверс")):
+        if any(token in lower for token in ("комис", "ндс", "swift", "mt103", "adv pmt", "advance payment", "вк", "валютн", "операц", "платеж", "платёж", "перевод", "зачислен", "покупк", "конверс")):
             candidates.append((current_index, segment))
 
     for index, line in enumerate(lines):
-        if re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", line):
+        if _looks_like_statement_row_start(line):
             flush_current()
             current_index = index
             current_lines = [line]
@@ -2926,7 +3253,7 @@ def _extract_vtb_statement_rows(text: str, *, account_currency: str) -> list[dic
             lower = line.casefold()
             if not re.search(r"\d", line):
                 continue
-            if any(token in lower for token in ("комис", "ндс", "swift", "вк", "валютн", "операц", "платеж", "платёж", "перевод", "зачислен", "покупк", "конверс")):
+            if any(token in lower for token in ("комис", "ндс", "swift", "mt103", "adv pmt", "advance payment", "вк", "валютн", "операц", "платеж", "платёж", "перевод", "зачислен", "покупк", "конверс")):
                 candidates.append((index, line))
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2948,12 +3275,15 @@ def _statement_row_from_segment(segment: str, *, index: int, account_currency: s
     operation_date = _parse_date(_first_match(segment, r"(\d{1,2}\.\d{1,2}\.\d{4})"))
     document_number = (
         _first_match(segment, r"(?:Плат[её]жное\s+поручение|Поручение|Док(?:умент)?\.?)\s*№\s*([A-Za-zА-Яа-я0-9/-]+)", flags=re.I)
+        or _first_match(segment, r"^\d{1,2}\.\d{1,2}\.\d{2,4}\s+([A-Za-zА-Яа-я0-9/-]+)\s+\S+\s+\d{8,14}\s+\d{9}\s+(?:\d[\s-]?){20}", flags=re.I)
         or ""
     )
     operation_number = _extract_statement_operation_number(segment)
     category = _statement_fee_category(segment)
     row_type = "bank_fee" if category else _statement_non_fee_row_type(segment)
-    amount_currency = _statement_amount_currency(segment, account_currency=account_currency)
+    if not operation_number and row_type == "supplier_payment":
+        operation_number = _digits_only(document_number)
+    amount_currency = _statement_amount_currency(segment, account_currency=account_currency, row_type=row_type)
     debit_cny = amount_currency[0] if amount_currency[1] == "CNY" and row_type in {"bank_fee", "supplier_payment"} else None
     debit_rub = amount_currency[0] if amount_currency[1] == "RUB" and row_type in {"bank_fee", "supplier_payment"} else None
     credit_cny = amount_currency[0] if amount_currency[1] == "CNY" and row_type == "conversion_in" else None
@@ -2981,7 +3311,7 @@ def _statement_row_from_segment(segment: str, *, index: int, account_currency: s
         "operation_number": operation_number,
         "operation_code": _first_match(segment, r"\bВО\s*([0-9]{3,6})\b", flags=re.I),
         "counterparty": _extract_statement_counterparty(segment),
-        "counterparty_account": _first_match(segment, r"\b(?:\d[\s-]?){20}\b") or "",
+        "counterparty_account": _extract_statement_counterparty_account(segment),
         "debit_cny": _decimal_to_storage(debit_cny) if debit_cny is not None else None,
         "credit_cny": _decimal_to_storage(credit_cny) if credit_cny is not None else None,
         "debit_rub": _decimal_to_storage(debit_rub) if debit_rub is not None else None,
@@ -3000,18 +3330,28 @@ def _statement_row_from_segment(segment: str, *, index: int, account_currency: s
     }
 
 
+def _looks_like_statement_row_start(line: str) -> bool:
+    if not re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", line):
+        return False
+    if re.search(r"\b(?:\d[\s-]?){20}\b", line):
+        return True
+    if re.search(r"\b(?:Документ|Док\.|Плат[её]жное\s+поручение|Поручение)\b", line, flags=re.I):
+        return True
+    return False
+
+
 def _statement_non_fee_row_type(segment: str) -> str:
     lower = segment.casefold()
     if any(token in lower for token in ("зачислен", "покупк", "конверс", "purchase of foreign currency")):
         return "conversion_in"
-    if any(token in lower for token in ("перевод", "платеж", "платёж", "payment", "swift")):
+    if any(token in lower for token in ("перевод", "платеж", "платёж", "payment", "adv pmt", "mt103", "swift")):
         return "supplier_payment"
     return "other"
 
 
 def _statement_fee_category(segment: str) -> str:
     lower = segment.casefold()
-    if "ндс" in lower and ("вк" in lower or "валютн" in lower):
+    if re.search(r"ндс\s+за\s+(?:вк|валютн)", lower):
         return EXPENSE_CATEGORY_CURRENCY_CONTROL_VAT
     if ("вк" in lower or "валютн" in lower) and "комис" in lower:
         return EXPENSE_CATEGORY_CURRENCY_CONTROL_FEE
@@ -3022,7 +3362,26 @@ def _statement_fee_category(segment: str) -> str:
     return ""
 
 
-def _statement_amount_currency(segment: str, *, account_currency: str) -> tuple[Decimal | None, str]:
+def _statement_amount_currency(segment: str, *, account_currency: str, row_type: str = "") -> tuple[Decimal | None, str]:
+    rub_debit, rub_credit, cny_debit, cny_credit = _statement_turnover_columns(segment)
+    if row_type in {"bank_fee", "supplier_payment"}:
+        if account_currency == "CNY" and cny_debit is not None and cny_debit > 0:
+            return cny_debit, "CNY"
+        if account_currency == "RUB" and rub_debit is not None and rub_debit > 0:
+            return rub_debit, "RUB"
+        if cny_debit is not None and cny_debit > 0:
+            return cny_debit, "CNY"
+        if rub_debit is not None and rub_debit > 0:
+            return rub_debit, "RUB"
+    if row_type == "conversion_in":
+        if account_currency == "CNY" and cny_credit is not None and cny_credit > 0:
+            return cny_credit, "CNY"
+        if account_currency == "RUB" and rub_credit is not None and rub_credit > 0:
+            return rub_credit, "RUB"
+        if cny_credit is not None and cny_credit > 0:
+            return cny_credit, "CNY"
+        if rub_credit is not None and rub_credit > 0:
+            return rub_credit, "RUB"
     labeled = re.search(
         r"(?:Дебет|Списано|Списание|Комиссия|НДС|Debit|Charge)[^\d]{0,40}"
         r"([0-9][\d\s\u00a0\u202f.,]*[,.]\d{1,2})\s*(CNY|RUB|CNH|RMB|РУБ)\b",
@@ -3038,6 +3397,23 @@ def _statement_amount_currency(segment: str, *, account_currency: str) -> tuple[
     values = _extract_decimal_values(segment)
     value = values[-1] if values else None
     return value, account_currency
+
+
+def _statement_turnover_columns(segment: str) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+    account_match = re.search(r"\b(?:\d[\s-]?){20}\b", segment)
+    if not account_match:
+        return None, None, None, None
+    tail = segment[account_match.end() :] if account_match else segment
+    values: list[Decimal] = []
+    for match in re.finditer(r"(?<![\d./])([0-9][\d\s\u00a0\u202f]*[,.]\d{2})(?![\d./])", tail):
+        value = _parse_decimal(match.group(1))
+        if value is not None:
+            values.append(value)
+        if len(values) >= 4:
+            break
+    while len(values) < 4:
+        values.append(Decimal("0"))
+    return values[0], values[1], values[2], values[3]
 
 
 def _extract_currency_amount_from_segment(segment: str, currency: str) -> Decimal | None:
@@ -3075,6 +3451,7 @@ def _extract_statement_operation_number(segment: str) -> str:
     return (
         _first_match(segment, r"операц(?:ии|ия|и)?\s*№\s*([0-9]+)", flags=re.I)
         or _first_match(segment, r"Плат[её]жное\s+поручение\s*№\s*([0-9]+)", flags=re.I)
+        or _first_match(segment, r"(?:swift|шанхай)[^№]{0,40}№\s*([0-9]+)", flags=re.I)
         or _first_match(segment, r"\boperation\s*#?\s*([0-9]+)", flags=re.I)
         or ""
     )
@@ -3084,6 +3461,12 @@ def _extract_statement_counterparty(segment: str) -> str:
     return _clean_value(
         _first_match(segment, r"(?:Контрагент|Получатель|Плательщик|Beneficiary|Counterparty)[:\s]+(.{3,120}?)(?:\s{2,}|$)", flags=re.I)
     )
+
+
+def _extract_statement_counterparty_account(segment: str) -> str:
+    value = _first_match(segment, r"\b((?:\d[\s-]?){20})\b", flags=re.I)
+    digits = re.sub(r"\D+", "", value)
+    return digits if len(digits) == 20 else ""
 
 
 def _extract_statement_mt103(segment: str) -> str:
@@ -3147,6 +3530,18 @@ def _payment_anchor_from_document(document: Mapping[str, Any]) -> dict[str, Any]
         "mt103_ref": str(document.get("mt103_ref") or ""),
         "beneficiary_account": str(document.get("beneficiary_account") or ""),
     }
+
+
+def _supplier_payment_dedupe_key(document: Mapping[str, Any]) -> str:
+    document_id = str(document.get("document_id") or "").strip()
+    if document_id and str(document.get("source") or "") == "financial_document":
+        return f"financial:{document_id}"
+    amount = _decimal_to_storage(_parse_decimal(document.get("cny_amount") or document.get("transfer_amount") or document.get("total_amount")))
+    date_value = _optional_iso_date(document.get("operation_datetime")) or _optional_iso_date(document.get("document_date"))
+    operation_number = _extract_statement_operation_number(str(document.get("payment_details") or "")) or _digits_only(document.get("document_number"))
+    contract = str(document.get("contract_number") or "").strip()
+    invoice = str(document.get("invoice_number") or "").strip()
+    return "|".join([operation_number, amount, date_value, contract, invoice]).strip("|")
 
 
 def _match_statement_anchor(anchor: Mapping[str, Any], rows: list[Mapping[str, Any]], *, shipment: Mapping[str, Any]) -> dict[str, Any]:
@@ -4619,6 +5014,13 @@ def _parse_status_for_payload(
             "contract_number",
             "contract_date",
         ],
+        FINANCIAL_DOCUMENT_TYPE_PACKING_LIST: [
+            "document_title",
+            "total_cartons",
+            "total_quantity",
+            "total_gross_weight_kg",
+            "total_volume_m3",
+        ],
     }
     missing = [key for key in required_by_type.get(str(normalized.get("document_type") or ""), []) if not normalized.get(key)]
     if missing:
@@ -4965,6 +5367,12 @@ def _decimal_to_float(value: Decimal | None) -> float | None:
     return float(value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP))
 
 
+def _decimal_to_float_raw(value: Decimal | None) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
 def _decimal_to_display(value: Decimal | None) -> str:
     if value is None:
         return ""
@@ -5082,6 +5490,18 @@ def _safe_filename(value: str) -> str:
     raw = Path(str(value or "financial-document.pdf")).name
     raw = raw.replace("/", "_").replace("\\", "_").strip()
     return raw or "financial-document.pdf"
+
+
+def _financial_document_content_type(filename: str, uploaded_content_type: str | None) -> str:
+    explicit = str(uploaded_content_type or "").split(";", 1)[0].strip().lower()
+    if explicit:
+        return explicit
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".xls":
+        return "application/vnd.ms-excel"
+    if suffix == ".xlsx":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return FINANCIAL_DOCUMENT_CONTENT_TYPE
 
 
 def _relative_to_runtime(runtime_dir: Path, target_path: Path) -> str:

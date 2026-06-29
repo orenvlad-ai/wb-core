@@ -329,7 +329,7 @@ Current promo live-wiring note:
   - `SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL` = operator-facing org label for the same supplier;
   - `SELLER_PORTAL_RELOGIN_SSH_DESTINATION` = SSH host alias baked into the downloadable macOS launcher for localhost-only noVNC tunneling.
 - hosted deploy contract must materialize the bounded workbook/parser/browser dependency on the remote system python:
-  - current canonical packages = `openpyxl==3.1.5`, `playwright==1.58.0`, `pypdf==6.4.1`
+  - current canonical packages = `openpyxl==3.1.5`, `xlrd==2.0.1`, `playwright==1.58.0`, `pypdf==6.4.1`
   - deploy runner installs them on host before restart if they are still missing;
   - deploy runner also verifies or installs Playwright Chromium with host browser dependencies before restart.
 - current seller-portal relogin recovery on the EU hosted runtime is repo-owned dependency setup, not a manual one-off host state:
@@ -404,7 +404,7 @@ Current deploy contract note:
   - sync current checkout;
   - ensure host OS dependencies for SellerPortalBot recovery are present (`python3-pip`, `python3-venv`, `xvfb`, `x11vnc`, `novnc`, `websockify`, `openbox`);
   - ensure host OS dependencies for SellerPortalBot owner runtime are present (`postgresql`, `postgresql-client`);
-  - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`, `playwright==1.58.0`, `pypdf==6.4.1`);
+  - ensure required hosted runtime python packages are present (`openpyxl==3.1.5`, `xlrd==2.0.1`, `playwright==1.58.0`, `pypdf==6.4.1`);
   - create/repair `/opt/wb-web-bot/venv`, install `playwright==1.58.0` and `psycopg2-binary==2.9.11` into it and ensure Playwright Chromium can launch from both Python contexts;
   - create/repair `/opt/wb-ai/venv`, install the pinned local API/handoff packages and verify `/opt/wb-web-bot/bot` plus `/opt/wb-ai/run_web_source_handoff.py` imports;
   - install/update repo-owned systemd units when configured;

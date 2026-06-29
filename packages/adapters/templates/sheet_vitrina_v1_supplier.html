@@ -171,8 +171,8 @@
       background: rgba(170, 176, 197, 0.05);
     }
     .document-row-missing .badge {
-      color: var(--muted);
-      background: rgba(170, 176, 197, 0.10);
+      color: var(--danger);
+      background: rgba(251, 113, 133, 0.14);
     }
     .document-row-uploaded { cursor: pointer; }
     .document-row-uploaded:hover td { background: rgba(56, 189, 248, 0.08); }
@@ -544,7 +544,7 @@
             <button id="addFinancialDocumentButton" class="primary compact" type="button">Добавить документ</button>
             <a id="allDocumentsPackageLink" class="button-link compact" href="#" hidden>Скачать все документы</a>
             <a id="logisticsDocumentsPackageLink" class="button-link compact" href="#" hidden>Скачать пакет для логистов</a>
-            <input id="financialDocumentFileInput" type="file" accept=".pdf" multiple hidden>
+            <input id="financialDocumentFileInput" type="file" accept=".pdf,.xls,.xlsx" multiple hidden>
             <p id="financialDocumentsMessage" class="message"></p>
             <ul id="financialUploadProgress" class="finance-upload-progress" hidden></ul>
           </div>
@@ -746,7 +746,8 @@
             bank_control_statement: "Ведомость банковского контроля",
             bank_transfer_application: "Заявление на перевод ВТБ / платёжка",
             bank_fee_statement: "Банковская выписка для комиссий",
-            bank_fee: "Комиссия банка CNY"
+            bank_fee: "Комиссия банка CNY",
+            packing_list: "Packing list / Упаковочный лист"
           };
           const orderDocumentStatusLabels = {
             uploaded: "Загружен",
@@ -815,6 +816,13 @@
         const number = Number(value);
         return Number.isFinite(number)
           ? new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(number)
+          : "-";
+      }
+
+      function formatVolume(value) {
+        const number = Number(value);
+        return Number.isFinite(number)
+          ? new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 6 }).format(number)
           : "-";
       }
 
@@ -1547,6 +1555,7 @@
         const quote = summary.quote || {};
         const invoices = summary.invoices || {};
         const customs = summary.customs_declaration || {};
+        const packing = summary.packing_list || {};
         const match = summary.quote_invoice_match || {};
         const perKg = summary.per_kg || {};
         const perUnit = summary.per_unit || {};
@@ -1579,6 +1588,18 @@
               ["КП: доставка+таможня, ₽/шт", formatAmount(perUnit.quote_delivery_customs_rub_per_unit, "₽")],
               ["Факт: доставка+таможня, ₽/шт", formatAmount(perUnit.fact_delivery_customs_rub_per_unit, "₽")],
               ["Себестоимость на единицу товара", formatAmount(perUnit.exact_landed_cost_per_unit_rub, "₽"), exactCostTooltip(perUnit)]
+            ]
+          },
+          {
+            title: "Упаковочный лист",
+            items: [
+              ["Коробок", formatNumber(packing.total_cartons)],
+              ["Товаров, шт", formatNumber(packing.total_quantity)],
+              ["Вес брутто, кг", formatAmount(packing.total_gross_weight_kg, "кг")],
+              ["Объём, м³", formatVolume(packing.total_volume_m3)],
+              ["Размер короба", packing.carton_size || "—"],
+              ["Моделей", formatNumber(packing.model_count)],
+              ["Среднее шт/короб", formatNumber(packing.avg_qty_per_carton)]
             ]
           },
           {
@@ -1696,7 +1717,7 @@
         if (status === "parsed" || status === "confirmed" || status === "uploaded") {
           return "success";
         }
-        if (status === "parse_error" || status === "error") {
+        if (status === "parse_error" || status === "error" || status === "missing") {
           return "error";
         }
         return "warning";
@@ -1825,6 +1846,18 @@
             { label: "Комиссии", value: normalized.charges_mode }
           ];
         }
+        if (type === "packing_list") {
+          return [
+            { label: "Документ", value: normalized.document_title || document.document_number },
+            { label: "Коробок", value: formatNumber(normalized.total_cartons) },
+            { label: "Товаров, шт", value: formatNumber(normalized.total_quantity) },
+            { label: "Вес брутто", value: formatAmount(normalized.total_gross_weight_kg, "кг") },
+            { label: "Объём", value: normalized.total_volume_m3 != null ? (formatVolume(normalized.total_volume_m3) + " м³") : "" },
+            { label: "Размер короба", value: normalized.carton_size },
+            { label: "Моделей", value: formatNumber(normalized.model_count) },
+            { label: "Среднее шт/короб", value: formatNumber(normalized.avg_qty_per_carton) }
+          ];
+        }
         return [{ label: "Тип", value: type || "-" }];
       }
 
@@ -1937,8 +1970,8 @@
         try {
           for (let index = 0; index < files.length; index += 1) {
             const file = files[index];
-            if (!file.name.toLowerCase().endsWith(".pdf")) {
-              progress[index] = { name: file.name, status: "Не PDF", tone: "error" };
+            if (!/\.(pdf|xls|xlsx)$/i.test(file.name)) {
+              progress[index] = { name: file.name, status: "Нужен PDF/XLS/XLSX", tone: "error" };
               errorCount += 1;
               renderFinancialUploadProgress(progress);
               continue;
@@ -2032,7 +2065,6 @@
           await loadFinancialDocuments({ selectedDocumentId: documentId });
           const detail = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), { headers: { Accept: "application/json" } });
           currentShipment = detail;
-          fillFormFromShipment(detail);
           renderCard();
           await loadRegistry();
           setMessage(financialDocumentsMessage, "Комиссии импортированы.", "success");

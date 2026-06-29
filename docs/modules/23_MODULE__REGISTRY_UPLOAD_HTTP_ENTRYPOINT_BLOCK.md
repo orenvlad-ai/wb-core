@@ -395,6 +395,7 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents` also detects CNY conversion purchase and supplier CNY payment PDFs, stores them once in the CNY account ledger with `source_order_id`, and triggers order CNY calculation replay instead of duplicating them as separate financial-document truth
   - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents` also detects VTB bank statements for commissions, stores a parent `bank_fee_statement` financial document scoped to the order and returns preview without creating expense lines
   - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/confirm-import` confirms importable statement fee rows idempotently; CNY-account fee rows create linked canonical `bank_fee` ledger documents, RUB-account fee rows remain direct order expense lines
+  - `POST /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents` accepts `packing_list` uploads as `.xls`/`.xlsx`, stores the workbook as a supplier financial document, parses carton/quantity/weight/volume summary fields and returns them in the order document summary/checklist
 - Для compact daily-report compare basis current live rule остаётся fully server-side:
   - `current_business_date` = now in `Asia/Yekaterinburg`
   - `newer_closed_day` читается как `yesterday_closed` из latest persisted ready snapshot `<= default_business_as_of_date(now)`

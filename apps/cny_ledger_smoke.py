@@ -669,6 +669,24 @@ def _assert_http_routes_and_order_integration() -> None:
                 raise AssertionError(f"exact cost per unit must be exposed after confirmed fees: {detail_status} {detail}")
             if detail.get("exact_cost_status") != "ok":
                 raise AssertionError(f"exact cost status must be ok when CNY ledger and quantity are available: {detail}")
+            delete_statement_status, delete_statement = _delete_json(
+                f"{base_url}{order_doc_path}/{statement_document_id}"
+            )
+            if (
+                delete_statement_status != 200
+                or delete_statement.get("deleted") is not True
+                or len(delete_statement.get("cny_documents_deleted") or []) != 3
+                or not delete_statement.get("cny_replay")
+            ):
+                raise AssertionError(f"bank statement delete must cleanup linked CNY fees: {delete_statement_status} {delete_statement}")
+            remaining_fee_documents = [
+                item
+                for item in runtime.list_cny_documents()
+                if item.get("document_type") == CNY_DOCUMENT_TYPE_BANK_FEE
+                and item.get("source_order_id") == "http-order"
+            ]
+            if remaining_fee_documents:
+                raise AssertionError(f"linked CNY bank fee documents must be removed after source delete: {remaining_fee_documents}")
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -940,6 +958,15 @@ def _get_text(url: str) -> tuple[int, str]:
 def _open_json(request: urllib_request.Request) -> tuple[int, dict[str, object]]:
     try:
         with urllib_request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _delete_json(url: str) -> tuple[int, dict[str, object]]:
+    request = urllib_request.Request(url, method="DELETE", headers={"Accept": "application/json"})
+    try:
+        with urllib_request.urlopen(request, timeout=10) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib_error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
