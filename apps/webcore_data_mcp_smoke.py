@@ -76,6 +76,29 @@ def _assert_tool_list(gateway: WebCoreDataMcpGateway) -> None:
 def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
     calls = [
         ("get_data_freshness_status", {}),
+        ("get_webcore_data_map", {"domain": "all"}),
+        ("resolve_webcore_data_request", {"intent": "покажи реестр поставок", "limit": 5}),
+        ("resolve_webcore_data_request", {"intent": "покажи документы по поставке", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "открой инвойс", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи БТТ", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи WB supply", "supply_id": "WB-SUP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи метрику за дату", "metric_key_or_label": "total_orderSum", "date": "2026-06-26"}),
+        ("resolve_webcore_data_request", {"intent": "найди SKU", "sku_or_nm_id": "210183142"}),
+        ("resolve_webcore_data_request", {"intent": "проверь свежесть данных"}),
+        ("list_webcore_business_tables", {}),
+        ("get_webcore_business_table_schema", {"table": "sheet_vitrina_v1_supplier_shipments"}),
+        ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_wb_supplies", "limit": 5, "include_raw_business_payloads": True}),
+        ("get_supplier_shipments_registry", {"limit": 5}),
+        ("get_supplier_shipment_full_details", {"shipment_id": "SHIP-1", "include_raw_business_payloads": True}),
+        ("get_wb_supplies_registry", {"limit": 5}),
+        ("get_wb_supply_full_details", {"supply_id": "WB-SUP-1", "include_raw_business_payloads": True}),
+        ("list_supply_artifacts", {"shipment_id": "SHIP-1", "limit": 10}),
+        ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "metadata"}),
+        ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "parsed"}),
+        ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "text", "max_bytes": 4}),
+        ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "text", "max_bytes": 200}),
+        ("get_supply_artifact", {"artifact_ref": "financial_document:SHIP-1:FD-1", "mode": "base64_chunk", "max_bytes": 64}),
+        ("get_supply_artifact", {"artifact_ref": "financial_document:SHIP-1:FD-BAD", "mode": "base64_chunk"}),
         ("search_business_objects", {"query": "210183142"}),
         ("explain_metric_source", {"metric_key": "orders_revenue_rub"}),
         ("get_wb_supplies_summary", {"limit": 5}),
@@ -97,7 +120,7 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
     for name, args in calls:
         result = gateway.call_tool(name, args, identity="smoke")
         serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)
-        if "/tmp/secret" in serialized or "storage_state" in serialized or "source_file_path" in serialized:
+        if "/tmp/secret" in serialized or "storage_state" in serialized:
             raise AssertionError(f"redaction failed for {name}: {serialized}")
         if name == "get_revenue_by_date" and not args.get("revenue_metric"):
             if result.get("status") != "ambiguous_revenue_metric":
@@ -109,9 +132,40 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         if name == "get_revenue_by_date" and args.get("revenue_metric") == "total_orderSum":
             if result.get("status") != "ok" or not result.get("values"):
                 raise AssertionError(f"total_orderSum revenue projection failed: {result}")
+        if name == "get_webcore_data_map":
+            domains = {item.get("domain") for item in result.get("domains") or []}
+            if not {"supplier_shipments", "artifacts", "metrics"}.issubset(domains):
+                raise AssertionError(f"data map missing required domains: {result}")
+        if name == "resolve_webcore_data_request" and "реестр поставок" in str(args.get("intent")):
+            if not any(call.get("tool") == "get_supplier_shipments_registry" for call in result.get("recommended_calls") or []):
+                raise AssertionError(f"resolver did not route registry intent: {result}")
+        if name == "get_webcore_business_table_rows":
+            rows = result.get("rows") or []
+            serialized_rows = json.dumps(rows, ensure_ascii=False)
+            if "secret_path" in serialized_rows and "/tmp/secret" in serialized_rows:
+                raise AssertionError(f"raw business payload was not scrubbed: {result}")
+        if name == "get_supply_artifact" and args.get("artifact_ref") == "trade_document:TD-1" and args.get("mode") == "text":
+            if args.get("max_bytes") == 4 and result.get("status") != "too_large":
+                raise AssertionError(f"large text artifact should require chunk mode: {result}")
+            if args.get("max_bytes") != 4 and "token=" in json.dumps(result, ensure_ascii=False).lower():
+                raise AssertionError(f"artifact text was not scrubbed: {result}")
+        if name == "get_supply_artifact" and args.get("artifact_ref") == "financial_document:SHIP-1:FD-BAD":
+            if result.get("status") != "path_outside_runtime_root":
+                raise AssertionError(f"path traversal artifact must be blocked: {result}")
     unknown = gateway.call_tool("explain_metric_source", {"metric_key": "not_real_metric"}, identity="smoke")
     if unknown.get("status") != "metric_not_found":
         raise AssertionError(f"metric_not_found expected: {unknown}")
+    for bad_name, bad_args in [
+        ("get_webcore_business_table_schema", {"table": "sqlite_master"}),
+        ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_supplier_shipments", "filters": {"source_file_path": "/tmp/secret"}}),
+        ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_supplier_shipments", "order_by": "source_file_path"}),
+    ]:
+        try:
+            gateway.call_tool(bad_name, bad_args, identity="smoke")
+        except Exception:
+            pass
+        else:
+            raise AssertionError(f"unsafe table access should fail: {bad_name} {bad_args}")
 
 
 def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
@@ -424,6 +478,18 @@ def _b64(value: bytes) -> str:
 
 
 def _create_fixture_db(db_path: Path) -> None:
+    runtime_root = db_path.parent
+    trade_file = Path("trade_documents/files/contract/TD-1/contract.txt")
+    financial_file = Path("supplier_financial_documents/files/SHIP-1/FD-1/fd.pdf")
+    cny_file = Path("cny_documents/files/CNY-1/cny.pdf")
+    for relative_path, body in (
+        (trade_file, b"Contract text token=must-redact"),
+        (financial_file, b"%PDF-1.4\nfinancial fixture\n"),
+        (cny_file, b"%PDF-1.4\ncny fixture\n"),
+    ):
+        target = runtime_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
     with closing(sqlite3.connect(db_path)) as conn:
         conn.executescript(
             """
@@ -551,12 +617,23 @@ def _create_fixture_db(db_path: Path) -> None:
                 document_id TEXT PRIMARY KEY,
                 supplier_order_id TEXT NOT NULL,
                 document_type TEXT NOT NULL,
+                original_filename TEXT,
                 stored_file_path TEXT NOT NULL,
+                file_content_type TEXT,
+                file_sha256 TEXT,
                 uploaded_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 parse_status TEXT NOT NULL,
+                vendor TEXT,
+                document_number TEXT,
                 document_date TEXT,
-                total_amount_rub REAL
+                currency TEXT,
+                total_amount REAL,
+                total_amount_rub REAL,
+                raw_parse_json TEXT,
+                normalized_parse_json TEXT,
+                warnings_json TEXT,
+                errors_json TEXT
             );
             CREATE TABLE sheet_vitrina_v1_supplier_financial_expense_lines (
                 line_id TEXT PRIMARY KEY,
@@ -565,15 +642,91 @@ def _create_fixture_db(db_path: Path) -> None:
                 sort_order INTEGER NOT NULL,
                 category TEXT NOT NULL,
                 stage TEXT,
-                amount_rub REAL
+                amount_rub REAL,
+                raw_json TEXT
             );
             CREATE TABLE sheet_vitrina_v1_trade_documents (
                 document_id TEXT PRIMARY KEY,
                 document_type TEXT NOT NULL,
+                number TEXT,
+                document_date TEXT,
+                supplier_name TEXT,
+                currency TEXT,
+                amount_total REAL,
                 source_shipment_id TEXT,
+                file_original_name TEXT,
+                file_content_type TEXT,
+                file_sha256 TEXT,
                 file_path TEXT NOT NULL,
+                parsed_metadata_json TEXT,
+                warnings_json TEXT,
+                errors_json TEXT,
                 status TEXT NOT NULL,
+                created_at TEXT,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_invoice_contract_links (
+                invoice_document_id TEXT PRIMARY KEY,
+                contract_document_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                linked_by TEXT,
+                source TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_cny_documents (
+                document_id TEXT PRIMARY KEY,
+                document_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_order_id TEXT,
+                context_order_id TEXT,
+                linked_financial_document_id TEXT,
+                original_filename TEXT,
+                stored_file_path TEXT,
+                file_content_type TEXT,
+                file_sha256 TEXT,
+                natural_key TEXT,
+                uploaded_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                operation_date TEXT,
+                operation_datetime TEXT,
+                status TEXT NOT NULL,
+                document_number TEXT,
+                currency TEXT,
+                rub_amount TEXT,
+                cny_amount TEXT,
+                bank_rate TEXT,
+                parsed_payload_json TEXT,
+                raw_parse_json TEXT,
+                warnings_json TEXT,
+                errors_json TEXT
+            );
+            CREATE TABLE sheet_vitrina_v1_cny_ledger_operations (
+                operation_id TEXT PRIMARY KEY,
+                operation_type TEXT NOT NULL,
+                source_document_id TEXT,
+                source_order_id TEXT,
+                operation_date TEXT,
+                operation_datetime TEXT,
+                sequence_key TEXT NOT NULL,
+                cny_delta TEXT,
+                rub_value_delta TEXT,
+                status TEXT NOT NULL,
+                error_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sheet_vitrina_v1_cny_ledger_replay_state (
+                slot INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                reason TEXT,
+                replayed_at TEXT NOT NULL,
+                operation_count INTEGER,
+                document_count INTEGER,
+                balance_cny TEXT,
+                balance_rub_value TEXT,
+                average_rate TEXT,
+                diagnostics_json TEXT
             );
             CREATE TABLE sheet_vitrina_v1_nomenclature_items (
                 item_id TEXT PRIMARY KEY,
@@ -724,16 +877,138 @@ def _create_fixture_db(db_path: Path) -> None:
             [("line-1", "SHIP-1", "product", 1, 210183142, 10, 500, "matched")],
         )
         conn.execute(
-            "INSERT INTO sheet_vitrina_v1_supplier_financial_documents VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("FD-1", "SHIP-1", "logistics_invoice", "/tmp/secret/fd.pdf", "2026-06-26T15:35:38Z", "2026-06-26T15:35:38Z", "parsed", "2026-06-25", 2000),
+            "INSERT INTO sheet_vitrina_v1_supplier_financial_documents VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "FD-1",
+                "SHIP-1",
+                "logistics_invoice",
+                "fd.pdf",
+                str(financial_file),
+                "application/pdf",
+                "hash-redacted",
+                "2026-06-26T15:35:38Z",
+                "2026-06-26T15:35:38Z",
+                "parsed",
+                "Logistics vendor",
+                "FD-001",
+                "2026-06-25",
+                "RUB",
+                2000,
+                2000,
+                json.dumps({"token": "must-redact"}),
+                json.dumps({"document_type": "logistics_invoice", "total_amount_rub": 2000}),
+                "[]",
+                "[]",
+            ),
         )
         conn.execute(
-            "INSERT INTO sheet_vitrina_v1_supplier_financial_expense_lines VALUES(?, ?, ?, ?, ?, ?, ?)",
-            ("EL-1", "FD-1", "SHIP-1", 1, "logistics", "china_to_ff", 2000),
+            "INSERT INTO sheet_vitrina_v1_supplier_financial_documents VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "FD-BAD",
+                "SHIP-1",
+                "bank_transfer_application",
+                "bad.pdf",
+                "/tmp/secret/fd.pdf",
+                "application/pdf",
+                "hash-redacted",
+                "2026-06-26T15:35:38Z",
+                "2026-06-26T15:35:38Z",
+                "parsed",
+                "Bank",
+                "BAD-001",
+                "2026-06-25",
+                "CNY",
+                500,
+                None,
+                "{}",
+                json.dumps({"document_type": "bank_transfer_application"}),
+                "[]",
+                "[]",
+            ),
         )
         conn.execute(
-            "INSERT INTO sheet_vitrina_v1_trade_documents VALUES(?, ?, ?, ?, ?, ?)",
-            ("TD-1", "contract", "SHIP-1", "/tmp/secret/contract.pdf", "active", "2026-06-25T09:47:56Z"),
+            "INSERT INTO sheet_vitrina_v1_supplier_financial_expense_lines VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            ("EL-1", "FD-1", "SHIP-1", 1, "logistics", "china_to_ff", 2000, json.dumps({"secret_path": "/tmp/secret/line"})),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_trade_documents VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "TD-1",
+                "contract",
+                "CON-1",
+                "2026-06-01",
+                "Supplier",
+                "USD",
+                None,
+                "SHIP-1",
+                "contract.txt",
+                "text/plain",
+                "hash-redacted",
+                str(trade_file),
+                json.dumps({"contract_number": "CON-1", "secret_path": "/tmp/secret/contract"}),
+                "[]",
+                "[]",
+                "active",
+                "2026-06-25T09:47:56Z",
+                "2026-06-25T09:47:56Z",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_invoice_contract_links VALUES(?, ?, ?, ?, ?, ?)",
+            ("TD-INVOICE-1", "TD-1", "2026-06-25T09:47:56Z", "2026-06-25T09:47:56Z", "smoke", "operator"),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_cny_documents VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "CNY-1",
+                "supplier_cny_payment",
+                "supplier_order",
+                "SHIP-1",
+                "SHIP-1",
+                "",
+                "cny.pdf",
+                str(cny_file),
+                "application/pdf",
+                "hash-redacted",
+                "cny-natural-key-redacted",
+                "2026-06-26T15:35:38Z",
+                "2026-06-26T15:35:38Z",
+                "2026-06-26T15:35:38Z",
+                "2026-06-25",
+                "2026-06-25T10:00:00Z",
+                "posted",
+                "PAY-1",
+                "CNY",
+                "",
+                "500",
+                "",
+                json.dumps({"document_type": "supplier_cny_payment", "payment_purpose": "invoice INV-1"}),
+                "{}",
+                "[]",
+                "[]",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_cny_ledger_operations VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "OP-1",
+                "supplier_payment_out",
+                "CNY-1",
+                "SHIP-1",
+                "2026-06-25",
+                "2026-06-25T10:00:00Z",
+                "00000001",
+                "-500",
+                "-6000",
+                "posted",
+                "",
+                "2026-06-26T15:35:38Z",
+                "2026-06-26T15:35:38Z",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_cny_ledger_replay_state VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "ok", "smoke", "2026-06-26T15:35:38Z", 1, 1, "1000", "12000", "12", "[]"),
         )
         conn.execute(
             "INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(?, ?, ?, ?, ?, ?, ?, ?)",

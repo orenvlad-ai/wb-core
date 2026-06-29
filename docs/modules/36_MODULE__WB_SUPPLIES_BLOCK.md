@@ -129,6 +129,7 @@ The cache is an operator registry/cache only:
 - sync upserts rows and preserves cached data after failed upstream attempts.
 - list-only sync/backfill must not downgrade enriched rows: if new list evidence arrives but cached `raw_detail`, `raw_goods` or `raw_package` already exists, normalization is rebuilt from the new list plus existing enriched evidence.
 - lazy detail/goods enrichment uses row-only persistence and does not rewrite global sync-state.
+- WebCore Data MCP exposes this cache only through auth-gated read-only tools: `get_wb_supplies_registry`, `get_wb_supply_full_details` and the allowlisted business-table catalog/schema/rows tools. MCP reads do not call WB sync/backfill/detail lazy fetch, do not mutate sync-state, and return raw cached business payloads only through explicit scrubbed/bounded fields.
 
 # 4. API Routes
 
