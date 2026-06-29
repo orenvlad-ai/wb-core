@@ -3,17 +3,19 @@ title: "Модуль: supplier_shipments_block"
 doc_id: "WB-CORE-MODULE-34-SUPPLIER-SHIPMENTS-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для блока `Поставки -> От поставщика` и `Поставки -> Реестр поставок`: Реестр заказов, supplier invoice parser, server-side nomenclature matching, persisted invoice price conformity, документы заказа by supplier order, read-only shipment registry matrix, runtime storage, protected API and supplier-only UI."
-scope: "Server-owned invoice order registry under current WebCore runtime: XLSX parse with openpyxl, deterministic type/model matching through server-side nomenclature, persisted per-line invoice price conformity against current purchase_price_yuan snapshots, editable shipment card, filesystem-backed original invoice, contract and order-document storage under runtime dir, SQLite metadata/lines/nomenclature/trade documents/financial documents/expense lines, read-only shipment comparison matrix, operator embedded UI, settings surface and supplier-only role boundary."
+purpose: "Зафиксировать canonical contract для блока `Поставки -> От поставщика`, `Поставки -> Реестр поставок` и `Поставки -> Счёт CNY`: Реестр заказов, supplier invoice parser, server-side nomenclature matching, persisted invoice price conformity, документы заказа by supplier order, read-only shipment registry matrix, server-side CNY account ledger/replay, runtime storage, protected API and supplier-only UI."
+scope: "Server-owned invoice order registry under current WebCore runtime: XLSX parse with openpyxl, deterministic type/model matching through server-side nomenclature, persisted per-line invoice price conformity against current purchase_price_yuan snapshots, editable shipment card, filesystem-backed original invoice, contract and order-document storage under runtime dir, SQLite metadata/lines/nomenclature/trade documents/financial documents/expense lines/CNY currency documents/CNY ledger operations, read-only shipment comparison matrix, operator embedded UI, settings surface and supplier-only role boundary."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
 related_modules:
   - "packages/contracts/supplier_shipments.py"
   - "packages/contracts/supplier_financial_documents.py"
+  - "packages/contracts/cny_ledger.py"
   - "packages/application/supplier_invoice_parser.py"
   - "packages/application/supplier_shipments.py"
   - "packages/application/supplier_financial_documents.py"
+  - "packages/application/cny_ledger.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
@@ -28,6 +30,9 @@ related_tables:
   - "sheet_vitrina_v1_invoice_contract_links"
   - "sheet_vitrina_v1_supplier_financial_documents"
   - "sheet_vitrina_v1_supplier_financial_expense_lines"
+  - "sheet_vitrina_v1_cny_documents"
+  - "sheet_vitrina_v1_cny_ledger_operations"
+  - "sheet_vitrina_v1_cny_ledger_replay_state"
 related_endpoints:
   - "GET /sheet-vitrina-v1/supplier"
   - "GET /sheet-vitrina-v1/settings"
@@ -54,6 +59,14 @@ related_endpoints:
   - "PATCH /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
   - "DELETE /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}"
   - "GET /v1/sheet-vitrina-v1/supply/supplier-shipments/{shipment_id}/financial-documents/{document_id}/file"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account"
+  - "POST /v1/sheet-vitrina-v1/supply/cny-account/documents"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account/conversions"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account/ledger"
+  - "POST /v1/sheet-vitrina-v1/supply/cny-account/opening-balance"
+  - "POST /v1/sheet-vitrina-v1/supply/cny-account/replay"
+  - "DELETE /v1/sheet-vitrina-v1/supply/cny-account/documents/{document_id}"
+  - "GET /v1/sheet-vitrina-v1/supply/cny-account/documents/{document_id}/file"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature"
   - "POST /v1/sheet-vitrina-v1/settings/nomenclature"
   - "GET /v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
@@ -79,6 +92,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_supplier_auth_smoke.py"
   - "apps/sheet_vitrina_v1_trade_documents_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_browser_smoke.py"
+  - "apps/cny_ledger_smoke.py"
 related_docs:
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
@@ -91,7 +105,7 @@ current_update_note: "`Настройки` is a common-shell right-side action w
 
 # 1. Contract
 
-- Operator surface: in `Поставки`, inner tab `Расчёты` keeps the existing factory/WB supply calculators; inner tab `Реестр поставок` renders the read-only comparison matrix; inner tab `От поставщика` embeds the supplier registry without an extra operator card/title wrapper.
+- Operator surface: in `Поставки`, inner tab `Расчёты` keeps the existing factory/WB supply calculators; inner tab `Реестр поставок` renders the read-only comparison matrix; inner tab `Счёт CNY` renders the server-side CNY account ledger; inner tab `От поставщика` embeds the supplier registry without an extra operator card/title wrapper.
 - Supplier-only surface: `GET /sheet-vitrina-v1/supplier` renders only the supplier shipment registry without full operator navigation and without the manual price recheck button, even when opened from an operator session.
 - Standalone supplier-facing labels in the order registry/card use `中文 / English / Русский` business wording. The main title is `订单登记表 / Order registry / Реестр заказов`; duplicated registry headings and the old subtitle are not rendered. In framed operator view the same template is configured as Russian-only: title `Реестр заказов`, title row actions `Добавить заказ`, `Выйти`, then `Открыть отдельно`; the standalone-open link points to the existing `GET /sheet-vitrina-v1/supplier` UI route and does not introduce a new API route.
 - Registry list UI separates `loading`, `loaded_empty`, `loaded_with_rows` and `error`: the initial DOM and in-flight list fetch show a compact loading state, while the empty text is rendered only after the list API has returned an empty shipment list. Standalone supplier empty text remains `暂无订单 / No orders yet / Заказов пока нет.`; operator embedded empty/loading/error text is Russian-only.
@@ -143,7 +157,7 @@ current_update_note: "`Настройки` is a common-shell right-side action w
   - SQLite table `sheet_vitrina_v1_supplier_financial_documents` stores document metadata, parser/rate status and raw/normalized parse JSON;
   - SQLite table `sheet_vitrina_v1_supplier_financial_expense_lines` stores normalized expense lines by document/order.
 - Canonical required order-document checklist types are `invoice`, `contract`, `logistics_quote`, `logistics_invoice`, `customs_declaration`, `bank_control_statement` and `bank_transfer_application`. The checklist is built by the server from existing trade-document links, supplier financial/order documents and deterministic required types; missing required rows are returned with status `Не загружен`, not inferred from browser-local state.
-- Supported supplier-order PDF document types are `logistics_quote`, `logistics_invoice`, `customs_declaration`, `bank_control_statement` and `bank_transfer_application`. Factory invoices, factory payments, RUB->CNY conversion, SKU cost allocation and WB mutations are out of this module scope.
+- Supported ordinary supplier-order financial PDF document types are `logistics_quote`, `logistics_invoice`, `customs_declaration`, `bank_control_statement` and non-CNY `bank_transfer_application`. CNY conversion purchase and supplier CNY payment PDFs are routed to the canonical CNY account ledger instead of being duplicated as ordinary financial documents. Factory invoices, factory payments, SKU cost allocation and WB mutations remain out of this module scope.
 - Document upload accepts PDF only and first attempts text-layer extraction. Runtime prefers `pdftotext` when available, then `pypdf`; OCR is not an MVP dependency for this parser and missing text/OCR returns controlled `parse_error`/warnings instead of silent failure.
 - For customs declarations, if the primary `pdftotext` extraction recognizes the document but misses gross weight or customs value, parsing retries against the same stored PDF through `pypdf` and accepts the fallback only when those critical fields are recovered. The same bounded fallback applies to VTB/MT103-like transfer applications when primary extraction recognizes the document but misses critical transfer fields.
 - Parser is deterministic/rule-based and returns normalized fields, expense lines, parser version (`supplier_financial_document_parser_v3`), warnings and confidence/status. It detects Transitplus logistics quotes, logistics invoices like World-Logistik invoices 103/113, aggregate customs declarations (`ДТ`) with customs fee/duty/VAT totals, customs value and aggregate gross/net item weights, bank control statements headed `ВЕДОМОСТЬ БАНКОВСКОГО КОНТРОЛЯ ПО КОНТРАКТУ`, and VTB/MT103-like `ЗАЯВЛЕНИЕ на перевод` applications. Transitplus quote parsing is table-layout aware for both `pypdf` and production `pdftotext -layout` shapes: when service labels are separated from the `Общая стоимость` column, or rows are extracted as `1 Стоимость доставки 14360` without `USD`, the parser maps known service labels/trailing amounts plus numbered cost-column rows and a total-sum sanity check to `delivery_cost`, `customs_payments_and_fees`, `ecological_fee`, `brokerage_services`, `company_commission` and `insurance`. A total-validated numbered block wins over percent-like label values such as `Страховая ставка, % 1,0%`.
@@ -187,6 +201,21 @@ current_update_note: "`Настройки` is a common-shell right-side action w
 - Registry quote RUB/unit uses `quote_total_usd * quote_total_rate / total_units`, where `quote_total_rate` is the same quote-vs-invoice CBR spread estimate when invoices are available and falls back to the quote-date CBR rate when only КП is available. Fact RUB/unit uses `(logistics_invoice_total_rub + customs_total_payments_rub) / total_units`.
 - The comparison UI lets an operator choose one temporary КП PDF, select exactly one shipment column, and render grouped rows with `КП`, `Поставка факт`, `Разница` and `Оценка КП`. Numeric differences are `КП - Поставка`, percent differences use the shipment value as baseline when available, and missing baselines remain `—`. For cost metrics with lower-is-better semantics the status text is explicit (`КП выгоднее`, `КП дороже`, `примерно равно`); neutral rows keep evaluation unavailable.
 - Temporary quote RUB/unit in comparison is estimated, not divided by the selected shipment unit count directly. The estimator uses selected-shipment `total_units / customs_gross_weight_kg` first, falls back to selected quote gross weight when customs weight is missing, then divides quote RUB total by `quote_gross_weight_kg * selected_units_per_kg`. If the selected shipment has no usable units/kg coefficient, the quote RUB/unit cell remains unavailable and warns `Нет коэффициента шт/кг для оценки КП`.
+
+# 1.4 CNY Account Ledger
+
+- `Поставки -> Счёт CNY` is the server-owned management ledger for CNY currency account costing. It is not бухгалтерский налоговый валютный учёт, does not calculate FX revaluation, and does not write `cost_price`, 1C, WB/web-vitrina metrics or Google Sheets/GAS.
+- Canonical currency documents live once in `sheet_vitrina_v1_cny_documents`. Supported document types are `cny_conversion_purchase`, `supplier_cny_payment`, `bank_fee`, `opening_balance` and `adjustment`. A document may carry nullable `source_order_id`/`context_order_id`; this only records upload/context provenance and does not mean a whole conversion belongs to that supplier order.
+- Canonical ledger rows live in `sheet_vitrina_v1_cny_ledger_operations`. Supported operation types are `opening_balance`, `conversion_in`, `supplier_payment_out`, `conversion_fee`, `transfer_fee` and `adjustment`. Money and rates are calculated with Decimal-compatible storage strings, not float arithmetic.
+- Conversion purchase increases CNY balance and RUB value balance by the actual RUB debit; conversion fees in RUB, when parsed/provided, are included in purchased-CNY RUB value. Average account rate after conversion is `balance_rub_value / balance_cny`.
+- Supplier CNY payment decreases CNY balance at average account rate before payment. The order payment component is `paid_cny * average_rate_before`; the order effective CNY rate is weighted across all linked supplier-payment operations as `sum(payment_currency_rub_cost) / sum(paid_cny)`. The legacy `approx_yuan_rate` remains manual/advisory and is never overwritten by ledger replay.
+- Supplier transfer fees are separate order cost components. RUB fees add directly to `cny_bank_fee_rub`; CNY fees consume CNY at average account rate and are still stored as a separate fee component, not mixed into the effective currency rate.
+- Replay is deterministic and server-side after create/update/import of currency documents, after CNY document upload from an order, and after explicit `POST /v1/sheet-vitrina-v1/supply/cny-account/replay`. Replay sorts by bank execution/accepted datetime when present, then operation date, then document created time/id/type. Multiple date-only operations on the same date are processed deterministically and marked `needs_review` instead of silently inventing an ordering.
+- Historical backfill is supported by replaying all currency documents from the beginning of the stored period and updating existing supplier orders that already have linked `supplier_cny_payment` documents. If there is no positive CNY balance before a historical payment, replay blocks with `missing_opening_balance`; it does not borrow `approx_yuan_rate` and does not fabricate a historical course.
+- Order rows/detail expose ledger-derived read-only fields: `cny_ledger_effective_rate` (`Курс CNY по счёту` / effective management ledger rate), `cny_payment_currency_rub_cost`, `cny_paid_amount`, `cny_bank_fee_rub`, `cny_calculation_status`, `cny_calculation_error` and `cny_calculated_at`.
+- Blocked/diagnostic statuses include `missing_opening_balance`, `insufficient_balance`, `payment_not_linked`, `parse_error`, `ambiguous_allocation`, `document_date_missing` and `no_supplier_payment`. These statuses are visible in CNY account status/ledger and supplier order CNY fields; blocked rows do not emit fake RUB costs.
+- The VTB conversion purchase parser extracts `document_number`, date, RUB debit account, CNY credit account, RUB amount, CNY amount, bank rate, bank/branch, accepted/execution datetime and status text from tolerant Russian text-layer PDF parsing. Raw user PDFs are runtime files only and are not committed; tests use sanitized text fixtures.
+- Current bounded allocation model is one supplier CNY payment document -> one supplier order through `source_order_id`. The document/operation schema keeps payment operations independent from conversion provenance and does not block future split allocation rows, but UI for one payment covering multiple orders is not implemented in this checkpoint.
 
 # 2. Parser
 

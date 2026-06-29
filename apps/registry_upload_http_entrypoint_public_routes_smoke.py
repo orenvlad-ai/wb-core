@@ -72,6 +72,13 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/supply/wb-supplies/",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments/",
+        "/v1/sheet-vitrina-v1/supply/cny-account",
+        "/v1/sheet-vitrina-v1/supply/cny-account/documents",
+        "/v1/sheet-vitrina-v1/supply/cny-account/conversions",
+        "/v1/sheet-vitrina-v1/supply/cny-account/ledger",
+        "/v1/sheet-vitrina-v1/supply/cny-account/opening-balance",
+        "/v1/sheet-vitrina-v1/supply/cny-account/replay",
+        "/v1/sheet-vitrina-v1/supply/cny-account/documents/",
         "/v1/sheet-vitrina-v1/settings/nomenclature",
         "/v1/sheet-vitrina-v1/settings/nomenclature/",
         "/v1/sheet-vitrina-v1/settings/documents",
@@ -161,6 +168,20 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include supplier shipment list exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/supplier-shipments/ {") != 1:
         raise AssertionError("rendered nginx block must include supplier shipment prefix exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/cny-account {") != 1:
+        raise AssertionError("rendered nginx block must include CNY account status exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/cny-account/documents {") != 1:
+        raise AssertionError("rendered nginx block must include CNY account document upload exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/cny-account/conversions {") != 1:
+        raise AssertionError("rendered nginx block must include CNY account conversions exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/cny-account/ledger {") != 1:
+        raise AssertionError("rendered nginx block must include CNY account ledger exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/cny-account/opening-balance {") != 1:
+        raise AssertionError("rendered nginx block must include CNY account opening balance exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/cny-account/replay {") != 1:
+        raise AssertionError("rendered nginx block must include CNY account replay exactly once")
+    if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/cny-account/documents/ {") != 1:
+        raise AssertionError("rendered nginx block must include CNY account document file prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/settings/nomenclature {") != 1:
         raise AssertionError("rendered nginx block must include nomenclature API exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/nomenclature/ {") != 1:

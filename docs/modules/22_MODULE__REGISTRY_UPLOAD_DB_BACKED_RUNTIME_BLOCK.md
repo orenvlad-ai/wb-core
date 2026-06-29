@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-22-REGISTRY-UPLOAD-DB-BACKED-RUNTIME-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_db_backed_runtime_block`."
-scope: "Локальный SQLite-backed runtime ingest для V2-реестров: persistent current state, version history, upload result, exact-date temporal source snapshots, role-aware temporal slot truth (`provisional_current / closed_day_candidate / accepted_closed`), persisted closure-retry state и supplier invoice shipment registry state без Apps Script UI и внешнего API."
+scope: "Локальный SQLite-backed runtime ingest для V2-реестров: persistent current state, version history, upload result, exact-date temporal source snapshots, role-aware temporal slot truth (`provisional_current / closed_day_candidate / accepted_closed`), persisted closure-retry state, supplier invoice shipment registry state and CNY account ledger state без Apps Script UI и внешнего API."
 source_basis:
   - "migration/86_registry_upload_contract.md"
   - "migration/88_registry_upload_file_backed_service.md"
@@ -20,6 +20,7 @@ related_modules:
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/factory_order_sales_history.py"
   - "packages/application/supplier_shipments.py"
+  - "packages/application/cny_ledger.py"
 related_tables:
   - "CONFIG_V2"
   - "METRICS_V2"
@@ -35,6 +36,9 @@ related_tables:
   - "sheet_vitrina_v1_supplier_shipment_lines"
   - "sheet_vitrina_v1_trade_documents"
   - "sheet_vitrina_v1_invoice_contract_links"
+  - "sheet_vitrina_v1_cny_documents"
+  - "sheet_vitrina_v1_cny_ledger_operations"
+  - "sheet_vitrina_v1_cny_ledger_replay_state"
 related_endpoints: []
 related_runners:
   - "apps/registry_upload_bundle_v1_smoke.py"
@@ -43,6 +47,7 @@ related_runners:
   - "apps/factory_order_sales_history_smoke.py"
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_trade_documents_smoke.py"
+  - "apps/cny_ledger_smoke.py"
 related_docs:
   - "migration/86_registry_upload_contract.md"
   - "migration/88_registry_upload_file_backed_service.md"
@@ -50,7 +55,7 @@ related_docs:
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments and trade document registry: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state including legacy planned `shipment_date`, nullable fact dates `actual_shipment_date` / `actual_ff_acceptance_date` and nullable manual `approx_yuan_rate`, trade document rows/links including parsed contract metadata/warnings/default supplier backfill, and a separate manual monthly baseline table used only by the plan-report."
+update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments, trade document registry and CNY account ledger: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state including legacy planned `shipment_date`, nullable fact dates `actual_shipment_date` / `actual_ff_acceptance_date`, nullable manual `approx_yuan_rate` and ledger-derived CNY calculation fields, trade document rows/links including parsed contract metadata/warnings/default supplier backfill, CNY currency documents/ledger operations/replay state, and a separate manual monthly baseline table used only by the plan-report."
 ---
 
 # 1. Идентификатор и статус
@@ -111,10 +116,14 @@ update_note: "Обновлён под current temporal closure seam, plan-report
   - last successful factory-order result state.
   - supplier invoice registry state:
     - staged upload metadata in `sheet_vitrina_v1_supplier_shipment_uploads`;
-    - shipment headers/totals/status/file references, legacy planned `shipment_date`, nullable `actual_shipment_date`, nullable `actual_ff_acceptance_date`, nullable `approx_yuan_rate` and nullable `invoice_document_id` in `sheet_vitrina_v1_supplier_shipments`;
+    - shipment headers/totals/status/file references, legacy planned `shipment_date`, nullable `actual_shipment_date`, nullable `actual_ff_acceptance_date`, nullable manual `approx_yuan_rate`, ledger-derived nullable `cny_ledger_effective_rate` / `cny_payment_currency_rub_cost` / `cny_paid_amount` / `cny_bank_fee_rub` / `cny_calculation_status` / `cny_calculation_error` / `cny_calculated_at`, and nullable `invoice_document_id` in `sheet_vitrina_v1_supplier_shipments`;
     - editable product/extra line details and persisted invoice price conformity snapshots/statuses in `sheet_vitrina_v1_supplier_shipment_lines`;
     - server-owned trade document registry in `sheet_vitrina_v1_trade_documents` for `contract` and `invoice` files;
     - one-primary-contract-per-invoice links in `sheet_vitrina_v1_invoice_contract_links`.
+  - server-owned CNY account ledger state:
+    - canonical currency documents in `sheet_vitrina_v1_cny_documents` with document type, source/order context, file metadata/hash, operation date/datetime, parse payload, status and natural key;
+    - deterministic replay rows in `sheet_vitrina_v1_cny_ledger_operations` with operation type, document/order links, sequence key, CNY/RUB deltas, balances, effective/average rates and diagnostic status;
+    - last replay state in `sheet_vitrina_v1_cny_ledger_replay_state` with balance, average rate, counts and diagnostics.
   - trade document files:
     - settings-uploaded files live under `<runtime_dir>/trade_documents/files/<document_type>/<document_id>/<safe_filename>`;
     - supplier shipment invoice documents may reference existing `<runtime_dir>/supplier_invoices/files/...` paths to preserve backward-compatible invoice downloads;
