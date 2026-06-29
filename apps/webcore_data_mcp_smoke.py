@@ -71,16 +71,32 @@ def _assert_tool_list(gateway: WebCoreDataMcpGateway) -> None:
             raise AssertionError(f"tool is not marked read-only: {tool['name']}")
         if any(marker in tool["name"] for marker in ("sql", "shell", "ssh", "sync", "backfill", "upload")):
             raise AssertionError(f"forbidden tool name exposed: {tool['name']}")
+        properties = (tool.get("inputSchema") or {}).get("properties") or {}
+        if tool["name"] == "get_supplier_shipments_registry" and "sort_by" not in properties:
+            raise AssertionError("supplier registry schema must expose sort_by")
+        if tool["name"] == "get_webcore_business_table_rows" and "sort_by" in properties:
+            raise AssertionError("business table row schema must not expose registry sort_by")
 
 
 def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
     calls = [
         ("get_data_freshness_status", {}),
         ("get_webcore_data_map", {"domain": "all"}),
+        ("get_webcore_data_map", {"domain": "supplier_shipments"}),
+        ("get_webcore_data_map", {"domain": "artifacts"}),
+        ("get_webcore_data_map", {"domain": "business_tables"}),
         ("resolve_webcore_data_request", {"intent": "покажи реестр поставок", "limit": 5}),
+        ("resolve_webcore_data_request", {"intent": "найди самую большую поставку", "limit": 5}),
+        ("resolve_webcore_data_intent", {"intent": "сколько коробок по упаковочному листу", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "открой packing list", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи parsed-поля packing list", "shipment_id": "SHIP-1"}),
         ("resolve_webcore_data_request", {"intent": "покажи документы по поставке", "shipment_id": "SHIP-1"}),
         ("resolve_webcore_data_request", {"intent": "открой инвойс", "shipment_id": "SHIP-1"}),
         ("resolve_webcore_data_request", {"intent": "покажи БТТ", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи ВБК", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи ДТ", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи КП логистов", "shipment_id": "SHIP-1"}),
+        ("resolve_webcore_data_request", {"intent": "покажи CNY документы", "shipment_id": "SHIP-1"}),
         ("resolve_webcore_data_request", {"intent": "покажи WB supply", "supply_id": "WB-SUP-1"}),
         ("resolve_webcore_data_request", {"intent": "покажи метрику за дату", "metric_key_or_label": "total_orderSum", "date": "2026-06-26"}),
         ("resolve_webcore_data_request", {"intent": "найди SKU", "sku_or_nm_id": "210183142"}),
@@ -88,13 +104,17 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("list_webcore_business_tables", {}),
         ("get_webcore_business_table_schema", {"table": "sheet_vitrina_v1_supplier_shipments"}),
         ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_wb_supplies", "limit": 5, "include_raw_business_payloads": True}),
-        ("get_supplier_shipments_registry", {"limit": 5}),
+        ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_supplier_financial_documents", "filters": {"supplier_order_id": "SHIP-1", "document_type": "packing_list"}, "limit": 5, "include_raw_business_payloads": True}),
+        ("get_supplier_shipments_registry", {"limit": 5, "sort_by": "product_qty_total_desc"}),
         ("get_supplier_shipment_full_details", {"shipment_id": "SHIP-1", "include_raw_business_payloads": True}),
         ("get_wb_supplies_registry", {"limit": 5}),
         ("get_wb_supply_full_details", {"supply_id": "WB-SUP-1", "include_raw_business_payloads": True}),
         ("list_supply_artifacts", {"shipment_id": "SHIP-1", "limit": 10}),
+        ("list_supply_artifacts", {"shipment_id": "SHIP-1", "artifact_kind": "packing_list", "limit": 10}),
         ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "metadata"}),
         ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "parsed"}),
+        ("get_supply_artifact", {"artifact_ref": "financial_document:SHIP-1:FD-PACK", "mode": "metadata"}),
+        ("get_supply_artifact", {"artifact_ref": "financial_document:SHIP-1:FD-PACK", "mode": "parsed"}),
         ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "text", "max_bytes": 4}),
         ("get_supply_artifact", {"artifact_ref": "trade_document:TD-1", "mode": "text", "max_bytes": 200}),
         ("get_supply_artifact", {"artifact_ref": "financial_document:SHIP-1:FD-1", "mode": "base64_chunk", "max_bytes": 64}),
@@ -134,16 +154,47 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
                 raise AssertionError(f"total_orderSum revenue projection failed: {result}")
         if name == "get_webcore_data_map":
             domains = {item.get("domain") for item in result.get("domains") or []}
-            if not {"supplier_shipments", "artifacts", "metrics"}.issubset(domains):
+            if args.get("domain") == "all" and not {"supplier_shipments", "artifacts", "metrics"}.issubset(domains):
                 raise AssertionError(f"data map missing required domains: {result}")
+            if args.get("domain") in {"all", "artifacts"}:
+                artifact_kinds = {item.get("artifact_kind") for item in result.get("artifact_catalog") or []}
+                if "packing_list" not in artifact_kinds:
+                    raise AssertionError(f"data map missing packing_list artifact kind: {result}")
         if name == "resolve_webcore_data_request" and "реестр поставок" in str(args.get("intent")):
             if not any(call.get("tool") == "get_supplier_shipments_registry" for call in result.get("recommended_calls") or []):
                 raise AssertionError(f"resolver did not route registry intent: {result}")
+        if name in {"resolve_webcore_data_request", "resolve_webcore_data_intent"} and "самую большую" in str(args.get("intent")):
+            first_call = (result.get("recommended_calls") or [{}])[0]
+            if first_call.get("tool") != "get_supplier_shipments_registry" or (first_call.get("arguments") or {}).get("sort_by") != "product_qty_total_desc":
+                raise AssertionError(f"resolver did not route largest shipment intent: {result}")
+        if name in {"resolve_webcore_data_request", "resolve_webcore_data_intent"} and "упаковочному листу" in str(args.get("intent")):
+            if not any(call.get("tool") == "get_supplier_shipment_full_details" for call in result.get("recommended_calls") or []):
+                raise AssertionError(f"resolver did not route packing-list summary intent: {result}")
         if name == "get_webcore_business_table_rows":
             rows = result.get("rows") or []
             serialized_rows = json.dumps(rows, ensure_ascii=False)
             if "secret_path" in serialized_rows and "/tmp/secret" in serialized_rows:
                 raise AssertionError(f"raw business payload was not scrubbed: {result}")
+            if args.get("table") == "sheet_vitrina_v1_supplier_financial_documents":
+                payload = (((rows or [{}])[0] or {}).get("normalized_parse_json_scrubbed_payload") or {})
+                if payload.get("total_cartons") != 221.0 or payload.get("document_type") != "packing_list":
+                    raise AssertionError(f"packing-list business payload not exposed safely: {result}")
+        if name == "get_supplier_shipments_registry":
+            row = (result.get("rows") or [{}])[0]
+            if row.get("shipment_id") != "SHIP-1" or row.get("packing_list_total_cartons") != 221.0:
+                raise AssertionError(f"registry missing packing-list summary fields: {result}")
+        if name == "get_supplier_shipment_full_details":
+            packing = result.get("packing_list_summary") or {}
+            if packing.get("total_cartons") != 221.0 or packing.get("total_boxes") != 221.0 or packing.get("line_item_count") != 2:
+                raise AssertionError(f"full details missing packing-list summary: {result}")
+        if name == "list_supply_artifacts" and args.get("artifact_kind") == "packing_list":
+            artifacts = result.get("artifacts") or []
+            if not artifacts or artifacts[0].get("artifact_ref") != "financial_document:SHIP-1:FD-PACK":
+                raise AssertionError(f"packing-list artifact not listed: {result}")
+        if name == "get_supply_artifact" and args.get("artifact_ref") == "financial_document:SHIP-1:FD-PACK" and args.get("mode") == "parsed":
+            packing = result.get("packing_list_summary") or {}
+            if packing.get("total_cartons") != 221.0 or packing.get("box_count") != 221.0:
+                raise AssertionError(f"packing-list parsed artifact missing aliases: {result}")
         if name == "get_supply_artifact" and args.get("artifact_ref") == "trade_document:TD-1" and args.get("mode") == "text":
             if args.get("max_bytes") == 4 and result.get("status") != "too_large":
                 raise AssertionError(f"large text artifact should require chunk mode: {result}")
@@ -481,10 +532,12 @@ def _create_fixture_db(db_path: Path) -> None:
     runtime_root = db_path.parent
     trade_file = Path("trade_documents/files/contract/TD-1/contract.txt")
     financial_file = Path("supplier_financial_documents/files/SHIP-1/FD-1/fd.pdf")
+    packing_file = Path("supplier_financial_documents/files/SHIP-1/FD-PACK/packing-list.xlsx")
     cny_file = Path("cny_documents/files/CNY-1/cny.pdf")
     for relative_path, body in (
         (trade_file, b"Contract text token=must-redact"),
         (financial_file, b"%PDF-1.4\nfinancial fixture\n"),
+        (packing_file, b"PK\x03\x04packing-list-fixture"),
         (cny_file, b"%PDF-1.4\ncny fixture\n"),
     ):
         target = runtime_root / relative_path
@@ -922,6 +975,68 @@ def _create_fixture_db(db_path: Path) -> None:
                 None,
                 "{}",
                 json.dumps({"document_type": "bank_transfer_application"}),
+                "[]",
+                "[]",
+            ),
+        )
+        packing_payload = {
+            "document_type": "packing_list",
+            "document_title": "PACKING LIST",
+            "document_number": "PL-001",
+            "total_cartons": 221.0,
+            "total_quantity": 55250.0,
+            "total_gross_weight_kg": 4680.45,
+            "total_volume_m3": 21.538881,
+            "carton_size": "51*39*49",
+            "model_count": 2,
+            "avg_qty_per_carton": 250.0,
+            "line_item_count": 2,
+            "line_items": [
+                {
+                    "row_number": 8,
+                    "carton_range": "1-120",
+                    "model": "SKU-A",
+                    "carton_count": 120.0,
+                    "qty_per_carton": 250.0,
+                    "total_qty": 30000.0,
+                    "total_gross_weight_kg": 2541.0,
+                    "carton_size": "51*39*49",
+                    "volume_m3": 11.696224,
+                },
+                {
+                    "row_number": 9,
+                    "carton_range": "121-221",
+                    "model": "SKU-B",
+                    "carton_count": 101.0,
+                    "qty_per_carton": 250.0,
+                    "total_qty": 25250.0,
+                    "total_gross_weight_kg": 2139.45,
+                    "carton_size": "51*39*49",
+                    "volume_m3": 9.842657,
+                },
+            ],
+        }
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_supplier_financial_documents VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "FD-PACK",
+                "SHIP-1",
+                "packing_list",
+                "packing-list.xlsx",
+                str(packing_file),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "hash-redacted",
+                "2026-06-26T16:35:38Z",
+                "2026-06-26T16:35:38Z",
+                "parsed",
+                "Supplier",
+                "PL-001",
+                "2026-06-25",
+                "",
+                None,
+                None,
+                json.dumps({"storage_state": "must-redact"}),
+                json.dumps(packing_payload),
                 "[]",
                 "[]",
             ),

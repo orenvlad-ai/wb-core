@@ -27,6 +27,7 @@ SCOPE_FINANCE_READ = "webcore.finance.read"
 APPROVED_TOOL_NAMES = (
     "get_webcore_data_map",
     "resolve_webcore_data_request",
+    "resolve_webcore_data_intent",
     "list_webcore_business_tables",
     "get_webcore_business_table_schema",
     "get_webcore_business_table_rows",
@@ -213,7 +214,7 @@ class WebCoreDataMcpGateway:
                 include_examples=_optional_bool(args.get("include_examples"), default=True),
                 include_limitations=_optional_bool(args.get("include_limitations"), default=True),
             )
-        if name == "resolve_webcore_data_request":
+        if name in {"resolve_webcore_data_request", "resolve_webcore_data_intent"}:
             return self.resolve_webcore_data_request(
                 intent=_required_str(args, "intent", max_length=500),
                 domain=_optional_str(args.get("domain"), max_length=40) or "auto",
@@ -260,6 +261,7 @@ class WebCoreDataMcpGateway:
                 document_status=_optional_str(args.get("document_status"), max_length=80),
                 date_from=_optional_date(args.get("date_from")),
                 date_to=_optional_date(args.get("date_to")),
+                sort_by=_optional_str(args.get("sort_by"), max_length=80) or "date_desc",
                 limit=_bounded_limit(args.get("limit"), self.max_limit),
                 cursor=_optional_str(args.get("cursor"), max_length=40),
                 offset=_optional_int(args.get("offset"), default=0, minimum=0, maximum=100000),
@@ -657,6 +659,7 @@ class WebCoreDataMcpGateway:
             financial_docs = self._supplier_financial_doc_summary(conn, shipment_id)
             expenses = self._supplier_expense_summary(conn, shipment_id)
             trade_docs = self._supplier_trade_doc_summary(conn, shipment_id)
+            packing_docs = _fetch_packing_list_docs_for_shipments(conn, [shipment_id]).get(shipment_id, [])
             return {
                 "status": "ok",
                 "source_tables": [
@@ -671,6 +674,7 @@ class WebCoreDataMcpGateway:
                 "financial_documents": financial_docs,
                 "expense_summary": expenses,
                 "trade_documents": trade_docs,
+                "packing_list_summary": _packing_list_summary_from_documents(packing_docs, line_item_limit=0),
                 "redaction": "raw files, file paths, hashes and raw parse JSON are not exposed",
             }
 
@@ -1206,8 +1210,11 @@ class WebCoreDataMcpGateway:
                     args["date_to"] = date_to
                 calls.append(_recommended_call(1, "get_wb_supplies_registry", args, SCOPE_SUPPLY_READ, "Cached WB supplies registry/list; no upstream sync."))
         elif resolved_domain in {"supplier_shipments", "artifacts", "cny"}:
-            if action == "show_registry":
+            if action in {"show_registry", "find_largest"}:
                 args = {"limit": limit}
+                if action == "find_largest":
+                    args["limit"] = 1
+                    args["sort_by"] = "product_qty_total_desc"
                 if invoice_no:
                     args["invoice_no"] = invoice_no
                 if supplier_name:
@@ -1217,6 +1224,31 @@ class WebCoreDataMcpGateway:
                 if date_to:
                     args["date_to"] = date_to
                 calls.append(_recommended_call(1, "get_supplier_shipments_registry", args, SCOPE_SUPPLY_READ, "Supplier shipment registry rows with financial/document completeness."))
+                if action == "find_largest":
+                    calls.append(
+                        _recommended_call(
+                            2,
+                            "get_supplier_shipment_full_details",
+                            {"shipment_id": "<shipment_id from step 1>"},
+                            SCOPE_SUPPLY_READ,
+                            "Packing list summary and document metadata for the largest returned shipment.",
+                        )
+                    )
+            elif action == "packing_list_summary":
+                if resolved_shipment_id:
+                    calls.append(_recommended_call(1, "get_supplier_shipment_full_details", {"shipment_id": resolved_shipment_id}, SCOPE_SUPPLY_READ, "Expanded shipment card with packing_list_summary aliases."))
+                    calls.append(_recommended_call(2, "list_supply_artifacts", {"shipment_id": resolved_shipment_id, "artifact_kind": "packing_list", "limit": limit}, SCOPE_SUPPLY_READ, "Packing-list artifact_ref for metadata/parsed reads."))
+                else:
+                    calls.append(_recommended_call(1, "get_supplier_shipments_registry", {"sort_by": "product_qty_total_desc", "limit": 1}, SCOPE_SUPPLY_READ, "Find the largest shipment and its top-level packing-list fields."))
+                    calls.append(
+                        _recommended_call(
+                            2,
+                            "get_supplier_shipment_full_details",
+                            {"shipment_id": "<shipment_id from step 1>"},
+                            SCOPE_SUPPLY_READ,
+                            "Use the returned shipment_id for full packing-list summary and line sample.",
+                        )
+                    )
             elif action in {"show_documents", "open_artifact"}:
                 if not resolved_shipment_id and invoice_no:
                     calls.append(_recommended_call(1, "search_business_objects", {"query": invoice_no, "object_types": ["shipment"]}, SCOPE_ANALYTICS_READ, "Find shipment id by invoice number before listing artifacts."))
@@ -1399,11 +1431,11 @@ class WebCoreDataMcpGateway:
         document_status: str | None,
         date_from: str | None,
         date_to: str | None,
+        sort_by: str,
         limit: int,
         cursor: str | None,
         offset: int,
     ) -> dict[str, Any]:
-        del document_status
         effective_offset = _cursor_to_offset(cursor, offset)
         with self._connect() as conn:
             if not _table_exists(conn, "sheet_vitrina_v1_supplier_shipments"):
@@ -1421,7 +1453,14 @@ class WebCoreDataMcpGateway:
             if date_to:
                 clauses.append("COALESCE(s.shipment_date, s.invoice_date, s.created_at, '') <= ?")
                 params.append(date_to)
+            if document_status:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM sheet_vitrina_v1_supplier_financial_documents fd_status "
+                    "WHERE fd_status.supplier_order_id = s.shipment_id AND fd_status.parse_status = ?)"
+                )
+                params.append(document_status)
             where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            order_sql = _supplier_registry_order_by(sort_by)
             rows = conn.execute(
                 f"""
                 SELECT s.shipment_id, s.created_at, s.updated_at, s.shipment_date, s.actual_shipment_date,
@@ -1441,14 +1480,22 @@ class WebCoreDataMcpGateway:
                 LEFT JOIN sheet_vitrina_v1_trade_documents td ON td.source_shipment_id = s.shipment_id
                 {where_sql}
                 GROUP BY s.shipment_id
-                ORDER BY COALESCE(s.invoice_date, s.shipment_date, s.created_at, '') DESC, s.shipment_id
+                ORDER BY {order_sql}
                 LIMIT ? OFFSET ?
                 """,
                 (*params, limit + 1, effective_offset),
             ).fetchall()
+            packing_docs_by_shipment = _fetch_packing_list_docs_for_shipments(
+                conn,
+                [str(row["shipment_id"] or "") for row in rows[:limit]],
+            )
         result_rows = []
         for row in rows[:limit]:
             item = _row_dict(row)
+            packing_summary = _packing_list_summary_from_documents(
+                packing_docs_by_shipment.get(str(item.get("shipment_id") or ""), []),
+                line_item_limit=0,
+            )
             qty = _first_number(item.get("product_qty_total"), item.get("line_qty_total"))
             expenses = _number_or_zero(item.get("expense_amount_rub"))
             invoice_amount = _first_number(item.get("invoice_amount_total"), item.get("product_amount_total"))
@@ -1458,12 +1505,27 @@ class WebCoreDataMcpGateway:
                 "expense_amount_rub": expenses,
                 "available_unit_cost_evidence": ((invoice_amount or 0) + expenses) / qty if qty and qty > 0 else None,
             }
+            item["packing_list_document_count"] = packing_summary.get("document_count")
+            item["packing_list_parse_status"] = packing_summary.get("parse_status")
+            item["packing_list_total_cartons"] = packing_summary.get("total_cartons")
+            item["packing_list_box_count"] = packing_summary.get("box_count")
+            item["packing_list_carton_count"] = packing_summary.get("carton_count")
+            item["packing_list_total_boxes"] = packing_summary.get("total_boxes")
+            item["packing_list_total_quantity"] = packing_summary.get("total_quantity")
+            item["packing_list_total_volume_m3"] = packing_summary.get("total_volume_m3")
+            item["packing_list_total_gross_weight_kg"] = packing_summary.get("total_gross_weight_kg")
+            item["packing_list_model_count"] = packing_summary.get("model_count")
+            item["packing_list_avg_qty_per_carton"] = packing_summary.get("avg_qty_per_carton")
+            item["packing_list_reason"] = packing_summary.get("reason")
+            item["packing_list_summary"] = packing_summary
             item["completeness_flags"] = {
                 "has_lines": bool(item.get("line_count")),
                 "has_matched_nm_id": bool(item.get("matched_nm_id_count")),
                 "has_financial_documents": bool(item.get("financial_document_count")),
                 "has_trade_documents": bool(item.get("trade_document_count")),
                 "has_fact_dates": bool(item.get("actual_shipment_date") and item.get("actual_ff_acceptance_date")),
+                "has_packing_list": bool(packing_summary.get("document_count")),
+                "packing_list_parsed": bool(packing_summary.get("document_count")) and packing_summary.get("parse_status") == "parsed",
             }
             result_rows.append(item)
         return {
@@ -1483,8 +1545,10 @@ class WebCoreDataMcpGateway:
                 "supplier_name": supplier_name,
                 "order_status": order_status,
                 "match_status": match_status,
+                "document_status": document_status,
                 "date_from": date_from,
                 "date_to": date_to,
+                "sort_by": sort_by,
             },
             "rows": result_rows,
             "pagination": {"limit": limit, "offset": effective_offset, "next_cursor": str(effective_offset + limit) if len(rows) > limit else "", "truncated": len(rows) > limit},
@@ -1553,6 +1617,8 @@ class WebCoreDataMcpGateway:
                 order_by="operation_date DESC, document_id ASC",
             )
             artifact_rows = self._artifact_rows(conn, shipment_id=shipment_id, supplier_order_id=shipment_id, artifact_kind=None, source_domain=None)
+            packing_docs = _fetch_packing_list_docs_for_shipments(conn, [shipment_id]).get(shipment_id, [])
+        packing_summary = _packing_list_summary_from_documents(packing_docs, line_item_limit=min(line_limit, 20))
         return {
             **base,
             "contract_name": "webcore_data_mcp_supplier_shipment_full_details",
@@ -1563,6 +1629,8 @@ class WebCoreDataMcpGateway:
             "trade_documents_metadata": _with_artifact_refs(trade_documents, source_domain="trade_documents"),
             "cny_documents_metadata": _with_artifact_refs(cny_documents, source_domain="cny_documents"),
             "artifact_refs": [_artifact_public(row) for row in artifact_rows[:document_limit]],
+            "packing_list_summary": packing_summary,
+            "document_parsed_fields_summary": _document_parsed_fields_summary(packing_docs),
             "redaction": "No absolute paths, hashes, secrets, raw DB payloads or unbounded file contents are exposed.",
         }
 
@@ -1770,13 +1838,26 @@ class WebCoreDataMcpGateway:
             parsed = artifact.get("parsed_payload")
             if parsed in (None, "", {}, []):
                 return {"status": "parsed_unavailable", "artifact": public}
-            return {
+            result = {
                 "status": "ok",
                 "contract_name": "webcore_data_mcp_supply_artifact",
                 "mode": "parsed",
                 "artifact": public,
                 "parsed_business_payload": _scrub_business_payload(parsed),
             }
+            if public.get("artifact_kind") == "packing_list":
+                result["packing_list_summary"] = _packing_list_summary_from_documents(
+                    [
+                        {
+                            "document_id": public.get("linked_document_id"),
+                            "document_type": "packing_list",
+                            "parse_status": public.get("parse_status"),
+                            "normalized_parse_json": parsed,
+                        }
+                    ],
+                    line_item_limit=20,
+                )
+            return result
         path_result = self._resolve_artifact_file_path(artifact)
         if path_result.get("status") != "ok":
             return {"status": path_result.get("status"), "artifact": public, "reason": path_result.get("reason") or ""}
@@ -2655,7 +2736,31 @@ def _tool_definitions() -> list[ToolDefinition]:
                     "date": _date_schema(),
                     "date_from": _date_schema(),
                     "date_to": _date_schema(),
-                    "artifact_kind": _enum_schema(["auto", "invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "bank_fee_statement", "cny_conversion_purchase", "supplier_cny_payment", "document_package", "unknown_business_document"]),
+                    "artifact_kind": _enum_schema(["auto", "invoice", "contract", "packing_list", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "bank_fee_statement", "cny_conversion_purchase", "supplier_cny_payment", "document_package", "unknown_business_document"]),
+                    "mode": _enum_schema(["metadata_only", "open_or_read", "download_hint"]),
+                    "limit": _int_schema(1, MAX_LIMIT),
+                },
+                required=["intent"],
+            ),
+        ),
+        ToolDefinition(
+            "resolve_webcore_data_intent",
+            "Alias for resolve_webcore_data_request. Use this when the user intent is ambiguous; it recommends ordered MCP calls without executing them.",
+            _schema(
+                {
+                    "intent": _string_schema(1, 500),
+                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"]),
+                    "object_id": _string_schema(0, 160),
+                    "shipment_id": _string_schema(0, 160),
+                    "supply_id": _string_schema(0, 160),
+                    "invoice_no": _string_schema(0, 160),
+                    "supplier_name": _string_schema(0, 160),
+                    "sku_or_nm_id": _string_schema(0, 120),
+                    "metric_key_or_label": _string_schema(0, 180),
+                    "date": _date_schema(),
+                    "date_from": _date_schema(),
+                    "date_to": _date_schema(),
+                    "artifact_kind": _enum_schema(["auto", "invoice", "contract", "packing_list", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "bank_fee_statement", "cny_conversion_purchase", "supplier_cny_payment", "document_package", "unknown_business_document"]),
                     "mode": _enum_schema(["metadata_only", "open_or_read", "download_hint"]),
                     "limit": _int_schema(1, MAX_LIMIT),
                 },
@@ -2703,6 +2808,7 @@ def _tool_definitions() -> list[ToolDefinition]:
                     "document_status": _string_schema(0, 80),
                     "date_from": _date_schema(),
                     "date_to": _date_schema(),
+                    "sort_by": _enum_schema(["date_desc", "shipment_date_desc", "product_qty_total_desc", "invoice_amount_total_desc", "expense_amount_rub_desc"]),
                     "limit": _int_schema(1, MAX_LIMIT),
                     "cursor": _string_schema(0, 40),
                     "offset": _int_schema(0, 100000),
@@ -2834,7 +2940,7 @@ def _domain_catalog() -> list[dict[str, Any]]:
         },
         {
             "domain": "supplier_shipments",
-            "description": "Supplier shipment registry, shipment cards, line rows, price conformity, financial docs, trade docs and CNY links.",
+            "description": "Supplier shipment registry, shipment cards, line rows, price conformity, packing-list summaries, financial docs, trade docs and CNY links.",
             "primary_tools": ["get_supplier_shipments_registry", "get_supplier_shipment_full_details", "list_supply_artifacts"],
             "legacy_tools": ["rank_supplier_shipments_by_unit_cost", "get_supplier_shipment_details"],
             "required_scope": SCOPE_SUPPLY_READ,
@@ -2878,10 +2984,13 @@ def _domain_catalog() -> list[dict[str, Any]]:
 def _intent_examples() -> list[dict[str, Any]]:
     return [
         {"intent": "покажи реестр поставок", "call": {"tool": "get_supplier_shipments_registry", "arguments": {"limit": 50}}},
+        {"intent": "найди самую большую поставку", "call": {"tool": "get_supplier_shipments_registry", "arguments": {"sort_by": "product_qty_total_desc", "limit": 1}}},
+        {"intent": "сколько коробок по упаковочному листу", "call": {"tool": "get_supplier_shipment_full_details", "arguments": {"shipment_id": "SHIP-1"}}},
         {"intent": "найди поставку по инвойсу INV-1", "call": {"tool": "search_business_objects", "arguments": {"query": "INV-1", "object_types": ["shipment"]}}},
         {"intent": "покажи карточку поставки SHIP-1", "call": {"tool": "get_supplier_shipment_full_details", "arguments": {"shipment_id": "SHIP-1"}}},
         {"intent": "покажи документы по поставке SHIP-1", "call": {"tool": "list_supply_artifacts", "arguments": {"shipment_id": "SHIP-1"}}},
         {"intent": "открой инвойс", "call": {"tool": "list_supply_artifacts", "arguments": {"artifact_kind": "invoice"}}},
+        {"intent": "открой packing list", "call": {"tool": "list_supply_artifacts", "arguments": {"artifact_kind": "packing_list"}}},
         {"intent": "покажи WB supply", "call": {"tool": "get_wb_supplies_registry", "arguments": {"limit": 50}}},
         {"intent": "покажи метрику за дату", "call": {"tool": "get_metric_values", "arguments": {"metric_key_or_label": "total_orderSum", "date": "YYYY-MM-DD"}}},
         {"intent": "найди SKU", "call": {"tool": "search_business_objects", "arguments": {"query": "nmId or name", "object_types": ["sku", "nomenclature"]}}},
@@ -2981,6 +3090,7 @@ def _artifact_kind_catalog() -> list[dict[str, Any]]:
     return [
         {"artifact_kind": "invoice", "source_domain": "trade_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
         {"artifact_kind": "contract", "source_domain": "trade_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
+        {"artifact_kind": "packing_list", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
         {"artifact_kind": "logistics_quote", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
         {"artifact_kind": "logistics_invoice", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
         {"artifact_kind": "customs_declaration", "source_domain": "financial_documents", "read_modes": ["metadata", "parsed", "base64_chunk"]},
@@ -3379,6 +3489,226 @@ def _fetch_table_rows_for_owner(
     ]
 
 
+def _fetch_packing_list_docs_for_shipments(conn: sqlite3.Connection, shipment_ids: Iterable[str]) -> dict[str, list[dict[str, Any]]]:
+    ids = []
+    seen = set()
+    for value in shipment_ids:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            ids.append(text)
+            seen.add(text)
+    if not ids or not _table_exists(conn, "sheet_vitrina_v1_supplier_financial_documents"):
+        return {}
+    columns = set(_table_columns(conn, "sheet_vitrina_v1_supplier_financial_documents"))
+    if "supplier_order_id" not in columns or "document_type" not in columns:
+        return {}
+    selected = _select_existing_columns(
+        columns,
+        [
+            "document_id",
+            "supplier_order_id",
+            "document_type",
+            "original_filename",
+            "uploaded_at",
+            "updated_at",
+            "parse_status",
+            "document_number",
+            "document_date",
+            "currency",
+            "total_amount",
+            "total_amount_rub",
+            "normalized_parse_json",
+            "warnings_json",
+            "errors_json",
+        ],
+    )
+    placeholders = ", ".join("?" for _ in ids)
+    safe_order = _safe_order_clause_for_existing_columns("uploaded_at DESC, document_id ASC", list(columns))
+    rows = conn.execute(
+        f"""
+        SELECT {', '.join(_quote_ident(column) for column in selected)}
+        FROM sheet_vitrina_v1_supplier_financial_documents
+        WHERE supplier_order_id IN ({placeholders}) AND document_type = ?
+        {safe_order}
+        LIMIT ?
+        """,
+        (*ids, "packing_list", min(MAX_LIMIT, max(1, len(ids) * 10))),
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        item = _row_dict(row)
+        supplier_order_id = str(item.get("supplier_order_id") or "")
+        if not supplier_order_id:
+            continue
+        grouped.setdefault(supplier_order_id, []).append(item)
+    return grouped
+
+
+def _packing_list_summary_from_documents(documents: list[Mapping[str, Any]], *, line_item_limit: int) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "document_count": len(documents),
+        "parsed_document_count": 0,
+        "parse_status": None,
+        "document_ids": [str(document.get("document_id") or "") for document in documents if document.get("document_id")],
+        "document_number": "",
+        "total_cartons": None,
+        "box_count": None,
+        "carton_count": None,
+        "total_boxes": None,
+        "total_quantity": None,
+        "total_gross_weight_kg": None,
+        "total_volume_m3": None,
+        "carton_size": "",
+        "model_count": None,
+        "avg_qty_per_carton": None,
+        "line_item_count": 0,
+        "line_items_sample": [],
+        "missing_fields": [],
+        "reason": "",
+    }
+    if not documents:
+        summary["reason"] = "packing_list_document_not_found"
+        return summary
+    statuses = [str(document.get("parse_status") or "").strip() for document in documents if str(document.get("parse_status") or "").strip()]
+    summary["parse_status"] = statuses[0] if len(set(statuses)) == 1 else ", ".join(sorted(set(statuses)))
+    parsed_payloads: list[dict[str, Any]] = []
+    for document in documents:
+        parsed = document.get("normalized_parse")
+        if not isinstance(parsed, Mapping):
+            parsed = _safe_json_loads(document.get("normalized_parse_json"))
+        if isinstance(parsed, Mapping) and isinstance(parsed.get("normalized_parse"), Mapping):
+            parsed = parsed.get("normalized_parse")
+        if isinstance(parsed, Mapping):
+            parsed_payloads.append(dict(parsed))
+    summary["parsed_document_count"] = len(parsed_payloads)
+    if not parsed_payloads:
+        summary["reason"] = "packing_list_parse_payload_unavailable"
+        return summary
+    primary = parsed_payloads[0]
+    total_cartons = _sum_present_numbers(payload.get("total_cartons") for payload in parsed_payloads)
+    total_quantity = _sum_present_numbers(payload.get("total_quantity") for payload in parsed_payloads)
+    total_gross = _sum_present_numbers(payload.get("total_gross_weight_kg") for payload in parsed_payloads)
+    total_volume = _sum_present_numbers(payload.get("total_volume_m3") for payload in parsed_payloads)
+    summary["document_number"] = str(primary.get("document_number") or primary.get("document_title") or "")
+    summary["total_cartons"] = total_cartons
+    summary["box_count"] = total_cartons
+    summary["carton_count"] = total_cartons
+    summary["total_boxes"] = total_cartons
+    summary["total_quantity"] = total_quantity
+    summary["total_gross_weight_kg"] = total_gross
+    summary["total_volume_m3"] = total_volume
+    summary["carton_size"] = _first_present_text(payload.get("carton_size") for payload in parsed_payloads)
+    summary["model_count"] = _first_present_number(payload.get("model_count") for payload in parsed_payloads)
+    summary["avg_qty_per_carton"] = (
+        total_quantity / total_cartons
+        if total_quantity is not None and total_cartons not in (None, 0)
+        else _first_present_number(payload.get("avg_qty_per_carton") for payload in parsed_payloads)
+    )
+    line_items: list[Any] = []
+    line_count = 0
+    for payload in parsed_payloads:
+        payload_items = payload.get("line_items")
+        if isinstance(payload_items, list):
+            line_items.extend(payload_items)
+            line_count += len(payload_items)
+        else:
+            count = _first_present_number([payload.get("line_item_count")])
+            if count is not None:
+                line_count += int(count)
+    summary["line_item_count"] = line_count
+    if line_item_limit > 0:
+        summary["line_items_sample"] = _scrub_business_payload(line_items[:line_item_limit])
+    missing = [
+        field
+        for field in ("total_cartons", "total_quantity", "total_gross_weight_kg", "total_volume_m3")
+        if summary.get(field) is None
+    ]
+    summary["missing_fields"] = missing
+    if missing:
+        summary["reason"] = "packing_list_parsed_payload_missing_fields"
+    return summary
+
+
+def _document_parsed_fields_summary(packing_docs: list[Mapping[str, Any]]) -> dict[str, Any]:
+    packing_summary = _packing_list_summary_from_documents(packing_docs, line_item_limit=0)
+    return {
+        "packing_list": {
+            "document_count": packing_summary.get("document_count"),
+            "parsed_document_count": packing_summary.get("parsed_document_count"),
+            "parse_status": packing_summary.get("parse_status"),
+            "available_fields": [
+                field
+                for field in (
+                    "total_cartons",
+                    "box_count",
+                    "carton_count",
+                    "total_boxes",
+                    "total_quantity",
+                    "total_gross_weight_kg",
+                    "total_volume_m3",
+                    "carton_size",
+                    "model_count",
+                    "avg_qty_per_carton",
+                    "line_item_count",
+                )
+                if packing_summary.get(field) not in (None, "", [])
+            ],
+            "missing_fields": packing_summary.get("missing_fields") or [],
+            "reason": packing_summary.get("reason") or "",
+        }
+    }
+
+
+def _supplier_registry_order_by(sort_by: str) -> str:
+    key = str(sort_by or "").strip()
+    return {
+        "date_desc": "COALESCE(s.invoice_date, s.shipment_date, s.created_at, '') DESC, s.shipment_id",
+        "shipment_date_desc": "COALESCE(s.shipment_date, s.invoice_date, s.created_at, '') DESC, s.shipment_id",
+        "product_qty_total_desc": "COALESCE(s.product_qty_total, SUM(CASE WHEN l.qty IS NULL THEN 0 ELSE l.qty END), 0) DESC, COALESCE(s.invoice_date, s.shipment_date, s.created_at, '') DESC, s.shipment_id",
+        "invoice_amount_total_desc": "COALESCE(s.invoice_amount_total, s.product_amount_total, 0) DESC, COALESCE(s.invoice_date, s.shipment_date, s.created_at, '') DESC, s.shipment_id",
+        "expense_amount_rub_desc": "COALESCE(SUM(CASE WHEN fe.amount_rub IS NULL THEN 0 ELSE fe.amount_rub END), 0) DESC, COALESCE(s.invoice_date, s.shipment_date, s.created_at, '') DESC, s.shipment_id",
+    }.get(key, "COALESCE(s.invoice_date, s.shipment_date, s.created_at, '') DESC, s.shipment_id")
+
+
+def _sum_present_numbers(values: Iterable[Any]) -> float | None:
+    total = 0.0
+    seen = False
+    for value in values:
+        number = _coerce_number(value)
+        if number is None:
+            continue
+        total += number
+        seen = True
+    return total if seen else None
+
+
+def _first_present_number(values: Iterable[Any]) -> float | None:
+    for value in values:
+        number = _coerce_number(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _first_present_text(values: Iterable[Any]) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _coerce_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_order_clause_for_existing_columns(order_by: str, columns: list[str]) -> str:
     parts: list[str] = []
     for raw_part in str(order_by or "").split(","):
@@ -3521,6 +3851,9 @@ def _normalize_artifact_kind(value: str) -> str:
     aliases = {
         "contract": "contract",
         "invoice": "invoice",
+        "packing_list": "packing_list",
+        "packing list": "packing_list",
+        "packing-list": "packing_list",
         "logistics_quote": "logistics_quote",
         "logistics_invoice": "logistics_invoice",
         "customs_declaration": "customs_declaration",
@@ -3606,6 +3939,13 @@ def _infer_request_intent(intent: str, **hints: Any) -> dict[str, Any]:
         domain, action, object_type = "sku", "find_sku", "sku"
     elif any(marker in text for marker in ("wb supply", "wildberries", "вб постав", "wb постав")):
         domain, action, object_type = "wb_supplies", "show_wb_supply", "wb_supply"
+    elif any(marker in text for marker in ("самая большая постав", "самую большую постав", "largest shipment", "biggest shipment")):
+        domain, action, object_type = "supplier_shipments", "find_largest", "shipment"
+    elif any(marker in text for marker in ("упаковоч", "packing list", "короб", "carton", "box count", "boxes", "parsed-пол", "parsed пол")):
+        if any(marker in text for marker in ("открой", "open", "прочитай", "read", "документ")):
+            domain, action, object_type = "artifacts", "open_artifact", "artifact"
+        else:
+            domain, action, object_type = "supplier_shipments", "packing_list_summary", "shipment"
     elif any(marker in text for marker in ("реестр постав", "registry")):
         domain, action, object_type = "supplier_shipments", "show_registry", "shipment"
     elif any(marker in text for marker in ("инвойс", "договор", "бтт", "втб", "платёж", "платеж", "заявление на перевод", "вбк", "ведомость банковского", "дт", "тамож", "кп логист", "счёт логист", "счет логист", "документ")):
@@ -3634,6 +3974,7 @@ def _artifact_kind_from_text(text: str, explicit: str) -> str:
     if explicit and explicit != "auto":
         return explicit
     checks = [
+        ("packing_list", ("packing list", "упаковоч", "короб", "carton", "box count", "boxes")),
         ("bank_control_statement", ("вбк", "ведомость банковского")),
         ("bank_transfer_application", ("бтт", "втб", "платёж", "платеж", "заявление на перевод")),
         ("customs_declaration", ("дт", "тамож")),

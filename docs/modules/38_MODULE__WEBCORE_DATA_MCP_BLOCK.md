@@ -60,7 +60,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. MCP now exposes a metadata-only navigation layer (`get_webcore_data_map`, `resolve_webcore_data_request`), allowlisted runtime business table catalog/schema/row reads, expanded supplier/WB supply read tools and server-owned artifact access by opaque refs with bounded metadata/parsed/text/base64 modes. Metric tools project bounded values from persisted DATA_VITRINA ready snapshots, including TOTAL|total_* and SKU:<nm_id>|* rows, without exposing raw plan_json unless a raw business payload column is explicitly requested through the allowlisted scrubbed table-reader path."
+update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. MCP now exposes a metadata-only navigation layer (`get_webcore_data_map`, `resolve_webcore_data_request`, alias `resolve_webcore_data_intent`), allowlisted runtime business table catalog/schema/row reads, expanded supplier/WB supply read tools and server-owned artifact access by opaque refs with bounded metadata/parsed/text/base64 modes. Supplier registry/full-details and packing-list artifact reads expose bounded parsed packing-list totals/aliases from `normalized_parse_json`, including cartons/boxes, quantity, gross weight, volume, carton size, model count and line samples when available. Metric tools project bounded values from persisted DATA_VITRINA ready snapshots, including TOTAL|total_* and SKU:<nm_id>|* rows, without exposing raw plan_json unless a raw business payload column is explicitly requested through the allowlisted scrubbed table-reader path."
 ---
 
 # 1. Identifier and Status
@@ -132,6 +132,7 @@ Navigation / catalog:
 
 - `get_webcore_data_map`
 - `resolve_webcore_data_request`
+- `resolve_webcore_data_intent`
 - `list_webcore_business_tables`
 - `get_webcore_business_table_schema`
 - `get_webcore_business_table_rows`
@@ -261,7 +262,7 @@ Reads ready snapshot max dates, temporal source slot max dates/captured timestam
 
 Navigation:
 
-`get_webcore_data_map` is a derived guide over current tool definitions, scope constants, allowlisted runtime tables, artifact kinds and canonical module docs. It is not a new source of truth. `resolve_webcore_data_request` accepts natural-language intent and optional hints, recognizes Russian business aliases such as `реестр поставок`, `инвойс`, `договор`, `БТТ`, `ВТБ`, `ВБК`, `ДТ`, `КП логистов`, `счёт CNY`, `номенклатура`, `метрика`, `остатки` and `свежесть данных`, and returns recommended MCP calls without executing them.
+`get_webcore_data_map` is a derived guide over current tool definitions, scope constants, allowlisted runtime tables, artifact kinds and canonical module docs. It is not a new source of truth. `resolve_webcore_data_request` and alias `resolve_webcore_data_intent` accept natural-language intent and optional hints, recognize Russian business aliases such as `реестр поставок`, `самая большая поставка`, `упаковочный лист`, `packing list`, `коробки`, `инвойс`, `договор`, `БТТ`, `ВТБ`, `ВБК`, `ДТ`, `КП логистов`, `счёт CNY`, `номенклатура`, `метрика`, `остатки` and `свежесть данных`, and return recommended MCP calls without executing them. For “найди самую большую поставку” the resolver recommends `get_supplier_shipments_registry(sort_by=product_qty_total_desc, limit=1)` and then shipment full-details/artifact reads using the returned `shipment_id`.
 
 Business table access:
 
@@ -273,11 +274,11 @@ Reads cached rows only from `sheet_vitrina_v1_wb_supplies` and related sync/enri
 
 Supplier shipments:
 
-Legacy `get_supplier_shipment_details` reads shipment metadata, line aggregates, financial document status aggregates, expense summaries and trade document status counts. `get_supplier_shipments_registry` exposes a read-only registry/list with shipment dates/statuses/totals and completeness flags. `get_supplier_shipment_full_details` expands one shipment to safe header, line rows, price conformity fields when present, financial documents, expense lines, trade documents, CNY-linked rows and artifact refs. It never exposes absolute paths, hashes, secrets or unbounded raw payloads.
+Legacy `get_supplier_shipment_details` reads shipment metadata, line aggregates, financial document status aggregates, expense summaries, trade document status counts and compact `packing_list_summary`. `get_supplier_shipments_registry` exposes a read-only registry/list with shipment dates/statuses/totals, completeness flags and optional `sort_by` (`date_desc`, `shipment_date_desc`, `product_qty_total_desc`, `invoice_amount_total_desc`, `expense_amount_rub_desc`). When a parsed `packing_list` exists in `sheet_vitrina_v1_supplier_financial_documents.normalized_parse_json`, registry rows include top-level `packing_list_*` fields: document count/status, `total_cartons`, aliases `box_count`/`carton_count`/`total_boxes`, total quantity, gross weight kg, volume m3, model count and avg qty/carton. Missing parsed data is explicit via null fields plus `packing_list_reason`. `get_supplier_shipment_full_details` expands one shipment to safe header, line rows, price conformity fields when present, financial documents, expense lines, trade documents, CNY-linked rows, artifact refs, `packing_list_summary`, parsed field availability and bounded packing-list line samples. It never exposes absolute paths, hashes, secrets or unbounded raw payloads.
 
 Artifacts:
 
-`list_supply_artifacts` returns metadata and opaque refs for server-owned runtime artifacts from allowlisted rows in `sheet_vitrina_v1_trade_documents`, `sheet_vitrina_v1_supplier_financial_documents` and `sheet_vitrina_v1_cny_documents`. Supported kinds include `invoice`, `contract`, `logistics_quote`, `logistics_invoice`, `customs_declaration`, `bank_control_statement`, `bank_transfer_application`, `bank_fee_statement`, `cny_conversion_purchase`, `supplier_cny_payment`, `document_package` and `unknown_business_document`. `get_supply_artifact` accepts only an `artifact_ref`; it never accepts a filesystem path. Modes are `metadata`, `parsed`, `text`, `text_chunk` and `base64_chunk`. File reads require the registered path to resolve inside the WebCore runtime root, enforce size/chunk caps and redact secret-like text. PDF/text extraction is intentionally conservative; parsed metadata is preferred where available.
+`list_supply_artifacts` returns metadata and opaque refs for server-owned runtime artifacts from allowlisted rows in `sheet_vitrina_v1_trade_documents`, `sheet_vitrina_v1_supplier_financial_documents` and `sheet_vitrina_v1_cny_documents`. Supported kinds include `invoice`, `contract`, `packing_list`, `logistics_quote`, `logistics_invoice`, `customs_declaration`, `bank_control_statement`, `bank_transfer_application`, `bank_fee_statement`, `cny_conversion_purchase`, `supplier_cny_payment`, `document_package` and `unknown_business_document`. `get_supply_artifact` accepts only an `artifact_ref`; it never accepts a filesystem path. Modes are `metadata`, `parsed`, `text`, `text_chunk` and `base64_chunk`. For `packing_list` artifacts, `mode=parsed` returns scrubbed parsed business payload plus `packing_list_summary` with cartons/box aliases and bounded line samples. File reads require the registered path to resolve inside the WebCore runtime root, enforce size/chunk caps and redact secret-like text. PDF/text extraction is intentionally conservative; parsed metadata is preferred where available.
 
 CNY:
 
@@ -325,6 +326,8 @@ The smoke proves:
 - all tools have `readOnlyHint: true`;
 - unauthenticated HTTP MCP POST leaks no business data;
 - all P0/P1 tools work on a fixture DB;
+- navigation routes cover largest-shipment and packing-list intents;
+- supplier registry/full-details/artifact/table reads expose parsed packing-list totals/aliases without paths/secrets;
 - redaction removes paths/storage-state markers;
 - revenue ambiguity is explicit;
 - universal metric projection reads the `DATA_VITRINA` layout and returns `total_orderSum`;
