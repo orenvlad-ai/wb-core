@@ -64,6 +64,13 @@ DATE_ONLY_OPERATION_PRIORITY = {
     CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT: 4,
     CNY_LEDGER_OPERATION_ADJUSTMENT: 5,
 }
+DATE_ONLY_OPERATION_START_OF_DAY_TYPES = {
+    CNY_LEDGER_OPERATION_OPENING_BALANCE,
+    CNY_LEDGER_OPERATION_CONVERSION_IN,
+    CNY_LEDGER_OPERATION_CONVERSION_FEE,
+    CNY_LEDGER_OPERATION_TRANSFER_FEE,
+    "bank_fee",
+}
 
 TextExtractor = Callable[[bytes, str], tuple[str, dict[str, Any], list[str]]]
 
@@ -963,8 +970,7 @@ def _mark_date_only_sequence_warnings(operations: list[dict[str, Any]]) -> None:
     by_date: dict[str, int] = {}
     for op in operations:
         date_value = str(op.get("operation_date") or "")
-        datetime_value = str(op.get("operation_datetime") or "")
-        if date_value and not datetime_value:
+        if date_value:
             by_date[date_value] = by_date.get(date_value, 0) + 1
     for op in operations:
         date_value = str(op.get("operation_date") or "")
@@ -982,7 +988,10 @@ def _operation_sort_key(operation: Mapping[str, Any]) -> str:
     if operation_datetime:
         return "|".join([operation_datetime, operation_date, "0", created_at, source_document_id, operation_type])
     priority = DATE_ONLY_OPERATION_PRIORITY.get(operation_type, 99)
-    primary = f"{operation_date}T23:59:59Z"
+    if operation_type in DATE_ONLY_OPERATION_START_OF_DAY_TYPES:
+        primary = f"{operation_date}T00:00:{min(priority, 59):02d}Z"
+    else:
+        primary = f"{operation_date}T23:59:{min(priority, 59):02d}Z"
     return "|".join([primary, operation_date, "1", f"{priority:02d}", created_at, source_document_id, operation_type])
 
 
