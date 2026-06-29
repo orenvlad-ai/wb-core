@@ -120,9 +120,10 @@ update_note: "Обновлён под current temporal closure seam, plan-report
     - editable product/extra line details and persisted invoice price conformity snapshots/statuses in `sheet_vitrina_v1_supplier_shipment_lines`;
     - server-owned trade document registry in `sheet_vitrina_v1_trade_documents` for `contract` and `invoice` files;
     - one-primary-contract-per-invoice links in `sheet_vitrina_v1_invoice_contract_links`.
+    - supplier financial documents/expense lines in `sheet_vitrina_v1_supplier_financial_documents` and `sheet_vitrina_v1_supplier_financial_expense_lines`, including confirmed `bank_fee_statement` parent documents and matched bank-fee expense lines. Statement upload preview is stored as normalized JSON on the parent document; confirmed expense lines are created only after explicit confirm and are idempotent by statement row/natural key. Exact-cost fields (`exact_*`) are derived read-side from shipment header CNY fields and financial summary, not stored as separate shipment columns in this checkpoint.
   - server-owned CNY account ledger state:
     - canonical currency documents in `sheet_vitrina_v1_cny_documents` with document type, source/order context, file metadata/hash, operation date/datetime, parse payload, status and natural key;
-    - deterministic replay rows in `sheet_vitrina_v1_cny_ledger_operations` with operation type, document/order links, sequence key, CNY/RUB deltas, balances, effective/average rates and diagnostic status;
+    - deterministic replay rows in `sheet_vitrina_v1_cny_ledger_operations` with operation type, document/order links, sequence key, CNY/RUB deltas, balances, effective/average rates and diagnostic status. Confirmed CNY-account bank statement fees create canonical `bank_fee` documents and `transfer_fee` operations through the existing ledger; RUB-account statement fees stay only in supplier financial expense lines;
     - last replay state in `sheet_vitrina_v1_cny_ledger_replay_state` with balance, average rate, counts and diagnostics.
   - trade document files:
     - settings-uploaded files live under `<runtime_dir>/trade_documents/files/<document_type>/<document_id>/<safe_filename>`;

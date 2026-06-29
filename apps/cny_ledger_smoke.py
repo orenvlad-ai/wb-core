@@ -34,6 +34,11 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.application.cny_ledger import CnyLedgerBlock, parse_cny_document_text  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.supplier_financial_documents import (  # noqa: E402
+    build_bank_fee_statement_import_preview,
+    build_financial_summary,
+    parse_financial_document_text,
+)
 from packages.contracts.cny_ledger import (  # noqa: E402
     CNY_CALC_STATUS_INSUFFICIENT_BALANCE,
     CNY_CALC_STATUS_MISSING_OPENING_BALANCE,
@@ -41,6 +46,7 @@ from packages.contracts.cny_ledger import (  # noqa: E402
     CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
     CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
     CNY_DOCUMENT_STATUS_POSTED,
+    CNY_DOCUMENT_TYPE_BANK_FEE,
     CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE,
     CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
 )
@@ -58,12 +64,12 @@ CONVERSION_TEXT = """Поручение №2 от 12.05.2026
 Принято электронно 12.05.2026 11:20
 """
 
-PAYMENT_TEXT = """Заявление на перевод № PAY-1
+PAYMENT_TEXT = """Заявление на перевод № 1
 от 13 мая 2026
 Исполнен 13.05.2026 в 12:10:00
 Please debit our account with you): 40802156616580000008
 Валюта Currency Code CNY
-Сумма перевода Amount of transfer 50,00
+Сумма перевода Amount of transfer 785087,50
 50 Ordering Customer
 ООО Тест
 56 Банк-посредник
@@ -74,7 +80,35 @@ ABCNCNBJXXX BANK OF CHINA
 12345678901234567890 TEST SUPPLIER LTD
 Назначение платежа Details of payment 70
 PAYMENT UNDER CONTRACT CN-1 от 01.05.2026
+INVOICE INV-1 от 10.05.2026
 Расходы и комиссии OUR
+"""
+
+BANK_STATEMENT_TEXT = """
+Выписка по счету 40802156616580000008 CNY за период с 13.05.2026 по 21.05.2026
+Банк ВТБ
+Входящий остаток 818 367,81 CNY
+Исходящий остаток 17 000,00 CNY
+13.05.2026 Документ № 1 Дебет 785 087,50 CNY Платёжное поручение № 1 оплата поставщику 785087.50 CNY контракт CN-1 от 01.05.2026 инвойс INV-1 от 10.05.2026 TEST SUPPLIER LTD
+13.05.2026 Документ № VAT-1 Дебет 172.72 CNY НДС за ВК по операции №1 на сумму 785087.50 CNY контракт CN-1 от 01.05.2026 инвойс INV-1 от 10.05.2026
+13.05.2026 Документ № VK-1 Дебет 785.09 CNY комиссия за ВК по операции №1 на сумму 785087.50 CNY контракт CN-1 от 01.05.2026 инвойс INV-1 от 10.05.2026
+13.05.2026 Документ № SWIFT-1 Дебет 15 623.24 CNY комиссия за перевод SWIFT ВТБ Шанхай по операции №1 на сумму 785087.50 CNY контракт CN-1 от 01.05.2026 инвойс INV-1 от 10.05.2026
+14.05.2026 Документ № 2 Дебет 100 000,00 CNY Платёжное поручение № 2 оплата поставщику 100000.00 CNY контракт CN-2 от 02.05.2026 инвойс INV-2 от 11.05.2026 OTHER SUPPLIER
+14.05.2026 Документ № VAT-2 Дебет 22.00 CNY НДС за ВК по операции №2 на сумму 100000.00 CNY контракт CN-2 от 02.05.2026
+14.05.2026 Документ № VK-2 Дебет 100.00 CNY комиссия за ВК по операции №2 на сумму 100000.00 CNY контракт CN-2 от 02.05.2026
+13.05.2026 Документ № CNV-1 Кредит 818 367,81 CNY Покупка иностранной валюты поручение №2
+"""
+
+RUB_BANK_STATEMENT_TEXT = """
+Выписка по счету 40802810012480001092 RUB за период с 13.05.2026 по 13.05.2026
+Банк ВТБ
+13.05.2026 Документ № RUBFEE-1 Дебет 12 345,67 RUB комиссия банка по операции №1 на сумму 785087.50 CNY контракт CN-1 от 01.05.2026 инвойс INV-1 от 10.05.2026
+"""
+
+WEAK_BANK_STATEMENT_TEXT = """
+Выписка по счету 40802156616580000008 CNY за период с 13.05.2026 по 13.05.2026
+Банк ВТБ
+13.05.2026 Документ № WEAK-1 Дебет 172.72 CNY комиссия банка
 """
 
 HTTP_NOW = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
@@ -91,6 +125,8 @@ class Clock:
 
 def main() -> None:
     _assert_vtb_parser()
+    _assert_bank_fee_statement_parser_and_matching()
+    _assert_exact_cost_summary_rules()
     _assert_application_ledger_replay()
     _assert_blocked_states()
     _assert_http_routes_and_order_integration()
@@ -117,6 +153,138 @@ def _assert_vtb_parser() -> None:
             raise AssertionError(f"VTB parser field {key} changed: {normalized.get(key)!r}")
     if parsed.get("errors"):
         raise AssertionError(f"VTB parser must not emit errors: {parsed['errors']}")
+
+
+def _assert_bank_fee_statement_parser_and_matching() -> None:
+    parsed = parse_financial_document_text(BANK_STATEMENT_TEXT, filename="sanitized-vtb-bank-statement.txt")
+    normalized = parsed["normalized_parse"]
+    if normalized.get("document_type") != "bank_fee_statement":
+        raise AssertionError(f"bank statement parser did not detect document type: {normalized}")
+    expected = {
+        "period_start": "2026-05-13",
+        "period_end": "2026-05-21",
+        "account_number": "40802156616580000008",
+        "account_currency": "CNY",
+    }
+    for key, value in expected.items():
+        if normalized.get(key) != value:
+            raise AssertionError(f"bank statement parser field {key} changed: {normalized.get(key)!r}")
+    payments = normalized.get("payment_rows") or []
+    if not any(item.get("operation_number") == "1" and _dec(item.get("amount")) == Decimal("785087.50") for item in payments):
+        raise AssertionError(f"statement must extract operation #1 supplier payment: {payments}")
+    if len(normalized.get("fee_rows") or []) != 5:
+        raise AssertionError(f"statement must extract three op #1 fees and two unrelated op #2 fees: {normalized.get('fee_rows')}")
+    if len(normalized.get("conversion_rows") or []) != 1:
+        raise AssertionError(f"conversion rows must be parsed but not imported as fees: {normalized.get('conversion_rows')}")
+
+    anchor = {
+        "document_id": "pay-1",
+        "document_number": "1",
+        "document_date": "2026-05-13",
+        "operation_datetime": "2026-05-13T12:10:00Z",
+        "cny_amount": "785087.50",
+        "contract_number": "CN-1",
+        "contract_date": "2026-05-01",
+        "invoice_number": "INV-1",
+        "invoice_date": "2026-05-10",
+    }
+    shipment = {"header": {"shipment_id": "order-1", "contract_no": "CN-1", "contract_date": "2026-05-01", "invoice_no": "INV-1", "invoice_date": "2026-05-10"}}
+    preview = build_bank_fee_statement_import_preview(normalized, shipment=shipment, payment_documents=[anchor])
+    if preview["status"] != "ready_to_confirm" or preview["match_confidence"] != "strong":
+        raise AssertionError(f"anchored fee preview must be ready with strong confidence: {preview}")
+    amounts = sorted((_dec(item.get("amount")), item.get("fee_category"), item.get("currency")) for item in preview["matched_fee_rows"])
+    expected_amounts = sorted(
+        [
+            (Decimal("172.72"), "currency_control_vat", "CNY"),
+            (Decimal("785.09"), "currency_control_fee", "CNY"),
+            (Decimal("15623.24"), "bank_transfer_fee", "CNY"),
+        ]
+    )
+    if amounts != expected_amounts:
+        raise AssertionError(f"operation #1 matched fees changed: {amounts}")
+    if preview["fee_totals_by_currency"].get("CNY") != "16581.05":
+        raise AssertionError(f"CNY fee total changed: {preview['fee_totals_by_currency']}")
+    ignored = preview["ignored_rows"]
+    if not any(item.get("row_type") == "conversion_in" for item in ignored):
+        raise AssertionError(f"conversion inflow row must be ignored by order fee import: {ignored}")
+    if not any(item.get("operation_number") == "2" for item in ignored):
+        raise AssertionError(f"operation #2 rows must be ignored for operation #1 anchor: {ignored}")
+
+    rub_parsed = parse_financial_document_text(RUB_BANK_STATEMENT_TEXT, filename="sanitized-vtb-rub-statement.txt")
+    rub_preview = build_bank_fee_statement_import_preview(
+        rub_parsed["normalized_parse"],
+        shipment=shipment,
+        payment_documents=[anchor],
+    )
+    rub_rows = rub_preview.get("matched_fee_rows") or []
+    if rub_preview["status"] != "ready_to_confirm" or len(rub_rows) != 1:
+        raise AssertionError(f"RUB statement fee must be matched through the same anchor: {rub_preview}")
+    if rub_rows[0].get("currency") != "RUB" or _dec(rub_rows[0].get("amount")) != Decimal("12345.67"):
+        raise AssertionError(f"RUB fee amount/currency changed: {rub_rows}")
+
+    weak_parsed = parse_financial_document_text(WEAK_BANK_STATEMENT_TEXT, filename="sanitized-vtb-weak-statement.txt")
+    weak_preview = build_bank_fee_statement_import_preview(
+        weak_parsed["normalized_parse"],
+        shipment={"header": {"shipment_id": "weak"}},
+        payment_documents=[{"document_id": "weak-pay", "document_date": "2026-05-13", "cny_amount": "785087.50"}],
+    )
+    if weak_preview["status"] != "needs_review" or weak_preview.get("matched_fee_rows"):
+        raise AssertionError(f"weak match must not auto-import: {weak_preview}")
+    if not weak_preview.get("weak_candidates"):
+        raise AssertionError(f"weak candidates should be exposed for manual review: {weak_preview}")
+
+
+def _assert_exact_cost_summary_rules() -> None:
+    confirmed_statement = {
+        "document_id": "fee-statement",
+        "document_type": "bank_fee_statement",
+        "parse_status": "confirmed",
+        "normalized_parse": {},
+    }
+    rub_fee_line = {
+        "line_id": "rub-fee",
+        "financial_document_id": "fee-statement",
+        "category": "bank_transfer_fee",
+        "currency": "RUB",
+        "amount": 123.45,
+        "amount_rub": 123.45,
+        "raw": {"source": "bank_fee_statement", "original_currency": "RUB"},
+    }
+    cny_fee_line = {
+        "line_id": "cny-fee",
+        "financial_document_id": "fee-statement",
+        "category": "bank_transfer_fee",
+        "currency": "CNY",
+        "amount": 10.0,
+        "amount_rub": None,
+        "raw": {"source": "bank_fee_statement", "original_currency": "CNY", "rub_equivalent_status": "cny_ledger_pending"},
+    }
+    exact_summary = build_financial_summary(
+        [confirmed_statement],
+        [rub_fee_line],
+        shipment={"header": {"shipment_id": "exact-ok", "product_qty_total": 10, "invoice_amount_total": 100, "approx_yuan_rate": 99, "cny_payment_currency_rub_cost": 1000, "cny_calculation_status": CNY_CALC_STATUS_OK}},
+    )
+    per_unit = exact_summary["per_unit"]
+    if per_unit["exact_bank_fees_rub"] != 123.45 or per_unit["exact_landed_cost_per_unit_rub"] != 112.35:
+        raise AssertionError(f"RUB bank fee must add directly to exact cost: {per_unit}")
+
+    no_payment_summary = build_financial_summary(
+        [confirmed_statement],
+        [rub_fee_line],
+        shipment={"header": {"shipment_id": "no-payment", "product_qty_total": 10, "invoice_amount_total": 100, "approx_yuan_rate": 99}},
+    )
+    no_payment_per_unit = no_payment_summary["per_unit"]
+    if no_payment_per_unit["exact_landed_cost_per_unit_rub"] is not None or "cny_payment_cost_unavailable" not in no_payment_per_unit["exact_cost_blockers"]:
+        raise AssertionError(f"exact cost must not fall back to approximate CNY rate: {no_payment_per_unit}")
+
+    cny_pending_summary = build_financial_summary(
+        [confirmed_statement],
+        [cny_fee_line],
+        shipment={"header": {"shipment_id": "cny-pending", "product_qty_total": 10, "cny_payment_currency_rub_cost": 1000, "cny_calculation_status": CNY_CALC_STATUS_OK}},
+    )
+    cny_pending_per_unit = cny_pending_summary["per_unit"]
+    if cny_pending_per_unit["exact_landed_cost_per_unit_rub"] is not None or "cny_ledger_missing" not in cny_pending_per_unit["exact_cost_blockers"]:
+        raise AssertionError(f"CNY fee must wait for CNY ledger RUB equivalent: {cny_pending_per_unit}")
 
 
 def _assert_application_ledger_replay() -> None:
@@ -248,6 +416,7 @@ def _assert_http_routes_and_order_integration() -> None:
         )
         entrypoint.cny_ledger_block.timestamp_factory = clock
         entrypoint.cny_ledger_block.pdf_text_extractor = _fixture_text_extractor
+        entrypoint.supplier_financial_documents_block.pdf_text_extractor = _fixture_text_extractor
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -302,11 +471,63 @@ def _assert_http_routes_and_order_integration() -> None:
             if payment_status != 200 or payment_payload.get("document_type") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
                 raise AssertionError(f"supplier payment upload changed: {payment_status} {payment_payload}")
 
+            statement_status, statement_preview = _post_multipart(
+                f"{base_url}{order_doc_path}",
+                b"bank-statement-pdf",
+                filename="bank-statement.pdf",
+            )
+            import_preview = statement_preview.get("import_preview") or {}
+            if (
+                statement_status != 200
+                or not statement_preview.get("preview_required")
+                or import_preview.get("status") != "ready_to_confirm"
+                or len(import_preview.get("matched_fee_rows") or []) != 3
+            ):
+                raise AssertionError(f"bank statement upload must return fee preview: {statement_status} {statement_preview}")
+            duplicate_statement_status, duplicate_statement = _post_multipart(
+                f"{base_url}{order_doc_path}",
+                b"bank-statement-pdf",
+                filename="bank-statement.pdf",
+            )
+            if duplicate_statement_status != 200 or not duplicate_statement.get("idempotent"):
+                raise AssertionError(f"duplicate statement preview must be idempotent: {duplicate_statement_status} {duplicate_statement}")
+            before_confirm_lines = runtime.list_supplier_financial_expense_lines("http-order")
+            if before_confirm_lines:
+                raise AssertionError(f"preview must not create expense lines before confirmation: {before_confirm_lines}")
+            statement_document_id = str(statement_preview.get("document_id") or "")
+            confirm_status, confirmed_statement = _post_json(
+                f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
+                {},
+            )
+            if confirm_status != 200 or confirmed_statement.get("parse_status") != "confirmed":
+                raise AssertionError(f"statement confirm import changed: {confirm_status} {confirmed_statement}")
+            imported_lines = runtime.list_supplier_financial_expense_lines("http-order")
+            if len(imported_lines) != 3 or {item.get("currency") for item in imported_lines} != {"CNY"}:
+                raise AssertionError(f"confirmed import must create exactly three CNY expense lines: {imported_lines}")
+            cny_fee_documents = [
+                item
+                for item in runtime.list_cny_documents()
+                if item.get("document_type") == CNY_DOCUMENT_TYPE_BANK_FEE
+                and item.get("source_order_id") == "http-order"
+            ]
+            if len(cny_fee_documents) != 3:
+                raise AssertionError(f"CNY fee import must create three CNY ledger documents: {cny_fee_documents}")
+            duplicate_confirm_status, duplicate_confirm = _post_json(
+                f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
+                {},
+            )
+            if duplicate_confirm_status != 200 or not duplicate_confirm.get("already_added"):
+                raise AssertionError(f"duplicate confirm must be idempotent: {duplicate_confirm_status} {duplicate_confirm}")
+            if len(runtime.list_supplier_financial_expense_lines("http-order")) != 3:
+                raise AssertionError("duplicate confirm must not duplicate expense lines")
+
             order_docs_path = f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/http-order/{DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT}"
             docs_status, docs_payload = _get_json(f"{base_url}{order_docs_path}")
             docs = docs_payload.get("documents") or []
             if docs_status != 200 or not any(item.get("document_id") == payment_payload.get("document_id") for item in docs):
                 raise AssertionError(f"CNY payment must be visible in supplier order documents: {docs_status} {docs_payload}")
+            if not any(item.get("document_id") == statement_document_id for item in docs):
+                raise AssertionError(f"confirmed bank statement must be visible in supplier order documents: {docs_status} {docs_payload}")
 
             replay_status, replay_payload = _post_json(f"{base_url}{DEFAULT_CNY_ACCOUNT_REPLAY_PATH}", {})
             if replay_status != 200 or replay_payload["replay"]["status"] != CNY_CALC_STATUS_OK:
@@ -322,6 +543,11 @@ def _assert_http_routes_and_order_integration() -> None:
                 raise AssertionError(f"order CNY calculated fields missing: {shipment}")
             if shipment["approx_yuan_rate"] != 15.75:
                 raise AssertionError("HTTP flow must not overwrite old estimated CNY rate")
+            detail_status, detail = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/http-order")
+            if detail_status != 200 or detail.get("exact_landed_cost_per_unit_rub") in (None, "", 0):
+                raise AssertionError(f"exact cost per unit must be exposed after confirmed fees: {detail_status} {detail}")
+            if detail.get("exact_cost_status") != "ok":
+                raise AssertionError(f"exact cost status must be ok when CNY ledger and quantity are available: {detail}")
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -469,6 +695,8 @@ def _seed_supplier_order(
 
 
 def _fixture_text_extractor(file_bytes: bytes, filename: str) -> tuple[str, dict[str, object], list[str]]:
+    if "statement" in filename.lower() or b"statement" in file_bytes:
+        return BANK_STATEMENT_TEXT, {"method": "smoke_text_fixture"}, []
     if "payment" in filename.lower() or b"payment" in file_bytes:
         return PAYMENT_TEXT, {"method": "smoke_text_fixture"}, []
     return CONVERSION_TEXT, {"method": "smoke_text_fixture"}, []
