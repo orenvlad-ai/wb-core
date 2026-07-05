@@ -406,12 +406,14 @@ def main() -> None:
                 raise AssertionError(f"duplicate sync must not duplicate rows, got {duplicate_status} {duplicate_payload}")
             duplicate_sync = duplicate_payload.get("sync", {})
             if (
-                duplicate_sync.get("upserted_count") != 2
+                duplicate_sync.get("upserted_count") != 6
                 or duplicate_sync.get("unchanged_rows") != 7
-                or duplicate_sync.get("enriched") != 2
+                or duplicate_sync.get("enriched") != 5
                 or duplicate_sync.get("enriched_active_rows") != 2
+                or duplicate_sync.get("refreshed_recent_historical_rows") != 4
+                or duplicate_sync.get("failed_enrich") != 1
             ):
-                raise AssertionError(f"second incremental sync must refresh unchanged active rows only, got {duplicate_sync}")
+                raise AssertionError(f"second incremental sync must refresh active and recent historical rows, got {duplicate_sync}")
 
             fake_source.list_rows[4]["updatedDate"] = "2026-06-09T15:00:00+03:00"
             fake_source.goods_http_errors = {"1003": 429}
@@ -422,11 +424,12 @@ def main() -> None:
             rate_limited_sync = rate_limited_payload.get("sync", {})
             if (
                 rate_limited_status != 200
-                or rate_limited_sync.get("upserted_count") != 2
+                or rate_limited_sync.get("upserted_count") != 6
                 or rate_limited_sync.get("changed_rows") != 1
                 or rate_limited_sync.get("unchanged_rows") != 6
                 or rate_limited_sync.get("enriched_active_rows") != 1
-                or rate_limited_sync.get("failed_enrich") != 1
+                or rate_limited_sync.get("refreshed_recent_historical_rows") != 4
+                or rate_limited_sync.get("failed_enrich") != 2
             ):
                 raise AssertionError(
                     f"detail/goods 429 must not fail list sync, got {rate_limited_status} {rate_limited_payload}"
@@ -443,8 +446,10 @@ def main() -> None:
             restore_sync = restore_payload.get("sync", {})
             if (
                 restore_status != 200
-                or restore_sync.get("upserted_count") != 2
+                or restore_sync.get("upserted_count") != 6
                 or restore_sync.get("enriched_active_rows") != 2
+                or restore_sync.get("refreshed_recent_historical_rows") != 4
+                or restore_sync.get("failed_enrich") != 1
             ):
                 raise AssertionError(f"restore sync must keep fake cache usable, got {restore_status} {restore_payload}")
 

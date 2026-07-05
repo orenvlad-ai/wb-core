@@ -42,6 +42,7 @@ DEFAULT_SYNC_LIMIT = 1000
 DEFAULT_PAGE_LIMIT = 20
 DEFAULT_TRANSIT_COST_ENRICHMENT_LIMIT = 50
 MAX_TRANSIT_COST_ENRICHMENT_LIMIT = 100
+MAX_FORCED_STATUS_REFRESH_ROWS = 12
 TRANSIT_COST_ENRICHMENT_FRESH_SECONDS = 24 * 60 * 60
 SYNC_MODE_INCREMENTAL_REFRESH = "incremental_refresh"
 SYNC_MODE_FULL_BACKFILL = "full_backfill"
@@ -72,6 +73,8 @@ PLANNED_STATUS_ID = 2
 ACTIVE_RECONCILE_STATUS_IDS = (1, 2, 3, 4)
 ACTIVE_SUPPLY_BACKED_STATUS_IDS = (2, 3, 4)
 HISTORICAL_STATUS_IDS = (5, 6)
+RECENT_HISTORICAL_RECONCILE_STATUS_IDS = HISTORICAL_STATUS_IDS
+SUPPLY_BACKED_REFRESH_STATUS_IDS = ACTIVE_SUPPLY_BACKED_STATUS_IDS + HISTORICAL_STATUS_IDS
 BOX_TYPE_LABELS_RU = {
     1: "Короб",
 }
@@ -348,9 +351,12 @@ class WbSuppliesBlock:
             raw_rows = list(list_result.rows)
             targeted_status_ids: list[int] = []
             targeted_raw_count = 0
+            recent_historical_status_ids: list[int] = []
+            recent_historical_raw_count = 0
             partial_status_slices = False
             active_reconciliation_complete = False
             active_authoritative_keys = _active_authoritative_keys_from_raw_rows(raw_rows)
+            force_enrich_source_rows: list[Mapping[str, Any]] = []
             if not request["status_ids"]:
                 try:
                     active_result = _coerce_list_result(
@@ -363,6 +369,7 @@ class WbSuppliesBlock:
                     )
                     targeted_status_ids = list(ACTIVE_RECONCILE_STATUS_IDS)
                     targeted_raw_count = active_result.raw_count
+                    force_enrich_source_rows.extend(active_result.rows)
                     active_authoritative_keys.update(_active_authoritative_keys_from_raw_rows(active_result.rows))
                     active_reconciliation_complete = active_result.raw_count < active_result.limit
                     partial_status_slices = not active_reconciliation_complete
@@ -370,13 +377,33 @@ class WbSuppliesBlock:
                 except (WbSuppliesHttpStatusError, WbSuppliesTransportError, OfficialApiRuntimeError) as exc:
                     partial_status_slices = True
                     warnings.append(f"active status refresh failed; primary latest window used: {_safe_error_message(exc)}")
+                try:
+                    historical_result = _coerce_list_result(
+                        self.source.list_supplies(
+                            limit=request["limit"],
+                            offset=0,
+                            status_ids=list(RECENT_HISTORICAL_RECONCILE_STATUS_IDS),
+                            dates=request["dates"],
+                        )
+                    )
+                    recent_historical_status_ids = list(RECENT_HISTORICAL_RECONCILE_STATUS_IDS)
+                    recent_historical_raw_count = historical_result.raw_count
+                    force_enrich_source_rows.extend(historical_result.rows)
+                    partial_status_slices = partial_status_slices or historical_result.raw_count >= historical_result.limit
+                    raw_rows = _merge_raw_supply_rows(raw_rows, historical_result.rows)
+                except (WbSuppliesHttpStatusError, WbSuppliesTransportError, OfficialApiRuntimeError) as exc:
+                    partial_status_slices = True
+                    warnings.append(f"recent historical status refresh failed; primary latest window used: {_safe_error_message(exc)}")
             warehouse_by_id = _warehouse_map(warehouses)
             warehouse_district_mapping = self._fetch_warehouse_district_mapping(
                 warehouses=warehouses,
                 raw_rows=raw_rows,
                 warnings=warnings,
             )
-            active_force_enrich_keys = _active_force_enrich_keys(raw_rows, self.runtime.list_wb_supplies_cache_records())
+            status_force_enrich_keys = _status_force_enrich_keys(
+                force_enrich_source_rows or raw_rows,
+                self.runtime.list_wb_supplies_cache_records(),
+            )
             sync_result = self._prepare_list_rows_for_upsert(
                 raw_rows=raw_rows,
                 warehouse_by_id=warehouse_by_id,
@@ -384,7 +411,7 @@ class WbSuppliesBlock:
                 synced_at=synced_at,
                 enrich=request["enrich"] != "none",
                 changed_only=request["enrich"] != "all",
-                force_enrich_cache_keys=active_force_enrich_keys,
+                force_enrich_cache_keys=status_force_enrich_keys,
                 include_missing_enrichment=request["enrich"] == "missing_critical",
             )
             normalized_rows = sync_result["rows"]
@@ -483,15 +510,21 @@ class WbSuppliesBlock:
             "raw_fetched_count": list_result.raw_count,
             "fetched_default": list_result.raw_count,
             "fetched_active_statuses": targeted_raw_count,
+            "fetched_recent_historical_statuses": recent_historical_raw_count,
             "raw_merged_count": len(raw_rows),
             "targeted_status_ids": targeted_status_ids,
             "targeted_raw_fetched_count": targeted_raw_count,
+            "recent_historical_status_ids": recent_historical_status_ids,
+            "recent_historical_raw_fetched_count": recent_historical_raw_count,
             "upserted_count": len(normalized_rows),
             "new_rows": sync_result["new_rows"],
             "changed_rows": sync_result["changed_rows"],
             "unchanged_rows": sync_result["unchanged_rows"],
             "changed_active_rows": sync_result["changed_active_rows"],
             "enriched_active_rows": sync_result["enriched_active_rows"],
+            "forced_status_refresh_rows": sync_result["forced_status_refresh_rows"],
+            "refreshed_recent_historical_rows": sync_result["refreshed_recent_historical_rows"],
+            "accepted_qty_changed_rows": sync_result["accepted_qty_changed_rows"],
             "enriched": sync_result["enriched"],
             "failed_enrich": sync_result["failed_enrich"],
             "deleted_active_rows": len(deleted_active_keys),
@@ -1276,6 +1309,9 @@ class WbSuppliesBlock:
             "unchanged_rows": 0,
             "changed_active_rows": 0,
             "enriched_active_rows": 0,
+            "forced_status_refresh_rows": 0,
+            "refreshed_recent_historical_rows": 0,
+            "accepted_qty_changed_rows": 0,
             "enriched": 0,
             "failed_enrich": 0,
         }
@@ -1290,10 +1326,13 @@ class WbSuppliesBlock:
             existing_updated_date = str(((existing or {}).get("normalized") or {}).get("updated_date") or "")
             force_enrich = bool(force_enrich_cache_keys and cache_key in force_enrich_cache_keys)
             is_new = existing is None
+            existing_normalized = (existing or {}).get("normalized") or {}
+            existing_status_id = _optional_int(existing_normalized.get("status_id"))
             is_changed = (not is_new) and (
                 not existing_hash
                 or existing_hash != raw_list_hash
                 or (raw_updated_date and raw_updated_date != existing_updated_date)
+                or (raw_status_id is not None and existing_status_id is not None and raw_status_id != existing_status_id)
             )
             needs_enrichment = bool(
                 include_missing_enrichment and existing and _row_needs_enrichment(existing.get("normalized") or {})
@@ -1318,6 +1357,8 @@ class WbSuppliesBlock:
                 enrich and lookup_id and (force_enrich or is_new or is_changed or needs_enrichment or not changed_only)
             )
             if attempted_enrichment:
+                counters["forced_status_refresh_rows"] += 1 if force_enrich else 0
+                counters["refreshed_recent_historical_rows"] += 1 if force_enrich and raw_status_id in HISTORICAL_STATUS_IDS else 0
                 fetched_detail = self._fetch_detail(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
                 fetched_goods = self._fetch_goods(lookup_id, is_preorder_id=is_preorder_id, warnings=row_warnings)
                 if fetched_detail is not None:
@@ -1363,6 +1404,8 @@ class WbSuppliesBlock:
                 "failed" if failed_enrich else "ok" if attempted_enrichment else str((existing or {}).get("enrichment_status") or "not_requested")
             )
             normalized["enrichment_error"] = "; ".join(row_warnings) if failed_enrich else ""
+            if not is_new and _numbers_differ(existing_normalized.get("accepted_quantity"), normalized.get("accepted_quantity")):
+                counters["accepted_qty_changed_rows"] += 1
             rows_to_upsert.append(normalized)
         return {"rows": rows_to_upsert, "touched_cache_keys": [str(row.get("cache_key") or "") for row in rows_to_upsert], **counters}
 
@@ -1765,6 +1808,8 @@ def _package_summary(raw_package: list[Mapping[str, Any]] | None) -> dict[str, A
 
 def _normalized_row_public_fingerprint(row: Mapping[str, Any]) -> dict[str, Any]:
     keys = (
+        "status_id",
+        "status_label",
         "warehouse_display",
         "warehouse_fact_line",
         "type_label",
@@ -1790,48 +1835,49 @@ def _normalize_supply_row(
     warnings: list[str],
 ) -> dict[str, Any]:
     detail = raw_detail or {}
-    sources = [("detail", detail), ("list", raw_list)]
+    detail_sources = [("detail", detail), ("list", raw_list)]
+    list_sources = [("list", raw_list), ("detail", detail)]
     supply_id_value, _supply_id_evidence = _first_non_empty_from_sources(
-        sources, "supplyID", "supplyId", "supply_id", "ID", "id"
+        list_sources, "supplyID", "supplyId", "supply_id", "ID", "id"
     )
     preorder_id_value, _preorder_id_evidence = _first_non_empty_from_sources(
-        sources, "preorderID", "preorderId", "preorder_id", "orderID", "orderId"
+        list_sources, "preorderID", "preorderId", "preorder_id", "orderID", "orderId"
     )
     supply_id = _id_to_string(supply_id_value)
     preorder_id = _id_to_string(preorder_id_value)
     cache_supply_id = supply_id or (f"preorder:{preorder_id}" if preorder_id else _raw_row_cache_id(raw_list))
     visible_number = supply_id or preorder_id or cache_supply_id
 
-    status_id = _optional_int(_first_non_empty_from_sources(sources, "statusID", "statusId", "status_id")[0])
-    warehouse_id, warehouse_id_evidence = _first_id_from_sources(sources, "warehouseID", "warehouseId", "warehouse_id")
+    status_id = _optional_int(_first_non_empty_from_sources(list_sources, "statusID", "statusId", "status_id")[0])
+    warehouse_id, warehouse_id_evidence = _first_id_from_sources(list_sources, "warehouseID", "warehouseId", "warehouse_id")
     actual_warehouse_id, actual_warehouse_id_evidence = _first_id_from_sources(
-        sources, "actualWarehouseID", "actualWarehouseId", "actual_warehouse_id"
+        detail_sources, "actualWarehouseID", "actualWarehouseId", "actual_warehouse_id"
     )
     transit_warehouse_id, transit_warehouse_id_evidence = _first_id_from_sources(
-        sources, "transitWarehouseID", "transitWarehouseId", "transit_warehouse_id"
+        detail_sources, "transitWarehouseID", "transitWarehouseId", "transit_warehouse_id"
     )
-    warehouse_name, warehouse_name_evidence = _first_string_from_sources(sources, "warehouseName", "warehouse_name")
+    warehouse_name, warehouse_name_evidence = _first_string_from_sources(list_sources, "warehouseName", "warehouse_name")
     if not warehouse_name and warehouse_id:
         warehouse_name = warehouse_by_id.get(warehouse_id, "")
         warehouse_name_evidence = "warehouse_dict" if warehouse_name else warehouse_name_evidence
     actual_warehouse_name, actual_warehouse_name_evidence = _first_string_from_sources(
-        sources, "actualWarehouseName", "actual_warehouse_name"
+        detail_sources, "actualWarehouseName", "actual_warehouse_name"
     )
     if not actual_warehouse_name and actual_warehouse_id:
         actual_warehouse_name = warehouse_by_id.get(actual_warehouse_id, "")
         actual_warehouse_name_evidence = "warehouse_dict" if actual_warehouse_name else actual_warehouse_name_evidence
     transit_warehouse_name, transit_warehouse_name_evidence = _first_string_from_sources(
-        sources, "transitWarehouseName", "transit_warehouse_name"
+        detail_sources, "transitWarehouseName", "transit_warehouse_name"
     )
     if not transit_warehouse_name and transit_warehouse_id:
         transit_warehouse_name = warehouse_by_id.get(transit_warehouse_id, "")
         transit_warehouse_name_evidence = "warehouse_dict" if transit_warehouse_name else transit_warehouse_name_evidence
-    box_type_id = _optional_int(_first_non_empty_from_sources(sources, "boxTypeID", "boxTypeId", "box_type_id")[0])
+    box_type_id = _optional_int(_first_non_empty_from_sources(list_sources, "boxTypeID", "boxTypeId", "box_type_id")[0])
     virtual_type_id = _optional_int(
-        _first_non_empty_from_sources(sources, "virtualTypeID", "virtualTypeId", "virtual_type_id")[0]
+        _first_non_empty_from_sources(list_sources, "virtualTypeID", "virtualTypeId", "virtual_type_id")[0]
     )
     planned_quantity, planned_quantity_evidence = _first_number_from_sources(
-        sources, "quantity", "plannedQuantity", "planned_quantity", "addedQuantity", "added_quantity"
+        list_sources, "quantity", "plannedQuantity", "planned_quantity", "addedQuantity", "added_quantity"
     )
     goods_quantity = _sum_goods_field(raw_goods, "quantity") if raw_goods is not None else None
     goods_supplier_box_quantity = _sum_goods_field(raw_goods, "supplierBoxAmount") if raw_goods is not None else None
@@ -1841,18 +1887,20 @@ def _normalize_supply_row(
         (goods_quantity, "goods.quantity_total"),
         (package_quantity, "package.quantity_total"),
     )
-    accepted_quantity, accepted_quantity_evidence = _first_number_from_sources(
-        sources, "acceptedQuantity", "accepted_quantity"
+    accepted_quantity, accepted_quantity_evidence = _quantity_from_list_goods_detail(
+        raw_list=raw_list,
+        raw_detail=detail,
+        raw_goods=raw_goods,
+        field_keys=("acceptedQuantity", "accepted_quantity"),
+        goods_key="acceptedQuantity",
     )
-    if accepted_quantity is None and raw_goods is not None:
-        accepted_quantity = _sum_goods_field(raw_goods, "acceptedQuantity")
-        accepted_quantity_evidence = "goods.acceptedQuantity_total" if accepted_quantity is not None else accepted_quantity_evidence
-    unloading_quantity, unloading_quantity_evidence = _first_number_from_sources(
-        sources, "unloadingQuantity", "unloading_quantity"
+    unloading_quantity, unloading_quantity_evidence = _quantity_from_list_goods_detail(
+        raw_list=raw_list,
+        raw_detail=detail,
+        raw_goods=raw_goods,
+        field_keys=("unloadingQuantity", "unloading_quantity"),
+        goods_key="unloadingQuantity",
     )
-    if unloading_quantity is None and raw_goods is not None:
-        unloading_quantity = _sum_goods_field(raw_goods, "unloadingQuantity")
-        unloading_quantity_evidence = "goods.unloadingQuantity_total" if unloading_quantity is not None else unloading_quantity_evidence
     quantity_for_size_filter, quantity_evidence = _quantity_for_size_filter(
         planned_quantity=quantity_added,
         goods_quantity=goods_quantity,
@@ -1861,16 +1909,16 @@ def _normalize_supply_row(
         planned_quantity_evidence=quantity_evidence,
     )
     packed_quantity, packed_quantity_evidence = _packed_quantity(
-        sources=sources,
+        sources=list_sources,
         goods_quantity=goods_quantity,
         goods_supplier_box_quantity=goods_supplier_box_quantity,
         package_quantity=package_quantity,
         quantity_added=quantity_added,
         status_id=status_id,
     )
-    acceptance_cost, acceptance_cost_evidence = _first_number_from_sources(sources, "acceptanceCost", "acceptance_cost")
+    acceptance_cost, acceptance_cost_evidence = _first_number_from_sources(list_sources, "acceptanceCost", "acceptance_cost")
     transit_cost, transit_cost_evidence = _first_number_from_sources(
-        sources,
+        list_sources,
         "transitCost",
         "transit_cost",
         "transitTariff",
@@ -1879,10 +1927,10 @@ def _normalize_supply_row(
         "transit_cost_total",
     )
     acceptance_coefficient = _first_number_from_sources(
-        sources, "paidAcceptanceCoefficient", "acceptanceCoefficient", "acceptance_coefficient"
+        list_sources, "paidAcceptanceCoefficient", "acceptanceCoefficient", "acceptance_coefficient"
     )[0]
     cost_total, cost_evidence = _cost_total(
-        sources=sources,
+        sources=list_sources,
         acceptance_cost=acceptance_cost,
         acceptance_cost_evidence=acceptance_cost_evidence,
         transit_cost=transit_cost,
@@ -1891,10 +1939,10 @@ def _normalize_supply_row(
         status_id=status_id,
         acceptance_coefficient=acceptance_coefficient,
     )
-    create_date = _first_string_from_sources(sources, "createDate", "createdAt", "created_at")[0]
-    supply_date = _first_string_from_sources(sources, "supplyDate", "supply_date")[0]
-    fact_date = _first_string_from_sources(sources, "factDate", "fact_date")[0]
-    updated_date = _first_string_from_sources(sources, "updatedDate", "updated_at", "updatedDate")[0]
+    create_date = _first_string_from_sources(list_sources, "createDate", "createdAt", "created_at")[0]
+    supply_date = _first_string_from_sources(list_sources, "supplyDate", "supply_date")[0]
+    fact_date = _first_string_from_sources(list_sources, "factDate", "fact_date")[0]
+    updated_date = _first_string_from_sources(list_sources, "updatedDate", "updated_at", "updatedDate")[0]
     is_transit = bool(transit_warehouse_id or transit_warehouse_name)
     warehouse_from_name = warehouse_name
     warehouse_to_name = transit_warehouse_name if is_transit else ""
@@ -1925,11 +1973,13 @@ def _normalize_supply_row(
         "status_id": status_id,
         "status_label": _status_label(status_id),
         "status_tone": _status_tone(status_id),
+        "status_visual_tone": _status_visual_tone(status_id),
+        "status_class": _status_visual_tone(status_id),
         "box_type_id": box_type_id,
         "virtual_type_id": virtual_type_id,
         "box_type_label": _box_type_label(box_type_id),
         "type_label": _type_label(box_type_id=box_type_id, virtual_type_id=virtual_type_id, is_transit=is_transit),
-        "is_box_on_pallet": _optional_bool(_first_non_empty_from_sources(sources, "isBoxOnPallet", "is_box_on_pallet")[0]),
+        "is_box_on_pallet": _optional_bool(_first_non_empty_from_sources(list_sources, "isBoxOnPallet", "is_box_on_pallet")[0]),
         "warehouse_id": warehouse_id,
         "warehouse_name": warehouse_name,
         "planned_warehouse_id": warehouse_id,
@@ -2082,6 +2132,55 @@ def _first_quantity_with_evidence(*candidates: tuple[float | None, str]) -> tupl
         if value is not None:
             return value, evidence
     return None, "unknown"
+
+
+def _quantity_from_list_goods_detail(
+    *,
+    raw_list: Mapping[str, Any],
+    raw_detail: Mapping[str, Any],
+    raw_goods: list[Mapping[str, Any]] | None,
+    field_keys: tuple[str, ...],
+    goods_key: str,
+) -> tuple[float | None, str]:
+    list_value, list_evidence = _first_number_from_sources([("list", raw_list)], *field_keys)
+    if list_value is not None:
+        return list_value, list_evidence
+    detail_value, detail_evidence = _first_number_from_sources([("detail", raw_detail)], *field_keys)
+    if detail_value is not None and _detail_is_fresh_for_list(raw_detail=raw_detail, raw_list=raw_list):
+        return detail_value, detail_evidence
+    goods_value = _sum_goods_field(raw_goods, goods_key) if raw_goods is not None else None
+    if goods_value is not None:
+        return goods_value, f"goods.{goods_key}_total"
+    return detail_value, detail_evidence
+
+
+def _detail_is_fresh_for_list(*, raw_detail: Mapping[str, Any], raw_list: Mapping[str, Any]) -> bool:
+    if not raw_detail:
+        return False
+    detail_status = _optional_int(_first_value(raw_detail, "statusID", "statusId", "status_id"))
+    list_status = _optional_int(_first_value(raw_list, "statusID", "statusId", "status_id"))
+    if detail_status is not None and list_status is not None and detail_status != list_status:
+        return False
+    detail_updated = _parse_iso_datetime(_first_string(raw_detail, "updatedDate", "updated_at", "updated_date"))
+    list_updated = _parse_iso_datetime(_first_string(raw_list, "updatedDate", "updated_at", "updated_date"))
+    if list_updated is not None:
+        if detail_updated is None:
+            return False
+        return detail_updated >= list_updated
+    return True
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _packed_quantity(
@@ -2294,7 +2393,15 @@ def _status_options(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         set(OFFICIAL_STATUS_IDS)
         | {status_id for row in rows if (status_id := _optional_int(row.get("status_id"))) is not None}
     )
-    return [{"value": status_id, "label": _status_label(status_id)} for status_id in status_ids]
+    return [
+        {
+            "value": status_id,
+            "label": _status_label(status_id),
+            "status_tone": _status_tone(status_id),
+            "status_visual_tone": _status_visual_tone(status_id),
+        }
+        for status_id in status_ids
+    ]
 
 
 def _warehouse_map(rows: list[Mapping[str, Any]]) -> dict[str, str]:
@@ -2320,6 +2427,12 @@ def _status_tone(status_id: int | None) -> str:
         return "warning"
     if status_id in {1, 2}:
         return "idle"
+    return "neutral"
+
+
+def _status_visual_tone(status_id: int | None) -> str:
+    if status_id in OFFICIAL_STATUS_IDS:
+        return f"status-{status_id}"
     return "neutral"
 
 
@@ -2389,16 +2502,29 @@ def _stable_cache_key(row: Mapping[str, Any]) -> str:
 
 def _merge_raw_supply_rows(primary_rows: list[Mapping[str, Any]], extra_rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     result: list[Mapping[str, Any]] = []
-    seen: set[str] = set()
+    index_by_key: dict[str, int] = {}
     for row in [*primary_rows, *extra_rows]:
         if not isinstance(row, Mapping):
             continue
         cache_key = _stable_cache_key(row)
-        if cache_key in seen:
+        if cache_key in index_by_key:
+            result[index_by_key[cache_key]] = _prefer_raw_supply_row(result[index_by_key[cache_key]], row)
             continue
-        seen.add(cache_key)
+        index_by_key[cache_key] = len(result)
         result.append(row)
     return result
+
+
+def _prefer_raw_supply_row(current: Mapping[str, Any], candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    current_updated = _first_string(current, "updatedDate", "updated_at", "updated_date")
+    candidate_updated = _first_string(candidate, "updatedDate", "updated_at", "updated_date")
+    current_status = _optional_int(_first_value(current, "statusID", "status_id"))
+    candidate_status = _optional_int(_first_value(candidate, "statusID", "status_id"))
+    if candidate_updated and (not current_updated or candidate_updated >= current_updated):
+        return candidate
+    if candidate_status is not None and current_status is not None and candidate_status != current_status:
+        return candidate
+    return current
 
 
 def _active_authoritative_keys_from_raw_rows(rows: list[Mapping[str, Any]]) -> set[str]:
@@ -2410,20 +2536,61 @@ def _active_authoritative_keys_from_raw_rows(rows: list[Mapping[str, Any]]) -> s
     return result
 
 
-def _active_force_enrich_keys(raw_rows: list[Mapping[str, Any]], existing_records: list[Mapping[str, Any]]) -> set[str]:
+def _status_force_enrich_keys(raw_rows: list[Mapping[str, Any]], existing_records: list[Mapping[str, Any]]) -> set[str]:
     existing_by_key = _cache_record_index(existing_records)
-    result: set[str] = set()
-    for row in raw_rows:
+    candidates: list[tuple[int, float, int, str]] = []
+    for index, row in enumerate(raw_rows):
         status_id = _optional_int(_first_value(row, "statusID", "status_id"))
-        if status_id not in ACTIVE_SUPPLY_BACKED_STATUS_IDS:
+        if status_id not in SUPPLY_BACKED_REFRESH_STATUS_IDS:
             continue
         cache_key = _stable_cache_key(row)
         lookup_id, _is_preorder_id = _resolve_upstream_lookup_id(row)
         existing = existing_by_key.get(cache_key) or existing_by_key.get(lookup_id)
         if existing is None:
             continue
-        result.add(cache_key)
-    return result
+        priority = _status_row_forced_refresh_priority(row, existing)
+        if priority is None:
+            continue
+        raw_updated = _parse_iso_datetime(_first_string(row, "updatedDate", "updated_at", "updated_date"))
+        updated_sort = -(raw_updated.timestamp() if raw_updated is not None else 0.0)
+        candidates.append((priority, updated_sort, index, cache_key))
+    candidates.sort()
+    return {cache_key for _priority, _updated_sort, _index, cache_key in candidates[:MAX_FORCED_STATUS_REFRESH_ROWS]}
+
+
+def _status_row_forced_refresh_priority(row: Mapping[str, Any], existing: Mapping[str, Any]) -> int | None:
+    normalized = existing.get("normalized") if isinstance(existing.get("normalized"), Mapping) else {}
+    status_id = _optional_int(_first_value(row, "statusID", "status_id"))
+    existing_status_id = _optional_int(normalized.get("status_id"))
+    if status_id is not None and existing_status_id is not None and status_id != existing_status_id:
+        return 0
+    raw_updated = _parse_iso_datetime(_first_string(row, "updatedDate", "updated_at", "updated_date"))
+    enriched_at = _parse_iso_datetime(str(existing.get("last_enriched_at") or normalized.get("last_enriched_at") or ""))
+    if raw_updated is not None and (enriched_at is None or enriched_at < raw_updated):
+        return 1
+    if _row_needs_enrichment(normalized):
+        return 2
+    planned_quantity = _optional_number(
+        normalized.get("quantity_added")
+        if normalized.get("quantity_added") is not None
+        else normalized.get("packed_quantity")
+    )
+    accepted_quantity = _optional_number(normalized.get("accepted_quantity"))
+    if status_id == 5 and planned_quantity and accepted_quantity is not None and accepted_quantity <= 0:
+        return 2
+    if str(existing.get("enrichment_status") or normalized.get("enrichment_status") or "").strip() == "failed":
+        return 3
+    return None
+
+
+def _numbers_differ(left: Any, right: Any) -> bool:
+    left_number = _optional_number(left)
+    right_number = _optional_number(right)
+    if left_number is None and right_number is None:
+        return False
+    if left_number is None or right_number is None:
+        return True
+    return abs(float(left_number) - float(right_number)) > 1e-9
 
 
 def _raw_identity_keys_from_rows(rows: list[Mapping[str, Any]]) -> set[str]:
@@ -2675,6 +2842,9 @@ def _parse_iso_date(value: Any) -> date | None:
 
 def _row_with_display_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(row)
+    status_id = _optional_int(result.get("status_id"))
+    result["status_visual_tone"] = str(result.get("status_visual_tone") or _status_visual_tone(status_id))
+    result["status_class"] = str(result.get("status_class") or result["status_visual_tone"])
     supply_date = _parse_iso_date(row.get("supply_date"))
     fact_date = _parse_iso_date(row.get("fact_date"))
     interface_year = _current_business_year()

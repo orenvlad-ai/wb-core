@@ -48,6 +48,7 @@ related_runners:
   - "apps/wb_supplies_live_diagnostics.py"
   - "apps/wb_supplies_normalization_smoke.py"
   - "apps/wb_supplies_renormalize_cache.py"
+  - "apps/wb_supplies_status_accepted_refresh_smoke.py"
   - "apps/wb_supplies_transit_cost_enrichment_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_browser_smoke.py"
@@ -55,7 +56,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. User-triggered `Обновить поставки` first runs official WB API sync, then attempts the separate Seller Portal browser/network-json enrichment job for missing transit cabinet cost; the enrichment stores normalized facts and provenance, never official raw evidence, and Seller Portal/session failures do not invalidate successful official sync. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Ordinary sync now fetches bounded recent historical status slices `5/6` in addition to active `1..4`, forces detail/goods refresh for up to 12 prioritized active/recent historical rows that changed, failed enrichment or have newer raw evidence, gives fresh list/detail/goods evidence priority over stale cached detail on overlapping status/accepted quantity fields, and returns diagnostics such as `forced_status_refresh_rows`, `refreshed_recent_historical_rows` and `accepted_qty_changed_rows`. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. User-triggered `Обновить поставки` first runs official WB API sync, then attempts the separate Seller Portal browser/network-json enrichment job for missing transit cabinet cost; the enrichment stores normalized facts and provenance, never official raw evidence, and Seller Portal/session failures do not invalidate successful official sync. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
@@ -195,14 +196,18 @@ Body:
 Algorithm:
 - fetch latest page/window from official WB API at `offset=0`;
 - if the caller did not request an explicit status-limited sync, also fetch a bounded active-status page with `statusIDs=[1,2,3,4]` so active supplies are discoverable and authoritative for current active state;
-- merge/dedupe default and targeted raw rows by stable supply/preorder key before upsert;
+- also fetch a bounded recent historical page with `statusIDs=[5,6]`; these rows are never used for hard-delete, but they are current status/quantity evidence for supplies that just moved to accepted/gate-shipped or whose accepted quantity changed after initial acceptance;
+- merge/dedupe default and targeted raw rows by stable supply/preorder key before upsert, preferring the row with fresher `updatedDate` or targeted status evidence on duplicate keys;
 - calculate stable `raw_list_hash`;
 - upsert and enrich only new rows and rows whose `updatedDate`/raw hash changed;
-- refresh supply-backed active rows (`2/3/4`) through detail/goods on ordinary refresh so date/status/route/quantity/goods changes are reflected even when list evidence is otherwise unchanged;
+- refresh supply-backed active rows (`2/3/4`) through detail/goods on ordinary refresh only when evidence requires it: status changed, enrichment failed/missing, or raw `updatedDate` is newer than the last enrichment;
+- refresh supply-backed recent historical rows (`5/6`) from the bounded status slice through detail/goods when evidence requires it: previous active/non-historical status, failed/missing enrichment, suspicious accepted-zero row, or raw `updatedDate` newer than the last enrichment; forced refresh is capped at 12 prioritized rows per ordinary sync with status transitions first, then newer raw evidence, then critical/failed rows. This covers status `3/4 -> 5`, `3 -> 6` and same-status accepted-quantity changes without forcing detail/goods for every historical row on every click;
+- for overlapping fields, fresh list evidence wins over cached detail for status/dates/planned quantity; `acceptedQuantity`/`unloadingQuantity` use list fields when present, then fresh aggregate detail, then goods totals, and stale detail only as fallback;
 - when the active-status slice completes without upstream error and is not capped by `limit`, hard-delete local rows still in statuses `1..4` that are absent from both default latest and the active-status slice;
 - never hard-delete accepted/historical statuses `5/6` just because they are absent from a latest refresh window;
-- old unchanged historical rows with missing critical fields are not retried by ordinary refresh; request `enrich=missing_critical` to run that bounded enrichment lane explicitly;
-- unchanged historical rows are counted as `unchanged` and do not call detail/goods again.
+- old historical rows absent from the bounded recent `5/6` slice are not retried by ordinary refresh; request `enrich=missing_critical` to run that bounded enrichment lane explicitly.
+
+Sync response diagnostics include `fetched_recent_historical_statuses`, `recent_historical_status_ids`, `forced_status_refresh_rows`, `refreshed_recent_historical_rows`, `accepted_qty_changed_rows`, `partial_status_slices` and the existing new/changed/unchanged/enriched/delete counters.
 
 `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill`
 
@@ -274,6 +279,7 @@ Contract:
 - quantity source is only goods composition `nmId -> quantity`; accepted/ready/partial reception fields are not used for overlay quantity;
 - unknown active SKU, missing `nmId`, missing/non-positive quantity and non-active `nmId` goods rows are skipped with diagnostics;
 - response exposes status/date evidence, date source field, warehouse/district mapping evidence, usable SKU count/quantity, skipped goods and disabled reasons.
+- the operator UI `Обновить список` action is sync-first: it runs bounded official `POST .../wb-supplies/sync` with `enrich=changed_only`, reloads cached list/options, preserves valid selected ids and shows a controlled warning when stale/invalid selected ids are dropped after revalidation.
 
 # 4.1 Warehouse District Mapping
 
@@ -294,8 +300,8 @@ Operator UI must not render the full unmapped warehouse warning list inline in t
 # 5. Field Normalization
 
 Normalization keeps separate evidence sources instead of flattening them with lossy overwrite:
-- detail fields may be primary for status/date fields;
-- warehouse, route, quantity and cost fields use first non-empty evidence from detail/list/goods/package/warehouse dictionary as appropriate;
+- list fields are primary for status/date/planned fields during ordinary sync, with detail only filling fields absent from list;
+- warehouse, route, quantity and cost fields use first non-empty fresh evidence from list/detail/goods/package/warehouse dictionary as appropriate;
 - `planned_warehouse_name` / `target_warehouse_name` / `district_source_warehouse_name` identify the warehouse used for district mapping;
 - `actual_warehouse_name` / `transit_warehouse_name` / `warehouse_to_name` identify fact/transit route evidence and can appear in `warehouse_display`;
 - `None` and empty strings from detail do not erase non-empty list or dictionary evidence;
@@ -316,9 +322,9 @@ For transit supplies, official detail evidence observed in live diagnostics maps
 Therefore `warehouse_display` for a transit supply is `warehouseName → transitWarehouseName`. The UI does not show `Факт: ...` for ordinary transit rows where `actualWarehouseName` is the same destination as `transitWarehouseName`, because that duplicates and can invert the cabinet route.
 
 Quantity fields:
-- `quantity_added` priority: detail `quantity`, then `sum(goods.quantity)`, then `sum(package.quantity)`;
+- `quantity_added` priority: list/planned `quantity`, then `sum(goods.quantity)`, then `sum(package.quantity)`;
 - `packed_quantity` priority: explicit packed/package field if present, then `sum(goods.quantity)`, then `sum(goods.supplierBoxAmount)`, then `sum(package.quantity)`, then accepted-supply fallback to `quantity_added`;
-- `accepted_quantity` priority: detail `acceptedQuantity`, then `sum(goods.acceptedQuantity)`;
+- `accepted_quantity` priority: list `acceptedQuantity` when present, then fresh detail `acceptedQuantity`, then `sum(goods.acceptedQuantity)`, then stale detail fallback;
 - `quantity_for_size_filter` follows `quantity_added` before accepted/unloading fallbacks.
 
 Cost fields:
@@ -399,7 +405,7 @@ Known status labels:
 - `6` = `Отгружено на воротах`;
 - unknown status = `Статус <id>`.
 
-The status selector always exposes the official status set `1..6`, even before rows with every status are present in cache. `Виртуальная` is not shown unless upstream evidence adds a specific marker.
+The status selector always exposes the official status set `1..6`, even before rows with every status are present in cache. Rows keep backward-compatible `status_tone` (`idle`/`warning`/`success`/`neutral`) and also expose distinct `status_visual_tone` / `status_class` values `status-1..status-6`: `1` muted/neutral, `2` blue-muted, `3` violet/blue, `4` amber/orange, `5` green and `6` teal. The UI uses the distinct visual tone for pills while old consumers can keep reading `status_tone`. `Виртуальная` is not shown unless upstream evidence adds a specific marker.
 
 Filter state is browser-owned and persisted for search, warehouse, selected district presets, selected statuses, size filter, page size and date sort. `Обновить поставки` must preserve those filters, reapply them after the new payload arrives, and ignore stale in-flight responses if the operator changes filters while a request is running.
 
@@ -409,7 +415,8 @@ First open behavior:
 - if token/API is unavailable, the UI shows a controlled error instead of a silent empty table.
 
 Buttons:
-- `Обновить поставки` = one primary operator action. It first runs incremental latest-window official WB API refresh; after that official stage succeeds, the UI calls the separate Seller Portal transit-cost enrichment route for missing transit costs in the current list scope. It does not scan all offsets and does not re-enrich unchanged rows or old unknown-quantity rows.
+- `Обновить поставки` = one primary operator action. It first runs incremental latest-window official WB API refresh including active `1..4` and bounded recent historical `5/6` status slices; after that official stage succeeds, the UI reloads the list/overlay options and calls the separate Seller Portal transit-cost enrichment route for missing transit costs in the current list scope. It does not scan all offsets and does not re-enrich historical rows outside the bounded recent `5/6` slice unless explicitly requested.
+- the final UI message separates `Поставки WB обновлены` from `Стоимость транзита: success/partial/session_expired/lock_busy/...`;
 - official sync failure stops the flow and does not launch Seller Portal enrichment;
 - Seller Portal `session_expired`, automation lock busy, partial failure or no-candidate states are rendered as transit-cost stage messages and do not turn the completed official sync into a failed refresh;
 - page open / cache read does not trigger transit-cost enrichment;
@@ -470,6 +477,7 @@ Targeted smokes:
 - `python3 apps/wb_supplies_goods_composition_smoke.py`;
 - `python3 apps/wb_supplies_backfill_smoke.py`;
 - `python3 apps/wb_supplies_incremental_sync_smoke.py`;
+- `python3 apps/wb_supplies_status_accepted_refresh_smoke.py`;
 - `python3 apps/wb_supplies_filter_sort_date_smoke.py`;
 - `python3 apps/wb_supplies_acceptance_expenses_report_smoke.py`;
 - `python3 apps/wb_supplies_transit_cost_enrichment_smoke.py`;
