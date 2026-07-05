@@ -83,10 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     if not due:
         _print({"status": "no_due_schedules", "runtime_dir": str(runtime_dir), "base_url": base_url, "due_count": 0})
         return 0
-    _mark_missed_due_slots(block, missed_due)
     cookie = _build_web_auth_cookie(os.environ)
     results: list[dict[str, Any]] = []
     exit_code = 0
+    missed_due_marked = False
     for schedule, due_at in selected_due:
         schedule_id = str(schedule.get("id") or "")
         started_at = _utc_now()
@@ -128,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 terminal = refresh_result
+            if not _is_active_job_skip(terminal) and not missed_due_marked:
+                _mark_missed_due_slots(block, missed_due)
+                missed_due_marked = True
             status = str(terminal.get("status") or "").lower()
             error = str(terminal.get("error") or "")
             if not _terminal_contains_server_schedule_update(terminal):
@@ -142,6 +145,9 @@ def main(argv: list[str] | None = None) -> int:
             results.append({"schedule_id": schedule_id, "due_at": due_at, "job_id": job_id, "status": status or terminal.get("semantic_status") or "success"})
         except Exception as exc:
             exit_code = 1
+            if not missed_due_marked:
+                _mark_missed_due_slots(block, missed_due)
+                missed_due_marked = True
             block.mark_run_finished(
                 schedule_id,
                 finished_at=_utc_now(),
@@ -305,6 +311,10 @@ def _public_due(item: tuple[Mapping[str, Any], str]) -> dict[str, Any]:
 def _terminal_contains_server_schedule_update(payload: Mapping[str, Any]) -> bool:
     result = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
     return isinstance(result.get("auto_schedule"), Mapping) or isinstance(payload.get("auto_schedule"), Mapping)
+
+
+def _is_active_job_skip(payload: Mapping[str, Any]) -> bool:
+    return str(payload.get("status") or "").lower() == "skipped" and bool(payload.get("already_running_job_id"))
 
 
 def _print(payload: Mapping[str, Any]) -> None:
