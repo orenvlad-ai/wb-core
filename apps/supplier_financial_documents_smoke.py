@@ -196,6 +196,17 @@ INVOICE_113_TEXT = """
 Оплатить не позднее 23.06.2026
 """
 
+INVOICE_121_TEXT = """
+Счет на оплату № 121 от 29 июня 2026 г.
+Поставщик (Исполнитель): ООО "ВОРЛД-ЛОГИСТИК"
+Основание: ДОГОВОР ТРАНСПОРТНОЙ ЭКСПЕДИЦИИ № ORE от 04.06.2026
+1 Организация экспедирования груза по маршруту г. Суйфэньхэ - г. Пограничный, CMR № 464-ORE-003
+Итого: 5 000,00
+НДС 0% -
+Всего к оплате: 5 000,00
+Оплатить не позднее 02.07.2026
+"""
+
 CUSTOMS_TEXT = """
 ИМ 40 ЭД
 1 10
@@ -469,6 +480,7 @@ TEXT_BY_FILENAME = {
     "quote-2026-06-19.pdf": QUOTE_2026_06_19_TEXT,
     "invoice-103.pdf": INVOICE_103_TEXT,
     "invoice-113.pdf": INVOICE_113_TEXT,
+    "invoice-121.pdf": INVOICE_121_TEXT,
     "customs.pdf": CUSTOMS_TEXT,
     "bank-control.pdf": BANK_CONTROL_TEXT,
     "bank-transfer.pdf": BANK_TRANSFER_TEXT,
@@ -568,6 +580,7 @@ def _assert_parser_smoke() -> None:
     _assert_summary_metrics_smoke()
     _assert_missing_customs_data_summary_smoke()
     _assert_new_quote_parser_smoke()
+    _assert_bad_quote_rate_guardrail_smoke()
     _assert_registry_lead_time_rows_smoke()
     _assert_approx_landed_cost_summary_smoke()
     _assert_incomplete_quote_summary_smoke()
@@ -973,6 +986,64 @@ def _assert_new_quote_parser_smoke() -> None:
         raise AssertionError(f"new Transitplus quote percent metrics mismatch: {quote_percent}")
 
 
+def _assert_bad_quote_rate_guardrail_smoke() -> None:
+    quote_payload = parse_financial_document_text(QUOTE_2026_06_19_TEXT, filename="quote-2026-06-19.txt")
+    invoice_121 = parse_financial_document_text(INVOICE_121_TEXT, filename="invoice-121.txt")
+    documents, lines = _summary_documents_and_lines_from_payloads(
+        [("quote-2026-06-19", quote_payload), ("invoice-121", invoice_121)]
+    )
+    shipment = {
+        "header": {
+            "shipment_id": "bad_rate",
+            "product_qty_total": 80250,
+        },
+        "lines": [],
+    }
+    summary = build_financial_summary(documents, lines, shipment=shipment)
+    match = summary.get("quote_invoice_match") or {}
+    per_unit = summary.get("per_unit") or {}
+    quote = summary.get("quote") or {}
+    if quote.get("total_usd") != 40720.0 or quote.get("total_rub_equivalent") is not None:
+        raise AssertionError(f"bad-rate guard must preserve USD quote and hide RUB quote total: {summary}")
+    if (
+        match.get("rate_sanity_status") != "rejected"
+        or match.get("implied_rate") is not None
+        or match.get("estimated_bank_rate_on_quote_date") is not None
+        or not _approx(match.get("rejected_implied_rate"), 0.37, tolerance=0.01)
+    ):
+        raise AssertionError(f"bad-rate guard must reject implausible implied rate: {match}")
+    if (
+        per_unit.get("quote_total_rub_equivalent") is not None
+        or per_unit.get("quote_delivery_customs_rub_per_unit") is not None
+    ):
+        raise AssertionError(f"bad-rate guard must hide quote RUB/unit metrics: {per_unit}")
+    if not any("рублёвые КП-метрики скрыты" in warning for warning in summary.get("warnings", [])):
+        raise AssertionError(f"bad-rate guard must surface needs-review warning: {summary.get('warnings')}")
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "bad_rate",
+                "header": shipment["header"],
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": summary,
+            }
+        ]
+    )
+    if _registry_cell_display(registry, "quote_logistics", "quote_total_usd", "bad_rate") != "40 720.00 USD":
+        raise AssertionError(f"bad-rate registry must still show USD quote total: {registry}")
+    for row_id in (
+        "quote_total_rub",
+        "quote_total_rub_per_unit",
+        "quote_logistics_rub_per_quote_kg",
+        "quote_customs_rub_per_quote_kg",
+        "quote_total_rub_per_quote_kg",
+    ):
+        if _registry_cell_display(registry, "quote_logistics", row_id, "bad_rate") != "—":
+            raise AssertionError(f"bad-rate registry row {row_id} must render blank: {registry}")
+
+
 def _assert_registry_lead_time_rows_smoke() -> None:
     quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
     documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=False)
@@ -1095,6 +1166,7 @@ def _summary_documents_and_lines_from_payloads(payloads: list[tuple[str, dict[st
         "quote": 78.0,
         "invoice-103": 77.5,
         "invoice-113": 82.07119747159833,
+        "invoice-121": 77.06,
         "customs": None,
         "quote-2026-06-19": 78.0,
     }
