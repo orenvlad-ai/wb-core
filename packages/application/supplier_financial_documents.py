@@ -103,6 +103,10 @@ QUOTE_AMOUNT_LABELS = (
 )
 PCT_QUANT = Decimal("0.0001")
 QUOTE_UNIT_ESTIMATOR_MISSING_WARNING = "Нет коэффициента шт/кг для оценки КП"
+QUOTE_RATE_SANITY_MIN_RATIO = Decimal("0.50")
+QUOTE_RATE_SANITY_MAX_RATIO = Decimal("1.50")
+QUOTE_RATE_SANITY_MIN_ABSOLUTE = Decimal("20")
+QUOTE_RATE_SANITY_MAX_ABSOLUTE = Decimal("250")
 ORDER_MATCH_STATUS_MATCHED = "matched"
 ORDER_MATCH_STATUS_PROBABLE_MATCH = "probable_match"
 ORDER_MATCH_STATUS_NEEDS_REVIEW = "needs_review"
@@ -1670,14 +1674,18 @@ def build_financial_summary(
         factual_supply_expenses_rub=factual_supply_expenses_rub,
         total_units=total_units,
     )
-    estimated_bank_rate = _estimate_bank_rate_on_quote_date(
-        quote_doc=quote_doc,
-        invoice_docs=invoice_docs,
-        invoice_fact_rub=invoice_fact_rub,
-        linked_quote_usd_component=linked_quote_usd_for_rate,
-        quote_base_status="parsed" if quote_required_complete else ("missing_required_amounts" if quote_docs else ""),
-    )
-    quote_total_rate = estimated_bank_rate or (_parse_decimal(quote_doc.get("cbr_usd_rate_value")) if quote_doc else None)
+    estimated_bank_rate = None
+    if rate_summary.get("rate_sanity_status") == "ok":
+        estimated_bank_rate = _estimate_bank_rate_on_quote_date(
+            quote_doc=quote_doc,
+            invoice_docs=invoice_docs,
+            invoice_fact_rub=invoice_fact_rub,
+            linked_quote_usd_component=linked_quote_usd_for_rate,
+            quote_base_status="parsed" if quote_required_complete else ("missing_required_amounts" if quote_docs else ""),
+        )
+    quote_total_rate = estimated_bank_rate
+    if quote_doc and not invoice_docs:
+        quote_total_rate = _parse_decimal(quote_doc.get("cbr_usd_rate_value"))
     quote_total_rub_equivalent = quote_total_usd * quote_total_rate if quote_total_usd is not None and quote_total_rate is not None else None
     quote_delivery_customs_rub_per_unit = _safe_div(quote_total_rub_equivalent, total_units)
     fact_delivery_customs_rub_per_unit = _safe_div(delivery_customs_total_rub, total_units)
@@ -4823,8 +4831,50 @@ def _build_rate_summary(
     relative_spread_pct = _safe_div(implied_rate, cbr_invoice_rate)
     if relative_spread_pct is not None:
         relative_spread_pct -= Decimal("1")
+    sanity = _quote_rate_sanity(
+        implied_rate=implied_rate,
+        estimated_bank_rate=estimated_bank_rate,
+        cbr_invoice_rate=cbr_invoice_rate,
+        quote_cbr_rate=quote_cbr_rate,
+    )
+    if sanity["status"] != "ok":
+        warnings.extend(_string_list(sanity.get("warnings")))
+        return {
+            "status": "needs_review",
+            "rate_sanity_status": sanity["status"],
+            "rate_sanity_reason": sanity.get("reason") or "",
+            "rate_sanity": sanity,
+            "linked_quote_usd_component": _decimal_to_float(linked_quote_usd_component),
+            "linked_quote_line_categories": [
+                EXPENSE_CATEGORY_DELIVERY,
+                EXPENSE_CATEGORY_BROKERAGE,
+                EXPENSE_CATEGORY_COMPANY_COMMISSION,
+                EXPENSE_CATEGORY_INSURANCE,
+            ],
+            "invoice_amount_rub": _decimal_to_float(invoice_fact_rub),
+            "invoice_rate_requested_date": invoice_doc.get("cbr_usd_rate_requested_date") or invoice_doc.get("document_date") or "",
+            "invoice_rate_effective_date": invoice_doc.get("cbr_usd_rate_effective_date") or "",
+            "cbr_usd_rate_on_invoice_date": _decimal_to_float(cbr_invoice_rate),
+            "implied_rate": None,
+            "absolute_spread": None,
+            "relative_spread_pct": None,
+            "spread_pct": None,
+            "quote_rate_requested_date": quote_doc.get("cbr_usd_rate_requested_date") or quote_doc.get("document_date") or "",
+            "quote_rate_effective_date": quote_doc.get("cbr_usd_rate_effective_date") or "",
+            "cbr_usd_rate_on_quote_date": _decimal_to_float(quote_cbr_rate),
+            "estimated_bank_rate_on_quote_date": None,
+            "quote_rub_equivalent": None,
+            "delta_rub": None,
+            "rejected_implied_rate": _decimal_to_float(implied_rate),
+            "rejected_estimated_bank_rate_on_quote_date": _decimal_to_float(estimated_bank_rate),
+            "bank_rate_label": "расчётный курс по правилу КП",
+            "warnings": _dedupe_strings(warnings),
+        }
     return {
         "status": "needs_review",
+        "rate_sanity_status": "ok",
+        "rate_sanity_reason": "",
+        "rate_sanity": sanity,
         "linked_quote_usd_component": _decimal_to_float(linked_quote_usd_component),
         "linked_quote_line_categories": [
             EXPENSE_CATEGORY_DELIVERY,
@@ -4848,6 +4898,60 @@ def _build_rate_summary(
         "delta_rub": _decimal_to_float(delta_rub),
         "bank_rate_label": "расчётный курс по правилу КП",
         "warnings": warnings,
+    }
+
+
+def _quote_rate_sanity(
+    *,
+    implied_rate: Decimal | None,
+    estimated_bank_rate: Decimal | None,
+    cbr_invoice_rate: Decimal | None,
+    quote_cbr_rate: Decimal | None,
+) -> dict[str, Any]:
+    checks = [
+        ("implied_rate", implied_rate, cbr_invoice_rate),
+        ("estimated_bank_rate_on_quote_date", estimated_bank_rate, quote_cbr_rate),
+    ]
+    for field_name, value, cbr_rate in checks:
+        if value is None or cbr_rate is None or cbr_rate <= 0:
+            return {
+                "status": "not_available",
+                "reason": f"{field_name}_missing",
+                "warnings": ["Расчётный курс КП не рассчитан: недостаточно данных для проверки курса."],
+            }
+        ratio = _safe_div(value, cbr_rate)
+        if (
+            value < QUOTE_RATE_SANITY_MIN_ABSOLUTE
+            or value > QUOTE_RATE_SANITY_MAX_ABSOLUTE
+            or ratio is None
+            or ratio < QUOTE_RATE_SANITY_MIN_RATIO
+            or ratio > QUOTE_RATE_SANITY_MAX_RATIO
+        ):
+            return {
+                "status": "rejected",
+                "reason": f"{field_name}_outside_cbr_sanity_band",
+                "field": field_name,
+                "value": _decimal_to_float(value),
+                "cbr_rate": _decimal_to_float(cbr_rate),
+                "ratio_to_cbr": _decimal_to_float(ratio),
+                "min_ratio": _decimal_to_float(QUOTE_RATE_SANITY_MIN_RATIO),
+                "max_ratio": _decimal_to_float(QUOTE_RATE_SANITY_MAX_RATIO),
+                "min_absolute": _decimal_to_float(QUOTE_RATE_SANITY_MIN_ABSOLUTE),
+                "max_absolute": _decimal_to_float(QUOTE_RATE_SANITY_MAX_ABSOLUTE),
+                "warnings": [
+                    "Расчётный курс КП требует проверки: "
+                    f"{field_name}={_decimal_to_display(value)} радикально отличается от CBR "
+                    f"{_decimal_to_display(cbr_rate)}; рублёвые КП-метрики скрыты."
+                ],
+            }
+    return {
+        "status": "ok",
+        "reason": "",
+        "min_ratio": _decimal_to_float(QUOTE_RATE_SANITY_MIN_RATIO),
+        "max_ratio": _decimal_to_float(QUOTE_RATE_SANITY_MAX_RATIO),
+        "min_absolute": _decimal_to_float(QUOTE_RATE_SANITY_MIN_ABSOLUTE),
+        "max_absolute": _decimal_to_float(QUOTE_RATE_SANITY_MAX_ABSOLUTE),
+        "warnings": [],
     }
 
 
