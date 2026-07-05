@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
+from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
@@ -716,6 +717,13 @@ class RegistryUploadHttpEntrypoint:
         self.wb_supplies_block = WbSuppliesBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
+        )
+        self.fulfillment_services_block = FulfillmentServicesBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.wb_supplies_block.fulfillment_overlay_provider = (
+            self.fulfillment_services_block.approved_overlay_by_supply
         )
         self.wb_regional_supply_planning_block = WbRegionalSupplyPlanningBlock(
             runtime=self.runtime,
@@ -2260,6 +2268,34 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_supplies_overlay_options_request(self) -> dict[str, Any]:
         return self.wb_supplies_block.build_overlay_options()
+
+    def handle_fulfillment_services_template_request(self) -> tuple[bytes, str, str]:
+        return self.fulfillment_services_block.build_template()
+
+    def handle_fulfillment_services_upload_request(
+        self,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return self.fulfillment_services_block.upload_xlsx(
+            workbook_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+        )
+
+    def handle_fulfillment_services_uploads_request(self) -> dict[str, Any]:
+        return self.fulfillment_services_block.list_uploads()
+
+    def handle_fulfillment_services_upload_detail_request(self, upload_id: str) -> dict[str, Any]:
+        return self.fulfillment_services_block.get_upload(upload_id)
+
+    def handle_fulfillment_services_payment_validation_pdf_request(
+        self,
+        upload_id: str,
+    ) -> tuple[bytes, str, str]:
+        return self.fulfillment_services_block.download_pdf(upload_id)
 
     def handle_nomenclature_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_nomenclature()

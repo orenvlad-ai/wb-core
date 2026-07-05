@@ -457,6 +457,12 @@ def main() -> None:
             main_ids = {row["wb_supply_id"] for row in main_payload.get("rows", [])}
             if main_status != 200 or main_ids != {"39265492", "39265540", "1001", "1003"}:
                 raise AssertionError(f"main_250 must return numeric >=250 rows only, got {main_status} {main_ids} {main_payload}")
+            schema_labels = [item.get("label") for item in main_payload.get("schema", {}).get("columns", [])]
+            if "Транзит" not in schema_labels or "Услуги fulfillment" not in schema_labels or "Стоимость" in schema_labels:
+                raise AssertionError(f"WB supplies schema must expose transit/fulfillment labels, got {schema_labels}")
+            row_39265492 = next(row for row in main_payload.get("rows", []) if row.get("wb_supply_id") == "39265492")
+            if "₽/шт" not in str(row_39265492.get("transit_per_unit_display") or ""):
+                raise AssertionError(f"transit column must expose per-unit display, got {row_39265492}")
             if main_payload.get("summary", {}).get("hidden_by_size_filter_count") != 3:
                 raise AssertionError("summary must expose rows hidden by size filter")
             if main_payload.get("summary", {}).get("unknown_quantity_count") != 2:
@@ -673,6 +679,11 @@ def main() -> None:
                 "Показать записей",
                 "Загрузить всю историю",
                 "Учесть WB-поставки",
+                "Fulfillment",
+                "Услуги fulfillment",
+                "Транзит",
+                "fulfillment_services_template_path",
+                "fulfillment_services_uploads_path",
                 "Выбрать eligible",
                 "ФО",
                 "ЦФО",
@@ -688,6 +699,8 @@ def main() -> None:
                     raise AssertionError(f"operator HTML must expose WB supplies UI token {expected!r}")
             if "Обновить стоимость транзита" in operator_html:
                 raise AssertionError("operator UI must not expose transit-cost refresh as a second primary button")
+            if "<th>Стоимость</th>" in operator_html:
+                raise AssertionError("operator UI must no longer expose Стоимость as WB supplies header")
         finally:
             server.shutdown()
             thread.join(timeout=5)

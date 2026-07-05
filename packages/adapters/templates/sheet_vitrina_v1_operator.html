@@ -3721,12 +3721,14 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», WB/FBW registry живёт
-          в «Wildberries», матрица поставок доступна в «Реестр поставок», а реестр заказов поставщика доступен в «От поставщика».
+          в «Wildberries», Fulfillment-услуги регистрируются в «Fulfillment», матрица поставок доступна в «Реестр поставок»,
+          а реестр заказов поставщика доступен в «От поставщика».
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы поставок">
           <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
           <button class="subsection-button" type="button" data-supply-mode-button="wildberries" aria-selected="false">Wildberries</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="fulfillment" aria-selected="false">Fulfillment</button>
           <button class="subsection-button" type="button" data-supply-mode-button="shipment-registry" aria-selected="false">Реестр поставок</button>
           <button class="subsection-button" type="button" data-supply-mode-button="cny-account" aria-selected="false">Счёт CNY</button>
           <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
@@ -4372,6 +4374,63 @@
           </section>
         </section>
 
+        <section class="supply-mode-panel" data-supply-mode-panel="fulfillment" hidden>
+          <section class="block fulfillment-services-block" aria-labelledby="fulfillmentServicesTitle">
+            <div class="wb-supplies-header">
+              <div>
+                <h2 id="fulfillmentServicesTitle" class="wb-supplies-title">Fulfillment</h2>
+                <p class="wb-supplies-lead">Регистрация услуг Fulfillment по WB-поставкам и PDF-виза на оплату.</p>
+                <p id="fulfillmentServicesState" class="wb-supplies-source">Server-owned runtime SQLite · XLSX/PDF</p>
+              </div>
+              <div class="block-actions">
+                <button id="fulfillmentTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон</button>
+                <button id="fulfillmentUploadButton" class="action-button primary-button" type="button">Загрузить заполненный файл</button>
+                <input id="fulfillmentFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+              </div>
+            </div>
+            <p id="fulfillmentServicesMessage" class="wb-supplies-message">Загрузки ещё не запрошены.</p>
+            <div id="fulfillmentServicesSummary" class="wb-supplies-summary" aria-live="polite"></div>
+            <section class="shipment-registry-comparison" id="fulfillmentLatestBlock" hidden>
+              <h3>Последняя загрузка</h3>
+              <div id="fulfillmentLatestSummary" class="wb-supplies-summary"></div>
+              <div class="wb-supplies-table-wrap">
+                <table class="wb-supplies-table" aria-label="Ошибки Fulfillment upload">
+                  <thead>
+                    <tr>
+                      <th>Строка</th>
+                      <th>Номер поставки</th>
+                      <th>Матчинг</th>
+                      <th>Ошибка</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fulfillmentErrorsBody">
+                    <tr><td colspan="4" class="wb-supplies-empty">Ошибок нет.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+            <h3 class="block-title" style="margin-top: 18px;">Последние загрузки</h3>
+            <div class="wb-supplies-table-wrap">
+              <table class="wb-supplies-table" aria-label="Fulfillment uploads">
+                <thead>
+                  <tr>
+                    <th>Upload</th>
+                    <th>Статус</th>
+                    <th>Строки</th>
+                    <th>Итого</th>
+                    <th>НДС 5%</th>
+                    <th>К оплате</th>
+                    <th>PDF-виза</th>
+                  </tr>
+                </thead>
+                <tbody id="fulfillmentUploadsBody">
+                  <tr><td colspan="7" class="wb-supplies-empty">Загрузок пока нет.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section class="supply-mode-panel" data-supply-mode-panel="wildberries" hidden>
           <section class="block wb-supplies-block" aria-labelledby="wbSuppliesTitle">
             <div class="wb-supplies-header">
@@ -4446,12 +4505,13 @@
                     <th>Статус</th>
                     <th>Добавлено, шт / Упаковано → Принято</th>
                     <th>Коэф. приёмки</th>
-                    <th>Стоимость</th>
+                    <th>Транзит</th>
+                    <th>Услуги fulfillment</th>
                   </tr>
                 </thead>
                 <tbody id="wbSuppliesTableBody">
                   <tr>
-                    <td colspan="7" class="wb-supplies-empty">Данные ещё не загружены.</td>
+                    <td colspan="8" class="wb-supplies-empty">Данные ещё не загружены.</td>
                   </tr>
                 </tbody>
               </table>
@@ -4783,6 +4843,16 @@
       const cnyAccountMessage = document.getElementById("cnyAccountMessage");
       const cnyConversionsBody = document.getElementById("cnyConversionsBody");
       const cnyLedgerBody = document.getElementById("cnyLedgerBody");
+      const fulfillmentServicesState = document.getElementById("fulfillmentServicesState");
+      const fulfillmentTemplateButton = document.getElementById("fulfillmentTemplateButton");
+      const fulfillmentUploadButton = document.getElementById("fulfillmentUploadButton");
+      const fulfillmentFileInput = document.getElementById("fulfillmentFileInput");
+      const fulfillmentServicesMessage = document.getElementById("fulfillmentServicesMessage");
+      const fulfillmentServicesSummary = document.getElementById("fulfillmentServicesSummary");
+      const fulfillmentLatestBlock = document.getElementById("fulfillmentLatestBlock");
+      const fulfillmentLatestSummary = document.getElementById("fulfillmentLatestSummary");
+      const fulfillmentErrorsBody = document.getElementById("fulfillmentErrorsBody");
+      const fulfillmentUploadsBody = document.getElementById("fulfillmentUploadsBody");
 
       const actionLabels = {
         refresh: {
@@ -4804,7 +4874,7 @@
       const DEFAULT_SUPPLY_SECTION = "factory";
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
-      const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "shipment-registry", "cny-account", "supplier"]);
+      const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "fulfillment", "shipment-registry", "cny-account", "supplier"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
@@ -4951,6 +5021,10 @@
       let cnyAccountUploading = false;
       let cnyAccountReplayLoading = false;
       let cnyAccountOpeningSaving = false;
+      let fulfillmentServicesInitialized = false;
+      let fulfillmentServicesLoading = false;
+      let fulfillmentServicesUploading = false;
+      let fulfillmentServicesPayload = null;
       let wbSuppliesPayload = null;
       let wbSuppliesInitialized = false;
       let wbSuppliesLoading = false;
@@ -5493,6 +5567,9 @@
         if (activeModeName === "wildberries") {
           ensureWbSuppliesLoaded();
         }
+        if (activeModeName === "fulfillment") {
+          ensureFulfillmentServicesLoaded();
+        }
         if (activeModeName === "shipment-registry") {
           ensureShipmentRegistryLoaded();
         }
@@ -5751,6 +5828,24 @@
       reportSectionButtons.forEach((button) => {
         button.addEventListener("click", () => activateReportSection(button.dataset.reportSectionButton));
       });
+
+      if (fulfillmentTemplateButton) {
+        fulfillmentTemplateButton.addEventListener("click", () => {
+          if (config.fulfillment_services_template_path) {
+            window.location.href = config.fulfillment_services_template_path;
+          }
+        });
+      }
+      if (fulfillmentUploadButton && fulfillmentFileInput) {
+        fulfillmentUploadButton.addEventListener("click", () => fulfillmentFileInput.click());
+      }
+      if (fulfillmentFileInput) {
+        fulfillmentFileInput.addEventListener("change", () => {
+          if (fulfillmentFileInput.files && fulfillmentFileInput.files[0]) {
+            uploadFulfillmentWorkbook();
+          }
+        });
+      }
 
       function setActionState(activeAction) {
         const refreshLoading = activeAction === "refresh";
@@ -9245,6 +9340,238 @@
         return text;
       }
 
+      function setFulfillmentServicesMessage(message, tone) {
+        if (!fulfillmentServicesMessage) {
+          return;
+        }
+        fulfillmentServicesMessage.textContent = message || "";
+        fulfillmentServicesMessage.className = "wb-supplies-message" + (tone ? " is-" + tone : "");
+      }
+
+      function updateFulfillmentServicesBusyState() {
+        if (fulfillmentUploadButton) {
+          fulfillmentUploadButton.disabled = fulfillmentServicesLoading || fulfillmentServicesUploading;
+          fulfillmentUploadButton.textContent = fulfillmentServicesUploading ? "Загружаем..." : "Загрузить заполненный файл";
+        }
+        if (fulfillmentTemplateButton) {
+          fulfillmentTemplateButton.disabled = fulfillmentServicesUploading;
+        }
+      }
+
+      function ensureFulfillmentServicesLoaded() {
+        if (fulfillmentServicesInitialized || fulfillmentServicesLoading) {
+          return;
+        }
+        fulfillmentServicesInitialized = true;
+        loadFulfillmentServices();
+      }
+
+      async function loadFulfillmentServices(options) {
+        if (!config.fulfillment_services_uploads_path || fulfillmentServicesLoading) {
+          return;
+        }
+        fulfillmentServicesLoading = true;
+        updateFulfillmentServicesBusyState();
+        if (!options || !options.preserveMessage) {
+          setFulfillmentServicesMessage("Читаем Fulfillment uploads...", "");
+        }
+        try {
+          const response = await fetch(config.fulfillment_services_uploads_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const listPayload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(listPayload.error) + " (HTTP " + response.status + ")");
+          }
+          let detailPayload = options && options.detail ? options.detail : null;
+          const latest = listPayload && listPayload.latest_upload ? listPayload.latest_upload : null;
+          if (!detailPayload && latest && latest.upload_id) {
+            detailPayload = await fetchFulfillmentUploadDetail(latest.upload_id);
+          }
+          fulfillmentServicesPayload = { list: listPayload, detail: detailPayload };
+          renderFulfillmentServices(fulfillmentServicesPayload);
+          if (!options || !options.preserveMessage) {
+            const status = latest && latest.validation_status ? latest.validation_status : "нет загрузок";
+            setFulfillmentServicesMessage("Последняя загрузка: " + status, latest && latest.validation_status === "failed" ? "warning" : "");
+          }
+        } catch (error) {
+          renderFulfillmentServices({ list: { uploads: [] }, detail: null });
+          setFulfillmentServicesMessage(
+            "Fulfillment uploads не загружены: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          fulfillmentServicesLoading = false;
+          updateFulfillmentServicesBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      async function fetchFulfillmentUploadDetail(uploadId) {
+        const response = await fetch(config.fulfillment_services_uploads_path.replace(/\/$/, "") + "/" + encodeURIComponent(uploadId), {
+          method: "GET",
+          headers: { "Accept": "application/json" }
+        });
+        const payload = await readJson(response);
+        if (!response.ok) {
+          throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+        }
+        return payload;
+      }
+
+      async function uploadFulfillmentWorkbook() {
+        const file = fulfillmentFileInput && fulfillmentFileInput.files ? fulfillmentFileInput.files[0] : null;
+        if (!file || fulfillmentServicesUploading) {
+          setFulfillmentServicesMessage("Сначала выберите заполненный XLSX-файл.", "error");
+          return;
+        }
+        fulfillmentServicesUploading = true;
+        updateFulfillmentServicesBusyState();
+        setFulfillmentServicesMessage("Загружаем Fulfillment XLSX...", "");
+        try {
+          const formData = new FormData();
+          formData.append("file", file, file.name || "fulfillment-services.xlsx");
+          const response = await fetch(config.fulfillment_services_uploads_path, {
+            method: "POST",
+            headers: { "Accept": "application/json" },
+            body: formData
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (fulfillmentFileInput) {
+            fulfillmentFileInput.value = "";
+          }
+          const upload = payload && payload.upload ? payload.upload : {};
+          const isOk = upload.validation_status === "ok";
+          setFulfillmentServicesMessage(
+            isOk ? "Fulfillment upload OK, PDF-виза доступна." : "Fulfillment upload failed: " + valueOrDash(upload.validation_error_summary),
+            isOk ? "success" : "warning"
+          );
+          await loadFulfillmentServices({ preserveMessage: true, detail: payload });
+          if (wbSuppliesInitialized) {
+            await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
+          }
+        } catch (error) {
+          setFulfillmentServicesMessage(
+            "Fulfillment upload не выполнен: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          fulfillmentServicesUploading = false;
+          updateFulfillmentServicesBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      function renderFulfillmentServices(payload) {
+        const listPayload = payload && payload.list ? payload.list : {};
+        const detailPayload = payload && payload.detail ? payload.detail : null;
+        const uploads = Array.isArray(listPayload.uploads) ? listPayload.uploads : [];
+        const latest = detailPayload && detailPayload.upload ? detailPayload.upload : (listPayload.latest_upload || null);
+        renderFulfillmentSummary(latest);
+        renderFulfillmentUploads(uploads);
+        renderFulfillmentLatest(detailPayload);
+      }
+
+      function renderFulfillmentSummary(latest) {
+        if (fulfillmentServicesState) {
+          fulfillmentServicesState.textContent = latest
+            ? "Последняя загрузка: " + valueOrDash(latest.uploaded_at)
+            : "Server-owned runtime SQLite · XLSX/PDF";
+        }
+        if (!fulfillmentServicesSummary) {
+          return;
+        }
+        if (!latest) {
+          fulfillmentServicesSummary.innerHTML = "<span class=\"wb-supplies-chip\">Загрузок нет</span>";
+          return;
+        }
+        const chips = [
+          "Status: " + valueOrDash(latest.validation_status),
+          "Rows: " + valueOrDash(latest.rows_matched) + "/" + valueOrDash(latest.rows_total),
+          "Итого: " + formatWbRub(latest.amount_without_vat_total),
+          "НДС 5%: " + formatWbRub(latest.vat_total),
+          "К оплате: " + formatWbRub(latest.amount_with_vat_total),
+          "PDF: " + (latest.pdf_available ? "доступна" : "нет")
+        ];
+        if (latest.payment_validation_id) {
+          chips.push("Виза: " + latest.payment_validation_id);
+        }
+        fulfillmentServicesSummary.innerHTML = chips.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
+      }
+
+      function renderFulfillmentUploads(uploads) {
+        if (!fulfillmentUploadsBody) {
+          return;
+        }
+        if (!uploads.length) {
+          fulfillmentUploadsBody.innerHTML = "<tr><td colspan=\"7\" class=\"wb-supplies-empty\">Загрузок пока нет.</td></tr>";
+          return;
+        }
+        fulfillmentUploadsBody.innerHTML = uploads.map((upload) => {
+          const pdfCell = upload.pdf_available && upload.pdf_path
+            ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.pdf_path) + "\" target=\"_blank\" rel=\"noreferrer\">Скачать PDF-визу</a>"
+            : "—";
+          return [
+            "<tr>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(valueOrDash(upload.upload_id)) + "</span><span class=\"wb-supplies-sub\">" + escapeHtml(valueOrDash(upload.original_filename)) + "</span></td>",
+            "<td>" + escapeHtml(valueOrDash(upload.validation_status)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(upload.rows_matched)) + "/" + escapeHtml(valueOrDash(upload.rows_total)) + "</td>",
+            "<td>" + escapeHtml(formatWbRub(upload.amount_without_vat_total)) + "</td>",
+            "<td>" + escapeHtml(formatWbRub(upload.vat_total)) + "</td>",
+            "<td>" + escapeHtml(formatWbRub(upload.amount_with_vat_total)) + "</td>",
+            "<td>" + pdfCell + "</td>",
+            "</tr>"
+          ].join("");
+        }).join("");
+      }
+
+      function renderFulfillmentLatest(detailPayload) {
+        if (!fulfillmentLatestBlock || !fulfillmentLatestSummary || !fulfillmentErrorsBody) {
+          return;
+        }
+        if (!detailPayload || !detailPayload.upload) {
+          fulfillmentLatestBlock.hidden = true;
+          return;
+        }
+        const upload = detailPayload.upload;
+        fulfillmentLatestBlock.hidden = false;
+        const latestItems = [
+          "upload_id: " + valueOrDash(upload.upload_id),
+          "hash: " + valueOrDash(upload.short_file_hash),
+          "status: " + valueOrDash(upload.validation_status),
+          "К оплате: " + formatWbRub(upload.amount_with_vat_total)
+        ];
+        if (upload.payment_validation_id) {
+          latestItems.push("payment_validation_id: " + upload.payment_validation_id);
+        }
+        if (upload.pdf_available && upload.pdf_path) {
+          latestItems.push("<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.pdf_path) + "\" target=\"_blank\" rel=\"noreferrer\">Скачать PDF-визу</a>");
+        }
+        fulfillmentLatestSummary.innerHTML = latestItems.map((item) => {
+          if (String(item).startsWith("<a ")) {
+            return "<span class=\"wb-supplies-chip\">" + item + "</span>";
+          }
+          return "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>";
+        }).join("");
+        const errors = Array.isArray(detailPayload.row_errors) ? detailPayload.row_errors : [];
+        if (!errors.length) {
+          fulfillmentErrorsBody.innerHTML = "<tr><td colspan=\"4\" class=\"wb-supplies-empty\">Ошибок нет.</td></tr>";
+          return;
+        }
+        fulfillmentErrorsBody.innerHTML = errors.map((error) => [
+          "<tr>",
+          "<td>" + escapeHtml(valueOrDash(error.row_index)) + "</td>",
+          "<td>" + escapeHtml(valueOrDash(error.supply_id_input)) + "</td>",
+          "<td>" + escapeHtml(valueOrDash(error.match_status)) + "</td>",
+          "<td>" + escapeHtml(valueOrDash(error.row_error)) + "</td>",
+          "</tr>"
+        ].join("")).join("");
+      }
+
       function setWbSuppliesMessage(message, tone) {
         if (!wbSuppliesMessage) {
           return;
@@ -9935,7 +10262,7 @@
           return;
         }
         if (!rows.length) {
-          wbSuppliesTableBody.innerHTML = "<tr><td colspan=\"7\" class=\"wb-supplies-empty\">Поставки не найдены.</td></tr>";
+          wbSuppliesTableBody.innerHTML = "<tr><td colspan=\"8\" class=\"wb-supplies-empty\">Поставки не найдены.</td></tr>";
           return;
         }
         wbSuppliesTableBody.innerHTML = rows.map((row) => {
@@ -9946,14 +10273,16 @@
           const quantitySub = row.accepted_quantity !== null && row.accepted_quantity !== undefined
             ? "<span class=\"wb-supplies-sub\">Упаковано " + escapeHtml(formatWbNumber(row.packed_quantity)) + " → Принято " + escapeHtml(formatWbNumber(row.accepted_quantity)) + "</span>"
             : "";
-          const costSub = row.has_transit_cost_marker
-            ? "<span class=\"wb-supplies-sub\">" +
-              (row.effective_cost_source === "seller_portal_browser" ? "с транзитом · Seller Portal" : "с транзитом") +
-              "</span>"
-            : "";
           const costValue = row.effective_cost_total !== null && row.effective_cost_total !== undefined
             ? row.effective_cost_total
             : row.cost_total;
+          const costSub = costValue !== null && costValue !== undefined
+            ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.transit_per_unit_display || "₽/шт —") + "</span>"
+            : "";
+          const fulfillmentValue = row.fulfillment_amount_with_vat_total;
+          const fulfillmentCell = fulfillmentValue !== null && fulfillmentValue !== undefined
+            ? "<span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(fulfillmentValue)) + "</span><span class=\"wb-supplies-sub\">" + escapeHtml(row.fulfillment_per_unit_display || "₽/шт —") + "</span>"
+            : "<span class=\"wb-supplies-main\">—</span>";
           const warehouseFact = row.warehouse_fact_line
             ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.warehouse_fact_line) + "</span>"
             : "";
@@ -9966,6 +10295,7 @@
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbNumber(row.quantity_added)) + "</span>" + quantitySub + "</td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbCoefficient(row.acceptance_coefficient)) + "</span></td>",
             "<td><span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(costValue)) + "</span>" + costSub + "</td>",
+            "<td>" + fulfillmentCell + "</td>",
             "</tr>"
           ].join("");
         }).join("");

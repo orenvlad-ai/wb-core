@@ -70,6 +70,9 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/sync-status",
         "/v1/sheet-vitrina-v1/supply/wb-supplies/",
+        "/v1/sheet-vitrina-v1/supply/fulfillment-services/template.xlsx",
+        "/v1/sheet-vitrina-v1/supply/fulfillment-services/uploads",
+        "/v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments",
         "/v1/sheet-vitrina-v1/supply/supplier-shipments/",
         "/v1/sheet-vitrina-v1/supply/cny-account",
@@ -164,6 +167,12 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include WB supplies sync status exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/wb-supplies/ {") != 1:
         raise AssertionError("rendered nginx block must include WB supplies detail prefix exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/fulfillment-services/template.xlsx {") != 1:
+        raise AssertionError("rendered nginx block must include Fulfillment template exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads {") != 1:
+        raise AssertionError("rendered nginx block must include Fulfillment uploads exactly once")
+    if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/ {") != 1:
+        raise AssertionError("rendered nginx block must include Fulfillment upload detail/PDF prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/supply/supplier-shipments {") != 1:
         raise AssertionError("rendered nginx block must include supplier shipment list exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/supply/supplier-shipments/ {") != 1:
