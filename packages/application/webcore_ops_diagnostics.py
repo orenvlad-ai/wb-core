@@ -246,7 +246,12 @@ class WebCoreOpsDiagnostics:
         with self._connect() as conn:
             latest_ready = _latest_ready_snapshot(conn)
             latest_ready_in_range = _latest_ready_snapshot(conn, date_from=date_from, date_to=date_to)
-            snapshots = _ready_snapshot_presence(conn, date_from=date_from, date_to=date_to)
+            snapshots = _ready_snapshot_presence(
+                conn,
+                date_from=date_from,
+                date_to=date_to,
+                latest_ready=latest_ready,
+            )
             temporal_presence = _temporal_presence(conn, date_from=date_from, date_to=date_to)
             source_outcomes = _source_outcomes_from_latest_ready(latest_ready_in_range or latest_ready)
             auto_update_state = _single_row(conn, "sheet_vitrina_v1_auto_update_state", "slot = 1")
@@ -668,7 +673,13 @@ def _ready_snapshot_rows(conn: sqlite3.Connection, *, date_from: str, date_to: s
     return [_row_dict(row) for row in rows]
 
 
-def _ready_snapshot_presence(conn: sqlite3.Connection, *, date_from: str, date_to: str) -> dict[str, dict[str, Any]]:
+def _ready_snapshot_presence(
+    conn: sqlite3.Connection,
+    *,
+    date_from: str,
+    date_to: str,
+    latest_ready: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
     presence = {item: {"date": item, "ready_snapshot": False} for item in _date_span(date_from, date_to)}
     for row in _ready_snapshot_rows(conn, date_from=date_from, date_to=date_to):
         day = str(row.get("as_of_date") or "")
@@ -681,7 +692,34 @@ def _ready_snapshot_presence(conn: sqlite3.Connection, *, date_from: str, date_t
                     "plan_version": row.get("plan_version") or "",
                 }
             )
+    for day, item in _current_tail_coverage(latest_ready).items():
+        if day in presence:
+            presence[day].update(item)
     return presence
+
+
+def _current_tail_coverage(row: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not row:
+        return {}
+    payload = _safe_json_loads(str(row.get("plan_json") or ""))
+    if not isinstance(payload, Mapping):
+        return {}
+    coverage: dict[str, dict[str, Any]] = {}
+    for slot in payload.get("temporal_slots") or []:
+        if not isinstance(slot, Mapping):
+            continue
+        if str(slot.get("slot_key") or "") != "today_current":
+            continue
+        day = str(slot.get("column_date") or "")
+        if not _DATE_RE.fullmatch(day):
+            continue
+        coverage[day] = {
+            "current_tail_ready_snapshot": True,
+            "current_tail_snapshot_id": row.get("snapshot_id") or "",
+            "current_tail_as_of_date": row.get("as_of_date") or "",
+            "current_tail_refreshed_at": row.get("refreshed_at") or "",
+        }
+    return coverage
 
 
 def _temporal_presence(conn: sqlite3.Connection, *, date_from: str, date_to: str) -> dict[str, dict[str, Any]]:
@@ -988,6 +1026,7 @@ def _likely_failure_area(
     materialization_gaps = [
         day
         for day in missing_ready
+        if not bool((snapshots.get(day) or {}).get("current_tail_ready_snapshot"))
         if int((temporal_presence.get(day) or {}).get("temporal_source_count") or 0) > 0
         or int((temporal_presence.get(day) or {}).get("temporal_slot_count") or 0) > 0
     ]
@@ -1043,6 +1082,7 @@ def _merge_snapshot_presence(
         item.update(temporal_presence.get(day) or {})
         item["materialization_gap"] = (
             not bool(item.get("ready_snapshot"))
+            and not bool(item.get("current_tail_ready_snapshot"))
             and (
                 int(item.get("temporal_source_count") or 0) > 0
                 or int(item.get("temporal_slot_count") or 0) > 0

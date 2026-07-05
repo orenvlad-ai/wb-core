@@ -212,8 +212,8 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("get_revenue_range", {"date_from": "2026-06-25", "date_to": "2026-06-26", "group_by": "date", "revenue_metric": "total_orderSum"}),
         ("get_runtime_health_summary", {}),
         ("get_service_logs", {"unit": "wb-core-data-mcp.service", "since": "1h", "priority": "info", "limit": 999}),
-        ("get_refresh_diagnostics", {"date_from": "2026-06-26", "date_to": "2026-06-27"}),
-        ("get_runtime_snapshot_status", {"date_from": "2026-06-25", "date_to": "2026-06-27"}),
+        ("get_refresh_diagnostics", {"date_from": "2026-06-26", "date_to": "2026-06-28"}),
+        ("get_runtime_snapshot_status", {"date_from": "2026-06-25", "date_to": "2026-06-28"}),
         ("get_deploy_state", {}),
     ]
     for name, args in calls:
@@ -303,7 +303,10 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
             presence = result.get("snapshot_presence") or []
             if not presence or not any(item.get("ready_snapshot") for item in presence):
                 raise AssertionError(f"refresh diagnostics missing snapshot presence: {result}")
-            gap_rows = [item for item in presence if item.get("date") == "2026-06-27"]
+            current_tail_rows = [item for item in presence if item.get("date") == "2026-06-27"]
+            if not current_tail_rows or current_tail_rows[0].get("current_tail_ready_snapshot") is not True or current_tail_rows[0].get("materialization_gap"):
+                raise AssertionError(f"current today_current tail must not be classified as materialization loss: {result}")
+            gap_rows = [item for item in presence if item.get("date") == "2026-06-28"]
             if not gap_rows or gap_rows[0].get("materialization_gap") is not True:
                 raise AssertionError(f"refresh diagnostics must flag temporal-without-ready materialization gaps: {result}")
             if result.get("likely_failure_area", {}).get("area") != "ready_materialization_gap":
@@ -1023,6 +1026,10 @@ def _create_fixture_db(db_path: Path) -> None:
             {
                 "as_of_date": "2026-06-26",
                 "date_columns": ["2026-06-26", "2026-06-27"],
+                "temporal_slots": [
+                    {"slot_key": "yesterday_closed", "slot_label": "yesterday_closed", "column_date": "2026-06-26"},
+                    {"slot_key": "today_current", "slot_label": "today_current", "column_date": "2026-06-27"},
+                ],
                 "metadata": {"fixture": "webcore_data_mcp_smoke"},
                 "sheets": [
                     {
@@ -1139,6 +1146,11 @@ def _create_fixture_db(db_path: Path) -> None:
         conn.execute(
             "INSERT INTO temporal_source_slot_snapshots VALUES(?, ?, ?, ?, ?)",
             ("stocks", "2026-06-27", "yesterday_closed", "2026-06-28T17:00:36Z", "{}"),
+        )
+        conn.execute("INSERT INTO temporal_source_snapshots VALUES(?, ?, ?, ?)", ("stocks", "2026-06-28", "2026-06-29T17:00:36Z", "{}"))
+        conn.execute(
+            "INSERT INTO temporal_source_slot_snapshots VALUES(?, ?, ?, ?, ?)",
+            ("stocks", "2026-06-28", "yesterday_closed", "2026-06-29T17:00:36Z", "{}"),
         )
         conn.execute(
             "INSERT INTO temporal_source_closure_state VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
