@@ -216,6 +216,9 @@ DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
+DEFAULT_FULFILLMENT_SERVICES_PATH = "/v1/sheet-vitrina-v1/supply/fulfillment-services"
+DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/template.xlsx"
+DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/uploads"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -1609,6 +1612,29 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.ACCEPTED, result)
                 return
 
+            if parsed.path == DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    payload = entrypoint.handle_fulfillment_services_upload_request(
+                        upload_payload["workbook_bytes"],
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": f"Fulfillment upload failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -2461,6 +2487,88 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"WB supplies overlay options failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    workbook_bytes, filename, content_type = entrypoint.handle_fulfillment_services_template_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Fulfillment template failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if parsed.path == DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_fulfillment_services_uploads_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Fulfillment uploads list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_fulfillment_payment_validation_pdf_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_id = _resolve_fulfillment_upload_id_from_pdf_path(parsed.path)
+                    pdf_bytes, filename, content_type = entrypoint.handle_fulfillment_services_payment_validation_pdf_request(upload_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Fulfillment PDF download failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    pdf_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if _is_fulfillment_upload_detail_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_id = _resolve_fulfillment_upload_id_from_detail_path(parsed.path)
+                    payload = entrypoint.handle_fulfillment_services_upload_detail_request(upload_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Fulfillment upload detail failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3925,6 +4033,37 @@ def _is_wb_supply_detail_path(path: str) -> bool:
         return False
     suffix = path[len(DEFAULT_WB_SUPPLIES_PATH) + 1 :]
     return bool(suffix) and "/" not in suffix and suffix != "sync"
+
+
+def _fulfillment_upload_path_parts(path: str) -> list[str]:
+    if not path.startswith(DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH + "/"):
+        return []
+    suffix = path[len(DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH) + 1 :]
+    return [part for part in suffix.split("/") if part]
+
+
+def _is_fulfillment_upload_detail_path(path: str) -> bool:
+    parts = _fulfillment_upload_path_parts(path)
+    return len(parts) == 1 and bool(parts[0])
+
+
+def _is_fulfillment_payment_validation_pdf_path(path: str) -> bool:
+    parts = _fulfillment_upload_path_parts(path)
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "payment-validation.pdf"
+
+
+def _resolve_fulfillment_upload_id_from_detail_path(path: str) -> str:
+    parts = _fulfillment_upload_path_parts(path)
+    if len(parts) != 1 or not parts[0]:
+        raise ValueError(f"unsupported Fulfillment upload detail path: {path}")
+    return urllib_parse.unquote(parts[0])
+
+
+def _resolve_fulfillment_upload_id_from_pdf_path(path: str) -> str:
+    parts = _fulfillment_upload_path_parts(path)
+    if len(parts) != 2 or parts[1] != "payment-validation.pdf":
+        raise ValueError(f"unsupported Fulfillment PDF path: {path}")
+    return urllib_parse.unquote(parts[0])
 
 
 def _is_nomenclature_item_path(path: str) -> bool:
@@ -5833,6 +5972,8 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_transit_cost_enrich_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH,
         "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
+        "fulfillment_services_template_path": DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH,
+        "fulfillment_services_uploads_path": DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_shipment_registry_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,

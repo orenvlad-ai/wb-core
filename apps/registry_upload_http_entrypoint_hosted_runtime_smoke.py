@@ -220,8 +220,10 @@ def main() -> None:
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for playwright")
             if "pypdf==6.4.1" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
                 raise AssertionError("deploy --dry-run must expose runtime pip install command for pypdf")
-            if "import openpyxl, xlrd, playwright, pypdf" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
-                raise AssertionError("deploy --dry-run must guard on openpyxl, xlrd, playwright and pypdf imports")
+            if "reportlab==4.4.5" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
+                raise AssertionError("deploy --dry-run must expose runtime pip install command for reportlab")
+            if "import openpyxl, xlrd, playwright, pypdf, reportlab" not in " ".join(deploy_dry_run["commands"]["runtime_pip_install"]):
+                raise AssertionError("deploy --dry-run must guard on openpyxl, xlrd, playwright, pypdf and reportlab imports")
             seller_venv_command = " ".join(deploy_dry_run["commands"]["seller_portal_recovery_venv"])
             if "python3 -m venv /opt/wb-web-bot/venv" not in seller_venv_command:
                 raise AssertionError("deploy --dry-run must create or repair /opt/wb-web-bot/venv")

@@ -109,9 +109,10 @@ def main() -> None:
                     "Статус",
                     "Добавлено, шт / Упаковано → Принято",
                     "Коэф. приёмки",
-                    "Стоимость",
+                    "Транзит",
+                    "Услуги fulfillment",
                 ]
-                actual_columns = operator_frame.locator(".wb-supplies-table").first.locator("thead th").evaluate_all(
+                actual_columns = operator_frame.locator("#wbSuppliesTableBody").locator("xpath=ancestor::table[1]//thead//th").evaluate_all(
                     "(nodes) => nodes.map((node) => node.textContent.trim())"
                 )
                 if actual_columns != expected_columns:
@@ -132,7 +133,8 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("1002")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("3 333 ₽", timeout=10000)
-                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("Seller Portal", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("₽/шт", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).not_to_contain_text("Seller Portal")
                 expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки WB обновлены. Стоимость транзита: success 1.", timeout=10000)
                 status_classes = operator_frame.locator(".wb-supplies-status-pill").evaluate_all(
                     "(nodes) => Array.from(new Set(nodes.map((node) => Array.from(node.classList).filter((item) => item.startsWith('is-status-')).join(' ')).filter(Boolean))).sort()"

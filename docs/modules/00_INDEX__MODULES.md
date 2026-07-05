@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–38`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–39`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -44,6 +44,7 @@ source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
   - "docs/modules/38_MODULE__WEBCORE_DATA_MCP_BLOCK.md"
+  - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -87,8 +88,9 @@ related_docs:
   - "36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
   - "38_MODULE__WEBCORE_DATA_MCP_BLOCK.md"
+  - "39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под Google Sheets decommission: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
+update_note: "Обновлён под Google Sheets decommission and Fulfillment services contour: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
 
 # 1. Назначение индекса
@@ -105,7 +107,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–38`; module `38` repo-implemented/live-gated как отдельный read-only WebCore Data MCP gateway для ChatGPT custom app/Project boundary.
+На текущем `main` main-confirmed модульные блоки доходят до `01–39`; module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -136,6 +138,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 - `wb_supplies_block` как active bounded read-only WB/FBW supplies registry: official WB Supplies API adapter, server-side runtime cache/state/run/warehouse tables, protected list/incremental sync/full backfill/sync-status/detail routes, targeted active-status reconciliation with hard-delete for confirmed removed active rows and preservation of accepted/historical rows, numeric `Основные от 250 шт` / `Мелкие до 249 шт` size filters without status overrides, checkbox multi-status filters with persisted UI state, route/warehouse/quantity/cost evidence normalization, empty-date-bottom supply-date server sort, year-aware date display, compact operator table and pagination without WB mutations.
 - `sheet_vitrina_v1_ads_operator_block` как active SKU-first operator-раздел `Реклама`: active SKU/nm_id universe from `registry_upload_config_v2`, enrichment from `sheet_vitrina_v1_nomenclature_items`, WB Promotion reverse index `nm_id -> campaigns[] -> placements[]`, read routes for SKU table/drawer, guarded backend-only bid `preview -> commit -> audit -> delayed refresh` workflow over one nm_id/advert_id/placement, and explicit no-bulk/no-auto-bidding/no-direct-frontend-PATCH boundary.
 - `webcore_data_mcp_block` как repo-implemented/live-gated read-only MCP gateway: standalone HTTP MCP server over SQLite `mode=ro` + `PRAGMA query_only=ON`, allowlisted business tools and separate `webcore.ops.read` diagnostics tools with `readOnlyHint: true`, OAuth 2.1/PKCE connector auth, bounded universal persisted `DATA_VITRINA` metric projections by key/Russian label/date/SKU, fixed-unit sanitized ops health/log/refresh/snapshot/deploy summaries, redaction/audit/limits, no arbitrary SQL/shell/SSH/sync/backfill/refresh/load/raw files/secrets and explicit revenue metric ambiguity handling.
+- `fulfillment_services_block` как server-owned operator supply contour: PNG-derived XLSX template, protected upload/list/detail/PDF routes, SQLite upload/line persistence, stable PDF-виза payment validation and approved-only `Поставки -> Wildberries` overlay without changing WB official evidence, 1C cost truth, ЕБД metric truth or final товарная себестоимость.
 
 Главный незакрытый gap текущей линии:
 - текущий `main` уже содержит server upload line and bounded refresh/read split for website/operator web-vitrina;
@@ -224,6 +227,7 @@ update_note: "Обновлён под Google Sheets decommission: modules 17/18/
 | `36_MODULE__WB_SUPPLIES_BLOCK.md` | `wb_supplies_block` | `web/operator/supply/official-api` | read-only `Поставки -> Wildberries` registry over official WB FBW Supplies API: runtime cache/history, protected list/incremental sync/full backfill/sync-status/detail routes, targeted active-status reconciliation with hard-delete for confirmed removed active rows and historical accepted-row preservation, warehouse/checkbox-status/search/size filters with persisted UI state, route/warehouse/quantity/cost evidence normalization, empty-date-bottom supply-date sort, year-aware date display, numeric `Основные от 250 шт` filter, compact table and pagination; no WB mutations, no ЕБД metric truth writes |
 | `37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md` | `sheet_vitrina_v1_ads_operator_block` | `web/operator/wb-promotion` | SKU-first `Реклама` tab over WB Promotion API: active SKU/nm_id table from `registry_upload_config_v2`, nomenclature enrichment, reverse index `nm_id -> campaigns[] -> placements[]`, drawer with campaign metrics/min/recommended/current bids, guarded backend-only one-row bid preview/commit/audit/delayed-refresh workflow; no bulk changes, no auto-bidding, no direct frontend WB/PATCH writes |
 | `38_MODULE__WEBCORE_DATA_MCP_BLOCK.md` | `webcore_data_mcp_block` | `production-facing-integration/read-only-data-gateway` | repo-implemented/live-gated standalone WebCore Data MCP: read-only SQLite projections, strict allowlisted business tools plus `webcore.ops.read` diagnostics, `readOnlyHint`, OAuth 2.1/PKCE auth, universal persisted ready-snapshot metrics, fixed-unit sanitized health/log/refresh/snapshot/deploy summaries, redaction/audit/limits, explicit no SQL/shell/SSH/sync/backfill/refresh/load/raw files/secrets boundary |
+| `39_MODULE__FULFILLMENT_SERVICES_BLOCK.md` | `fulfillment_services_block` | `web/operator/supply/runtime-upload` | server-owned `Поставки -> Fulfillment`: PNG-derived XLSX template, protected XLSX upload/parser, SQLite upload/line persistence, OK-only PDF-виза на оплату and approved-only Fulfillment expense overlay in `Поставки -> Wildberries`; no final cost truth, no 1C/ЕБД truth switch |
 
 # 5. Как эта папка используется дальше
 

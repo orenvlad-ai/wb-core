@@ -9,7 +9,7 @@ import json
 from math import ceil
 import threading
 import time
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 import uuid
 
 from packages.adapters.official_api_runtime import OfficialApiRuntimeError
@@ -89,7 +89,8 @@ SCHEMA_COLUMNS = [
     {"key": "status", "label": "Статус"},
     {"key": "quantities", "label": "Добавлено, шт / Упаковано → Принято"},
     {"key": "acceptance_coefficient", "label": "Коэф. приёмки"},
-    {"key": "acceptance_cost", "label": "Стоимость"},
+    {"key": "transit_cost", "label": "Транзит"},
+    {"key": "fulfillment_services", "label": "Услуги fulfillment"},
 ]
 
 
@@ -163,6 +164,7 @@ class WbSuppliesBlock:
         self.source = source or HttpBackedWbSuppliesSource()
         self.transit_cost_source = transit_cost_source or SellerPortalTransitCostNetworkJsonSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
+        self.fulfillment_overlay_provider: Callable[[], Mapping[str, Mapping[str, Any]]] | None = None
         self._run_lock = threading.Lock()
         self._transit_cost_run_lock = threading.Lock()
 
@@ -171,6 +173,7 @@ class WbSuppliesBlock:
         rows = self.runtime.list_wb_supplies()
         transit_cost_enrichments = _transit_cost_enrichment_map(self.runtime.list_wb_supply_transit_cost_enrichments())
         rows = [_row_with_transit_cost_enrichment(row, transit_cost_enrichments) for row in rows]
+        rows = self._with_fulfillment_overlay(rows)
         warehouses = self.runtime.list_wb_supplies_warehouses()
         district_mapping = self.current_warehouse_district_mapping(rows=rows, warehouses=warehouses)
         rows = [augment_supply_row_with_district(row, district_mapping) for row in rows]
@@ -706,14 +709,29 @@ class WbSuppliesBlock:
         record = self._ensure_supply_detail_record(record)
         detail = _supply_detail_payload(record)
         transit_cost = self.runtime.load_wb_supply_transit_cost_enrichment(normalized_id)
-        if transit_cost and isinstance(detail.get("supply"), Mapping):
-            detail["supply"] = _row_with_transit_cost_enrichment(detail["supply"], _transit_cost_enrichment_map([transit_cost]))
+        if isinstance(detail.get("supply"), Mapping):
+            detail["supply"] = _row_with_transit_cost_enrichment(
+                detail["supply"],
+                _transit_cost_enrichment_map([transit_cost] if transit_cost else []),
+            )
+        if isinstance(detail.get("supply"), Mapping):
+            detail["supply"] = self._with_fulfillment_overlay([detail["supply"]])[0]
+            detail["supply"] = _row_with_display_fields(detail["supply"])
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "meta": {"source": WB_SUPPLIES_SOURCE_LABEL, "read_only": True},
             **detail,
         }
+
+    def _with_fulfillment_overlay(self, rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        if not self.fulfillment_overlay_provider:
+            return [_row_with_fulfillment_overlay(row, {}) for row in rows]
+        try:
+            overlay = self.fulfillment_overlay_provider()
+        except Exception:
+            overlay = {}
+        return [_row_with_fulfillment_overlay(row, overlay) for row in rows]
 
     def _ensure_supply_detail_record(self, record: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(record.get("normalized") or {})
@@ -2855,7 +2873,73 @@ def _row_with_display_fields(row: Mapping[str, Any]) -> dict[str, Any]:
         fact_date,
         interface_year=interface_year,
     )
+    result.update(_per_unit_display_fields(result, "transit", _optional_number(result.get("effective_cost_total"))))
+    result.update(
+        _per_unit_display_fields(
+            result,
+            "fulfillment",
+            _optional_number(result.get("fulfillment_amount_with_vat_total")),
+        )
+    )
     return result
+
+
+def _row_with_fulfillment_overlay(
+    row: Mapping[str, Any],
+    overlay_by_identity: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    result = dict(row)
+    overlay: Mapping[str, Any] = {}
+    for value in _row_identity_values(row):
+        candidate = overlay_by_identity.get(value)
+        if candidate:
+            overlay = candidate
+            break
+    amount_with_vat = _optional_number(overlay.get("amount_with_vat_total")) if overlay else None
+    amount_without_vat = _optional_number(overlay.get("amount_without_vat_total")) if overlay else None
+    vat_total = _optional_number(overlay.get("vat_total")) if overlay else None
+    result["fulfillment_amount_with_vat_total"] = amount_with_vat
+    result["fulfillment_amount_without_vat_total"] = amount_without_vat
+    result["fulfillment_vat_total"] = vat_total
+    result["fulfillment_amount_display"] = _format_effective_cost(amount_with_vat)
+    result["fulfillment_upload_ids"] = list(overlay.get("upload_ids") or []) if overlay else []
+    result["fulfillment_payment_validation_ids"] = list(overlay.get("payment_validation_ids") or []) if overlay else []
+    result["fulfillment_service_names"] = list(overlay.get("service_names") or []) if overlay else []
+    result["fulfillment_line_count"] = int(overlay.get("line_count") or 0) if overlay else 0
+    result["fulfillment_source"] = "fulfillment_services_upload" if overlay else ""
+    return result
+
+
+def _per_unit_display_fields(row: Mapping[str, Any], prefix: str, amount: float | None) -> dict[str, Any]:
+    denominator, source, preliminary = _per_unit_denominator(row)
+    per_unit = (float(amount) / denominator) if amount is not None and denominator and denominator > 0 else None
+    return {
+        f"{prefix}_per_unit_denominator": denominator,
+        f"{prefix}_per_unit_denominator_source": source,
+        f"{prefix}_per_unit_preliminary": preliminary,
+        f"{prefix}_per_unit_amount": per_unit,
+        f"{prefix}_per_unit_display": _format_per_unit(per_unit, preliminary=preliminary),
+    }
+
+
+def _per_unit_denominator(row: Mapping[str, Any]) -> tuple[float | None, str, bool]:
+    accepted_quantity = _optional_number(row.get("accepted_quantity"))
+    if accepted_quantity and accepted_quantity > 0:
+        return accepted_quantity, "accepted_quantity", False
+    quantity_for_size_filter = _optional_number(row.get("quantity_for_size_filter"))
+    if quantity_for_size_filter and quantity_for_size_filter > 0:
+        return quantity_for_size_filter, "quantity_for_size_filter", False
+    planned_quantity = _optional_number(row.get("quantity_added"))
+    if planned_quantity and planned_quantity > 0:
+        return planned_quantity, "quantity_added", True
+    return None, "", False
+
+
+def _format_per_unit(value: float | None, *, preliminary: bool = False) -> str:
+    if value is None:
+        return "₽/шт —"
+    marker = " предвар." if preliminary else ""
+    return _format_effective_cost(value).replace(" ₽", " ₽/шт") + marker
 
 
 def _row_with_transit_cost_enrichment(
