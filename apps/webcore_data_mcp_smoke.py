@@ -34,8 +34,13 @@ from packages.application.webcore_data_mcp import (  # noqa: E402
     APPROVED_TOOL_NAMES,
     SCOPE_ANALYTICS_READ,
     SCOPE_FINANCE_READ,
+    SCOPE_OPS_READ,
     SCOPE_SUPPLY_READ,
     WebCoreDataMcpGateway,
+)
+from packages.application.webcore_ops_diagnostics import (  # noqa: E402
+    CommandResult,
+    MAX_SERVICE_LOG_LIMIT,
 )
 
 
@@ -45,7 +50,11 @@ def main() -> int:
         db_path = root / "registry_upload_runtime.sqlite3"
         audit_log_path = root / "audit" / "webcore_data_mcp_audit.jsonl"
         _create_fixture_db(db_path)
-        gateway = WebCoreDataMcpGateway(db_path=db_path, audit_log_path=audit_log_path)
+        gateway = WebCoreDataMcpGateway(
+            db_path=db_path,
+            audit_log_path=audit_log_path,
+            ops_command_runner=_fake_ops_command_runner,
+        )
         _assert_read_only(gateway)
         _assert_tool_list(gateway)
         _assert_direct_tools(gateway)
@@ -59,6 +68,59 @@ def _assert_read_only(gateway: WebCoreDataMcpGateway) -> None:
     probe = gateway.verify_read_only_connection()
     if probe.get("status") != "ok" or not probe.get("write_probe_blocked"):
         raise AssertionError(f"read-only DB probe failed: {probe}")
+
+
+def _fake_ops_command_runner(args, timeout_seconds):  # type: ignore[no-untyped-def]
+    if not args:
+        return CommandResult(2, "", "empty command")
+    command = args[0]
+    if command == "systemctl":
+        unit = str(args[-1])
+        return CommandResult(
+            0,
+            "\n".join(
+                [
+                    f"Id={unit}",
+                    "LoadState=loaded",
+                    "ActiveState=active",
+                    "SubState=running",
+                    "UnitFileState=enabled",
+                    "Result=success",
+                    "ExecMainCode=0",
+                    "ExecMainStatus=0",
+                    "NRestarts=1",
+                    "ActiveEnterTimestamp=Sun 2026-07-05 12:00:00 UTC",
+                    "InactiveEnterTimestamp=",
+                    "StateChangeTimestamp=Sun 2026-07-05 12:00:00 UTC",
+                ]
+            ),
+        )
+    if command == "journalctl":
+        entries = []
+        for index in range(305):
+            entries.append(
+                json.dumps(
+                    {
+                        "__REALTIME_TIMESTAMP": str(1783240000000000 + index),
+                        "_SYSTEMD_UNIT": "wb-core-data-mcp.service",
+                        "PRIORITY": "6",
+                        "SYSLOG_IDENTIFIER": "python3",
+                        "_PID": "1234",
+                        "MESSAGE": (
+                            "ok"
+                            if index
+                            else (
+                                "Authorization: Bearer abc token=secret cookie=session password=pw "
+                                "client_secret=hidden -----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY----- "
+                                "/opt/wb-core-runtime/state/db.sqlite3 /etc/wb-core-data-mcp.env"
+                            )
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return CommandResult(0, "\n".join(entries))
+    return CommandResult(127, "", f"unsupported fake command: {command}")
 
 
 def _assert_tool_list(gateway: WebCoreDataMcpGateway) -> None:
@@ -76,6 +138,18 @@ def _assert_tool_list(gateway: WebCoreDataMcpGateway) -> None:
             raise AssertionError("supplier registry schema must expose sort_by")
         if tool["name"] == "get_webcore_business_table_rows" and "sort_by" in properties:
             raise AssertionError("business table row schema must not expose registry sort_by")
+        if tool["name"] in {
+            "get_runtime_health_summary",
+            "get_service_logs",
+            "get_refresh_diagnostics",
+            "get_runtime_snapshot_status",
+            "get_deploy_state",
+        }:
+            scopes = ((tool.get("securitySchemes") or [{}])[0].get("scopes") or [])
+            if scopes != [SCOPE_OPS_READ]:
+                raise AssertionError(f"ops tool must use only webcore.ops.read: {tool}")
+            if tool.get("annotations", {}).get("readOnlyHint") is not True:
+                raise AssertionError(f"ops tool must be read-only: {tool}")
 
 
 def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
@@ -136,6 +210,11 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("get_revenue_by_date", {"date": "2026-06-26"}),
         ("get_revenue_by_date", {"date": "2026-06-26", "revenue_metric": "total_orderSum"}),
         ("get_revenue_range", {"date_from": "2026-06-25", "date_to": "2026-06-26", "group_by": "date", "revenue_metric": "total_orderSum"}),
+        ("get_runtime_health_summary", {}),
+        ("get_service_logs", {"unit": "wb-core-data-mcp.service", "since": "1h", "priority": "info", "limit": 999}),
+        ("get_refresh_diagnostics", {"date": "2026-06-26"}),
+        ("get_runtime_snapshot_status", {"date_from": "2026-06-25", "date_to": "2026-06-26"}),
+        ("get_deploy_state", {}),
     ]
     for name, args in calls:
         result = gateway.call_tool(name, args, identity="smoke")
@@ -203,6 +282,37 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         if name == "get_supply_artifact" and args.get("artifact_ref") == "financial_document:SHIP-1:FD-BAD":
             if result.get("status") != "path_outside_runtime_root":
                 raise AssertionError(f"path traversal artifact must be blocked: {result}")
+        if name == "get_runtime_health_summary":
+            units = result.get("units") or []
+            if len(units) != 6 or any(item.get("active_state") != "active" for item in units):
+                raise AssertionError(f"runtime health summary mismatch: {result}")
+            serialized_health = json.dumps(result, ensure_ascii=False).lower()
+            if "/opt/" in serialized_health or "/etc/" in serialized_health:
+                raise AssertionError(f"runtime health must not expose raw paths: {result}")
+        if name == "get_service_logs":
+            entries = result.get("entries") or []
+            if result.get("requested_limit") != MAX_SERVICE_LOG_LIMIT or len(entries) != MAX_SERVICE_LOG_LIMIT or not result.get("truncated"):
+                raise AssertionError(f"service log limit/truncation mismatch: {result}")
+            serialized_logs = json.dumps(result, ensure_ascii=False).lower()
+            forbidden = ("bearer abc", "token=secret", "cookie=session", "password=pw", "client_secret=hidden", "private key", "/opt/", "/etc/")
+            if any(marker in serialized_logs for marker in forbidden):
+                raise AssertionError(f"service logs were not sanitized: {result}")
+        if name == "get_refresh_diagnostics":
+            if result.get("raw_payloads_returned") or result.get("upstream_calls") or result.get("mutations"):
+                raise AssertionError(f"refresh diagnostics must be read-only/summarized: {result}")
+            presence = result.get("snapshot_presence") or []
+            if not presence or not any(item.get("ready_snapshot") for item in presence):
+                raise AssertionError(f"refresh diagnostics missing snapshot presence: {result}")
+        if name == "get_runtime_snapshot_status":
+            if result.get("summary", {}).get("raw_payloads_returned") is not False:
+                raise AssertionError(f"snapshot status must not return raw payloads: {result}")
+            if not result.get("ready_snapshots"):
+                raise AssertionError(f"snapshot status missing ready snapshots: {result}")
+        if name == "get_deploy_state":
+            if result.get("credential_values_returned") or result.get("raw_env_returned"):
+                raise AssertionError(f"deploy state must not expose env/secrets: {result}")
+            if result.get("target_identity", {}).get("public_base_url") != "https://api.selleros.pro":
+                raise AssertionError(f"deploy state target mismatch: {result}")
     unknown = gateway.call_tool("explain_metric_source", {"metric_key": "not_real_metric"}, identity="smoke")
     if unknown.get("status") != "metric_not_found":
         raise AssertionError(f"metric_not_found expected: {unknown}")
@@ -210,6 +320,12 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("get_webcore_business_table_schema", {"table": "sqlite_master"}),
         ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_supplier_shipments", "filters": {"source_file_path": "/tmp/secret"}}),
         ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_supplier_shipments", "order_by": "source_file_path"}),
+        ("get_service_logs", {"unit": "ssh.service"}),
+        ("get_service_logs", {"unit": "../wb-core-data-mcp.service"}),
+        ("get_service_logs", {"unit": "wb-core-data-mcp.service; rm -rf /"}),
+        ("get_service_logs", {"unit": "wb-core-data-mcp.service", "since": "1h; rm -rf /"}),
+        ("get_service_logs", {"unit": "wb-core-data-mcp.service", "priority": "info; rm -rf /"}),
+        ("get_runtime_snapshot_status", {"date_from": "2026-01-01", "date_to": "2026-06-30"}),
     ]:
         try:
             gateway.call_tool(bad_name, bad_args, identity="smoke")
@@ -240,7 +356,7 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         resource_url=resource_url,
         resource_documentation_url="",
         authorization_servers=(resource_url,),
-        scopes=(SCOPE_ANALYTICS_READ, SCOPE_SUPPLY_READ, SCOPE_FINANCE_READ),
+        scopes=(SCOPE_ANALYTICS_READ, SCOPE_SUPPLY_READ, SCOPE_FINANCE_READ, SCOPE_OPS_READ),
         oauth_signing_secret="x" * 48,
         oauth_owner_username="owner",
         oauth_owner_password_hash=owner_hash,
@@ -307,6 +423,8 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
             schemes = tool.get("securitySchemes") or []
             if not schemes or not str((schemes[0].get("scopes") or [""])[0]).startswith("webcore."):
                 raise AssertionError(f"tool OAuth scope must use webcore.* namespace: {tool}")
+            if tool.get("name") == "get_deploy_state" and (schemes[0].get("scopes") or []) != [SCOPE_OPS_READ]:
+                raise AssertionError(f"ops tool must advertise webcore.ops.read in HTTP tools/list: {tool}")
         call = _post_json(
             f"{base_url}{DEFAULT_MCP_PATH}",
             {
@@ -424,6 +542,50 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         metric_content = oauth_metric_call.get("result", {}).get("structuredContent", {})
         if metric_content.get("status") != "ok" or not metric_content.get("rows"):
             raise AssertionError(f"OAuth metric projection failed: {oauth_metric_call}")
+        ops_call = _post_json(
+            f"{base_url}{DEFAULT_MCP_PATH}",
+            {
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {"name": "get_deploy_state", "arguments": {}},
+            },
+            headers=oauth_headers,
+        )
+        if ops_call.get("result", {}).get("structuredContent", {}).get("status") != "ok":
+            raise AssertionError(f"OAuth ops deploy state call failed: {ops_call}")
+        analytics_only_code = _oauth_authorize_code(
+            base_url,
+            owner_password=owner_password,
+            verifier_challenge=challenge,
+            resource_url=resource_url,
+            scope=SCOPE_ANALYTICS_READ,
+        )
+        analytics_only_token_payload = _post_form(
+            f"{base_url}{DEFAULT_OAUTH_TOKEN_PATH}",
+            {
+                "grant_type": "authorization_code",
+                "code": analytics_only_code,
+                "redirect_uri": "http://127.0.0.1/callback",
+                "client_id": "https://chatgpt.com/oauth/webcore-smoke/client.json",
+                "code_verifier": verifier,
+                "resource": resource_url,
+            },
+        )
+        analytics_only_headers = {"Authorization": f"Bearer {analytics_only_token_payload.get('access_token')}"}
+        insufficient_ops_call = _post_json(
+            f"{base_url}{DEFAULT_MCP_PATH}",
+            {
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {"name": "get_deploy_state", "arguments": {}},
+            },
+            headers=analytics_only_headers,
+        )
+        error = insufficient_ops_call.get("error") or {}
+        if error.get("data", {}).get("code") != "insufficient_scope":
+            raise AssertionError(f"analytics-only OAuth token must not call ops tools: {insufficient_ops_call}")
     finally:
         server.shutdown()
         server.server_close()
@@ -473,6 +635,7 @@ def _oauth_authorize_code(
     owner_password: str,
     verifier_challenge: str,
     resource_url: str,
+    scope: str | None = None,
 ) -> str:
     payload = {
         "response_type": "code",
@@ -482,7 +645,7 @@ def _oauth_authorize_code(
         "code_challenge_method": "S256",
         "state": "smoke-state",
         "resource": resource_url,
-        "scope": f"{SCOPE_ANALYTICS_READ} {SCOPE_SUPPLY_READ} {SCOPE_FINANCE_READ}",
+        "scope": scope or f"{SCOPE_ANALYTICS_READ} {SCOPE_SUPPLY_READ} {SCOPE_FINANCE_READ} {SCOPE_OPS_READ}",
         "username": "owner",
         "password": owner_password,
     }
@@ -583,6 +746,34 @@ def _create_fixture_db(db_path: Path) -> None:
                 refreshed_at TEXT NOT NULL,
                 plan_json TEXT NOT NULL
             );
+            CREATE TABLE sheet_vitrina_v1_auto_update_state (
+                slot INTEGER PRIMARY KEY,
+                last_run_started_at TEXT,
+                last_run_finished_at TEXT,
+                last_run_status TEXT,
+                last_run_error TEXT,
+                last_run_snapshot_id TEXT,
+                last_run_as_of_date TEXT,
+                last_run_refreshed_at TEXT,
+                last_run_result_json TEXT,
+                last_successful_auto_update_at TEXT
+            );
+            CREATE TABLE sheet_vitrina_v1_manual_operator_state (
+                slot INTEGER PRIMARY KEY,
+                last_successful_manual_refresh_at TEXT,
+                last_successful_manual_load_at TEXT,
+                last_manual_refresh_result_json TEXT,
+                last_manual_load_result_json TEXT
+            );
+            CREATE TABLE sheet_vitrina_v1_load_state (
+                slot INTEGER PRIMARY KEY,
+                loaded_at TEXT,
+                snapshot_id TEXT,
+                as_of_date TEXT,
+                refreshed_at TEXT,
+                plan_fingerprint TEXT,
+                result_json TEXT
+            );
             CREATE TABLE temporal_source_slot_snapshots (
                 source_key TEXT NOT NULL,
                 snapshot_date TEXT NOT NULL,
@@ -595,6 +786,18 @@ def _create_fixture_db(db_path: Path) -> None:
                 snapshot_date TEXT NOT NULL,
                 captured_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL
+            );
+            CREATE TABLE temporal_source_closure_state (
+                source_key TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                slot_kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                next_retry_at TEXT,
+                last_reason TEXT,
+                last_attempt_at TEXT,
+                last_success_at TEXT,
+                accepted_at TEXT
             );
             CREATE TABLE sheet_vitrina_v1_wb_supplies (
                 supply_id TEXT PRIMARY KEY,
@@ -829,8 +1032,20 @@ def _create_fixture_db(db_path: Path) -> None:
                     },
                     {
                         "sheet_name": "STATUS",
-                        "header": ["source_key", "kind", "freshness", "snapshot_date", "note"],
-                        "rows": [["stocks", "source", "ok", "2026-06-26", "fixture"]],
+                        "header": [
+                            "source_key",
+                            "kind",
+                            "freshness",
+                            "snapshot_date",
+                            "date",
+                            "date_from",
+                            "date_to",
+                            "requested_count",
+                            "covered_count",
+                            "missing_nm_ids",
+                            "note",
+                        ],
+                        "rows": [["stocks[yesterday_closed]", "success", "2026-06-26", "2026-06-26", "2026-06-26", "", "", 1, 1, "", "fixture"]],
                     },
                 ],
             },
@@ -858,6 +1073,54 @@ def _create_fixture_db(db_path: Path) -> None:
                 ("bundle-v1", "2026-06-26T20:00:00Z", "2026-06-26", "snap-26", "plan-v1", "2026-06-27T17:00:00Z", plan_json),
             ],
         )
+        auto_update_result = json.dumps(
+            {
+                "status": "success",
+                "snapshot_id": "snap-26",
+                "as_of_date": "2026-06-26",
+                "source_outcome_counts": {"success": 1, "warning": 0, "error": 0},
+                "source_outcomes": [{"source_key": "stocks", "status": "success", "reason": "ok"}],
+                "secret": "must-redact",
+            },
+            ensure_ascii=False,
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_auto_update_state VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "2026-06-27T16:59:50Z",
+                "2026-06-27T17:01:00Z",
+                "success",
+                None,
+                "snap-26",
+                "2026-06-26",
+                "2026-06-27T17:00:00Z",
+                auto_update_result,
+                "2026-06-27T17:01:00Z",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_manual_operator_state VALUES(?, ?, ?, ?, ?)",
+            (
+                1,
+                "2026-06-27T17:02:00Z",
+                "2026-06-27T17:03:00Z",
+                json.dumps({"status": "success", "token": "must-redact"}, ensure_ascii=False),
+                json.dumps({"status": "success", "password": "must-redact"}, ensure_ascii=False),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_load_state VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "2026-06-27T17:03:00Z",
+                "snap-26",
+                "2026-06-26",
+                "2026-06-27T17:00:00Z",
+                "fingerprint-1",
+                json.dumps({"status": "success", "loaded_at": "2026-06-27T17:03:00Z", "cookie": "must-redact"}, ensure_ascii=False),
+            ),
+        )
         conn.executemany(
             "INSERT INTO temporal_source_slot_snapshots VALUES(?, ?, ?, ?, ?)",
             [
@@ -867,6 +1130,10 @@ def _create_fixture_db(db_path: Path) -> None:
             ],
         )
         conn.execute("INSERT INTO temporal_source_snapshots VALUES(?, ?, ?, ?)", ("stocks", "2026-06-26", "2026-06-27T17:00:36Z", "{}"))
+        conn.execute(
+            "INSERT INTO temporal_source_closure_state VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("stocks", "2026-06-26", "yesterday_closed", "accepted", 1, None, None, "2026-06-27T17:00:30Z", "2026-06-27T17:00:36Z", "2026-06-27T17:00:36Z"),
+        )
         conn.execute(
             "INSERT INTO sheet_vitrina_v1_wb_supplies VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (

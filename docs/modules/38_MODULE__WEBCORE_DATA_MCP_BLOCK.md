@@ -3,10 +3,11 @@ title: "Модуль: webcore_data_mcp_block"
 doc_id: "WB-CORE-MODULE-38-WEBCORE-DATA-MCP-BLOCK"
 doc_type: "module"
 status: "repo_implemented_private_loopback_live_gated"
-purpose: "Зафиксировать отдельный read-only MCP gateway для безопасного доступа ChatGPT Project/custom app к business data `wb-core`."
-scope: "Standalone HTTP MCP server over allowlisted read-only business tools: navigation/data-map resolver, freshness, search, universal persisted ready-snapshot metrics by key/label/date/SKU, metric source explanation, allowlisted runtime business table reads, cached WB supplies registry/detail, supplier shipments registry/full details, server-owned supply artifact metadata/chunk access, CNY document/ledger table projections, factory-order state, persisted stock/SKU snapshots and explicit revenue ambiguity handling. No arbitrary SQL, shell, SSH, upstream sync/backfill, arbitrary filesystem browsing, secrets, auth/session material or unbounded payload dumps."
+purpose: "Зафиксировать отдельный read-only MCP gateway для безопасного доступа ChatGPT Project/custom app к business data и bounded ops diagnostics `wb-core`."
+scope: "Standalone HTTP MCP server over allowlisted read-only business tools plus separate ops diagnostics tools: navigation/data-map resolver, freshness, search, universal persisted ready-snapshot metrics by key/label/date/SKU, metric source explanation, allowlisted runtime business table reads, cached WB supplies registry/detail, supplier shipments registry/full details, server-owned supply artifact metadata/chunk access, CNY document/ledger table projections, factory-order state, persisted stock/SKU snapshots, explicit revenue ambiguity handling, fixed-unit runtime health, sanitized journal excerpts, refresh/load diagnostics, snapshot presence and deploy labels. No arbitrary SQL, shell, SSH, upstream sync/backfill/refresh/load, arbitrary filesystem browsing, secrets, auth/session material, env dumps or unbounded payload dumps."
 source_basis:
   - "packages/application/webcore_data_mcp.py"
+  - "packages/application/webcore_ops_diagnostics.py"
   - "apps/webcore_data_mcp_server.py"
   - "apps/webcore_data_mcp_smoke.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
@@ -22,6 +23,10 @@ related_tables:
   - "sheet_vitrina_v1_ready_snapshots"
   - "temporal_source_snapshots"
   - "temporal_source_slot_snapshots"
+  - "temporal_source_closure_state"
+  - "sheet_vitrina_v1_auto_update_state"
+  - "sheet_vitrina_v1_manual_operator_state"
+  - "sheet_vitrina_v1_load_state"
   - "registry_upload_config_v2"
   - "registry_upload_metrics_v2"
   - "registry_upload_formulas_v2"
@@ -60,7 +65,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. MCP now exposes a metadata-only navigation layer (`get_webcore_data_map`, `resolve_webcore_data_request`, alias `resolve_webcore_data_intent`), allowlisted runtime business table catalog/schema/row reads, expanded supplier/WB supply read tools and server-owned artifact access by opaque refs with bounded metadata/parsed/text/base64 modes. Supplier registry/full-details and packing-list artifact reads expose bounded parsed packing-list totals/aliases from `normalized_parse_json`, including cartons/boxes, quantity, gross weight, volume, carton size, model count and line samples when available. Metric tools project bounded values from persisted DATA_VITRINA ready snapshots, including TOTAL|total_* and SKU:<nm_id>|* rows, without exposing raw plan_json unless a raw business payload column is explicitly requested through the allowlisted scrubbed table-reader path."
+update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. MCP exposes business-data tools plus bounded ops diagnostics tools under separate OAuth scope `webcore.ops.read`. Ops tools are read-only, fixed-allowlist only, run `systemctl`/`journalctl` through shell=False fixed arg vectors, read SQLite in mode=ro/query_only, redact logs, avoid raw env/secrets/paths and cannot restart/refresh/backfill/load/upload/delete/patch/mutate. Business tools remain metadata/data projections with bounded scrubbed payloads."
 ---
 
 # 1. Identifier and Status
@@ -124,7 +129,7 @@ Supported JSON-RPC methods:
 - `resources/list` returns empty
 - `prompts/list` returns empty
 
-The gateway is data-only. It does not expose UI resources/components.
+The gateway exposes data/diagnostics tools only. It does not expose UI resources/components.
 
 # 4. Tool Allowlist
 
@@ -168,11 +173,19 @@ P1:
 - `get_revenue_by_date`
 - `get_revenue_range`
 
+Ops diagnostics (`webcore.ops.read`):
+
+- `get_runtime_health_summary`
+- `get_service_logs`
+- `get_refresh_diagnostics`
+- `get_runtime_snapshot_status`
+- `get_deploy_state`
+
 Every tool is emitted with MCP annotations:
 
 `{"readOnlyHint": true}`
 
-No write-like tool names are exposed. There is no arbitrary SQL, shell, SSH, arbitrary filesystem browser, sync, backfill, upload, refresh, replay, delete, patch or mutation tool. Artifact access is not a filesystem browser: callers must first obtain an opaque `artifact_ref` from allowlisted runtime DB rows, and reads are bounded/scrubbed.
+No write-like tool names are exposed. There is no arbitrary SQL, shell, SSH, arbitrary filesystem browser, sync, backfill, upload, refresh, replay, load, restart, delete, patch or mutation tool. Artifact access is not a filesystem browser: callers must first obtain an opaque `artifact_ref` from allowlisted runtime DB rows, and reads are bounded/scrubbed. Ops diagnostics use fixed enum allowlists only: unit names are limited to the six WebCore runtime units in code, log priority is an enum, date windows are bounded, SQLite reads are fixed SELECTs over known tables, and subprocess use is limited to fixed `systemctl show` / `journalctl --output=json` arg vectors with `shell=False`.
 
 # 5. Auth Model
 
@@ -212,6 +225,13 @@ OAuth/env config:
 - `WEBCORE_DATA_MCP_OAUTH_CODE_TTL_SECONDS`
 - `WEBCORE_DATA_MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS`
 
+Default scopes exposed by the server:
+
+- `webcore.analytics.read`
+- `webcore.supply.read`
+- `webcore.finance.read`
+- `webcore.ops.read`
+
 # 6. Redaction and Limits
 
 The gateway redacts:
@@ -221,6 +241,7 @@ The gateway redacts:
 - file paths;
 - hashes;
 - auth/session/OAuth/env/private-key material;
+- journal log messages are sanitized for bearer tokens, cookies, passwords, secret-like key/value pairs, private keys and private host paths before return;
 - raw parse JSON unless requested through explicit scrubbed business payload tools;
 - raw upstream payload blobs unless requested through explicit scrubbed business payload tools;
 - workbook blobs.
@@ -231,8 +252,12 @@ Boundaries:
 - tool output lists are bounded;
 - default limit: 50;
 - max limit: 100;
+- service log default limit: 100;
+- service log max limit: 300;
+- service log time window max: 7 days;
 - artifact chunks are bounded by server-side `max_bytes` caps;
 - revenue range max: 62 days;
+- snapshot/refresh diagnostics date range max: 62 days;
 - audit log stores argument keys and hashes, not raw payloads.
 
 # 7. Audit
@@ -259,6 +284,14 @@ The audit log must not include secrets, raw arguments, raw DB payloads or file c
 Freshness:
 
 Reads ready snapshot max dates, temporal source slot max dates/captured timestamps, WB supplies sync run state, supplier shipment/doc freshness, factory-order result timestamps and DB mtime.
+
+Ops diagnostics:
+
+- `get_runtime_health_summary` reads fixed unit states for `wb-core-registry-http.service`, sheet-vitrina refresh/closure timers/services and `wb-core-data-mcp.service`, plus runtime disk and DB size/mtime summaries. It does not expose env values or arbitrary paths.
+- `get_service_logs` reads only one enum unit through `journalctl --output=json`, bounds `since/until/priority/limit`, redacts entries and returns only timestamp/unit/priority/identifier/pid/message fields.
+- `get_refresh_diagnostics` reads persisted ready snapshot, auto/manual refresh, load state, temporal source snapshot and closure-state summaries for a requested date/range. It never triggers refresh/load/upstream calls.
+- `get_runtime_snapshot_status` summarizes ready/temporal/source-slot snapshot presence and counts without returning raw payload blobs.
+- `get_deploy_state` returns safe active-EU target labels, public base URL, optional commit if available, and fixed source mtimes by label only. It does not print raw env, tokens, cookies or runtime paths.
 
 Navigation:
 
@@ -329,9 +362,14 @@ The smoke proves:
 - navigation routes cover largest-shipment and packing-list intents;
 - supplier registry/full-details/artifact/table reads expose parsed packing-list totals/aliases without paths/secrets;
 - redaction removes paths/storage-state markers;
+- ops tools expose `readOnlyHint: true` and only `webcore.ops.read`;
+- fake-runner ops smoke covers fixed unit health, bounded sanitized logs, refresh diagnostics, snapshot status and deploy labels;
+- unknown units, path traversal-like unit strings, shell-injection strings, unsupported priorities and over-wide date ranges are rejected;
+- service log output redacts authorization/token/cookie/password/secret/private-key/private-path markers and enforces max 300 entries;
 - revenue ambiguity is explicit;
 - universal metric projection reads the `DATA_VITRINA` layout and returns `total_orderSum`;
-- OAuth-auth MCP can call `get_metric_values(total_orderSum, date)`;
+- OAuth-auth MCP can call `get_metric_values(total_orderSum, date)` and `get_deploy_state` when scoped for ops;
+- OAuth tokens without `webcore.ops.read` receive `insufficient_scope` for ops tools;
 - no sync/backfill/refresh/write tools are reachable.
 
 # 10. Live Publication Gate
@@ -351,5 +389,5 @@ Before treating `/mcp` as live-verified ChatGPT-ready:
 1. Configure env-only OAuth signing secret and owner auth material on the host.
 2. Keep all secrets env-only/server-side.
 3. Prove unauthenticated public probe returns 401 and no data.
-4. Prove authenticated MCP `initialize`, `tools/list` and a safe tool call.
+4. Prove authenticated MCP `initialize`, `tools/list`, `get_runtime_health_summary` and a bounded sanitized `get_service_logs` call.
 5. Keep DevControl MCP unchanged and separate.
