@@ -255,6 +255,7 @@ class WebCoreOpsDiagnostics:
             closure_rows = _closure_diagnostics(conn, date_from=date_from, date_to=date_to)
         likely_failure_area = _likely_failure_area(
             snapshots=snapshots,
+            temporal_presence=temporal_presence,
             source_outcomes=source_outcomes,
             auto_update_state=auto_update_state,
             load_state=load_state,
@@ -975,6 +976,7 @@ def _ready_snapshot_compact(row: Mapping[str, Any] | None) -> dict[str, Any]:
 def _likely_failure_area(
     *,
     snapshots: Mapping[str, Mapping[str, Any]],
+    temporal_presence: Mapping[str, Mapping[str, Any]],
     source_outcomes: Sequence[Mapping[str, Any]],
     auto_update_state: Mapping[str, Any] | None,
     load_state: Mapping[str, Any] | None,
@@ -983,11 +985,23 @@ def _likely_failure_area(
     date_to: str,
 ) -> dict[str, Any]:
     missing_ready = [day for day, item in snapshots.items() if not item.get("ready_snapshot")]
+    materialization_gaps = [
+        day
+        for day in missing_ready
+        if int((temporal_presence.get(day) or {}).get("temporal_source_count") or 0) > 0
+        or int((temporal_presence.get(day) or {}).get("temporal_slot_count") or 0) > 0
+    ]
     error_sources = [item for item in source_outcomes if item.get("status") == "error"]
     warning_sources = [item for item in source_outcomes if item.get("status") == "warning"]
     reasons: list[str] = []
     area = "no_obvious_persisted_failure"
-    if missing_ready:
+    if materialization_gaps:
+        area = "ready_materialization_gap"
+        reasons.append(
+            "ready snapshots missing while temporal source/slot snapshots exist "
+            f"for {len(materialization_gaps)} requested date(s)"
+        )
+    elif missing_ready:
         area = "ready_snapshot_missing"
         reasons.append(f"ready snapshots missing for {len(missing_ready)} requested date(s)")
     if error_sources:
@@ -1012,6 +1026,7 @@ def _likely_failure_area(
         "source_error_count": len(error_sources),
         "source_warning_count": len(warning_sources),
         "missing_ready_dates": missing_ready[:MAX_DIAGNOSTIC_ROWS],
+        "materialization_gap_dates": materialization_gaps[:MAX_DIAGNOSTIC_ROWS],
     }
 
 
@@ -1026,6 +1041,13 @@ def _merge_snapshot_presence(
     for day in _date_span(date_from, date_to):
         item = dict(snapshots.get(day) or {"date": day, "ready_snapshot": False})
         item.update(temporal_presence.get(day) or {})
+        item["materialization_gap"] = (
+            not bool(item.get("ready_snapshot"))
+            and (
+                int(item.get("temporal_source_count") or 0) > 0
+                or int(item.get("temporal_slot_count") or 0) > 0
+            )
+        )
         merged.append(item)
     return merged
 

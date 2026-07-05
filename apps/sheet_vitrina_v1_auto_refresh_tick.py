@@ -90,12 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     for schedule, due_at in selected_due:
         schedule_id = str(schedule.get("id") or "")
         started_at = _utc_now()
-        block.mark_run_started(
-            schedule_id,
-            started_at=started_at,
-            due_at=due_at,
-            trigger_source="scheduled",
-        )
+        accepted_attempt = False
         try:
             refresh_result = _post_json(
                 base_url + refresh_path,
@@ -111,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             job_id = str(refresh_result.get("job_id") or refresh_result.get("id") or "")
             if job_id:
+                accepted_attempt = True
                 block.mark_run_started(
                     schedule_id,
                     started_at=started_at,
@@ -128,31 +124,40 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 terminal = refresh_result
-            if not _is_active_job_skip(terminal) and not missed_due_marked:
+                accepted_attempt = not _is_active_job_skip(terminal)
+                if accepted_attempt:
+                    block.mark_run_started(
+                        schedule_id,
+                        started_at=started_at,
+                        due_at=due_at,
+                        trigger_source="scheduled",
+                    )
+            if accepted_attempt and not missed_due_marked:
                 _mark_missed_due_slots(block, missed_due)
                 missed_due_marked = True
             status = str(terminal.get("status") or "").lower()
             error = str(terminal.get("error") or "")
-            if not _terminal_contains_server_schedule_update(terminal):
+            if accepted_attempt and not _terminal_contains_server_schedule_update(terminal):
                 block.mark_run_finished(
                     schedule_id,
                     finished_at=_utc_now(),
                     result_payload=terminal,
                     error=error if status == "error" else "",
                 )
-            if status == "error":
+            if status == "error" or _is_stale_active_job_skip(terminal):
                 exit_code = 1
             results.append({"schedule_id": schedule_id, "due_at": due_at, "job_id": job_id, "status": status or terminal.get("semantic_status") or "success"})
         except Exception as exc:
             exit_code = 1
-            if not missed_due_marked:
+            if accepted_attempt and not missed_due_marked:
                 _mark_missed_due_slots(block, missed_due)
                 missed_due_marked = True
-            block.mark_run_finished(
-                schedule_id,
-                finished_at=_utc_now(),
-                error=str(exc),
-            )
+            if accepted_attempt:
+                block.mark_run_finished(
+                    schedule_id,
+                    finished_at=_utc_now(),
+                    error=str(exc),
+                )
             results.append({"schedule_id": schedule_id, "due_at": due_at, "status": "error", "error": str(exc)})
     _print(
         {
@@ -315,6 +320,10 @@ def _terminal_contains_server_schedule_update(payload: Mapping[str, Any]) -> boo
 
 def _is_active_job_skip(payload: Mapping[str, Any]) -> bool:
     return str(payload.get("status") or "").lower() == "skipped" and bool(payload.get("already_running_job_id"))
+
+
+def _is_stale_active_job_skip(payload: Mapping[str, Any]) -> bool:
+    return _is_active_job_skip(payload) and bool(payload.get("active_job_stale"))
 
 
 def _print(payload: Mapping[str, Any]) -> None:

@@ -494,6 +494,8 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - systemd cadence = `OnCalendar=*-*-* *:00,10,20,30,40,50:00`
   - systemd timer is non-persistent; missed business-time catch-up is evaluated by the runner/runtime schedule state, not by an immediate stale systemd fire during deploy restart
   - the runner authenticates with WebCore session cookie before calling `POST /v1/sheet-vitrina-v1/refresh` with `{"async": true, "auto_refresh": true}`
+  - due slot accounting is accepted-attempt based: the tick runner must not mutate `last_due_at`, mark missed due slots, or report terminal schedule state until the refresh route returns a real `job_id` or another non-concurrency terminal attempt; active-job skips keep both selected and accumulated missed due slots retryable
+  - stale active auto-update jobs are surfaced explicitly in the skip payload (`active_job_stale`, `active_job_age_seconds`) and make the tick service fail visibly while preserving the due slot, instead of turning a blocked refresh into a green completed no-op
 - Schedule runner/systemd wiring is repo-owned and deploys into live systemd units:
   - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.service`
   - source artifacts = `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`

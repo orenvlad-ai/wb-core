@@ -212,8 +212,8 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("get_revenue_range", {"date_from": "2026-06-25", "date_to": "2026-06-26", "group_by": "date", "revenue_metric": "total_orderSum"}),
         ("get_runtime_health_summary", {}),
         ("get_service_logs", {"unit": "wb-core-data-mcp.service", "since": "1h", "priority": "info", "limit": 999}),
-        ("get_refresh_diagnostics", {"date": "2026-06-26"}),
-        ("get_runtime_snapshot_status", {"date_from": "2026-06-25", "date_to": "2026-06-26"}),
+        ("get_refresh_diagnostics", {"date_from": "2026-06-26", "date_to": "2026-06-27"}),
+        ("get_runtime_snapshot_status", {"date_from": "2026-06-25", "date_to": "2026-06-27"}),
         ("get_deploy_state", {}),
     ]
     for name, args in calls:
@@ -303,6 +303,11 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
             presence = result.get("snapshot_presence") or []
             if not presence or not any(item.get("ready_snapshot") for item in presence):
                 raise AssertionError(f"refresh diagnostics missing snapshot presence: {result}")
+            gap_rows = [item for item in presence if item.get("date") == "2026-06-27"]
+            if not gap_rows or gap_rows[0].get("materialization_gap") is not True:
+                raise AssertionError(f"refresh diagnostics must flag temporal-without-ready materialization gaps: {result}")
+            if result.get("likely_failure_area", {}).get("area") != "ready_materialization_gap":
+                raise AssertionError(f"materialization gap must be the likely failure area: {result}")
         if name == "get_runtime_snapshot_status":
             if result.get("summary", {}).get("raw_payloads_returned") is not False:
                 raise AssertionError(f"snapshot status must not return raw payloads: {result}")
@@ -1130,6 +1135,11 @@ def _create_fixture_db(db_path: Path) -> None:
             ],
         )
         conn.execute("INSERT INTO temporal_source_snapshots VALUES(?, ?, ?, ?)", ("stocks", "2026-06-26", "2026-06-27T17:00:36Z", "{}"))
+        conn.execute("INSERT INTO temporal_source_snapshots VALUES(?, ?, ?, ?)", ("stocks", "2026-06-27", "2026-06-28T17:00:36Z", "{}"))
+        conn.execute(
+            "INSERT INTO temporal_source_slot_snapshots VALUES(?, ?, ?, ?, ?)",
+            ("stocks", "2026-06-27", "yesterday_closed", "2026-06-28T17:00:36Z", "{}"),
+        )
         conn.execute(
             "INSERT INTO temporal_source_closure_state VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("stocks", "2026-06-26", "yesterday_closed", "accepted", 1, None, None, "2026-06-27T17:00:30Z", "2026-06-27T17:00:36Z", "2026-06-27T17:00:36Z"),

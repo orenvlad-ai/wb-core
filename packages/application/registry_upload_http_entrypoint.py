@@ -157,6 +157,7 @@ SHEET_VITRINA_SELLER_RECOVERY_START_ROUTE = "/v1/sheet-vitrina-v1/web-vitrina/se
 SHEET_VITRINA_SELLER_RECOVERY_LAUNCHER_ROUTE = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 SHEET_VITRINA_DAILY_TIMER_NAME = "wb-core-sheet-vitrina-refresh.timer"
 SHEET_VITRINA_DAILY_AUTO_ACTION = "server-side refresh ready snapshot for website/operator web-vitrina"
+SHEET_VITRINA_ACTIVE_JOB_STALE_AFTER_SECONDS = 2 * 60 * 60
 SHEET_VITRINA_DAILY_BUSINESS_TIMES = ", ".join(
     f"{hour:02d}:00" for hour in DAILY_REFRESH_BUSINESS_HOURS
 )
@@ -1402,11 +1403,14 @@ class RegistryUploadHttpEntrypoint:
         active_job: Mapping[str, Any],
     ) -> dict[str, Any]:
         active_job_id = str(active_job.get("job_id") or "")
+        staleness = _active_job_staleness_payload(active_job, now=self.activated_at_factory())
         reason = (
             "Слот расписания пропущен: предыдущее автообновление"
             + (f" job_id={active_job_id}" if active_job_id else "")
             + " ещё выполняется."
         )
+        if staleness.get("active_job_stale"):
+            reason += " Active job stale; due slot сохранён для retry и требует recovery/restart вместо silent consume."
         auto_schedule = self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
         return {
             "status": "skipped",
@@ -1419,6 +1423,7 @@ class RegistryUploadHttpEntrypoint:
             "already_running_job_id": active_job_id,
             "retryable": True,
             "due_preserved": True,
+            **staleness,
             "active_job": dict(active_job),
             "auto_schedule": auto_schedule,
         }
@@ -4583,6 +4588,40 @@ def _is_scheduled_auto_refresh_trigger(value: str) -> bool:
     return str(value or "scheduled").strip().lower() == "scheduled"
 
 
+def _parse_job_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _active_job_staleness_payload(
+    active_job: Mapping[str, Any],
+    *,
+    now: str,
+) -> dict[str, Any]:
+    started_at = str(active_job.get("started_at") or "")
+    started = _parse_job_timestamp(started_at)
+    current = _parse_job_timestamp(now)
+    age_seconds = None
+    stale = False
+    if started is not None and current is not None:
+        age_seconds = max(0, int((current - started).total_seconds()))
+        stale = age_seconds >= SHEET_VITRINA_ACTIVE_JOB_STALE_AFTER_SECONDS
+    return {
+        "active_job_started_at": started_at,
+        "active_job_age_seconds": age_seconds,
+        "active_job_stale_after_seconds": SHEET_VITRINA_ACTIVE_JOB_STALE_AFTER_SECONDS,
+        "active_job_stale": stale,
+    }
+
+
 @dataclass
 class SheetVitrinaV1OperatorJob:
     job_id: str
@@ -4621,6 +4660,7 @@ class SheetVitrinaV1OperatorJobStore:
     def __init__(self, timestamp_factory: Callable[[], str]) -> None:
         self.timestamp_factory = timestamp_factory
         self._jobs: dict[str, SheetVitrinaV1OperatorJob] = {}
+        self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
 
     def start(
@@ -4636,14 +4676,14 @@ class SheetVitrinaV1OperatorJobStore:
             status="running",
             started_at=self.timestamp_factory(),
         )
-        with self._lock:
-            self._jobs[job_id] = job
-
         thread = threading.Thread(
             target=self._run,
             args=(job_id, runner),
             daemon=True,
         )
+        with self._lock:
+            self._jobs[job_id] = job
+            self._threads[job_id] = thread
         thread.start()
         return self.get(job_id)
 
@@ -4707,6 +4747,7 @@ class SheetVitrinaV1OperatorJobStore:
     def active_job(self, *, operations: tuple[str, ...]) -> dict[str, Any] | None:
         normalized_operations = {str(value).strip() for value in operations if str(value).strip()}
         with self._lock:
+            self._reap_stopped_running_threads_unlocked()
             jobs = list(self._jobs.values())
         candidates = [
             job
@@ -4724,6 +4765,18 @@ class SheetVitrinaV1OperatorJobStore:
             ),
         )[1]
         return selected.snapshot()
+
+    def _reap_stopped_running_threads_unlocked(self) -> None:
+        for job_id, job in list(self._jobs.items()):
+            if job.status != "running":
+                continue
+            thread = self._threads.get(job_id)
+            if thread is None or thread.ident is None or thread.is_alive():
+                continue
+            job.status = "error"
+            job.finished_at = self.timestamp_factory()
+            job.error = "operator job thread stopped without terminal state"
+            job.log_lines.append(f"{job.finished_at} Ошибка: {job.error}")
 
     def _run(
         self,
