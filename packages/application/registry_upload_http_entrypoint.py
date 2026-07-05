@@ -1407,13 +1407,6 @@ class RegistryUploadHttpEntrypoint:
             + (f" job_id={active_job_id}" if active_job_id else "")
             + " ещё выполняется."
         )
-        if due_at:
-            self.sheet_auto_refresh_schedules_block.mark_due_skipped(
-                schedule_id,
-                due_at=due_at,
-                reason=reason,
-                trigger_source=trigger_source or "scheduled",
-            )
         auto_schedule = self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
         return {
             "status": "skipped",
@@ -1424,6 +1417,8 @@ class RegistryUploadHttpEntrypoint:
             "reason": reason,
             "blocker": reason,
             "already_running_job_id": active_job_id,
+            "retryable": True,
+            "due_preserved": True,
             "active_job": dict(active_job),
             "auto_schedule": auto_schedule,
         }

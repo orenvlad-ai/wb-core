@@ -363,11 +363,16 @@ def _assert_scheduled_parallel_block(entrypoint: RegistryUploadHttpEntrypoint) -
             due_at="2026-04-20T18:30:00Z",
             trigger_source="scheduled",
         )
-        if skipped.get("status") != "skipped" or not skipped.get("already_running_job_id"):
+        if (
+            skipped.get("status") != "skipped"
+            or not skipped.get("already_running_job_id")
+            or skipped.get("retryable") is not True
+            or skipped.get("due_preserved") is not True
+        ):
             raise AssertionError(f"scheduled slot must be blocked while prior auto update is running, got {skipped}")
         schedule = entrypoint.sheet_auto_refresh_schedules_block.get_schedule("custom_evening")
-        if schedule.get("last_status") != "skipped" or "ещё выполняется" not in str(schedule.get("last_error_summary") or ""):
-            raise AssertionError(f"blocked scheduled slot must persist honest skipped reason, got {schedule}")
+        if schedule.get("last_due_at") == "2026-04-20T18:30:00Z" or schedule.get("last_status") == "skipped":
+            raise AssertionError(f"blocked scheduled slot must remain due for retry, got {schedule}")
     finally:
         release.set()
         _wait_for_job(entrypoint, str(active["job_id"]))
