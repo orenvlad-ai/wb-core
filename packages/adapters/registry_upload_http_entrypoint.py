@@ -3370,6 +3370,25 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if _is_fulfillment_upload_detail_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_id = _resolve_fulfillment_upload_id_from_detail_path(parsed.path)
+                    payload = entrypoint.handle_fulfillment_services_upload_delete_request(upload_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Fulfillment upload delete failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_supplier_financial_document_detail_path(parsed.path):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return

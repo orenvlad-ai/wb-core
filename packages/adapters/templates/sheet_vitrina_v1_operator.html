@@ -3051,6 +3051,14 @@
       color: var(--muted);
     }
 
+    .wb-supplies-message[hidden] {
+      display: none;
+    }
+
+    .wb-supplies-message.is-success {
+      color: var(--success-text);
+    }
+
     .wb-supplies-message.is-error {
       color: var(--error-text);
     }
@@ -3077,6 +3085,57 @@
       background: var(--control-bg);
       color: var(--muted-strong);
       white-space: nowrap;
+    }
+
+    .fulfillment-errors-block {
+      margin-top: 10px;
+    }
+
+    .fulfillment-errors-block[hidden] {
+      display: none;
+    }
+
+    .fulfillment-delete-confirm {
+      display: grid;
+      gap: 8px;
+      min-width: 180px;
+      max-width: 280px;
+    }
+
+    .fulfillment-delete-confirm-text {
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--muted-strong);
+    }
+
+    .fulfillment-delete-confirm-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .fulfillment-row-button {
+      appearance: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--text);
+      padding: 5px 8px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .fulfillment-row-button.is-danger {
+      border-color: rgba(185, 28, 28, 0.26);
+      color: var(--error-text);
+      background: var(--error-bg);
+    }
+
+    .fulfillment-row-button:disabled {
+      cursor: wait;
+      opacity: 0.65;
     }
 
     .wb-supplies-table-wrap {
@@ -3721,14 +3780,14 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», WB/FBW registry живёт
-          в «Wildberries», Fulfillment-услуги регистрируются в «Fulfillment», матрица поставок доступна в «Реестр поставок»,
+          в «Wildberries», услуги фулфилмента регистрируются в «Услуги фулфилмента», матрица поставок доступна в «Реестр поставок»,
           а реестр заказов поставщика доступен в «От поставщика».
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы поставок">
           <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
           <button class="subsection-button" type="button" data-supply-mode-button="wildberries" aria-selected="false">Wildberries</button>
-          <button class="subsection-button" type="button" data-supply-mode-button="fulfillment" aria-selected="false">Fulfillment</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="fulfillment" aria-selected="false">Услуги фулфилмента</button>
           <button class="subsection-button" type="button" data-supply-mode-button="shipment-registry" aria-selected="false">Реестр поставок</button>
           <button class="subsection-button" type="button" data-supply-mode-button="cny-account" aria-selected="false">Счёт CNY</button>
           <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
@@ -4378,9 +4437,8 @@
           <section class="block fulfillment-services-block" aria-labelledby="fulfillmentServicesTitle">
             <div class="wb-supplies-header">
               <div>
-                <h2 id="fulfillmentServicesTitle" class="wb-supplies-title">Fulfillment</h2>
-                <p class="wb-supplies-lead">Регистрация услуг Fulfillment по WB-поставкам и PDF-виза на оплату.</p>
-                <p id="fulfillmentServicesState" class="wb-supplies-source">Server-owned runtime SQLite · XLSX/PDF</p>
+                <h2 id="fulfillmentServicesTitle" class="wb-supplies-title">Услуги фулфилмента</h2>
+                <p class="wb-supplies-lead">Регистрация услуг фулфилмента по WB-поставкам и PDF-виза на оплату.</p>
               </div>
               <div class="block-actions">
                 <button id="fulfillmentTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон</button>
@@ -4388,43 +4446,39 @@
                 <input id="fulfillmentFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
               </div>
             </div>
-            <p id="fulfillmentServicesMessage" class="wb-supplies-message">Загрузки ещё не запрошены.</p>
-            <div id="fulfillmentServicesSummary" class="wb-supplies-summary" aria-live="polite"></div>
-            <section class="shipment-registry-comparison" id="fulfillmentLatestBlock" hidden>
-              <h3>Последняя загрузка</h3>
-              <div id="fulfillmentLatestSummary" class="wb-supplies-summary"></div>
+            <p id="fulfillmentServicesMessage" class="wb-supplies-message" hidden></p>
+            <section class="fulfillment-errors-block" id="fulfillmentErrorsBlock" hidden>
               <div class="wb-supplies-table-wrap">
-                <table class="wb-supplies-table" aria-label="Ошибки Fulfillment upload">
+                <table class="wb-supplies-table" aria-label="Ошибки загрузки услуг фулфилмента">
                   <thead>
                     <tr>
                       <th>Строка</th>
                       <th>Номер поставки</th>
-                      <th>Матчинг</th>
-                      <th>Ошибка</th>
+                      <th>Причина</th>
                     </tr>
                   </thead>
                   <tbody id="fulfillmentErrorsBody">
-                    <tr><td colspan="4" class="wb-supplies-empty">Ошибок нет.</td></tr>
                   </tbody>
                 </table>
               </div>
             </section>
-            <h3 class="block-title" style="margin-top: 18px;">Последние загрузки</h3>
+            <h3 class="block-title" style="margin-top: 18px;">Загруженные документы</h3>
             <div class="wb-supplies-table-wrap">
-              <table class="wb-supplies-table" aria-label="Fulfillment uploads">
+              <table class="wb-supplies-table" aria-label="Загруженные документы услуг фулфилмента">
                 <thead>
                   <tr>
-                    <th>Upload</th>
-                    <th>Статус</th>
+                    <th>Дата загрузки</th>
+                    <th>Документ</th>
                     <th>Строки</th>
                     <th>Итого</th>
                     <th>НДС 5%</th>
                     <th>К оплате</th>
                     <th>PDF-виза</th>
+                    <th>Удалить</th>
                   </tr>
                 </thead>
                 <tbody id="fulfillmentUploadsBody">
-                  <tr><td colspan="7" class="wb-supplies-empty">Загрузок пока нет.</td></tr>
+                  <tr><td colspan="8" class="wb-supplies-empty">Загруженных документов пока нет. Скачайте шаблон, заполните его и загрузите файл.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -4506,7 +4560,7 @@
                     <th>Добавлено, шт / Упаковано → Принято</th>
                     <th>Коэф. приёмки</th>
                     <th>Транзит</th>
-                    <th>Услуги fulfillment</th>
+                    <th>Услуги фулфилмента</th>
                   </tr>
                 </thead>
                 <tbody id="wbSuppliesTableBody">
@@ -4843,14 +4897,11 @@
       const cnyAccountMessage = document.getElementById("cnyAccountMessage");
       const cnyConversionsBody = document.getElementById("cnyConversionsBody");
       const cnyLedgerBody = document.getElementById("cnyLedgerBody");
-      const fulfillmentServicesState = document.getElementById("fulfillmentServicesState");
       const fulfillmentTemplateButton = document.getElementById("fulfillmentTemplateButton");
       const fulfillmentUploadButton = document.getElementById("fulfillmentUploadButton");
       const fulfillmentFileInput = document.getElementById("fulfillmentFileInput");
       const fulfillmentServicesMessage = document.getElementById("fulfillmentServicesMessage");
-      const fulfillmentServicesSummary = document.getElementById("fulfillmentServicesSummary");
-      const fulfillmentLatestBlock = document.getElementById("fulfillmentLatestBlock");
-      const fulfillmentLatestSummary = document.getElementById("fulfillmentLatestSummary");
+      const fulfillmentErrorsBlock = document.getElementById("fulfillmentErrorsBlock");
       const fulfillmentErrorsBody = document.getElementById("fulfillmentErrorsBody");
       const fulfillmentUploadsBody = document.getElementById("fulfillmentUploadsBody");
 
@@ -5025,6 +5076,8 @@
       let fulfillmentServicesLoading = false;
       let fulfillmentServicesUploading = false;
       let fulfillmentServicesPayload = null;
+      let fulfillmentDeleteConfirmUploadId = "";
+      let fulfillmentDeletingUploadId = "";
       let wbSuppliesPayload = null;
       let wbSuppliesInitialized = false;
       let wbSuppliesLoading = false;
@@ -5843,6 +5896,30 @@
         fulfillmentFileInput.addEventListener("change", () => {
           if (fulfillmentFileInput.files && fulfillmentFileInput.files[0]) {
             uploadFulfillmentWorkbook();
+          }
+        });
+      }
+      if (fulfillmentUploadsBody) {
+        fulfillmentUploadsBody.addEventListener("click", (event) => {
+          const target = event.target instanceof Element ? event.target : null;
+          if (!target) {
+            return;
+          }
+          const cancelButton = target.closest("[data-fulfillment-delete-cancel]");
+          if (cancelButton) {
+            fulfillmentDeleteConfirmUploadId = "";
+            renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
+            return;
+          }
+          const confirmButton = target.closest("[data-fulfillment-delete-confirm]");
+          if (confirmButton) {
+            deleteFulfillmentUpload(confirmButton.getAttribute("data-upload-id") || "");
+            return;
+          }
+          const deleteButton = target.closest("[data-fulfillment-delete]");
+          if (deleteButton) {
+            fulfillmentDeleteConfirmUploadId = deleteButton.getAttribute("data-upload-id") || "";
+            renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
           }
         });
       }
@@ -9344,7 +9421,9 @@
         if (!fulfillmentServicesMessage) {
           return;
         }
-        fulfillmentServicesMessage.textContent = message || "";
+        const text = String(message || "").trim();
+        fulfillmentServicesMessage.textContent = text;
+        fulfillmentServicesMessage.hidden = !text;
         fulfillmentServicesMessage.className = "wb-supplies-message" + (tone ? " is-" + tone : "");
       }
 
@@ -9373,7 +9452,8 @@
         fulfillmentServicesLoading = true;
         updateFulfillmentServicesBusyState();
         if (!options || !options.preserveMessage) {
-          setFulfillmentServicesMessage("Читаем Fulfillment uploads...", "");
+          setFulfillmentServicesMessage("", "");
+          renderFulfillmentErrors(null);
         }
         try {
           const response = await fetch(config.fulfillment_services_uploads_path, {
@@ -9385,20 +9465,12 @@
             throw new Error(valueOrDash(listPayload.error) + " (HTTP " + response.status + ")");
           }
           let detailPayload = options && options.detail ? options.detail : null;
-          const latest = listPayload && listPayload.latest_upload ? listPayload.latest_upload : null;
-          if (!detailPayload && latest && latest.upload_id) {
-            detailPayload = await fetchFulfillmentUploadDetail(latest.upload_id);
-          }
           fulfillmentServicesPayload = { list: listPayload, detail: detailPayload };
           renderFulfillmentServices(fulfillmentServicesPayload);
-          if (!options || !options.preserveMessage) {
-            const status = latest && latest.validation_status ? latest.validation_status : "нет загрузок";
-            setFulfillmentServicesMessage("Последняя загрузка: " + status, latest && latest.validation_status === "failed" ? "warning" : "");
-          }
         } catch (error) {
           renderFulfillmentServices({ list: { uploads: [] }, detail: null });
           setFulfillmentServicesMessage(
-            "Fulfillment uploads не загружены: " + (error instanceof Error ? error.message : String(error)),
+            "Загруженные документы не удалось прочитать: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
         } finally {
@@ -9428,7 +9500,8 @@
         }
         fulfillmentServicesUploading = true;
         updateFulfillmentServicesBusyState();
-        setFulfillmentServicesMessage("Загружаем Fulfillment XLSX...", "");
+        setFulfillmentServicesMessage("Загружаем XLSX...", "");
+        renderFulfillmentErrors(null);
         try {
           const formData = new FormData();
           formData.append("file", file, file.name || "fulfillment-services.xlsx");
@@ -9447,16 +9520,18 @@
           const upload = payload && payload.upload ? payload.upload : {};
           const isOk = upload.validation_status === "ok";
           setFulfillmentServicesMessage(
-            isOk ? "Fulfillment upload OK, PDF-виза доступна." : "Fulfillment upload failed: " + valueOrDash(upload.validation_error_summary),
+            isOk
+              ? "Документ принят. Все строки смэтчены, PDF-виза сформирована."
+              : "Документ не принят. Исправьте ошибки и загрузите файл заново.",
             isOk ? "success" : "warning"
           );
           await loadFulfillmentServices({ preserveMessage: true, detail: payload });
-          if (wbSuppliesInitialized) {
+          if (isOk && wbSuppliesInitialized) {
             await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
           }
         } catch (error) {
           setFulfillmentServicesMessage(
-            "Fulfillment upload не выполнен: " + (error instanceof Error ? error.message : String(error)),
+            "Документ не принят. Исправьте ошибки и загрузите файл заново. " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
         } finally {
@@ -9469,38 +9544,10 @@
       function renderFulfillmentServices(payload) {
         const listPayload = payload && payload.list ? payload.list : {};
         const detailPayload = payload && payload.detail ? payload.detail : null;
-        const uploads = Array.isArray(listPayload.uploads) ? listPayload.uploads : [];
-        const latest = detailPayload && detailPayload.upload ? detailPayload.upload : (listPayload.latest_upload || null);
-        renderFulfillmentSummary(latest);
+        const uploads = (Array.isArray(listPayload.uploads) ? listPayload.uploads : [])
+          .filter((upload) => upload && upload.validation_status === "ok" && !upload.deleted_at);
         renderFulfillmentUploads(uploads);
-        renderFulfillmentLatest(detailPayload);
-      }
-
-      function renderFulfillmentSummary(latest) {
-        if (fulfillmentServicesState) {
-          fulfillmentServicesState.textContent = latest
-            ? "Последняя загрузка: " + valueOrDash(latest.uploaded_at)
-            : "Server-owned runtime SQLite · XLSX/PDF";
-        }
-        if (!fulfillmentServicesSummary) {
-          return;
-        }
-        if (!latest) {
-          fulfillmentServicesSummary.innerHTML = "<span class=\"wb-supplies-chip\">Загрузок нет</span>";
-          return;
-        }
-        const chips = [
-          "Status: " + valueOrDash(latest.validation_status),
-          "Rows: " + valueOrDash(latest.rows_matched) + "/" + valueOrDash(latest.rows_total),
-          "Итого: " + formatWbRub(latest.amount_without_vat_total),
-          "НДС 5%: " + formatWbRub(latest.vat_total),
-          "К оплате: " + formatWbRub(latest.amount_with_vat_total),
-          "PDF: " + (latest.pdf_available ? "доступна" : "нет")
-        ];
-        if (latest.payment_validation_id) {
-          chips.push("Виза: " + latest.payment_validation_id);
-        }
-        fulfillmentServicesSummary.innerHTML = chips.map((item) => "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>").join("");
+        renderFulfillmentErrors(detailPayload);
       }
 
       function renderFulfillmentUploads(uploads) {
@@ -9508,68 +9555,152 @@
           return;
         }
         if (!uploads.length) {
-          fulfillmentUploadsBody.innerHTML = "<tr><td colspan=\"7\" class=\"wb-supplies-empty\">Загрузок пока нет.</td></tr>";
+          fulfillmentUploadsBody.innerHTML = "<tr><td colspan=\"8\" class=\"wb-supplies-empty\">Загруженных документов пока нет. Скачайте шаблон, заполните его и загрузите файл.</td></tr>";
           return;
         }
         fulfillmentUploadsBody.innerHTML = uploads.map((upload) => {
           const pdfCell = upload.pdf_available && upload.pdf_path
-            ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.pdf_path) + "\" target=\"_blank\" rel=\"noreferrer\">Скачать PDF-визу</a>"
+            ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.pdf_path) + "\" target=\"_blank\" rel=\"noreferrer\" title=\"" + escapeHtml(valueOrDash(upload.payment_validation_id)) + "\">Скачать PDF-визу</a>"
             : "—";
+          const uploadId = String(upload.upload_id || "");
+          const deleteCell = renderFulfillmentDeleteCell(upload);
           return [
             "<tr>",
-            "<td><span class=\"wb-supplies-main\">" + escapeHtml(valueOrDash(upload.upload_id)) + "</span><span class=\"wb-supplies-sub\">" + escapeHtml(valueOrDash(upload.original_filename)) + "</span></td>",
-            "<td>" + escapeHtml(valueOrDash(upload.validation_status)) + "</td>",
+            "<td>" + escapeHtml(formatFulfillmentUploadedAt(upload.uploaded_at)) + "</td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(valueOrDash(upload.original_filename)) + "</span></td>",
             "<td>" + escapeHtml(valueOrDash(upload.rows_matched)) + "/" + escapeHtml(valueOrDash(upload.rows_total)) + "</td>",
             "<td>" + escapeHtml(formatWbRub(upload.amount_without_vat_total)) + "</td>",
             "<td>" + escapeHtml(formatWbRub(upload.vat_total)) + "</td>",
             "<td>" + escapeHtml(formatWbRub(upload.amount_with_vat_total)) + "</td>",
             "<td>" + pdfCell + "</td>",
+            "<td data-fulfillment-upload-id=\"" + escapeHtml(uploadId) + "\">" + deleteCell + "</td>",
             "</tr>"
           ].join("");
         }).join("");
       }
 
-      function renderFulfillmentLatest(detailPayload) {
-        if (!fulfillmentLatestBlock || !fulfillmentLatestSummary || !fulfillmentErrorsBody) {
+      function renderFulfillmentDeleteCell(upload) {
+        const uploadId = String(upload && upload.upload_id ? upload.upload_id : "");
+        if (!uploadId) {
+          return "—";
+        }
+        const isDeleting = fulfillmentDeletingUploadId === uploadId;
+        if (fulfillmentDeleteConfirmUploadId === uploadId) {
+          return [
+            "<div class=\"fulfillment-delete-confirm\">",
+            "<span class=\"fulfillment-delete-confirm-text\">Удалить документ? Данные услуг фулфилмента по связанным WB-поставкам будут удалены из системы.</span>",
+            "<span class=\"fulfillment-delete-confirm-actions\">",
+            "<button class=\"fulfillment-row-button\" type=\"button\" data-fulfillment-delete-cancel data-upload-id=\"" + escapeHtml(uploadId) + "\"" + (isDeleting ? " disabled" : "") + ">Отмена</button>",
+            "<button class=\"fulfillment-row-button is-danger\" type=\"button\" data-fulfillment-delete-confirm data-upload-id=\"" + escapeHtml(uploadId) + "\"" + (isDeleting ? " disabled" : "") + ">" + (isDeleting ? "Удаляем..." : "Удалить") + "</button>",
+            "</span>",
+            "</div>"
+          ].join("");
+        }
+        return "<button class=\"fulfillment-row-button is-danger\" type=\"button\" data-fulfillment-delete data-upload-id=\"" + escapeHtml(uploadId) + "\"" + (isDeleting ? " disabled" : "") + ">Удалить</button>";
+      }
+
+      function renderFulfillmentErrors(detailPayload) {
+        if (!fulfillmentErrorsBlock || !fulfillmentErrorsBody) {
           return;
         }
-        if (!detailPayload || !detailPayload.upload) {
-          fulfillmentLatestBlock.hidden = true;
+        const upload = detailPayload && detailPayload.upload ? detailPayload.upload : null;
+        const errors = Array.isArray(detailPayload && detailPayload.row_errors) ? detailPayload.row_errors : [];
+        if (!upload || upload.validation_status !== "failed" || !errors.length) {
+          fulfillmentErrorsBlock.hidden = true;
+          fulfillmentErrorsBody.innerHTML = "";
           return;
         }
-        const upload = detailPayload.upload;
-        fulfillmentLatestBlock.hidden = false;
-        const latestItems = [
-          "upload_id: " + valueOrDash(upload.upload_id),
-          "hash: " + valueOrDash(upload.short_file_hash),
-          "status: " + valueOrDash(upload.validation_status),
-          "К оплате: " + formatWbRub(upload.amount_with_vat_total)
-        ];
-        if (upload.payment_validation_id) {
-          latestItems.push("payment_validation_id: " + upload.payment_validation_id);
-        }
-        if (upload.pdf_available && upload.pdf_path) {
-          latestItems.push("<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.pdf_path) + "\" target=\"_blank\" rel=\"noreferrer\">Скачать PDF-визу</a>");
-        }
-        fulfillmentLatestSummary.innerHTML = latestItems.map((item) => {
-          if (String(item).startsWith("<a ")) {
-            return "<span class=\"wb-supplies-chip\">" + item + "</span>";
-          }
-          return "<span class=\"wb-supplies-chip\">" + escapeHtml(item) + "</span>";
-        }).join("");
-        const errors = Array.isArray(detailPayload.row_errors) ? detailPayload.row_errors : [];
-        if (!errors.length) {
-          fulfillmentErrorsBody.innerHTML = "<tr><td colspan=\"4\" class=\"wb-supplies-empty\">Ошибок нет.</td></tr>";
-          return;
-        }
+        fulfillmentErrorsBlock.hidden = false;
         fulfillmentErrorsBody.innerHTML = errors.map((error) => [
           "<tr>",
           "<td>" + escapeHtml(valueOrDash(error.row_index)) + "</td>",
           "<td>" + escapeHtml(valueOrDash(error.supply_id_input)) + "</td>",
-          "<td>" + escapeHtml(valueOrDash(error.match_status)) + "</td>",
-          "<td>" + escapeHtml(valueOrDash(error.row_error)) + "</td>",
+          "<td>" + escapeHtml(formatFulfillmentRowError(error)) + "</td>",
           "</tr>"
         ].join("")).join("");
+      }
+
+      function formatFulfillmentUploadedAt(value) {
+        const raw = String(value || "").trim();
+        if (!raw) {
+          return "—";
+        }
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) {
+          return raw.replace("T", " ");
+        }
+        return new Intl.DateTimeFormat("ru-RU", {
+          timeZone: "Asia/Yekaterinburg",
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false
+        }).format(parsed).replace(",", "");
+      }
+
+      function formatFulfillmentRowError(error) {
+        const rowIndex = valueOrDash(error && error.row_index);
+        const supplyId = valueOrDash(error && error.supply_id_input);
+        const raw = String((error && error.row_error) || "").trim();
+        if (raw.includes("does not match cached WB supply")) {
+          return "Строка " + rowIndex + ": поставка " + supplyId + " не найдена в WB-поставках.";
+        }
+        if (raw.includes("Duplicate")) {
+          return "Строка " + rowIndex + ": дублируется номер поставки " + supplyId + ".";
+        }
+        if (raw.includes("Итого must be numeric")) {
+          return "Строка " + rowIndex + ": некорректное значение в колонке “Итого”.";
+        }
+        if (raw.includes("НДС 5% must be numeric")) {
+          return "Строка " + rowIndex + ": некорректное значение в колонке “НДС 5%”.";
+        }
+        if (raw.includes("Итого must be >= 0")) {
+          return "Строка " + rowIndex + ": значение в колонке “Итого” должно быть не меньше 0.";
+        }
+        if (raw.includes("НДС 5% must be >= 0")) {
+          return "Строка " + rowIndex + ": значение в колонке “НДС 5%” должно быть не меньше 0.";
+        }
+        if (raw.includes("Номер поставки is required")) {
+          return "Строка " + rowIndex + ": номер поставки не заполнен.";
+        }
+        return "Строка " + rowIndex + ": " + valueOrDash(raw);
+      }
+
+      async function deleteFulfillmentUpload(uploadId) {
+        const normalizedId = String(uploadId || "").trim();
+        if (!normalizedId || !config.fulfillment_services_uploads_path || fulfillmentDeletingUploadId) {
+          return;
+        }
+        fulfillmentDeletingUploadId = normalizedId;
+        setFulfillmentServicesMessage("Удаляем документ...", "");
+        renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
+        try {
+          const response = await fetch(config.fulfillment_services_uploads_path.replace(/\/$/, "") + "/" + encodeURIComponent(normalizedId), {
+            method: "DELETE",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          fulfillmentDeleteConfirmUploadId = "";
+          setFulfillmentServicesMessage("Документ удалён. Данные услуг фулфилмента удалены из Wildberries overlay.", "success");
+          await loadFulfillmentServices({ preserveMessage: true });
+          if (wbSuppliesInitialized) {
+            await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
+          }
+        } catch (error) {
+          setFulfillmentServicesMessage(
+            "Документ не удалён: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          fulfillmentDeletingUploadId = "";
+          renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
+          scheduleEmbeddedHeightPost();
+        }
       }
 
       function setWbSuppliesMessage(message, tone) {

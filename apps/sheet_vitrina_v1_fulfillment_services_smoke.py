@@ -66,6 +66,9 @@ def main() -> None:
             or not ok_payload.get("pdf_available")
         ):
             raise AssertionError(f"valid upload must pass and generate PDF, got {ok_payload}")
+        accepted_list = block.list_uploads()
+        if [item.get("upload_id") for item in accepted_list.get("uploads") or []] != [ok_upload["upload_id"]]:
+            raise AssertionError(f"list must expose accepted OK uploads only, got {accepted_list}")
         pdf_bytes, _, _ = block.download_pdf(ok_upload["upload_id"])
         pdf_text = _pdf_text(pdf_bytes)
         for expected in (
@@ -85,12 +88,32 @@ def main() -> None:
             raise AssertionError(f"unmatched upload must fail without PDF, got {unmatched}")
         if "does not match cached WB supply" not in json.dumps(unmatched.get("row_errors"), ensure_ascii=False):
             raise AssertionError(f"unmatched row error missing, got {unmatched}")
+        if [item.get("upload_id") for item in block.list_uploads().get("uploads") or []] != [ok_upload["upload_id"]]:
+            raise AssertionError("failed unmatched upload must not enter accepted uploads list")
 
         duplicate = block.upload_xlsx(_build_workbook([_valid_row("1001"), _valid_row("1001")]), uploaded_filename="duplicate.xlsx")
         if duplicate.get("validation_status") != "failed" or duplicate["upload"].get("pdf_available"):
             raise AssertionError(f"duplicate upload must fail without PDF, got {duplicate}")
         if "Duplicate" not in json.dumps(duplicate.get("row_errors"), ensure_ascii=False):
             raise AssertionError(f"duplicate row error missing, got {duplicate}")
+        if [item.get("upload_id") for item in block.list_uploads().get("uploads") or []] != [ok_upload["upload_id"]]:
+            raise AssertionError("failed duplicate upload must not enter accepted uploads list")
+        overlay_before_delete = block.approved_overlay_by_supply()
+        if overlay_before_delete.get("1001", {}).get("amount_with_vat_total") != 1575.0:
+            raise AssertionError(f"approved overlay missing before delete, got {overlay_before_delete}")
+        deleted = block.delete_upload(ok_upload["upload_id"])
+        if not deleted.get("deleted") or not deleted.get("soft_deleted"):
+            raise AssertionError(f"delete must soft-delete upload, got {deleted}")
+        if block.list_uploads().get("uploads"):
+            raise AssertionError("deleted upload must disappear from accepted uploads list")
+        try:
+            block.download_pdf(ok_upload["upload_id"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("deleted upload PDF must be unavailable")
+        if block.approved_overlay_by_supply():
+            raise AssertionError("deleted upload lines must disappear from approved overlay")
 
     with TemporaryDirectory(prefix="fulfillment-services-http-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -149,7 +172,7 @@ def main() -> None:
             if wb_status != 200:
                 raise AssertionError(f"WB supplies route failed: {wb_status} {wb_payload}")
             labels = [item.get("label") for item in wb_payload.get("schema", {}).get("columns", [])]
-            if "Транзит" not in labels or "Услуги fulfillment" not in labels or "Стоимость" in labels:
+            if "Транзит" not in labels or "Услуги фулфилмента" not in labels or "Стоимость" in labels:
                 raise AssertionError(f"WB supplies schema must expose transit/fulfillment labels, got {labels}")
             by_number = {str(row.get("visible_number") or row.get("wb_supply_id")): row for row in wb_payload.get("rows") or []}
             row1001 = by_number.get("1001") or {}
@@ -160,20 +183,39 @@ def main() -> None:
             ):
                 raise AssertionError(f"WB supplies overlay must include fulfillment/transit per-unit, got {row1001}")
 
+            delete_status, delete_payload = _delete_json(f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}")
+            if delete_status != 200 or not delete_payload.get("deleted"):
+                raise AssertionError(f"DELETE route must soft-delete upload, got {delete_status} {delete_payload}")
+            pdf_after_delete_status, _, _ = _get_bytes(
+                f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}/payment-validation.pdf"
+            )
+            if pdf_after_delete_status != 404:
+                raise AssertionError(f"deleted upload PDF must be unavailable, got HTTP {pdf_after_delete_status}")
+            list_after_delete_status, list_after_delete = _get_json(f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}")
+            if list_after_delete_status != 200 or any(item.get("upload_id") == upload_id for item in list_after_delete.get("uploads") or []):
+                raise AssertionError(f"deleted upload must not be listed, got {list_after_delete_status} {list_after_delete}")
+            wb_after_delete_status, wb_after_delete = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search=1001&size_filter=all")
+            row1001_after_delete = (wb_after_delete.get("rows") or [{}])[0]
+            if wb_after_delete_status != 200 or row1001_after_delete.get("fulfillment_amount_with_vat_total") is not None:
+                raise AssertionError(f"deleted upload must disappear from WB overlay, got {wb_after_delete_status} {wb_after_delete}")
+
             operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=factory-order")
             for expected in (
-                "Fulfillment",
+                "Услуги фулфилмента",
                 "Скачать шаблон",
                 "Загрузить заполненный файл",
-                "Услуги fulfillment",
+                "Загруженные документы",
+                "Дата загрузки",
+                "Удалить",
                 "Транзит",
                 "fulfillment_services_template_path",
                 "fulfillment_services_uploads_path",
             ):
                 if operator_status != 200 or expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose Fulfillment UI token {expected!r}")
-            if "<th>Стоимость</th>" in operator_html:
-                raise AssertionError("operator WB supplies table must no longer expose Стоимость header")
+            for forbidden in ("fulfillmentLatestBlock", "fulfillmentLatestSummary", "Услуги fulfillment", ">Fulfillment<", "<th>Стоимость</th>"):
+                if forbidden in operator_html:
+                    raise AssertionError(f"operator UI must not expose forbidden Fulfillment token {forbidden!r}")
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -287,6 +329,11 @@ def _get_bytes(url: str) -> tuple[int, bytes, dict[str, str]]:
             return response.status, response.read(), dict(response.headers.items())
     except urllib_error.HTTPError as exc:
         return exc.code, exc.read(), dict(exc.headers.items())
+
+
+def _delete_json(url: str) -> tuple[int, dict]:
+    req = urllib_request.Request(url, method="DELETE", headers={"Accept": "application/json"})
+    return _open_json(req)
 
 
 def _post_multipart(url: str, file_bytes: bytes, *, filename: str) -> tuple[int, dict]:
