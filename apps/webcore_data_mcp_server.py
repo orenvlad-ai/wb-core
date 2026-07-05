@@ -27,6 +27,7 @@ from packages.application.webcore_data_mcp import (  # noqa: E402
     APPROVED_TOOL_NAMES,
     SCOPE_ANALYTICS_READ,
     SCOPE_FINANCE_READ,
+    SCOPE_OPS_READ,
     SCOPE_SUPPLY_READ,
     WebCoreDataMcpError,
     WebCoreDataMcpGateway,
@@ -42,7 +43,7 @@ DEFAULT_AUTHORIZATION_SERVER_METADATA_PATH = "/.well-known/oauth-authorization-s
 DEFAULT_OPENID_CONFIGURATION_PATH = "/.well-known/openid-configuration"
 DEFAULT_OAUTH_AUTHORIZE_PATH = "/oauth/authorize"
 DEFAULT_OAUTH_TOKEN_PATH = "/oauth/token"
-DEFAULT_SCOPES = (SCOPE_ANALYTICS_READ, SCOPE_SUPPLY_READ, SCOPE_FINANCE_READ)
+DEFAULT_SCOPES = (SCOPE_ANALYTICS_READ, SCOPE_SUPPLY_READ, SCOPE_FINANCE_READ, SCOPE_OPS_READ)
 DEFAULT_OAUTH_CODE_TTL_SECONDS = 300
 DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600
 DEFAULT_OAUTH_ALLOWED_REDIRECT_PREFIXES = (
@@ -340,8 +341,9 @@ def _handle_json_rpc(payload: Any, gateway: WebCoreDataMcpGateway, identity: Aut
                         "WebCore Data MCP exposes read-only, allowlisted business analytics tools only. "
                         "Call get_webcore_data_map for orientation and resolve_webcore_data_request when unsure which "
                         "business-data tool to use. Use list_supply_artifacts/get_supply_artifact only for server-owned "
-                        "opaque artifact refs. No arbitrary SQL, filesystem browsing, shell, sync/backfill, writes, "
-                        "secrets or unbounded payloads are available."
+                        "opaque artifact refs. Ops diagnostics tools require webcore.ops.read and expose only fixed "
+                        "unit/log/snapshot/deploy summaries. No arbitrary SQL, filesystem browsing, shell, SSH, "
+                        "sync/backfill/refresh/load, writes, secrets or unbounded payloads are available."
                     ),
                 },
             )

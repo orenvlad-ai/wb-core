@@ -15,6 +15,14 @@ import time
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
+from packages.application.webcore_ops_diagnostics import (
+    ALLOWED_RUNTIME_UNITS,
+    OPS_TOOL_NAMES,
+    SERVICE_LOG_PRIORITIES,
+    WebCoreOpsDiagnostics,
+    WebCoreOpsDiagnosticsError,
+)
+
 DB_FILENAME = "registry_upload_runtime.sqlite3"
 DEFAULT_MAX_LIMIT = 50
 MAX_LIMIT = 100
@@ -23,8 +31,9 @@ AUDIT_SCHEMA_VERSION = "webcore_data_mcp_audit_v1"
 SCOPE_ANALYTICS_READ = "webcore.analytics.read"
 SCOPE_SUPPLY_READ = "webcore.supply.read"
 SCOPE_FINANCE_READ = "webcore.finance.read"
+SCOPE_OPS_READ = "webcore.ops.read"
 
-APPROVED_TOOL_NAMES = (
+BUSINESS_TOOL_NAMES = (
     "get_webcore_data_map",
     "resolve_webcore_data_request",
     "resolve_webcore_data_intent",
@@ -54,6 +63,7 @@ APPROVED_TOOL_NAMES = (
     "get_revenue_by_date",
     "get_revenue_range",
 )
+APPROVED_TOOL_NAMES = (*BUSINESS_TOOL_NAMES, *OPS_TOOL_NAMES)
 
 FORBIDDEN_OUTPUT_KEY_MARKERS = (
     "password",
@@ -125,6 +135,8 @@ class WebCoreDataMcpGateway:
         db_path: Path | None = None,
         audit_log_path: Path | None = None,
         max_limit: int = DEFAULT_MAX_LIMIT,
+        ops_diagnostics: WebCoreOpsDiagnostics | None = None,
+        ops_command_runner: Any | None = None,
     ) -> None:
         resolved_runtime_dir: Path | None = runtime_dir
         if db_path is None:
@@ -138,6 +150,11 @@ class WebCoreDataMcpGateway:
         self.db_path = Path(db_path).expanduser()
         self.audit_log_path = Path(audit_log_path).expanduser() if audit_log_path else None
         self.max_limit = max(1, min(int(max_limit or DEFAULT_MAX_LIMIT), MAX_LIMIT))
+        self.ops_diagnostics = ops_diagnostics or WebCoreOpsDiagnostics(
+            runtime_dir=self.runtime_dir,
+            db_path=self.db_path,
+            command_runner=ops_command_runner,
+        )
 
     def list_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
@@ -208,6 +225,11 @@ class WebCoreDataMcpGateway:
             }
 
     def _call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name in OPS_TOOL_NAMES:
+            try:
+                return self.ops_diagnostics.call_tool(name, args)
+            except WebCoreOpsDiagnosticsError as exc:
+                raise WebCoreDataMcpError(str(exc), code="invalid_ops_diagnostics_request") from exc
         if name == "get_webcore_data_map":
             return self.get_webcore_data_map(
                 domain=_optional_str(args.get("domain"), max_length=40) or "all",
@@ -1121,6 +1143,7 @@ class WebCoreDataMcpGateway:
                 {"scope": SCOPE_ANALYTICS_READ, "domains": ["navigation", "freshness", "metrics", "sku", "business_tables"]},
                 {"scope": SCOPE_SUPPLY_READ, "domains": ["supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order"]},
                 {"scope": SCOPE_FINANCE_READ, "domains": ["finance", "revenue"]},
+                {"scope": SCOPE_OPS_READ, "domains": ["ops_diagnostics"]},
             ],
             "intent_examples": _intent_examples() if include_examples else [],
             "business_table_catalog": [
@@ -2713,7 +2736,7 @@ def _tool_definitions() -> list[ToolDefinition]:
             "Use this first for orientation. Returns the WebCore Data MCP guide: domains, tools, scopes, business tables, artifact kinds, Russian intent examples and safety boundaries.",
             _schema(
                 {
-                    "domain": _enum_schema(["all", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"]),
+                    "domain": _enum_schema(["all", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables", "ops_diagnostics"]),
                     "include_examples": {"type": "boolean"},
                     "include_limitations": {"type": "boolean"},
                 }
@@ -2725,7 +2748,7 @@ def _tool_definitions() -> list[ToolDefinition]:
             _schema(
                 {
                     "intent": _string_schema(1, 500),
-                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"]),
+                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables", "ops_diagnostics"]),
                     "object_id": _string_schema(0, 160),
                     "shipment_id": _string_schema(0, 160),
                     "supply_id": _string_schema(0, 160),
@@ -2749,7 +2772,7 @@ def _tool_definitions() -> list[ToolDefinition]:
             _schema(
                 {
                     "intent": _string_schema(1, 500),
-                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"]),
+                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables", "ops_diagnostics"]),
                     "object_id": _string_schema(0, 160),
                     "shipment_id": _string_schema(0, 160),
                     "supply_id": _string_schema(0, 160),
@@ -2902,6 +2925,45 @@ def _tool_definitions() -> list[ToolDefinition]:
         ToolDefinition("get_sku_snapshot", "Use this for SKU identity plus persisted ready snapshot metrics and freshness flags.", _schema({"sku_or_nm_id": _string_schema(1, 120), "date": _date_schema()}, required=["sku_or_nm_id"])),
         ToolDefinition("get_revenue_by_date", "Use this for date/SKU revenue only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "revenue_metric": _string_schema(0, 160)}, required=["date"]), scope=SCOPE_FINANCE_READ),
         ToolDefinition("get_revenue_range", "Use this for bounded revenue ranges only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date_from": _date_schema(), "date_to": _date_schema(), "group_by": _enum_schema(["date", "sku", "total"]), "revenue_metric": _string_schema(0, 160)}, required=["date_from", "date_to"]), scope=SCOPE_FINANCE_READ),
+        ToolDefinition(
+            "get_runtime_health_summary",
+            "Use this for bounded read-only live runtime diagnostics over fixed WebCore systemd units, runtime disk summary and DB file summary. No shell, env or arbitrary paths are exposed.",
+            _schema({}),
+            scope=SCOPE_OPS_READ,
+        ),
+        ToolDefinition(
+            "get_service_logs",
+            "Use this for bounded sanitized journal excerpts for one allowlisted WebCore unit. Unit and priority are enums; output is redacted and limited.",
+            _schema(
+                {
+                    "unit": _enum_schema(list(ALLOWED_RUNTIME_UNITS)),
+                    "since": _string_schema(0, 48),
+                    "until": _string_schema(0, 48),
+                    "priority": _enum_schema(list(SERVICE_LOG_PRIORITIES)),
+                    "limit": _int_schema(1, 300),
+                },
+                required=["unit"],
+            ),
+            scope=SCOPE_OPS_READ,
+        ),
+        ToolDefinition(
+            "get_refresh_diagnostics",
+            "Use this to inspect persisted refresh/load diagnostics for a date or bounded date range. Reads runtime DB/state only and never refreshes or calls upstream.",
+            _schema({"date": _date_schema(), "date_from": _date_schema(), "date_to": _date_schema()}),
+            scope=SCOPE_OPS_READ,
+        ),
+        ToolDefinition(
+            "get_runtime_snapshot_status",
+            "Use this to summarize ready, temporal source and temporal source slot snapshot presence for a bounded date range. Raw payload blobs are not returned.",
+            _schema({"date": _date_schema(), "date_from": _date_schema(), "date_to": _date_schema()}),
+            scope=SCOPE_OPS_READ,
+        ),
+        ToolDefinition(
+            "get_deploy_state",
+            "Use this to inspect safe deploy identity/version labels for the active EU MCP runtime. Does not expose secrets, raw env, SSH commands or runtime paths.",
+            _schema({}),
+            scope=SCOPE_OPS_READ,
+        ),
     ]
 
 
@@ -2913,7 +2975,7 @@ def tool_required_scope(name: str) -> str:
 
 
 def _data_map_domains() -> set[str]:
-    return {"all", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables"}
+    return {"all", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables", "ops_diagnostics"}
 
 
 def _domain_catalog() -> list[dict[str, Any]]:
@@ -2924,6 +2986,19 @@ def _domain_catalog() -> list[dict[str, Any]]:
             "primary_tools": ["get_data_freshness_status"],
             "required_scope": SCOPE_ANALYTICS_READ,
             "recommended_first_call": "get_data_freshness_status",
+        },
+        {
+            "domain": "ops_diagnostics",
+            "description": "Read-only production diagnostics for fixed WebCore runtime units, sanitized logs, refresh/load state, snapshot presence and deploy labels.",
+            "primary_tools": [
+                "get_runtime_health_summary",
+                "get_service_logs",
+                "get_refresh_diagnostics",
+                "get_runtime_snapshot_status",
+                "get_deploy_state",
+            ],
+            "required_scope": SCOPE_OPS_READ,
+            "known_caveat": "No arbitrary shell, SSH, filesystem browsing, SQL, env, secrets or mutations are exposed.",
         },
         {
             "domain": "metrics",
@@ -4003,7 +4078,7 @@ def _redact(value: Any) -> Any:
                 redacted[str(key)] = _redact(item)
         return redacted
     if isinstance(value, list):
-        return [_redact(item) for item in value[:200]]
+        return [_redact(item) for item in value[:300]]
     if isinstance(value, str):
         return _redact_string(value)
     return value
