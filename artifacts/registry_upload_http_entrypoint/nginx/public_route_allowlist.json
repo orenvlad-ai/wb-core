@@ -328,7 +328,7 @@
       "name": "sheet_vitrina_supply_fulfillment_services_upload_items",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/",
-      "methods": ["GET"]
+      "methods": ["GET", "DELETE"]
     },
     {
       "name": "sheet_vitrina_supply_supplier_shipments_list",

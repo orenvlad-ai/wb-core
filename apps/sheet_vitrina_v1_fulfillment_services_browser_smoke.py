@@ -71,9 +71,16 @@ def main() -> None:
                 page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
                 page.locator("[data-unified-tab-button='factory-order']").click()
                 operator_frame = page.frame_locator("iframe[title='Поставки']")
-                expect(operator_frame.get_by_role("button", name="Fulfillment", exact=True)).to_be_visible(timeout=10000)
-                operator_frame.get_by_role("button", name="Fulfillment", exact=True).click()
-                expect(operator_frame.locator("#fulfillmentServicesTitle")).to_contain_text("Fulfillment")
+                fulfillment_tab = operator_frame.get_by_role("button", name="Услуги фулфилмента", exact=True)
+                expect(fulfillment_tab).to_be_visible(timeout=10000)
+                fulfillment_tab.click()
+                expect(operator_frame.locator("#fulfillmentServicesTitle")).to_contain_text("Услуги фулфилмента")
+                expect(operator_frame.locator(".fulfillment-services-block")).to_contain_text("Загруженные документы")
+                if operator_frame.locator("#fulfillmentLatestBlock").count() != 0:
+                    raise AssertionError("Fulfillment UI must not render the old latest-upload block")
+                if operator_frame.locator("#fulfillmentServicesSummary").count() != 0:
+                    raise AssertionError("Fulfillment UI must not render technical summary chips")
+                expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text("Загруженных документов пока нет")
 
                 template_path = Path(tmp) / "downloaded-fulfillment-template.xlsx"
                 with page.expect_download() as download_info:
@@ -87,15 +94,16 @@ def main() -> None:
                 _fill_downloaded_template(template_path, ok_xlsx_path, [_valid_row("1001"), _valid_row("1002")])
                 operator_frame.locator("#fulfillmentFileInput").set_input_files(str(ok_xlsx_path))
                 expect(operator_frame.locator("#fulfillmentServicesMessage")).to_contain_text(
-                    "Fulfillment upload OK, PDF-виза доступна.",
+                    "Документ принят. Все строки смэтчены, PDF-виза сформирована.",
                     timeout=10000,
                 )
-                expect(operator_frame.locator("#fulfillmentServicesSummary")).to_contain_text("Status: ok")
-                expect(operator_frame.locator("#fulfillmentServicesSummary")).to_contain_text("Rows: 2/2")
-                expect(operator_frame.locator("#fulfillmentServicesSummary")).to_contain_text("К оплате: 3 150 ₽")
-                expect(operator_frame.locator("#fulfillmentLatestSummary")).to_contain_text("payment_validation_id:")
-                expect(operator_frame.locator("#fulfillmentLatestSummary")).to_contain_text("Скачать PDF-визу")
-                expect(operator_frame.locator("#fulfillmentErrorsBody")).to_contain_text("Ошибок нет.")
+                fulfillment_section_text = _normalize_ui_text(operator_frame.locator(".fulfillment-services-block").inner_text())
+                for expected in ("Дата загрузки", "fulfillment-ok", "2/2", "3 000 ₽", "150 ₽", "3 150 ₽", "Скачать PDF-визу", "Удалить"):
+                    if expected not in fulfillment_section_text:
+                        raise AssertionError(f"accepted table must expose {expected!r}: {fulfillment_section_text}")
+                for forbidden in ("Последняя загрузка", "upload_id:", "hash:", "status:", "payment_validation_id:"):
+                    if forbidden in fulfillment_section_text:
+                        raise AssertionError(f"Fulfillment main screen must not expose technical token {forbidden!r}: {fulfillment_section_text}")
 
                 list_status, list_payload = _get_json(f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}")
                 latest_upload = (list_payload.get("uploads") or [{}])[0]
@@ -125,7 +133,7 @@ def main() -> None:
                 actual_columns = operator_frame.locator("#wbSuppliesTableBody").locator("xpath=ancestor::table[1]//thead//th").evaluate_all(
                     "(nodes) => nodes.map((node) => node.textContent.trim())"
                 )
-                if "Стоимость" in actual_columns or "Транзит" not in actual_columns or "Услуги fulfillment" not in actual_columns:
+                if "Стоимость" in actual_columns or "Транзит" not in actual_columns or "Услуги фулфилмента" not in actual_columns:
                     raise AssertionError(f"WB supplies columns must expose new overlay contract, got {actual_columns}")
                 row1001_text = _normalize_ui_text(
                     operator_frame.locator("#wbSuppliesTableBody tr", has_text="1001").inner_text()
@@ -136,32 +144,65 @@ def main() -> None:
                 if "Seller Portal" in row1001_text:
                     raise AssertionError(f"transit cell must show per-unit instead of Seller Portal source label: {row1001_text}")
 
-                operator_frame.get_by_role("button", name="Fulfillment", exact=True).click()
+                fulfillment_tab.click()
+                operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete]").first.click()
+                expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text(
+                    "Удалить документ? Данные услуг фулфилмента по связанным WB-поставкам будут удалены из системы.",
+                    timeout=10000,
+                )
+                operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete-cancel]").first.click()
+                expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text("fulfillment-ok.xlsx")
+                if operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete-confirm]").count() != 0:
+                    raise AssertionError("cancel must close Fulfillment delete confirmation")
+                operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete]").first.click()
+                operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete-confirm]").first.click()
+                expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text("Загруженных документов пока нет", timeout=10000)
+                if "fulfillment-ok.xlsx" in operator_frame.locator("#fulfillmentUploadsBody").inner_text():
+                    raise AssertionError("deleted accepted document must disappear from accepted table")
+                pdf_after_delete_status, _, _ = _get_bytes(
+                    f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}/payment-validation.pdf"
+                )
+                if pdf_after_delete_status != 404:
+                    raise AssertionError(f"deleted upload PDF must be unavailable, got HTTP {pdf_after_delete_status}")
+                operator_frame.get_by_role("button", name="Wildberries", exact=True).click()
+                operator_frame.locator("#wbSuppliesSizeFilterSelect").select_option("all")
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1001", timeout=10000)
+                row1001_after_delete = _normalize_ui_text(
+                    operator_frame.locator("#wbSuppliesTableBody tr", has_text="1001").inner_text()
+                )
+                if "1 575 ₽" in row1001_after_delete or "157,50 ₽/шт" in row1001_after_delete:
+                    raise AssertionError(f"deleted upload must disappear from WB overlay: {row1001_after_delete}")
+                if "200 ₽" not in row1001_after_delete or "20 ₽/шт" not in row1001_after_delete:
+                    raise AssertionError(f"transit amount/per-unit must remain after Fulfillment delete: {row1001_after_delete}")
+
+                fulfillment_tab.click()
                 unmatched_xlsx_path = Path(tmp) / "fulfillment-unmatched.xlsx"
                 _fill_downloaded_template(template_path, unmatched_xlsx_path, [_valid_row("9999")])
                 operator_frame.locator("#fulfillmentFileInput").set_input_files(str(unmatched_xlsx_path))
-                expect(operator_frame.locator("#fulfillmentServicesMessage")).to_contain_text("Fulfillment upload failed", timeout=10000)
-                expect(operator_frame.locator("#fulfillmentServicesSummary")).to_contain_text("Status: failed")
+                expect(operator_frame.locator("#fulfillmentServicesMessage")).to_contain_text(
+                    "Документ не принят. Исправьте ошибки и загрузите файл заново.",
+                    timeout=10000,
+                )
                 expect(operator_frame.locator("#fulfillmentErrorsBody")).to_contain_text("9999")
-                expect(operator_frame.locator("#fulfillmentErrorsBody")).to_contain_text("does not match cached WB supply")
-                if operator_frame.locator("#fulfillmentLatestSummary a").count() != 0:
-                    raise AssertionError("failed unmatched upload must not expose latest PDF link")
+                expect(operator_frame.locator("#fulfillmentErrorsBody")).to_contain_text("не найдена в WB-поставках")
+                if "fulfillment-unmatched.xlsx" in operator_frame.locator("#fulfillmentUploadsBody").inner_text():
+                    raise AssertionError("failed unmatched upload must not enter accepted table")
 
                 duplicate_xlsx_path = Path(tmp) / "fulfillment-duplicate.xlsx"
                 _fill_downloaded_template(template_path, duplicate_xlsx_path, [_valid_row("1001"), _valid_row("1001")])
                 operator_frame.locator("#fulfillmentFileInput").set_input_files(str(duplicate_xlsx_path))
-                expect(operator_frame.locator("#fulfillmentServicesMessage")).to_contain_text("Fulfillment upload failed", timeout=10000)
-                expect(operator_frame.locator("#fulfillmentServicesSummary")).to_contain_text("Status: failed")
-                expect(operator_frame.locator("#fulfillmentErrorsBody")).to_contain_text("Duplicate")
-                if operator_frame.locator("#fulfillmentLatestSummary a").count() != 0:
-                    raise AssertionError("failed duplicate upload must not expose latest PDF link")
+                expect(operator_frame.locator("#fulfillmentServicesMessage")).to_contain_text(
+                    "Документ не принят. Исправьте ошибки и загрузите файл заново.",
+                    timeout=10000,
+                )
+                expect(operator_frame.locator("#fulfillmentErrorsBody")).to_contain_text("дублируется номер поставки 1001")
+                if "fulfillment-duplicate.xlsx" in operator_frame.locator("#fulfillmentUploadsBody").inner_text():
+                    raise AssertionError("failed duplicate upload must not enter accepted table")
 
                 wb_status, wb_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search=1001&size_filter=all")
                 wb_row = (wb_payload.get("rows") or [{}])[0]
-                if wb_status != 200 or wb_row.get("fulfillment_amount_with_vat_total") != 1575.0:
-                    raise AssertionError(f"failed uploads must not alter approved WB overlay, got {wb_status} {wb_payload}")
-                if "₽/шт" not in str(wb_row.get("fulfillment_per_unit_display") or ""):
-                    raise AssertionError(f"approved fulfillment overlay must keep per-unit display, got {wb_row}")
+                if wb_status != 200 or wb_row.get("fulfillment_amount_with_vat_total") is not None:
+                    raise AssertionError(f"failed/deleted uploads must not alter approved WB overlay, got {wb_status} {wb_payload}")
 
                 browser.close()
         finally:

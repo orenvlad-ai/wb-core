@@ -3,8 +3,8 @@ title: "Модуль: fulfillment_services_block"
 doc_id: "WB-CORE-MODULE-39-FULFILLMENT-SERVICES-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для `Поставки -> Fulfillment`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату и overlay расходов Fulfillment в `Поставки -> Wildberries`."
-scope: "Operator supply contour for Fulfillment service expenses only: PNG-derived XLSX template, protected HTTP routes, openpyxl parser, SQLite upload/line persistence, PDF payment-validation artifact, approved-only WB supplies overlay. Final product cost, 1C cost truth, ЕБД metric truth and global cost-source switching are out of scope."
+purpose: "Зафиксировать canonical contract для `Поставки -> Услуги фулфилмента`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату, accepted-only documents table, delete flow and overlay расходов фулфилмента в `Поставки -> Wildberries`."
+scope: "Operator supply contour for Fulfillment service expenses only: PNG-derived XLSX template, protected HTTP routes, openpyxl parser, SQLite upload/line persistence with soft-delete, PDF payment-validation artifact, accepted-only UI list and approved-only WB supplies overlay. Final product cost, 1C cost truth, ЕБД metric truth and global cost-source switching are out of scope."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
@@ -25,6 +25,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}"
+  - "DELETE /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}/payment-validation.pdf"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies"
 related_runners:
@@ -38,21 +39,20 @@ related_docs:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Fulfillment uploads are server-owned runtime truth for uploaded service-expense files and payment validation only. They are not official WB evidence, not 1C cost truth, not ЕБД metric truth and not final товарная себестоимость. Only fully valid uploads generate a stable payment_validation_id/PDF and enter the approved WB supplies overlay."
+update_note: "Fulfillment uploads are server-owned runtime truth for uploaded service-expense files and payment validation only. They are not official WB evidence, not 1C cost truth, not ЕБД metric truth and not final товарная себестоимость. The operator UI is user-facing as `Услуги фулфилмента`, shows only accepted uploads in `Загруженные документы`, keeps failed uploads out of the accepted list/overlay, and soft-deletes accepted uploads so their PDF and WB supplies overlay amounts become unavailable."
 ---
 
 # 1. Contract
 
-`Поставки` exposes a new inner section `Fulfillment`.
+`Поставки` exposes the inner section `Услуги фулфилмента`.
 
 The section is server-owned/runtime-backed and contains:
 - `Скачать шаблон`;
 - `Загрузить заполненный файл`;
-- latest upload status;
-- upload list;
-- row-level validation errors;
-- upload totals;
-- PDF-виза link only for fully valid uploads.
+- one accepted-documents block `Загруженные документы`;
+- an accepted-only table with `Дата загрузки`, source filename, row counts, totals, PDF link and delete action;
+- compact row-level validation errors only after a failed upload;
+- PDF-виза link only for fully valid, non-deleted uploads.
 
 Browser `localStorage`, Google Sheets/GAS and legacy project packs are not source of truth for this contour.
 
@@ -167,9 +167,14 @@ Routes:
 - `GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads`;
 - `GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}`.
 
-List returns latest uploads, status, totals, row counts, payment validation id when available, PDF availability and timestamps.
+List returns non-deleted accepted uploads only (`validation_status=ok`) with totals, row counts, PDF availability and timestamps. Failed uploads may remain in DB for diagnostics, but they are not accepted documents and are not returned to the operator accepted-documents table.
 
-Detail returns upload metadata, parsed lines, row errors, validation status, totals and PDF link/status.
+Detail returns upload metadata, parsed lines, row errors, validation status, totals and PDF link/status for non-deleted uploads.
+
+Delete route:
+- `DELETE /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}`.
+
+Delete is protected by the same supply-operator auth boundary. The current implementation soft-deletes the upload by setting `deleted_at`, `deleted_by` and `delete_reason`, clears/removes the generated PDF path, and keeps source XLSX/line evidence in runtime storage for diagnostics. Deleted uploads are excluded from accepted list/detail/PDF download and from WB supplies overlay. The delete action does not delete WB supplies cache, official WB evidence, Seller Portal transit enrichment, transit costs, 1C/ЕБД data or final cost data.
 
 # 7. WB Supplies Overlay
 
@@ -177,11 +182,11 @@ Detail returns upload metadata, parsed lines, row errors, validation status, tot
 
 Table changes:
 - old column `Стоимость` is renamed to `Транзит`;
-- new column `Услуги fulfillment` is added.
+- new column `Услуги фулфилмента` is added.
 
 `Транзит` shows the current transit/effective cost amount plus `₽/шт`. It does not place source labels such as `Seller Portal` under the amount; those labels stay backend provenance fields.
 
-`Услуги fulfillment` shows approved `amount_with_vat` plus `₽/шт`; supplies without approved matched Fulfillment lines show `—`.
+`Услуги фулфилмента` shows approved `amount_with_vat` plus `₽/шт`; supplies without approved matched active Fulfillment lines show `—`.
 
 Denominator priority for per-unit display:
 1. accepted quantity / accepted goods total;
@@ -189,7 +194,7 @@ Denominator priority for per-unit display:
 3. planned/added quantity with preliminary marker;
 4. missing or zero denominator -> `₽/шт —`.
 
-Only uploads with `validation_status=ok` and matched lines enter the overlay. Failed, unmatched and duplicate uploads are excluded.
+Only active uploads with `validation_status=ok`, `deleted_at IS NULL` and matched lines enter the overlay. Failed, unmatched, duplicate and deleted uploads are excluded.
 
 # 8. Smokes
 
@@ -202,6 +207,13 @@ Targeted smokes:
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
 
 The browser smoke uses an isolated temporary runtime SQLite DB, seeds bounded WB supplies cache rows, downloads the template through UI, fills the downloaded XLSX, uploads OK/unmatched/duplicate workbooks through UI, verifies PDF text, and verifies the WB supplies overlay.
+
+Current smoke expectations also cover:
+- accepted uploads appear in `Загруженные документы`;
+- failed uploads do not appear in the accepted table;
+- delete requires UI confirmation;
+- cancel keeps the accepted document;
+- confirm soft-deletes the accepted document, makes its PDF unavailable and removes its Fulfillment amounts/per-unit values from `Поставки -> Wildberries`.
 
 # 9. Explicit Non-Scope
 

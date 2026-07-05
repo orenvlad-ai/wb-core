@@ -2291,6 +2291,9 @@ class RegistryUploadHttpEntrypoint:
     def handle_fulfillment_services_upload_detail_request(self, upload_id: str) -> dict[str, Any]:
         return self.fulfillment_services_block.get_upload(upload_id)
 
+    def handle_fulfillment_services_upload_delete_request(self, upload_id: str) -> dict[str, Any]:
+        return self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
+
     def handle_fulfillment_services_payment_validation_pdf_request(
         self,
         upload_id: str,

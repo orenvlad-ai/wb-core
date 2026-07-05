@@ -90,7 +90,7 @@ SCHEMA_COLUMNS = [
     {"key": "quantities", "label": "Добавлено, шт / Упаковано → Принято"},
     {"key": "acceptance_coefficient", "label": "Коэф. приёмки"},
     {"key": "transit_cost", "label": "Транзит"},
-    {"key": "fulfillment_services", "label": "Услуги fulfillment"},
+    {"key": "fulfillment_services", "label": "Услуги фулфилмента"},
 ]
 
 

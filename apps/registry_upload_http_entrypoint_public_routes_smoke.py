@@ -102,6 +102,13 @@ def main() -> None:
     missing = sorted(required_paths - route_paths)
     if missing:
         raise AssertionError(f"public route allowlist missing required paths: {missing}")
+    fulfillment_upload_prefix = next(
+        route
+        for route in routes
+        if route["path"] == "/v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/"
+    )
+    if {"GET", "DELETE"} - set(fulfillment_upload_prefix.get("methods") or []):
+        raise AssertionError(f"Fulfillment upload item prefix must publish GET/DELETE, got {fulfillment_upload_prefix}")
 
     rendered = hosted_runtime.render_nginx_public_route_block(
         manifest,

@@ -192,10 +192,12 @@ class FulfillmentServicesBlock:
                 f"""
                 SELECT *
                 FROM {UPLOADS_TABLE}
+                WHERE validation_status = ?
+                  AND deleted_at IS NULL
                 ORDER BY uploaded_at DESC, created_at DESC, upload_id DESC
                 LIMIT ?
                 """,
-                (normalized_limit,),
+                (VALIDATION_OK, normalized_limit),
             ).fetchall()
         uploads = [_upload_row_to_dict(row, include_links=True) for row in rows]
         latest = uploads[0] if uploads else None
@@ -208,6 +210,7 @@ class FulfillmentServicesBlock:
                 "returned_uploads": len(uploads),
                 "latest_status": latest.get("validation_status") if latest else "",
                 "latest_upload_id": latest.get("upload_id") if latest else "",
+                "accepted_uploads": len(uploads),
             },
         }
 
@@ -218,7 +221,7 @@ class FulfillmentServicesBlock:
         with self._connect() as conn:
             _ensure_schema(conn)
             upload_row = conn.execute(
-                f"SELECT * FROM {UPLOADS_TABLE} WHERE upload_id = ?",
+                f"SELECT * FROM {UPLOADS_TABLE} WHERE upload_id = ? AND deleted_at IS NULL",
                 (normalized_id,),
             ).fetchone()
             if upload_row is None:
@@ -272,6 +275,80 @@ class FulfillmentServicesBlock:
         filename = f"fulfillment-payment-validation-{upload['upload_id']}.pdf"
         return pdf_path.read_bytes(), filename, PDF_CONTENT_TYPE
 
+    def delete_upload(
+        self,
+        upload_id: str,
+        *,
+        deleted_by: str = "",
+        delete_reason: str = "operator_delete",
+    ) -> dict[str, Any]:
+        normalized_id = str(upload_id or "").strip()
+        if not normalized_id:
+            raise ValueError("upload_id is required")
+        now = self.timestamp_factory()
+        pdf_file_path = ""
+        already_deleted = False
+        with self._connect() as conn:
+            _ensure_schema(conn)
+            upload_row = conn.execute(
+                f"SELECT * FROM {UPLOADS_TABLE} WHERE upload_id = ?",
+                (normalized_id,),
+            ).fetchone()
+            if upload_row is None:
+                raise ValueError(f"Fulfillment upload not found: {normalized_id}")
+            pdf_file_path = str(upload_row["pdf_file_path"] or "")
+            already_deleted = bool(upload_row["deleted_at"])
+            if already_deleted:
+                deleted_at = str(upload_row["deleted_at"] or "")
+                if pdf_file_path:
+                    conn.execute(
+                        f"""
+                        UPDATE {UPLOADS_TABLE}
+                        SET pdf_file_path = '',
+                            updated_at = ?
+                        WHERE upload_id = ?
+                        """,
+                        (now, normalized_id),
+                    )
+            else:
+                deleted_at = now
+                conn.execute(
+                    f"""
+                    UPDATE {UPLOADS_TABLE}
+                    SET deleted_at = ?,
+                        deleted_by = ?,
+                        delete_reason = ?,
+                        pdf_file_path = '',
+                        updated_at = ?
+                    WHERE upload_id = ?
+                    """,
+                    (
+                        deleted_at,
+                        str(deleted_by or "").strip(),
+                        str(delete_reason or "").strip(),
+                        now,
+                        normalized_id,
+                    ),
+                )
+            conn.commit()
+        if pdf_file_path:
+            try:
+                self._runtime_path(pdf_file_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "upload_id": normalized_id,
+            "deleted": True,
+            "already_deleted": already_deleted,
+            "deleted_at": deleted_at,
+            "soft_deleted": True,
+            "lines_deactivated": True,
+            "pdf_available": False,
+            "message": "Документ удалён. Данные услуг фулфилмента удалены из overlay WB-поставок.",
+        }
+
     def approved_overlay_by_supply(self) -> dict[str, dict[str, Any]]:
         with self._connect() as conn:
             _ensure_schema(conn)
@@ -281,6 +358,7 @@ class FulfillmentServicesBlock:
                 FROM {LINES_TABLE} AS line
                 JOIN {UPLOADS_TABLE} AS upload ON upload.upload_id = line.upload_id
                 WHERE upload.validation_status = ?
+                  AND upload.deleted_at IS NULL
                   AND line.match_status = ?
                 ORDER BY upload.uploaded_at ASC, line.row_index ASC
                 """,
@@ -810,6 +888,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             amount_with_vat_total REAL NOT NULL DEFAULT 0,
             payment_validation_id TEXT,
             pdf_file_path TEXT,
+            deleted_at TEXT,
+            deleted_by TEXT,
+            delete_reason TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -855,6 +936,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON {LINES_TABLE}(matched_wb_supply_id, matched_wb_cache_key, match_status);
         """
     )
+    existing_upload_columns = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({UPLOADS_TABLE})").fetchall()
+    }
+    for column_name, column_sql in {
+        "deleted_at": "TEXT",
+        "deleted_by": "TEXT",
+        "delete_reason": "TEXT",
+    }.items():
+        if column_name not in existing_upload_columns:
+            conn.execute(f"ALTER TABLE {UPLOADS_TABLE} ADD COLUMN {column_name} {column_sql}")
 
 
 def _upload_row_to_dict(row: sqlite3.Row, *, include_links: bool = False) -> dict[str, Any]:
@@ -874,7 +966,10 @@ def _upload_row_to_dict(row: sqlite3.Row, *, include_links: bool = False) -> dic
         "amount_with_vat_total": row["amount_with_vat_total"],
         "payment_validation_id": row["payment_validation_id"] or "",
         "pdf_file_path": row["pdf_file_path"] or "",
-        "pdf_available": bool(row["pdf_file_path"] and row["validation_status"] == VALIDATION_OK),
+        "deleted_at": row["deleted_at"] or "",
+        "deleted_by": row["deleted_by"] or "",
+        "delete_reason": row["delete_reason"] or "",
+        "pdf_available": bool(row["pdf_file_path"] and row["validation_status"] == VALIDATION_OK and not row["deleted_at"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
