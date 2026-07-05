@@ -178,13 +178,14 @@ def main() -> None:
             second_sync.get("new_rows") != 0
             or second_sync.get("changed_rows") != 0
             or second_sync.get("unchanged_rows") != 2
-            or second_sync.get("enriched") != 1
-            or second_sync.get("enriched_active_rows") != 1
-            or second_sync.get("upserted_count") != 1
+            or second_sync.get("enriched") != 0
+            or second_sync.get("enriched_active_rows") != 0
+            or second_sync.get("refreshed_recent_historical_rows") != 0
+            or second_sync.get("upserted_count") != 0
         ):
-            raise AssertionError(f"second incremental must reconcile active planned rows only, got {second_sync}")
-        if source.detail_calls != ["7002"] or source.goods_calls != ["7002"]:
-            raise AssertionError(f"second incremental must refresh active planned detail/goods, got {source.detail_calls} {source.goods_calls}")
+            raise AssertionError(f"second incremental must skip unchanged already-enriched rows, got {second_sync}")
+        if source.detail_calls or source.goods_calls:
+            raise AssertionError(f"second incremental must not refresh unchanged rows, got {source.detail_calls} {source.goods_calls}")
         source.detail_calls.clear()
         source.goods_calls.clear()
 
@@ -196,6 +197,7 @@ def main() -> None:
             changed_sync.get("changed_rows") != 1
             or changed_sync.get("unchanged_rows") != 1
             or changed_sync.get("enriched") != 1
+            or changed_sync.get("refreshed_recent_historical_rows") != 1
             or source.detail_calls != ["7002"]
         ):
             raise AssertionError(f"changed row must be upserted/enriched only once, got {changed_sync}")
@@ -289,28 +291,29 @@ def main() -> None:
         latest_sync = latest.get("sync", {})
         if (
             latest_sync.get("new_rows") != 0
-            or latest_sync.get("changed_rows") != 1
-            or latest_sync.get("unchanged_rows") != 1
+            or latest_sync.get("changed_rows") != 2
+            or latest_sync.get("unchanged_rows") != 0
             or latest_sync.get("changed_active_rows") != 1
             or latest_sync.get("enriched_active_rows") != 1
-            or latest_sync.get("enriched") != 1
-            or latest_sync.get("upserted_count") != 1
-            or source.detail_calls != ["7002"]
-            or source.goods_calls != ["7002"]
+            or latest_sync.get("refreshed_recent_historical_rows") != 1
+            or latest_sync.get("enriched") != 2
+            or latest_sync.get("upserted_count") != 2
+            or source.detail_calls != ["7001", "7002"]
+            or source.goods_calls != ["7001", "7002"]
         ):
-            raise AssertionError(f"default incremental must reconcile active missing-critical rows only, got {latest_sync}")
+            raise AssertionError(f"default incremental must reconcile active and recent historical missing rows, got {latest_sync}")
         source.detail_calls.clear()
         source.goods_calls.clear()
 
         explicit = block.sync_supplies({"limit": 1000, "enrich": "missing_critical"})
         explicit_sync = explicit.get("sync", {})
         if (
-            explicit_sync.get("changed_rows") != 1
-            or explicit_sync.get("enriched") != 2
-            or source.detail_calls != ["7001", "7002"]
-            or source.goods_calls != ["7001", "7002"]
+            explicit_sync.get("unchanged_rows") != 2
+            or explicit_sync.get("enriched") != 0
+            or source.detail_calls
+            or source.goods_calls
         ):
-            raise AssertionError(f"explicit missing-critical enrichment must enrich missing rows, got {explicit_sync}")
+            raise AssertionError(f"explicit missing-critical enrichment must skip already repaired rows, got {explicit_sync}")
 
     print("wb_supplies_incremental_sync_smoke: OK")
 
@@ -320,7 +323,7 @@ def _timestamp_factory():
 
     def _next() -> str:
         counter["value"] += 1
-        return f"2026-06-10T01:00:{counter['value']:02d}Z"
+        return f"2026-06-10T15:00:{counter['value']:02d}Z"
 
     return _next
 

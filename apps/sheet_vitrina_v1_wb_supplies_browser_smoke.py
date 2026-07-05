@@ -133,7 +133,12 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003")
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("3 333 ₽", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("Seller Portal", timeout=10000)
-                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки обновлены. Стоимость транзита обновлена: 1.", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки WB обновлены. Стоимость транзита: success 1.", timeout=10000)
+                status_classes = operator_frame.locator(".wb-supplies-status-pill").evaluate_all(
+                    "(nodes) => Array.from(new Set(nodes.map((node) => Array.from(node.classList).filter((item) => item.startsWith('is-status-')).join(' ')).filter(Boolean))).sort()"
+                )
+                if "is-status-3" not in status_classes or "is-status-5" not in status_classes:
+                    raise AssertionError(f"WB supplies status pills must use distinct official status classes, got {status_classes}")
                 if fake_transit_cost_source.calls != [["1003"]]:
                     raise AssertionError(f"refresh click must call transit enrichment after official sync only for 1003, got {fake_transit_cost_source.calls}")
                 expect(operator_frame.locator("#wbSuppliesSummary")).to_contain_text("Скрыто размером: 3")
@@ -163,7 +168,7 @@ def main() -> None:
                 operator_frame.locator("#wbSuppliesRefreshButton").click()
                 expect(operator_frame.locator("#wbSuppliesSearchInput")).to_have_value("1003", timeout=10000)
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("1003", timeout=10000)
-                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки обновлены. Транзитная стоимость не требовала обновления.", timeout=10000)
+                expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text("Поставки WB обновлены. Стоимость транзита: не требовала обновления.", timeout=10000)
 
                 transit_mode = {"kind": ""}
 
@@ -243,14 +248,14 @@ def main() -> None:
                 transit_mode["kind"] = "session_expired"
                 operator_frame.locator("#wbSuppliesRefreshButton").click()
                 expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text(
-                    "Поставки обновлены. Стоимость транзита не обновилась: Seller-сессия протухла. Восстановите сессию в блоке «Действия и состояния».",
+                    "Поставки WB обновлены. Стоимость транзита: session_expired. Восстановите Seller-сессию в блоке «Действия и состояния».",
                     timeout=10000,
                 )
 
                 transit_mode["kind"] = "lock_busy"
                 operator_frame.locator("#wbSuppliesRefreshButton").click()
                 expect(operator_frame.locator("#wbSuppliesMessage")).to_contain_text(
-                    "Поставки обновлены. Стоимость транзита не запущена: другой Seller Portal процесс уже выполняется.",
+                    "Поставки WB обновлены. Стоимость транзита: lock_busy, другой Seller Portal процесс уже выполняется.",
                     timeout=10000,
                 )
 

@@ -31,6 +31,7 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypoint,
     _sanitize_auto_update_reason,
 )
+from packages.adapters.wb_supplies import WbSuppliesListResult  # noqa: E402
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope  # noqa: E402
@@ -101,6 +102,62 @@ class OnecCountingBlock:
             stage_count=1,
         )
         return SimpleNamespace(result=payload)
+
+
+class AutoWbSuppliesSource:
+    def __init__(self) -> None:
+        self.list_calls: list[list[int]] = []
+
+    def fetch_warehouses(self):
+        return [{"ID": 507, "name": "Коледино"}]
+
+    def fetch_marketplace_offices(self):
+        return [{"name": "Коледино", "federalDistrict": "Центральный федеральный округ"}]
+
+    def fetch_box_tariffs(self, *, tariff_date=None):
+        return []
+
+    def list_supplies(self, *, limit=100, offset=0, status_ids=None, dates=None):
+        statuses = [int(item) for item in status_ids or []]
+        self.list_calls.append(statuses)
+        row = {
+            "supplyID": 7701,
+            "preorderID": 8701,
+            "supplyDate": "2026-04-15T00:00:00+03:00",
+            "updatedDate": "2026-04-13T12:00:00+03:00",
+            "statusID": 2,
+            "warehouseID": 507,
+            "warehouseName": "Коледино",
+            "quantity": 120,
+        }
+        rows = [row] if not statuses or 2 in set(statuses) else []
+        return WbSuppliesListResult(
+            rows=rows[offset : offset + limit],
+            raw_count=len(rows[offset : offset + limit]),
+            limit=limit,
+            offset=offset,
+            status_ids=statuses,
+            dates=list(dates or []),
+        )
+
+    def fetch_supply_details(self, supply_id, *, is_preorder_id=False):
+        return {
+            "supplyID": int(supply_id),
+            "statusID": 2,
+            "warehouseID": 507,
+            "warehouseName": "Коледино",
+            "actualWarehouseID": 507,
+            "actualWarehouseName": "Коледино",
+            "quantity": 120,
+            "acceptedQuantity": 0,
+            "acceptanceCost": 0,
+        }
+
+    def fetch_supply_goods(self, supply_id, *, limit=1000, offset=0, is_preorder_id=False):
+        return [{"nmID": 210183919, "quantity": 120, "acceptedQuantity": 0}][offset : offset + limit]
+
+    def fetch_supply_package(self, supply_id):
+        return []
 
 
 class FakeSheetLoadRunner:
@@ -181,6 +238,12 @@ def main() -> None:
             now_factory=lambda: SERVER_NOW,
             sheet_load_runner=load_runner,
         )
+        fake_wb_supplies_source = AutoWbSuppliesSource()
+        entrypoint.wb_supplies_block.source = fake_wb_supplies_source
+        entrypoint._maybe_start_wb_supplies_auto_transit_cost_enrichment = lambda *, log: {
+            "status": "skipped_session_not_valid",
+            "warning": "session_missing",
+        }
         entrypoint.sheet_plan_block = SheetVitrinaV1LivePlanBlock(
             runtime=runtime,
             now_factory=lambda: SERVER_NOW,
@@ -254,6 +317,17 @@ def main() -> None:
             refresh_reason = str(refresh_payload.get("semantic_reason") or "")
             if "legacy Google Sheets load: archived / not executed" in refresh_reason:
                 raise AssertionError(f"archived legacy load must not pollute auto-refresh reason: {refresh_reason}")
+            wb_auto = refresh_payload.get("wb_supplies_auto_sync") or {}
+            wb_official = wb_auto.get("official_sync") or {}
+            if (
+                refresh_payload.get("wb_supplies_auto_sync_status") != "warning"
+                or wb_official.get("status") != "success"
+                or wb_official.get("new_rows") != 1
+                or (wb_auto.get("transit_cost") or {}).get("status") != "skipped_session_not_valid"
+                or [1, 2, 3, 4] not in fake_wb_supplies_source.list_calls
+                or [5, 6] not in fake_wb_supplies_source.list_calls
+            ):
+                raise AssertionError(f"auto_refresh must run WB supplies official sync as nonfatal stage, got {wb_auto}")
             _assert_counting_calls(counters)
             plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=AS_OF_DATE)
             status_rows = {
@@ -291,6 +365,9 @@ def main() -> None:
                 )
             if (server_context.get("last_auto_run_result") or {}).get("snapshot_id") != refresh_payload.get("snapshot_id"):
                 raise AssertionError(f"auto_refresh must persist the refresh-only auto result, got {server_context}")
+            persisted_wb = (server_context.get("last_auto_run_result") or {}).get("wb_supplies_auto_sync") or {}
+            if (persisted_wb.get("official_sync") or {}).get("status") != "success":
+                raise AssertionError(f"status context must persist WB supplies auto sync diagnostics, got {persisted_wb}")
             if status_payload.get("manual_context") != _expected_manual_context():
                 raise AssertionError("status must keep manual timestamps empty after refresh-only daily path")
             schedules_by_id = {

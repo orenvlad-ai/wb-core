@@ -3172,6 +3172,42 @@
       color: var(--warning-text);
     }
 
+    .wb-supplies-status-pill.is-status-1 {
+      border-color: rgba(148, 163, 184, 0.28);
+      background: rgba(51, 65, 85, 0.22);
+      color: #cbd5e1;
+    }
+
+    .wb-supplies-status-pill.is-status-2 {
+      border-color: rgba(96, 165, 250, 0.30);
+      background: rgba(30, 64, 175, 0.20);
+      color: #bfdbfe;
+    }
+
+    .wb-supplies-status-pill.is-status-3 {
+      border-color: rgba(129, 140, 248, 0.34);
+      background: rgba(67, 56, 202, 0.22);
+      color: #c7d2fe;
+    }
+
+    .wb-supplies-status-pill.is-status-4 {
+      border-color: rgba(251, 146, 60, 0.36);
+      background: rgba(154, 52, 18, 0.22);
+      color: #fed7aa;
+    }
+
+    .wb-supplies-status-pill.is-status-5 {
+      border-color: rgba(34, 197, 94, 0.32);
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    .wb-supplies-status-pill.is-status-6 {
+      border-color: rgba(45, 212, 191, 0.34);
+      background: rgba(15, 118, 110, 0.22);
+      color: #99f6e4;
+    }
+
     .wb-supplies-empty {
       padding: 28px 12px;
       color: var(--muted);
@@ -7274,26 +7310,51 @@
       function reconcileSelectedWbSupplyIdsWithOptions(payload) {
         const rawOptions = Array.isArray(payload && payload.options) ? payload.options : [];
         if (!rawOptions.length) {
-          return;
+          return { dropped: [] };
         }
         const eligible = new Set(overlayEligibleOptions(payload).map((item) => String(item.supply_id || "").trim()).filter(Boolean));
         const next = selectedWbSupplyIds.filter((id) => eligible.has(id));
+        const dropped = selectedWbSupplyIds.filter((id) => !eligible.has(id));
         if (next.length !== selectedWbSupplyIds.length) {
           selectedWbSupplyIds = next;
           persistWbSupplyOverlaySelection();
         }
+        return { dropped };
       }
 
       async function loadWbSupplyOverlayOptions(options) {
         if (!config.wb_supplies_overlay_options_path || wbSupplyOverlayLoading) {
           return;
         }
+        const syncFirst = Boolean(options && options.syncFirst);
         wbSupplyOverlayLoading = true;
         updateWbSupplyOverlayButtons();
         if (!options || !options.silent) {
-          setWbSupplyOverlayMessage("Читаем WB-поставки для расчёта...", "");
+          setWbSupplyOverlayMessage(syncFirst ? "Обновляем WB-поставки для расчёта..." : "Читаем WB-поставки для расчёта...", "");
         }
         try {
+          if (syncFirst) {
+            if (!config.wb_supplies_sync_path) {
+              throw new Error("route WB supplies sync не настроен");
+            }
+            const syncResponse = await fetch(config.wb_supplies_sync_path, {
+              method: "POST",
+              headers: { "Accept": "application/json", "Content-Type": "application/json" },
+              body: JSON.stringify({
+                mode: "incremental_refresh",
+                limit: 1000,
+                enrich: "changed_only",
+                list_params: currentWbSuppliesListParams()
+              })
+            });
+            const syncPayload = await readJson(syncResponse);
+            if (!syncResponse.ok) {
+              throw new Error(valueOrDash(syncPayload.error) + " (HTTP " + syncResponse.status + ")");
+            }
+            if (config.wb_supplies_path) {
+              await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
+            }
+          }
           const response = await fetch(config.wb_supplies_overlay_options_path, {
             method: "GET",
             headers: { "Accept": "application/json" }
@@ -7303,18 +7364,21 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           wbSupplyOverlayOptionsPayload = payload;
-          reconcileSelectedWbSupplyIdsWithOptions(payload);
+          const selectionReconcile = reconcileSelectedWbSupplyIdsWithOptions(payload);
           renderWbSupplyOverlayOptions(payload);
           const summary = payload.summary || {};
           const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
           const warningDetails = payload.warning_details && typeof payload.warning_details === "object" ? payload.warning_details : {};
           const unmappedCount = Number(warningDetails.unmapped_warehouse_count || summary.unmapped_warehouse_count || 0);
+          const droppedCount = Array.isArray(selectionReconcile.dropped) ? selectionReconcile.dropped.length : 0;
           renderWbSupplyOverlayWarnings(payload);
           setWbSupplyOverlayMessage(
-            "Доступно к расчёту: " + valueOrDash(summary.eligible) +
+            (syncFirst ? "WB-поставки обновлены. " : "") +
+              "Доступно к расчёту: " + valueOrDash(summary.eligible) +
               " / всего " + valueOrDash(summary.total) +
-              (warnings.length ? ". Есть warnings: " + (unmappedCount > 0 ? unmappedCount + " складов без ФО" : warnings.length) + "." : "."),
-            warnings.length ? "warning" : ""
+              (warnings.length ? ". Есть warnings: " + (unmappedCount > 0 ? unmappedCount + " складов без ФО" : warnings.length) + "." : ".") +
+              (droppedCount ? " Выбор обновлён: снято stale/invalid " + droppedCount + "." : ""),
+            warnings.length || droppedCount ? "warning" : ""
           );
         } catch (error) {
           wbSupplyOverlayOptionsPayload = null;
@@ -9330,7 +9394,7 @@
             return;
           }
           const sync = payload.sync || {};
-          const syncMessage = "Поставки: готово, new " + valueOrDash(sync.new_rows) +
+          const syncMessage = "Поставки WB обновлены: new " + valueOrDash(sync.new_rows) +
             ", changed " + valueOrDash(sync.changed_rows) +
             ", unchanged " + valueOrDash(sync.unchanged_rows) +
             ", enriched " + valueOrDash(sync.enriched) + ".";
@@ -9343,7 +9407,7 @@
           }
           wbSuppliesSyncing = false;
           updateWbSuppliesBusyState();
-          setWbSuppliesMessage("Поставки: готово. Стоимость транзита: обновление...", syncTone);
+          setWbSuppliesMessage("Поставки WB обновлены. Стоимость транзита: обновление...", syncTone);
           const transitResult = await startWbSuppliesTransitCostEnrichment({ afterOfficialSync: true });
           const finalCopy = wbSuppliesUnifiedRefreshMessage(transitResult);
           setWbSuppliesMessage(finalCopy.message, finalCopy.tone || syncTone);
@@ -9611,32 +9675,32 @@
         const failedCount = Number(run.failed_count || 0);
         const notFoundCount = Number(run.not_found_count || 0);
         if (kind === "success") {
-          return { message: "Поставки обновлены. Стоимость транзита обновлена: " + valueOrDash(successCount) + ".", tone: "" };
+          return { message: "Поставки WB обновлены. Стоимость транзита: success " + valueOrDash(successCount) + ".", tone: "" };
         }
         if (kind === "no_candidates") {
-          return { message: "Поставки обновлены. Транзитная стоимость не требовала обновления.", tone: "" };
+          return { message: "Поставки WB обновлены. Стоимость транзита: не требовала обновления.", tone: "" };
         }
         if (kind === "session_expired") {
           return {
-            message: "Поставки обновлены. Стоимость транзита не обновилась: Seller-сессия протухла. Восстановите сессию в блоке «Действия и состояния».",
+            message: "Поставки WB обновлены. Стоимость транзита: session_expired. Восстановите Seller-сессию в блоке «Действия и состояния».",
             tone: "warning"
           };
         }
         if (kind === "lock_busy") {
           return {
-            message: "Поставки обновлены. Стоимость транзита не запущена: другой Seller Portal процесс уже выполняется.",
+            message: "Поставки WB обновлены. Стоимость транзита: lock_busy, другой Seller Portal процесс уже выполняется.",
             tone: "warning"
           };
         }
         if (kind === "partial") {
           return {
-            message: "Поставки обновлены. Стоимость транзита обновилась частично: success " + valueOrDash(successCount) +
+            message: "Поставки WB обновлены. Стоимость транзита: partial, success " + valueOrDash(successCount) +
               ", failed " + valueOrDash(failedCount) + ", not found " + valueOrDash(notFoundCount) + ".",
             tone: "warning"
           };
         }
         return {
-          message: "Поставки обновлены. Стоимость транзита не обновилась" +
+          message: "Поставки WB обновлены. Стоимость транзита: failed" +
             (result && result.error ? ": " + result.error : "."),
           tone: "warning"
         };
@@ -9875,7 +9939,8 @@
           return;
         }
         wbSuppliesTableBody.innerHTML = rows.map((row) => {
-          const statusTone = row.status_tone ? " is-" + row.status_tone : "";
+          const statusToneValue = row.status_visual_tone || row.status_class || row.status_tone || "";
+          const statusTone = statusToneValue ? " is-" + statusToneValue : "";
           const detailId = String(row.wb_supply_id || row.supply_id || row.cache_key || row.visible_number || "").trim();
           const cacheKey = String(row.cache_key || "").trim();
           const quantitySub = row.accepted_quantity !== null && row.accepted_quantity !== undefined
@@ -11133,7 +11198,7 @@
         });
       });
       if (wbSupplyOverlayRefreshButton) {
-        wbSupplyOverlayRefreshButton.addEventListener("click", () => loadWbSupplyOverlayOptions());
+        wbSupplyOverlayRefreshButton.addEventListener("click", () => loadWbSupplyOverlayOptions({ syncFirst: true }));
       }
       if (wbSupplyOverlaySelectEligibleButton) {
         wbSupplyOverlaySelectEligibleButton.addEventListener("click", () => {

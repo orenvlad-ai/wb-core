@@ -2327,6 +2327,7 @@ class RegistryUploadHttpEntrypoint:
             )
             refresh_payload: dict[str, Any] | None = None
             load_payload: dict[str, Any] | None = None
+            wb_supplies_payload: dict[str, Any] | None = None
             try:
                 refresh_payload = self._run_sheet_refresh(
                     as_of_date=requested_as_of_date,
@@ -2341,6 +2342,7 @@ class RegistryUploadHttpEntrypoint:
                     technical_status="error",
                     finished_at=finished_at,
                     error=str(exc),
+                    wb_supplies_payload=wb_supplies_payload,
                 )
                 self.runtime.save_sheet_vitrina_auto_update_result(
                     started_at=started_at,
@@ -2377,6 +2379,7 @@ class RegistryUploadHttpEntrypoint:
                 )
                 raise
 
+            wb_supplies_payload = self._run_wb_supplies_auto_sync(log=emit)
             finished_at = self.activated_at_factory()
             auto_result = _build_auto_update_result_payload(
                 refresh_payload=refresh_payload,
@@ -2384,6 +2387,7 @@ class RegistryUploadHttpEntrypoint:
                 technical_status="success",
                 finished_at=finished_at,
                 error=None,
+                wb_supplies_payload=wb_supplies_payload,
             )
             auto_status = str(auto_result.get("semantic_status") or "warning")
             self.runtime.save_sheet_vitrina_auto_update_result(
@@ -2417,6 +2421,8 @@ class RegistryUploadHttpEntrypoint:
             payload["semantic_tone"] = str(auto_result.get("semantic_tone") or "warning")
             payload["semantic_reason"] = str(auto_result.get("semantic_reason") or "")
             payload["auto_result"] = auto_result
+            payload["wb_supplies_auto_sync_status"] = auto_result.get("wb_supplies_auto_sync_status")
+            payload["wb_supplies_auto_sync"] = auto_result.get("wb_supplies_auto_sync")
             payload["operation"] = "auto_update"
             payload["auto_update_started_at"] = started_at
             payload["auto_update_finished_at"] = finished_at
@@ -2424,6 +2430,127 @@ class RegistryUploadHttpEntrypoint:
             payload["manual_context"] = self.build_sheet_manual_context()
             payload["load_context"] = self.build_sheet_load_context()
             return payload
+
+    def _run_wb_supplies_auto_sync(self, *, log: OperatorLogEmitter | None) -> dict[str, Any]:
+        emit = log or _noop_log
+        started_at = self.activated_at_factory()
+        result: dict[str, Any] = {
+            "status": "warning",
+            "semantic_status": "warning",
+            "stage": "wb_supplies_auto_sync",
+            "started_at": started_at,
+            "official_sync": {"status": "not_started"},
+            "transit_cost": {"status": "not_started"},
+        }
+        emit(_format_log_event("wb_supplies_auto_sync_start", stage="official_sync"))
+        try:
+            official_payload = self.wb_supplies_block.sync_supplies(
+                {
+                    "mode": "incremental_refresh",
+                    "limit": 1000,
+                    "enrich": "changed_only",
+                    "list_params": {
+                        "limit": 20,
+                        "offset": 0,
+                        "size_filter": "main_250",
+                        "sort_key": "supply_date",
+                        "sort_dir": "desc",
+                    },
+                }
+            )
+            official_sync = dict(official_payload.get("sync") or {})
+            result["official_sync"] = {
+                "status": "success",
+                "run_id": str(official_sync.get("run_id") or ""),
+                "raw_merged_count": int(official_sync.get("raw_merged_count") or 0),
+                "new_rows": int(official_sync.get("new_rows") or 0),
+                "changed_rows": int(official_sync.get("changed_rows") or 0),
+                "unchanged_rows": int(official_sync.get("unchanged_rows") or 0),
+                "enriched": int(official_sync.get("enriched") or 0),
+                "failed_enrich": int(official_sync.get("failed_enrich") or 0),
+                "forced_status_refresh_rows": int(official_sync.get("forced_status_refresh_rows") or 0),
+                "refreshed_recent_historical_rows": int(official_sync.get("refreshed_recent_historical_rows") or 0),
+                "accepted_qty_changed_rows": int(official_sync.get("accepted_qty_changed_rows") or 0),
+                "warnings": list(official_sync.get("warnings") or [])[:10],
+            }
+            result["status"] = "success"
+            result["semantic_status"] = "success"
+            emit(
+                _format_log_event(
+                    "wb_supplies_auto_sync_finish",
+                    stage="official_sync",
+                    status="success",
+                    run_id=result["official_sync"]["run_id"],
+                    changed_rows=result["official_sync"]["changed_rows"],
+                    accepted_qty_changed_rows=result["official_sync"]["accepted_qty_changed_rows"],
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - auto-refresh must not fail critical web-vitrina snapshot.
+            error = str(exc)
+            result["official_sync"] = {"status": "failed", "error": error}
+            result["status"] = "warning"
+            result["semantic_status"] = "warning"
+            result["reason"] = f"WB supplies official sync failed: {error}"
+            emit(_format_log_event("wb_supplies_auto_sync_finish", stage="official_sync", status="warning", error=error))
+            result["finished_at"] = self.activated_at_factory()
+            return result
+
+        transit_result = self._maybe_start_wb_supplies_auto_transit_cost_enrichment(log=emit)
+        result["transit_cost"] = transit_result
+        if str(transit_result.get("status") or "") not in {"success", "queued", "skipped_no_candidates"}:
+            result["status"] = "warning"
+            result["semantic_status"] = "warning"
+        result["reason"] = _wb_supplies_auto_sync_reason(result)
+        result["finished_at"] = self.activated_at_factory()
+        return result
+
+    def _maybe_start_wb_supplies_auto_transit_cost_enrichment(self, *, log: OperatorLogEmitter | None) -> dict[str, Any]:
+        emit = log or _noop_log
+        try:
+            from apps.seller_portal_automation_guard import current_lock_status
+
+            lock_status = current_lock_status(self.runtime.runtime_dir)
+        except Exception as exc:  # noqa: BLE001 - diagnostics-only preflight.
+            return {"status": "skipped_lock_probe_failed", "warning": str(exc)}
+        if bool(lock_status.get("busy")):
+            return {"status": "skipped_lock_busy", "warning": "seller_portal_automation_busy", "lock": lock_status}
+        try:
+            session = self.handle_seller_portal_session_check_request(
+                launcher_download_path=SHEET_VITRINA_SELLER_RECOVERY_LAUNCHER_ROUTE,
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics-only preflight.
+            return {"status": "skipped_session_probe_failed", "warning": str(exc)}
+        session_status = str(session.get("status") or "")
+        if session_status != "session_valid_canonical":
+            return {
+                "status": "skipped_session_not_valid",
+                "warning": session_status or "session_not_valid",
+                "session_status": session_status,
+                "session_status_label": str(session.get("status_label") or ""),
+            }
+        try:
+            payload = self.wb_supplies_block.start_transit_cost_enrichment({"limit": 20, "force": False})
+        except Exception as exc:  # noqa: BLE001 - transit cost is supplemental.
+            return {"status": "failed_to_start", "warning": str(exc), "session_status": session_status}
+        active_run = payload.get("active_run") if isinstance(payload.get("active_run"), Mapping) else {}
+        candidate_count = int(payload.get("candidate_count") or active_run.get("candidate_count") or 0)
+        run_status = str(payload.get("status") or active_run.get("status") or "")
+        status = "skipped_no_candidates" if candidate_count <= 0 else "queued" if run_status in {"queued", "running"} else run_status or "accepted"
+        emit(
+            _format_log_event(
+                "wb_supplies_auto_transit_cost",
+                status=status,
+                run_id=str(payload.get("run_id") or ""),
+                candidate_count=candidate_count,
+            )
+        )
+        return {
+            "status": status,
+            "run_id": str(payload.get("run_id") or ""),
+            "candidate_count": candidate_count,
+            "session_status": session_status,
+            "limit": 20,
+        }
 
     def _run_sheet_scheduled_auto_update(
         self,
@@ -4475,13 +4602,15 @@ def _build_auto_update_result_payload(
     technical_status: str,
     finished_at: str,
     error: str | None,
+    wb_supplies_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     refresh_semantic = str((refresh_payload or {}).get("semantic_status") or "warning")
     load_semantic = str((load_payload or {}).get("semantic_status") or "")
+    wb_supplies_semantic = str((wb_supplies_payload or {}).get("semantic_status") or "")
     semantic_status = (
         "error"
         if technical_status == "error"
-        else _worst_tone([value for value in [refresh_semantic, load_semantic] if value])
+        else _worst_tone([value for value in [refresh_semantic, load_semantic, wb_supplies_semantic] if value])
     )
     semantic_reason = (
         str(error or "").strip()
@@ -4491,8 +4620,11 @@ def _build_auto_update_result_payload(
             for part in [
                 f"refresh: {str((refresh_payload or {}).get('semantic_reason') or '').strip()}",
                 f"load: {str((load_payload or {}).get('semantic_reason') or '').strip()}",
+                f"wb_supplies: {_wb_supplies_auto_sync_reason(wb_supplies_payload or {})}",
             ]
-            if not part.endswith(": ") and (load_payload is not None or not part.startswith("load:"))
+            if not part.endswith(": ")
+            and (load_payload is not None or not part.startswith("load:"))
+            and (wb_supplies_payload is not None or not part.startswith("wb_supplies:"))
         )
     )
     return {
@@ -4506,7 +4638,32 @@ def _build_auto_update_result_payload(
         "as_of_date": str((load_payload or refresh_payload or {}).get("as_of_date") or ""),
         "refreshed_at": str((load_payload or refresh_payload or {}).get("refreshed_at") or ""),
         "finished_at": finished_at,
+        "wb_supplies_auto_sync_status": str((wb_supplies_payload or {}).get("status") or ""),
+        "wb_supplies_auto_sync": dict(wb_supplies_payload or {}),
     }
+
+
+def _wb_supplies_auto_sync_reason(payload: Mapping[str, Any]) -> str:
+    if not isinstance(payload, Mapping) or not payload:
+        return ""
+    explicit_reason = str(payload.get("reason") or "").strip()
+    if explicit_reason:
+        return explicit_reason
+    official = payload.get("official_sync") if isinstance(payload.get("official_sync"), Mapping) else {}
+    transit = payload.get("transit_cost") if isinstance(payload.get("transit_cost"), Mapping) else {}
+    official_status = str(official.get("status") or "")
+    transit_status = str(transit.get("status") or "")
+    if official_status == "success":
+        changed = int(official.get("changed_rows") or 0)
+        accepted_changed = int(official.get("accepted_qty_changed_rows") or 0)
+        return (
+            "official success"
+            + f", changed={changed}, accepted_qty_changed={accepted_changed}"
+            + (f", transit_cost={transit_status}" if transit_status else "")
+        )
+    if official_status:
+        return f"official {official_status}: {str(official.get('error') or '').strip()}"
+    return str(payload.get("status") or "")
 
 
 _ARCHIVED_LEGACY_AUTO_UPDATE_REASON = "legacy Google Sheets load: archived / not executed"
