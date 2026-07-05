@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ from tempfile import TemporaryDirectory
 import threading
 import time
 from types import MethodType
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -19,7 +21,12 @@ if str(ROOT) not in sys.path:
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1AutoRefreshSchedulesBlock
-from apps.sheet_vitrina_v1_auto_refresh_tick import _mark_missed_due_slots, _select_due_for_tick
+from apps.sheet_vitrina_v1_auto_refresh_tick import (
+    _is_active_job_skip,
+    _mark_missed_due_slots,
+    _select_due_for_tick,
+    main as auto_refresh_tick_main,
+)
 
 
 NOW = datetime(2026, 4, 20, 9, 0, tzinfo=timezone.utc)
@@ -42,6 +49,7 @@ def main() -> None:
         _assert_default_timezone_schedule(runtime_dir)
         _assert_old_state_read_migrates(runtime_dir / "old-state")
         _assert_interval_policy(runtime_dir / "interval-policy")
+        _assert_tick_active_skip_keeps_due_retryable(runtime_dir / "tick-active-skip")
         _assert_cross_process_schedule_writes(runtime_dir / "cross-process")
 
         saved = block.save_schedules(
@@ -324,6 +332,27 @@ def _assert_interval_policy(runtime_dir: Path) -> None:
     missed_due, selected_due = _select_due_for_tick(due)
     if [item[0]["local_time_hhmm"] for item in missed_due] != ["10:00", "14:00"] or [item[0]["local_time_hhmm"] for item in selected_due] != ["18:00"]:
         raise AssertionError(f"tick must select only latest accumulated due slot, got missed={missed_due}, selected={selected_due}")
+    skip_block = SheetVitrinaV1AutoRefreshSchedulesBlock(
+        runtime_dir=runtime_dir / "due-active-skip",
+        now_factory=lambda: datetime(2026, 5, 12, 14, 30, tzinfo=timezone.utc),
+    )
+    skip_block.save_schedules({"schedule_policy": {"mode": "interval", "interval_hours": 4}, "schedules": []})
+    skip_due = skip_block.due_schedules(now=datetime(2026, 5, 12, 14, 30, tzinfo=timezone.utc))
+    skip_missed_due, skip_selected_due = _select_due_for_tick(skip_due)
+    active_skip = {
+        "status": "skipped",
+        "already_running_job_id": "fixture-active-job",
+        "retryable": True,
+        "due_preserved": True,
+    }
+    if not _is_active_job_skip(active_skip):
+        raise AssertionError(f"fixture must be classified as active-job skip: {active_skip}")
+    due_after_active_skip = skip_block.due_schedules(now=datetime(2026, 5, 12, 14, 31, tzinfo=timezone.utc))
+    if [item[0]["local_time_hhmm"] for item in due_after_active_skip] != ["10:00", "14:00", "18:00"]:
+        raise AssertionError(
+            "active-job skip must preserve both missed and selected due slots for retry, "
+            f"got missed={skip_missed_due}, selected={skip_selected_due}, after={due_after_active_skip}"
+        )
     _mark_missed_due_slots(due_block, missed_due)
     due_after_missed = due_block.due_schedules(now=datetime(2026, 5, 12, 14, 31, tzinfo=timezone.utc))
     if [item[0]["local_time_hhmm"] for item in due_after_missed] != ["18:00"]:
@@ -376,6 +405,90 @@ def _assert_scheduled_parallel_block(entrypoint: RegistryUploadHttpEntrypoint) -
     finally:
         release.set()
         _wait_for_job(entrypoint, str(active["job_id"]))
+
+
+def _assert_tick_active_skip_keeps_due_retryable(runtime_dir: Path) -> None:
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    local_due_time = (now.astimezone(ZoneInfo("Asia/Yekaterinburg")) - timedelta(minutes=1)).strftime("%H:%M")
+    block = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir, now_factory=lambda: now)
+    saved = block.save_schedules(
+        {
+            "schedule_policy": {"mode": "manual"},
+            "schedules": [
+                {
+                    "id": "fixture_due",
+                    "enabled": True,
+                    "local_time_hhmm": local_due_time,
+                    "timezone": "Asia/Yekaterinburg",
+                }
+            ],
+        }
+    )
+    due_before = block.due_schedules(now=now)
+    if len(due_before) != 1:
+        raise AssertionError(f"fixture schedule must be due before tick, got saved={saved} due={due_before}")
+    due_at = due_before[0][1]
+    env_file = runtime_dir / "tick.env"
+    env_file.write_text(
+        "WB_CORE_WEB_AUTH_USERNAME=fixture\nWB_CORE_WEB_AUTH_SESSION_SECRET=fixture-secret\n",
+        encoding="utf-8",
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        seen_payloads: list[dict[str, object]] = []
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name.
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length)
+            Handler.seen_payloads.append(json.loads(body.decode("utf-8")))
+            response = json.dumps(
+                {
+                    "status": "skipped",
+                    "already_running_job_id": "fixture-active-job",
+                    "retryable": True,
+                    "due_preserved": True,
+                    "active_job_stale": True,
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib signature.
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        exit_code = auto_refresh_tick_main(
+            [
+                "--env-file",
+                str(env_file),
+                "--runtime-dir",
+                str(runtime_dir),
+                "--base-url",
+                f"http://127.0.0.1:{server.server_port}",
+                "--timeout-seconds",
+                "2",
+                "--poll-seconds",
+                "0.1",
+            ]
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+    if exit_code != 1:
+        raise AssertionError(f"stale active-job skip must make tick visibly fail without consuming due, got {exit_code}")
+    if not Handler.seen_payloads or Handler.seen_payloads[0].get("due_at") != due_at:
+        raise AssertionError(f"tick must call refresh with selected due context, got {Handler.seen_payloads}")
+    after = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir, now_factory=lambda: now).get_schedule("fixture_due")
+    if after.get("last_due_at") == due_at or after.get("last_status") in {"running", "skipped"}:
+        raise AssertionError(f"active-job skip must not consume or mark the due slot, got {after}")
 
 
 def _assert_cross_process_schedule_writes(runtime_dir: Path) -> None:
