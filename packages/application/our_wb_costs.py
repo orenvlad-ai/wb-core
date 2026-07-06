@@ -446,10 +446,17 @@ class OurWbCostBlock:
         return count
 
     def materialize_daily_state(self, *, opening_date: str = OUR_WB_COST_OPENING_DATE) -> int:
-        dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
+        snapshot_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
             date_from=opening_date,
             descending=False,
         )
+        if not snapshot_dates:
+            return 0
+        stock_by_date = self._load_stock_metrics_by_date_column(
+            snapshot_dates=snapshot_dates,
+            opening_date=opening_date,
+        )
+        dates = sorted(stock_by_date)
         if not dates:
             return 0
         openings = self._load_opening_baseline(opening_date)
@@ -460,7 +467,7 @@ class OurWbCostBlock:
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
             for snapshot_date in dates:
-                stock_by_nm = self._load_snapshot_sku_metric(snapshot_date, "stock_total")
+                stock_by_nm = stock_by_date.get(snapshot_date, {})
                 current_by_nm: dict[int, dict[str, float | str | None]] = {}
                 nm_ids = set(stock_by_nm) | set(openings) | set(previous_by_nm)
                 for nm_id in sorted(nm_ids):
@@ -861,30 +868,28 @@ class OurWbCostBlock:
             snapshot = self.runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=as_of_date)
         except Exception:
             return {}
-        try:
-            date_index = list(snapshot.date_columns).index(as_of_date)
-            value_index = 2 + date_index
-        except ValueError:
-            value_index = -1
-        for sheet in snapshot.sheets:
-            if sheet.sheet_name != "DATA_VITRINA":
+        return _extract_snapshot_sku_metric(snapshot, column_date=as_of_date, metric_key=metric_key)
+
+    def _load_stock_metrics_by_date_column(
+        self,
+        *,
+        snapshot_dates: Iterable[str],
+        opening_date: str,
+    ) -> dict[str, dict[int, float]]:
+        by_date: dict[str, dict[int, float]] = {}
+        for snapshot_date in snapshot_dates:
+            try:
+                snapshot = self.runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=snapshot_date)
+            except Exception:
                 continue
-            result: dict[int, float] = {}
-            for row in sheet.rows:
-                if len(row) < 3 or (value_index >= 0 and len(row) <= value_index):
+            for column_date in snapshot.date_columns:
+                date_key = str(column_date or "")
+                if date_key < opening_date:
                     continue
-                row_id = str(row[1] or "")
-                prefix = "SKU:"
-                suffix = f"|{metric_key}"
-                if not row_id.startswith(prefix) or not row_id.endswith(suffix):
-                    continue
-                nm_raw = row_id[len(prefix) : -len(suffix)]
-                nm_id = _optional_int(nm_raw)
-                value = _optional_float(row[value_index])
-                if nm_id is not None and value is not None:
-                    result[nm_id] = value
-            return result
-        return {}
+                values = _extract_snapshot_sku_metric(snapshot, column_date=date_key, metric_key="stock_total")
+                if values:
+                    by_date[date_key] = values
+        return by_date
 
     def _select_opening_baseline(
         self,
@@ -1283,6 +1288,33 @@ def _select_opening_ff_line_for_baseline(
     if near_future:
         return sorted(near_future, key=lambda line: str(line.get("accepted_ff_date") or ""))[0]
     return None
+
+
+def _extract_snapshot_sku_metric(snapshot: Any, *, column_date: str, metric_key: str) -> dict[int, float]:
+    try:
+        date_index = list(snapshot.date_columns).index(column_date)
+        value_index = 2 + date_index
+    except ValueError:
+        value_index = -1
+    for sheet in snapshot.sheets:
+        if sheet.sheet_name != "DATA_VITRINA":
+            continue
+        result: dict[int, float] = {}
+        for row in sheet.rows:
+            if len(row) < 3 or (value_index >= 0 and len(row) <= value_index):
+                continue
+            row_id = str(row[1] or "")
+            prefix = "SKU:"
+            suffix = f"|{metric_key}"
+            if not row_id.startswith(prefix) or not row_id.endswith(suffix):
+                continue
+            nm_raw = row_id[len(prefix) : -len(suffix)]
+            nm_id = _optional_int(nm_raw)
+            value = _optional_float(row[value_index])
+            if nm_id is not None and value is not None:
+                result[nm_id] = value
+        return result
+    return {}
 
 
 def _roll_daily_state(
