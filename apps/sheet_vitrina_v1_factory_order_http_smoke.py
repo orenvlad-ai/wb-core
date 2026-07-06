@@ -670,14 +670,14 @@ def main() -> None:
 
             patch_status, patch_payload = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window",
-                {"order_status": ORDER_STATUS_ACCEPTED_FF},
+                {"actual_ff_acceptance_date": "2026-05-23"},
             )
             if patch_status != 200 or patch_payload.get("order_status") != ORDER_STATUS_ACCEPTED_FF:
-                raise AssertionError(f"status-only PATCH must persist accepted_ff, got {patch_status} {patch_payload}")
+                raise AssertionError(f"actual_ff_acceptance_date PATCH must trigger accepted_ff, got {patch_status} {patch_payload}")
 
             patched_status_code, patched_status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
             if patched_status_code != 200:
-                raise AssertionError(f"factory status after accepted_ff PATCH must return 200, got {patched_status_code}")
+                raise AssertionError(f"factory status after actual_ff_acceptance_date PATCH must return 200, got {patched_status_code}")
             patched_supplier_summary = patched_status_payload.get("supplier_registry_inbound_summary", {})
             patched_supplier_shipments = patched_supplier_summary.get("shipment_summary", [])
             if any(item.get("shipment_id") == "sup_factory_inbound_inside_window" for item in patched_supplier_shipments):
@@ -688,7 +688,7 @@ def main() -> None:
                 or patched_diagnostics.get("excluded_accepted_ff_line_count") != 4
                 or patched_diagnostics.get("excluded_accepted_ff_quantity") != 89.0
             ):
-                raise AssertionError(f"status after accepted_ff PATCH must expose excluded counters, got {patched_diagnostics}")
+                raise AssertionError(f"status after actual_ff_acceptance_date PATCH must expose excluded counters, got {patched_diagnostics}")
 
             patched_supplier_status, patched_supplier_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
@@ -706,7 +706,7 @@ def main() -> None:
                 },
             )
             if patched_supplier_status != 200:
-                raise AssertionError(f"supplier registry calc after accepted_ff PATCH must succeed, got {patched_supplier_status} {patched_supplier_payload}")
+                raise AssertionError(f"supplier registry calc after actual_ff_acceptance_date PATCH must succeed, got {patched_supplier_status} {patched_supplier_payload}")
             patched_supplier_sku = next(item for item in patched_supplier_payload.get("rows", []) if item.get("nm_id") == 210183919)
             if patched_supplier_sku.get("inbound_factory_to_ff") != 0.0:
                 raise AssertionError(f"accepted_ff shipment must not count in supplier registry inbound after PATCH, got {patched_supplier_sku}")

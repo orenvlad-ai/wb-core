@@ -160,8 +160,6 @@ def main() -> None:
                             "upload_id": parse_payload["upload_id"],
                             "shipment_date": "2026-05-14",
                             "actual_shipment_date": "2026-05-16",
-                            "actual_ff_acceptance_date": "2026-05-28",
-                            "order_status": "accepted_ff",
                             "payload": parse_payload,
                         },
                     )
@@ -172,15 +170,15 @@ def main() -> None:
                 if (
                     create_payload.get("planned_shipment_date") != "2026-05-14"
                     or create_payload.get("actual_shipment_date") != "2026-05-16"
-                    or create_payload.get("actual_ff_acceptance_date") != "2026-05-28"
+                    or create_payload.get("actual_ff_acceptance_date") != ""
                 ):
                         raise AssertionError("supplier role must create planned/fact shipment dates")
                 shipment_id = str(create_payload["shipment_id"])
                 detail_code, detail_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
                 if detail_code != 200 or detail_payload.get("shipment_id") != shipment_id:
                         raise AssertionError("supplier role must read supplier shipment detail")
-                if detail_payload.get("actual_ff_acceptance_date") != "2026-05-28":
-                        raise AssertionError("supplier role detail must include actual FF acceptance date")
+                if detail_payload.get("actual_ff_acceptance_date") != "":
+                        raise AssertionError("supplier role detail must keep blank actual FF acceptance date until saved")
                 supplier_price_check_code, supplier_price_check_payload = _opener_post_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/price-check",
@@ -217,6 +215,7 @@ def main() -> None:
                     or patch_payload.get("shipment_date") != "2026-05-15"
                     or patch_payload.get("actual_shipment_date") != "2026-05-17"
                     or patch_payload.get("actual_ff_acceptance_date") != "2026-05-30"
+                    or patch_payload.get("order_status") != "accepted_ff"
                 ):
                         raise AssertionError(f"supplier role must edit supplier shipments, got {patch_code} {patch_payload}")
                 supplier_status_code, supplier_status_payload = _opener_patch_json(
@@ -231,8 +230,8 @@ def main() -> None:
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                         {"order_status": "accepted_ff"},
                     )
-                if operator_status_code != 200 or operator_status_payload.get("order_status") != "accepted_ff":
-                        raise AssertionError(f"operator role must update supplier order_status, got {operator_status_code} {operator_status_payload}")
+                if operator_status_code != 400 or "actual_ff_acceptance_date" not in operator_status_payload.get("error", ""):
+                        raise AssertionError(f"operator role must not set accepted_ff by status-only PATCH, got {operator_status_code} {operator_status_payload}")
                 forbidden_html_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
                 if forbidden_html_code != 403:
                         raise AssertionError("supplier role must not access full web-vitrina/operator shell")

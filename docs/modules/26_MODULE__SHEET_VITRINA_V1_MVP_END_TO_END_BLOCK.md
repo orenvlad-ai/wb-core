@@ -481,6 +481,11 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `proxy_profit_2_rub` / `total_proxy_profit_2_rub` = proxy-profit formula with only `cost_price_rub` replaced by `onec_WB_STOCK_unit_cost_rub`
   - `proxy_margin_2_pct` / `proxy_margin_2_pct_total` = SKU `proxy_profit_2_rub / orderSum`, TOTAL `SUM(proxy_profit_2_rub) / SUM(orderSum)`
   - `inventory_capital_return_pct` / `inventory_capital_return_pct_total` = SKU `proxy_profit_2_rub / onec_total_cost_rub`, TOTAL `SUM(proxy_profit_2_rub) / SUM(onec_total_cost_rub)`
+- Current management proxy WB cost keys are runtime-extended from repo code and read materialized daily state from `sheet_vitrina_v1_wb_cost_daily_state`:
+  - `our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` = `Себестоимость WB наша, ₽/шт`; TOTAL is `SUM(unit_cost * stock_qty) / SUM(stock_qty)`;
+  - `our_wb_cost_confirmed_share_pct` / `total_our_wb_cost_confirmed_share_pct` = `Доля подтверждённой себестоимости, %`; TOTAL is `SUM(confirmed_qty) / SUM(stock_qty)`;
+  - `proxy_profit_3_rub` / `total_proxy_profit_3_rub` = `proxy прибыль 3`; before `2026-07-01` it equals `proxy_profit_2_rub`, from `2026-07-01` it uses `orderSum * 0.5096 - orderCount * 0.91 * our_wb_unit_cost_rub - ads_sum`, and TOTAL is sum of SKU rows.
+- Management proxy WB cost rows are not strict accounting FIFO and do not replace `proxy_profit_2_rub`; source/component statuses must stay explicit when values come from fallback, estimates or pending components.
 - `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
 - `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
 
@@ -527,6 +532,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - TOTAL `total_proxy_profit_rub` = sum of SKU `proxy_profit_rub`;
   - TOTAL `proxy_margin_pct_total` = `total_proxy_profit_rub / total_orderSum`, если denominator допустим.
   - 1C `proxy_profit_2_rub` uses the same coefficients and dependencies as `proxy_profit_rub`, replacing only `cost_price_rub` with `onec_WB_STOCK_unit_cost_rub`;
+  - `proxy_profit_3_rub` keeps the same coefficients and date boundary: before `2026-07-01` it resolves to `proxy_profit_2_rub`, after the opening date it replaces only the cost input with `our_wb_unit_cost_rub`;
   - 1C percent totals `proxy_margin_2_pct_total` and `inventory_capital_return_pct_total` are ratio-of-aggregates, not averages of SKU rows;
   - zero denominators for the new percent metrics return `0.0` when numerator data is present, matching existing proxy margin behavior.
 - Пустой или неполный `COST_PRICE` dataset не валит refresh/load:

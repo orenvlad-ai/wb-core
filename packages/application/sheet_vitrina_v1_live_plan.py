@@ -60,6 +60,16 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     resolve_onec_stocks_account_id,
     summarize_onec_stage_bucket_coverage,
 )
+from packages.application.sheet_vitrina_v1_our_wb_costs import (
+    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_COST_OPENING_DATE,
+    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    extend_metrics_with_our_wb_cost_metrics,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
     TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY,
@@ -306,7 +316,6 @@ class SlotLookups:
     prices_lookup: dict[int, Any]
     sf_period_lookup: dict[int, Any]
     spp_lookup: dict[int, Any]
-    spp_proxy_lookup: dict[int, Any]
     ads_bids_lookup: dict[int, Any]
     stocks_lookup: dict[int, Any]
     onec_stocks_lookup: dict[int, dict[str, float]]
@@ -315,6 +324,9 @@ class SlotLookups:
     fin_storage_fee_total: float | None
     cost_price_lookup: dict[str, "ResolvedCostPrice"]
     promo_lookup: dict[int, dict[str, float]]
+    spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
+    our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    column_date: str = ""
 
 
 @dataclass(frozen=True)
@@ -946,7 +958,9 @@ class SheetVitrinaV1LivePlanBlock:
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 
-        effective_metrics = extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        effective_metrics = extend_metrics_with_our_wb_cost_metrics(
+            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        )
         metrics_by_key = {item.metric_key: item for item in effective_metrics}
         formulas_by_id = {item.formula_id: item for item in current_state.formulas_v2}
         displayed_metrics = sorted(
@@ -1196,6 +1210,7 @@ class SheetVitrinaV1LivePlanBlock:
         statuses: list[LiveSourceStatus] = []
         slot_lookups: dict[str, SlotLookups] = {
             slot.slot_key: SlotLookups(
+                column_date=slot.column_date,
                 seller_funnel_lookup={},
                 history_lookup={},
                 web_lookup={},
@@ -1206,6 +1221,7 @@ class SheetVitrinaV1LivePlanBlock:
                 ads_bids_lookup={},
                 stocks_lookup={},
                 onec_stocks_lookup={},
+                our_wb_cost_lookup={},
                 ads_compact_lookup={},
                 fin_lookup={},
                 fin_storage_fee_total=None,
@@ -1461,6 +1477,13 @@ class SheetVitrinaV1LivePlanBlock:
                         )
                 elif source_key == "promo_by_price":
                     current_lookups.promo_lookup = _index_promo_items(payload)
+
+            try:
+                current_lookups.our_wb_cost_lookup = self.runtime.load_our_wb_cost_daily_state(
+                    as_of_date=slot.column_date
+                )
+            except Exception:
+                current_lookups.our_wb_cost_lookup = {}
 
         if not selected_source_keys or "cost_price" in selected_source_keys:
             for slot in temporal_slots:
@@ -2573,6 +2596,16 @@ class _MetricEvaluator:
                     self.enabled_config,
                     temporal_slot,
                 )
+            elif metric.metric_key == OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY:
+                value = self._aggregate_sum(
+                    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
+            elif metric.metric_key == TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY:
+                value = self._aggregate_our_wb_unit_cost(temporal_slot)
+            elif metric.metric_key == TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY:
+                value = self._aggregate_our_wb_confirmed_share(temporal_slot)
             elif metric.metric_key == ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY:
                 value = _divide_or_zero(
                     self.resolve_total(ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY, temporal_slot),
@@ -2724,6 +2757,43 @@ class _MetricEvaluator:
             return 0.0 if float(total_cost) == 0.0 else None
         return float(total_cost) / float(total_qty)
 
+    def _aggregate_our_wb_unit_cost(self, temporal_slot: str) -> float | None:
+        lookup = self._slot_lookups(temporal_slot).our_wb_cost_lookup
+        weighted_sum = 0.0
+        total_stock = 0.0
+        for item in self.enabled_config:
+            row = lookup.get(item.nm_id)
+            if not row:
+                continue
+            unit_cost = _optional_float(row.get("our_wb_unit_cost_rub"))
+            stock_qty = _optional_float(row.get("stock_qty"))
+            if unit_cost is None or stock_qty is None or stock_qty <= 0:
+                continue
+            weighted_sum += unit_cost * stock_qty
+            total_stock += stock_qty
+        if total_stock <= 0:
+            return None
+        return weighted_sum / total_stock
+
+    def _aggregate_our_wb_confirmed_share(self, temporal_slot: str) -> float | None:
+        lookup = self._slot_lookups(temporal_slot).our_wb_cost_lookup
+        confirmed_qty = 0.0
+        stock_qty = 0.0
+        has_rows = False
+        for item in self.enabled_config:
+            row = lookup.get(item.nm_id)
+            if not row:
+                continue
+            row_stock = _optional_float(row.get("stock_qty"))
+            if row_stock is None:
+                continue
+            has_rows = True
+            stock_qty += max(row_stock, 0.0)
+            confirmed_qty += max(_optional_float(row.get("confirmed_qty")) or 0.0, 0.0)
+        if not has_rows or stock_qty <= 0:
+            return None
+        return confirmed_qty / stock_qty
+
     def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
         if metric_key == "cost_price_rub":
             config_item = self.config_by_nm_id.get(nm_id)
@@ -2756,6 +2826,28 @@ class _MetricEvaluator:
             return (
                 float(order_sum) * 0.5096
                 - float(order_count) * 0.91 * float(onec_wb_unit_cost)
+                - float(ads_sum)
+            )
+        if metric_key == OUR_WB_UNIT_COST_RUB_METRIC_KEY:
+            return _optional_float(
+                self._slot_lookups(temporal_slot).our_wb_cost_lookup.get(nm_id, {}).get("our_wb_unit_cost_rub")
+            )
+        if metric_key == OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY:
+            return _optional_float(
+                self._slot_lookups(temporal_slot).our_wb_cost_lookup.get(nm_id, {}).get("confirmed_share_pct")
+            )
+        if metric_key == OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY:
+            if self._slot_lookups(temporal_slot).column_date < OUR_WB_COST_OPENING_DATE:
+                return self.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, nm_id, temporal_slot)
+            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+            order_count = self.resolve_sku("orderCount", nm_id, temporal_slot)
+            our_wb_unit_cost = self.resolve_sku(OUR_WB_UNIT_COST_RUB_METRIC_KEY, nm_id, temporal_slot)
+            ads_sum = self.resolve_sku("ads_sum", nm_id, temporal_slot)
+            if None in {order_sum, order_count, our_wb_unit_cost, ads_sum}:
+                return None
+            return (
+                float(order_sum) * 0.5096
+                - float(order_count) * 0.91 * float(our_wb_unit_cost)
                 - float(ads_sum)
             )
         if metric_key == ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY:
@@ -3899,6 +3991,17 @@ def _numeric_payload_value(value: Any) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     return 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _index_items_by_nm_id(payload: Any | None) -> dict[int, Any]:

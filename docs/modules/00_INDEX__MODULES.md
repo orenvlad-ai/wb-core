@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–39`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–40`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -45,6 +45,7 @@ source_basis:
   - "docs/modules/37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
   - "docs/modules/38_MODULE__WEBCORE_DATA_MCP_BLOCK.md"
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
+  - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -89,8 +90,9 @@ related_docs:
   - "37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
   - "38_MODULE__WEBCORE_DATA_MCP_BLOCK.md"
   - "39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
+  - "40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под Google Sheets decommission and Fulfillment services contour: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
+update_note: "Обновлён под Google Sheets decommission, Fulfillment services contour and management proxy WB cost model: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, module 40 owns our WB cost/proxy3 model, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
 
 # 1. Назначение индекса
@@ -107,7 +109,7 @@ update_note: "Обновлён под Google Sheets decommission and Fulfillment
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–39`; module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`.
+На текущем `main` main-confirmed модульные блоки доходят до `01–40`; module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`, module `40` implements management proxy WB cost/proxy3 contour.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -228,6 +230,7 @@ update_note: "Обновлён под Google Sheets decommission and Fulfillment
 | `37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md` | `sheet_vitrina_v1_ads_operator_block` | `web/operator/wb-promotion` | SKU-first `Реклама` tab over WB Promotion API: active SKU/nm_id table from `registry_upload_config_v2`, nomenclature enrichment, reverse index `nm_id -> campaigns[] -> placements[]`, drawer with campaign metrics/min/recommended/current bids, guarded backend-only one-row bid preview/commit/audit/delayed-refresh workflow; no bulk changes, no auto-bidding, no direct frontend WB/PATCH writes |
 | `38_MODULE__WEBCORE_DATA_MCP_BLOCK.md` | `webcore_data_mcp_block` | `production-facing-integration/read-only-data-gateway` | repo-implemented/live-gated standalone WebCore Data MCP: read-only SQLite projections, strict allowlisted business tools plus `webcore.ops.read` diagnostics, `readOnlyHint`, OAuth 2.1/PKCE auth, universal persisted ready-snapshot metrics, fixed-unit sanitized health/log/refresh/snapshot/deploy summaries, redaction/audit/limits, explicit no SQL/shell/SSH/sync/backfill/refresh/load/raw files/secrets boundary |
 | `39_MODULE__FULFILLMENT_SERVICES_BLOCK.md` | `fulfillment_services_block` | `web/operator/supply/runtime-upload` | server-owned `Поставки -> Услуги ФФ`: PNG-derived XLSX template with `Склад`, protected XLSX upload/parser, `STORAGE` row allocation across ordinary matched WB supplies, SQLite upload/line persistence with soft-delete, accepted-only `Загруженные документы`, OK-only PDF-виза на оплату and active approved-only `Услуги ФФ` overlay in `Поставки -> Wildberries`; no final cost truth, no 1C/ЕБД truth switch |
+| `40_MODULE__OUR_WB_COST_MODEL_BLOCK.md` | `our_wb_cost_model` | `web/operator/supply/runtime-cost` | Management proxy WB cost contour: SKU-level FF cost layers on `actual_ff_acceptance_date`, direct-zero/transit classifier, WB supply cost layers, opening baseline `2026-07-01`, rolling weighted average state and vitrina metrics `Себестоимость WB наша`, `Доля подтверждённой себестоимости`, `proxy прибыль 3`; no strict FIFO/accounting truth and no proxy2 replacement |
 
 # 5. Как эта папка используется дальше
 

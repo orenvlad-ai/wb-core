@@ -216,6 +216,8 @@ DEFAULT_WB_SUPPLIES_SYNC_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_ENRICH_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
 DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
+DEFAULT_OUR_WB_COST_RECALCULATE_PATH = "/v1/sheet-vitrina-v1/wb-cost/recalculate"
+DEFAULT_OUR_WB_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/wb-cost/status"
 DEFAULT_FULFILLMENT_SERVICES_PATH = "/v1/sheet-vitrina-v1/supply/fulfillment-services"
 DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/template.xlsx"
 DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/uploads"
@@ -1632,6 +1634,25 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.ACCEPTED, result)
                 return
 
+            if parsed.path == DEFAULT_OUR_WB_COST_RECALCULATE_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_our_wb_cost_recalculate_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"our WB cost recalculation failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if parsed.path == DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH:
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -2487,6 +2508,21 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"WB transit cost enrichment status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_OUR_WB_COST_STATUS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_our_wb_cost_status_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"our WB cost status failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)

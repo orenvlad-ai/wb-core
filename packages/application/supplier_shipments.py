@@ -43,6 +43,9 @@ from packages.contracts.supplier_shipments import (
     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
     MATCH_STATUS_UNMATCHED,
     ORDER_STATUS_DEFAULT,
+    ORDER_STATUS_ACCEPTED_FF,
+    ORDER_STATUS_IN_TRANSIT,
+    ORDER_STATUS_PRODUCTION,
     ORDER_STATUSES,
     PRICE_CONFORMITY_CHECK_MODE_INITIAL_PARSE,
     PRICE_CONFORMITY_CHECK_MODE_MANUAL_RECHECK,
@@ -276,7 +279,7 @@ class SupplierShipmentsBlock:
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_ff_acceptance_date")
         approx_yuan_rate = _resolve_optional_positive_decimal_field(payload, edited_payload, None, "approx_yuan_rate")
-        order_status = ORDER_STATUS_DEFAULT
+        order_status = ORDER_STATUS_ACCEPTED_FF if actual_ff_acceptance_date else ORDER_STATUS_DEFAULT
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
             shipment_date=shipment_date,
@@ -346,6 +349,8 @@ class SupplierShipmentsBlock:
             "errors": errors,
         }
         self.runtime.save_supplier_shipment(header=header, lines=lines)
+        if actual_ff_acceptance_date:
+            self._materialize_ff_cost_layer(shipment_id)
         self._autolink_invoice_contract_from_metadata(
             invoice_document_id=str(invoice_document.get("document_id") or ""),
             contract_no=str(metadata.get("contract_no") or ""),
@@ -373,6 +378,12 @@ class SupplierShipmentsBlock:
         existing_header = dict(existing["header"])
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_ff_acceptance_date")
+        existing_ff_acceptance_date = str(existing_header.get("actual_ff_acceptance_date") or "").strip()
+        if existing_ff_acceptance_date and actual_ff_acceptance_date != existing_ff_acceptance_date:
+            if self._has_current_ff_cost_layer(shipment_id):
+                raise ValueError(
+                    "actual_ff_acceptance_date cannot be cleared or changed after FF cost layer materialization"
+                )
         approx_yuan_rate = _resolve_optional_positive_decimal_field(payload, edited_payload, existing_header, "approx_yuan_rate")
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
@@ -382,6 +393,10 @@ class SupplierShipmentsBlock:
         order_status = _normalize_order_status(
             payload.get("order_status") if "order_status" in payload else existing_header.get("order_status")
         )
+        if actual_ff_acceptance_date:
+            order_status = ORDER_STATUS_ACCEPTED_FF
+        elif order_status == ORDER_STATUS_ACCEPTED_FF:
+            raise ValueError("accepted_ff status is set only by actual_ff_acceptance_date")
         now = self.timestamp_factory()
         header = {
             **existing_header,
@@ -408,6 +423,8 @@ class SupplierShipmentsBlock:
             "errors": errors,
         }
         self.runtime.save_supplier_shipment(header=header, lines=lines)
+        if actual_ff_acceptance_date:
+            self._materialize_ff_cost_layer(shipment_id)
         if "contract_document_id" in payload:
             contract_document_id = str(payload.get("contract_document_id") or "").strip()
             if contract_document_id:
@@ -426,6 +443,13 @@ class SupplierShipmentsBlock:
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         normalized = _normalize_order_status(order_status)
+        if normalized == ORDER_STATUS_ACCEPTED_FF:
+            raise ValueError("accepted_ff status is set only by actual_ff_acceptance_date")
+        if normalized not in {ORDER_STATUS_PRODUCTION, ORDER_STATUS_IN_TRANSIT}:
+            raise ValueError(f"unsupported selectable supplier order_status: {normalized}")
+        existing_header = dict(existing["header"])
+        if str(existing_header.get("order_status") or "") == ORDER_STATUS_ACCEPTED_FF:
+            raise ValueError("accepted_ff shipment status cannot be changed by status dropdown")
         updated = self.runtime.update_supplier_shipment_order_status(
             shipment_id=shipment_id,
             order_status=normalized,
@@ -434,6 +458,26 @@ class SupplierShipmentsBlock:
         if not updated:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         return self.get_shipment(shipment_id)
+
+    def _materialize_ff_cost_layer(self, shipment_id: str) -> None:
+        from packages.application.our_wb_costs import OurWbCostBlock
+
+        cost_block = OurWbCostBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
+        cost_block.materialize_supplier_ff_cost_layer(shipment_id)
+        cost_block.materialize_wb_supply_cost_layers()
+        cost_block.materialize_opening_baseline()
+        cost_block.materialize_daily_state()
+
+    def _has_current_ff_cost_layer(self, shipment_id: str) -> bool:
+        from packages.application.our_wb_costs import OurWbCostBlock
+
+        return OurWbCostBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).has_current_supplier_ff_cost_layer(shipment_id)
 
     def recheck_shipment_prices(self, shipment_id: str, *, actor: str = "", context: Mapping[str, Any] | None = None) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)

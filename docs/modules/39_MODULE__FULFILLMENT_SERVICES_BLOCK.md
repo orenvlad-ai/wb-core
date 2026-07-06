@@ -37,6 +37,7 @@ related_runners:
   - "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"
 related_docs:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
+  - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
 update_note: "Fulfillment uploads are server-owned runtime truth for uploaded service-expense files and payment validation only. They are not official WB evidence, not 1C cost truth, not ЕБД metric truth and not final товарная себестоимость. The operator UI is user-facing as `Услуги ФФ`, shows only accepted uploads in `Загруженные документы`, keeps failed uploads out of the accepted list/overlay, supports `STORAGE` rows in `Номер поставки` for storage allocation across ordinary matched rows, and soft-deletes accepted uploads so their PDF and WB supplies overlay amounts become unavailable."
@@ -55,6 +56,8 @@ The section is server-owned/runtime-backed and contains:
 - PDF-виза link only for fully valid, non-deleted uploads.
 
 Browser `localStorage`, Google Sheets/GAS and legacy project packs are not source of truth for this contour.
+
+Accepted, non-deleted Fulfillment uploads are also read by the management proxy WB cost model as explicit `ff_services_per_unit_rub` and allocated `ff_storage_per_unit_rub` components. Failed, deleted, unmatched and duplicate uploads remain excluded; missing upload evidence is surfaced as component status, not as silent confirmed zero.
 
 # 2. Template
 

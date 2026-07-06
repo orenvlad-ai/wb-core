@@ -27,6 +27,7 @@ related_tables:
   - "sheet_vitrina_v1_wb_supplies_warehouses"
   - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment"
   - "sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs"
+  - "sheet_vitrina_v1_wb_supply_cost_layers"
   - "sheet_vitrina_v1_fulfillment_service_uploads"
   - "sheet_vitrina_v1_fulfillment_service_lines"
 related_endpoints:
@@ -36,6 +37,8 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill"
   - "POST /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/enrich"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/transit-cost/status"
+  - "POST /v1/sheet-vitrina-v1/wb-cost/recalculate"
+  - "GET /v1/sheet-vitrina-v1/wb-cost/status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/sync-status"
   - "GET /v1/sheet-vitrina-v1/supply/wb-supplies/{supply_id}"
   - "GET /v1/sheet-vitrina-v1/supply/fulfillment-services/template.xlsx"
@@ -50,6 +53,7 @@ related_runners:
   - "apps/wb_supplies_backfill_live.py"
   - "apps/wb_supplies_backfill_smoke.py"
   - "apps/wb_supplies_accepted_parity_diagnostics.py"
+  - "apps/our_wb_costs_smoke.py"
   - "apps/wb_supplies_first20_parity_smoke.py"
   - "apps/wb_supplies_goods_composition_diagnostics.py"
   - "apps/wb_supplies_goods_composition_smoke.py"
@@ -67,6 +71,7 @@ related_runners:
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
+  - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
 source_of_truth_level: "module_canonical"
 update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Ordinary sync now fetches bounded recent historical status slices `5/6` in addition to active `1..4`, forces detail/goods refresh for up to 12 prioritized active/recent historical rows that changed, failed enrichment or have newer raw evidence, gives fresh list/detail/goods evidence priority over stale cached detail on overlapping status/accepted quantity fields, and returns diagnostics such as `forced_status_refresh_rows`, `refreshed_recent_historical_rows` and `accepted_qty_changed_rows`. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. User-triggered `Обновить поставки` first runs official WB API sync, then attempts the separate Seller Portal browser/network-json enrichment job for missing transit cabinet cost; the enrichment stores normalized facts and provenance, never official raw evidence, and Seller Portal/session failures do not invalidate successful official sync. The table names effective cost as `Транзит`, adds active approved-only `Услуги ФФ`, and shows `₽/шт` for both using accepted/known/planned quantity denominators. `Услуги ФФ` includes allocated STORAGE amounts and shows `в т.ч. хранение` when storage exists. Deleted, failed, unmatched and duplicate Fulfillment uploads do not affect the overlay. Fulfillment upload data is server-owned operator payment-validation truth only, not official WB evidence, not final product cost, not 1C cost truth and not ЕБД metric truth. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
@@ -86,6 +91,7 @@ update_note: "Read-only WB/FBW supplies registry separates quick incremental/lat
 - Official WB API remains canonical for supply list/status/route/quantity evidence.
 - Seller Portal is used only by the post-sync transit-cost enrichment job and only as a supplemental read-only source for missing transit cost. It is not part of the backend official sync route, does not run on page open, and does not use FBS APIs.
 - Fulfillment uploads are not official WB evidence. They are operator-uploaded runtime truth for service expenses and PDF payment validation only; failed uploads, unmatched rows, duplicate rows and deleted uploads must not affect the WB supplies list overlay.
+- Management proxy WB cost layers are not official WB evidence and not strict accounting FIFO. They classify supply transit as `direct_zero_confirmed`, `transit_confirmed`, `transit_missing` or `unknown_route`, then combine SKU-level FF cost, WB transit, accepted Fulfillment services and allocated storage into `our_wb_unit_cost_rub`. Direct supplies with no transit marker and official/detail zero acceptance cost are confirmed zero transit, not missing transit; this explicitly covers supply patterns like `40431461`.
 
 # 2. Official API Boundary
 
@@ -134,6 +140,7 @@ Tables:
 - `sheet_vitrina_v1_wb_supplies_warehouses`: cached warehouse dictionary/options.
 - `sheet_vitrina_v1_wb_supply_transit_cost_enrichment`: supplemental Seller Portal facts keyed by `supply_id`, with `amount`, `currency`, `amount_label`, `is_transit`, `source=seller_portal_browser`, `evidence_type=network_json`, `confidence`, `fetched_at`, `status`, sanitized `error`, sanitized `source_endpoint_path`, `created_at` and `updated_at`.
 - `sheet_vitrina_v1_wb_supply_transit_cost_enrichment_runs`: background run state for explicit transit-cost enrichment jobs, with counters for processed/success/not-found/failed/session-expired rows, sanitized last error, compact logs and optional lock status.
+- `sheet_vitrina_v1_wb_supply_cost_layers`: management proxy cost-by-supply/SKU rows keyed by `wb_supply_id + nm_id + version`, current-row partial unique index, explicit `transit_cost_status`, source FF layer ids, Fulfillment upload id, per-unit transit/services/storage components, `our_wb_unit_cost_rub`, `source_status`, component JSON, `inputs_hash` and supersession fields. This table is recomputable/idempotent and does not mutate WB official evidence.
 - `sheet_vitrina_v1_fulfillment_service_uploads` and `sheet_vitrina_v1_fulfillment_service_lines`: server-owned Fulfillment upload/line persistence. The WB supplies block reads only fully valid uploads through the approved overlay provider and never treats them as WB official raw evidence.
 
 Transit-cost enrichment persistence must not store cookies, headers, Authorization values, storage-state content, raw HTML, screenshots or full raw network payloads.

@@ -50,6 +50,17 @@ def main() -> None:
             fin_report_daily_block=_SyntheticSuccessBlock("fin_report_daily"),
             now_factory=lambda: datetime(2026, 4, 13, 9, 0, tzinfo=timezone.utc),
         ).build_plan(as_of_date=AS_OF_DATE)
+        data_sheet = next((sheet for sheet in plan.sheets if sheet.sheet_name == "DATA_VITRINA"), None)
+        if data_sheet is None:
+            raise AssertionError("DATA_VITRINA sheet missing")
+        labels = "\n".join(str(row[0]) for row in data_sheet.rows if row)
+        for expected_label in (
+            "Себестоимость WB наша, ₽/шт",
+            "Доля подтверждённой себестоимости, %",
+            "proxy прибыль 3",
+        ):
+            if expected_label not in labels:
+                raise AssertionError(f"new our WB cost metric label missing from DATA_VITRINA: {expected_label}")
         refresh_result = runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
             refreshed_at=REFRESHED_AT,
