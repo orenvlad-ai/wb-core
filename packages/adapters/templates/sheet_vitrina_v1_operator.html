@@ -3780,14 +3780,14 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», WB/FBW registry живёт
-          в «Wildberries», услуги фулфилмента регистрируются в «Услуги фулфилмента», матрица поставок доступна в «Реестр поставок»,
+          в «Wildberries», услуги ФФ регистрируются в «Услуги ФФ», матрица поставок доступна в «Реестр поставок»,
           а реестр заказов поставщика доступен в «От поставщика».
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы поставок">
           <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
           <button class="subsection-button" type="button" data-supply-mode-button="wildberries" aria-selected="false">Wildberries</button>
-          <button class="subsection-button" type="button" data-supply-mode-button="fulfillment" aria-selected="false">Услуги фулфилмента</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="fulfillment" aria-selected="false">Услуги ФФ</button>
           <button class="subsection-button" type="button" data-supply-mode-button="shipment-registry" aria-selected="false">Реестр поставок</button>
           <button class="subsection-button" type="button" data-supply-mode-button="cny-account" aria-selected="false">Счёт CNY</button>
           <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
@@ -4437,8 +4437,8 @@
           <section class="block fulfillment-services-block" aria-labelledby="fulfillmentServicesTitle">
             <div class="wb-supplies-header">
               <div>
-                <h2 id="fulfillmentServicesTitle" class="wb-supplies-title">Услуги фулфилмента</h2>
-                <p class="wb-supplies-lead">Регистрация услуг фулфилмента по WB-поставкам и PDF-виза на оплату.</p>
+                <h2 id="fulfillmentServicesTitle" class="wb-supplies-title">Услуги ФФ</h2>
+                <p class="wb-supplies-lead">Регистрация услуг ФФ по WB-поставкам и PDF-виза на оплату.</p>
               </div>
               <div class="block-actions">
                 <button id="fulfillmentTemplateButton" class="action-button secondary-button" type="button">Скачать шаблон</button>
@@ -4449,7 +4449,7 @@
             <p id="fulfillmentServicesMessage" class="wb-supplies-message" hidden></p>
             <section class="fulfillment-errors-block" id="fulfillmentErrorsBlock" hidden>
               <div class="wb-supplies-table-wrap">
-                <table class="wb-supplies-table" aria-label="Ошибки загрузки услуг фулфилмента">
+                <table class="wb-supplies-table" aria-label="Ошибки загрузки услуг ФФ">
                   <thead>
                     <tr>
                       <th>Строка</th>
@@ -4464,7 +4464,7 @@
             </section>
             <h3 class="block-title" style="margin-top: 18px;">Загруженные документы</h3>
             <div class="wb-supplies-table-wrap">
-              <table class="wb-supplies-table" aria-label="Загруженные документы услуг фулфилмента">
+              <table class="wb-supplies-table" aria-label="Загруженные документы услуг ФФ">
                 <thead>
                   <tr>
                     <th>Дата загрузки</th>
@@ -4560,7 +4560,7 @@
                     <th>Добавлено, шт / Упаковано → Принято</th>
                     <th>Коэф. приёмки</th>
                     <th>Транзит</th>
-                    <th>Услуги фулфилмента</th>
+                    <th>Услуги ФФ</th>
                   </tr>
                 </thead>
                 <tbody id="wbSuppliesTableBody">
@@ -9588,7 +9588,7 @@
         if (fulfillmentDeleteConfirmUploadId === uploadId) {
           return [
             "<div class=\"fulfillment-delete-confirm\">",
-            "<span class=\"fulfillment-delete-confirm-text\">Удалить документ? Данные услуг фулфилмента по связанным WB-поставкам будут удалены из системы.</span>",
+            "<span class=\"fulfillment-delete-confirm-text\">Удалить документ? Данные услуг ФФ по связанным WB-поставкам будут удалены из системы.</span>",
             "<span class=\"fulfillment-delete-confirm-actions\">",
             "<button class=\"fulfillment-row-button\" type=\"button\" data-fulfillment-delete-cancel data-upload-id=\"" + escapeHtml(uploadId) + "\"" + (isDeleting ? " disabled" : "") + ">Отмена</button>",
             "<button class=\"fulfillment-row-button is-danger\" type=\"button\" data-fulfillment-delete-confirm data-upload-id=\"" + escapeHtml(uploadId) + "\"" + (isDeleting ? " disabled" : "") + ">" + (isDeleting ? "Удаляем..." : "Удалить") + "</button>",
@@ -9665,6 +9665,9 @@
         if (raw.includes("Номер поставки is required")) {
           return "Строка " + rowIndex + ": номер поставки не заполнен.";
         }
+        if (raw.includes("Невозможно распределить хранение")) {
+          return "Строка " + rowIndex + ": невозможно распределить хранение, нет количества для строки.";
+        }
         return "Строка " + rowIndex + ": " + valueOrDash(raw);
       }
 
@@ -9686,7 +9689,7 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           fulfillmentDeleteConfirmUploadId = "";
-          setFulfillmentServicesMessage("Документ удалён. Данные услуг фулфилмента удалены из Wildberries overlay.", "success");
+          setFulfillmentServicesMessage("Документ удалён. Данные услуг ФФ удалены из Wildberries overlay.", "success");
           await loadFulfillmentServices({ preserveMessage: true });
           if (wbSuppliesInitialized) {
             await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
@@ -10411,8 +10414,12 @@
             ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.transit_per_unit_display || "₽/шт —") + "</span>"
             : "";
           const fulfillmentValue = row.fulfillment_amount_with_vat_total;
+          const fulfillmentStorageValue = row.fulfillment_storage_allocated_amount_with_vat_total;
+          const fulfillmentStorageSub = fulfillmentStorageValue !== null && fulfillmentStorageValue !== undefined && Number(fulfillmentStorageValue) > 0
+            ? "<span class=\"wb-supplies-sub\">в т.ч. хранение: " + escapeHtml(row.fulfillment_storage_per_unit_display || "₽/шт —") + "</span>"
+            : "";
           const fulfillmentCell = fulfillmentValue !== null && fulfillmentValue !== undefined
-            ? "<span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(fulfillmentValue)) + "</span><span class=\"wb-supplies-sub\">" + escapeHtml(row.fulfillment_per_unit_display || "₽/шт —") + "</span>"
+            ? "<span class=\"wb-supplies-main\">" + escapeHtml(formatWbRub(fulfillmentValue)) + "</span><span class=\"wb-supplies-sub\">" + escapeHtml(row.fulfillment_per_unit_display || "₽/шт —") + "</span>" + fulfillmentStorageSub
             : "<span class=\"wb-supplies-main\">—</span>";
           const warehouseFact = row.warehouse_fact_line
             ? "<span class=\"wb-supplies-sub\">" + escapeHtml(row.warehouse_fact_line) + "</span>"

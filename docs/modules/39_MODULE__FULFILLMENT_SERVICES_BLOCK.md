@@ -3,8 +3,8 @@ title: "Модуль: fulfillment_services_block"
 doc_id: "WB-CORE-MODULE-39-FULFILLMENT-SERVICES-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для `Поставки -> Услуги фулфилмента`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату, accepted-only documents table, delete flow and overlay расходов фулфилмента в `Поставки -> Wildberries`."
-scope: "Operator supply contour for Fulfillment service expenses only: PNG-derived XLSX template, protected HTTP routes, openpyxl parser, SQLite upload/line persistence with soft-delete, PDF payment-validation artifact, accepted-only UI list and approved-only WB supplies overlay. Final product cost, 1C cost truth, ЕБД metric truth and global cost-source switching are out of scope."
+purpose: "Зафиксировать canonical contract для `Поставки -> Услуги ФФ`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату, accepted-only documents table, delete flow and overlay расходов ФФ в `Поставки -> Wildberries`."
+scope: "Operator supply contour for Fulfillment service expenses only: PNG-derived XLSX template, protected HTTP routes, openpyxl parser, STORAGE row handling with storage allocation, SQLite upload/line persistence with soft-delete, PDF payment-validation artifact, accepted-only UI list and approved-only WB supplies overlay. Final product cost, 1C cost truth, ЕБД metric truth and global cost-source switching are out of scope."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
@@ -39,12 +39,12 @@ related_docs:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Fulfillment uploads are server-owned runtime truth for uploaded service-expense files and payment validation only. They are not official WB evidence, not 1C cost truth, not ЕБД metric truth and not final товарная себестоимость. The operator UI is user-facing as `Услуги фулфилмента`, shows only accepted uploads in `Загруженные документы`, keeps failed uploads out of the accepted list/overlay, and soft-deletes accepted uploads so their PDF and WB supplies overlay amounts become unavailable."
+update_note: "Fulfillment uploads are server-owned runtime truth for uploaded service-expense files and payment validation only. They are not official WB evidence, not 1C cost truth, not ЕБД metric truth and not final товарная себестоимость. The operator UI is user-facing as `Услуги ФФ`, shows only accepted uploads in `Загруженные документы`, keeps failed uploads out of the accepted list/overlay, supports `STORAGE` rows in `Номер поставки` for storage allocation across ordinary matched rows, and soft-deletes accepted uploads so their PDF and WB supplies overlay amounts become unavailable."
 ---
 
 # 1. Contract
 
-`Поставки` exposes the inner section `Услуги фулфилмента`.
+`Поставки` exposes the inner section `Услуги ФФ`.
 
 The section is server-owned/runtime-backed and contains:
 - `Скачать шаблон`;
@@ -62,7 +62,7 @@ The XLSX template is generated server-side from the local visual source `~/Downl
 
 Headers:
 1. `Номер поставки`;
-2. `Стоимость услуг`;
+2. `Склад`;
 3. `Кол-во коробов`;
 4. `Цена`;
 5. `Кол-во паллет`;
@@ -73,6 +73,8 @@ Headers:
 10. `НДС 5%`.
 
 The first column is the only added system column. Duplicate headers such as `Цена` and the blank subtotal column are preserved because the template is intended to stay familiar for managers/Fulfillment.
+
+The parser remains backward-compatible with the old second-column header `Стоимость услуг`, but newly downloaded templates must use `Склад`. Operators use `Склад` for warehouse/route/description text; storage rows usually use `Хранение`.
 
 Route:
 - `GET /v1/sheet-vitrina-v1/supply/fulfillment-services/template.xlsx`
@@ -90,20 +92,29 @@ Parser rules:
 - detect the header row by `Номер поставки`, `Итого` and `НДС 5%`;
 - save the original XLSX under runtime storage;
 - persist SHA256 of the original file;
-- parse every detail row as exactly one WB supply;
+- parse every ordinary detail row as exactly one WB supply;
+- recognize `STORAGE` in `Номер поставки` case-insensitively as a service storage row, not as a WB supply;
 - skip fully empty rows and footer/total rows without `Номер поставки`;
 - parse numeric values with spaces, NBSP, comma decimal separator, ruble suffixes and empty optional cells;
 - preserve raw row JSON and useful line fields even when MVP overlay uses only totals.
 
 Validation OK requires:
-- at least one detail row;
-- every detail row has non-empty `Номер поставки`;
-- every supply number matches an existing cached row in `Поставки -> Wildberries`;
+- at least one ordinary WB supply detail row;
+- every ordinary detail row has non-empty `Номер поставки`;
+- every ordinary supply number matches an existing cached row in `Поставки -> Wildberries`;
 - no duplicate supply id inside the upload;
 - `Итого` is numeric and `>= 0`;
 - `НДС 5%` is numeric and `>= 0`;
 - `amount_with_vat = Итого + НДС 5%`;
-- all lines have `match_status=ok`.
+- all ordinary lines have `match_status=ok`.
+
+`STORAGE` rows:
+- do not require WB match and do not appear as separate WB supplies;
+- require numeric non-negative `Итого` and `НДС 5%`;
+- may appear once or multiple times; their `Итого + НДС 5%` is summed;
+- cannot be the only accepted content in an upload.
+
+When storage exists, `storage_total_with_vat` is allocated across ordinary matched rows in the same upload. Allocation uses `boxes_qty` first, then matched WB supply quantity. If neither source is available for an ordinary row, the upload fails with a controlled validation error. Rounding is adjusted so allocated storage totals equal the source storage total.
 
 On any failure:
 - upload status is `failed`;
@@ -134,6 +145,10 @@ Line rows store:
 - service/route text;
 - boxes/pallets/departure fields;
 - `amount_without_vat`, `vat_amount`, `amount_with_vat`;
+- `is_storage_line`;
+- storage source totals for STORAGE rows;
+- allocated storage amount/per-unit for ordinary rows;
+- service amount with and without allocated storage;
 - raw row JSON;
 - row error and warnings.
 
@@ -143,7 +158,7 @@ Original XLSX files and generated PDFs live under the current runtime directory 
 
 For fully valid uploads the backend generates one protected PDF:
 
-`Виза на оплату Fulfillment-услуг`
+`Виза на оплату услуг ФФ`
 
 The PDF includes:
 - title and status `Проверено системой / OK`;
@@ -153,7 +168,8 @@ The PDF includes:
 - source filename and short hash;
 - rows total/matched;
 - totals for `Итого`, `НДС 5%`, `К оплате = Итого + НДС 5%`;
-- matched supplies table;
+- storage summary line `Хранение`;
+- matched supplies table with ordinary lines and allocated storage;
 - note that the PDF is valid only for the uploaded file with the shown upload id and hash.
 
 Route:
@@ -182,11 +198,11 @@ Delete is protected by the same supply-operator auth boundary. The current imple
 
 Table changes:
 - old column `Стоимость` is renamed to `Транзит`;
-- new column `Услуги фулфилмента` is added.
+- new column `Услуги ФФ` is added.
 
 `Транзит` shows the current transit/effective cost amount plus `₽/шт`. It does not place source labels such as `Seller Portal` under the amount; those labels stay backend provenance fields.
 
-`Услуги фулфилмента` shows approved `amount_with_vat` plus `₽/шт`; supplies without approved matched active Fulfillment lines show `—`.
+`Услуги ФФ` shows approved service amount with allocated storage included plus `₽/шт`; supplies without approved matched active Fulfillment lines show `—`. When storage allocation exists, the cell also shows `в т.ч. хранение: X ₽/шт`.
 
 Denominator priority for per-unit display:
 1. accepted quantity / accepted goods total;
@@ -194,7 +210,7 @@ Denominator priority for per-unit display:
 3. planned/added quantity with preliminary marker;
 4. missing or zero denominator -> `₽/шт —`.
 
-Only active uploads with `validation_status=ok`, `deleted_at IS NULL` and matched lines enter the overlay. Failed, unmatched, duplicate and deleted uploads are excluded.
+Only active uploads with `validation_status=ok`, `deleted_at IS NULL` and ordinary matched lines enter the overlay. STORAGE rows enter only through their allocated amount on ordinary lines. Failed, unmatched, duplicate and deleted uploads are excluded.
 
 # 8. Smokes
 
@@ -206,14 +222,14 @@ Targeted smokes:
 - `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`;
 - `python3 apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py`.
 
-The browser smoke uses an isolated temporary runtime SQLite DB, seeds bounded WB supplies cache rows, downloads the template through UI, fills the downloaded XLSX, uploads OK/unmatched/duplicate workbooks through UI, verifies PDF text, and verifies the WB supplies overlay.
+The browser smoke uses an isolated temporary runtime SQLite DB, seeds bounded WB supplies cache rows, downloads the template through UI, uploads a real local `~/Downloads/fulfillment_services_filled_*.xlsx` workbook containing `STORAGE`, verifies PDF text, verifies storage allocation in the WB supplies overlay, and verifies delete/failed flows.
 
 Current smoke expectations also cover:
 - accepted uploads appear in `Загруженные документы`;
 - failed uploads do not appear in the accepted table;
 - delete requires UI confirmation;
 - cancel keeps the accepted document;
-- confirm soft-deletes the accepted document, makes its PDF unavailable and removes its Fulfillment amounts/per-unit values from `Поставки -> Wildberries`.
+- confirm soft-deletes the accepted document, makes its PDF unavailable and removes its Fulfillment/storage amounts/per-unit values from `Поставки -> Wildberries`.
 
 # 9. Explicit Non-Scope
 
