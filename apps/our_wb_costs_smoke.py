@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -59,6 +60,10 @@ def main() -> None:
         if second is None or second.get("materialized"):
             raise AssertionError(f"second FF cost materialization must be idempotent, got {second}")
         _assert_supplier_ff_reconciliation(runtime)
+        _seed_wb_supply(runtime)
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
+            raise AssertionError("WB supply cost layer materialization must write one SKU layer")
+        _assert_wb_supply_cost_layer(runtime)
 
         supplier_block = SupplierShipmentsBlock(runtime=runtime, timestamp_factory=lambda: NOW)
         try:
@@ -255,6 +260,65 @@ def _seed_financial_inputs(runtime: RegistryUploadDbBackedRuntime, *, shipment_i
             """,
             (f"{shipment_id}_customs_line", f"{shipment_id}_customs", shipment_id),
         )
+
+
+def _seed_wb_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
+    with _connect(runtime.db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_wb_supplies (
+                supply_id,
+                cache_key,
+                wb_supply_id,
+                normalized_row_json,
+                raw_goods_json,
+                quantity_for_size_filter,
+                supply_date,
+                fact_date,
+                synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "40431461",
+                "supply:40431461",
+                "40431461",
+                json.dumps(
+                    {
+                        "supply_id": "40431461",
+                        "warehouseName": "Электросталь",
+                        "has_transit_cost_marker": 0,
+                        "acceptanceCost": 0,
+                        "cost_total": 0,
+                        "cost_evidence": "detail.acceptanceCost",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps([{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 10}], ensure_ascii=False),
+                10,
+                "2026-07-03",
+                "2026-07-03",
+                NOW,
+            ),
+        )
+
+
+def _assert_wb_supply_cost_layer(runtime: RegistryUploadDbBackedRuntime) -> None:
+    with _connect(runtime.db_path) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT transit_cost_status, transit_per_unit_rub, our_wb_unit_cost_rub, source_status
+            FROM sheet_vitrina_v1_wb_supply_cost_layers
+            WHERE wb_supply_id = '40431461' AND nm_id = 497413000 AND is_current = 1
+            """
+        ).fetchone()
+    if row is None:
+        raise AssertionError("WB supply cost layer missing")
+    if row["transit_cost_status"] != TRANSIT_DIRECT_ZERO_CONFIRMED or float(row["transit_per_unit_rub"]) != 0.0:
+        raise AssertionError(f"direct WB supply must have confirmed zero transit, got {dict(row)}")
+    if row["our_wb_unit_cost_rub"] is None:
+        raise AssertionError("WB supply cost layer must calculate our_wb_unit_cost_rub")
 
 
 def _assert_supplier_ff_reconciliation(runtime: RegistryUploadDbBackedRuntime) -> None:
