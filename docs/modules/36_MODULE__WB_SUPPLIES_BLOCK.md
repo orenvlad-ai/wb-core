@@ -68,14 +68,14 @@ related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Ordinary sync now fetches bounded recent historical status slices `5/6` in addition to active `1..4`, forces detail/goods refresh for up to 12 prioritized active/recent historical rows that changed, failed enrichment or have newer raw evidence, gives fresh list/detail/goods evidence priority over stale cached detail on overlapping status/accepted quantity fields, and returns diagnostics such as `forced_status_refresh_rows`, `refreshed_recent_historical_rows` and `accepted_qty_changed_rows`. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. User-triggered `Обновить поставки` first runs official WB API sync, then attempts the separate Seller Portal browser/network-json enrichment job for missing transit cabinet cost; the enrichment stores normalized facts and provenance, never official raw evidence, and Seller Portal/session failures do not invalidate successful official sync. The table names effective cost as `Транзит`, adds active approved-only `Услуги фулфилмента`, and shows `₽/шт` for both using accepted/known/planned quantity denominators. Deleted, failed, unmatched and duplicate Fulfillment uploads do not affect the overlay. Fulfillment upload data is server-owned operator payment-validation truth only, not official WB evidence, not final product cost, not 1C cost truth and not ЕБД metric truth. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
+update_note: "Read-only WB/FBW supplies registry separates quick incremental/latest-window refresh from resumable full history backfill, preserves enriched raw evidence, exposes normalized goods composition, maps the planned/target WB warehouse name to the six repo-owned calculation districts through Marketplace offices primary evidence, tariffs/box fallback and bounded known-warehouse fallback, exposes district presets inside the `Склад` dropdown in `Все поставки`, and publishes a read-only calculation-overlay options route for `Поставки -> Расчёты`. Actual/transit warehouses stay route/display evidence and do not define the calculation district. Ordinary sync now fetches bounded recent historical status slices `5/6` in addition to active `1..4`, forces detail/goods refresh for up to 12 prioritized active/recent historical rows that changed, failed enrichment or have newer raw evidence, gives fresh list/detail/goods evidence priority over stale cached detail on overlapping status/accepted quantity fields, and returns diagnostics such as `forced_status_refresh_rows`, `refreshed_recent_historical_rows` and `accepted_qty_changed_rows`. Overlay selector options include only calculation-eligible statuses 2/3/4/6; statuses 1/5 stay out of the selector and are revalidated/skipped server-side if posted manually. User-triggered `Обновить поставки` first runs official WB API sync, then attempts the separate Seller Portal browser/network-json enrichment job for missing transit cabinet cost; the enrichment stores normalized facts and provenance, never official raw evidence, and Seller Portal/session failures do not invalidate successful official sync. The table names effective cost as `Транзит`, adds active approved-only `Услуги ФФ`, and shows `₽/шт` for both using accepted/known/planned quantity denominators. `Услуги ФФ` includes allocated STORAGE amounts and shows `в т.ч. хранение` when storage exists. Deleted, failed, unmatched and duplicate Fulfillment uploads do not affect the overlay. Fulfillment upload data is server-owned operator payment-validation truth only, not official WB evidence, not final product cost, not 1C cost truth and not ЕБД metric truth. It adds no WB mutations, no FBS process, no Google Sheets/GAS writes and no ЕБД metric truth writes."
 ---
 
 # 1. Contract
 
-- Operator surface: `Поставки` has sibling inner sections `Расчёты`, `Wildberries`, `Услуги фулфилмента`, `От поставщика`.
+- Operator surface: `Поставки` has sibling inner sections `Расчёты`, `Wildberries`, `Услуги ФФ`, `От поставщика`.
 - `Расчёты` keeps the existing factory-order and WB regional calculators.
-- `Услуги фулфилмента` is a separate server-owned upload/payment-validation contour documented in `39_MODULE__FULFILLMENT_SERVICES_BLOCK.md`; this module only defines how active approved Fulfillment expense lines are rendered over WB supply rows.
+- `Услуги ФФ` is a separate server-owned upload/payment-validation contour documented in `39_MODULE__FULFILLMENT_SERVICES_BLOCK.md`; this module only defines how active approved Fulfillment expense lines are rendered over WB supply rows.
 - `От поставщика` remains the supplier invoice registry and is not redefined by this module.
 - `Wildberries` renders one screen:
   - inner section label: `Wildberries`;
@@ -204,6 +204,11 @@ Rows may also expose approved Fulfillment overlay fields:
 - `fulfillment_per_unit_denominator_source`;
 - `fulfillment_per_unit_amount`;
 - `fulfillment_per_unit_display`.
+- `fulfillment_service_amount_with_vat_without_storage_total`;
+- `fulfillment_storage_allocated_amount_with_vat_total`;
+- `fulfillment_storage_per_unit_denominator`;
+- `fulfillment_storage_per_unit_amount`;
+- `fulfillment_storage_per_unit_display`.
 
 Display priority:
 1. official `cost_total`, when official evidence provides it;
@@ -417,13 +422,13 @@ Columns:
 5. `Добавлено, шт / Упаковано → Принято`;
 6. `Коэф. приёмки`;
 7. `Транзит`;
-8. `Услуги фулфилмента`.
+8. `Услуги ФФ`.
 
 `Транзит` renders the current `effective_cost_total` amount plus `₽/шт`. The second line is the per-unit calculation, not a service/source label such as `Seller Portal`. Provenance remains available in backend fields.
 
-`Услуги фулфилмента` renders active approved Fulfillment `amount_with_vat` plus `₽/шт`. Rows without approved matched Fulfillment upload lines render `—`. Failed, unmatched, duplicate and deleted Fulfillment uploads do not enter this column.
+`Услуги ФФ` renders active approved Fulfillment amount with allocated STORAGE included plus `₽/шт`. Rows without approved matched Fulfillment upload lines render `—`. When storage allocation exists, the cell adds `в т.ч. хранение: X ₽/шт`. Failed, unmatched, duplicate and deleted Fulfillment uploads do not enter this column.
 
-Per-unit denominator priority for both `Транзит` and `Услуги фулфилмента`:
+Per-unit denominator priority for both `Транзит` and `Услуги ФФ`:
 1. accepted quantity / accepted goods total when available;
 2. `quantity_for_size_filter` / known supply quantity;
 3. planned/added quantity with a preliminary marker;

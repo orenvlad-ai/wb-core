@@ -53,30 +53,54 @@ def main() -> None:
         if template_headers != TEMPLATE_HEADERS:
             raise AssertionError(f"template headers must match PNG-derived form, got {template_headers}")
 
-        ok_payload = block.upload_xlsx(_build_workbook([_valid_row("1001"), _valid_row("1002")]), uploaded_filename="ok.xlsx")
+        if template_headers[0] != "Номер поставки" or template_headers[1] != "Склад":
+            raise AssertionError(f"template must expose first columns Номер поставки/Склад, got {template_headers[:2]}")
+
+        legacy_payload = block.upload_xlsx(
+            _build_workbook([_valid_row("1001")], headers=_legacy_headers()),
+            uploaded_filename="legacy-ok.xlsx",
+        )
+        if legacy_payload.get("validation_status") != "ok":
+            raise AssertionError(f"legacy Стоимость услуг header must remain accepted, got {legacy_payload}")
+        block.delete_upload(legacy_payload["upload"]["upload_id"])
+
+        ok_payload = block.upload_xlsx(
+            _build_workbook([_valid_row("1001"), _valid_row("1002"), _storage_row()]),
+            uploaded_filename="ok.xlsx",
+        )
         ok_upload = ok_payload["upload"]
         if (
             ok_payload.get("validation_status") != "ok"
             or ok_upload.get("rows_total") != 2
             or ok_upload.get("rows_matched") != 2
-            or ok_upload.get("amount_without_vat_total") != 3000.0
-            or ok_upload.get("vat_total") != 150.0
-            or ok_upload.get("amount_with_vat_total") != 3150.0
+            or ok_upload.get("amount_without_vat_total") != 3500.0
+            or ok_upload.get("vat_total") != 175.0
+            or ok_upload.get("amount_with_vat_total") != 3675.0
             or not ok_upload.get("payment_validation_id")
             or not ok_payload.get("pdf_available")
         ):
             raise AssertionError(f"valid upload must pass and generate PDF, got {ok_payload}")
+        detail_lines = ok_payload.get("lines") or []
+        if not any(line.get("is_storage_line") and line.get("storage_total_amount_with_vat") == 525.0 for line in detail_lines):
+            raise AssertionError(f"STORAGE line must be persisted as storage, got {detail_lines}")
+        ordinary_1001 = next(line for line in detail_lines if line.get("supply_id_input") == "1001")
+        if (
+            ordinary_1001.get("storage_allocated_amount_with_vat") != 210.0
+            or ordinary_1001.get("service_amount_with_storage") != 1785.0
+        ):
+            raise AssertionError(f"storage must allocate by boxes to ordinary rows, got {ordinary_1001}")
         accepted_list = block.list_uploads()
         if [item.get("upload_id") for item in accepted_list.get("uploads") or []] != [ok_upload["upload_id"]]:
             raise AssertionError(f"list must expose accepted OK uploads only, got {accepted_list}")
         pdf_bytes, _, _ = block.download_pdf(ok_upload["upload_id"])
         pdf_text = _pdf_text(pdf_bytes)
         for expected in (
-            "Виза на оплату Fulfillment-услуг",
+            "Виза на оплату услуг ФФ",
             ok_upload["upload_id"],
             ok_upload["payment_validation_id"],
             ok_upload["short_file_hash"],
             "К оплате = Итого + НДС 5%",
+            "Хранение",
             "1001",
             "1002",
         ):
@@ -98,8 +122,25 @@ def main() -> None:
             raise AssertionError(f"duplicate row error missing, got {duplicate}")
         if [item.get("upload_id") for item in block.list_uploads().get("uploads") or []] != [ok_upload["upload_id"]]:
             raise AssertionError("failed duplicate upload must not enter accepted uploads list")
+        only_storage = block.upload_xlsx(_build_workbook([_storage_row()]), uploaded_filename="only-storage.xlsx")
+        if only_storage.get("validation_status") != "failed" or only_storage["upload"].get("pdf_available"):
+            raise AssertionError(f"only STORAGE upload must fail without PDF, got {only_storage}")
+        bad_storage = block.upload_xlsx(_build_workbook([_valid_row("1001"), _storage_row(total="bad")]), uploaded_filename="bad-storage.xlsx")
+        if bad_storage.get("validation_status") != "failed" or bad_storage["upload"].get("pdf_available"):
+            raise AssertionError(f"bad STORAGE amount must fail without PDF, got {bad_storage}")
+        missing_denominator = block.upload_xlsx(
+            _build_workbook([_valid_row_without_boxes("1003"), _storage_row()]),
+            uploaded_filename="missing-denominator.xlsx",
+        )
+        if missing_denominator.get("validation_status") != "failed" or missing_denominator["upload"].get("pdf_available"):
+            raise AssertionError(f"missing storage allocation denominator must fail without PDF, got {missing_denominator}")
+        if "Невозможно распределить хранение" not in json.dumps(missing_denominator.get("row_errors"), ensure_ascii=False):
+            raise AssertionError(f"missing denominator error missing, got {missing_denominator}")
         overlay_before_delete = block.approved_overlay_by_supply()
-        if overlay_before_delete.get("1001", {}).get("amount_with_vat_total") != 1575.0:
+        if (
+            overlay_before_delete.get("1001", {}).get("amount_with_vat_total") != 1785.0
+            or overlay_before_delete.get("1001", {}).get("storage_allocated_amount_with_vat_total") != 210.0
+        ):
             raise AssertionError(f"approved overlay missing before delete, got {overlay_before_delete}")
         deleted = block.delete_upload(ok_upload["upload_id"])
         if not deleted.get("deleted") or not deleted.get("soft_deleted"):
@@ -147,7 +188,7 @@ def main() -> None:
 
             upload_status, upload_payload = _post_multipart(
                 f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}",
-                _build_workbook([_valid_row("1001"), _valid_row("1002")]),
+                _build_workbook([_valid_row("1001"), _valid_row("1002"), _storage_row()]),
                 filename="http-ok.xlsx",
             )
             if upload_status != 200 or upload_payload.get("validation_status") != "ok":
@@ -158,8 +199,10 @@ def main() -> None:
             if list_status != 200 or not list_payload.get("uploads"):
                 raise AssertionError(f"list route must return uploads, got {list_status} {list_payload}")
             detail_status, detail_payload = _get_json(f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}")
-            if detail_status != 200 or len(detail_payload.get("lines") or []) != 2:
+            if detail_status != 200 or len(detail_payload.get("lines") or []) != 3:
                 raise AssertionError(f"detail route must return parsed lines, got {detail_status} {detail_payload}")
+            if not any(line.get("is_storage_line") for line in detail_payload.get("lines") or []):
+                raise AssertionError(f"detail route must expose STORAGE line, got {detail_payload}")
             pdf_status, pdf_body, pdf_headers = _get_bytes(
                 f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}/payment-validation.pdf"
             )
@@ -172,13 +215,15 @@ def main() -> None:
             if wb_status != 200:
                 raise AssertionError(f"WB supplies route failed: {wb_status} {wb_payload}")
             labels = [item.get("label") for item in wb_payload.get("schema", {}).get("columns", [])]
-            if "Транзит" not in labels or "Услуги фулфилмента" not in labels or "Стоимость" in labels:
+            if "Транзит" not in labels or "Услуги ФФ" not in labels or "Стоимость" in labels:
                 raise AssertionError(f"WB supplies schema must expose transit/fulfillment labels, got {labels}")
             by_number = {str(row.get("visible_number") or row.get("wb_supply_id")): row for row in wb_payload.get("rows") or []}
             row1001 = by_number.get("1001") or {}
             if (
-                row1001.get("fulfillment_amount_with_vat_total") != 1575.0
+                row1001.get("fulfillment_amount_with_vat_total") != 1785.0
+                or row1001.get("fulfillment_storage_allocated_amount_with_vat_total") != 210.0
                 or "₽/шт" not in str(row1001.get("fulfillment_per_unit_display") or "")
+                or "₽/шт" not in str(row1001.get("fulfillment_storage_per_unit_display") or "")
                 or "₽/шт" not in str(row1001.get("transit_per_unit_display") or "")
             ):
                 raise AssertionError(f"WB supplies overlay must include fulfillment/transit per-unit, got {row1001}")
@@ -201,7 +246,7 @@ def main() -> None:
 
             operator_status, operator_html = _get_text(f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=factory-order")
             for expected in (
-                "Услуги фулфилмента",
+                "Услуги ФФ",
                 "Скачать шаблон",
                 "Загрузить заполненный файл",
                 "Загруженные документы",
@@ -213,7 +258,7 @@ def main() -> None:
             ):
                 if operator_status != 200 or expected not in operator_html:
                     raise AssertionError(f"operator HTML must expose Fulfillment UI token {expected!r}")
-            for forbidden in ("fulfillmentLatestBlock", "fulfillmentLatestSummary", "Услуги fulfillment", ">Fulfillment<", "<th>Стоимость</th>"):
+            for forbidden in ("fulfillmentLatestBlock", "fulfillmentLatestSummary", "Услуги fulfillment", "Услуги фулфилмента", ">Fulfillment<", "<th>Стоимость</th>"):
                 if forbidden in operator_html:
                     raise AssertionError(f"operator UI must not expose forbidden Fulfillment token {forbidden!r}")
         finally:
@@ -228,6 +273,7 @@ def _seed_wb_supplies(runtime: RegistryUploadDbBackedRuntime) -> None:
         rows=[
             _wb_supply_row("1001", accepted_quantity=10, quantity_added=10, cost_total=200),
             _wb_supply_row("1002", accepted_quantity=20, quantity_added=20, cost_total=400),
+            _wb_supply_row("1003", accepted_quantity=0, quantity_added=0, cost_total=600),
         ],
         warehouses=[{"ID": 777, "name": "Электросталь"}],
         synced_at=NOW,
@@ -275,20 +321,41 @@ def _valid_row(supply_id: str) -> list[object]:
     return [supply_id, "Сталь", 2, 450, 1, 500, 1400, 100, 1500, 75]
 
 
-def _build_workbook(rows: list[list[object]]) -> bytes:
+def _valid_row_without_boxes(supply_id: str) -> list[object]:
+    return [supply_id, "Сталь", None, None, None, None, None, None, 1500, 75]
+
+
+def _storage_row(*, total: object = 500, vat: object = 25) -> list[object]:
+    return ["STORAGE", "Хранение", None, None, None, None, None, None, total, vat]
+
+
+def _legacy_headers() -> list[str]:
+    headers = list(TEMPLATE_HEADERS)
+    headers[1] = "Стоимость услуг"
+    return headers
+
+
+def _build_workbook(rows: list[list[object]], *, headers: list[str] | None = None) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Fulfillment"
-    sheet.append(TEMPLATE_HEADERS)
+    sheet.title = "Услуги ФФ"
+    sheet.append(headers or TEMPLATE_HEADERS)
     for row in rows:
         sheet.append(row)
     if rows:
-        total = sum(float(row[8]) for row in rows)
-        vat = sum(float(row[9]) for row in rows)
+        total = sum(_float_or_zero(row[8]) for row in rows)
+        vat = sum(_float_or_zero(row[9]) for row in rows)
         sheet.append(["", "", "", "", "", "", "", "", total, vat])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def _float_or_zero(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _read_headers(workbook_bytes: bytes) -> list[str]:

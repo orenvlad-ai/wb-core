@@ -110,7 +110,7 @@ def main() -> None:
                     "Добавлено, шт / Упаковано → Принято",
                     "Коэф. приёмки",
                     "Транзит",
-                    "Услуги фулфилмента",
+                    "Услуги ФФ",
                 ]
                 actual_columns = operator_frame.locator("#wbSuppliesTableBody").locator("xpath=ancestor::table[1]//thead//th").evaluate_all(
                     "(nodes) => nodes.map((node) => node.textContent.trim())"

@@ -33,7 +33,7 @@ LINES_TABLE = "sheet_vitrina_v1_fulfillment_service_lines"
 
 TEMPLATE_HEADERS = [
     "Номер поставки",
-    "Стоимость услуг",
+    "Склад",
     "Кол-во коробов",
     "Цена",
     "Кол-во паллет",
@@ -45,12 +45,14 @@ TEMPLATE_HEADERS = [
 ]
 
 HEADER_SUPPLY_ID = "Номер поставки"
-HEADER_SERVICE_NAME = "Стоимость услуг"
+HEADER_SERVICE_NAME = "Склад"
+LEGACY_HEADER_SERVICE_NAME = "Стоимость услуг"
 HEADER_BOXES_QTY = "Кол-во коробов"
 HEADER_PALLETS_QTY = "Кол-во паллет"
 HEADER_DEPARTURE = "Выезд"
 HEADER_TOTAL = "Итого"
 HEADER_VAT = "НДС 5%"
+STORAGE_SUPPLY_ID = "STORAGE"
 
 VALIDATION_OK = "ok"
 VALIDATION_FAILED = "failed"
@@ -87,6 +89,15 @@ class _ParsedLine:
     match_status: str = MATCH_INVALID
     matched_wb_supply_id: str = ""
     matched_wb_cache_key: str = ""
+    is_storage_line: bool = False
+    storage_total_amount_without_vat: Decimal | None = None
+    storage_total_vat_amount: Decimal | None = None
+    storage_total_amount_with_vat: Decimal | None = None
+    storage_allocated_amount_with_vat: Decimal | None = None
+    storage_allocated_per_unit: Decimal | None = None
+    service_amount_with_vat_without_storage: Decimal | None = None
+    service_amount_with_storage: Decimal | None = None
+    allocation_weight: Decimal | None = None
 
 
 class FulfillmentServicesBlock:
@@ -104,7 +115,7 @@ class FulfillmentServicesBlock:
     def build_template(self) -> tuple[bytes, str, str]:
         workbook = Workbook()
         sheet = workbook.active
-        sheet.title = "Fulfillment"
+        sheet.title = "Услуги ФФ"
         header_fill = PatternFill("solid", fgColor="E8C9D7")
         header_font = Font(bold=True, italic=True, color="1F1F23")
         for index, header in enumerate(TEMPLATE_HEADERS, start=1):
@@ -141,14 +152,15 @@ class FulfillmentServicesBlock:
         parsed_lines, parse_errors = self._parse_workbook(workbook_bytes)
         validated_lines, validation_errors = self._validate_lines(parsed_lines)
         all_errors = [*parse_errors, *validation_errors]
-        rows_total = len(validated_lines)
-        rows_matched = sum(1 for line in validated_lines if line.match_status == MATCH_OK)
+        ordinary_lines = [line for line in validated_lines if not line.is_storage_line]
+        rows_total = len(ordinary_lines)
+        rows_matched = sum(1 for line in ordinary_lines if line.match_status == MATCH_OK)
         totals = _line_totals(validated_lines)
         validation_status = VALIDATION_OK if rows_total > 0 and not all_errors else VALIDATION_FAILED
         if rows_total <= 0:
             validation_status = VALIDATION_FAILED
-            if not any("detail row" in item for item in all_errors):
-                all_errors.append("XLSX must contain at least one detail row")
+            if not any("ordinary WB supply detail row" in item for item in all_errors):
+                all_errors.append("XLSX must contain at least one ordinary WB supply detail row")
 
         payment_validation_id = ""
         pdf_file_path = ""
@@ -346,7 +358,7 @@ class FulfillmentServicesBlock:
             "soft_deleted": True,
             "lines_deactivated": True,
             "pdf_available": False,
-            "message": "Документ удалён. Данные услуг фулфилмента удалены из overlay WB-поставок.",
+            "message": "Документ удалён. Данные услуг ФФ удалены из overlay WB-поставок.",
         }
 
     def approved_overlay_by_supply(self) -> dict[str, dict[str, Any]]:
@@ -360,6 +372,7 @@ class FulfillmentServicesBlock:
                 WHERE upload.validation_status = ?
                   AND upload.deleted_at IS NULL
                   AND line.match_status = ?
+                  AND COALESCE(line.is_storage_line, 0) = 0
                 ORDER BY upload.uploaded_at ASC, line.row_index ASC
                 """,
                 (VALIDATION_OK, MATCH_OK),
@@ -376,6 +389,8 @@ class FulfillmentServicesBlock:
                     "amount_without_vat_total": 0.0,
                     "vat_total": 0.0,
                     "amount_with_vat_total": 0.0,
+                    "service_amount_with_vat_without_storage_total": 0.0,
+                    "storage_allocated_amount_with_vat_total": 0.0,
                     "upload_ids": [],
                     "payment_validation_ids": [],
                     "service_names": [],
@@ -383,9 +398,18 @@ class FulfillmentServicesBlock:
                     "uploaded_at": str(row["uploaded_at"] or ""),
                 },
             )
+            service_without_storage = _float_or_zero(row["service_amount_with_vat_without_storage"])
+            if not service_without_storage and row["service_amount_with_vat_without_storage"] is None:
+                service_without_storage = _float_or_zero(row["amount_with_vat"])
+            storage_allocated = _float_or_zero(row["storage_allocated_amount_with_vat"])
+            service_with_storage = _float_or_zero(row["service_amount_with_storage"])
+            if not service_with_storage and row["service_amount_with_storage"] is None:
+                service_with_storage = service_without_storage + storage_allocated
             item["amount_without_vat_total"] += float(row["amount_without_vat"] or 0)
             item["vat_total"] += float(row["vat_amount"] or 0)
-            item["amount_with_vat_total"] += float(row["amount_with_vat"] or 0)
+            item["amount_with_vat_total"] += service_with_storage
+            item["service_amount_with_vat_without_storage_total"] += service_without_storage
+            item["storage_allocated_amount_with_vat_total"] += storage_allocated
             item["line_count"] += 1
             _append_unique(item["upload_ids"], str(row["upload_id"] or ""))
             _append_unique(item["payment_validation_ids"], str(row["payment_validation_id"] or ""))
@@ -420,9 +444,15 @@ class FulfillmentServicesBlock:
     def _validate_lines(self, lines: list[_ParsedLine]) -> tuple[list[_ParsedLine], list[str]]:
         errors: list[str] = []
         seen_supply_ids: set[str] = set()
+        ordinary_lines: list[_ParsedLine] = []
+        storage_lines: list[_ParsedLine] = []
         for line in lines:
             line_errors: list[str] = []
-            if not line.supply_id_input:
+            if line.is_storage_line:
+                storage_lines.append(line)
+            else:
+                ordinary_lines.append(line)
+            if not line.supply_id_input and not line.is_storage_line:
                 line.match_status = MATCH_INVALID
                 line_errors.append("Номер поставки is required")
             if line.amount_without_vat is None:
@@ -435,14 +465,26 @@ class FulfillmentServicesBlock:
                 line_errors.append("НДС 5% must be >= 0")
             if line.amount_without_vat is not None and line.vat_amount is not None:
                 line.amount_with_vat = _money(line.amount_without_vat + line.vat_amount)
-            normalized_supply = _normalize_supply_identity(line.supply_id_input)
-            if normalized_supply and normalized_supply in seen_supply_ids:
-                line.match_status = MATCH_DUPLICATE
-                line_errors.append("Duplicate Номер поставки inside upload")
-            elif normalized_supply:
-                seen_supply_ids.add(normalized_supply)
+                if line.is_storage_line:
+                    line.storage_total_amount_without_vat = line.amount_without_vat
+                    line.storage_total_vat_amount = line.vat_amount
+                    line.storage_total_amount_with_vat = line.amount_with_vat
+                else:
+                    line.service_amount_with_vat_without_storage = line.amount_with_vat
+                    line.service_amount_with_storage = line.amount_with_vat
 
-            if line.supply_id_input and line.match_status != MATCH_DUPLICATE:
+            if line.is_storage_line:
+                if not line_errors:
+                    line.match_status = MATCH_OK
+            else:
+                normalized_supply = _normalize_supply_identity(line.supply_id_input)
+                if normalized_supply and normalized_supply in seen_supply_ids:
+                    line.match_status = MATCH_DUPLICATE
+                    line_errors.append("Duplicate Номер поставки inside upload")
+                elif normalized_supply:
+                    seen_supply_ids.add(normalized_supply)
+
+            if line.supply_id_input and not line.is_storage_line and line.match_status != MATCH_DUPLICATE:
                 match = self.runtime.load_wb_supply_record(line.supply_id_input)
                 if match is None:
                     line.match_status = MATCH_UNMATCHED
@@ -462,6 +504,9 @@ class FulfillmentServicesBlock:
                         or normalized.get("supply_id")
                         or line.matched_wb_supply_id
                     ).strip()
+                    line.allocation_weight = _matched_supply_quantity(match)
+                    if line.boxes_qty is not None and line.boxes_qty > 0:
+                        line.allocation_weight = line.boxes_qty
                     if not line_errors:
                         line.match_status = MATCH_OK
             if line_errors:
@@ -472,7 +517,51 @@ class FulfillmentServicesBlock:
             elif line.match_status != MATCH_OK:
                 line.row_error = f"match_status={line.match_status}"
                 errors.append(f"row {line.row_index}: {line.row_error}")
+        if not ordinary_lines:
+            errors.append("XLSX must contain at least one ordinary WB supply detail row")
+        storage_total = _money(
+            sum(((line.storage_total_amount_with_vat or Decimal("0")) for line in storage_lines), Decimal("0"))
+        )
+        if storage_total > 0 and not errors:
+            allocation_errors = self._allocate_storage(storage_total, ordinary_lines)
+            errors.extend(allocation_errors)
         return lines, errors
+
+    def _allocate_storage(self, storage_total: Decimal, ordinary_lines: list[_ParsedLine]) -> list[str]:
+        allocation_candidates: list[_ParsedLine] = []
+        errors: list[str] = []
+        for line in ordinary_lines:
+            if line.match_status != MATCH_OK or line.row_error:
+                continue
+            weight = line.boxes_qty if line.boxes_qty is not None and line.boxes_qty > 0 else line.allocation_weight
+            if weight is None or weight <= 0:
+                line.match_status = MATCH_INVALID
+                line.row_error = f"Невозможно распределить хранение: нет количества для строки {line.row_index}"
+                errors.append(f"row {line.row_index}: {line.row_error}")
+                continue
+            line.allocation_weight = weight
+            allocation_candidates.append(line)
+        total_weight = sum((line.allocation_weight or Decimal("0")) for line in allocation_candidates)
+        if total_weight <= 0:
+            errors.append("Невозможно распределить хранение: нет количества для обычных строк")
+            return errors
+        if errors:
+            return errors
+        allocated_so_far = Decimal("0")
+        last_index = len(allocation_candidates) - 1
+        for index, line in enumerate(allocation_candidates):
+            if index == last_index:
+                allocated = _money(storage_total - allocated_so_far)
+            else:
+                allocated = _money(storage_total * (line.allocation_weight or Decimal("0")) / total_weight)
+                allocated_so_far += allocated
+            line.storage_allocated_amount_with_vat = allocated
+            line.service_amount_with_vat_without_storage = line.amount_with_vat
+            line.service_amount_with_storage = _money((line.amount_with_vat or Decimal("0")) + allocated)
+            denominator = line.allocation_weight if line.allocation_weight and line.allocation_weight > 0 else None
+            if denominator:
+                line.storage_allocated_per_unit = _money(allocated / denominator)
+        return []
 
     def _save_upload(
         self,
@@ -558,12 +647,20 @@ class FulfillmentServicesBlock:
                     amount_without_vat,
                     vat_amount,
                     amount_with_vat,
+                    is_storage_line,
+                    storage_total_amount_without_vat,
+                    storage_total_vat_amount,
+                    storage_total_amount_with_vat,
+                    storage_allocated_amount_with_vat,
+                    storage_allocated_per_unit,
+                    service_amount_with_vat_without_storage,
+                    service_amount_with_storage,
                     raw_row_json,
                     row_error,
                     row_warnings_json,
                     created_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [_line_insert_values(upload_id, line, created_at) for line in lines],
             )
@@ -641,7 +738,7 @@ class FulfillmentServicesBlock:
             rightMargin=14 * mm,
             topMargin=14 * mm,
             bottomMargin=14 * mm,
-            title="Виза на оплату Fulfillment-услуг",
+            title="Виза на оплату услуг ФФ",
         )
         styles = getSampleStyleSheet()
         for style in styles.byName.values():
@@ -650,8 +747,15 @@ class FulfillmentServicesBlock:
         title_style.fontName = font_name
         body_style = styles["BodyText"]
         body_style.fontName = font_name
+        ordinary_rows = [line for line in rows if not line.is_storage_line]
+        storage_total = _money(
+            sum(
+                ((line.storage_total_amount_with_vat or Decimal("0")) for line in rows if line.is_storage_line),
+                Decimal("0"),
+            )
+        )
         story: list[Any] = [
-            Paragraph("Виза на оплату Fulfillment-услуг", title_style),
+            Paragraph("Виза на оплату услуг ФФ", title_style),
             Spacer(1, 4 * mm),
         ]
         meta_rows = [
@@ -661,10 +765,11 @@ class FulfillmentServicesBlock:
             ("payment_validation_id", payment_validation_id),
             ("Source filename", source_filename),
             ("Short file hash", file_sha256[:12]),
-            ("Rows total", str(len(rows))),
-            ("Rows matched", str(len(rows))),
+            ("Rows total", str(len(ordinary_rows))),
+            ("Rows matched", str(sum(1 for line in ordinary_rows if line.match_status == MATCH_OK))),
             ("Total Итого", _format_money(totals["amount_without_vat_total"])),
             ("Total НДС 5%", _format_money(totals["vat_total"])),
+            ("Хранение", _format_money(storage_total)),
             ("К оплате = Итого + НДС 5%", _format_money(totals["amount_with_vat_total"])),
         ]
         meta_table = Table([[Paragraph(k, body_style), Paragraph(v, body_style)] for k, v in meta_rows], colWidths=[55 * mm, 115 * mm])
@@ -683,15 +788,15 @@ class FulfillmentServicesBlock:
             )
         )
         story.extend([meta_table, Spacer(1, 5 * mm)])
-        table_rows = [["Номер поставки", "Стоимость услуг / направление", "Итого", "НДС 5%", "К оплате"]]
-        for line in rows:
+        table_rows = [["Номер поставки", "Склад", "Услуги", "Хранение", "К оплате"]]
+        for line in ordinary_rows:
             table_rows.append(
                 [
                     line.supply_id_input,
                     line.service_name or line.route or "—",
-                    _format_money(line.amount_without_vat),
-                    _format_money(line.vat_amount),
                     _format_money(line.amount_with_vat),
+                    _format_money(line.storage_allocated_amount_with_vat),
+                    _format_money(line.service_amount_with_storage or line.amount_with_vat),
                 ]
             )
         supplies_table = Table(table_rows, colWidths=[28 * mm, 70 * mm, 28 * mm, 25 * mm, 30 * mm], repeatRows=1)
@@ -751,7 +856,7 @@ def _header_columns(normalized_headers: list[str]) -> dict[str, int]:
     supply_col = first(HEADER_SUPPLY_ID)
     total_col = first(HEADER_TOTAL)
     vat_col = first(HEADER_VAT)
-    service_col = first(HEADER_SERVICE_NAME)
+    service_col = first(HEADER_SERVICE_NAME) or first(LEGACY_HEADER_SERVICE_NAME)
     boxes_col = first(HEADER_BOXES_QTY)
     pallets_col = first(HEADER_PALLETS_QTY)
     departure_col = first(HEADER_DEPARTURE)
@@ -781,6 +886,7 @@ def _header_columns(normalized_headers: list[str]) -> dict[str, int]:
 
 def _line_from_values(row_index: int, values: list[Any], columns: Mapping[str, int], raw_row: dict[str, Any]) -> _ParsedLine:
     supply_id = _cell_text(_value_at(values, columns["supply_id"]))
+    is_storage_line = _is_storage_supply_id(supply_id)
     service_name = _cell_text(_value_at(values, columns.get("service_name", 0)))
     boxes_qty = _parse_decimal(_value_at(values, columns.get("boxes_qty", 0)))
     box_price = _parse_decimal(_value_at(values, columns.get("box_price", 0)))
@@ -812,6 +918,7 @@ def _line_from_values(row_index: int, values: list[Any], columns: Mapping[str, i
         raw_row=raw_row,
         row_error="",
         row_warnings=[],
+        is_storage_line=is_storage_line,
     )
 
 
@@ -832,9 +939,9 @@ def _raw_row_payload(row_index: int, values: list[Any], columns: Mapping[str, in
 
 
 def _line_totals(lines: list[_ParsedLine]) -> dict[str, Decimal]:
-    amount_without_vat_total = sum((line.amount_without_vat or Decimal("0")) for line in lines)
-    vat_total = sum((line.vat_amount or Decimal("0")) for line in lines)
-    amount_with_vat_total = sum((line.amount_with_vat or Decimal("0")) for line in lines)
+    amount_without_vat_total = sum(((line.amount_without_vat or Decimal("0")) for line in lines), Decimal("0"))
+    vat_total = sum(((line.vat_amount or Decimal("0")) for line in lines), Decimal("0"))
+    amount_with_vat_total = sum(((line.amount_with_vat or Decimal("0")) for line in lines), Decimal("0"))
     return {
         "amount_without_vat_total": _money(amount_without_vat_total),
         "vat_total": _money(vat_total),
@@ -863,6 +970,14 @@ def _line_insert_values(upload_id: str, line: _ParsedLine, created_at: str) -> t
         _decimal_to_float(line.amount_without_vat),
         _decimal_to_float(line.vat_amount),
         _decimal_to_float(line.amount_with_vat),
+        1 if line.is_storage_line else 0,
+        _decimal_to_float(line.storage_total_amount_without_vat),
+        _decimal_to_float(line.storage_total_vat_amount),
+        _decimal_to_float(line.storage_total_amount_with_vat),
+        _decimal_to_float(line.storage_allocated_amount_with_vat),
+        _decimal_to_float(line.storage_allocated_per_unit),
+        _decimal_to_float(line.service_amount_with_vat_without_storage),
+        _decimal_to_float(line.service_amount_with_storage),
         json.dumps(line.raw_row, ensure_ascii=False),
         line.row_error,
         json.dumps(line.row_warnings, ensure_ascii=False),
@@ -923,6 +1038,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             amount_without_vat REAL,
             vat_amount REAL,
             amount_with_vat REAL,
+            is_storage_line INTEGER NOT NULL DEFAULT 0,
+            storage_total_amount_without_vat REAL,
+            storage_total_vat_amount REAL,
+            storage_total_amount_with_vat REAL,
+            storage_allocated_amount_with_vat REAL,
+            storage_allocated_per_unit REAL,
+            service_amount_with_vat_without_storage REAL,
+            service_amount_with_storage REAL,
             raw_row_json TEXT NOT NULL,
             row_error TEXT NOT NULL DEFAULT '',
             row_warnings_json TEXT NOT NULL DEFAULT '[]',
@@ -947,6 +1070,22 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     }.items():
         if column_name not in existing_upload_columns:
             conn.execute(f"ALTER TABLE {UPLOADS_TABLE} ADD COLUMN {column_name} {column_sql}")
+    existing_line_columns = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({LINES_TABLE})").fetchall()
+    }
+    for column_name, column_sql in {
+        "is_storage_line": "INTEGER NOT NULL DEFAULT 0",
+        "storage_total_amount_without_vat": "REAL",
+        "storage_total_vat_amount": "REAL",
+        "storage_total_amount_with_vat": "REAL",
+        "storage_allocated_amount_with_vat": "REAL",
+        "storage_allocated_per_unit": "REAL",
+        "service_amount_with_vat_without_storage": "REAL",
+        "service_amount_with_storage": "REAL",
+    }.items():
+        if column_name not in existing_line_columns:
+            conn.execute(f"ALTER TABLE {LINES_TABLE} ADD COLUMN {column_name} {column_sql}")
 
 
 def _upload_row_to_dict(row: sqlite3.Row, *, include_links: bool = False) -> dict[str, Any]:
@@ -1003,6 +1142,14 @@ def _line_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "amount_without_vat": row["amount_without_vat"],
         "vat_amount": row["vat_amount"],
         "amount_with_vat": row["amount_with_vat"],
+        "is_storage_line": bool(row["is_storage_line"]),
+        "storage_total_amount_without_vat": row["storage_total_amount_without_vat"],
+        "storage_total_vat_amount": row["storage_total_vat_amount"],
+        "storage_total_amount_with_vat": row["storage_total_amount_with_vat"],
+        "storage_allocated_amount_with_vat": row["storage_allocated_amount_with_vat"],
+        "storage_allocated_per_unit": row["storage_allocated_per_unit"],
+        "service_amount_with_vat_without_storage": row["service_amount_with_vat_without_storage"],
+        "service_amount_with_storage": row["service_amount_with_storage"],
         "raw_row": _loads_json_dict(row["raw_row_json"]),
         "row_error": row["row_error"] or "",
         "row_warnings": _loads_json_list(row["row_warnings_json"]),
@@ -1041,6 +1188,36 @@ def _normalize_supply_identity(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+def _is_storage_supply_id(value: Any) -> bool:
+    return str(value or "").strip().casefold() == STORAGE_SUPPLY_ID.casefold()
+
+
+def _matched_supply_quantity(match: Mapping[str, Any]) -> Decimal | None:
+    normalized = match.get("normalized") if isinstance(match.get("normalized"), Mapping) else {}
+    for key in (
+        "accepted_quantity",
+        "goods_accepted_total",
+        "total_accepted_quantity",
+        "quantity_for_size_filter",
+        "quantity_added",
+        "planned_quantity",
+    ):
+        value = normalized.get(key)
+        parsed = _parse_decimal(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _float_or_zero(value: Any) -> float:
+    if value is None or value == "":
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _value_at(values: list[Any], column: int | None) -> Any:
     if not column or column <= 0:
         return None
@@ -1067,7 +1244,7 @@ def _row_looks_like_footer(values: list[Any], columns: Mapping[str, int]) -> boo
     if supply_id:
         return False
     service_name = _cell_text(_value_at(values, columns.get("service_name", 0))).casefold()
-    if service_name in {"итого", "всего", "total", "footer"}:
+    if service_name in {"итого", "всего", "к оплате", "total", "footer", "payable"}:
         return True
     non_empty_by_key = []
     for key, column in columns.items():

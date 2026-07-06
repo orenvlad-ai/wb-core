@@ -90,7 +90,7 @@ SCHEMA_COLUMNS = [
     {"key": "quantities", "label": "Добавлено, шт / Упаковано → Принято"},
     {"key": "acceptance_coefficient", "label": "Коэф. приёмки"},
     {"key": "transit_cost", "label": "Транзит"},
-    {"key": "fulfillment_services", "label": "Услуги фулфилмента"},
+    {"key": "fulfillment_services", "label": "Услуги ФФ"},
 ]
 
 
@@ -2881,6 +2881,13 @@ def _row_with_display_fields(row: Mapping[str, Any]) -> dict[str, Any]:
             _optional_number(result.get("fulfillment_amount_with_vat_total")),
         )
     )
+    result.update(
+        _per_unit_display_fields(
+            result,
+            "fulfillment_storage",
+            _optional_number(result.get("fulfillment_storage_allocated_amount_with_vat_total")),
+        )
+    )
     return result
 
 
@@ -2898,9 +2905,17 @@ def _row_with_fulfillment_overlay(
     amount_with_vat = _optional_number(overlay.get("amount_with_vat_total")) if overlay else None
     amount_without_vat = _optional_number(overlay.get("amount_without_vat_total")) if overlay else None
     vat_total = _optional_number(overlay.get("vat_total")) if overlay else None
+    service_without_storage = (
+        _optional_number(overlay.get("service_amount_with_vat_without_storage_total")) if overlay else None
+    )
+    storage_allocated = (
+        _optional_number(overlay.get("storage_allocated_amount_with_vat_total")) if overlay else None
+    )
     result["fulfillment_amount_with_vat_total"] = amount_with_vat
     result["fulfillment_amount_without_vat_total"] = amount_without_vat
     result["fulfillment_vat_total"] = vat_total
+    result["fulfillment_service_amount_with_vat_without_storage_total"] = service_without_storage
+    result["fulfillment_storage_allocated_amount_with_vat_total"] = storage_allocated
     result["fulfillment_amount_display"] = _format_effective_cost(amount_with_vat)
     result["fulfillment_upload_ids"] = list(overlay.get("upload_ids") or []) if overlay else []
     result["fulfillment_payment_validation_ids"] = list(overlay.get("payment_validation_ids") or []) if overlay else []
