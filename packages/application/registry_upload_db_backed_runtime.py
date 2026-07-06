@@ -414,6 +414,38 @@ class RegistryUploadDbBackedRuntime:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [str(row["as_of_date"]) for row in rows]
 
+    def load_our_wb_cost_daily_state(self, *, as_of_date: str) -> dict[int, dict[str, Any]]:
+        date_key = str(as_of_date or "").strip()
+        if not date_key:
+            return {}
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_wb_cost_daily_state
+                WHERE as_of_date = ?
+                """,
+                (date_key,),
+            ).fetchall()
+        return {
+            int(row["nm_id"]): {
+                "as_of_date": str(row["as_of_date"]),
+                "nm_id": int(row["nm_id"]),
+                "stock_qty": row["stock_qty"],
+                "our_wb_unit_cost_rub": row["our_wb_unit_cost_rub"],
+                "confirmed_qty": row["confirmed_qty"],
+                "estimated_qty": row["estimated_qty"],
+                "fallback_qty": row["fallback_qty"],
+                "confirmed_share_pct": row["confirmed_share_pct"],
+                "source_status": row["source_status"],
+                "component_status_json": row["component_status_json"],
+                "calculated_at": row["calculated_at"],
+            }
+            for row in rows
+            if row["nm_id"] is not None
+        }
+
     def load_sheet_vitrina_refresh_status(self, as_of_date: str | None = None) -> SheetVitrinaV1RefreshResult:
         current_state = self.load_current_state()
         with _connect(self.db_path) as conn:
@@ -6963,6 +6995,143 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_financial_expense_lines_by_order
         ON sheet_vitrina_v1_supplier_financial_expense_lines(supplier_order_id, financial_document_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_ff_cost_layers (
+            layer_id TEXT PRIMARY KEY,
+            supplier_shipment_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_shipments(shipment_id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            accepted_ff_date TEXT,
+            calculated_at TEXT NOT NULL,
+            effective_cny_rate REAL,
+            invoice_amount_total_cny REAL,
+            invoice_extras_total_cny REAL,
+            product_qty_total REAL,
+            common_expense_pool_rub REAL,
+            common_expense_per_unit_rub REAL,
+            weighted_avg_ff_unit_cost_rub REAL,
+            reconciliation_status TEXT NOT NULL,
+            reconciliation_delta_rub REAL,
+            inputs_hash TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            is_current INTEGER NOT NULL DEFAULT 1,
+            supersedes_layer_id TEXT,
+            superseded_at TEXT,
+            source_status_json TEXT NOT NULL DEFAULT '{}',
+            component_status_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(supplier_shipment_id, version)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_ff_cost_layers_current
+        ON sheet_vitrina_v1_supplier_ff_cost_layers(supplier_shipment_id)
+        WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_ff_cost_layers_by_status
+        ON sheet_vitrina_v1_supplier_ff_cost_layers(status, accepted_ff_date DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_ff_cost_layer_lines (
+            layer_line_id TEXT PRIMARY KEY,
+            layer_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_ff_cost_layers(layer_id) ON DELETE CASCADE,
+            supplier_shipment_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_supplier_shipments(shipment_id) ON DELETE CASCADE,
+            supplier_line_id TEXT NOT NULL,
+            nm_id INTEGER,
+            sku TEXT,
+            display_name TEXT,
+            qty REAL,
+            invoice_unit_price_cny REAL,
+            sku_purchase_cost_rub REAL,
+            allocated_common_expenses_per_unit_rub REAL,
+            sku_ff_unit_cost_rub REAL,
+            line_total_cost_rub REAL,
+            allocation_method TEXT NOT NULL,
+            source_status TEXT NOT NULL,
+            missing_reason TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_ff_cost_layer_lines_by_nm
+        ON sheet_vitrina_v1_supplier_ff_cost_layer_lines(nm_id, supplier_shipment_id);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_supply_cost_layers (
+            wb_supply_cost_layer_id TEXT PRIMARY KEY,
+            wb_supply_id TEXT NOT NULL,
+            cache_key TEXT,
+            nm_id INTEGER NOT NULL,
+            accepted_qty REAL NOT NULL DEFAULT 0,
+            qty_denominator REAL NOT NULL DEFAULT 0,
+            supply_date TEXT,
+            accepted_date TEXT,
+            supplier_ff_cost_layer_id TEXT,
+            supplier_ff_cost_layer_line_id TEXT,
+            sku_ff_unit_cost_rub REAL,
+            transit_cost_status TEXT NOT NULL,
+            transit_amount_total REAL,
+            transit_per_unit_rub REAL NOT NULL DEFAULT 0,
+            ff_upload_id TEXT,
+            ff_services_amount_total REAL NOT NULL DEFAULT 0,
+            ff_services_per_unit_rub REAL NOT NULL DEFAULT 0,
+            ff_storage_amount_total REAL NOT NULL DEFAULT 0,
+            ff_storage_per_unit_rub REAL NOT NULL DEFAULT 0,
+            our_wb_unit_cost_rub REAL,
+            source_status TEXT NOT NULL,
+            component_status_json TEXT NOT NULL DEFAULT '{}',
+            missing_reason TEXT,
+            calculated_at TEXT NOT NULL,
+            inputs_hash TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            is_current INTEGER NOT NULL DEFAULT 1,
+            supersedes_id TEXT,
+            superseded_at TEXT,
+            UNIQUE(wb_supply_id, nm_id, version)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supply_cost_layers_current
+        ON sheet_vitrina_v1_wb_supply_cost_layers(wb_supply_id, nm_id)
+        WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_supply_cost_layers_by_date_nm
+        ON sheet_vitrina_v1_wb_supply_cost_layers(supply_date, nm_id, source_status);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_opening_baseline (
+            as_of_date TEXT NOT NULL,
+            nm_id INTEGER NOT NULL,
+            display_name TEXT,
+            opening_stock_qty REAL NOT NULL DEFAULT 0,
+            opening_unit_cost_rub REAL,
+            source_priority INTEGER NOT NULL,
+            source_status TEXT NOT NULL,
+            supplier_ff_cost_layer_id TEXT,
+            supplier_ff_cost_layer_line_id TEXT,
+            metric11_value REAL,
+            confirmed_qty REAL NOT NULL DEFAULT 0,
+            estimated_qty REAL NOT NULL DEFAULT 0,
+            fallback_qty REAL NOT NULL DEFAULT 0,
+            missing_reason TEXT,
+            component_status_json TEXT NOT NULL DEFAULT '{}',
+            calculated_at TEXT NOT NULL,
+            inputs_hash TEXT NOT NULL,
+            PRIMARY KEY(as_of_date, nm_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_opening_baseline_by_source
+        ON sheet_vitrina_v1_wb_opening_baseline(as_of_date, source_status, source_priority);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_cost_daily_state (
+            as_of_date TEXT NOT NULL,
+            nm_id INTEGER NOT NULL,
+            stock_qty REAL NOT NULL DEFAULT 0,
+            our_wb_unit_cost_rub REAL,
+            confirmed_qty REAL NOT NULL DEFAULT 0,
+            estimated_qty REAL NOT NULL DEFAULT 0,
+            fallback_qty REAL NOT NULL DEFAULT 0,
+            confirmed_share_pct REAL,
+            source_status TEXT NOT NULL,
+            component_status_json TEXT NOT NULL DEFAULT '{}',
+            calculated_at TEXT NOT NULL,
+            inputs_hash TEXT NOT NULL,
+            PRIMARY KEY(as_of_date, nm_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_wb_cost_daily_state_by_date
+        ON sheet_vitrina_v1_wb_cost_daily_state(as_of_date, source_status);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_cny_documents (
             document_id TEXT PRIMARY KEY,

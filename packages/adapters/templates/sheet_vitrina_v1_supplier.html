@@ -737,6 +737,7 @@
             in_transit: "В пути",
             accepted_ff: "Принято на ФФ"
           };
+          const selectableOrderStatuses = ["production", "in_transit"];
           const financialDocumentTypeLabels = {
             invoice: "Invoice",
             contract: "Контракт",
@@ -1162,7 +1163,10 @@
 
           function renderOrderStatusCell(row) {
             const value = orderStatusLabels[row.order_status] ? row.order_status : "production";
-            const options = Object.keys(orderStatusLabels).map((status) => (
+            if (value === "accepted_ff") {
+              return '<td data-order-status-column><span class="badge success" title="Статус выставляется автоматически по фактической дате приёмки на ФФ">' + escapeHtml(orderStatusLabels[value]) + '</span></td>';
+            }
+            const options = selectableOrderStatuses.map((status) => (
               '<option value="' + status + '"' + (status === value ? " selected" : "") + '>' + escapeHtml(orderStatusLabels[status]) + '</option>'
             )).join("");
             return '<td data-order-status-column><select class="order-status-select" data-order-status-shipment="' + escapeHtml(row.shipment_id) + '" data-previous-status="' + escapeHtml(value) + '" aria-label="Статус заказа">' + options + '</select></td>';
@@ -1241,7 +1245,7 @@
           async function updateOrderStatus(select) {
             const shipmentId = select.dataset.orderStatusShipment || "";
             const previousStatus = select.dataset.previousStatus || "production";
-            if (!shipmentId || !orderStatusLabels[select.value]) {
+            if (!shipmentId || selectableOrderStatuses.indexOf(select.value) === -1) {
               select.value = previousStatus;
               return;
             }
@@ -1388,6 +1392,11 @@
         shipmentDateInput.value = shipment.planned_shipment_date || shipment.shipment_date || "";
         actualShipmentDateInput.value = shipment.actual_shipment_date || "";
         actualFfAcceptanceDateInput.value = shipment.actual_ff_acceptance_date || "";
+        actualFfAcceptanceDateInput.readOnly = !!(shipment.shipment_id && shipment.order_status === "accepted_ff" && shipment.actual_ff_acceptance_date);
+        actualFfAcceptanceDateInput.disabled = actualFfAcceptanceDateInput.readOnly;
+        actualFfAcceptanceDateInput.title = actualFfAcceptanceDateInput.readOnly
+          ? "Дата уже зафиксирована; корректировка заблокирована для MVP после материализации себестоимости."
+          : "";
         approxYuanRateInput.value = shipment.approx_yuan_rate ?? "";
         metaInputs.forEach((input) => {
           input.value = metadata[input.dataset.metaField] ?? "";

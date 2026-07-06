@@ -401,7 +401,6 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_label("Плановая дата отгрузки").fill("2026-05-14")
                 frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-16")
-                frame.get_by_label("Фактическая дата приёмки на ФФ").fill("2026-05-28")
                 frame.get_by_label("Примерный курс юаня, ₽/¥").fill("13.2")
                 expect(frame.get_by_role("button", name="Сохранить")).to_be_enabled()
                 frame.get_by_role("button", name="Сохранить").click()
@@ -442,7 +441,6 @@ def main() -> None:
                 expect(frame.locator("#cardMessage")).to_contain_text("Проверка цен обновлена.", timeout=5000)
                 expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("2026-05-16")).to_be_visible()
-                expect(frame.locator("#shipmentRows").get_by_text("2026-05-28")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("HanShang Technology")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("Проверить")).to_be_visible()
                 frame.get_by_role("button", name="Закрыть").click()
@@ -459,6 +457,9 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows")).not_to_contain_text("26GN391")
                 frame.locator("#orderStatusFilter input[value='all']").check()
                 expect(frame.locator("#shipmentRows").get_by_text("26GN391")).to_be_visible(timeout=5000)
+                accepted_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN391").first
+                expect(accepted_row.locator("[data-order-status-shipment]")).to_have_count(0)
+                expect(accepted_row.locator(".badge", has_text="Принято на ФФ")).to_be_visible()
                 frame.locator("#orderStatusFilter input[value='all']").uncheck()
                 expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
                 expect(frame.locator("#orderStatusFilter input[value='in_transit']")).to_be_checked()
@@ -492,7 +493,7 @@ def main() -> None:
                 expect(active_row.locator("[data-delete-shipment]").first).to_have_text("Удалить")
                 active_row.click()
                 expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-16")
-                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("2026-05-28")
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("")
                 expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("13.2")
                 expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
@@ -663,7 +664,6 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
             page.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки").fill("2026-05-14")
             page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки").fill("2026-05-16")
-            page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ").fill("2026-05-28")
             expect(page.get_by_role("button", name="保存 / Save / Сохранить")).to_be_enabled()
             page.get_by_role("button", name="保存 / Save / Сохранить").click()
             expect(page.get_by_text("订单已保存 / Order saved / Заказ сохранён.")).to_be_visible(timeout=5000)
@@ -679,7 +679,7 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             page.locator("#shipmentRows tr[data-row]").first.click()
             expect(page.locator("#shipmentCard")).to_be_visible()
             expect(page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_have_value("2026-05-16")
-            expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("2026-05-28")
+            expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("")
             expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_have_value("")
             expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
             expect(page.locator("#priceCheckButton")).to_have_count(0)
@@ -830,10 +830,6 @@ def _seed_accepted_ff_supplier_order(
     shipment_id = str(created.get("shipment_id") or "")
     if not shipment_id:
         raise AssertionError(f"accepted_ff seed shipment was not created: {created}")
-    entrypoint.handle_supplier_shipments_order_status_patch_request(
-        shipment_id,
-        {"order_status": "accepted_ff"},
-    )
     return shipment_id
 
 

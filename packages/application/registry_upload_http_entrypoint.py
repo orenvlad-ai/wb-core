@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.fulfillment_services import FulfillmentServicesBlock
+from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
@@ -719,6 +720,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.fulfillment_services_block = FulfillmentServicesBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.our_wb_cost_block = OurWbCostBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -1871,6 +1876,22 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
         return self.supplier_shipments_block.update_order_status(shipment_id, payload.get("order_status"))
+
+    def handle_our_wb_cost_recalculate_request(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        result = self.our_wb_cost_block.rebuild_all()
+        return {
+            "contract_name": "sheet_vitrina_v1_our_wb_cost_recalculate",
+            "status": "ok",
+            "result": asdict(result),
+            "requested": dict(payload or {}),
+        }
+
+    def handle_our_wb_cost_status_request(self) -> dict[str, Any]:
+        return {
+            "contract_name": "sheet_vitrina_v1_our_wb_cost_status",
+            "status": "ok",
+            "result": self.our_wb_cost_block.status(),
+        }
 
     def handle_supplier_shipments_delete_request(self, shipment_id: str) -> dict[str, Any]:
         return self.supplier_shipments_block.delete_shipment(shipment_id)
