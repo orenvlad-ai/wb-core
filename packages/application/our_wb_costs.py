@@ -280,6 +280,7 @@ class OurWbCostBlock:
 
     def materialize_wb_supply_cost_layers(self, *, opening_date: str = OUR_WB_COST_OPENING_DATE) -> int:
         ff_overlay_block = FulfillmentServicesBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
+        ff_overlays = ff_overlay_block.approved_overlay_by_supply()
         current_ff_lines = self._load_current_supplier_ff_cost_lines_by_nm()
         count = 0
         now = self.timestamp_factory()
@@ -299,7 +300,8 @@ class OurWbCostBlock:
                 goods = _parse_wb_goods(supply.get("raw_goods_json"))
                 if not goods:
                     continue
-                overlay = ff_overlay_block.approved_overlay_by_supply(str(supply.get("supply_id") or ""))
+                supply_id = str(supply.get("supply_id") or "")
+                overlay = ff_overlays.get(supply_id)
                 supply_qty = _sum_positive(_wb_good_qty(item) for item in goods)
                 denominator = _positive_number(supply.get("quantity_for_size_filter")) or supply_qty
                 if denominator <= 0:
@@ -308,8 +310,12 @@ class OurWbCostBlock:
                     _normalized_wb_row(supply),
                     denominator=denominator,
                 )
-                services_total = _number_or_zero((overlay or {}).get("service_amount_total"))
-                storage_total = _number_or_zero((overlay or {}).get("storage_amount_total"))
+                services_total = _number_or_zero(
+                    (overlay or {}).get("service_amount_with_vat_without_storage_total")
+                )
+                storage_total = _number_or_zero(
+                    (overlay or {}).get("storage_allocated_amount_with_vat_total")
+                )
                 services_per_unit = services_total / denominator if denominator > 0 else 0.0
                 storage_per_unit = storage_total / denominator if denominator > 0 else 0.0
                 for good in goods:
@@ -1044,6 +1050,7 @@ class OurWbCostBlock:
                 source_status = WB_COST_STATUS_ESTIMATED
                 missing_reason = None
         supply_id = str(supply.get("supply_id") or supply.get("wb_supply_id") or "")
+        upload_ids = (overlay or {}).get("upload_ids") or []
         payload = {
             "wb_supply_id": supply_id,
             "cache_key": _optional_text(supply.get("cache_key")),
@@ -1058,7 +1065,7 @@ class OurWbCostBlock:
             "transit_cost_status": transit.status,
             "transit_amount_total": transit.amount_total,
             "transit_per_unit_rub": transit.per_unit if transit.per_unit is not None else 0.0,
-            "ff_upload_id": _optional_text((overlay or {}).get("upload_id")),
+            "ff_upload_id": _optional_text(",".join(str(item) for item in upload_ids) if upload_ids else None),
             "ff_services_amount_total": services_total,
             "ff_services_per_unit_rub": services_per_unit,
             "ff_storage_amount_total": storage_total,
@@ -1074,9 +1081,10 @@ class OurWbCostBlock:
                 "transit_evidence": transit.evidence,
             },
         }
+        payload_input = dict(payload)
         payload["input"] = {
             "schema": "wb_supply_cost_layer_v1",
-            "payload": payload,
+            "payload": payload_input,
             "supply": _selected_wb_supply_inputs(supply),
         }
         return payload
