@@ -2300,8 +2300,10 @@ class RegistryUploadHttpEntrypoint:
     ) -> tuple[bytes, str, str]:
         return self.fulfillment_services_block.download_pdf(upload_id)
 
-    def handle_nomenclature_list_request(self) -> dict[str, Any]:
-        return self.supplier_shipments_block.list_nomenclature()
+    def handle_nomenclature_list_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        visibility = str(params.get("visibility") or "visible")
+        return self.supplier_shipments_block.list_nomenclature(visibility=visibility)
 
     def handle_nomenclature_export_request(self) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.export_nomenclature_xlsx()
@@ -2335,6 +2337,18 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_nomenclature_item_barcode_sync_request(self, item_id: str) -> dict[str, Any]:
         return self.supplier_shipments_block.sync_nomenclature_item_barcode(item_id)
+
+    def handle_sku_groups_list_request(self) -> dict[str, Any]:
+        return self.supplier_shipments_block.list_sku_groups(include_inactive=True)
+
+    def handle_sku_groups_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.create_sku_group(payload)
+
+    def handle_sku_groups_patch_request(self, group_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.supplier_shipments_block.update_sku_group(group_key, payload)
+
+    def handle_sku_groups_delete_request(self, group_key: str) -> dict[str, Any]:
+        return self.supplier_shipments_block.deactivate_sku_group(group_key)
 
     def _run_sheet_auto_update(
         self,

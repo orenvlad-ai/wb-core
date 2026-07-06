@@ -17,7 +17,7 @@
 - `ads_compact_block`
 - `fin_report_daily_block`
 - `wb_feedbacks` / `sheet_vitrina_v1_feedbacks` read-only route
-- `wb_content` / `Настройки -> Номенклатура` read-only barcode sync from WB Content cards
+- `wb_content` / `Настройки -> Номенклатура` read-only SKU/card sync from WB Content cards
 
 `web_source_snapshot_block` и `seller_funnel_snapshot_block` не используют direct WB token path: они ходят в repo-owned hosted runtime contour. Active hosted target is `wb-core-eu-root` / `89.191.226.88`, with `api.selleros.pro` allowed as the current live DNS name; archived `selleros-root` / `178.72.152.177` is rollback/read-only evidence only, and mutating deploy/apply-nginx/restart/update/GC paths must fail fast unless the explicit emergency rollback override is set.
 
@@ -66,6 +66,6 @@
 
 Для feedbacks MVP это означает: `GET /v1/sheet-vitrina-v1/feedbacks` использует тот же `WB_API_TOKEN` через adapter boundary `packages/adapters/wb_feedbacks.py`; отсутствие прав WB token на категорию feedbacks должно surface-иться как явная 401/403 upstream error, а не как fallback на другой secret name.
 
-Для nomenclature barcode sync это означает: `POST /v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync` и `POST /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}/barcode-sync` используют тот же `WB_API_TOKEN` через read-only adapter boundary `packages/adapters/wb_content.py` к WB Content `POST /content/v2/get/cards/list`. Optional base URL override is `WB_CONTENT_API_BASE_URL`; отсутствие token или Content permission surface-ится как controlled `token_missing`/`sync_error` diagnostics and does not reject saving nomenclature rows.
+Для nomenclature SKU sync это означает: `POST /v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync` использует тот же `WB_API_TOKEN` через read-only adapter boundary `packages/adapters/wb_content.py` к WB Content `POST /content/v2/get/cards/list`, читает карточки cursor pagination и синхронизирует только локальные reference-поля (`nm_id`, non-manual `barcode/barcodes`, `vendor_code`, WB title/subject/updatedAt and sync evidence). `POST /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}/barcode-sync` остаётся совместимым per-row barcode reference route. Optional base URL override is `WB_CONTENT_API_BASE_URL`; отсутствие token, Content permission, rate-limit или upstream transport failure surface-ится как controlled `token_missing`/`sync_error` diagnostics without printing token material and does not reject saving nomenclature rows. WB Content sync is read-only and must not create/update/delete WB cards.
 
 Для WB regional supply planning это означает: `POST /v1/sheet-vitrina-v1/supply/wb-regional/planning-options` использует тот же `WB_API_TOKEN` через read-only `packages/adapters/wb_supplies.py` boundary к WB FBW `POST /api/v1/acceptance/options`, `GET /api/v1/warehouses`, `GET /api/v1/transit-tariffs` and Common/Tariffs `GET /api/tariffs/v1/acceptance/coefficients` / `GET /api/v1/tariffs/box`. Optional base URL overrides stay `WB_SUPPLIES_API_BASE_URL`, `WB_MARKETPLACE_API_BASE_URL` and `WB_TARIFFS_API_BASE_URL`. Missing token, permission errors, rate limits and non-JSON upstream failures surface as controlled planning blockers/warnings and must not print token material.

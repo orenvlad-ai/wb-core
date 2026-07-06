@@ -403,9 +403,27 @@
       "methods": ["POST"]
     },
     {
+      "name": "sheet_vitrina_settings_nomenclature_wb_sync",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_settings_nomenclature_items",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/settings/nomenclature/",
+      "methods": ["PATCH", "DELETE", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_settings_sku_groups",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/settings/sku-groups",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_settings_sku_group_items",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/settings/sku-groups/",
       "methods": ["PATCH", "DELETE"]
     },
     {

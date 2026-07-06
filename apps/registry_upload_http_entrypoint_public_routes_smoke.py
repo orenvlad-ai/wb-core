@@ -83,7 +83,10 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/supply/cny-account/replay",
         "/v1/sheet-vitrina-v1/supply/cny-account/documents/",
         "/v1/sheet-vitrina-v1/settings/nomenclature",
+        "/v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync",
         "/v1/sheet-vitrina-v1/settings/nomenclature/",
+        "/v1/sheet-vitrina-v1/settings/sku-groups",
+        "/v1/sheet-vitrina-v1/settings/sku-groups/",
         "/v1/sheet-vitrina-v1/settings/documents",
         "/v1/sheet-vitrina-v1/settings/documents/",
         "/v1/sheet-vitrina-v1/settings/users",
@@ -200,8 +203,14 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include CNY account document file prefix exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/settings/nomenclature {") != 1:
         raise AssertionError("rendered nginx block must include nomenclature API exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync {") != 1:
+        raise AssertionError("rendered nginx block must include nomenclature WB sync exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/nomenclature/ {") != 1:
         raise AssertionError("rendered nginx block must include nomenclature item API exactly once")
+    if rendered.count("location = /v1/sheet-vitrina-v1/settings/sku-groups {") != 1:
+        raise AssertionError("rendered nginx block must include SKU groups API exactly once")
+    if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/sku-groups/ {") != 1:
+        raise AssertionError("rendered nginx block must include SKU group item API exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/settings/documents {") != 1:
         raise AssertionError("rendered nginx block must include trade documents API exactly once")
     if rendered.count("location ^~ /v1/sheet-vitrina-v1/settings/documents/ {") != 1:

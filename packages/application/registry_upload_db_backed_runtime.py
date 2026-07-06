@@ -4020,7 +4020,7 @@ class RegistryUploadDbBackedRuntime:
                 SELECT *
                 FROM sheet_vitrina_v1_nomenclature_items
                 {where_clause}
-                ORDER BY is_active DESC, product_type ASC, match_key ASC, nomenclature_name ASC
+                ORDER BY is_hidden ASC, is_active DESC, created_at ASC, product_type ASC, match_key ASC, nomenclature_name ASC
                 """
             ).fetchall()
             return [_nomenclature_item_to_dict(row) for row in rows]
@@ -4098,6 +4098,9 @@ class RegistryUploadDbBackedRuntime:
                 {
                     "item_id": item_id,
                     "is_active": 1 if bool(item.get("is_active")) else 0,
+                    "is_hidden": 1 if bool(item.get("is_hidden")) else 0,
+                    "hidden_at": str(item.get("hidden_at") or ""),
+                    "hidden_reason": str(item.get("hidden_reason") or ""),
                     "our_sku": str(item.get("our_sku") or ""),
                     "nm_id": item.get("nm_id"),
                     "barcode": barcode,
@@ -4108,6 +4111,16 @@ class RegistryUploadDbBackedRuntime:
                     "barcode_updated_at": str(item.get("barcode_updated_at") or ""),
                     "barcode_evidence_json": json.dumps(
                         item.get("barcode_evidence") if isinstance(item.get("barcode_evidence"), Mapping) else {},
+                        ensure_ascii=False,
+                    ),
+                    "vendor_code": str(item.get("vendor_code") or item.get("seller_article") or ""),
+                    "wb_title": str(item.get("wb_title") or ""),
+                    "wb_subject_name": str(item.get("wb_subject_name") or ""),
+                    "wb_updated_at": str(item.get("wb_updated_at") or ""),
+                    "wb_synced_at": str(item.get("wb_synced_at") or ""),
+                    "wb_sync_status": str(item.get("wb_sync_status") or ""),
+                    "wb_sync_evidence_json": json.dumps(
+                        item.get("wb_sync_evidence") if isinstance(item.get("wb_sync_evidence"), Mapping) else {},
                         ensure_ascii=False,
                     ),
                     "nomenclature_name": str(item.get("nomenclature_name") or ""),
@@ -4134,6 +4147,9 @@ class RegistryUploadDbBackedRuntime:
                     INSERT INTO sheet_vitrina_v1_nomenclature_items(
                         item_id,
                         is_active,
+                        is_hidden,
+                        hidden_at,
+                        hidden_reason,
                         our_sku,
                         nm_id,
                         barcode,
@@ -4143,6 +4159,13 @@ class RegistryUploadDbBackedRuntime:
                         barcode_synced_at,
                         barcode_updated_at,
                         barcode_evidence_json,
+                        vendor_code,
+                        wb_title,
+                        wb_subject_name,
+                        wb_updated_at,
+                        wb_synced_at,
+                        wb_sync_status,
+                        wb_sync_evidence_json,
                         nomenclature_name,
                         product_type,
                         match_key,
@@ -4154,9 +4177,12 @@ class RegistryUploadDbBackedRuntime:
                         created_at,
                         updated_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(item_id) DO UPDATE SET
                         is_active = excluded.is_active,
+                        is_hidden = excluded.is_hidden,
+                        hidden_at = excluded.hidden_at,
+                        hidden_reason = excluded.hidden_reason,
                         our_sku = excluded.our_sku,
                         nm_id = excluded.nm_id,
                         barcode = excluded.barcode,
@@ -4166,6 +4192,13 @@ class RegistryUploadDbBackedRuntime:
                         barcode_synced_at = excluded.barcode_synced_at,
                         barcode_updated_at = excluded.barcode_updated_at,
                         barcode_evidence_json = excluded.barcode_evidence_json,
+                        vendor_code = excluded.vendor_code,
+                        wb_title = excluded.wb_title,
+                        wb_subject_name = excluded.wb_subject_name,
+                        wb_updated_at = excluded.wb_updated_at,
+                        wb_synced_at = excluded.wb_synced_at,
+                        wb_sync_status = excluded.wb_sync_status,
+                        wb_sync_evidence_json = excluded.wb_sync_evidence_json,
                         nomenclature_name = excluded.nomenclature_name,
                         product_type = excluded.product_type,
                         match_key = excluded.match_key,
@@ -4179,6 +4212,9 @@ class RegistryUploadDbBackedRuntime:
                     (
                         prepared["item_id"],
                         prepared["is_active"],
+                        prepared["is_hidden"],
+                        prepared["hidden_at"],
+                        prepared["hidden_reason"],
                         prepared["our_sku"],
                         prepared["nm_id"],
                         prepared["barcode"],
@@ -4188,6 +4224,13 @@ class RegistryUploadDbBackedRuntime:
                         prepared["barcode_synced_at"],
                         prepared["barcode_updated_at"],
                         prepared["barcode_evidence_json"],
+                        prepared["vendor_code"],
+                        prepared["wb_title"],
+                        prepared["wb_subject_name"],
+                        prepared["wb_updated_at"],
+                        prepared["wb_synced_at"],
+                        prepared["wb_sync_status"],
+                        prepared["wb_sync_evidence_json"],
                         prepared["nomenclature_name"],
                         prepared["product_type"],
                         prepared["match_key"],
@@ -4230,6 +4273,97 @@ class RegistryUploadDbBackedRuntime:
         if loaded is None:
             raise ValueError(f"nomenclature item not found: {item_id}")
         return loaded
+
+    def list_sku_groups(self, *, include_inactive: bool = True) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            where_clause = "" if include_inactive else "WHERE is_active = 1"
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM sheet_vitrina_v1_sku_groups
+                {where_clause}
+                ORDER BY is_active DESC, group_key ASC
+                """
+            ).fetchall()
+            return [_sku_group_to_dict(row) for row in rows]
+
+    def load_sku_group(self, group_key: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_sku_groups
+                WHERE group_key = ?
+                """,
+                (str(group_key or "").strip(),),
+            ).fetchone()
+            return _sku_group_to_dict(row) if row is not None else None
+
+    def save_sku_group(self, group: Mapping[str, Any]) -> dict[str, Any]:
+        group_key = str(group.get("group_key") or "").strip()
+        if not group_key:
+            raise ValueError("sku group_key is required")
+        created_at = str(group.get("created_at") or "").strip()
+        updated_at = str(group.get("updated_at") or "").strip()
+        _validate_timestamp(created_at, field_name="created_at")
+        _validate_timestamp(updated_at, field_name="updated_at")
+        aliases = group.get("aliases") if isinstance(group.get("aliases"), list) else []
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_sku_groups(
+                    group_key,
+                    label,
+                    aliases_json,
+                    is_active,
+                    is_system,
+                    created_at,
+                    updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(group_key) DO UPDATE SET
+                    label = excluded.label,
+                    aliases_json = excluded.aliases_json,
+                    is_active = excluded.is_active,
+                    is_system = excluded.is_system,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    group_key,
+                    str(group.get("label") or group_key),
+                    json.dumps([str(alias) for alias in aliases if str(alias or "").strip()], ensure_ascii=False),
+                    1 if bool(group.get("is_active", True)) else 0,
+                    1 if bool(group.get("is_system")) else 0,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        loaded = self.load_sku_group(group_key)
+        if loaded is None:
+            raise ValueError(f"sku group was not saved: {group_key}")
+        return loaded
+
+    def sku_group_active_item_count(self, group_key: str) -> int:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS item_count
+                FROM sheet_vitrina_v1_nomenclature_items
+                WHERE is_active = 1
+                  AND product_type = ?
+                """,
+                (str(group_key or "").strip(),),
+            ).fetchone()
+            return int(row["item_count"] if row is not None else 0)
 
     def save_plan_report_monthly_baseline(
         self,
@@ -5925,6 +6059,9 @@ def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "item_id": row["item_id"],
         "is_active": bool(row["is_active"]),
+        "is_hidden": bool(row["is_hidden"]),
+        "hidden_at": row["hidden_at"] or "",
+        "hidden_reason": row["hidden_reason"] or "",
         "our_sku": row["our_sku"] or "",
         "nm_id": row["nm_id"],
         "barcode": barcode,
@@ -5936,6 +6073,14 @@ def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "barcode_synced_at": row["barcode_synced_at"] or "",
         "barcode_updated_at": row["barcode_updated_at"] or "",
         "barcode_evidence": _loads_json_object(row["barcode_evidence_json"]),
+        "vendor_code": row["vendor_code"] or "",
+        "seller_article": row["vendor_code"] or "",
+        "wb_title": row["wb_title"] or "",
+        "wb_subject_name": row["wb_subject_name"] or "",
+        "wb_updated_at": row["wb_updated_at"] or "",
+        "wb_synced_at": row["wb_synced_at"] or "",
+        "wb_sync_status": row["wb_sync_status"] or "",
+        "wb_sync_evidence": _loads_json_object(row["wb_sync_evidence_json"]),
         "nomenclature_name": row["nomenclature_name"] or "",
         "product_type": row["product_type"] or "",
         "match_key": row["match_key"] or "",
@@ -5946,6 +6091,18 @@ def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
             str(item) for item in _loads_json_list(row["compatible_model_keys_json"]) if str(item or "").strip()
         ],
         "comment": row["comment"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _sku_group_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "group_key": row["group_key"],
+        "label": row["label"] or row["group_key"],
+        "aliases": [str(item) for item in _loads_json_list(row["aliases_json"]) if str(item or "").strip()],
+        "is_active": bool(row["is_active"]),
+        "is_system": bool(row["is_system"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -6885,6 +7042,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_nomenclature_items (
             item_id TEXT PRIMARY KEY,
             is_active INTEGER NOT NULL,
+            is_hidden INTEGER NOT NULL DEFAULT 0,
+            hidden_at TEXT NOT NULL DEFAULT '',
+            hidden_reason TEXT NOT NULL DEFAULT '',
             our_sku TEXT,
             nm_id INTEGER,
             barcode TEXT NOT NULL DEFAULT '',
@@ -6894,6 +7054,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             barcode_synced_at TEXT,
             barcode_updated_at TEXT,
             barcode_evidence_json TEXT NOT NULL DEFAULT '{}',
+            vendor_code TEXT NOT NULL DEFAULT '',
+            wb_title TEXT NOT NULL DEFAULT '',
+            wb_subject_name TEXT NOT NULL DEFAULT '',
+            wb_updated_at TEXT NOT NULL DEFAULT '',
+            wb_synced_at TEXT NOT NULL DEFAULT '',
+            wb_sync_status TEXT NOT NULL DEFAULT '',
+            wb_sync_evidence_json TEXT NOT NULL DEFAULT '{}',
             nomenclature_name TEXT NOT NULL,
             product_type TEXT NOT NULL,
             match_key TEXT NOT NULL,
@@ -6908,6 +7075,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_nomenclature_items_by_match_key
         ON sheet_vitrina_v1_nomenclature_items(is_active, match_key);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_sku_groups (
+            group_key TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            aliases_json TEXT NOT NULL DEFAULT '[]',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            is_system INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     users_access_columns_added = False
@@ -6987,6 +7164,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         column_sql="TEXT NOT NULL DEFAULT '[]'",
     )
     for column_name, column_sql in (
+        ("is_hidden", "INTEGER NOT NULL DEFAULT 0"),
+        ("hidden_at", "TEXT NOT NULL DEFAULT ''"),
+        ("hidden_reason", "TEXT NOT NULL DEFAULT ''"),
         ("barcode", "TEXT NOT NULL DEFAULT ''"),
         ("barcodes_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("barcode_source", "TEXT NOT NULL DEFAULT 'missing'"),
@@ -6994,6 +7174,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ("barcode_synced_at", "TEXT"),
         ("barcode_updated_at", "TEXT"),
         ("barcode_evidence_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("vendor_code", "TEXT NOT NULL DEFAULT ''"),
+        ("wb_title", "TEXT NOT NULL DEFAULT ''"),
+        ("wb_subject_name", "TEXT NOT NULL DEFAULT ''"),
+        ("wb_updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("wb_synced_at", "TEXT NOT NULL DEFAULT ''"),
+        ("wb_sync_status", "TEXT NOT NULL DEFAULT ''"),
+        ("wb_sync_evidence_json", "TEXT NOT NULL DEFAULT '{}'"),
     ):
         _ensure_column(
             conn,
@@ -7001,6 +7188,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             column_name=column_name,
             column_sql=column_sql,
         )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_nomenclature_items_by_wb
+        ON sheet_vitrina_v1_nomenclature_items(nm_id, vendor_code)
+        """
+    )
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_auto_update_state",

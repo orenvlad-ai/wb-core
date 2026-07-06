@@ -60,6 +60,28 @@ class WbContentBarcodeResolution:
     endpoint: str = "/content/v2/get/cards/list"
 
 
+@dataclass(frozen=True)
+class WbContentCard:
+    nm_id: int | None
+    vendor_code: str
+    title: str
+    subject_name: str
+    updated_at: str
+    barcodes: list[str]
+    endpoint: str = "/content/v2/get/cards/list"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "nm_id": self.nm_id,
+            "vendor_code": self.vendor_code,
+            "title": self.title,
+            "subject_name": self.subject_name,
+            "updated_at": self.updated_at,
+            "barcodes": list(self.barcodes),
+            "endpoint": self.endpoint,
+        }
+
+
 class HttpBackedWbContentSource:
     """Read-only source for WB Content cards through the canonical official API token."""
 
@@ -73,14 +95,16 @@ class HttpBackedWbContentSource:
         opener: Any | None = None,
         page_limit: int = 100,
         max_pages_per_nm_id: int = 3,
+        max_cards_pages: int = 500,
     ) -> None:
         self._default_base_url = base_url.rstrip("/")
         self._token_env_var = token_env_var
         self._base_url_env_var = base_url_env_var
         self._default_timeout_seconds = timeout_seconds
         self._opener = opener or urllib_request.urlopen
-        self._page_limit = _bounded_int(page_limit, default=100, minimum=1, maximum=1000)
+        self._page_limit = _bounded_int(page_limit, default=100, minimum=1, maximum=100)
         self._max_pages_per_nm_id = _bounded_int(max_pages_per_nm_id, default=3, minimum=1, maximum=10)
+        self._max_cards_pages = _bounded_int(max_cards_pages, default=500, minimum=1, maximum=5000)
 
     def fetch_barcodes_by_nm_ids(self, nm_ids: list[int]) -> dict[int, WbContentBarcodeResolution]:
         runtime = load_runtime_config(
@@ -97,6 +121,40 @@ class HttpBackedWbContentSource:
                 token=runtime.token,
                 timeout_seconds=runtime.timeout_seconds,
             )
+        return result
+
+    def fetch_cards(self, *, limit: int | None = None, max_pages: int | None = None) -> list[WbContentCard]:
+        runtime = load_runtime_config(
+            token_env_var=self._token_env_var,
+            default_base_url=self._default_base_url,
+            base_url_env_var=self._base_url_env_var,
+            default_timeout_seconds=self._default_timeout_seconds,
+        )
+        page_limit = _bounded_int(limit, default=self._page_limit, minimum=1, maximum=100)
+        max_page_count = _bounded_int(max_pages, default=self._max_cards_pages, minimum=1, maximum=5000)
+        cursor: dict[str, Any] = {"limit": page_limit}
+        result: list[WbContentCard] = []
+        seen_cursors: set[tuple[str, int | None]] = set()
+        for _ in range(max_page_count):
+            payload = self._request_cards_page(
+                base_url=runtime.base_url,
+                token=runtime.token,
+                timeout_seconds=runtime.timeout_seconds,
+                cursor=cursor,
+            )
+            cards = _extract_cards(payload)
+            result.extend(_normalize_card(card) for card in cards)
+            next_cursor = _extract_cursor(payload)
+            total = _optional_int(next_cursor.get("total")) or len(cards)
+            if total < page_limit:
+                break
+            updated_at = str(next_cursor.get("updatedAt") or "").strip()
+            cursor_nm_id = _optional_int(next_cursor.get("nmID") or next_cursor.get("nmId") or next_cursor.get("nm_id"))
+            cursor_key = (updated_at, cursor_nm_id)
+            if not updated_at or cursor_nm_id is None or cursor_key in seen_cursors:
+                break
+            seen_cursors.add(cursor_key)
+            cursor = {"limit": page_limit, "updatedAt": updated_at, "nmID": cursor_nm_id}
         return result
 
     def _fetch_one_nm_id(
@@ -153,6 +211,30 @@ class HttpBackedWbContentSource:
             barcodes=barcodes,
             cards_found=cards_found,
             pages_fetched=pages_fetched,
+        )
+
+    def _request_cards_page(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        timeout_seconds: float,
+        cursor: Mapping[str, Any],
+    ) -> Any:
+        body = {
+            "settings": {
+                "cursor": dict(cursor),
+                "filter": {
+                    "withPhoto": -1,
+                },
+            }
+        }
+        return self._request_json(
+            method="POST",
+            url=f"{base_url}/content/v2/get/cards/list",
+            token=token,
+            timeout_seconds=timeout_seconds,
+            body=body,
         )
 
     def _request_json(
@@ -257,6 +339,29 @@ def _extract_card_barcodes(card: Mapping[str, Any]) -> list[str]:
     return barcodes
 
 
+def _normalize_card(card: Mapping[str, Any]) -> WbContentCard:
+    return WbContentCard(
+        nm_id=_optional_int(card.get("nmID") or card.get("nmId") or card.get("nm_id")),
+        vendor_code=_optional_str(card.get("vendorCode") or card.get("vendor_code") or card.get("sellerArticle")),
+        title=_optional_str(card.get("title") or card.get("imtName") or card.get("name")),
+        subject_name=_optional_str(card.get("subjectName") or card.get("subject_name") or card.get("object")),
+        updated_at=_optional_str(card.get("updatedAt") or card.get("updated_at")),
+        barcodes=_normalize_string_list(_extract_card_barcodes(card)),
+    )
+
+
+def _normalize_string_list(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        normalized = str(value or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
 def _normalize_nm_ids(values: list[int]) -> list[int]:
     result: list[int] = []
     seen: set[int] = set()
@@ -276,6 +381,10 @@ def _optional_int(value: Any) -> int | None:
         return int(float(str(value).strip()))
     except (TypeError, ValueError):
         return None
+
+
+def _optional_str(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:

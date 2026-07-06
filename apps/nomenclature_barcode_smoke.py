@@ -25,6 +25,7 @@ from packages.adapters.wb_content import HttpBackedWbContentSource, WbContentHtt
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH,
     DEFAULT_NOMENCLATURE_PATH,
+    DEFAULT_SKU_GROUPS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -38,10 +39,17 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 class FakeBarcodeSource:
-    def __init__(self, mapping: dict[int, list[str]] | None = None, exc: Exception | None = None) -> None:
+    def __init__(
+        self,
+        mapping: dict[int, list[str]] | None = None,
+        exc: Exception | None = None,
+        cards: list[dict[str, object]] | None = None,
+    ) -> None:
         self.mapping = mapping or {}
         self.exc = exc
+        self.cards = cards or []
         self.calls: list[list[int]] = []
+        self.card_calls: list[dict[str, int | None]] = []
 
     def fetch_barcodes_by_nm_ids(self, nm_ids: list[int]):
         self.calls.append(list(nm_ids))
@@ -57,6 +65,12 @@ class FakeBarcodeSource:
             }
             for nm_id in nm_ids
         }
+
+    def fetch_cards(self, *, limit: int | None = None, max_pages: int | None = None):
+        self.card_calls.append({"limit": limit, "max_pages": max_pages})
+        if self.exc is not None:
+            raise self.exc
+        return list(self.cards)
 
 
 class FakeResponse:
@@ -127,6 +141,35 @@ def _adapter_smoke() -> None:
             raise AssertionError(f"content adapter body changed unexpectedly: {body}")
         if timeout <= 0:
             raise AssertionError("content adapter must pass timeout")
+
+        opener.next_payload = json.dumps(
+            {
+                "cards": [
+                    {
+                        "nmID": 701001,
+                        "vendorCode": "No Frame Anti-Spy iPhone 16 Pro Max",
+                        "title": "WB No Frame Anti-Spy",
+                        "subjectName": "Защитные стекла",
+                        "updatedAt": "2026-07-01T10:00:00Z",
+                        "sizes": [{"skus": ["7000000000001", "7000000000002"]}],
+                    }
+                ],
+                "cursor": {"total": 1},
+            }
+        ).encode("utf-8")
+        cards = source.fetch_cards(limit=100, max_pages=1)
+        if len(cards) != 1:
+            raise AssertionError(f"content adapter must parse one card, got {cards}")
+        card = cards[0]
+        if (
+            card.nm_id != 701001
+            or card.vendor_code != "No Frame Anti-Spy iPhone 16 Pro Max"
+            or card.title != "WB No Frame Anti-Spy"
+            or card.subject_name != "Защитные стекла"
+            or card.updated_at != "2026-07-01T10:00:00Z"
+            or card.barcodes != ["7000000000001", "7000000000002"]
+        ):
+            raise AssertionError(f"content adapter card parsing mismatch: {card}")
 
         opener.next_error = urllib_error.HTTPError(
             "https://content-api.example.test/content/v2/get/cards/list",
@@ -234,6 +277,263 @@ def _application_runtime_xlsx_smoke() -> None:
         old_import = block.import_nomenclature_xlsx(_build_old_import_workbook(), uploaded_filename="old.xlsx")
         if old_import["created_count"] != 1:
             raise AssertionError(f"old import workbook without barcode must remain valid, got {old_import}")
+        legacy_row = next(item for item in runtime.list_nomenclature_items() if item["match_key"] == "clear|iphone_18")
+        if legacy_row["product_type"] != "clear":
+            raise AssertionError(f"legacy clear product type must survive import, got {legacy_row}")
+        legacy_export_bytes, _, _ = block.export_nomenclature_xlsx()
+        legacy_workbook = load_workbook(BytesIO(legacy_export_bytes), data_only=True)
+        legacy_headers = [cell.value for cell in next(legacy_workbook.active.iter_rows(min_row=1, max_row=1))]
+        group_index = legacy_headers.index("Группа")
+        match_index = legacy_headers.index("Match key")
+        legacy_export_row = next(
+            row
+            for row in legacy_workbook.active.iter_rows(min_row=2, values_only=True)
+            if row[match_index] == "clear|iphone_18"
+        )
+        if legacy_export_row[group_index] != "Clean":
+            raise AssertionError(f"legacy clear label must export as Clean, got {legacy_export_row[group_index]}")
+
+        _wb_card_sync_smoke(runtime)
+
+
+def _wb_card_sync_smoke(runtime: RegistryUploadDbBackedRuntime) -> None:
+    now = "2026-06-27T10:00:00Z"
+    runtime.save_nomenclature_items_atomic(
+        [
+            _nomenclature_item(
+                "sync_nm",
+                nm_id=810001,
+                name="Manual name must survive",
+                product_type="clean",
+                match_key="clean|manual_nm",
+                barcode="",
+                barcode_source="missing",
+                barcode_status="missing",
+                vendor_code="",
+                is_hidden=False,
+                price=9.0,
+                now=now,
+            ),
+            _nomenclature_item(
+                "sync_barcode",
+                nm_id=None,
+                name="Manual barcode must survive",
+                product_type="matte",
+                match_key="matte|manual_barcode",
+                barcode="8100000000002",
+                barcode_source="manual",
+                barcode_status="manual",
+                vendor_code="",
+                is_hidden=False,
+                price=8.0,
+                now=now,
+            ),
+            _nomenclature_item(
+                "sync_vendor",
+                nm_id=None,
+                name="Vendor existing name",
+                product_type="anti_spy",
+                match_key="anti_spy|vendor_existing",
+                barcode="",
+                barcode_source="missing",
+                barcode_status="missing",
+                vendor_code="Vendor Match Existing",
+                is_hidden=False,
+                price=7.0,
+                now=now,
+            ),
+            _nomenclature_item(
+                "sync_hidden",
+                nm_id=None,
+                name="Hidden No Frame Clean",
+                product_type="no_frame_clean",
+                match_key="no_frame_clean|hidden",
+                barcode="",
+                barcode_source="missing",
+                barcode_status="missing",
+                vendor_code="No Frame Clean iPhone 16 Pro Max",
+                is_hidden=True,
+                price=6.0,
+                now=now,
+            ),
+        ]
+    )
+    cards = [
+        {
+            "nm_id": 810001,
+            "vendor_code": "WB NM Existing",
+            "title": "WB nm title",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:00Z",
+            "barcodes": ["8100000000001"],
+        },
+        {
+            "nm_id": 810002,
+            "vendor_code": "WB Barcode Existing",
+            "title": "WB barcode title",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:01Z",
+            "barcodes": ["8100000000002", "8100000000003"],
+        },
+        {
+            "nm_id": 810003,
+            "vendor_code": "Vendor Match Existing",
+            "title": "WB vendor title",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:02Z",
+            "barcodes": ["8100000000004"],
+        },
+        {
+            "nm_id": 810004,
+            "vendor_code": "No Frame Clean iPhone 16 Pro Max",
+            "title": "Hidden card title",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:03Z",
+            "barcodes": ["8100000000005"],
+        },
+        {
+            "nm_id": 810005,
+            "vendor_code": "No Frame Clean iPhone 17 Pro",
+            "title": "New no frame clean",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:04Z",
+            "barcodes": ["8100000000006"],
+        },
+        {
+            "nm_id": 810006,
+            "vendor_code": "No Frame Anti-Spy iPhone 16 Pro Max",
+            "title": "New no frame anti-spy",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:05Z",
+            "barcodes": ["8100000000007"],
+        },
+        {
+            "nm_id": 810007,
+            "vendor_code": "No Frame Matte iPhone 18 Pro",
+            "title": "New no frame matte",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:06Z",
+            "barcodes": ["8100000000008"],
+        },
+        {
+            "nm_id": 810008,
+            "vendor_code": "Mystery iPhone 19 Pro",
+            "title": "Unknown group",
+            "subject_name": "Glass",
+            "updated_at": "2026-07-01T00:00:07Z",
+            "barcodes": ["8100000000009"],
+        },
+    ]
+    sync_block = SupplierShipmentsBlock(
+        runtime=runtime,
+        barcode_source=FakeBarcodeSource(cards=cards),
+        timestamp_factory=_clock(start=30),
+    )
+    before_count = len(runtime.list_nomenclature_items())
+    result = sync_block.sync_nomenclature_barcodes({"limit": 100, "max_pages": 1})
+    if result["cards_processed"] != len(cards) or result["created"] != 4:
+        raise AssertionError(f"WB card sync counts mismatch: {result}")
+    if result["matched_nm_id"] < 1 or result["matched_barcode"] < 1 or result["matched_vendor_code"] < 2:
+        raise AssertionError(f"WB card sync must match by nmID, barcode and vendorCode: {result}")
+    nm_row = runtime.load_nomenclature_item("sync_nm")
+    if (
+        nm_row["nomenclature_name"] != "Manual name must survive"
+        or nm_row["product_type"] != "clean"
+        or nm_row["purchase_price_yuan"] != 9.0
+        or nm_row["match_key"] != "clean|manual_nm"
+        or nm_row["barcode"] != "8100000000001"
+        or nm_row["wb_title"] != "WB nm title"
+    ):
+        raise AssertionError(f"existing nmID match must update only WB-owned/reference fields, got {nm_row}")
+    barcode_row = runtime.load_nomenclature_item("sync_barcode")
+    if (
+        barcode_row["nm_id"] != 810002
+        or barcode_row["barcode"] != "8100000000002"
+        or barcode_row["barcode_source"] != "manual"
+        or barcode_row["wb_sync_status"] != "matched_barcode"
+    ):
+        raise AssertionError(f"barcode match must fill nm_id but preserve manual barcode override, got {barcode_row}")
+    vendor_row = runtime.load_nomenclature_item("sync_vendor")
+    if vendor_row["nm_id"] != 810003 or vendor_row["barcode"] != "8100000000004":
+        raise AssertionError(f"vendorCode match must update existing row, got {vendor_row}")
+    hidden_row = runtime.load_nomenclature_item("sync_hidden")
+    if not hidden_row["is_hidden"] or hidden_row["nm_id"] != 810004:
+        raise AssertionError(f"hidden row must match and remain hidden, got {hidden_row}")
+    if any(item["item_id"] == "sync_hidden" for item in sync_block.list_nomenclature()["items"]):
+        raise AssertionError("hidden row must not be visible by default")
+    hidden_list = sync_block.list_nomenclature(visibility="hidden")["items"]
+    if not any(item["item_id"] == "sync_hidden" for item in hidden_list):
+        raise AssertionError("hidden selector must show hidden row")
+    restored = sync_block.update_nomenclature_item("sync_hidden", {"is_hidden": False})["item"]
+    if restored["is_hidden"]:
+        raise AssertionError(f"restore hidden SKU failed: {restored}")
+    if not any(item["item_id"] == "sync_hidden" for item in sync_block.list_nomenclature()["items"]):
+        raise AssertionError("restored SKU must return to default visible list")
+    sync_block.update_nomenclature_item("sync_hidden", {"is_hidden": True})
+    repeat = sync_block.sync_nomenclature_barcodes({"limit": 100, "max_pages": 1})
+    after_count = len(runtime.list_nomenclature_items())
+    if after_count != before_count + 4 or repeat["created"] != 0:
+        raise AssertionError(f"hidden repeat sync must not create duplicate: before={before_count} after={after_count} repeat={repeat}")
+    rows = runtime.list_nomenclature_items()
+    by_vendor = {row["vendor_code"]: row for row in rows if row.get("vendor_code")}
+    if by_vendor["No Frame Clean iPhone 17 Pro"]["product_type"] != "no_frame_clean":
+        raise AssertionError("No Frame Clean vendorCode must auto-detect no_frame_clean")
+    if by_vendor["No Frame Anti-Spy iPhone 16 Pro Max"]["product_type"] != "no_frame_anti_spy":
+        raise AssertionError("No Frame Anti-Spy vendorCode must auto-detect no_frame_anti_spy")
+    if by_vendor["No Frame Matte iPhone 18 Pro"]["product_type"] != "no_frame_matte":
+        raise AssertionError("No Frame Matte vendorCode must auto-detect no_frame_matte")
+    if by_vendor["Mystery iPhone 19 Pro"]["product_type"] != "other" or by_vendor["Mystery iPhone 19 Pro"]["wb_sync_status"] != "needs_review":
+        raise AssertionError("unknown vendorCode must become other/needs_review")
+
+
+def _nomenclature_item(
+    item_id: str,
+    *,
+    nm_id: int | None,
+    name: str,
+    product_type: str,
+    match_key: str,
+    barcode: str,
+    barcode_source: str,
+    barcode_status: str,
+    vendor_code: str,
+    is_hidden: bool,
+    price: float,
+    now: str,
+) -> dict[str, object]:
+    return {
+        "item_id": item_id,
+        "is_active": True,
+        "is_hidden": is_hidden,
+        "hidden_at": now if is_hidden else "",
+        "hidden_reason": "smoke" if is_hidden else "",
+        "our_sku": "",
+        "nm_id": nm_id,
+        "barcode": barcode,
+        "barcodes": [barcode] if barcode else [],
+        "barcode_source": barcode_source,
+        "barcode_status": barcode_status,
+        "barcode_synced_at": "",
+        "barcode_updated_at": now if barcode else "",
+        "barcode_evidence": {},
+        "vendor_code": vendor_code,
+        "wb_title": "",
+        "wb_subject_name": "",
+        "wb_updated_at": "",
+        "wb_synced_at": "",
+        "wb_sync_status": "",
+        "wb_sync_evidence": {},
+        "nomenclature_name": name,
+        "product_type": product_type,
+        "match_key": match_key,
+        "purchase_price_yuan": price,
+        "aliases": [],
+        "compatible_models_text": "",
+        "compatible_model_keys": [],
+        "comment": "",
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def _http_route_smoke() -> None:
@@ -289,14 +589,18 @@ def _http_route_smoke() -> None:
                 raise AssertionError(f"HTTP auto-sync token warning must not block save: {auto_status} {auto_payload}")
             sync_status, sync_payload = _post_json(
                 f"{base_url}{DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH}",
-                {"active_only": True, "only_missing": True, "limit": 10},
+                {"limit": 10, "max_pages": 1},
             )
-            if sync_status != 200 or sync_payload.get("token_missing", 0) < 1:
-                raise AssertionError(f"HTTP batch barcode sync must expose token_missing count: {sync_status} {sync_payload}")
+            if sync_status != 200 or sync_payload.get("status") != "token_missing":
+                raise AssertionError(f"HTTP batch WB sync must expose token_missing status: {sync_status} {sync_payload}")
             list_status, list_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
             summary = list_payload.get("summary") or {}
             if list_status != 200 or summary.get("active_rows_missing_barcode", 0) < 1:
                 raise AssertionError(f"HTTP list must expose barcode summary: {list_status} {list_payload}")
+            groups_status, groups_payload = _get_json(f"{base_url}{DEFAULT_SKU_GROUPS_PATH}")
+            group_keys = {str(group.get("group_key") or "") for group in groups_payload.get("groups") or []}
+            if groups_status != 200 or "no_frame_clean" not in group_keys:
+                raise AssertionError(f"HTTP groups route must expose default SKU groups: {groups_status} {groups_payload}")
         finally:
             server.shutdown()
             server.server_close()

@@ -236,6 +236,7 @@ DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
 DEFAULT_NOMENCLATURE_IMPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
 DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync"
+DEFAULT_SKU_GROUPS_PATH = "/v1/sheet-vitrina-v1/settings/sku-groups"
 DEFAULT_TRADE_DOCUMENTS_PATH = "/v1/sheet-vitrina-v1/settings/documents"
 DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
@@ -1402,6 +1403,25 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"nomenclature barcode sync failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SKU_GROUPS_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sku_groups_create_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sku group create failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -2621,12 +2641,27 @@ def _build_handler(
                 if not _ensure_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_nomenclature_list_request()
+                    payload = entrypoint.handle_nomenclature_list_request(_flatten_query_params(parsed.query))
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"nomenclature list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SKU_GROUPS_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_sku_groups_list_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sku groups list failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3316,6 +3351,26 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if _is_sku_group_item_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    group_key = _resolve_sku_group_key(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sku_groups_patch_request(group_key, payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sku group patch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             _write_json_response(
                 self,
                 HTTPStatus.NOT_FOUND,
@@ -3479,6 +3534,25 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"nomenclature delete failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if _is_sku_group_item_path(parsed.path):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    group_key = _resolve_sku_group_key(parsed.path)
+                    payload = entrypoint.handle_sku_groups_delete_request(group_key)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sku group delete failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -4100,6 +4174,13 @@ def _is_nomenclature_item_barcode_sync_path(path: str) -> bool:
     return len(parts) == 2 and parts[1] == "barcode-sync" and parts[0] != "barcode-sync"
 
 
+def _is_sku_group_item_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SKU_GROUPS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SKU_GROUPS_PATH) + 1 :]
+    return bool(suffix) and "/" not in suffix
+
+
 def _is_trade_document_item_path(path: str) -> bool:
     if not path.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/"):
         return False
@@ -4238,6 +4319,12 @@ def _resolve_nomenclature_item_barcode_sync_id(path: str) -> str:
         raise ValueError(f"unsupported nomenclature barcode sync path: {path}")
     suffix = path[len(DEFAULT_NOMENCLATURE_PATH) + 1 :]
     return suffix.split("/", 1)[0]
+
+
+def _resolve_sku_group_key(path: str) -> str:
+    if not _is_sku_group_item_path(path):
+        raise ValueError(f"unsupported sku group path: {path}")
+    return urllib_parse.unquote(path[len(DEFAULT_SKU_GROUPS_PATH) + 1 :])
 
 
 def _resolve_trade_document_id(path: str) -> str:
@@ -6069,6 +6156,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
         "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
         "nomenclature_barcode_sync_path": DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH,
+        "sku_groups_path": DEFAULT_SKU_GROUPS_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -6144,6 +6232,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
         "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
         "nomenclature_barcode_sync_path": DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH,
+        "sku_groups_path": DEFAULT_SKU_GROUPS_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "job_path": job_path,

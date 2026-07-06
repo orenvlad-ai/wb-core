@@ -23,6 +23,7 @@ from openpyxl import Workbook, load_workbook
 from packages.adapters.official_api_runtime import OfficialApiRuntimeError
 from packages.adapters.wb_content import (
     HttpBackedWbContentSource,
+    WbContentCard,
     WbContentHttpStatusError,
     WbContentTransportError,
 )
@@ -95,13 +96,19 @@ NOMENCLATURE_XLSX_CONTENT_TYPE = SUPPLIER_INVOICE_CONTENT_TYPE
 NOMENCLATURE_XLSX_HEADERS = [
     "ID строки",
     "Включено",
+    "Скрыто",
     "nmId",
     "ШК / barcode",
     "Все ШК",
     "Источник ШК",
     "Статус ШК",
+    "Артикул продавца WB / vendorCode",
+    "Название WB",
+    "WB subject",
+    "WB updatedAt",
+    "Статус WB sync",
     "Номенклатура",
-    "Тип",
+    "Группа",
     "Match key",
     "Цена закупки, ¥",
     "Совместимые модели",
@@ -109,16 +116,41 @@ NOMENCLATURE_XLSX_HEADERS = [
     "Обновлено",
 ]
 NOMENCLATURE_PRODUCT_TYPE_LABELS = {
-    "clear": "Прозрачное",
-    "anti_spy": "Антишпион",
-    "matte": "Матовое",
+    "clear": "Clean",
+    "clean": "Clean",
+    "anti_spy": "Anti-spy",
+    "matte": "Matte",
+    "no_frame_clean": "No Frame Clean",
+    "no_frame_anti_spy": "No Frame Anti-spy",
+    "no_frame_matte": "No Frame Matte",
     "extra": "Доп. строка",
     "other": "Другое",
+}
+NOMENCLATURE_LEGACY_PRODUCT_TYPE_LABELS = {
+    "прозрачное": "clear",
+    "антишпион": "anti_spy",
+    "матовое": "matte",
 }
 NOMENCLATURE_PRODUCT_TYPE_BY_LABEL = {
     **{key: key for key in NOMENCLATURE_PRODUCT_TYPE_LABELS},
     **{value.casefold(): key for key, value in NOMENCLATURE_PRODUCT_TYPE_LABELS.items()},
+    **NOMENCLATURE_LEGACY_PRODUCT_TYPE_LABELS,
 }
+DEFAULT_SKU_GROUPS: tuple[dict[str, Any], ...] = (
+    {"group_key": "clean", "label": "Clean", "aliases": ["clean", "clear", "transparent", "прозрач"]},
+    {"group_key": "anti_spy", "label": "Anti-spy", "aliases": ["anti-spy", "anti spy", "antispy", "privacy", "антишпион"]},
+    {"group_key": "matte", "label": "Matte", "aliases": ["matte", "matt", "матов"]},
+    {"group_key": "no_frame_clean", "label": "No Frame Clean", "aliases": ["no frame clean", "noframe clean", "no frame clear"]},
+    {
+        "group_key": "no_frame_anti_spy",
+        "label": "No Frame Anti-spy",
+        "aliases": ["no frame anti-spy", "no frame anti spy", "noframe anti-spy", "noframe privacy"],
+    },
+    {"group_key": "no_frame_matte", "label": "No Frame Matte", "aliases": ["no frame matte", "noframe matte", "no frame matt"]},
+    {"group_key": "extra", "label": "Доп. строка", "aliases": []},
+    {"group_key": "other", "label": "Другое", "aliases": []},
+)
+WB_CARD_SYNC_SOURCE = "wb_content_cards"
 PRICE_CONFORMITY_MONEY_QUANT = Decimal("0.01")
 APPROX_YUAN_RATE_QUANT = Decimal("0.0001")
 PRICE_CONFORMITY_YUAN_CURRENCIES = {"CNY", "CNH", "RMB", "YUAN", "YUANS", "¥", "￥", "元"}
@@ -141,6 +173,9 @@ _TESSERACT_LANGUAGES_CACHE: list[str] | None = None
 
 class NomenclatureBarcodeSource(Protocol):
     def fetch_barcodes_by_nm_ids(self, nm_ids: list[int]) -> Mapping[int, Any]:
+        raise NotImplementedError
+
+    def fetch_cards(self, *, limit: int | None = None, max_pages: int | None = None) -> list[Any]:
         raise NotImplementedError
 
 
@@ -1106,13 +1141,22 @@ class SupplierShipmentsBlock:
         result["_backfill_stats"] = stats
         return result
 
-    def list_nomenclature(self) -> dict[str, Any]:
+    def list_nomenclature(self, *, visibility: str = "visible") -> dict[str, Any]:
         self._ensure_nomenclature_ready()
-        items = self.runtime.list_nomenclature_items()
+        visibility_mode = _normalize_visibility_mode(visibility)
+        all_items = self.runtime.list_nomenclature_items()
+        if visibility_mode == "visible":
+            items = [item for item in all_items if not bool(item.get("is_hidden"))]
+        elif visibility_mode == "hidden":
+            items = [item for item in all_items if bool(item.get("is_hidden"))]
+        else:
+            items = all_items
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
-            "summary": _nomenclature_barcode_summary(items),
+            "visibility": visibility_mode,
+            "summary": _nomenclature_barcode_summary(all_items),
+            "sku_groups": self.list_sku_groups(include_inactive=True)["groups"],
             "items": items,
         }
 
@@ -1127,11 +1171,17 @@ class SupplierShipmentsBlock:
                 [
                     str(item.get("item_id") or ""),
                     "да" if bool(item.get("is_active")) else "нет",
+                    "да" if bool(item.get("is_hidden")) else "нет",
                     item.get("nm_id") if item.get("nm_id") is not None else "",
                     str(item.get("barcode") or ""),
                     ", ".join(str(barcode) for barcode in item.get("barcodes") or [] if str(barcode or "").strip()),
                     str(item.get("barcode_source") or ""),
                     str(item.get("barcode_status") or ""),
+                    str(item.get("vendor_code") or ""),
+                    str(item.get("wb_title") or ""),
+                    str(item.get("wb_subject_name") or ""),
+                    str(item.get("wb_updated_at") or ""),
+                    str(item.get("wb_sync_status") or ""),
                     str(item.get("nomenclature_name") or ""),
                     NOMENCLATURE_PRODUCT_TYPE_LABELS.get(str(item.get("product_type") or ""), str(item.get("product_type") or "")),
                     str(item.get("match_key") or ""),
@@ -1142,7 +1192,7 @@ class SupplierShipmentsBlock:
                 ]
             )
         worksheet.freeze_panes = "A2"
-        for index, width in enumerate([24, 12, 14, 22, 34, 18, 18, 34, 18, 28, 18, 34, 34, 24], start=1):
+        for index, width in enumerate([24, 12, 12, 14, 22, 34, 18, 18, 34, 36, 22, 22, 20, 34, 22, 28, 18, 34, 34, 24], start=1):
             worksheet.column_dimensions[worksheet.cell(row=1, column=index).column_letter].width = width
         output = BytesIO()
         workbook.save(output)
@@ -1240,6 +1290,51 @@ class SupplierShipmentsBlock:
             items=saved_items,
         )
 
+    def list_sku_groups(self, *, include_inactive: bool = True) -> dict[str, Any]:
+        self._ensure_sku_groups_ready()
+        groups = self.runtime.list_sku_groups(include_inactive=include_inactive)
+        return {
+            "contract_name": "sheet_vitrina_v1_sku_groups",
+            "status": "ok",
+            "groups": groups,
+        }
+
+    def create_sku_group(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        self._ensure_sku_groups_ready()
+        now = self.timestamp_factory()
+        group = _normalize_sku_group_payload(payload, created_at=now, updated_at=now)
+        return {
+            "contract_name": "sheet_vitrina_v1_sku_groups",
+            "status": "ok",
+            "group": self.runtime.save_sku_group(group),
+            "groups": self.runtime.list_sku_groups(include_inactive=True),
+        }
+
+    def update_sku_group(self, group_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        self._ensure_sku_groups_ready()
+        existing = self.runtime.load_sku_group(group_key)
+        if existing is None:
+            raise ValueError(f"sku group not found: {group_key}")
+        now = self.timestamp_factory()
+        normalized = _normalize_sku_group_payload(
+            {**existing, **dict(payload), "group_key": str(existing.get("group_key") or group_key)},
+            created_at=str(existing.get("created_at") or now),
+            updated_at=now,
+        )
+        if not bool(normalized.get("is_active")) and bool(existing.get("is_active")):
+            usage_count = self.runtime.sku_group_active_item_count(str(existing.get("group_key") or group_key))
+            if usage_count:
+                raise ValueError(f"sku group is used by {usage_count} active nomenclature rows")
+        return {
+            "contract_name": "sheet_vitrina_v1_sku_groups",
+            "status": "ok",
+            "group": self.runtime.save_sku_group(normalized),
+            "groups": self.runtime.list_sku_groups(include_inactive=True),
+        }
+
+    def deactivate_sku_group(self, group_key: str) -> dict[str, Any]:
+        return self.update_sku_group(group_key, {"is_active": False})
+
     def create_nomenclature_item(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         now = self.timestamp_factory()
         prepared_payload = _prepare_nomenclature_barcode_payload(
@@ -1247,6 +1342,9 @@ class SupplierShipmentsBlock:
             payload=payload,
             updated_at=now,
         )
+        if bool(prepared_payload.get("is_hidden")) and not str(prepared_payload.get("hidden_at") or "").strip():
+            prepared_payload["hidden_at"] = now
+            prepared_payload["hidden_reason"] = str(prepared_payload.get("hidden_reason") or "operator_hidden")
         item = _normalize_nomenclature_payload(
             prepared_payload,
             item_id="nom_" + uuid4().hex,
@@ -1276,6 +1374,14 @@ class SupplierShipmentsBlock:
             payload=payload,
             updated_at=now,
         )
+        if "is_hidden" in payload:
+            requested_hidden = bool(payload.get("is_hidden"))
+            if requested_hidden and not bool(existing.get("is_hidden")):
+                prepared_payload["hidden_at"] = now
+                prepared_payload["hidden_reason"] = str(payload.get("hidden_reason") or "operator_hidden")
+            elif not requested_hidden:
+                prepared_payload["hidden_at"] = ""
+                prepared_payload["hidden_reason"] = ""
         item = _normalize_nomenclature_payload(
             {**existing, **prepared_payload},
             item_id=item_id,
@@ -1321,64 +1427,97 @@ class SupplierShipmentsBlock:
         }
 
     def sync_nomenclature_barcodes(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.sync_nomenclature_with_wb(payload)
+
+    def sync_nomenclature_with_wb(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
-        active_only = bool(payload.get("active_only", True))
-        limit = _bounded_int(payload.get("limit"), default=50, minimum=1, maximum=100)
-        only_missing = bool(payload.get("only_missing", True))
-        rows = self.runtime.list_nomenclature_items(active_only=active_only)
-        selected = rows[:limit]
+        self._ensure_nomenclature_ready()
+        limit = _bounded_int(payload.get("limit"), default=100, minimum=1, maximum=100)
+        max_pages = _bounded_int(payload.get("max_pages"), default=500, minimum=1, maximum=5000)
+        now = self.timestamp_factory()
+        try:
+            cards = self.barcode_source.fetch_cards(limit=limit, max_pages=max_pages)
+        except OfficialApiRuntimeError as exc:
+            return _nomenclature_wb_sync_error_result(
+                status="token_missing",
+                error=exc,
+                summary=_nomenclature_barcode_summary(self.runtime.list_nomenclature_items()),
+                limit=limit,
+                max_pages=max_pages,
+            )
+        except (WbContentHttpStatusError, WbContentTransportError, RuntimeError) as exc:
+            return _nomenclature_wb_sync_error_result(
+                status="sync_error",
+                error=exc,
+                summary=_nomenclature_barcode_summary(self.runtime.list_nomenclature_items()),
+                limit=limit,
+                max_pages=max_pages,
+            )
+
+        groups = self.runtime.list_sku_groups(include_inactive=False)
+        rows = self.runtime.list_nomenclature_items()
+        matcher = _NomenclatureWbCardMatcher(rows)
         counts = {
-            "processed": 0,
+            "cards_processed": 0,
+            "matched_nm_id": 0,
+            "matched_barcode": 0,
+            "matched_vendor_code": 0,
+            "created": 0,
+            "created_needs_review": 0,
             "updated": 0,
-            "skipped_manual": 0,
-            "skipped_existing": 0,
-            "missing_nm_id": 0,
-            "not_found": 0,
-            "token_missing": 0,
-            "errors": 0,
+            "manual_barcode_preserved": 0,
+            "hidden_matched": 0,
+            "skipped_invalid": 0,
         }
         results: list[dict[str, Any]] = []
-        for row in selected:
-            if (
-                str(row.get("barcode_source") or "") == NOMENCLATURE_BARCODE_SOURCE_MANUAL
-                and str(row.get("barcode") or "").strip()
-            ):
-                counts["skipped_manual"] += 1
-                counts["processed"] += 1
+        for raw_card in cards:
+            card = _normalize_wb_card_for_sync(raw_card)
+            if not _wb_card_has_identity(card):
+                counts["skipped_invalid"] += 1
                 continue
-            if only_missing and str(row.get("barcode") or "").strip():
-                counts["skipped_existing"] += 1
-                counts["processed"] += 1
-                continue
-            item, barcode_sync = self._sync_nomenclature_barcode_item(
-                row,
-                reason="manual_batch_sync",
-                allow_existing_non_manual=not only_missing,
-            )
-            sync_status = str(barcode_sync.get("status") or "")
-            if sync_status == "skipped_manual":
-                counts["skipped_manual"] += 1
-            elif sync_status == "missing_nm_id":
-                counts["missing_nm_id"] += 1
-            elif sync_status == "not_found":
-                counts["not_found"] += 1
-            elif sync_status == "token_missing":
-                counts["token_missing"] += 1
-            elif sync_status in {"sync_error", "error"}:
-                counts["errors"] += 1
-            if barcode_sync.get("save_item", False):
-                saved = self.runtime.save_nomenclature_item(item)
-                if str(saved.get("barcode") or "").strip():
-                    counts["updated"] += 1
+            counts["cards_processed"] += 1
+            matched, match_type = matcher.match(card)
+            if matched is not None:
+                if match_type == "nm_id":
+                    counts["matched_nm_id"] += 1
+                elif match_type == "barcode":
+                    counts["matched_barcode"] += 1
+                elif match_type == "vendor_code":
+                    counts["matched_vendor_code"] += 1
+                if bool(matched.get("is_hidden")):
+                    counts["hidden_matched"] += 1
+                updated = _apply_wb_card_to_existing_nomenclature(
+                    matched,
+                    card=card,
+                    match_type=match_type,
+                    synced_at=now,
+                )
+                if updated.get("_manual_barcode_preserved"):
+                    counts["manual_barcode_preserved"] += 1
+                updated.pop("_manual_barcode_preserved", None)
+                saved = self.runtime.save_nomenclature_item(updated)
+                matcher.replace(saved)
                 results.append(saved)
-            counts["processed"] += 1
+                counts["updated"] += 1
+                continue
+            created = _new_nomenclature_item_from_wb_card(
+                card,
+                groups=groups,
+                created_at=now,
+                updated_at=now,
+            )
+            saved = self.runtime.save_nomenclature_item(created)
+            matcher.replace(saved)
+            results.append(saved)
+            counts["created"] += 1
+            if str(saved.get("wb_sync_status") or "") == "needs_review":
+                counts["created_needs_review"] += 1
         items = self.runtime.list_nomenclature_items()
         return {
-            "contract_name": "sheet_vitrina_v1_nomenclature_barcode_sync",
+            "contract_name": "sheet_vitrina_v1_nomenclature_wb_sync",
             "status": "ok",
-            "active_only": active_only,
-            "only_missing": only_missing,
             "limit": limit,
+            "max_pages": max_pages,
             **counts,
             "items": results,
             "summary": _nomenclature_barcode_summary(items),
@@ -1781,8 +1920,27 @@ class SupplierShipmentsBlock:
         return self.runtime.list_nomenclature_items(active_only=True)
 
     def _ensure_nomenclature_ready(self) -> None:
+        self._ensure_sku_groups_ready()
         self._seed_nomenclature_from_current_config_if_empty()
         self._backfill_nomenclature_compatible_models()
+
+    def _ensure_sku_groups_ready(self) -> None:
+        now = self.timestamp_factory()
+        existing_keys = {str(group.get("group_key") or "") for group in self.runtime.list_sku_groups(include_inactive=True)}
+        for group in DEFAULT_SKU_GROUPS:
+            group_key = str(group.get("group_key") or "")
+            if not group_key or group_key in existing_keys:
+                continue
+            self.runtime.save_sku_group(
+                {
+                    **group,
+                    "is_active": True,
+                    "is_system": True,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            existing_keys.add(group_key)
 
     def _validate_nomenclature_unique(self, item: Mapping[str, Any]) -> None:
         if (
@@ -2415,9 +2573,10 @@ def _normalize_nomenclature_payload(
     updated_at: str,
 ) -> dict[str, Any]:
     product_type = str(payload.get("product_type") or "").strip()
-    if product_type not in {"clear", "anti_spy", "matte", "extra", "other"}:
-        raise ValueError("nomenclature product_type must be clear, anti_spy, matte, extra or other")
+    if not _valid_sku_group_key(product_type):
+        raise ValueError("nomenclature group must be a stable key like clean, anti_spy, matte, extra or other")
     is_active = bool(payload.get("is_active", True))
+    is_hidden = bool(payload.get("is_hidden", False))
     nomenclature_name = str(payload.get("nomenclature_name") or "").strip()
     match_key = _normalize_match_key(payload.get("match_key"))
     compatible_models_text = str(payload.get("compatible_models_text") or "").strip()
@@ -2428,9 +2587,7 @@ def _normalize_nomenclature_payload(
     )
     if not compatible_models_text and compatible_model_keys:
         compatible_models_text = _compatible_models_text_from_keys(compatible_model_keys)
-    if is_active and product_type in {"clear", "anti_spy", "matte"}:
-        if not match_key:
-            raise ValueError("active product nomenclature item requires match_key")
+    if is_active and product_type not in {"extra", "other"}:
         if not nomenclature_name:
             raise ValueError("active product nomenclature item requires nomenclature_name")
     purchase_price_yuan = _optional_nonnegative_number(
@@ -2451,6 +2608,9 @@ def _normalize_nomenclature_payload(
     return {
         "item_id": item_id,
         "is_active": is_active,
+        "is_hidden": is_hidden,
+        "hidden_at": str(payload.get("hidden_at") or "").strip(),
+        "hidden_reason": str(payload.get("hidden_reason") or "").strip(),
         "our_sku": str(payload.get("our_sku") or "").strip(),
         "nm_id": _optional_int(payload.get("nm_id")),
         "barcode": barcode,
@@ -2461,6 +2621,14 @@ def _normalize_nomenclature_payload(
         "barcode_synced_at": str(payload.get("barcode_synced_at") or "").strip(),
         "barcode_updated_at": str(payload.get("barcode_updated_at") or "").strip(),
         "barcode_evidence": payload.get("barcode_evidence") if isinstance(payload.get("barcode_evidence"), Mapping) else {},
+        "vendor_code": str(payload.get("vendor_code") or payload.get("seller_article") or "").strip(),
+        "seller_article": str(payload.get("vendor_code") or payload.get("seller_article") or "").strip(),
+        "wb_title": str(payload.get("wb_title") or "").strip(),
+        "wb_subject_name": str(payload.get("wb_subject_name") or "").strip(),
+        "wb_updated_at": str(payload.get("wb_updated_at") or "").strip(),
+        "wb_synced_at": str(payload.get("wb_synced_at") or "").strip(),
+        "wb_sync_status": str(payload.get("wb_sync_status") or "").strip(),
+        "wb_sync_evidence": payload.get("wb_sync_evidence") if isinstance(payload.get("wb_sync_evidence"), Mapping) else {},
         "nomenclature_name": nomenclature_name,
         "product_type": product_type,
         "match_key": match_key,
@@ -2628,9 +2796,12 @@ def _safe_barcode_error(error: Exception) -> str:
 def _nomenclature_barcode_summary(items: list[Mapping[str, Any]]) -> dict[str, Any]:
     active_rows = [item for item in items if bool(item.get("is_active"))]
     active_with_barcode = [item for item in active_rows if str(item.get("barcode") or "").strip()]
+    hidden_rows = [item for item in items if bool(item.get("is_hidden"))]
     return {
         "total_rows": len(items),
         "active_rows": len(active_rows),
+        "hidden_rows": len(hidden_rows),
+        "visible_rows": len(items) - len(hidden_rows),
         "active_rows_with_barcode": len(active_with_barcode),
         "active_rows_missing_barcode": len(active_rows) - len(active_with_barcode),
         "manual_barcode_count": sum(
@@ -2653,6 +2824,330 @@ def _nomenclature_barcode_summary(items: list[Mapping[str, Any]]) -> dict[str, A
         "multiple_barcode_count": sum(
             1 for item in items if str(item.get("barcode_status") or "") == NOMENCLATURE_BARCODE_STATUS_MULTIPLE
         ),
+    }
+
+
+def _normalize_visibility_mode(value: Any) -> str:
+    normalized = str(value or "visible").strip().casefold()
+    if normalized in {"visible", "hidden", "all"}:
+        return normalized
+    return "visible"
+
+
+def _normalize_sku_group_payload(payload: Mapping[str, Any], *, created_at: str, updated_at: str) -> dict[str, Any]:
+    group_key = _normalize_sku_group_key(payload.get("group_key"))
+    if not _valid_sku_group_key(group_key):
+        raise ValueError("sku group_key must contain lowercase latin letters, digits or underscores")
+    label = str(payload.get("label") or group_key).strip()
+    aliases = _normalize_alias_list(payload.get("aliases"))
+    return {
+        "group_key": group_key,
+        "label": label,
+        "aliases": aliases,
+        "is_active": bool(payload.get("is_active", True)),
+        "is_system": bool(payload.get("is_system", False)),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _normalize_sku_group_key(value: Any) -> str:
+    normalized = str(value or "").strip().casefold()
+    normalized = normalized.replace("-", "_").replace(" ", "_")
+    normalized = re.sub(r"[^a-z0-9_]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
+def _valid_sku_group_key(value: Any) -> bool:
+    normalized = str(value or "").strip()
+    return bool(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", normalized))
+
+
+def _normalize_wb_card_for_sync(raw_card: Any) -> dict[str, Any]:
+    if isinstance(raw_card, WbContentCard):
+        payload = raw_card.to_dict()
+    elif isinstance(raw_card, Mapping):
+        payload = dict(raw_card)
+    else:
+        payload = {}
+    nm_id = _optional_int(payload.get("nm_id") or payload.get("nmID") or payload.get("nmId"))
+    vendor_code = str(payload.get("vendor_code") or payload.get("vendorCode") or payload.get("seller_article") or "").strip()
+    title = str(payload.get("title") or payload.get("wb_title") or payload.get("name") or "").strip()
+    subject_name = str(payload.get("subject_name") or payload.get("subjectName") or payload.get("wb_subject_name") or "").strip()
+    updated_at = str(payload.get("updated_at") or payload.get("updatedAt") or payload.get("wb_updated_at") or "").strip()
+    return {
+        "nm_id": nm_id,
+        "vendor_code": vendor_code,
+        "title": title,
+        "subject_name": subject_name,
+        "updated_at": updated_at,
+        "barcodes": _normalize_barcode_list(payload.get("barcodes") or payload.get("skus") or []),
+        "endpoint": str(payload.get("endpoint") or "/content/v2/get/cards/list"),
+    }
+
+
+def _wb_card_has_identity(card: Mapping[str, Any]) -> bool:
+    return (
+        _optional_int(card.get("nm_id")) is not None
+        or bool(_normalize_barcode_list(card.get("barcodes") or []))
+        or bool(_normalize_vendor_code(card.get("vendor_code")))
+    )
+
+
+class _NomenclatureWbCardMatcher:
+    def __init__(self, rows: list[Mapping[str, Any]]) -> None:
+        self.rows = [dict(row) for row in rows]
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        self.by_nm_id: dict[int, dict[str, Any]] = {}
+        self.by_barcode: dict[str, dict[str, Any]] = {}
+        self.by_vendor_code: dict[str, dict[str, Any]] = {}
+        for row in self.rows:
+            nm_id = _optional_int(row.get("nm_id"))
+            if nm_id is not None and nm_id > 0:
+                self.by_nm_id.setdefault(nm_id, row)
+            for barcode in _normalize_barcode_list([row.get("barcode"), *(row.get("barcodes") or [])]):
+                self.by_barcode.setdefault(barcode, row)
+            vendor_code = _normalize_vendor_code(row.get("vendor_code") or row.get("seller_article"))
+            if vendor_code:
+                self.by_vendor_code.setdefault(vendor_code, row)
+
+    def match(self, card: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
+        nm_id = _optional_int(card.get("nm_id"))
+        if nm_id is not None and nm_id in self.by_nm_id:
+            return dict(self.by_nm_id[nm_id]), "nm_id"
+        for barcode in _normalize_barcode_list(card.get("barcodes") or []):
+            if barcode in self.by_barcode:
+                return dict(self.by_barcode[barcode]), "barcode"
+        vendor_code = _normalize_vendor_code(card.get("vendor_code"))
+        if vendor_code and vendor_code in self.by_vendor_code:
+            return dict(self.by_vendor_code[vendor_code]), "vendor_code"
+        return None, ""
+
+    def replace(self, row: Mapping[str, Any]) -> None:
+        item_id = str(row.get("item_id") or "")
+        replaced = False
+        for index, existing in enumerate(self.rows):
+            if str(existing.get("item_id") or "") == item_id:
+                self.rows[index] = dict(row)
+                replaced = True
+                break
+        if not replaced:
+            self.rows.append(dict(row))
+        self._rebuild()
+
+
+def _apply_wb_card_to_existing_nomenclature(
+    existing: Mapping[str, Any],
+    *,
+    card: Mapping[str, Any],
+    match_type: str,
+    synced_at: str,
+) -> dict[str, Any]:
+    updated = dict(existing)
+    card_nm_id = _optional_int(card.get("nm_id"))
+    if _optional_int(updated.get("nm_id")) is None and card_nm_id is not None:
+        updated["nm_id"] = card_nm_id
+    barcodes = sorted(_normalize_barcode_list(card.get("barcodes") or []))
+    manual_barcode = (
+        str(updated.get("barcode_source") or "") == NOMENCLATURE_BARCODE_SOURCE_MANUAL
+        and bool(str(updated.get("barcode") or "").strip())
+    )
+    if barcodes and not manual_barcode:
+        updated["barcode"] = barcodes[0]
+        updated["primary_barcode"] = barcodes[0]
+        updated["barcodes"] = barcodes
+        updated["barcode_source"] = NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT
+        updated["barcode_status"] = (
+            NOMENCLATURE_BARCODE_STATUS_MULTIPLE if len(barcodes) > 1 else NOMENCLATURE_BARCODE_STATUS_READY
+        )
+        updated["barcode_synced_at"] = synced_at
+        updated["barcode_updated_at"] = synced_at
+        updated["barcode_evidence"] = {
+            "source": NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT,
+            "endpoint": str(card.get("endpoint") or "/content/v2/get/cards/list"),
+            "nm_id": card_nm_id,
+            "result": "resolved",
+            "selected_primary": barcodes[0],
+            "barcode_count": len(barcodes),
+            "sync_reason": "wb_card_sync",
+        }
+    elif manual_barcode:
+        updated["_manual_barcode_preserved"] = True
+    updated["vendor_code"] = str(card.get("vendor_code") or "")
+    updated["seller_article"] = str(card.get("vendor_code") or "")
+    updated["wb_title"] = str(card.get("title") or "")
+    updated["wb_subject_name"] = str(card.get("subject_name") or "")
+    updated["wb_updated_at"] = str(card.get("updated_at") or "")
+    updated["wb_synced_at"] = synced_at
+    updated["wb_sync_status"] = (
+        "needs_review"
+        if str(existing.get("product_type") or "") == "other" and str(existing.get("wb_sync_status") or "") == "needs_review"
+        else f"matched_{match_type or 'unknown'}"
+    )
+    updated["wb_sync_evidence"] = _wb_card_sync_evidence(card, result="matched", match_type=match_type)
+    updated["updated_at"] = synced_at
+    return updated
+
+
+def _new_nomenclature_item_from_wb_card(
+    card: Mapping[str, Any],
+    *,
+    groups: list[Mapping[str, Any]],
+    created_at: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    detection = _detect_sku_group_from_vendor_code(str(card.get("vendor_code") or ""), groups)
+    group_key = str(detection.get("group_key") or "other")
+    needs_review = not bool(detection.get("group_key"))
+    name = str(card.get("vendor_code") or card.get("title") or card.get("nm_id") or "").strip()
+    barcodes = sorted(_normalize_barcode_list(card.get("barcodes") or []))
+    barcode = barcodes[0] if barcodes else ""
+    barcode_status = NOMENCLATURE_BARCODE_STATUS_MULTIPLE if len(barcodes) > 1 else (
+        NOMENCLATURE_BARCODE_STATUS_READY if barcode else NOMENCLATURE_BARCODE_STATUS_MISSING
+    )
+    match_suffix = _vendor_code_match_suffix(str(card.get("vendor_code") or name))
+    evidence = _wb_card_sync_evidence(
+        card,
+        result="created",
+        match_type="none",
+        detected_group=detection,
+        needs_review=needs_review,
+    )
+    return {
+        "item_id": "nom_wb_" + uuid4().hex,
+        "is_active": not needs_review and group_key not in {"extra", "other"},
+        "is_hidden": False,
+        "hidden_at": "",
+        "hidden_reason": "",
+        "our_sku": "",
+        "nm_id": _optional_int(card.get("nm_id")),
+        "barcode": barcode,
+        "primary_barcode": barcode,
+        "barcodes": barcodes,
+        "barcode_source": NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT if barcode else NOMENCLATURE_BARCODE_SOURCE_MISSING,
+        "barcode_status": barcode_status,
+        "barcode_synced_at": updated_at if barcode else "",
+        "barcode_updated_at": updated_at if barcode else "",
+        "barcode_evidence": {
+            "source": NOMENCLATURE_BARCODE_SOURCE_WB_CONTENT,
+            "endpoint": str(card.get("endpoint") or "/content/v2/get/cards/list"),
+            "nm_id": _optional_int(card.get("nm_id")),
+            "result": "resolved" if barcode else "missing",
+            "selected_primary": barcode,
+            "barcode_count": len(barcodes),
+            "sync_reason": "wb_card_sync",
+        },
+        "vendor_code": str(card.get("vendor_code") or ""),
+        "seller_article": str(card.get("vendor_code") or ""),
+        "wb_title": str(card.get("title") or ""),
+        "wb_subject_name": str(card.get("subject_name") or ""),
+        "wb_updated_at": str(card.get("updated_at") or ""),
+        "wb_synced_at": updated_at,
+        "wb_sync_status": "needs_review" if needs_review else "created",
+        "wb_sync_evidence": evidence,
+        "nomenclature_name": name,
+        "product_type": group_key,
+        "match_key": f"{group_key}|{match_suffix}" if match_suffix and group_key not in {"extra", "other"} else "",
+        "purchase_price_yuan": None,
+        "aliases": [],
+        "compatible_models_text": "",
+        "compatible_model_keys": [],
+        "comment": "needs_review: WB vendorCode group is not recognized" if needs_review else "created from WB Content sync",
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _detect_sku_group_from_vendor_code(vendor_code: str, groups: list[Mapping[str, Any]]) -> dict[str, Any]:
+    normalized_vendor = _normalize_vendor_code(vendor_code)
+    if not normalized_vendor:
+        return {}
+    candidates: list[tuple[int, int, str, str, str]] = []
+    for group in groups:
+        if not bool(group.get("is_active", True)):
+            continue
+        group_key = str(group.get("group_key") or "").strip()
+        for alias in group.get("aliases") or []:
+            normalized_alias = _normalize_vendor_code(alias)
+            if not normalized_alias:
+                continue
+            if _normalized_alias_matches(normalized_vendor, normalized_alias):
+                candidates.append((len(normalized_alias), normalized_alias.count(" "), group_key, str(group.get("label") or group_key), str(alias)))
+    if not candidates:
+        return {}
+    candidates.sort(reverse=True)
+    _, _, group_key, label, alias = candidates[0]
+    return {"group_key": group_key, "label": label, "matched_alias": alias, "confidence": "high"}
+
+
+def _normalized_alias_matches(normalized_vendor: str, normalized_alias: str) -> bool:
+    if not normalized_alias:
+        return False
+    return f" {normalized_alias} " in f" {normalized_vendor} " or normalized_alias in normalized_vendor
+
+
+def _normalize_vendor_code(value: Any) -> str:
+    normalized = str(value or "").strip().casefold().replace("ё", "е")
+    normalized = normalized.replace("–", "-").replace("—", "-").replace("−", "-")
+    normalized = re.sub(r"[-_/]+", " ", normalized)
+    normalized = re.sub(r"\bnoframe\b", "no frame", normalized)
+    normalized = re.sub(r"\bno\s*frame\b", "no frame", normalized)
+    normalized = re.sub(r"\bantispy\b", "anti spy", normalized)
+    normalized = re.sub(r"\banti\s*spy\b", "anti spy", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _vendor_code_match_suffix(value: str) -> str:
+    normalized = _normalize_vendor_code(value)
+    normalized = re.sub(r"[^a-z0-9а-я]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized[:96]
+
+
+def _wb_card_sync_evidence(
+    card: Mapping[str, Any],
+    *,
+    result: str,
+    match_type: str,
+    detected_group: Mapping[str, Any] | None = None,
+    needs_review: bool = False,
+) -> dict[str, Any]:
+    return {
+        "source": WB_CARD_SYNC_SOURCE,
+        "endpoint": str(card.get("endpoint") or "/content/v2/get/cards/list"),
+        "result": result,
+        "match_type": match_type,
+        "nm_id": _optional_int(card.get("nm_id")),
+        "vendor_code": str(card.get("vendor_code") or ""),
+        "barcode_count": len(_normalize_barcode_list(card.get("barcodes") or [])),
+        "detected_group": dict(detected_group or {}),
+        "needs_review": bool(needs_review),
+    }
+
+
+def _nomenclature_wb_sync_error_result(
+    *,
+    status: str,
+    error: Exception,
+    summary: Mapping[str, Any],
+    limit: int,
+    max_pages: int,
+) -> dict[str, Any]:
+    return {
+        "contract_name": "sheet_vitrina_v1_nomenclature_wb_sync",
+        "status": status,
+        "limit": limit,
+        "max_pages": max_pages,
+        "cards_processed": 0,
+        "created": 0,
+        "updated": 0,
+        "error": _safe_barcode_error(error),
+        "summary": dict(summary),
+        "items": [],
     }
 
 
@@ -2725,6 +3220,9 @@ def _nomenclature_import_header_keys(header_row: tuple[Any, ...]) -> list[str]:
         "включено": "is_active",
         "active": "is_active",
         "is_active": "is_active",
+        "скрыто": "is_hidden",
+        "hidden": "is_hidden",
+        "is_hidden": "is_hidden",
         "nmid": "nm_id",
         "nm id": "nm_id",
         "nm_id": "nm_id",
@@ -2741,10 +3239,24 @@ def _nomenclature_import_header_keys(header_row: tuple[Any, ...]) -> list[str]:
         "barcode_source": "barcode_source",
         "статус шк": "barcode_status",
         "barcode_status": "barcode_status",
+        "артикул продавца wb / vendorcode": "vendor_code",
+        "артикул продавца wb": "vendor_code",
+        "vendorcode": "vendor_code",
+        "vendor_code": "vendor_code",
+        "seller_article": "vendor_code",
+        "название wb": "wb_title",
+        "wb_title": "wb_title",
+        "wb subject": "wb_subject_name",
+        "wb_subject_name": "wb_subject_name",
+        "wb updatedat": "wb_updated_at",
+        "wb_updated_at": "wb_updated_at",
+        "статус wb sync": "wb_sync_status",
+        "wb_sync_status": "wb_sync_status",
         "номенклатура": "nomenclature_name",
         "nomenclature": "nomenclature_name",
         "nomenclature_name": "nomenclature_name",
         "тип": "product_type",
+        "группа": "product_type",
         "product_type": "product_type",
         "match key": "match_key",
         "match_key": "match_key",
@@ -2801,6 +3313,11 @@ def _normalize_nomenclature_import_row(
         _parse_nomenclature_bool(row_values.get("is_active"), default=bool(base.get("is_active", True)))
         if "is_active" in row_values
         else bool(base.get("is_active", True))
+    )
+    is_hidden = (
+        _parse_nomenclature_bool(row_values.get("is_hidden"), default=bool(base.get("is_hidden", False)))
+        if "is_hidden" in row_values
+        else bool(base.get("is_hidden", False))
     )
     product_type = (
         _parse_nomenclature_product_type(row_values.get("product_type"))
@@ -2864,8 +3381,22 @@ def _normalize_nomenclature_import_row(
         {
             **base,
             "is_active": is_active,
+            "is_hidden": is_hidden,
+            "hidden_at": base.get("hidden_at") or "",
+            "hidden_reason": base.get("hidden_reason") or "",
             "nm_id": nm_id,
             **barcode_payload,
+            "vendor_code": _cell_text(row_values.get("vendor_code")) if "vendor_code" in row_values else base.get("vendor_code") or "",
+            "wb_title": _cell_text(row_values.get("wb_title")) if "wb_title" in row_values else base.get("wb_title") or "",
+            "wb_subject_name": (
+                _cell_text(row_values.get("wb_subject_name"))
+                if "wb_subject_name" in row_values
+                else base.get("wb_subject_name") or ""
+            ),
+            "wb_updated_at": _cell_text(row_values.get("wb_updated_at")) if "wb_updated_at" in row_values else base.get("wb_updated_at") or "",
+            "wb_synced_at": base.get("wb_synced_at") or "",
+            "wb_sync_status": _cell_text(row_values.get("wb_sync_status")) if "wb_sync_status" in row_values else base.get("wb_sync_status") or "",
+            "wb_sync_evidence": base.get("wb_sync_evidence") or {},
             "nomenclature_name": nomenclature_name,
             "product_type": product_type,
             "match_key": match_key,
@@ -2907,10 +3438,13 @@ def _parse_nomenclature_product_type(value: Any) -> str:
     normalized = _cell_text(value).casefold().replace("ё", "е")
     if normalized in NOMENCLATURE_PRODUCT_TYPE_BY_LABEL:
         return NOMENCLATURE_PRODUCT_TYPE_BY_LABEL[normalized]
+    normalized_key = _normalize_sku_group_key(normalized)
+    if _valid_sku_group_key(normalized_key):
+        return normalized_key
     normalized_no_dot = normalized.replace(".", "")
     if normalized_no_dot in {"доп строка", "дополнительная строка"}:
         return "extra"
-    raise ValueError("Тип должен быть clear, anti_spy, matte, extra, other или русским label")
+    raise ValueError("Группа должна быть stable key или label из справочника групп SKU")
 
 
 def _parse_nomenclature_nm_id(value: Any, *, row_number: int) -> int | None:
@@ -2944,6 +3478,9 @@ def _cell_text(value: Any) -> str:
 def _nomenclature_item_changed(existing: Mapping[str, Any], item: Mapping[str, Any]) -> bool:
     keys = [
         "is_active",
+        "is_hidden",
+        "hidden_at",
+        "hidden_reason",
         "our_sku",
         "nm_id",
         "barcode",
@@ -2952,6 +3489,12 @@ def _nomenclature_item_changed(existing: Mapping[str, Any], item: Mapping[str, A
         "barcode_status",
         "barcode_synced_at",
         "barcode_updated_at",
+        "vendor_code",
+        "wb_title",
+        "wb_subject_name",
+        "wb_updated_at",
+        "wb_synced_at",
+        "wb_sync_status",
         "nomenclature_name",
         "product_type",
         "match_key",
@@ -3162,7 +3705,7 @@ def _product_type_from_config_item(display_name: str, group: str) -> str:
 
 def _model_text_from_nomenclature_name(value: str) -> str:
     text = str(value or "").strip()
-    text = re.sub(r"^\s*(clean|clear|matte|anti[-\s]?spy)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*(no\s*frame\s*)?(clean|clear|matte|anti[-\s]?spy)\s+", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
