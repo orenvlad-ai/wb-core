@@ -30,6 +30,7 @@ from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1Fee
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import SheetVitrinaV1FeedbacksAutoComplaintsBlock
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitrinaV1FeedbacksComplaintsBlock
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
+from packages.application.wb_prices_management import WbPricesManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -631,6 +632,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
         feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
         ads_block: SheetVitrinaV1AdsBlock | None = None,
+        prices_block: WbPricesManagementBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -685,6 +687,12 @@ class RegistryUploadHttpEntrypoint:
             now_factory=self.now_factory,
         )
         self.ads_block = ads_block or SheetVitrinaV1AdsBlock(
+            runtime=self.runtime,
+            runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.prices_block = prices_block or WbPricesManagementBlock(
             runtime=self.runtime,
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
@@ -1114,6 +1122,33 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_ads_bid_commit_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
         return self.ads_block.commit_bid_change(payload, actor=actor)
+
+    def handle_sheet_prices_goods_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.prices_block.build_goods_table(params or {})
+
+    def handle_sheet_prices_preview_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.prices_block.preview_changes(payload)
+
+    def handle_sheet_prices_upload_task_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+        return self.prices_block.upload_task(payload, actor=actor)
+
+    def handle_sheet_prices_upload_task_status_request(self, upload_id: int) -> dict[str, Any]:
+        return self.prices_block.get_upload_task(upload_id)
+
+    def handle_sheet_prices_upload_task_goods_request(
+        self,
+        upload_id: int,
+        params: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        params = params or {}
+        return self.prices_block.get_upload_task_goods(
+            upload_id,
+            limit=params.get("limit", 1000),
+            offset=params.get("offset", 0),
+        )
+
+    def handle_sheet_prices_quarantine_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.prices_block.get_quarantine_goods(params or {})
 
     def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
