@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from packages.application.our_wb_costs import (  # noqa: E402
     TRANSIT_DIRECT_ZERO_CONFIRMED,
     WB_COST_STATUS_CONFIRMED,
+    WB_COST_STATUS_ESTIMATED,
     OurWbCostBlock,
     classify_wb_supply_transit,
 )
@@ -34,8 +35,10 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (  # noqa: E402
     extend_metrics_with_onec_stock_metrics,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
+    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
 )
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
@@ -92,6 +95,8 @@ def main() -> None:
             raise AssertionError("non-final WB quantities must still materialize as non-confirmed layers")
         _assert_wb_quantity_source_status(runtime)
         _assert_daily_state_rolls_iso_timestamp_inbound(runtime, block)
+        _assert_confirmed_share_partial_bucket_math()
+        _assert_total_confirmed_share_is_quantity_weighted()
 
         supplier_block = SupplierShipmentsBlock(runtime=runtime, timestamp_factory=lambda: NOW)
         try:
@@ -515,7 +520,177 @@ def _assert_daily_state_rolls_iso_timestamp_inbound(
         raise AssertionError(f"ISO timestamp inbound cost must drive post-gap unit cost, got {state}")
 
 
+def _assert_confirmed_share_partial_bucket_math() -> None:
+    with TemporaryDirectory(prefix="our-wb-costs-partial-share-smoke-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        block = OurWbCostBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
+        accepted = runtime.ingest_bundle(bundle, activated_at="2026-07-01T00:00:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"partial-share fixture bundle must be accepted, got {accepted}")
+        current_state = runtime.load_current_state()
+        fallback_then_confirmed_nm = 888100001
+        confirmed_then_estimated_nm = 888100002
+        stock_by_date = {
+            "2026-07-01": {
+                fallback_then_confirmed_nm: 100,
+                confirmed_then_estimated_nm: 100,
+            },
+            "2026-07-02": {
+                fallback_then_confirmed_nm: 150,
+                confirmed_then_estimated_nm: 150,
+            },
+            "2026-07-03": {
+                fallback_then_confirmed_nm: 120,
+                confirmed_then_estimated_nm: 150,
+            },
+            "2026-07-04": {
+                fallback_then_confirmed_nm: 0,
+                confirmed_then_estimated_nm: 150,
+            },
+        }
+        for as_of_date, stocks in stock_by_date.items():
+            runtime.save_sheet_vitrina_ready_snapshot(
+                current_state=current_state,
+                refreshed_at=f"{as_of_date}T06:00:00Z",
+                plan=_daily_stock_plan_many(as_of_date=as_of_date, stock_by_nm=stocks),
+            )
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            _insert_opening_baseline(
+                conn,
+                nm_id=fallback_then_confirmed_nm,
+                display_name="fallback opening then confirmed inbound",
+                stock_qty=100,
+                unit_cost=80,
+                source_status="metric11_2026_07_01_fallback",
+                confirmed_qty=0,
+                estimated_qty=0,
+                fallback_qty=100,
+            )
+            _insert_opening_baseline(
+                conn,
+                nm_id=confirmed_then_estimated_nm,
+                display_name="confirmed opening then estimated inbound",
+                stock_qty=100,
+                unit_cost=120,
+                source_status="opening_confirmed_supply",
+                confirmed_qty=100,
+                estimated_qty=0,
+                fallback_qty=0,
+            )
+            _insert_wb_cost_layer(
+                conn,
+                layer_id="partial_confirmed_inbound",
+                supply_id="partial_confirmed_inbound",
+                nm_id=fallback_then_confirmed_nm,
+                qty=50,
+                supply_date="2026-07-02T00:00:00+03:00",
+                unit_cost=100,
+                source_status=WB_COST_STATUS_CONFIRMED,
+            )
+            _insert_wb_cost_layer(
+                conn,
+                layer_id="partial_estimated_inbound",
+                supply_id="partial_estimated_inbound",
+                nm_id=confirmed_then_estimated_nm,
+                qty=50,
+                supply_date="2026-07-02",
+                unit_cost=130,
+                source_status=WB_COST_STATUS_ESTIMATED,
+            )
+        daily_rows = block.materialize_daily_state(opening_date="2026-07-01")
+        if daily_rows < 8:
+            raise AssertionError(f"partial-share daily state must materialize fixture rows, got {daily_rows}")
+
+        july1 = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-01")[fallback_then_confirmed_nm]
+        if float(july1["stock_qty"]) != 100.0 or float(july1["confirmed_share_pct"]) != 0.0:
+            raise AssertionError(f"fallback opening stock must show 0% confirmed share, got {july1}")
+        july2 = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-02")[fallback_then_confirmed_nm]
+        _assert_close(float(july2["confirmed_qty"]), 50.0, "fallback+confirmed confirmed_qty")
+        _assert_close(float(july2["fallback_qty"]), 100.0, "fallback+confirmed fallback_qty")
+        _assert_close(float(july2["confirmed_share_pct"]), 1.0 / 3.0, "fallback+confirmed share")
+        july3 = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-03")[fallback_then_confirmed_nm]
+        _assert_close(float(july3["confirmed_qty"]), 40.0, "scaled confirmed_qty")
+        _assert_close(float(july3["fallback_qty"]), 80.0, "scaled fallback_qty")
+        _assert_close(float(july3["confirmed_share_pct"]), 1.0 / 3.0, "scaled confirmed share")
+        july4 = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-04")[fallback_then_confirmed_nm]
+        if float(july4["stock_qty"]) != 0.0 or july4["confirmed_share_pct"] is not None:
+            raise AssertionError(f"zero stock must display blank confirmed share, got {july4}")
+
+        estimated_mix = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-02")[confirmed_then_estimated_nm]
+        _assert_close(float(estimated_mix["confirmed_qty"]), 100.0, "confirmed+estimated confirmed_qty")
+        _assert_close(float(estimated_mix["estimated_qty"]), 50.0, "confirmed+estimated estimated_qty")
+        _assert_close(float(estimated_mix["confirmed_share_pct"]), 2.0 / 3.0, "confirmed+estimated share")
+
+
+def _assert_total_confirmed_share_is_quantity_weighted() -> None:
+    config = [
+        ConfigV2Item(nm_id=900000001, enabled=True, display_name="huge confirmed", group="A", display_order=1),
+        ConfigV2Item(nm_id=900000002, enabled=True, display_name="tiny fallback", group="B", display_order=2),
+    ]
+    metrics = extend_metrics_with_our_wb_cost_metrics([])
+    metrics_by_key = {item.metric_key: item for item in metrics}
+    temporal_slot = SheetVitrinaV1TemporalSlot(slot_key="after", slot_label="after", column_date="2026-07-02")
+    evaluator = _MetricEvaluator(
+        enabled_config=config,
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[temporal_slot],
+            statuses=[],
+            slot_lookups={
+                "after": SlotLookups(
+                    seller_funnel_lookup={},
+                    history_lookup={},
+                    web_lookup={},
+                    prices_lookup={},
+                    sf_period_lookup={},
+                    spp_lookup={},
+                    ads_bids_lookup={},
+                    stocks_lookup={},
+                    onec_stocks_lookup={},
+                    ads_compact_lookup={},
+                    fin_lookup={},
+                    fin_storage_fee_total=None,
+                    cost_price_lookup={},
+                    promo_lookup={},
+                    our_wb_cost_lookup={
+                        900000001: {
+                            "our_wb_unit_cost_rub": 100.0,
+                            "stock_qty": 1000.0,
+                            "confirmed_qty": 1000.0,
+                            "confirmed_share_pct": 1.0,
+                        },
+                        900000002: {
+                            "our_wb_unit_cost_rub": 100.0,
+                            "stock_qty": 1.0,
+                            "confirmed_qty": 0.0,
+                            "confirmed_share_pct": 0.0,
+                        },
+                    },
+                    column_date="2026-07-02",
+                )
+            },
+            source_temporal_policies={},
+        ),
+    )
+    huge_share = evaluator.resolve_sku(OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY, 900000001, "after")
+    tiny_share = evaluator.resolve_sku(OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY, 900000002, "after")
+    if huge_share != 1.0 or tiny_share != 0.0:
+        raise AssertionError(f"SKU shares must read daily-state values, got {huge_share=} {tiny_share=}")
+    total_share = evaluator.resolve_total(TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY, "after")
+    _assert_close(float(total_share or 0.0), 1000.0 / 1001.0, "TOTAL confirmed share must be quantity weighted")
+    if abs(float(total_share or 0.0) - 0.5) < 0.01:
+        raise AssertionError(f"TOTAL confirmed share must not average SKU percentages, got {total_share}")
+
+
 def _daily_stock_plan(*, as_of_date: str, nm_id: int, stock_qty: float) -> SheetVitrinaV1Envelope:
+    return _daily_stock_plan_many(as_of_date=as_of_date, stock_by_nm={nm_id: stock_qty})
+
+
+def _daily_stock_plan_many(*, as_of_date: str, stock_by_nm: dict[int, float]) -> SheetVitrinaV1Envelope:
+    rows = [[f"SKU {nm_id}: Остаток", f"SKU:{nm_id}|stock_total", stock_qty] for nm_id, stock_qty in stock_by_nm.items()]
     return SheetVitrinaV1Envelope(
         plan_version="daily-roll-fixture",
         snapshot_id=f"daily-roll-{as_of_date}",
@@ -538,8 +713,8 @@ def _daily_stock_plan(*, as_of_date: str, nm_id: int, stock_qty: float) -> Sheet
                 write_mode="overwrite",
                 partial_update_allowed=False,
                 header=["label", "key", as_of_date],
-                rows=[[f"SKU 1: Остаток", f"SKU:{nm_id}|stock_total", stock_qty]],
-                row_count=1,
+                rows=rows,
+                row_count=len(rows),
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(
@@ -582,6 +757,111 @@ def _daily_stock_plan(*, as_of_date: str, nm_id: int, stock_qty: float) -> Sheet
             ),
         ],
     )
+
+
+def _insert_opening_baseline(
+    conn,
+    *,
+    nm_id: int,
+    display_name: str,
+    stock_qty: float,
+    unit_cost: float,
+    source_status: str,
+    confirmed_qty: float,
+    estimated_qty: float,
+    fallback_qty: float,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_wb_opening_baseline (
+            as_of_date,
+            nm_id,
+            display_name,
+            opening_stock_qty,
+            opening_unit_cost_rub,
+            source_priority,
+            source_status,
+            confirmed_qty,
+            estimated_qty,
+            fallback_qty,
+            component_status_json,
+            calculated_at,
+            inputs_hash
+        ) VALUES ('2026-07-01', ?, ?, ?, ?, 1, ?, ?, ?, ?, '{}', ?, ?)
+        """,
+        (
+            nm_id,
+            display_name,
+            stock_qty,
+            unit_cost,
+            source_status,
+            confirmed_qty,
+            estimated_qty,
+            fallback_qty,
+            NOW,
+            f"opening-{nm_id}",
+        ),
+    )
+
+
+def _insert_wb_cost_layer(
+    conn,
+    *,
+    layer_id: str,
+    supply_id: str,
+    nm_id: int,
+    qty: float,
+    supply_date: str,
+    unit_cost: float,
+    source_status: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_wb_supply_cost_layers (
+            wb_supply_cost_layer_id,
+            wb_supply_id,
+            nm_id,
+            accepted_qty,
+            qty_denominator,
+            supply_date,
+            accepted_date,
+            sku_ff_unit_cost_rub,
+            transit_cost_status,
+            transit_per_unit_rub,
+            ff_services_amount_total,
+            ff_services_per_unit_rub,
+            ff_storage_amount_total,
+            ff_storage_per_unit_rub,
+            our_wb_unit_cost_rub,
+            source_status,
+            component_status_json,
+            calculated_at,
+            inputs_hash,
+            version,
+            is_current
+        ) VALUES (?, ?, ?, ?, ?, ?, substr(?, 1, 10), ?, 'direct_zero_confirmed', 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, 1, 1)
+        """,
+        (
+            layer_id,
+            supply_id,
+            nm_id,
+            qty,
+            qty,
+            supply_date,
+            supply_date,
+            unit_cost,
+            unit_cost,
+            source_status,
+            json.dumps({"fixture_source_status": source_status}, ensure_ascii=False),
+            NOW,
+            f"layer-{layer_id}",
+        ),
+    )
+
+
+def _assert_close(actual: float, expected: float, label: str, *, tolerance: float = 0.000001) -> None:
+    if abs(actual - expected) > tolerance:
+        raise AssertionError(f"{label}: expected {expected}, got {actual}")
 
 
 def _assert_supplier_ff_reconciliation(runtime: RegistryUploadDbBackedRuntime) -> None:

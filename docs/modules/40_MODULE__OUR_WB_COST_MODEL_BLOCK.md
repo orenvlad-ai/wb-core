@@ -150,7 +150,8 @@ Stock reductions keep unit cost stable and scale confirmed/estimated/fallback bu
 
 Runtime-extended user-facing metrics:
 - `our_wb_unit_cost_rub`, label `Себестоимость WB наша, ₽/шт`; TOTAL key `total_our_wb_unit_cost_rub` is weighted by stock qty.
-- `our_wb_cost_confirmed_share_pct`, label `Доля подтверждённой себестоимости, %`; TOTAL key `total_our_wb_cost_confirmed_share_pct` is `SUM(confirmed_qty) / SUM(stock_qty)`.
+- `our_wb_cost_confirmed_share_pct`, label `Доля подтверждённой себестоимости, %`; SKU value is bucket-based `confirmed_qty / stock_qty`, blank only when stock is zero/missing, and can be partial (for example fallback opening 100 + confirmed inbound 50 with stock 150 => `33.33%`).
+- TOTAL key `total_our_wb_cost_confirmed_share_pct` is quantity-weighted `SUM(confirmed_qty) / SUM(stock_qty)`, not an average of visible SKU percentages.
 - `proxy_profit_3_rub`, label `proxy прибыль 3`; TOTAL key `total_proxy_profit_3_rub` is sum of SKU rows.
 
 Date boundary:
