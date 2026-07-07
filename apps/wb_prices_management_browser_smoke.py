@@ -42,10 +42,36 @@ def main() -> None:
             page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
             page.locator('[data-unified-tab-button="prices"]').click()
             page.locator(f'[data-prices-row="{PRIMARY_NM}"]').wait_for(timeout=7000)
+            for removed_selector in (
+                "[data-prices-filter-errors]",
+                "[data-prices-filter-size]",
+                "[data-prices-filter-quarantine]",
+            ):
+                if page.locator(removed_selector).count():
+                    raise AssertionError(f"removed prices filter is still present: {removed_selector}")
+            table_text = page.locator("[data-prices-table]").inner_text()
+            if "СПП" not in table_text or "29%" not in table_text:
+                raise AssertionError(f"SPP column must render by default, got: {table_text}")
+            if "Акции" not in table_text or "2 / 3" not in table_text:
+                raise AssertionError(f"promo column must render by default, got: {table_text}")
+            page.locator("[data-prices-column-manager] summary").click()
+            if not page.locator("[data-prices-column-controls]").is_visible():
+                raise AssertionError("prices column menu must open")
+            page.locator('[data-prices-column-id="spp"]').uncheck()
+            table_text = page.locator("[data-prices-table]").inner_text()
+            if "СПП" in table_text or "29%" in table_text:
+                raise AssertionError(f"SPP column must hide, got: {table_text}")
+            page.locator('[data-prices-column-id="spp"]').check()
             guard_text = page.locator("[data-prices-guard]").inner_text()
             if "выключено" not in guard_text:
                 raise AssertionError(f"write-disabled guard text mismatch: {guard_text}")
             page.locator(f'[data-prices-edit-nm="{PRIMARY_NM}"][data-prices-edit-field="price"]').fill("200")
+            page.locator('[data-prices-column-id="promo"]').uncheck()
+            edited_value = page.locator(f'[data-prices-edit-nm="{PRIMARY_NM}"][data-prices-edit-field="price"]').input_value()
+            if edited_value != "200":
+                raise AssertionError(f"draft price edit must survive column toggle, got {edited_value!r}")
+            page.locator('[data-prices-column-id="promo"]').check()
+            page.locator("[data-prices-column-manager] summary").click()
             page.locator("[data-prices-preview]").click()
             page.locator("[data-prices-modal]").wait_for(state="visible", timeout=7000)
             modal_text = page.locator("[data-prices-modal]").inner_text()

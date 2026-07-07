@@ -39,6 +39,16 @@ from packages.application.wb_prices_management import (  # noqa: E402
     normalize_upload_good,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
+from packages.contracts.promo_live_source import (  # noqa: E402
+    PromoLiveSourceEnvelope,
+    PromoLiveSourceItem,
+    PromoLiveSourceSuccess,
+)
+from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
+    SheetVitrinaV1Envelope,
+    SheetVitrinaV1TemporalSlot,
+    SheetVitrinaWriteTarget,
+)
 
 BUNDLE_FIXTURE = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 NOW = datetime(2026, 7, 7, 7, 0, tzinfo=timezone.utc)
@@ -151,6 +161,25 @@ def _run_unit_checks() -> None:
     with TemporaryDirectory(prefix="wb-prices-unit-") as tmp:
         runtime = _seed_runtime(Path(tmp) / "runtime")
         block = _build_block(runtime, Path(tmp) / "runtime", FakePricesSource(), write_enabled=False)
+        table = block.build_goods_table()
+        rows_by_nm = {int(row["nmID"]): row for row in table["rows"]}
+        primary_row = rows_by_nm[PRIMARY_NM]
+        if primary_row["sppProxy"] != 0.29 or primary_row["sppProxyLabel"] != "29%":
+            raise AssertionError(f"spp_proxy enrichment mismatch: {primary_row}")
+        if (
+            primary_row["promoEligibleCount"] != 2.0
+            or primary_row["promoCandidateCount"] != 3.0
+            or primary_row["promoLabel"] != "2 / 3"
+        ):
+            raise AssertionError(f"promo enrichment mismatch: {primary_row}")
+        size_row = rows_by_nm[SIZE_PRICE_NM]
+        if (
+            size_row["sppProxy"] is not None
+            or size_row["sppProxyLabel"] != "н/д"
+            or size_row["promoCandidateCount"] is not None
+            or size_row["promoLabel"] != "н/д"
+        ):
+            raise AssertionError(f"missing read-side data must stay n/d, got: {size_row}")
         preview = block.preview_changes({"changes": [{"nmID": PRIMARY_NM, "price": 200, "discount": 10}]})
         row = preview["preview"]["rows"][0]
         if row["new"]["discountedPrice"] != 180 or "quarantine_risk" not in ",".join(row["warnings"]):
@@ -206,15 +235,28 @@ def _run_http_smoke(*, write_enabled: bool) -> None:
                 f'"prices_preview_path": "{DEFAULT_SHEET_PRICES_PREVIEW_PATH}"',
                 f'"prices_upload_task_path": "{DEFAULT_SHEET_PRICES_UPLOAD_TASK_PATH}"',
                 f'"prices_quarantine_path": "{DEFAULT_SHEET_PRICES_QUARANTINE_PATH}"',
+                'data-prices-column-manager',
+                'data-prices-column-controls',
+                "Колонки",
             ):
                 if expected not in ui_html:
                     raise AssertionError(f"prices UI must contain {expected!r}")
+            for removed in ("data-prices-filter-errors", "data-prices-filter-size", "data-prices-filter-quarantine"):
+                if removed in ui_html:
+                    raise AssertionError(f"prices UI must not contain removed filter {removed!r}")
             if "discounts-prices-api.wildberries.ru" in _prices_script_slice(ui_html):
                 raise AssertionError("frontend prices code must not call WB upstream directly")
 
             status, goods = _get_json(f"{base_url}{DEFAULT_SHEET_PRICES_GOODS_PATH}")
             if status != 200 or goods.get("contract_name") != "sheet_vitrina_v1_prices_goods":
                 raise AssertionError(f"goods route mismatch: {status} {goods}")
+            goods_rows_by_nm = {int(row["nmID"]): row for row in goods.get("rows", [])}
+            goods_primary = goods_rows_by_nm[PRIMARY_NM]
+            if goods_primary.get("sppProxyLabel") != "29%" or goods_primary.get("promoLabel") != "2 / 3":
+                raise AssertionError(f"goods route must expose spp/promo labels: {goods_primary}")
+            goods_size = goods_rows_by_nm[SIZE_PRICE_NM]
+            if goods_size.get("sppProxyLabel") != "н/д" or goods_size.get("promoLabel") != "н/д":
+                raise AssertionError(f"missing spp/promo values must render as n/d fields: {goods_size}")
             status, preview = _post_json(
                 f"{base_url}{DEFAULT_SHEET_PRICES_PREVIEW_PATH}",
                 {"changes": [{"nmID": PRIMARY_NM, "price": 900, "discount": 10}]},
@@ -300,7 +342,108 @@ def _seed_runtime(runtime_dir: Path) -> RegistryUploadDbBackedRuntime:
                 "updated_at": "2026-07-07T07:00:00Z",
             }
         )
+    _seed_prices_read_side(runtime)
     return runtime
+
+
+def _seed_prices_read_side(runtime: RegistryUploadDbBackedRuntime) -> None:
+    as_of_date = "2026-07-07"
+    current_state = runtime.load_current_state()
+    plan = SheetVitrinaV1Envelope(
+        plan_version="prices-smoke-read-side-v1",
+        snapshot_id="prices-smoke-read-side-2026-07-07",
+        as_of_date=as_of_date,
+        date_columns=[as_of_date],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(
+                slot_key="current",
+                slot_label="Current",
+                column_date=as_of_date,
+            )
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:C5",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", as_of_date],
+                rows=[
+                    ["Primary SPP proxy", f"SKU:{PRIMARY_NM}|spp_proxy", "0.286"],
+                    ["Primary promo eligible count", f"SKU:{PRIMARY_NM}|promo_count_by_price", 2],
+                    ["Size SPP proxy missing", f"SKU:{SIZE_PRICE_NM}|spp_proxy", ""],
+                    ["Size promo eligible missing", f"SKU:{SIZE_PRICE_NM}|promo_count_by_price", ""],
+                ],
+                row_count=4,
+                column_count=3,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K1",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=[
+                    "source_key",
+                    "kind",
+                    "freshness",
+                    "snapshot_date",
+                    "date",
+                    "date_from",
+                    "date_to",
+                    "requested_count",
+                    "covered_count",
+                    "missing_nm_ids",
+                    "note",
+                ],
+                rows=[],
+                row_count=0,
+                column_count=11,
+            ),
+        ],
+    )
+    runtime.save_sheet_vitrina_ready_snapshot(
+        current_state=current_state,
+        refreshed_at="2026-07-07T07:00:00Z",
+        plan=plan,
+    )
+    runtime.save_temporal_source_snapshot(
+        source_key="promo_by_price",
+        snapshot_date=as_of_date,
+        captured_at="2026-07-07T07:00:00Z",
+        payload=PromoLiveSourceEnvelope(
+            result=PromoLiveSourceSuccess(
+                kind="success",
+                snapshot_date=as_of_date,
+                date_from="2026-07-07",
+                date_to="2026-07-07",
+                requested_count=1,
+                covered_count=1,
+                items=[
+                    PromoLiveSourceItem(
+                        snapshot_date=as_of_date,
+                        nm_id=PRIMARY_NM,
+                        promo_count_by_price=2.0,
+                        promo_entry_price_best=1100.0,
+                        promo_participation=1.0,
+                        promo_candidate_count=3.0,
+                    )
+                ],
+                detail="smoke",
+                trace_run_dir="",
+                current_promos=3,
+                current_promos_downloaded=3,
+                current_promos_blocked=0,
+                future_promos=0,
+                skipped_past_promos=0,
+                ambiguous_promos=0,
+            )
+        ),
+    )
 
 
 def _goods_payload() -> dict[str, Any]:

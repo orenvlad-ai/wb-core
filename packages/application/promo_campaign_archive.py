@@ -1851,6 +1851,7 @@ def _build_zero_items(
             promo_count_by_price=0.0,
             promo_entry_price_best=0.0,
             promo_participation=0.0,
+            promo_candidate_count=0.0,
         )
         for nm_id in sorted({int(nm_id) for nm_id in requested_nm_ids})
     ]
@@ -1874,6 +1875,7 @@ def _build_item_from_candidate_rows(
             promo_count_by_price=round(evaluation.promo_count_by_price, 6),
             promo_entry_price_best=round(evaluation.promo_entry_price_best, 6),
             promo_participation=round(evaluation.promo_participation, 6),
+            promo_candidate_count=round(evaluation.promo_candidate_count, 6),
         ),
         evaluation,
     )

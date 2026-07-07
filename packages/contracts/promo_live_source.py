@@ -30,6 +30,7 @@ class PromoLiveSourceItem:
     promo_count_by_price: float
     promo_entry_price_best: float
     promo_participation: float
+    promo_candidate_count: float | None = None
 
 
 @dataclass(frozen=True)

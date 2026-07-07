@@ -76,7 +76,15 @@ class WbPricesManagementBlock:
             source_mode = "wb_list_goods_filter"
         goods = normalize_goods_payload(payload)
         enrichment = self._load_nomenclature_enrichment()
-        rows = [self._build_row(good, enrichment.get(good.nm_id, {})) for good in goods]
+        read_side = self._load_read_side_enrichment([good.nm_id for good in goods])
+        rows = [
+            self._build_row(
+                good,
+                enrichment.get(good.nm_id, {}),
+                read_side.get(good.nm_id, {}),
+            )
+            for good in goods
+        ]
         requested_set = set(requested_nm_ids)
         returned_set = {row["nmID"] for row in rows}
         missing_nm_ids = sorted(requested_set - returned_set)
@@ -309,7 +317,12 @@ class WbPricesManagementBlock:
             "wb_response": payload,
         }
 
-    def _build_row(self, good: WbPriceGood, enrichment: Mapping[str, Any]) -> dict[str, Any]:
+    def _build_row(
+        self,
+        good: WbPriceGood,
+        enrichment: Mapping[str, Any],
+        read_side: Mapping[str, Any],
+    ) -> dict[str, Any]:
         title = _display_title(enrichment)
         return {
             **good.to_dict(),
@@ -318,6 +331,13 @@ class WbPricesManagementBlock:
             "ourSku": str(enrichment.get("our_sku") or ""),
             "barcode": str(enrichment.get("barcode") or enrichment.get("primary_barcode") or ""),
             "photoUrl": str(enrichment.get("photo_url") or ""),
+            "sppProxy": read_side.get("sppProxy"),
+            "sppProxyLabel": str(read_side.get("sppProxyLabel") or "н/д"),
+            "sppProxyReason": str(read_side.get("sppProxyReason") or ""),
+            "promoEligibleCount": read_side.get("promoEligibleCount"),
+            "promoCandidateCount": read_side.get("promoCandidateCount"),
+            "promoLabel": str(read_side.get("promoLabel") or "н/д"),
+            "promoReason": str(read_side.get("promoReason") or ""),
             "lastUploadStatus": "",
             "wbErrorText": "",
         }
@@ -345,6 +365,144 @@ class WbPricesManagementBlock:
             if nm_id is not None:
                 result[nm_id] = item
         return result
+
+    def _load_read_side_enrichment(self, nm_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+        requested = _dedupe_ints([int(value) for value in nm_ids])
+        result = {
+            nm_id: {
+                "sppProxy": None,
+                "sppProxyLabel": "н/д",
+                "sppProxyReason": "spp_proxy source is unavailable",
+                "promoEligibleCount": None,
+                "promoCandidateCount": None,
+                "promoLabel": "н/д",
+                "promoReason": "promo source is unavailable",
+            }
+            for nm_id in requested
+        }
+        if not requested:
+            return result
+
+        try:
+            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot()
+        except Exception as exc:
+            reason = f"ready snapshot unavailable: {exc}"
+            for row in result.values():
+                row["sppProxyReason"] = reason
+                row["promoReason"] = reason
+            return result
+
+        data_sheet = next((sheet for sheet in getattr(snapshot, "sheets", []) if sheet.sheet_name == "DATA_VITRINA"), None)
+        if data_sheet is None:
+            for row in result.values():
+                row["sppProxyReason"] = "DATA_VITRINA sheet is unavailable"
+                row["promoReason"] = "DATA_VITRINA sheet is unavailable"
+            return result
+
+        date_columns = [str(item) for item in getattr(snapshot, "date_columns", []) if str(item)]
+        row_by_id = {
+            str(row[1]): list(row)
+            for row in getattr(data_sheet, "rows", [])
+            if isinstance(row, list) and len(row) >= 2
+        }
+        promo_candidate_cache: dict[str, tuple[dict[int, float] | None, set[int], str, str | None]] = {}
+
+        for nm_id in requested:
+            spp_value, spp_date = _latest_metric_value(
+                row_by_id.get(f"SKU:{nm_id}|spp_proxy"),
+                date_columns=date_columns,
+            )
+            if spp_value is None:
+                result[nm_id]["sppProxyReason"] = "spp_proxy value is unavailable in latest ready snapshot"
+            else:
+                result[nm_id]["sppProxy"] = spp_value
+                result[nm_id]["sppProxyLabel"] = _format_percent_label(spp_value)
+                result[nm_id]["sppProxyReason"] = f"source=DATA_VITRINA metric=spp_proxy date={spp_date}"
+
+            promo_eligible, promo_date = _latest_metric_value(
+                row_by_id.get(f"SKU:{nm_id}|promo_count_by_price"),
+                date_columns=date_columns,
+            )
+            if promo_eligible is None or not promo_date:
+                result[nm_id]["promoReason"] = "promo_count_by_price value is unavailable in latest ready snapshot"
+                continue
+
+            candidate_count, candidate_reason = self._load_promo_candidate_count(
+                nm_id=nm_id,
+                snapshot_date=promo_date,
+                cache=promo_candidate_cache,
+            )
+            result[nm_id]["promoEligibleCount"] = promo_eligible
+            result[nm_id]["promoCandidateCount"] = candidate_count
+            if candidate_count is None:
+                result[nm_id]["promoLabel"] = "н/д"
+                result[nm_id]["promoReason"] = candidate_reason
+            else:
+                result[nm_id]["promoLabel"] = f"{_format_count_label(promo_eligible)} / {_format_count_label(candidate_count)}"
+                result[nm_id]["promoReason"] = (
+                    f"eligible by price={_format_count_label(promo_eligible)}; "
+                    f"current candidate campaigns={_format_count_label(candidate_count)}; "
+                    f"source=promo_by_price date={promo_date}"
+                )
+        return result
+
+    def _load_promo_candidate_count(
+        self,
+        *,
+        nm_id: int,
+        snapshot_date: str,
+        cache: dict[str, tuple[dict[int, float] | None, set[int], str, str | None]],
+    ) -> tuple[float | None, str]:
+        if snapshot_date not in cache:
+            cache[snapshot_date] = self._load_promo_candidate_counts(snapshot_date=snapshot_date)
+        counts, missing_count_nm_ids, reason, captured_at = cache[snapshot_date]
+        if counts is None:
+            return None, reason
+        if nm_id in counts:
+            captured_part = f"; captured_at={captured_at}" if captured_at else ""
+            return counts[nm_id], f"source=promo_by_price date={snapshot_date}{captured_part}"
+        if nm_id in missing_count_nm_ids:
+            return None, (
+                f"promo source payload for {snapshot_date} has no candidate count; "
+                "run a fresh promo source refresh to populate denominator"
+            )
+        return None, f"promo source payload has no item for nmID {nm_id} on {snapshot_date}"
+
+    def _load_promo_candidate_counts(
+        self,
+        *,
+        snapshot_date: str,
+    ) -> tuple[dict[int, float] | None, set[int], str, str | None]:
+        try:
+            payload, captured_at = self.runtime.load_temporal_source_snapshot(
+                source_key="promo_by_price",
+                snapshot_date=snapshot_date,
+            )
+        except Exception as exc:
+            return None, set(), f"promo source payload is unavailable for {snapshot_date}: {exc}", None
+        if payload is None:
+            return None, set(), f"promo source payload is unavailable for {snapshot_date}", None
+        result_payload = getattr(payload, "result", None)
+        items = getattr(result_payload, "items", None)
+        if not isinstance(items, list):
+            return None, set(), f"promo source payload has no item list for {snapshot_date}", captured_at
+        counts: dict[int, float] = {}
+        missing_count_nm_ids: set[int] = set()
+        for item in items:
+            item_nm_id = _optional_int(getattr(item, "nm_id", None))
+            if item_nm_id is None:
+                continue
+            count = _number_or_none(getattr(item, "promo_candidate_count", None))
+            if count is None:
+                missing_count_nm_ids.add(item_nm_id)
+                continue
+            counts[item_nm_id] = float(count)
+        if not counts and missing_count_nm_ids:
+            return None, missing_count_nm_ids, (
+                f"promo source payload for {snapshot_date} has no candidate count; "
+                "run a fresh promo source refresh to populate denominator"
+            ), captured_at
+        return counts, missing_count_nm_ids, "", captured_at
 
     def _save_preview(self, preview: Mapping[str, Any]) -> None:
         self._preview_dir.mkdir(parents=True, exist_ok=True)
@@ -596,6 +754,37 @@ def _number_or_none(value: Any) -> float | None:
     except InvalidOperation:
         return None
     return _decimal_to_json(number)
+
+
+def _latest_metric_value(row: list[Any] | None, *, date_columns: Sequence[str]) -> tuple[float | None, str]:
+    if not row or not date_columns:
+        return None, ""
+    for index in range(len(date_columns) - 1, -1, -1):
+        value_index = index + 2
+        if value_index >= len(row):
+            continue
+        value = _number_or_none(row[value_index])
+        if value is not None:
+            return float(value), str(date_columns[index])
+    return None, ""
+
+
+def _format_percent_label(value: float) -> str:
+    number = float(value)
+    percent = number * 100 if abs(number) <= 1 else number
+    return f"{_format_decimal_label(percent, max_digits=1)}%"
+
+
+def _format_count_label(value: float) -> str:
+    return _format_decimal_label(float(value), max_digits=1)
+
+
+def _format_decimal_label(value: float, *, max_digits: int) -> str:
+    quant = Decimal("1") if max_digits <= 0 else Decimal("0." + ("0" * (max_digits - 1)) + "1")
+    number = Decimal(str(value)).quantize(quant, rounding=ROUND_HALF_UP)
+    if number == number.to_integral_value():
+        return str(int(number))
+    return format(number.normalize(), "f")
 
 
 def _number_to_decimal(value: Any) -> Decimal:
