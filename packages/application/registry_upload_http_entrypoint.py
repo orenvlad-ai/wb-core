@@ -2846,6 +2846,55 @@ class RegistryUploadHttpEntrypoint:
                     finished_at=self.activated_at_factory(),
                     status="success",
                 )
+                our_wb_cost_recalculate = self._run_our_wb_cost_post_refresh_recalculate(
+                    emit=emit,
+                    refresh_diagnostics=refresh_diagnostics,
+                )
+                refresh_diagnostics["our_wb_cost_recalculate"] = our_wb_cost_recalculate
+                if our_wb_cost_recalculate.get("changed"):
+                    emit(
+                        _format_log_event(
+                            "our_wb_cost_snapshot_rebuild_start",
+                            cycle="refresh",
+                            as_of_date=effective_as_of_date,
+                            reason="post_refresh_recalculate_changed_runtime_state",
+                        )
+                    )
+                    rebuild_phase = _start_operator_phase(
+                        "rebuild_plan_after_our_wb_cost_recalculate",
+                        started_at=self.activated_at_factory(),
+                    )
+                    initial_plan = plan
+                    plan = self.sheet_plan_block.build_plan(
+                        as_of_date=effective_as_of_date,
+                        log=emit,
+                        execution_mode=execution_mode,
+                    )
+                    plan = _with_full_refresh_metadata(
+                        plan,
+                        refreshed_at=refreshed_at,
+                        previous_plan=initial_plan,
+                        previous_refreshed_at=refreshed_at,
+                    )
+                    refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
+                        current_state=current_state,
+                        refreshed_at=refreshed_at,
+                        plan=plan,
+                    )
+                    _finish_operator_phase(
+                        refresh_diagnostics,
+                        rebuild_phase,
+                        finished_at=self.activated_at_factory(),
+                        status="success",
+                    )
+                    emit(
+                        _format_log_event(
+                            "our_wb_cost_snapshot_rebuild_finish",
+                            cycle="refresh",
+                            snapshot_id=refresh_result.snapshot_id,
+                            data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
+                        )
+                    )
                 promo_gc_phase = _start_operator_phase(
                     "promo_artifact_light_gc",
                     started_at=self.activated_at_factory(),
@@ -2997,6 +3046,35 @@ class RegistryUploadHttpEntrypoint:
                     )
                 )
                 raise
+
+    def _run_our_wb_cost_post_refresh_recalculate(
+        self,
+        *,
+        emit: OperatorLogEmitter,
+        refresh_diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        emit(_format_log_event("our_wb_cost_recalculate_start", cycle="refresh", stage="post_ready_snapshot"))
+        phase = _start_operator_phase(
+            "our_wb_cost_post_refresh_recalculate",
+            started_at=self.activated_at_factory(),
+        )
+        result = self.our_wb_cost_block.rebuild_all()
+        payload = {
+            "supplier_layers_materialized": int(getattr(result, "supplier_layers_materialized", 0) or 0),
+            "wb_supply_layers_materialized": int(getattr(result, "wb_supply_layers_materialized", 0) or 0),
+            "opening_rows_materialized": int(getattr(result, "opening_rows_materialized", 0) or 0),
+            "daily_state_rows_materialized": int(getattr(result, "daily_state_rows_materialized", 0) or 0),
+        }
+        changed = any(value > 0 for value in payload.values())
+        payload["changed"] = changed
+        _finish_operator_phase(
+            refresh_diagnostics,
+            phase,
+            finished_at=self.activated_at_factory(),
+            status="success",
+        )
+        emit(_format_log_event("our_wb_cost_recalculate_finish", cycle="refresh", **payload))
+        return payload
 
     def _run_sheet_source_group_refresh(
         self,

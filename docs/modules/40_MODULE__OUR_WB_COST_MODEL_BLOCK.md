@@ -114,6 +114,16 @@ Fulfillment service components come only from accepted non-deleted uploads. `STO
 
 Rows with incomplete components stay `pending`/`estimated`/`needs_review`; they are not counted as confirmed inbound.
 
+Quantity evidence rule:
+- confirmed WB cost rows require final accepted quantity from `acceptedQuantity` / `accepted_quantity` and accepted supply status `5` (`Принято`);
+- `quantity` / `qty` is planned evidence only and may materialize an `estimated` row, never `confirmed`;
+- partial receiving/open statuses such as `4` (`Идёт приёмка`) remain `estimated` even if WB already reports a non-zero accepted quantity;
+- outbound/gate status `6` (`Отгружено на воротах`) is not receiving-complete evidence and cannot create confirmed cost from planned quantity.
+
+Every current confirmed row must satisfy `our_wb_unit_cost_rub >= sku_ff_unit_cost_rub`; direct-zero transit remains a confirmed zero component only when the direct-route classifier has explicit zero evidence.
+
+Rolling daily state groups WB supply cost layers by normalized supply business date (`YYYY-MM-DD`). WB/operator evidence may store `supply_date` as an ISO timestamp such as `2026-07-03T00:00:00+03:00`; the rolling key keeps the local date part (`2026-07-03`) and does not timezone-shift it. Empty or invalid dates are skipped instead of crashing materialization.
+
 # 5. Opening Baseline And Rolling State
 
 Opening date is `2026-07-01`.
@@ -149,6 +159,8 @@ Date boundary:
 
 `proxy_profit_2_rub` remains visible and unchanged.
 
+The same runtime metric extension is used by the DATA snapshot builder and the web-vitrina read contract. Operator/public UI must show Russian labels for SKU and TOTAL rows, and `Доля подтверждённой себестоимости, %` is formatted as a percent (for example `0.727918` renders as about `72,79%`).
+
 # 7. Routes And Backfill
 
 Protected routes:
@@ -156,6 +168,10 @@ Protected routes:
 - `GET /v1/sheet-vitrina-v1/wb-cost/status`: read status counts and latest TOTAL diagnostics.
 
 These routes do not sync/enrich WB data and do not upload/delete files. They only materialize/recompute the management cost contour from existing runtime truth.
+
+The ordinary web-vitrina refresh path persists the freshly built ready snapshot, runs this idempotent recalculation from runtime truth, and rebuilds/saves the ready snapshot again only when recalculation changed supplier/WB/opening/daily cost state. This keeps cost metrics updated with normal refresh/auto-refresh without coupling them to WB sync/enrich/upload jobs and without recursive refresh loops.
+
+Backfill is performed by the same safe routines: rebuild cost state from existing runtime truth, then rebuild ready snapshots for selected historical dates. `proxy_profit_3_rub` is expected for the whole available analysis period wherever `proxy_profit_2_rub` is available; `our_wb_unit_cost_rub` and confirmed share start from `2026-07-01` where closed-day stock/input state exists.
 
 # 8. Explicit Non-Goals
 

@@ -39,6 +39,7 @@ WB_COST_STATUS_ESTIMATED = "estimated"
 WB_COST_STATUS_FALLBACK = "fallback"
 WB_COST_STATUS_PENDING = "pending"
 WB_COST_STATUS_NEEDS_REVIEW = "needs_review"
+WB_SUPPLY_STATUS_ACCEPTED = 5
 
 OPENING_SOURCE_CONFIRMED_SUPPLY = "opening_confirmed_supply"
 OPENING_SOURCE_NEAR_FUTURE_PROXY = "near_future_proxy"
@@ -302,7 +303,7 @@ class OurWbCostBlock:
                     continue
                 supply_id = str(supply.get("supply_id") or "")
                 overlay = ff_overlays.get(supply_id)
-                supply_qty = _sum_positive(_wb_good_qty(item) for item in goods)
+                supply_qty = _sum_positive(_wb_good_quantity(item).qty for item in goods)
                 denominator = _positive_number(supply.get("quantity_for_size_filter")) or supply_qty
                 if denominator <= 0:
                     continue
@@ -320,7 +321,8 @@ class OurWbCostBlock:
                 storage_per_unit = storage_total / denominator if denominator > 0 else 0.0
                 for good in goods:
                     nm_id = _optional_int(good.get("nmID") or good.get("nmId") or good.get("nm_id"))
-                    qty = _positive_number(_wb_good_qty(good))
+                    quantity = _wb_good_quantity(good)
+                    qty = _positive_number(quantity.qty)
                     if nm_id is None or qty <= 0:
                         continue
                     ff_line = current_ff_lines.get(nm_id)
@@ -328,6 +330,11 @@ class OurWbCostBlock:
                         supply=supply,
                         nm_id=nm_id,
                         accepted_qty=qty,
+                        quantity_source=quantity.source,
+                        quantity_is_final_accepted=_wb_good_quantity_is_final_accepted(
+                            supply=supply,
+                            quantity=quantity,
+                        ),
                         denominator=denominator,
                         ff_line=ff_line,
                         transit=transit,
@@ -1013,7 +1020,7 @@ class OurWbCostBlock:
         by_date: dict[str, dict[int, list[dict[str, Any]]]] = {}
         for row in rows:
             row_dict = dict(row)
-            supply_date = str(row_dict.get("supply_date") or "")
+            supply_date = _wb_supply_business_date_key(row_dict.get("supply_date"))
             nm_id = _optional_int(row_dict.get("nm_id"))
             if not supply_date or nm_id is None:
                 continue
@@ -1026,6 +1033,8 @@ class OurWbCostBlock:
         supply: Mapping[str, Any],
         nm_id: int,
         accepted_qty: float,
+        quantity_source: str,
+        quantity_is_final_accepted: bool,
         denominator: float,
         ff_line: Mapping[str, Any] | None,
         transit: TransitCostClassification,
@@ -1048,6 +1057,9 @@ class OurWbCostBlock:
             if transit.status == TRANSIT_MISSING or transit.status == TRANSIT_UNKNOWN_ROUTE:
                 source_status = WB_COST_STATUS_PENDING
                 missing_reason = transit.missing_reason or "transit_cost_pending"
+            elif not quantity_is_final_accepted:
+                source_status = WB_COST_STATUS_ESTIMATED
+                missing_reason = "wb_supply_quantity_not_final_accepted"
             elif ff_line is not None and str(ff_line.get("layer_status") or "") == SUPPLIER_FF_STATUS_CONFIRMED:
                 source_status = WB_COST_STATUS_CONFIRMED
                 missing_reason = None
@@ -1055,6 +1067,7 @@ class OurWbCostBlock:
                 source_status = WB_COST_STATUS_ESTIMATED
                 missing_reason = None
         supply_id = str(supply.get("supply_id") or supply.get("wb_supply_id") or "")
+        supply_status_id = _wb_supply_status_id(supply)
         upload_ids = (overlay or {}).get("upload_ids") or []
         payload = {
             "wb_supply_id": supply_id,
@@ -1084,6 +1097,9 @@ class OurWbCostBlock:
                 "ff_services": "accepted_upload" if overlay else "missing_or_zero",
                 "ff_storage": "accepted_upload_allocated_storage" if overlay else "missing_or_zero",
                 "transit_evidence": transit.evidence,
+                "wb_supply_status_id": supply_status_id,
+                "wb_quantity_source": quantity_source,
+                "wb_quantity_final_accepted": quantity_is_final_accepted,
             },
         }
         payload_input = dict(payload)
@@ -1382,6 +1398,13 @@ def _empty_daily_state(stock_qty: float) -> dict[str, float | str | None | dict[
     }
 
 
+@dataclass(frozen=True)
+class _WbGoodQuantity:
+    qty: float
+    source: str
+    is_final_accepted: bool
+
+
 def _normalized_wb_row(supply: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _json_loads(supply.get("normalized_row_json"))
     if isinstance(normalized, dict):
@@ -1403,15 +1426,31 @@ def _parse_wb_goods(raw_goods_json: Any) -> list[dict[str, Any]]:
 
 
 def _wb_good_qty(item: Mapping[str, Any]) -> float:
-    return _number_or_zero(
-        item.get("acceptedQuantity")
-        if item.get("acceptedQuantity") is not None
-        else item.get("accepted_quantity")
-        if item.get("accepted_quantity") is not None
-        else item.get("quantity")
-        if item.get("quantity") is not None
-        else item.get("qty")
-    )
+    return _wb_good_quantity(item).qty
+
+
+def _wb_good_quantity(item: Mapping[str, Any]) -> _WbGoodQuantity:
+    for key in ("acceptedQuantity", "accepted_quantity"):
+        if item.get(key) is not None:
+            return _WbGoodQuantity(qty=_number_or_zero(item.get(key)), source=key, is_final_accepted=True)
+    for key in ("quantity", "qty"):
+        if item.get(key) is not None:
+            return _WbGoodQuantity(qty=_number_or_zero(item.get(key)), source=key, is_final_accepted=False)
+    return _WbGoodQuantity(qty=0.0, source="missing", is_final_accepted=False)
+
+
+def _wb_supply_status_id(supply: Mapping[str, Any]) -> int | None:
+    status_id = _optional_int(supply.get("status_id") or supply.get("statusID") or supply.get("statusId"))
+    if status_id is not None:
+        return status_id
+    normalized = _json_loads(supply.get("normalized_row_json"))
+    if isinstance(normalized, Mapping):
+        return _optional_int(normalized.get("status_id") or normalized.get("statusID") or normalized.get("statusId"))
+    return None
+
+
+def _wb_good_quantity_is_final_accepted(*, supply: Mapping[str, Any], quantity: _WbGoodQuantity) -> bool:
+    return quantity.is_final_accepted and _wb_supply_status_id(supply) == WB_SUPPLY_STATUS_ACCEPTED
 
 
 def _wb_supply_row_to_dict(row: Any) -> dict[str, Any]:
@@ -1515,6 +1554,17 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _wb_supply_business_date_key(value: Any) -> str | None:
+    text = _optional_text(value)
+    if text is None or len(text) < 10:
+        return None
+    date_part = text[:10]
+    try:
+        return date.fromisoformat(date_part).isoformat()
+    except ValueError:
+        return None
 
 
 def _optional_int(value: Any) -> int | None:

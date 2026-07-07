@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from packages.application.our_wb_costs import (  # noqa: E402
     TRANSIT_DIRECT_ZERO_CONFIRMED,
+    WB_COST_STATUS_CONFIRMED,
     OurWbCostBlock,
     classify_wb_supply_transit,
 )
@@ -39,11 +40,16 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
 )
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
 from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item, MetricV2Item  # noqa: E402
-from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot  # noqa: E402
+from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
+    SheetVitrinaV1Envelope,
+    SheetVitrinaV1TemporalSlot,
+    SheetVitrinaWriteTarget,
+)
 from packages.contracts.supplier_shipments import ORDER_STATUS_ACCEPTED_FF, ORDER_STATUS_PRODUCTION  # noqa: E402
 
 
 NOW = "2026-07-07T07:00:00Z"
+BUNDLE_FIXTURE = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 
 
 def main() -> None:
@@ -64,6 +70,28 @@ def main() -> None:
         if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
             raise AssertionError("WB supply cost layer materialization must write one SKU layer")
         _assert_wb_supply_cost_layer(runtime)
+        _seed_wb_supply(
+            runtime,
+            supply_id="receiving_accepted_qty",
+            status_id=4,
+            goods=[{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 7}],
+        )
+        _seed_wb_supply(
+            runtime,
+            supply_id="planned_qty_only",
+            status_id=4,
+            goods=[{"nmID": 497413000, "quantity": 10}],
+        )
+        _seed_wb_supply(
+            runtime,
+            supply_id="status6_planned_qty_only",
+            status_id=6,
+            goods=[{"nmID": 497413000, "quantity": 10}],
+        )
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 3:
+            raise AssertionError("non-final WB quantities must still materialize as non-confirmed layers")
+        _assert_wb_quantity_source_status(runtime)
+        _assert_daily_state_rolls_iso_timestamp_inbound(runtime, block)
 
         supplier_block = SupplierShipmentsBlock(runtime=runtime, timestamp_factory=lambda: NOW)
         try:
@@ -262,7 +290,15 @@ def _seed_financial_inputs(runtime: RegistryUploadDbBackedRuntime, *, shipment_i
         )
 
 
-def _seed_wb_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
+def _seed_wb_supply(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str = "40431461",
+    status_id: int = 5,
+    goods: list[dict[str, object]] | None = None,
+) -> None:
+    goods_payload = goods or [{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 10}]
+    quantity_total = sum(float(item.get("quantity") or item.get("acceptedQuantity") or 0) for item in goods_payload)
     with _connect(runtime.db_path) as conn:
         _ensure_schema(conn)
         conn.execute(
@@ -280,12 +316,13 @@ def _seed_wb_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                "40431461",
-                "supply:40431461",
-                "40431461",
+                supply_id,
+                f"supply:{supply_id}",
+                supply_id,
                 json.dumps(
                     {
-                        "supply_id": "40431461",
+                        "supply_id": supply_id,
+                        "status_id": status_id,
                         "warehouseName": "Электросталь",
                         "has_transit_cost_marker": 0,
                         "acceptanceCost": 0,
@@ -294,8 +331,8 @@ def _seed_wb_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
                     },
                     ensure_ascii=False,
                 ),
-                json.dumps([{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 10}], ensure_ascii=False),
-                10,
+                json.dumps(goods_payload, ensure_ascii=False),
+                quantity_total,
                 "2026-07-03",
                 "2026-07-03",
                 NOW,
@@ -319,6 +356,224 @@ def _assert_wb_supply_cost_layer(runtime: RegistryUploadDbBackedRuntime) -> None
         raise AssertionError(f"direct WB supply must have confirmed zero transit, got {dict(row)}")
     if row["our_wb_unit_cost_rub"] is None:
         raise AssertionError("WB supply cost layer must calculate our_wb_unit_cost_rub")
+
+
+def _assert_wb_quantity_source_status(runtime: RegistryUploadDbBackedRuntime) -> None:
+    with _connect(runtime.db_path) as conn:
+        _ensure_schema(conn)
+        rows = {
+            str(row["wb_supply_id"]): dict(row)
+            for row in conn.execute(
+                """
+                SELECT wb_supply_id, accepted_qty, source_status, component_status_json
+                FROM sheet_vitrina_v1_wb_supply_cost_layers
+                WHERE wb_supply_id IN ('receiving_accepted_qty', 'planned_qty_only', 'status6_planned_qty_only')
+                  AND nm_id = 497413000
+                  AND is_current = 1
+                """
+            ).fetchall()
+        }
+    receiving = rows.get("receiving_accepted_qty")
+    planned = rows.get("planned_qty_only")
+    shipped_planned = rows.get("status6_planned_qty_only")
+    if receiving is None or planned is None or shipped_planned is None:
+        raise AssertionError(f"quantity source regression layers missing, got {rows}")
+    if (
+        receiving["source_status"] == WB_COST_STATUS_CONFIRMED
+        or planned["source_status"] == WB_COST_STATUS_CONFIRMED
+        or shipped_planned["source_status"] == WB_COST_STATUS_CONFIRMED
+    ):
+        raise AssertionError(f"non-final/planned quantity must not become confirmed, got {rows}")
+    if (
+        float(receiving["accepted_qty"]) != 7.0
+        or float(planned["accepted_qty"]) != 10.0
+        or float(shipped_planned["accepted_qty"]) != 10.0
+    ):
+        raise AssertionError(f"quantity values must preserve accepted/planned evidence, got {rows}")
+    receiving_components = json.loads(str(receiving["component_status_json"]))
+    planned_components = json.loads(str(planned["component_status_json"]))
+    shipped_planned_components = json.loads(str(shipped_planned["component_status_json"]))
+    if receiving_components.get("wb_quantity_final_accepted") is not False:
+        raise AssertionError(f"receiving status must not be final accepted, got {receiving_components}")
+    if planned_components.get("wb_quantity_source") != "quantity":
+        raise AssertionError(f"planned fallback source must be explicit, got {planned_components}")
+    if shipped_planned_components.get("wb_supply_status_id") != 6:
+        raise AssertionError(f"status 6 planned-only evidence must be preserved, got {shipped_planned_components}")
+    if shipped_planned_components.get("wb_quantity_final_accepted") is not False:
+        raise AssertionError(f"status 6 planned-only quantity must not be final accepted, got {shipped_planned_components}")
+
+
+def _assert_daily_state_rolls_iso_timestamp_inbound(
+    runtime: RegistryUploadDbBackedRuntime,
+    block: OurWbCostBlock,
+) -> None:
+    nm_id = 888000001
+    bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
+    accepted = runtime.ingest_bundle(bundle, activated_at="2026-07-01T00:00:00Z")
+    if accepted.status != "accepted":
+        raise AssertionError(f"daily rolling fixture bundle must be accepted, got {accepted}")
+    current_state = runtime.load_current_state()
+    for as_of_date, stock_qty in (
+        ("2026-07-01", 10),
+        ("2026-07-02", 0),
+        ("2026-07-03", 20),
+    ):
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at=f"{as_of_date}T06:00:00Z",
+            plan=_daily_stock_plan(as_of_date=as_of_date, nm_id=nm_id, stock_qty=stock_qty),
+        )
+    with _connect(runtime.db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_wb_opening_baseline (
+                as_of_date,
+                nm_id,
+                display_name,
+                opening_stock_qty,
+                opening_unit_cost_rub,
+                source_priority,
+                source_status,
+                confirmed_qty,
+                estimated_qty,
+                fallback_qty,
+                component_status_json,
+                calculated_at,
+                inputs_hash
+            ) VALUES ('2026-07-01', ?, 'SKU 1', 10, 100, 1, 'opening_confirmed_supply', 10, 0, 0, '{}', ?, 'opening')
+            """,
+            (nm_id, NOW),
+        )
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_wb_supply_cost_layers (
+                wb_supply_cost_layer_id,
+                wb_supply_id,
+                nm_id,
+                accepted_qty,
+                qty_denominator,
+                supply_date,
+                accepted_date,
+                sku_ff_unit_cost_rub,
+                transit_cost_status,
+                transit_per_unit_rub,
+                ff_services_amount_total,
+                ff_services_per_unit_rub,
+                ff_storage_amount_total,
+                ff_storage_per_unit_rub,
+                our_wb_unit_cost_rub,
+                source_status,
+                component_status_json,
+                calculated_at,
+                inputs_hash,
+                version,
+                is_current
+            ) VALUES (
+                'wbcost_iso_ts_888000001_1',
+                'iso_ts',
+                ?,
+                20,
+                20,
+                '2026-07-03T00:00:00+03:00',
+                '2026-07-03',
+                100,
+                'direct_zero_confirmed',
+                0,
+                0,
+                0,
+                0,
+                0,
+                110,
+                'confirmed',
+                '{"wb_quantity_final_accepted": true}',
+                ?,
+                'iso-ts-layer',
+                1,
+                1
+            )
+            """,
+            (nm_id, NOW),
+        )
+    daily_rows = block.materialize_daily_state(opening_date="2026-07-01")
+    if daily_rows < 3:
+        raise AssertionError(f"daily state materialization must cover fixture dates, got {daily_rows}")
+    state = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-03").get(nm_id)
+    if state is None:
+        raise AssertionError("daily state must include ISO timestamp inbound SKU row")
+    if float(state["confirmed_qty"]) != 20.0 or float(state["confirmed_share_pct"]) != 1.0:
+        raise AssertionError(f"ISO timestamp supply_date must roll into confirmed bucket, got {state}")
+    if abs(float(state["our_wb_unit_cost_rub"]) - 110.0) > 0.000001:
+        raise AssertionError(f"ISO timestamp inbound cost must drive post-gap unit cost, got {state}")
+
+
+def _daily_stock_plan(*, as_of_date: str, nm_id: int, stock_qty: float) -> SheetVitrinaV1Envelope:
+    return SheetVitrinaV1Envelope(
+        plan_version="daily-roll-fixture",
+        snapshot_id=f"daily-roll-{as_of_date}",
+        as_of_date=as_of_date,
+        date_columns=[as_of_date],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(
+                slot_key="closed_day",
+                slot_label="Closed day",
+                column_date=as_of_date,
+            )
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:C2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", as_of_date],
+                rows=[[f"SKU 1: Остаток", f"SKU:{nm_id}|stock_total", stock_qty]],
+                row_count=1,
+                column_count=3,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=[
+                    "source_key",
+                    "kind",
+                    "freshness",
+                    "snapshot_date",
+                    "date",
+                    "date_from",
+                    "date_to",
+                    "requested_count",
+                    "covered_count",
+                    "missing_nm_ids",
+                    "note",
+                ],
+                rows=[
+                    [
+                        "stock_total[closed_day]",
+                        "success",
+                        as_of_date,
+                        as_of_date,
+                        as_of_date,
+                        as_of_date,
+                        as_of_date,
+                        1,
+                        1,
+                        "",
+                        "",
+                    ]
+                ],
+                row_count=1,
+                column_count=11,
+            ),
+        ],
+    )
 
 
 def _assert_supplier_ff_reconciliation(runtime: RegistryUploadDbBackedRuntime) -> None:
