@@ -1343,11 +1343,16 @@ def _roll_daily_state(
     inbound_rows = list(inbounds)
     inbound_qty = _sum_positive(_number_or_zero(row.get("accepted_qty")) for row in inbound_rows)
     base_stock_qty = max(stock_qty - inbound_qty, 0.0)
-    scale = base_stock_qty / prev_stock if prev_stock > 0 else 0.0
+    previous_confirmed_qty = _number_or_zero(previous.get("_carry_confirmed_qty", previous.get("confirmed_qty")))
+    previous_estimated_qty = _number_or_zero(previous.get("_carry_estimated_qty", previous.get("estimated_qty")))
+    previous_fallback_qty = _number_or_zero(previous.get("_carry_fallback_qty", previous.get("fallback_qty")))
+    previous_bucket_qty = previous_confirmed_qty + previous_estimated_qty + previous_fallback_qty
+    previous_basis_qty = prev_stock if prev_stock > 0 else previous_bucket_qty
+    scale = base_stock_qty / previous_basis_qty if previous_basis_qty > 0 else 0.0
     base_cost = _optional_float(previous.get("our_wb_unit_cost_rub"))
-    confirmed_qty = _number_or_zero(previous.get("confirmed_qty")) * scale
-    estimated_qty = _number_or_zero(previous.get("estimated_qty")) * scale
-    fallback_qty = _number_or_zero(previous.get("fallback_qty")) * scale
+    confirmed_qty = previous_confirmed_qty * scale
+    estimated_qty = previous_estimated_qty * scale
+    fallback_qty = previous_fallback_qty * scale
     weighted_cost_sum = (base_cost or 0.0) * base_stock_qty if base_cost is not None else 0.0
     cost_weight_qty = base_stock_qty if base_cost is not None else 0.0
     status = str(previous.get("source_status") or "")
@@ -1369,18 +1374,31 @@ def _roll_daily_state(
         status = source_status
         component_status = _json_loads(row.get("component_status_json"))
     unit_cost = weighted_cost_sum / cost_weight_qty if cost_weight_qty > 0 else base_cost
+    carry_confirmed_qty = confirmed_qty
+    carry_estimated_qty = estimated_qty
+    carry_fallback_qty = fallback_qty
     total_buckets = confirmed_qty + estimated_qty + fallback_qty
     if stock_qty > 0 and total_buckets > stock_qty:
         scale_to_stock = stock_qty / total_buckets
         confirmed_qty *= scale_to_stock
         estimated_qty *= scale_to_stock
         fallback_qty *= scale_to_stock
+        carry_confirmed_qty = confirmed_qty
+        carry_estimated_qty = estimated_qty
+        carry_fallback_qty = fallback_qty
+    elif stock_qty <= 0:
+        confirmed_qty = 0.0
+        estimated_qty = 0.0
+        fallback_qty = 0.0
     return {
         "stock_qty": stock_qty,
         "our_wb_unit_cost_rub": unit_cost,
         "confirmed_qty": confirmed_qty,
         "estimated_qty": estimated_qty,
         "fallback_qty": fallback_qty,
+        "_carry_confirmed_qty": carry_confirmed_qty,
+        "_carry_estimated_qty": carry_estimated_qty,
+        "_carry_fallback_qty": carry_fallback_qty,
         "source_status": status,
         "component_status": component_status,
     }

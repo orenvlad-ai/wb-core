@@ -416,7 +416,8 @@ def _assert_daily_state_rolls_iso_timestamp_inbound(
     for as_of_date, stock_qty in (
         ("2026-07-01", 10),
         ("2026-07-02", 0),
-        ("2026-07-03", 20),
+        ("2026-07-03", 0),
+        ("2026-07-04", 20),
     ):
         runtime.save_sheet_vitrina_ready_snapshot(
             current_state=current_state,
@@ -496,13 +497,20 @@ def _assert_daily_state_rolls_iso_timestamp_inbound(
             (nm_id, NOW),
         )
     daily_rows = block.materialize_daily_state(opening_date="2026-07-01")
-    if daily_rows < 3:
+    if daily_rows < 4:
         raise AssertionError(f"daily state materialization must cover fixture dates, got {daily_rows}")
-    state = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-03").get(nm_id)
+    zero_stock_state = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-03").get(nm_id)
+    if zero_stock_state is None:
+        raise AssertionError("daily state must include ISO timestamp inbound SKU row on zero-stock day")
+    if float(zero_stock_state["stock_qty"]) != 0.0 or float(zero_stock_state["confirmed_qty"]) != 0.0:
+        raise AssertionError(f"zero-stock day must not persist off-stock confirmed bucket, got {zero_stock_state}")
+    if zero_stock_state["confirmed_share_pct"] is not None:
+        raise AssertionError(f"zero-stock day confirmed share must stay blank, got {zero_stock_state}")
+    state = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-04").get(nm_id)
     if state is None:
         raise AssertionError("daily state must include ISO timestamp inbound SKU row")
     if float(state["confirmed_qty"]) != 20.0 or float(state["confirmed_share_pct"]) != 1.0:
-        raise AssertionError(f"ISO timestamp supply_date must roll into confirmed bucket, got {state}")
+        raise AssertionError(f"ISO timestamp supply_date must carry into confirmed bucket when stock appears, got {state}")
     if abs(float(state["our_wb_unit_cost_rub"]) - 110.0) > 0.000001:
         raise AssertionError(f"ISO timestamp inbound cost must drive post-gap unit cost, got {state}")
 
