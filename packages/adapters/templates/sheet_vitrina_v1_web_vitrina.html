@@ -3955,12 +3955,40 @@
       gap: 14px;
     }
 
+    .prices-panel {
+      display: grid;
+      gap: 14px;
+    }
+
     .ads-toolbar {
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 12px;
       flex-wrap: wrap;
+    }
+
+    .prices-toolbar,
+    .prices-filters,
+    .prices-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .prices-toolbar {
+      justify-content: space-between;
+    }
+
+    .prices-filters .input {
+      width: min(320px, 100%);
+    }
+
+    .prices-guard {
+      margin: 0;
+      color: var(--muted-strong);
+      font-size: 12px;
     }
 
     .ads-workspace {
@@ -3979,16 +4007,37 @@
       overflow: hidden;
     }
 
+    .prices-table-shell {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
     .ads-table-scroll,
     .ads-drawer-scroll {
       overflow: auto;
       max-height: min(68vh, 760px);
     }
 
+    .prices-table-scroll {
+      overflow: auto;
+      max-height: min(70vh, 780px);
+    }
+
     .ads-table,
     .ads-detail-table {
       width: 100%;
       min-width: 920px;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 12px;
+    }
+
+    .prices-table {
+      width: 100%;
+      min-width: 1380px;
       border-collapse: collapse;
       table-layout: fixed;
       font-size: 12px;
@@ -4009,6 +4058,69 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    .prices-table th,
+    .prices-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: middle;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .prices-product {
+      display: grid;
+      grid-template-columns: 40px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .prices-photo {
+      width: 40px;
+      height: 40px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-subtle);
+      object-fit: cover;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .prices-product-title,
+    .prices-product-meta {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .prices-product-title {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .prices-product-meta {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .prices-edit-control {
+      display: grid;
+      grid-template-columns: minmax(76px, 1fr) minmax(60px, 0.7fr);
+      gap: 6px;
+      align-items: center;
+    }
+
+    .prices-edit-control .input {
+      min-width: 0;
+      height: 32px;
+      padding: 6px 8px;
+      font-size: 12px;
     }
 
     .ads-table tbody tr {
@@ -4067,6 +4179,36 @@
       font-size: 11px;
     }
 
+    .prices-badge {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      font-size: 11px;
+    }
+
+    .prices-badge.warning {
+      background: var(--warning-bg);
+      color: var(--warning-text);
+      border-color: rgba(245, 158, 11, 0.32);
+    }
+
+    .prices-badge.error {
+      background: var(--error-bg);
+      color: var(--error-text);
+      border-color: rgba(248, 113, 113, 0.36);
+    }
+
+    .prices-badge.success {
+      background: var(--success-bg);
+      color: var(--success-text);
+      border-color: rgba(34, 197, 94, 0.28);
+    }
+
     .ads-modal-backdrop {
       position: fixed;
       inset: 0;
@@ -4082,8 +4224,32 @@
       display: none;
     }
 
+    .prices-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 82;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(15, 23, 42, 0.64);
+    }
+
+    .prices-modal-backdrop[hidden] {
+      display: none;
+    }
+
     .ads-modal {
       width: min(640px, 100%);
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.36);
+    }
+
+    .prices-modal {
+      width: min(960px, 100%);
       max-height: calc(100vh - 40px);
       overflow: auto;
       border: 1px solid var(--border-strong);
@@ -4096,6 +4262,31 @@
       display: grid;
       gap: 10px;
       padding: 14px;
+    }
+
+    .prices-modal-body {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+    }
+
+    .prices-preview-table {
+      width: 100%;
+      min-width: 820px;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 12px;
+    }
+
+    .prices-preview-table th,
+    .prices-preview-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .ads-fact-grid {
@@ -4142,6 +4333,17 @@
 
       .ads-workspace {
         grid-template-columns: minmax(0, 1fr);
+      }
+
+      .prices-toolbar,
+      .prices-filters,
+      .prices-actions {
+        align-items: stretch;
+      }
+
+      .prices-filters .input,
+      .prices-actions .button {
+        width: 100%;
       }
 
       .ads-fact-grid {
@@ -4373,6 +4575,7 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="ads" role="tab" aria-selected="false">Реклама</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="prices" role="tab" aria-selected="false">Цены</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
       </nav>
       <div class="shell-actions">
@@ -4901,6 +5104,54 @@
       </section>
     </section>
 
+    <section class="unified-tab-panel" data-unified-tab-panel="prices" hidden>
+      <section class="panel prices-panel" data-prices-panel>
+        <div class="prices-toolbar">
+          <div>
+            <h2>Цены</h2>
+            <p class="panel-meta" data-prices-meta>WB Prices and Discounts API</p>
+          </div>
+          <div class="prices-actions">
+            <button class="button secondary" type="button" data-prices-refresh>Обновить</button>
+            <button class="button primary" type="button" data-prices-preview disabled>Сохранить изменения</button>
+          </div>
+        </div>
+        <p class="prices-guard" data-prices-guard>Проверяем server write guard…</p>
+        <div class="prices-filters" aria-label="Фильтры цен">
+          <input class="input" type="search" data-prices-search placeholder="Поиск по nmID / vendorCode / названию">
+          <label class="feedbacks-star-option"><input type="checkbox" data-prices-filter-errors>с ошибками</label>
+          <label class="feedbacks-star-option"><input type="checkbox" data-prices-filter-size>размерные цены</label>
+          <label class="feedbacks-star-option"><input type="checkbox" data-prices-filter-quarantine>карантин</label>
+        </div>
+        <p class="research-error" data-prices-error></p>
+        <div class="prices-table-shell">
+          <div class="prices-table-scroll">
+            <table class="prices-table" data-prices-table>
+              <thead>
+                <tr>
+                  <th style="width:260px">Товар</th>
+                  <th style="width:130px">vendorCode</th>
+                  <th style="width:110px">nmID</th>
+                  <th style="width:110px">Цена</th>
+                  <th style="width:110px">Скидка</th>
+                  <th style="width:130px">Цена со скидкой</th>
+                  <th style="width:110px">WB Клуб</th>
+                  <th style="width:130px">Цена WB Клуба</th>
+                  <th style="width:120px">Тип</th>
+                  <th style="width:130px">Upload</th>
+                  <th style="width:180px">Ошибка WB</th>
+                  <th style="width:180px">Редактирование</th>
+                </tr>
+              </thead>
+              <tbody data-prices-body>
+                <tr><td colspan="12">Загрузка…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </section>
+
     <section class="unified-tab-panel" data-unified-tab-panel="research" hidden>
       <section class="panel research-panel" data-research-panel>
         <div class="research-section-tabs" role="tablist" aria-label="Разделы исследования">
@@ -5066,6 +5317,20 @@
     </section>
   </div>
 
+  <div class="prices-modal-backdrop" data-prices-modal hidden>
+    <section class="prices-modal" role="dialog" aria-modal="true" aria-labelledby="prices-modal-title">
+      <div class="ads-modal-head">
+        <h3 class="ads-modal-title" id="prices-modal-title">Подтверждение изменения цен</h3>
+        <button class="button ghost" type="button" data-prices-modal-close>Закрыть</button>
+      </div>
+      <div class="prices-modal-body" data-prices-modal-body></div>
+      <div class="ads-modal-actions">
+        <button class="button secondary" type="button" data-prices-modal-close>Отмена</button>
+        <button class="button danger" type="button" data-prices-commit disabled>Отправить в WB</button>
+      </div>
+    </section>
+  </div>
+
   <script>
     const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
     const unifiedTabButtons = Array.from(document.querySelectorAll("[data-unified-tab-button]"));
@@ -5218,6 +5483,20 @@
     const adsModalNode = document.querySelector("[data-ads-modal]");
     const adsModalBodyNode = document.querySelector("[data-ads-modal-body]");
     const adsCommitButton = document.querySelector("[data-ads-commit]");
+    const pricesPanelNode = document.querySelector("[data-prices-panel]");
+    const pricesRefreshButton = document.querySelector("[data-prices-refresh]");
+    const pricesPreviewButton = document.querySelector("[data-prices-preview]");
+    const pricesMetaNode = document.querySelector("[data-prices-meta]");
+    const pricesGuardNode = document.querySelector("[data-prices-guard]");
+    const pricesErrorNode = document.querySelector("[data-prices-error]");
+    const pricesBodyNode = document.querySelector("[data-prices-body]");
+    const pricesSearchNode = document.querySelector("[data-prices-search]");
+    const pricesFilterErrorsNode = document.querySelector("[data-prices-filter-errors]");
+    const pricesFilterSizeNode = document.querySelector("[data-prices-filter-size]");
+    const pricesFilterQuarantineNode = document.querySelector("[data-prices-filter-quarantine]");
+    const pricesModalNode = document.querySelector("[data-prices-modal]");
+    const pricesModalBodyNode = document.querySelector("[data-prices-modal-body]");
+    const pricesCommitButton = document.querySelector("[data-prices-commit]");
     const vitrinaAutoAddButton = document.querySelector("[data-vitrina-auto-add]");
     const vitrinaAutoSaveButton = document.querySelector("[data-vitrina-auto-save]");
     const vitrinaAutoMetaNode = document.querySelector("[data-vitrina-auto-schedule-meta]");
@@ -5245,6 +5524,7 @@
     const DEFAULT_UNIFIED_TAB = "vitrina";
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const ADS_UNIFIED_TAB = "ads";
+    const PRICES_UNIFIED_TAB = "prices";
     const FEEDBACKS_AI_MAX_QUEUE_ROWS = 25;
     const FEEDBACKS_MAX_RANGE_DAYS = 62;
     const FEEDBACKS_WB_CATEGORY_LABELS = {
@@ -5345,7 +5625,7 @@
     const RESEARCH_UNIFIED_TAB = "research";
     const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
     const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
     const ALLOWED_UNIFIED_TABS = new Set(
       CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
@@ -5640,6 +5920,28 @@
         commitResult: null,
         commitError: ""
       },
+      prices: {
+        loading: false,
+        loaded: false,
+        rows: [],
+        quarantineRows: [],
+        quarantineNmIds: new Set(),
+        dirty: {},
+        rowUpload: {},
+        meta: null,
+        writeEnabled: false,
+        lastRefreshedAt: "",
+        error: "",
+        search: "",
+        filterErrors: false,
+        filterSize: false,
+        filterQuarantine: false,
+        previewLoading: false,
+        preview: null,
+        commitLoading: false,
+        commitResult: null,
+        statusPollSequence: 0
+      },
       vitrinaAuto: {
         loading: false,
         saving: false,
@@ -5704,6 +6006,24 @@
     }
     if (adsCommitButton) {
       adsCommitButton.addEventListener("click", commitAdsBidChange);
+    }
+    if (pricesRefreshButton) {
+      pricesRefreshButton.addEventListener("click", function() {
+        loadPricesGoods({force: true});
+      });
+    }
+    if (pricesPreviewButton) {
+      pricesPreviewButton.addEventListener("click", previewPriceChanges);
+    }
+    if (pricesPanelNode) {
+      pricesPanelNode.addEventListener("input", handlePricesInput);
+      pricesPanelNode.addEventListener("change", handlePricesInput);
+    }
+    if (pricesModalNode) {
+      pricesModalNode.addEventListener("click", handlePricesModalClick);
+    }
+    if (pricesCommitButton) {
+      pricesCommitButton.addEventListener("click", commitPriceChanges);
     }
 
     loadRefreshButton.addEventListener("click", function() {
@@ -6520,6 +6840,9 @@
       }
       if (activeTab === ADS_UNIFIED_TAB) {
         ensureAdsLoaded();
+      }
+      if (activeTab === PRICES_UNIFIED_TAB) {
+        ensurePricesLoaded();
       }
       if (activeTab === SETTINGS_UNIFIED_TAB) {
         ensureSettingsEmbed();
@@ -15490,6 +15813,532 @@
           setActionButtonsDisabled(false);
         }
       }
+    }
+
+    function ensurePricesLoaded() {
+      if (!state.prices.loaded && !state.prices.loading) {
+        loadPricesGoods({force: false});
+      }
+    }
+
+    async function loadPricesGoods(options) {
+      if (!WEB_VITRINA_CONFIG.prices_goods_path || state.prices.loading) {
+        return;
+      }
+      if (state.prices.loaded && !(options && options.force)) {
+        renderPricesTable();
+        return;
+      }
+      state.prices.loading = true;
+      state.prices.error = "";
+      renderPricesTable();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_goods_path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from prices goods route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "prices goods route returned " + response.status);
+        }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_prices_goods") {
+          throw new Error("unexpected prices goods payload");
+        }
+        state.prices.rows = Array.isArray(payload.rows) ? payload.rows : [];
+        state.prices.meta = payload.meta || null;
+        state.prices.writeEnabled = !!payload.write_enabled;
+        state.prices.lastRefreshedAt = String(payload.generated_at || "");
+        state.prices.loaded = true;
+        state.prices.dirty = {};
+        await loadPricesQuarantine();
+      } catch (error) {
+        state.prices.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.loading = false;
+        renderPricesTable();
+      }
+    }
+
+    async function loadPricesQuarantine() {
+      state.prices.quarantineRows = [];
+      state.prices.quarantineNmIds = new Set();
+      if (!WEB_VITRINA_CONFIG.prices_quarantine_path) {
+        return;
+      }
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_quarantine_path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from prices quarantine route");
+        if (!response.ok || !payload || payload.contract_name !== "sheet_vitrina_v1_prices_quarantine") {
+          return;
+        }
+        state.prices.quarantineRows = Array.isArray(payload.rows) ? payload.rows : [];
+        state.prices.quarantineNmIds = new Set(state.prices.quarantineRows.map(function(row) {
+          return String(row.nmID || "");
+        }).filter(Boolean));
+      } catch (error) {
+        // Quarantine is an optional filter surface; list prices remains usable if this endpoint is unavailable.
+      }
+    }
+
+    function renderPricesTable() {
+      if (!pricesBodyNode) {
+        return;
+      }
+      if (pricesMetaNode) {
+        const parts = [];
+        if (state.prices.lastRefreshedAt) {
+          parts.push("Обновлено: " + state.prices.lastRefreshedAt);
+        }
+        const meta = state.prices.meta || {};
+        if (meta.returned_count !== undefined) {
+          parts.push("Строк: " + String(meta.returned_count));
+        }
+        pricesMetaNode.textContent = parts.join(" · ") || "WB Prices and Discounts API";
+      }
+      if (pricesGuardNode) {
+        pricesGuardNode.textContent = state.prices.writeEnabled
+          ? "Live изменение цен включено на сервере. Отправка возможна только после preview и подтверждения."
+          : "Live изменение цен выключено на сервере: preview доступен, отправка в WB заблокирована.";
+      }
+      if (pricesErrorNode) {
+        pricesErrorNode.textContent = state.prices.error || "";
+      }
+      if (pricesRefreshButton) {
+        pricesRefreshButton.disabled = !!state.prices.loading;
+        pricesRefreshButton.textContent = state.prices.loading ? "Загрузка…" : "Обновить";
+      }
+      updatePricesPreviewButton();
+      if (state.prices.loading && !state.prices.loaded) {
+        pricesBodyNode.innerHTML = '<tr><td colspan="12">Загрузка…</td></tr>';
+        return;
+      }
+      if (state.prices.error && !state.prices.loaded) {
+        pricesBodyNode.innerHTML = '<tr><td colspan="12">Данные цен не загружены.</td></tr>';
+        return;
+      }
+      const rows = filteredPriceRows();
+      if (!rows.length) {
+        pricesBodyNode.innerHTML = '<tr><td colspan="12">Товары не найдены.</td></tr>';
+        return;
+      }
+      pricesBodyNode.innerHTML = rows.map(renderPriceRow).join("");
+    }
+
+    function filteredPriceRows() {
+      const search = String(state.prices.search || "").trim().toLowerCase();
+      return (state.prices.rows || []).filter(function(row) {
+        const nmId = String(row.nmID || "");
+        const upload = state.prices.rowUpload[nmId] || {};
+        const hasError = !!(row.wbErrorText || upload.errorText);
+        if (state.prices.filterErrors && !hasError) {
+          return false;
+        }
+        if (state.prices.filterSize && !row.editableSizePrice) {
+          return false;
+        }
+        if (state.prices.filterQuarantine && !state.prices.quarantineNmIds.has(nmId)) {
+          return false;
+        }
+        if (!search) {
+          return true;
+        }
+        const haystack = [
+          row.nmID,
+          row.vendorCode,
+          row.title,
+          row.displayName,
+          row.ourSku
+        ].join(" ").toLowerCase();
+        return haystack.indexOf(search) !== -1;
+      });
+    }
+
+    function renderPriceRow(row) {
+      const nmId = String(row.nmID || "");
+      const dirty = state.prices.dirty[nmId] || {};
+      const upload = state.prices.rowUpload[nmId] || {};
+      const priceValue = dirty.price !== undefined ? dirty.price : valueOrDash(row.price);
+      const discountValue = dirty.discount !== undefined ? dirty.discount : valueOrDash(row.discount);
+      const title = row.title || row.displayName || "nmID " + nmId;
+      const meta = [row.ourSku || "", row.barcode || ""].filter(Boolean).join(" · ");
+      const photo = row.photoUrl
+        ? '<img class="prices-photo" src="' + escapeHtml(row.photoUrl) + '" alt="">'
+        : '<span class="prices-photo" aria-hidden="true">WB</span>';
+      const typeBadge = row.editableSizePrice
+        ? '<span class="prices-badge warning">размерные цены</span>'
+        : '<span class="prices-badge">обычная цена</span>';
+      const quarantineBadge = state.prices.quarantineNmIds.has(nmId)
+        ? ' <span class="prices-badge error">карантин</span>'
+        : '';
+      const uploadStatus = upload.status
+        ? '<span class="prices-badge ' + priceStatusTone(upload.status) + '">' + escapeHtml(priceStatusLabel(upload.status)) + '</span>'
+        : "—";
+      const errorText = upload.errorText || row.wbErrorText || "";
+      return [
+        '<tr data-prices-row="' + escapeHtml(nmId) + '">',
+        '<td><div class="prices-product">' + photo + '<span><span class="prices-product-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</span><span class="prices-product-meta">' + escapeHtml(meta || "—") + '</span></span></div></td>',
+        '<td title="' + escapeHtml(row.vendorCode || "") + '">' + escapeHtml(valueOrDash(row.vendorCode)) + '</td>',
+        '<td>' + escapeHtml(nmId) + '</td>',
+        '<td>' + escapeHtml(pricesMoney(row.price, row.currencyIsoCode4217)) + '</td>',
+        '<td>' + escapeHtml(pricesDiscount(row.discount)) + '</td>',
+        '<td>' + escapeHtml(pricesMoney(row.discountedPrice, row.currencyIsoCode4217)) + '</td>',
+        '<td>' + escapeHtml(pricesDiscount(row.clubDiscount)) + '</td>',
+        '<td>' + escapeHtml(pricesMoney(row.clubDiscountedPrice, row.currencyIsoCode4217)) + '</td>',
+        '<td>' + typeBadge + quarantineBadge + '</td>',
+        '<td>' + uploadStatus + '</td>',
+        '<td title="' + escapeHtml(errorText) + '">' + escapeHtml(errorText || "—") + '</td>',
+        '<td><div class="prices-edit-control"><input class="input" type="number" min="1" step="1" value="' + escapeHtml(priceValue === "—" ? "" : priceValue) + '" data-prices-edit-field="price" data-prices-edit-nm="' + escapeHtml(nmId) + '"' + (row.editableSizePrice ? ' disabled title="Для размерных цен обычная цена заблокирована в MVP"' : '') + '><input class="input" type="number" min="0" max="99" step="1" value="' + escapeHtml(discountValue === "—" ? "" : discountValue) + '" data-prices-edit-field="discount" data-prices-edit-nm="' + escapeHtml(nmId) + '"></div></td>',
+        '</tr>'
+      ].join("");
+    }
+
+    function handlePricesInput(event) {
+      const target = event.target;
+      if (!target) {
+        return;
+      }
+      if (target === pricesSearchNode) {
+        state.prices.search = String(target.value || "");
+        renderPricesTable();
+        return;
+      }
+      if (target === pricesFilterErrorsNode) {
+        state.prices.filterErrors = !!target.checked;
+        renderPricesTable();
+        return;
+      }
+      if (target === pricesFilterSizeNode) {
+        state.prices.filterSize = !!target.checked;
+        renderPricesTable();
+        return;
+      }
+      if (target === pricesFilterQuarantineNode) {
+        state.prices.filterQuarantine = !!target.checked;
+        renderPricesTable();
+        return;
+      }
+      const field = target.getAttribute("data-prices-edit-field");
+      const nmId = target.getAttribute("data-prices-edit-nm");
+      if (!field || !nmId) {
+        return;
+      }
+      const row = (state.prices.rows || []).find(function(item) {
+        return String(item.nmID || "") === String(nmId);
+      });
+      if (!row) {
+        return;
+      }
+      const next = Object.assign({}, state.prices.dirty[nmId] || {});
+      const original = field === "price" ? row.price : row.discount;
+      const raw = String(target.value || "").trim();
+      if (raw === "" || raw === String(original)) {
+        delete next[field];
+      } else {
+        next[field] = raw;
+      }
+      if (Object.prototype.hasOwnProperty.call(next, "price") || Object.prototype.hasOwnProperty.call(next, "discount")) {
+        state.prices.dirty[nmId] = next;
+      } else {
+        delete state.prices.dirty[nmId];
+      }
+      updatePricesPreviewButton();
+    }
+
+    function updatePricesPreviewButton() {
+      const dirtyCount = collectPriceChanges().length;
+      if (pricesPreviewButton) {
+        pricesPreviewButton.disabled = !!state.prices.loading || dirtyCount === 0;
+        pricesPreviewButton.textContent = dirtyCount ? "Сохранить изменения (" + dirtyCount + ")" : "Сохранить изменения";
+      }
+    }
+
+    function collectPriceChanges() {
+      return Object.keys(state.prices.dirty || {}).map(function(nmId) {
+        const dirty = state.prices.dirty[nmId] || {};
+        const payload = {nmID: Number(nmId)};
+        if (Object.prototype.hasOwnProperty.call(dirty, "price")) {
+          payload.price = dirty.price;
+        }
+        if (Object.prototype.hasOwnProperty.call(dirty, "discount")) {
+          payload.discount = dirty.discount;
+        }
+        return payload;
+      }).filter(function(item) {
+        return Number.isFinite(item.nmID) && (item.price !== undefined || item.discount !== undefined);
+      });
+    }
+
+    async function previewPriceChanges() {
+      const changes = collectPriceChanges();
+      if (!changes.length || state.prices.previewLoading) {
+        return;
+      }
+      state.prices.previewLoading = true;
+      state.prices.error = "";
+      renderPricesTable();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_preview_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({changes: changes})
+        });
+        const payload = await readJsonResponse(response, "non-json response from prices preview route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "prices preview route returned " + response.status);
+        }
+        state.prices.preview = payload.preview || null;
+        state.prices.commitResult = null;
+        if (pricesModalNode) {
+          pricesModalNode.hidden = false;
+        }
+        renderPricesModal();
+      } catch (error) {
+        state.prices.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.previewLoading = false;
+        renderPricesTable();
+        renderPricesModal();
+      }
+    }
+
+    function handlePricesModalClick(event) {
+      if (event.target === pricesModalNode || event.target.closest("[data-prices-modal-close]")) {
+        closePricesModal();
+      }
+    }
+
+    function closePricesModal() {
+      if (pricesModalNode) {
+        pricesModalNode.hidden = true;
+      }
+      state.prices.preview = null;
+      state.prices.commitResult = null;
+    }
+
+    function renderPricesModal() {
+      if (!pricesModalBodyNode) {
+        return;
+      }
+      const preview = state.prices.preview || {};
+      const rows = Array.isArray(preview.rows) ? preview.rows : [];
+      const summary = preview.summary || {};
+      const result = state.prices.commitResult || null;
+      const rowsHtml = rows.map(function(row) {
+        const warnings = Array.isArray(row.warnings) ? row.warnings : [];
+        const errors = Array.isArray(row.errors) ? row.errors : [];
+        const tone = errors.length ? "error" : (warnings.length ? "warning" : "success");
+        return [
+          '<tr>',
+          '<td>' + escapeHtml(valueOrDash(row.nmID)) + '</td>',
+          '<td title="' + escapeHtml(row.title || row.vendorCode || "") + '">' + escapeHtml(valueOrDash(row.title || row.vendorCode)) + '</td>',
+          '<td>' + escapeHtml(pricesMoney(row.current && row.current.price, "")) + '</td>',
+          '<td>' + escapeHtml(pricesMoney(row.new && row.new.price, "")) + '</td>',
+          '<td>' + escapeHtml(pricesDiscount(row.current && row.current.discount)) + '</td>',
+          '<td>' + escapeHtml(pricesDiscount(row.new && row.new.discount)) + '</td>',
+          '<td>' + escapeHtml(pricesMoney(row.current && row.current.discountedPrice, "")) + '</td>',
+          '<td>' + escapeHtml(pricesMoney(row.new && row.new.discountedPrice, "")) + '</td>',
+          '<td><span class="prices-badge ' + tone + '">' + escapeHtml(errors[0] || warnings[0] || "ok") + '</span></td>',
+          '</tr>'
+        ].join("");
+      }).join("");
+      pricesModalBodyNode.innerHTML = [
+        '<div class="ads-danger-note">Это live изменение цены/скидки продавца через WB Prices and Discounts API. Финальный результат нужно проверять по upload status.</div>',
+        state.prices.writeEnabled ? '' : '<p class="research-error">Live изменение цен выключено на сервере. Commit заблокирован.</p>',
+        '<div class="ads-fact-grid">',
+        '<div class="ads-fact"><span class="ads-fact-label">Изменений</span><span class="ads-fact-value">' + escapeHtml(summary.requested || 0) + '</span></div>',
+        '<div class="ads-fact"><span class="ads-fact-label">Валидно</span><span class="ads-fact-value">' + escapeHtml(summary.valid || 0) + '</span></div>',
+        '<div class="ads-fact"><span class="ads-fact-label">Блокировано</span><span class="ads-fact-value">' + escapeHtml(summary.blocked || 0) + '</span></div>',
+        '<div class="ads-fact"><span class="ads-fact-label">Риски</span><span class="ads-fact-value">' + escapeHtml(summary.warnings || 0) + '</span></div>',
+        '</div>',
+        '<div class="table-scroll"><table class="prices-preview-table"><thead><tr><th>nmID</th><th>Товар</th><th>Цена была</th><th>Цена будет</th><th>Скидка была</th><th>Скидка будет</th><th>Со скидкой было</th><th>Со скидкой будет</th><th>Статус</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>',
+        result ? '<p class="research-result-note">uploadID: ' + escapeHtml(result.uploadID || "—") + ' · ' + escapeHtml(result.status || "") + '</p>' : ''
+      ].join("");
+      if (pricesCommitButton) {
+        const canCommit = !!(preview.preview_id && state.prices.writeEnabled && Number(summary.valid || 0) > 0 && !result);
+        pricesCommitButton.disabled = !canCommit || !!state.prices.commitLoading;
+        pricesCommitButton.textContent = state.prices.commitLoading ? "Отправка…" : (state.prices.writeEnabled ? "Отправить в WB" : "Live write выключен");
+      }
+    }
+
+    async function commitPriceChanges() {
+      const preview = state.prices.preview || {};
+      if (!preview.preview_id || state.prices.commitLoading || !state.prices.writeEnabled) {
+        return;
+      }
+      state.prices.commitLoading = true;
+      renderPricesModal();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_upload_task_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            preview_id: preview.preview_id,
+            confirmation_token: preview.confirmation_token,
+            confirm: true
+          })
+        });
+        const payload = await readJsonResponse(response, "non-json response from prices upload task route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "prices upload task route returned " + response.status);
+        }
+        state.prices.commitResult = payload;
+        state.prices.dirty = {};
+        markPriceUploadRows(preview.rows || [], payload.uploadID, "processing", "");
+        renderPricesTable();
+        if (payload.uploadID) {
+          pollPriceUploadStatus(payload.uploadID);
+        }
+      } catch (error) {
+        state.prices.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.commitLoading = false;
+        renderPricesModal();
+        renderPricesTable();
+      }
+    }
+
+    async function pollPriceUploadStatus(uploadId) {
+      const pollId = ++state.prices.statusPollSequence;
+      const statusPath = String(WEB_VITRINA_CONFIG.prices_upload_task_path || "") + "/" + encodeURIComponent(uploadId);
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        if (pollId !== state.prices.statusPollSequence) {
+          return;
+        }
+        await delay(attempt === 0 ? 800 : 2200);
+        try {
+          const response = await fetch(statusPath, {credentials: "same-origin"});
+          const payload = await readJsonResponse(response, "non-json response from prices upload status route");
+          if (!response.ok) {
+            throw new Error(payload && payload.error ? payload.error : "prices upload status route returned " + response.status);
+          }
+          const rows = state.prices.preview && Array.isArray(state.prices.preview.rows) ? state.prices.preview.rows : [];
+          markPriceUploadRows(rows, uploadId, payload.status || "unknown", "");
+          if (Array.isArray(payload.goods_errors)) {
+            payload.goods_errors.forEach(function(row) {
+              const nmId = String(row.nmID || "");
+              if (!nmId) {
+                return;
+              }
+              state.prices.rowUpload[nmId] = {
+                uploadID: uploadId,
+                status: payload.status || "unknown",
+                errorText: row.errorText || ""
+              };
+            });
+          }
+          renderPricesTable();
+          if (payload.is_final) {
+            if (payload.status === "success") {
+              await loadPricesGoods({force: true});
+            } else {
+              await loadPriceUploadGoods(uploadId, payload.status || "unknown");
+            }
+            return;
+          }
+        } catch (error) {
+          state.prices.error = String(error && error.message ? error.message : error);
+          renderPricesTable();
+          return;
+        }
+      }
+    }
+
+    async function loadPriceUploadGoods(uploadId, status) {
+      const path = String(WEB_VITRINA_CONFIG.prices_upload_task_path || "") + "/" + encodeURIComponent(uploadId) + "/goods?limit=1000&offset=0";
+      try {
+        const response = await fetch(path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from prices upload goods route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "prices upload goods route returned " + response.status);
+        }
+        (payload.rows || []).forEach(function(row) {
+          const nmId = String(row.nmID || "");
+          if (!nmId) {
+            return;
+          }
+          state.prices.rowUpload[nmId] = {
+            uploadID: uploadId,
+            status: status || row.status || "unknown",
+            errorText: row.errorText || ""
+          };
+        });
+      } catch (error) {
+        state.prices.error = String(error && error.message ? error.message : error);
+      } finally {
+        renderPricesTable();
+      }
+    }
+
+    function markPriceUploadRows(rows, uploadId, status, errorText) {
+      (rows || []).forEach(function(row) {
+        const nmId = String(row.nmID || "");
+        if (!nmId) {
+          return;
+        }
+        state.prices.rowUpload[nmId] = {
+          uploadID: uploadId,
+          status: status || "unknown",
+          errorText: errorText || ""
+        };
+      });
+    }
+
+    function pricesMoney(value, currency) {
+      if (value === null || value === undefined || value === "") {
+        return "—";
+      }
+      const numberValue = Number(value);
+      if (!Number.isFinite(numberValue)) {
+        return "—";
+      }
+      const suffix = currency ? " " + String(currency) : " ₽";
+      return formatNumber(numberValue, Number.isInteger(numberValue) ? 0 : 2, true) + suffix;
+    }
+
+    function pricesDiscount(value) {
+      if (value === null || value === undefined || value === "") {
+        return "—";
+      }
+      return String(value) + "%";
+    }
+
+    function priceStatusLabel(value) {
+      const normalized = String(value || "");
+      if (normalized === "processing") {
+        return "в обработке";
+      }
+      if (normalized === "success") {
+        return "успешно";
+      }
+      if (normalized === "partial_error") {
+        return "часть с ошибкой";
+      }
+      if (normalized === "all_error") {
+        return "ошибка";
+      }
+      if (normalized === "canceled") {
+        return "отменено";
+      }
+      return normalized || "—";
+    }
+
+    function priceStatusTone(value) {
+      const normalized = String(value || "");
+      if (normalized === "success") {
+        return "success";
+      }
+      if (normalized === "partial_error" || normalized === "processing") {
+        return "warning";
+      }
+      if (normalized === "all_error" || normalized === "canceled") {
+        return "error";
+      }
+      return "";
+    }
+
+    function delay(ms) {
+      return new Promise(function(resolve) {
+        window.setTimeout(resolve, ms);
+      });
     }
 
     function ensureAdsLoaded() {

@@ -753,7 +753,10 @@ def run_error_state_check(base_url: str, *, ignore_https_errors: bool) -> dict[s
         page = context.new_page()
         try:
             page.goto(page_url, wait_until="commit")
-            page.wait_for_selector("[data-table-state]:not(.is-hidden)", timeout=20000)
+            page.wait_for_function(
+                "() => ((document.querySelector('[data-state-title]') || {}).textContent || '').trim() === 'Витрина недоступна'",
+                timeout=20000,
+            )
             error_title = page.locator("[data-state-title]").inner_text().strip()
             error_body = page.locator("[data-state-body]").inner_text().strip()
         finally:
@@ -836,7 +839,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
     tab_texts = [item["text"] for item in tabs]
-    if tab_texts != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
+    if tab_texts != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Реклама", "Цены", "Исследования"]:
         raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
     shell_actions = page.locator(".shell-actions").evaluate(
         "node => Array.from(node.querySelectorAll('button, a')).map(item => (item.textContent || '').trim())"
@@ -2783,7 +2786,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования"]:
+    if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Реклама", "Цены", "Исследования"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
     if payload["shell_actions"] != ["Настройки", "Выйти"]:
         raise AssertionError(f"web-vitrina must expose Settings next to logout, got {payload}")

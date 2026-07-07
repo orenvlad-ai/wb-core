@@ -36,6 +36,7 @@ from packages.application.sheet_vitrina_v1_feedbacks import (
     SheetVitrinaV1FeedbacksError,
 )
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
+from packages.application.wb_prices_management import WbPricesManagementError
 from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
@@ -98,6 +99,10 @@ DEFAULT_SHEET_ADS_SKUS_PATH = "/v1/sheet-vitrina-v1/ads/skus"
 DEFAULT_SHEET_ADS_SKU_PREFIX = "/v1/sheet-vitrina-v1/ads/sku"
 DEFAULT_SHEET_ADS_BID_PREVIEW_PATH = "/v1/sheet-vitrina-v1/ads/bid-change/preview"
 DEFAULT_SHEET_ADS_BID_COMMIT_PATH = "/v1/sheet-vitrina-v1/ads/bid-change/commit"
+DEFAULT_SHEET_PRICES_GOODS_PATH = "/v1/sheet-vitrina-v1/prices/goods"
+DEFAULT_SHEET_PRICES_PREVIEW_PATH = "/v1/sheet-vitrina-v1/prices/preview"
+DEFAULT_SHEET_PRICES_UPLOAD_TASK_PATH = "/v1/sheet-vitrina-v1/prices/upload-task"
+DEFAULT_SHEET_PRICES_QUARANTINE_PATH = "/v1/sheet-vitrina-v1/prices/quarantine"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -136,6 +141,7 @@ WEB_AUTH_SECTION_SUPPLY = "supply"
 WEB_AUTH_SECTION_REPORTS = "reports"
 WEB_AUTH_SECTION_FEEDBACKS = "feedbacks"
 WEB_AUTH_SECTION_ADS = "ads"
+WEB_AUTH_SECTION_PRICES = "prices"
 WEB_AUTH_SECTION_RESEARCH = "research"
 WEB_AUTH_SECTION_SETTINGS = "settings"
 WEB_AUTH_SECTION_DEFINITIONS = (
@@ -144,6 +150,7 @@ WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_REPORTS, "label": "Отчёты"},
     {"section_id": WEB_AUTH_SECTION_FEEDBACKS, "label": "Отзывы"},
     {"section_id": WEB_AUTH_SECTION_ADS, "label": "Реклама"},
+    {"section_id": WEB_AUTH_SECTION_PRICES, "label": "Цены"},
     {"section_id": WEB_AUTH_SECTION_RESEARCH, "label": "Исследования"},
     {"section_id": WEB_AUTH_SECTION_SETTINGS, "label": "Настройки"},
 )
@@ -154,6 +161,7 @@ WEB_AUTH_UNIFIED_TAB_SECTIONS = {
     "reports": WEB_AUTH_SECTION_REPORTS,
     "feedbacks": WEB_AUTH_SECTION_FEEDBACKS,
     "ads": WEB_AUTH_SECTION_ADS,
+    "prices": WEB_AUTH_SECTION_PRICES,
     "research": WEB_AUTH_SECTION_RESEARCH,
     "settings": WEB_AUTH_SECTION_SETTINGS,
 }
@@ -789,6 +797,55 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"sheet vitrina ads bid commit failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PRICES_PREVIEW_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_prices_preview_request(payload)
+                except WbPricesManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices preview failed: {exc}"},
+                    )
+                    return
+
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PRICES_UPLOAD_TASK_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_prices_upload_task_request(
+                        payload,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except WbPricesManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices upload task failed: {exc}"},
                     )
                     return
 
@@ -1842,6 +1899,70 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"sheet vitrina ads sku failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PRICES_GOODS_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_prices_goods_request(_flatten_query_params(parsed.query))
+                except WbPricesManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices goods failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PRICES_QUARANTINE_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_prices_quarantine_request(_flatten_query_params(parsed.query))
+                except WbPricesManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices quarantine failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path.startswith(DEFAULT_SHEET_PRICES_UPLOAD_TASK_PATH + "/"):
+                try:
+                    upload_id = _resolve_sheet_prices_upload_id(parsed.path)
+                    if parsed.path.endswith("/goods"):
+                        payload = entrypoint.handle_sheet_prices_upload_task_goods_request(
+                            upload_id,
+                            _flatten_query_params(parsed.query),
+                        )
+                    else:
+                        payload = entrypoint.handle_sheet_prices_upload_task_status_request(upload_id)
+                except WbPricesManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices upload task read failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3815,6 +3936,24 @@ def _resolve_sheet_ads_sku_nm_id(path: str) -> int:
     return nm_id
 
 
+def _resolve_sheet_prices_upload_id(path: str) -> int:
+    prefix = DEFAULT_SHEET_PRICES_UPLOAD_TASK_PATH + "/"
+    if not path.startswith(prefix):
+        raise ValueError("unsupported prices upload-task path")
+    remainder = path[len(prefix) :].strip("/")
+    if remainder.endswith("/goods"):
+        remainder = remainder[: -len("/goods")].strip("/")
+    if not remainder or "/" in remainder:
+        raise ValueError("prices upload-task path must end with upload_id or upload_id/goods")
+    try:
+        upload_id = int(remainder)
+    except ValueError as exc:
+        raise ValueError("prices upload_id must be numeric") from exc
+    if upload_id <= 0:
+        raise ValueError("prices upload_id must be positive")
+    return upload_id
+
+
 def _resolve_optional_query_bool(query_string: str, name: str) -> bool:
     value = _resolve_single_query_param(query_string, name).lower()
     if not value:
@@ -5642,7 +5781,7 @@ def _allowed_unified_tabs_for_role(role: str) -> list[str]:
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
         return ["factory-order"]
     if _role_has_full_operator_access(normalized):
-        return ["vitrina", "factory-order", "reports", "feedbacks", "ads", "research", "settings"]
+        return ["vitrina", "factory-order", "reports", "feedbacks", "ads", "prices", "research", "settings"]
     return []
 
 
@@ -5703,6 +5842,8 @@ def _required_section_for_path(path: str) -> str:
         return WEB_AUTH_SECTION_FEEDBACKS
     if normalized.startswith("/v1/sheet-vitrina-v1/ads/"):
         return WEB_AUTH_SECTION_ADS
+    if normalized.startswith("/v1/sheet-vitrina-v1/prices/"):
+        return WEB_AUTH_SECTION_PRICES
     if normalized.startswith("/v1/sheet-vitrina-v1/research/"):
         return WEB_AUTH_SECTION_RESEARCH
     if normalized.startswith("/v1/sheet-vitrina-v1/supply/"):
@@ -6262,6 +6403,10 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "ads_sku_path": DEFAULT_SHEET_ADS_SKU_PREFIX,
         "ads_bid_preview_path": DEFAULT_SHEET_ADS_BID_PREVIEW_PATH,
         "ads_bid_commit_path": DEFAULT_SHEET_ADS_BID_COMMIT_PATH,
+        "prices_goods_path": DEFAULT_SHEET_PRICES_GOODS_PATH,
+        "prices_preview_path": DEFAULT_SHEET_PRICES_PREVIEW_PATH,
+        "prices_upload_task_path": DEFAULT_SHEET_PRICES_UPLOAD_TASK_PATH,
+        "prices_quarantine_path": DEFAULT_SHEET_PRICES_QUARANTINE_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,

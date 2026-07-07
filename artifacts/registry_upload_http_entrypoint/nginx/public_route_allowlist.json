@@ -175,6 +175,12 @@
       "methods": ["GET", "POST"]
     },
     {
+      "name": "sheet_vitrina_prices",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/prices/",
+      "methods": ["GET", "POST"]
+    },
+    {
       "name": "sheet_vitrina_web_vitrina_group_refresh",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/web-vitrina/group-refresh",

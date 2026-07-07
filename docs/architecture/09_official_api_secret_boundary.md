@@ -16,6 +16,7 @@
 - `sales_funnel_history_block`
 - `ads_compact_block`
 - `fin_report_daily_block`
+- `wb_prices_management_block` / operator section `Цены`
 - `wb_feedbacks` / `sheet_vitrina_v1_feedbacks` read-only route
 - `wb_content` / `Настройки -> Номенклатура` read-only SKU/card sync from WB Content cards
 
@@ -65,6 +66,8 @@
 Следствие: module adapter получает secret только через runtime boundary, а не строит собственную secret-loading схему.
 
 Для feedbacks MVP это означает: `GET /v1/sheet-vitrina-v1/feedbacks` использует тот же `WB_API_TOKEN` через adapter boundary `packages/adapters/wb_feedbacks.py`; отсутствие прав WB token на категорию feedbacks должно surface-иться как явная 401/403 upstream error, а не как fallback на другой secret name.
+
+Для `Цены` / WB Prices and Discounts management это означает: `GET/POST /v1/sheet-vitrina-v1/prices/...` использует тот же `WB_API_TOKEN` через `packages/adapters/wb_prices_management.py` к `https://discounts-prices-api.wildberries.ru`. Optional base URL override is `WB_PRICES_API_BASE_URL`. Live write is a separate server-side safety flag, `WB_PRICES_WRITE_ENABLED`, not a token source; when it is absent/false, preview and readback may work but `POST /v1/sheet-vitrina-v1/prices/upload-task` must fail closed before any WB `POST /api/v2/upload/task`. Tests/smokes must use fake upstreams and must not perform live price mutations.
 
 Для nomenclature SKU sync это означает: `POST /v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync` использует тот же `WB_API_TOKEN` через read-only adapter boundary `packages/adapters/wb_content.py` к WB Content `POST /content/v2/get/cards/list`, читает карточки cursor pagination и синхронизирует только локальные reference-поля (`nm_id`, non-manual `barcode/barcodes`, `vendor_code`, WB title/subject/updatedAt and sync evidence). `POST /v1/sheet-vitrina-v1/settings/nomenclature/{item_id}/barcode-sync` остаётся совместимым per-row barcode reference route. Optional base URL override is `WB_CONTENT_API_BASE_URL`; отсутствие token, Content permission, rate-limit или upstream transport failure surface-ится как controlled `token_missing`/`sync_error` diagnostics without printing token material and does not reject saving nomenclature rows. WB Content sync is read-only and must not create/update/delete WB cards.
 
