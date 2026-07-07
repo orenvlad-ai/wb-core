@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from packages.application.our_wb_costs import (  # noqa: E402
     TRANSIT_DIRECT_ZERO_CONFIRMED,
+    WB_COST_STATUS_CONFIRMED,
     OurWbCostBlock,
     classify_wb_supply_transit,
 )
@@ -64,6 +65,21 @@ def main() -> None:
         if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 1:
             raise AssertionError("WB supply cost layer materialization must write one SKU layer")
         _assert_wb_supply_cost_layer(runtime)
+        _seed_wb_supply(
+            runtime,
+            supply_id="receiving_accepted_qty",
+            status_id=4,
+            goods=[{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 7}],
+        )
+        _seed_wb_supply(
+            runtime,
+            supply_id="planned_qty_only",
+            status_id=4,
+            goods=[{"nmID": 497413000, "quantity": 10}],
+        )
+        if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 2:
+            raise AssertionError("non-final WB quantities must still materialize as non-confirmed layers")
+        _assert_wb_quantity_source_status(runtime)
 
         supplier_block = SupplierShipmentsBlock(runtime=runtime, timestamp_factory=lambda: NOW)
         try:
@@ -262,7 +278,15 @@ def _seed_financial_inputs(runtime: RegistryUploadDbBackedRuntime, *, shipment_i
         )
 
 
-def _seed_wb_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
+def _seed_wb_supply(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str = "40431461",
+    status_id: int = 5,
+    goods: list[dict[str, object]] | None = None,
+) -> None:
+    goods_payload = goods or [{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 10}]
+    quantity_total = sum(float(item.get("quantity") or item.get("acceptedQuantity") or 0) for item in goods_payload)
     with _connect(runtime.db_path) as conn:
         _ensure_schema(conn)
         conn.execute(
@@ -280,12 +304,13 @@ def _seed_wb_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                "40431461",
-                "supply:40431461",
-                "40431461",
+                supply_id,
+                f"supply:{supply_id}",
+                supply_id,
                 json.dumps(
                     {
-                        "supply_id": "40431461",
+                        "supply_id": supply_id,
+                        "status_id": status_id,
                         "warehouseName": "Электросталь",
                         "has_transit_cost_marker": 0,
                         "acceptanceCost": 0,
@@ -294,8 +319,8 @@ def _seed_wb_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
                     },
                     ensure_ascii=False,
                 ),
-                json.dumps([{"nmID": 497413000, "quantity": 10, "acceptedQuantity": 10}], ensure_ascii=False),
-                10,
+                json.dumps(goods_payload, ensure_ascii=False),
+                quantity_total,
                 "2026-07-03",
                 "2026-07-03",
                 NOW,
@@ -319,6 +344,37 @@ def _assert_wb_supply_cost_layer(runtime: RegistryUploadDbBackedRuntime) -> None
         raise AssertionError(f"direct WB supply must have confirmed zero transit, got {dict(row)}")
     if row["our_wb_unit_cost_rub"] is None:
         raise AssertionError("WB supply cost layer must calculate our_wb_unit_cost_rub")
+
+
+def _assert_wb_quantity_source_status(runtime: RegistryUploadDbBackedRuntime) -> None:
+    with _connect(runtime.db_path) as conn:
+        _ensure_schema(conn)
+        rows = {
+            str(row["wb_supply_id"]): dict(row)
+            for row in conn.execute(
+                """
+                SELECT wb_supply_id, accepted_qty, source_status, component_status_json
+                FROM sheet_vitrina_v1_wb_supply_cost_layers
+                WHERE wb_supply_id IN ('receiving_accepted_qty', 'planned_qty_only')
+                  AND nm_id = 497413000
+                  AND is_current = 1
+                """
+            ).fetchall()
+        }
+    receiving = rows.get("receiving_accepted_qty")
+    planned = rows.get("planned_qty_only")
+    if receiving is None or planned is None:
+        raise AssertionError(f"quantity source regression layers missing, got {rows}")
+    if receiving["source_status"] == WB_COST_STATUS_CONFIRMED or planned["source_status"] == WB_COST_STATUS_CONFIRMED:
+        raise AssertionError(f"non-final/planned quantity must not become confirmed, got {rows}")
+    if float(receiving["accepted_qty"]) != 7.0 or float(planned["accepted_qty"]) != 10.0:
+        raise AssertionError(f"quantity values must preserve accepted/planned evidence, got {rows}")
+    receiving_components = json.loads(str(receiving["component_status_json"]))
+    planned_components = json.loads(str(planned["component_status_json"]))
+    if receiving_components.get("wb_quantity_final_accepted") is not False:
+        raise AssertionError(f"receiving status must not be final accepted, got {receiving_components}")
+    if planned_components.get("wb_quantity_source") != "quantity":
+        raise AssertionError(f"planned fallback source must be explicit, got {planned_components}")
 
 
 def _assert_supplier_ff_reconciliation(runtime: RegistryUploadDbBackedRuntime) -> None:

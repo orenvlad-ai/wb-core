@@ -485,6 +485,8 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` = `Себестоимость WB наша, ₽/шт`; TOTAL is `SUM(unit_cost * stock_qty) / SUM(stock_qty)`;
   - `our_wb_cost_confirmed_share_pct` / `total_our_wb_cost_confirmed_share_pct` = `Доля подтверждённой себестоимости, %`; TOTAL is `SUM(confirmed_qty) / SUM(stock_qty)`;
   - `proxy_profit_3_rub` / `total_proxy_profit_3_rub` = `proxy прибыль 3`; before `2026-07-01` it equals `proxy_profit_2_rub`, from `2026-07-01` it uses `orderSum * 0.5096 - orderCount * 0.91 * our_wb_unit_cost_rub - ads_sum`, and TOTAL is sum of SKU rows.
+- Web-vitrina read contract uses the same runtime-extended metric catalog as the DATA snapshot builder, so SKU/TOTAL our-WB rows must expose Russian labels and format metadata; confirmed share rows use `format=percent`, not raw number rendering.
+- Ordinary manual/auto refresh saves the ready snapshot, runs idempotent our-WB cost recalculation from runtime truth, and rebuilds/saves the ready snapshot again only if recalculation changed supplier/WB/opening/daily state. This post-refresh hook must not call legacy Google Sheets/GAS and must not depend on WB sync/enrich/upload.
 - Management proxy WB cost rows are not strict accounting FIFO and do not replace `proxy_profit_2_rub`; source/component statuses must stay explicit when values come from fallback, estimates or pending components.
 - `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
 - `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
@@ -696,6 +698,9 @@ Bounded допущение:
   - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix`, не режется до `7` metric keys и сразу грузит `yesterday_closed + today_current`;
   - что current-snapshot-only sources materialize-ят `yesterday_closed` через accepted-current rollover seam и не blank-ят already accepted previous-day truth;
   - что later invalid auto/manual current-only attempt не перетирает already accepted same-day snapshot;
+  - что ordinary refresh/auto-refresh запускает idempotent our-WB cost recalculation after ready-snapshot save and updates/rebuilds ready snapshot only when cost state changed;
+  - что runtime-extended our-WB SKU/TOTAL rows in `GET /v1/sheet-vitrina-v1/web-vitrina` expose Russian labels and percent format metadata;
+  - что `proxy_profit_3_rub` is visible for historical dates before `2026-07-01` by equaling `proxy_profit_2_rub`, while our WB cost/share stay blank before their model opening date;
   - что manual refresh не создаёт persisted long-retry tail;
   - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и current/closed promo source facts `promo_by_price[*]` with collector trace/debug note;
   - что public `promo_by_price[today_current]` diagnostics не превращают expected ended/no-download campaign в fatal missing artifact и что current promo metric rows не становятся all blank;

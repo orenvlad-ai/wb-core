@@ -196,6 +196,20 @@ class FakeSheetLoadRunner:
         }
 
 
+class CountingOurWbCostBlock:
+    def __init__(self) -> None:
+        self.rebuild_calls = 0
+
+    def rebuild_all(self) -> SimpleNamespace:
+        self.rebuild_calls += 1
+        return SimpleNamespace(
+            supplier_layers_materialized=0,
+            wb_supply_layers_materialized=0,
+            opening_rows_materialized=0,
+            daily_state_rows_materialized=0,
+        )
+
+
 class SequenceTimestampFactory:
     def __init__(self, values: list[str]) -> None:
         self._values = list(values)
@@ -240,6 +254,8 @@ def main() -> None:
         )
         fake_wb_supplies_source = AutoWbSuppliesSource()
         entrypoint.wb_supplies_block.source = fake_wb_supplies_source
+        fake_our_wb_cost_block = CountingOurWbCostBlock()
+        entrypoint.our_wb_cost_block = fake_our_wb_cost_block
         entrypoint._maybe_start_wb_supplies_auto_transit_cost_enrichment = lambda *, log: {
             "status": "skipped_session_not_valid",
             "warning": "session_missing",
@@ -328,6 +344,15 @@ def main() -> None:
                 or [5, 6] not in fake_wb_supplies_source.list_calls
             ):
                 raise AssertionError(f"auto_refresh must run WB supplies official sync as nonfatal stage, got {wb_auto}")
+            if fake_our_wb_cost_block.rebuild_calls != 1:
+                raise AssertionError(
+                    "auto_refresh must run our WB cost post-refresh recalculation once, "
+                    f"got {fake_our_wb_cost_block.rebuild_calls}"
+                )
+            diagnostics = refresh_payload.get("refresh_diagnostics") or {}
+            cost_recalc = diagnostics.get("our_wb_cost_recalculate") or {}
+            if cost_recalc.get("daily_state_rows_materialized") != 0 or cost_recalc.get("changed") is not False:
+                raise AssertionError(f"idempotent our WB recalc diagnostics mismatch, got {cost_recalc}")
             _assert_counting_calls(counters)
             plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=AS_OF_DATE)
             status_rows = {

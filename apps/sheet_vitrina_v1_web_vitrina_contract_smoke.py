@@ -14,6 +14,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_our_wb_costs import (
+    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
@@ -77,7 +84,7 @@ def main() -> None:
         if payload.page_route != "/sheet-vitrina-v1/vitrina" or payload.read_route != "/v1/sheet-vitrina-v1/web-vitrina":
             raise AssertionError(f"route fixation mismatch, got {payload}")
 
-        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 4:
+        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 9:
             raise AssertionError(f"meta mismatch, got {payload.meta}")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
             raise AssertionError(f"meta date columns mismatch, got {payload.meta}")
@@ -127,6 +134,22 @@ def main() -> None:
             raise AssertionError(f"SKU normalization mismatch, got {first_sku_row}")
         if second_sku_row.values_by_date != {"2026-04-19": 5, "2026-04-20": 7}:
             raise AssertionError(f"values_by_date mismatch, got {second_sku_row}")
+        rows_by_id = {row.row_id: row for row in payload.rows}
+        total_cost_row = rows_by_id[f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
+        total_share_row = rows_by_id[f"TOTAL|{TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}"]
+        sku_proxy3_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY}"]
+        sku_cost_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
+        sku_share_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}"]
+        if total_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or total_cost_row.format != "rub":
+            raise AssertionError(f"TOTAL our WB cost metadata mismatch, got {total_cost_row}")
+        if total_share_row.metric_label != "Доля подтверждённой себестоимости, %" or total_share_row.format != "percent":
+            raise AssertionError(f"TOTAL confirmed share must be percent-labeled, got {total_share_row}")
+        if sku_proxy3_row.metric_label != "proxy прибыль 3" or sku_proxy3_row.format != "rub":
+            raise AssertionError(f"SKU proxy3 metadata mismatch, got {sku_proxy3_row}")
+        if sku_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or sku_cost_row.format != "rub":
+            raise AssertionError(f"SKU our WB cost metadata mismatch, got {sku_cost_row}")
+        if sku_share_row.metric_label != "Доля подтверждённой себестоимости, %" or sku_share_row.format != "percent":
+            raise AssertionError(f"SKU confirmed share must be percent-labeled, got {sku_share_row}")
 
         if payload.capabilities.exportable or not payload.capabilities.grid_library_agnostic:
             raise AssertionError(f"capabilities mismatch, got {payload.capabilities}")
@@ -182,8 +205,38 @@ def _build_plan(
                     [f"Группа {first_group}: Показы в воронке", f"GROUP:{first_group}|view_count", 40, 55],
                     [f"SKU A: Показы в воронке", f"SKU:{first_nm_id}|view_count", 20, 30],
                     [f"SKU B: Заказы, шт.", f"SKU:{second_nm_id}|orderSum", 5, 7],
+                    [
+                        "Итого: Себестоимость WB наша, ₽/шт",
+                        f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
+                        108.5,
+                        "",
+                    ],
+                    [
+                        "Итого: Доля подтверждённой себестоимости, %",
+                        f"TOTAL|{TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}",
+                        0.727918,
+                        "",
+                    ],
+                    [
+                        "SKU A: proxy прибыль 3",
+                        f"SKU:{first_nm_id}|{OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY}",
+                        123.45,
+                        "",
+                    ],
+                    [
+                        "SKU A: Себестоимость WB наша, ₽/шт",
+                        f"SKU:{first_nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}",
+                        96.2,
+                        "",
+                    ],
+                    [
+                        "SKU A: Доля подтверждённой себестоимости, %",
+                        f"SKU:{first_nm_id}|{OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}",
+                        1,
+                        "",
+                    ],
                 ],
-                row_count=4,
+                row_count=9,
                 column_count=4,
             ),
             SheetVitrinaWriteTarget(
