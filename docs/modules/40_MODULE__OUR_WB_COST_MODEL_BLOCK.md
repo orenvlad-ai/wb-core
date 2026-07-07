@@ -122,6 +122,8 @@ Quantity evidence rule:
 
 Every current confirmed row must satisfy `our_wb_unit_cost_rub >= sku_ff_unit_cost_rub`; direct-zero transit remains a confirmed zero component only when the direct-route classifier has explicit zero evidence.
 
+Rolling daily state groups WB supply cost layers by normalized supply business date (`YYYY-MM-DD`). WB/operator evidence may store `supply_date` as an ISO timestamp such as `2026-07-03T00:00:00+03:00`; the rolling key keeps the local date part (`2026-07-03`) and does not timezone-shift it. Empty or invalid dates are skipped instead of crashing materialization.
+
 # 5. Opening Baseline And Rolling State
 
 Opening date is `2026-07-01`.

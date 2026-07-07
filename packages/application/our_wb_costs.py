@@ -1020,7 +1020,7 @@ class OurWbCostBlock:
         by_date: dict[str, dict[int, list[dict[str, Any]]]] = {}
         for row in rows:
             row_dict = dict(row)
-            supply_date = str(row_dict.get("supply_date") or "")
+            supply_date = _wb_supply_business_date_key(row_dict.get("supply_date"))
             nm_id = _optional_int(row_dict.get("nm_id"))
             if not supply_date or nm_id is None:
                 continue
@@ -1554,6 +1554,17 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _wb_supply_business_date_key(value: Any) -> str | None:
+    text = _optional_text(value)
+    if text is None or len(text) < 10:
+        return None
+    date_part = text[:10]
+    try:
+        return date.fromisoformat(date_part).isoformat()
+    except ValueError:
+        return None
 
 
 def _optional_int(value: Any) -> int | None:
