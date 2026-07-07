@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-41-WB-PRICES-MANAGEMENT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический reference по operator-разделу `Цены` для чтения и guarded изменения цен/скидок через WB Prices and Discounts API."
-scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: current goods price/discount table, inline price/discount edits, backend preview with diff/quarantine risk, env-guarded explicit upload task commit, upload status/goods error readback and quarantine read-only surface. The module reuses canonical `WB_API_TOKEN`, keeps browser state transient and does not create a new business truth layer."
+scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: compact current goods price/discount table, browser-local column visibility, read-only `SPP-прокси`/promo summary enrichment from existing server-owned read-side sources, inline price/discount edits, backend preview with diff/quarantine risk, env-guarded explicit upload task commit, upload status/goods error readback and quarantine read-only diagnostics. The module reuses canonical `WB_API_TOKEN`, keeps browser state transient and does not create a new business truth layer."
 source_basis:
   - "packages/contracts/wb_prices_management.py"
   - "packages/adapters/wb_prices_management.py"
@@ -41,7 +41,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Initial guarded WB Prices and Discounts management MVP: read table, preview diff, quarantine risk, upload-task commit guarded by `WB_PRICES_WRITE_ENABLED`, status/detail/quarantine readback and browser smoke over fake upstream only."
+update_note: "Prices table now uses a simplified toolbar, browser-local column visibility, read-only `СПП` and `Акции` columns from existing `spp_proxy`/`promo_by_price` read-side data, and keeps the guarded manual preview+upload-task workflow controlled by `WB_PRICES_WRITE_ENABLED`."
 ---
 
 # 1. Идентификатор и статус
@@ -60,11 +60,13 @@ Top-level UI shows one row per active `nmID` where possible:
 - seller price, seller discount and discounted price;
 - WB Club discount and club discounted price as read-only fields;
 - `editableSizePrice` badge;
+- read-only `СПП` from current server-owned `spp_proxy`/`SPP-прокси` data, rendered as `н/д` when unavailable rather than fake zero;
+- read-only `Акции` as `eligible / candidate` counts from existing promo current semantics (`promo_count_by_price` plus current/candidate campaign count when available), rendered as `н/д` when the source/denominator is absent;
 - quarantine badge when read-only quarantine endpoint reports the nmID;
 - last upload status and per-row WB error when available;
 - inline draft price/discount controls.
 
-Browser state is only transient editing/filter/modal state. Current price truth is read from WB via backend routes; preview and upload status are server-owned readback surfaces.
+Browser state is only transient editing/modal state plus presentation-only column visibility in localStorage. Current price truth is read from WB via backend routes; SPP/promo values are read from current server-owned runtime/read-side sources; preview and upload status are server-owned readback surfaces.
 
 # 3. WB Prices API Boundary
 
@@ -103,8 +105,17 @@ The application normalizes WB payload into a server-owned view model:
 - `editableSizePrice`
 - `wholesaleDiscountThreshold`
 - `isBadTurnover`
+- `sppProxy`
+- `sppProxyLabel`
+- `sppProxyReason`
+- `promoEligibleCount`
+- `promoCandidateCount`
+- `promoLabel`
+- `promoReason`
 
 Nomenclature names/barcodes/our SKU are enrichment from current runtime reference data and are not WB price truth.
+
+`sppProxy*` is derived from latest available `DATA_VITRINA` `spp_proxy` row for the `nmID`; missing current data stays `null`/`н/д` with a reason. `promoEligibleCount` is derived from latest available `promo_count_by_price`; `promoCandidateCount` is read from the current `promo_by_price` temporal source payload when that read-side field is available. Existing promo metrics (`promo_participation`, `promo_count_by_price`, `promo_entry_price_best`) keep their original meaning.
 
 # 5. Safety Workflow
 
@@ -151,7 +162,9 @@ These files are operational evidence, not accepted business truth. Current price
 The `Цены` tab is a sibling section in the unified operator shell. It renders:
 - dense current prices table;
 - search by nmID/vendorCode/name when available;
-- filters for errors, size-price rows and quarantine rows;
+- compact `Колонки` menu with browser-local visibility for optional columns;
+- no separate toolbar filters for errors, size-price rows or quarantine rows;
+- row-level read-only `СПП`, `Акции`, upload status, WB error and quarantine diagnostics;
 - inline price/discount draft controls;
 - batch preview modal with old/new price, discount, discounted price and warnings;
 - disabled/guarded commit state when server write flag is off;
@@ -172,9 +185,13 @@ Regression smokes:
 
 All prices management smokes use fake upstreams and must not call live `POST /api/v2/upload/task`.
 
+Public/live verification may open the page, read goods, run preview and inspect commit enabled/disabled state, but must not click live commit.
+
 # 10. Out Of Scope
 
 - Excel import/export of prices.
+- `Проверка СПП`, SPP threshold tester and scheduled SPP probes.
+- Automatic price experiments.
 - WB Club discount writes.
 - B2B wholesale discount writes.
 - Size-level price editing through `/api/v2/upload/task/size`.

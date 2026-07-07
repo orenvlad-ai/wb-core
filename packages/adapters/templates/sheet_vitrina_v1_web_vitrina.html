@@ -3969,7 +3969,6 @@
     }
 
     .prices-toolbar,
-    .prices-filters,
     .prices-actions {
       display: flex;
       align-items: center;
@@ -3981,8 +3980,13 @@
       justify-content: space-between;
     }
 
-    .prices-filters .input {
-      width: min(320px, 100%);
+    .prices-actions .input {
+      width: min(320px, 42vw);
+    }
+
+    .prices-column-manager .column-manager-panel {
+      right: 0;
+      left: auto;
     }
 
     .prices-guard {
@@ -4037,7 +4041,7 @@
 
     .prices-table {
       width: 100%;
-      min-width: 1380px;
+      min-width: 1080px;
       border-collapse: collapse;
       table-layout: fixed;
       font-size: 12px;
@@ -4107,6 +4111,10 @@
     .prices-product-meta {
       color: var(--muted);
       font-size: 11px;
+    }
+
+    .prices-na {
+      color: var(--muted);
     }
 
     .prices-edit-control {
@@ -4336,12 +4344,12 @@
       }
 
       .prices-toolbar,
-      .prices-filters,
       .prices-actions {
         align-items: stretch;
       }
 
-      .prices-filters .input,
+      .prices-actions .input,
+      .prices-actions .column-manager,
       .prices-actions .button {
         width: 100%;
       }
@@ -5112,39 +5120,35 @@
             <p class="panel-meta" data-prices-meta>WB Prices and Discounts API</p>
           </div>
           <div class="prices-actions">
+            <input class="input" type="search" data-prices-search placeholder="Поиск по nmID / vendorCode / названию">
+            <details class="column-manager prices-column-manager" data-prices-column-manager>
+              <summary class="column-manager-toggle">Колонки</summary>
+              <div class="column-manager-panel">
+                <p class="column-manager-note" data-prices-column-note>Видимость колонок хранится только в браузере.</p>
+                <div class="column-checkbox-list" data-prices-column-controls></div>
+                <div class="column-manager-actions">
+                  <button class="button secondary" type="button" data-prices-columns-reset>Сбросить столбцы</button>
+                </div>
+              </div>
+            </details>
             <button class="button secondary" type="button" data-prices-refresh>Обновить</button>
             <button class="button primary" type="button" data-prices-preview disabled>Сохранить изменения</button>
           </div>
         </div>
         <p class="prices-guard" data-prices-guard>Проверяем server write guard…</p>
-        <div class="prices-filters" aria-label="Фильтры цен">
-          <input class="input" type="search" data-prices-search placeholder="Поиск по nmID / vendorCode / названию">
-          <label class="feedbacks-star-option"><input type="checkbox" data-prices-filter-errors>с ошибками</label>
-          <label class="feedbacks-star-option"><input type="checkbox" data-prices-filter-size>размерные цены</label>
-          <label class="feedbacks-star-option"><input type="checkbox" data-prices-filter-quarantine>карантин</label>
-        </div>
         <p class="research-error" data-prices-error></p>
         <div class="prices-table-shell">
           <div class="prices-table-scroll">
             <table class="prices-table" data-prices-table>
-              <thead>
+              <thead data-prices-head>
                 <tr>
                   <th style="width:260px">Товар</th>
-                  <th style="width:130px">vendorCode</th>
                   <th style="width:110px">nmID</th>
-                  <th style="width:110px">Цена</th>
-                  <th style="width:110px">Скидка</th>
-                  <th style="width:130px">Цена со скидкой</th>
-                  <th style="width:110px">WB Клуб</th>
-                  <th style="width:130px">Цена WB Клуба</th>
-                  <th style="width:120px">Тип</th>
-                  <th style="width:130px">Upload</th>
-                  <th style="width:180px">Ошибка WB</th>
                   <th style="width:180px">Редактирование</th>
                 </tr>
               </thead>
               <tbody data-prices-body>
-                <tr><td colspan="12">Загрузка…</td></tr>
+                <tr><td colspan="3">Загрузка…</td></tr>
               </tbody>
             </table>
           </div>
@@ -5489,11 +5493,12 @@
     const pricesMetaNode = document.querySelector("[data-prices-meta]");
     const pricesGuardNode = document.querySelector("[data-prices-guard]");
     const pricesErrorNode = document.querySelector("[data-prices-error]");
+    const pricesHeadNode = document.querySelector("[data-prices-head]");
     const pricesBodyNode = document.querySelector("[data-prices-body]");
     const pricesSearchNode = document.querySelector("[data-prices-search]");
-    const pricesFilterErrorsNode = document.querySelector("[data-prices-filter-errors]");
-    const pricesFilterSizeNode = document.querySelector("[data-prices-filter-size]");
-    const pricesFilterQuarantineNode = document.querySelector("[data-prices-filter-quarantine]");
+    const pricesColumnControlsNode = document.querySelector("[data-prices-column-controls]");
+    const pricesColumnNoteNode = document.querySelector("[data-prices-column-note]");
+    const pricesColumnsResetButton = document.querySelector("[data-prices-columns-reset]");
     const pricesModalNode = document.querySelector("[data-prices-modal]");
     const pricesModalBodyNode = document.querySelector("[data-prices-modal-body]");
     const pricesCommitButton = document.querySelector("[data-prices-commit]");
@@ -5622,6 +5627,34 @@
       ["match_score", "Match score"],
       ["last_error", "Ошибка"]
     ];
+    const PRICES_VISIBLE_COLUMNS_STORAGE_KEY = "wb_core_prices_visible_columns_v1";
+    const PRICES_DEFAULT_VISIBLE_COLUMNS = [
+      "product",
+      "nm_id",
+      "price",
+      "discount",
+      "discounted_price",
+      "spp",
+      "promo",
+      "edit"
+    ];
+    const PRICES_MANDATORY_COLUMNS = ["product", "nm_id", "edit"];
+    const PRICES_TABLE_COLUMNS = [
+      {id: "product", label: "Товар", width: 260},
+      {id: "vendor_code", label: "vendorCode", width: 130},
+      {id: "nm_id", label: "nmID", width: 110},
+      {id: "price", label: "Цена", width: 110},
+      {id: "discount", label: "Скидка", width: 110},
+      {id: "discounted_price", label: "Цена со скидкой", width: 130},
+      {id: "club_discount", label: "WB Клуб", width: 110},
+      {id: "club_discounted_price", label: "Цена WB Клуба", width: 130},
+      {id: "type", label: "Тип", width: 120},
+      {id: "spp", label: "СПП", width: 90},
+      {id: "promo", label: "Акции", width: 90},
+      {id: "upload", label: "Upload", width: 130},
+      {id: "wb_error", label: "Ошибка WB", width: 180},
+      {id: "edit", label: "Редактирование", width: 180}
+    ];
     const RESEARCH_UNIFIED_TAB = "research";
     const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
@@ -5635,7 +5668,7 @@
     if (!ALLOWED_UNIFIED_TABS.size) {
       ALLOWED_UNIFIED_TABS.add(DEFAULT_UNIFIED_TAB);
     }
-    const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker], details[data-feedbacks-complaints-column-manager]";
+    const FLOATING_DETAILS_SELECTOR = "details[data-column-manager], details[data-research-picker], details[data-feedbacks-complaints-column-manager], details[data-prices-column-manager]";
     const SELLER_RECOVERY_ACTIVE_STATUSES = new Set([
       "starting",
       "awaiting_login",
@@ -5933,9 +5966,7 @@
         lastRefreshedAt: "",
         error: "",
         search: "",
-        filterErrors: false,
-        filterSize: false,
-        filterQuarantine: false,
+        visibleColumnIds: loadPricesVisibleColumns(),
         previewLoading: false,
         preview: null,
         commitLoading: false,
@@ -6014,6 +6045,9 @@
     }
     if (pricesPreviewButton) {
       pricesPreviewButton.addEventListener("click", previewPriceChanges);
+    }
+    if (pricesColumnsResetButton) {
+      pricesColumnsResetButton.addEventListener("click", resetPricesColumns);
     }
     if (pricesPanelNode) {
       pricesPanelNode.addEventListener("input", handlePricesInput);
@@ -15873,14 +15907,184 @@
           return String(row.nmID || "");
         }).filter(Boolean));
       } catch (error) {
-        // Quarantine is an optional filter surface; list prices remains usable if this endpoint is unavailable.
+        // Quarantine is optional row diagnostics; list prices remains usable if this endpoint is unavailable.
       }
+    }
+
+    function pricesColumnById(columnId) {
+      return PRICES_TABLE_COLUMNS.find(function(column) {
+        return column.id === columnId;
+      }) || null;
+    }
+
+    function sanitizePricesVisibleColumns(columnIds) {
+      const allowedIds = new Set(PRICES_TABLE_COLUMNS.map(function(column) { return column.id; }));
+      const requested = Array.isArray(columnIds) && columnIds.length ? columnIds : PRICES_DEFAULT_VISIBLE_COLUMNS;
+      const seen = new Set();
+      const sanitized = [];
+      requested.forEach(function(columnId) {
+        const normalized = String(columnId || "");
+        if (allowedIds.has(normalized) && !seen.has(normalized)) {
+          seen.add(normalized);
+          sanitized.push(normalized);
+        }
+      });
+      PRICES_MANDATORY_COLUMNS.forEach(function(columnId) {
+        if (!seen.has(columnId) && allowedIds.has(columnId)) {
+          seen.add(columnId);
+          sanitized.push(columnId);
+        }
+      });
+      return sanitized.length ? sanitized : PRICES_DEFAULT_VISIBLE_COLUMNS.slice();
+    }
+
+    function loadPricesVisibleColumns() {
+      if (!window || !window.localStorage) {
+        return sanitizePricesVisibleColumns(PRICES_DEFAULT_VISIBLE_COLUMNS);
+      }
+      try {
+        const parsed = JSON.parse(window.localStorage.getItem(PRICES_VISIBLE_COLUMNS_STORAGE_KEY) || "null");
+        return sanitizePricesVisibleColumns(parsed);
+      } catch (error) {
+        return sanitizePricesVisibleColumns(PRICES_DEFAULT_VISIBLE_COLUMNS);
+      }
+    }
+
+    function persistPricesVisibleColumns() {
+      if (!window || !window.localStorage) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(
+          PRICES_VISIBLE_COLUMNS_STORAGE_KEY,
+          JSON.stringify(sanitizePricesVisibleColumns(state.prices.visibleColumnIds || []))
+        );
+      } catch (error) {
+        // Browser-local column visibility is a presentation preference only.
+      }
+    }
+
+    function resetPricesColumns() {
+      state.prices.visibleColumnIds = PRICES_DEFAULT_VISIBLE_COLUMNS.slice();
+      persistPricesVisibleColumns();
+      renderPricesTable();
+    }
+
+    function pricesHasActiveUpload() {
+      if (Object.keys(state.prices.rowUpload || {}).length) {
+        return true;
+      }
+      return (state.prices.rows || []).some(function(row) {
+        return !!row.lastUploadStatus;
+      });
+    }
+
+    function pricesHasActiveError() {
+      if (Object.keys(state.prices.rowUpload || {}).some(function(nmId) {
+        return !!((state.prices.rowUpload[nmId] || {}).errorText);
+      })) {
+        return true;
+      }
+      return (state.prices.rows || []).some(function(row) {
+        return !!row.wbErrorText;
+      });
+    }
+
+    function forcedPricesColumnReason(columnId) {
+      if (PRICES_MANDATORY_COLUMNS.indexOf(columnId) !== -1) {
+        return "обязательная";
+      }
+      if (columnId === "upload" && pricesHasActiveUpload()) {
+        return "активная операция";
+      }
+      if (columnId === "wb_error" && pricesHasActiveError()) {
+        return "активная ошибка";
+      }
+      return "";
+    }
+
+    function pricesActiveColumnIds() {
+      const visible = new Set(sanitizePricesVisibleColumns(state.prices.visibleColumnIds || []));
+      PRICES_MANDATORY_COLUMNS.forEach(function(columnId) { visible.add(columnId); });
+      if (pricesHasActiveUpload()) {
+        visible.add("upload");
+      }
+      if (pricesHasActiveError()) {
+        visible.add("wb_error");
+      }
+      return PRICES_TABLE_COLUMNS
+        .map(function(column) { return column.id; })
+        .filter(function(columnId) { return visible.has(columnId); });
+    }
+
+    function pricesActiveColumns() {
+      const activeIds = new Set(pricesActiveColumnIds());
+      return PRICES_TABLE_COLUMNS.filter(function(column) {
+        return activeIds.has(column.id);
+      });
+    }
+
+    function pricesColumnCount() {
+      return Math.max(1, pricesActiveColumnIds().length);
+    }
+
+    function renderPricesTableHeader() {
+      if (!pricesHeadNode) {
+        return;
+      }
+      const columns = pricesActiveColumns();
+      pricesHeadNode.innerHTML = "<tr>" + columns.map(function(column) {
+        return '<th style="width:' + String(column.width || 120) + 'px">' + escapeHtml(column.label || column.id) + "</th>";
+      }).join("") + "</tr>";
+    }
+
+    function renderPricesColumnControls() {
+      if (!pricesColumnControlsNode) {
+        return;
+      }
+      const visible = new Set(state.prices.visibleColumnIds || []);
+      PRICES_MANDATORY_COLUMNS.forEach(function(columnId) { visible.add(columnId); });
+      pricesColumnControlsNode.innerHTML = PRICES_TABLE_COLUMNS.map(function(column) {
+        const forcedReason = forcedPricesColumnReason(column.id);
+        const checked = visible.has(column.id) || !!forcedReason;
+        return [
+          '<label class="column-checkbox">',
+          '<input type="checkbox" data-prices-column-id="' + escapeHtml(column.id) + '"' + (checked ? " checked" : "") + (forcedReason ? " disabled" : "") + ">",
+          '<span class="column-checkbox-text">' + escapeHtml(column.label || column.id) + "</span>",
+          '<span class="column-checkbox-meta">' + escapeHtml(forcedReason || column.id) + "</span>",
+          "</label>"
+        ].join("");
+      }).join("");
+      if (pricesColumnNoteNode) {
+        pricesColumnNoteNode.textContent = "Видимость колонок хранится только в localStorage браузера.";
+      }
+    }
+
+    function updatePricesColumnVisibility(columnId, isVisible) {
+      const known = !!pricesColumnById(columnId);
+      if (!known || forcedPricesColumnReason(columnId)) {
+        renderPricesColumnControls();
+        return;
+      }
+      const next = new Set(state.prices.visibleColumnIds || []);
+      if (isVisible) {
+        next.add(columnId);
+      } else {
+        next.delete(columnId);
+      }
+      PRICES_MANDATORY_COLUMNS.forEach(function(mandatoryId) { next.add(mandatoryId); });
+      state.prices.visibleColumnIds = sanitizePricesVisibleColumns(Array.from(next));
+      persistPricesVisibleColumns();
+      renderPricesTable();
     }
 
     function renderPricesTable() {
       if (!pricesBodyNode) {
         return;
       }
+      renderPricesTableHeader();
+      renderPricesColumnControls();
+      const columnCount = pricesColumnCount();
       if (pricesMetaNode) {
         const parts = [];
         if (state.prices.lastRefreshedAt) {
@@ -15906,16 +16110,16 @@
       }
       updatePricesPreviewButton();
       if (state.prices.loading && !state.prices.loaded) {
-        pricesBodyNode.innerHTML = '<tr><td colspan="12">Загрузка…</td></tr>';
+        pricesBodyNode.innerHTML = '<tr><td colspan="' + String(columnCount) + '">Загрузка…</td></tr>';
         return;
       }
       if (state.prices.error && !state.prices.loaded) {
-        pricesBodyNode.innerHTML = '<tr><td colspan="12">Данные цен не загружены.</td></tr>';
+        pricesBodyNode.innerHTML = '<tr><td colspan="' + String(columnCount) + '">Данные цен не загружены.</td></tr>';
         return;
       }
       const rows = filteredPriceRows();
       if (!rows.length) {
-        pricesBodyNode.innerHTML = '<tr><td colspan="12">Товары не найдены.</td></tr>';
+        pricesBodyNode.innerHTML = '<tr><td colspan="' + String(columnCount) + '">Товары не найдены.</td></tr>';
         return;
       }
       pricesBodyNode.innerHTML = rows.map(renderPriceRow).join("");
@@ -15924,18 +16128,6 @@
     function filteredPriceRows() {
       const search = String(state.prices.search || "").trim().toLowerCase();
       return (state.prices.rows || []).filter(function(row) {
-        const nmId = String(row.nmID || "");
-        const upload = state.prices.rowUpload[nmId] || {};
-        const hasError = !!(row.wbErrorText || upload.errorText);
-        if (state.prices.filterErrors && !hasError) {
-          return false;
-        }
-        if (state.prices.filterSize && !row.editableSizePrice) {
-          return false;
-        }
-        if (state.prices.filterQuarantine && !state.prices.quarantineNmIds.has(nmId)) {
-          return false;
-        }
         if (!search) {
           return true;
         }
@@ -15967,26 +16159,80 @@
       const quarantineBadge = state.prices.quarantineNmIds.has(nmId)
         ? ' <span class="prices-badge error">карантин</span>'
         : '';
-      const uploadStatus = upload.status
-        ? '<span class="prices-badge ' + priceStatusTone(upload.status) + '">' + escapeHtml(priceStatusLabel(upload.status)) + '</span>'
+      const uploadStatusValue = upload.status || row.lastUploadStatus || "";
+      const uploadStatus = uploadStatusValue
+        ? '<span class="prices-badge ' + priceStatusTone(uploadStatusValue) + '">' + escapeHtml(priceStatusLabel(uploadStatusValue)) + '</span>'
         : "—";
       const errorText = upload.errorText || row.wbErrorText || "";
-      return [
-        '<tr data-prices-row="' + escapeHtml(nmId) + '">',
-        '<td><div class="prices-product">' + photo + '<span><span class="prices-product-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</span><span class="prices-product-meta">' + escapeHtml(meta || "—") + '</span></span></div></td>',
-        '<td title="' + escapeHtml(row.vendorCode || "") + '">' + escapeHtml(valueOrDash(row.vendorCode)) + '</td>',
-        '<td>' + escapeHtml(nmId) + '</td>',
-        '<td>' + escapeHtml(pricesMoney(row.price, row.currencyIsoCode4217)) + '</td>',
-        '<td>' + escapeHtml(pricesDiscount(row.discount)) + '</td>',
-        '<td>' + escapeHtml(pricesMoney(row.discountedPrice, row.currencyIsoCode4217)) + '</td>',
-        '<td>' + escapeHtml(pricesDiscount(row.clubDiscount)) + '</td>',
-        '<td>' + escapeHtml(pricesMoney(row.clubDiscountedPrice, row.currencyIsoCode4217)) + '</td>',
-        '<td>' + typeBadge + quarantineBadge + '</td>',
-        '<td>' + uploadStatus + '</td>',
-        '<td title="' + escapeHtml(errorText) + '">' + escapeHtml(errorText || "—") + '</td>',
-        '<td><div class="prices-edit-control"><input class="input" type="number" min="1" step="1" value="' + escapeHtml(priceValue === "—" ? "" : priceValue) + '" data-prices-edit-field="price" data-prices-edit-nm="' + escapeHtml(nmId) + '"' + (row.editableSizePrice ? ' disabled title="Для размерных цен обычная цена заблокирована в MVP"' : '') + '><input class="input" type="number" min="0" max="99" step="1" value="' + escapeHtml(discountValue === "—" ? "" : discountValue) + '" data-prices-edit-field="discount" data-prices-edit-nm="' + escapeHtml(nmId) + '"></div></td>',
-        '</tr>'
-      ].join("");
+      const context = {
+        nmId: nmId,
+        priceValue: priceValue,
+        discountValue: discountValue,
+        title: title,
+        meta: meta,
+        photo: photo,
+        typeBadge: typeBadge,
+        quarantineBadge: quarantineBadge,
+        uploadStatus: uploadStatus,
+        errorText: errorText
+      };
+      return '<tr data-prices-row="' + escapeHtml(nmId) + '">' +
+        pricesActiveColumnIds().map(function(columnId) {
+          return renderPriceCell(columnId, row, context);
+        }).join("") +
+        "</tr>";
+    }
+
+    function renderPriceCell(columnId, row, context) {
+      if (columnId === "product") {
+        return '<td><div class="prices-product">' + context.photo + '<span><span class="prices-product-title" title="' + escapeHtml(context.title) + '">' + escapeHtml(context.title) + '</span><span class="prices-product-meta">' + escapeHtml(context.meta || "—") + '</span></span></div></td>';
+      }
+      if (columnId === "vendor_code") {
+        return '<td title="' + escapeHtml(row.vendorCode || "") + '">' + escapeHtml(valueOrDash(row.vendorCode)) + '</td>';
+      }
+      if (columnId === "nm_id") {
+        return '<td>' + escapeHtml(context.nmId) + '</td>';
+      }
+      if (columnId === "price") {
+        return '<td>' + escapeHtml(pricesMoney(row.price, row.currencyIsoCode4217)) + '</td>';
+      }
+      if (columnId === "discount") {
+        return '<td>' + escapeHtml(pricesDiscount(row.discount)) + '</td>';
+      }
+      if (columnId === "discounted_price") {
+        return '<td>' + escapeHtml(pricesMoney(row.discountedPrice, row.currencyIsoCode4217)) + '</td>';
+      }
+      if (columnId === "club_discount") {
+        return '<td>' + escapeHtml(pricesDiscount(row.clubDiscount)) + '</td>';
+      }
+      if (columnId === "club_discounted_price") {
+        return '<td>' + escapeHtml(pricesMoney(row.clubDiscountedPrice, row.currencyIsoCode4217)) + '</td>';
+      }
+      if (columnId === "type") {
+        return '<td>' + context.typeBadge + context.quarantineBadge + '</td>';
+      }
+      if (columnId === "spp") {
+        return renderPricesReadonlyMetricCell(row.sppProxyLabel, row.sppProxyReason);
+      }
+      if (columnId === "promo") {
+        return renderPricesReadonlyMetricCell(row.promoLabel, row.promoReason);
+      }
+      if (columnId === "upload") {
+        return '<td>' + context.uploadStatus + '</td>';
+      }
+      if (columnId === "wb_error") {
+        return '<td title="' + escapeHtml(context.errorText) + '">' + escapeHtml(context.errorText || "—") + '</td>';
+      }
+      if (columnId === "edit") {
+        return '<td><div class="prices-edit-control"><input class="input" type="number" min="1" step="1" value="' + escapeHtml(context.priceValue === "—" ? "" : context.priceValue) + '" data-prices-edit-field="price" data-prices-edit-nm="' + escapeHtml(context.nmId) + '"' + (row.editableSizePrice ? ' disabled title="Для размерных цен обычная цена заблокирована в MVP"' : '') + '><input class="input" type="number" min="0" max="99" step="1" value="' + escapeHtml(context.discountValue === "—" ? "" : context.discountValue) + '" data-prices-edit-field="discount" data-prices-edit-nm="' + escapeHtml(context.nmId) + '"></div></td>';
+      }
+      return "<td></td>";
+    }
+
+    function renderPricesReadonlyMetricCell(label, reason) {
+      const normalizedLabel = String(label || "н/д");
+      const isMissing = normalizedLabel === "н/д";
+      return '<td title="' + escapeHtml(reason || "") + '"><span' + (isMissing ? ' class="prices-na"' : "") + '>' + escapeHtml(normalizedLabel) + '</span></td>';
     }
 
     function handlePricesInput(event) {
@@ -15999,19 +16245,9 @@
         renderPricesTable();
         return;
       }
-      if (target === pricesFilterErrorsNode) {
-        state.prices.filterErrors = !!target.checked;
-        renderPricesTable();
-        return;
-      }
-      if (target === pricesFilterSizeNode) {
-        state.prices.filterSize = !!target.checked;
-        renderPricesTable();
-        return;
-      }
-      if (target === pricesFilterQuarantineNode) {
-        state.prices.filterQuarantine = !!target.checked;
-        renderPricesTable();
+      const pricesColumnId = target.getAttribute("data-prices-column-id");
+      if (pricesColumnId) {
+        updatePricesColumnVisibility(pricesColumnId, !!target.checked);
         return;
       }
       const field = target.getAttribute("data-prices-edit-field");

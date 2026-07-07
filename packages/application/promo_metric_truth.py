@@ -33,6 +33,7 @@ class PromoEligibilityEvaluation:
     candidate_plan_prices: tuple[float, ...]
     eligible_campaign_identities: tuple[str, ...]
     eligible_plan_prices: tuple[float, ...]
+    promo_candidate_count: float
     promo_count_by_price: float
     promo_entry_price_best: float
     promo_participation: float
@@ -139,6 +140,7 @@ def evaluate_candidate_rows(
         candidate_plan_prices=candidate_plan_prices,
         eligible_campaign_identities=tuple(row.campaign_identity for row in eligible_rows),
         eligible_plan_prices=eligible_plan_prices,
+        promo_candidate_count=float(len(ordered_rows)),
         promo_count_by_price=promo_count,
         promo_entry_price_best=max(candidate_plan_prices) if candidate_plan_prices else 0.0,
         promo_participation=1.0 if eligible_rows else 0.0,
