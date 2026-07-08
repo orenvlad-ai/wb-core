@@ -388,6 +388,49 @@ def main() -> None:
         _seed_wb_supply_overlay_fixture(
             runtime,
             active_nm_ids=active_nm_ids,
+            supply_id="wb-overlay-planned",
+            supply_date="2026-04-20",
+            qty_by_nm={210183919: 20.0},
+            status_id=2,
+            status_label="Запланировано",
+        )
+        _seed_wb_supply_overlay_fixture(
+            runtime,
+            active_nm_ids=active_nm_ids,
+            supply_id="wb-overlay-accepted",
+            supply_date="2026-04-20",
+            qty_by_nm={210183919: 20.0},
+            status_id=5,
+            status_label="Принято",
+        )
+        skipped_status_result = block.calculate(
+            {
+                "prod_lead_time_days": 10,
+                "lead_time_factory_to_ff_days": 5,
+                "lead_time_ff_to_wb_days": 2,
+                "safety_days_mp": 3,
+                "safety_days_ff": 2,
+                "cycle_order_days": 14,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "sales_avg_period_days": 3,
+                "selected_wb_supply_ids": ["wb-overlay-planned", "wb-overlay-accepted"],
+            }
+        )
+        skipped_status_sku = {item.nm_id: item for item in skipped_status_result.rows}[210183919]
+        if skipped_status_sku.stock_ff != 30.0 or skipped_status_sku.inbound_ff_to_wb != 0.0:
+            raise AssertionError(f"status 2/5 selected WB supplies must not affect factory calculation, got {skipped_status_sku}")
+        skipped_payload = skipped_status_result.wb_supply_overlay or {}
+        if skipped_payload.get("factory_order", {}).get("added_inbound_ff_to_wb_qty_total") != 0.0:
+            raise AssertionError(f"status 2/5 must not add inbound projection, got {skipped_payload}")
+        if not any("Запланировано" in warning for warning in skipped_status_result.warnings) or not any(
+            "Принято" in warning for warning in skipped_status_result.warnings
+        ):
+            raise AssertionError(f"status 2/5 direct payload skips must be warned, got {skipped_status_result.warnings}")
+
+        _seed_wb_supply_overlay_fixture(
+            runtime,
+            active_nm_ids=active_nm_ids,
             supply_id="wb-overlay-outside",
             supply_date="2026-06-30",
             qty_by_nm={210183919: 5.0},
@@ -977,6 +1020,8 @@ def _seed_wb_supply_overlay_fixture(
     supply_id: str,
     supply_date: str,
     qty_by_nm: dict[int, float],
+    status_id: int = 3,
+    status_label: str = "Отгрузка разрешена",
 ) -> None:
     active_set = {int(item) for item in active_nm_ids}
     raw_goods = [
@@ -992,8 +1037,8 @@ def _seed_wb_supply_overlay_fixture(
                 "wb_supply_id": supply_id,
                 "preorder_id": "pre-" + supply_id,
                 "number_label": supply_id,
-                "status_id": 2,
-                "status_label": "Запланировано",
+                "status_id": status_id,
+                "status_label": status_label,
                 "warehouse_id": "507",
                 "warehouse_name": "Коледино",
                 "warehouse_display": "Коледино",
@@ -1001,7 +1046,7 @@ def _seed_wb_supply_overlay_fixture(
                 "district_key": "central",
                 "district_label_ru": "Центральный федеральный округ",
                 "quantity_for_size_filter": sum(float(item["quantity"]) for item in raw_goods),
-                "raw_list": {"supplyID": supply_id, "statusID": 2, "supplyDate": supply_date},
+                "raw_list": {"supplyID": supply_id, "statusID": status_id, "supplyDate": supply_date},
                 "raw_detail": {"warehouseID": 507, "warehouseName": "Коледино"},
                 "raw_goods": raw_goods,
                 "raw_package": [],

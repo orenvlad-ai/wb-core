@@ -29,6 +29,7 @@ from packages.adapters.seller_portal_transit_costs import (
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.wb_supply_overlay import (
+    ELIGIBLE_WB_SUPPLY_STATUS_IDS,
     augment_supply_row_with_district,
     build_warehouse_district_mapping,
     build_wb_supply_overlay_options,
@@ -298,7 +299,7 @@ class WbSuppliesBlock:
         for record in records:
             normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
             status_id = _optional_int(normalized.get("status_id"))
-            if status_id in {2, 3, 4, 6}:
+            if status_id in ELIGIBLE_WB_SUPPLY_STATUS_IDS:
                 eligible_rows.append(dict(normalized))
         return build_wb_supply_overlay_options(
             runtime=self.runtime,

@@ -204,6 +204,7 @@ class WbRegionalSupplyBlock:
             stock_ff_rows=stock_ff_rows,
             active_skus=active_skus,
             overlay=wb_supply_overlay,
+            deduct_selected_supplies=stock_ff_source != STOCK_FF_SOURCE_LEDGER,
         )
         (
             wb_regional_qty_by_nm_district,
@@ -454,6 +455,7 @@ class WbRegionalSupplyBlock:
         )
         warnings = [str(item) for item in result_diagnostics.get("warnings", []) if item]
         warnings.extend(str(item) for item in ledger_stock_ff_state.get("warnings", []) if str(item or "").strip())
+        warnings.extend(str(item) for item in wb_supply_overlay.get("warnings", []) if str(item or "").strip())
         warnings.extend(str(item) for item in wb_stock_ff_warnings if item)
         warnings.extend(str(item) for item in wb_regional_overlay_warnings if item)
         if seed_unfulfilled_qty_total > 0:

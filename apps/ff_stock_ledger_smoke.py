@@ -160,16 +160,32 @@ def main() -> None:
         _assert(doprinato_label and doprinato_label.get("skip_reason"), "type_label=Допринято must skip debit")
         _assert(_balance(block, second_nm_id) == 6.0, "Допринято skips must not change balance")
 
+        _seed_wb_supply_overlay_fixture(runtime, supply_id="wb-ledger-overlay", nm_id=probe_nm_id, quantity=10.0)
         factory_result = FactoryOrderSupplyBlock(
             runtime=runtime,
             stocks_block=FakeStocksBlock(active_nm_ids),
             sales_funnel_history_block=NoopSalesHistoryBlock(),
             now_factory=lambda: NOW,
             timestamp_factory=lambda: ACTIVATED_AT,
-        ).calculate(_factory_settings())
+        ).calculate(_factory_settings(selected_wb_supply_ids=["wb-ledger-overlay"]))
         _assert(factory_result.stock_ff_source == STOCK_FF_SOURCE_LEDGER, "factory calculation must keep ledger source")
         factory_probe = next(item for item in factory_result.rows if item.nm_id == probe_nm_id)
         _assert(factory_probe.stock_ff == -25.0, "factory calculation must use computed ledger balance, including negative")
+        _assert(factory_probe.inbound_ff_to_wb == 10.0, "factory ledger source must still add selected WB supply inbound")
+        _assert(
+            factory_probe.coverage_qty == -15.0,
+            "factory ledger coverage must be stock_total_mp + ledger_stock_ff + inbound_factory_to_ff + selected_wb_supply_inbound_ff_to_wb",
+        )
+        factory_overlay = factory_result.wb_supply_overlay or {}
+        factory_overlay_stock = factory_overlay.get("stock_ff", {})
+        _assert(
+            factory_overlay_stock.get("stock_deduction_applied") is False,
+            "factory ledger source must not deduct selected WB supply from stock_ff again",
+        )
+        _assert(
+            factory_overlay_stock.get("by_nm_id", {}).get(str(probe_nm_id), {}).get("effective_stock_ff") == -25.0,
+            "factory ledger overlay diagnostics must keep ledger stock_ff unchanged",
+        )
 
         regional_result = WbRegionalSupplyBlock(
             runtime=runtime,
@@ -177,9 +193,20 @@ def main() -> None:
             sales_funnel_history_block=NoopSalesHistoryBlock(),
             now_factory=lambda: NOW,
             timestamp_factory=lambda: ACTIVATED_AT,
-        ).calculate(_regional_settings())
+        ).calculate(_regional_settings(selected_wb_supply_ids=["wb-ledger-overlay"]))
         _assert(regional_result.stock_ff_source == STOCK_FF_SOURCE_LEDGER, "WB regional calculation must keep ledger source")
         _assert(regional_result.summary.total_qty >= 0, "WB regional calculation with ledger source must complete")
+        regional_overlay = regional_result.wb_supply_overlay or {}
+        regional_overlay_stock = regional_overlay.get("stock_ff", {})
+        regional_overlay_projection = regional_overlay.get("wb_regional", {})
+        _assert(
+            regional_overlay_stock.get("stock_deduction_applied") is False,
+            "WB regional ledger source must not deduct selected WB supply from stock_ff again",
+        )
+        _assert(
+            regional_overlay_projection.get("added_qty_by_district", {}).get("central") == 10.0,
+            "WB regional ledger source must still add selected WB supply to district projection",
+        )
 
     print("ff_stock_ledger_smoke: ok")
 
@@ -312,8 +339,8 @@ def _balance(block: FfStockLedgerBlock, nm_id: int) -> float:
     return float(rows[0]["current_stock_ff"])
 
 
-def _factory_settings() -> dict[str, object]:
-    return {
+def _factory_settings(*, selected_wb_supply_ids: list[str] | None = None) -> dict[str, object]:
+    settings: dict[str, object] = {
         "prod_lead_time_days": 1,
         "lead_time_factory_to_ff_days": 1,
         "lead_time_ff_to_wb_days": 1,
@@ -325,10 +352,13 @@ def _factory_settings() -> dict[str, object]:
         "report_date_override": "2026-04-18",
         "stock_ff_source": STOCK_FF_SOURCE_LEDGER,
     }
+    if selected_wb_supply_ids:
+        settings["selected_wb_supply_ids"] = selected_wb_supply_ids
+    return settings
 
 
-def _regional_settings() -> dict[str, object]:
-    return {
+def _regional_settings(*, selected_wb_supply_ids: list[str] | None = None) -> dict[str, object]:
+    settings: dict[str, object] = {
         "sales_avg_period_days": 7,
         "cycle_supply_days": 1,
         "lead_time_to_region_days": 1,
@@ -338,6 +368,52 @@ def _regional_settings() -> dict[str, object]:
         "stock_ff_source": STOCK_FF_SOURCE_LEDGER,
         "included_district_keys": ["central", "northwest"],
     }
+    if selected_wb_supply_ids:
+        settings["selected_wb_supply_ids"] = selected_wb_supply_ids
+    return settings
+
+
+def _seed_wb_supply_overlay_fixture(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    supply_id: str,
+    nm_id: int,
+    quantity: float,
+) -> None:
+    runtime.save_wb_supply_rows(
+        rows=[
+            {
+                "supply_id": supply_id,
+                "cache_key": supply_id,
+                "wb_supply_id": supply_id,
+                "preorder_id": "pre-" + supply_id,
+                "number_label": supply_id,
+                "status_id": 3,
+                "status_label": "Отгрузка разрешена",
+                "warehouse_id": "507",
+                "warehouse_name": "Коледино",
+                "planned_warehouse_id": "507",
+                "planned_warehouse_name": "Коледино",
+                "target_warehouse_id": "507",
+                "target_warehouse_name": "Коледино",
+                "warehouse_display": "Коледино",
+                "district_source_warehouse_id": "507",
+                "district_source_warehouse_name": "Коледино",
+                "district_source_warehouse_role": "planned",
+                "district_source_warehouse_evidence": "fixture.warehouse_name",
+                "supply_date": "2026-04-19",
+                "district_key": "central",
+                "district_label_ru": "Центральный федеральный округ",
+                "quantity_for_size_filter": float(quantity),
+                "raw_list": {"supplyID": supply_id, "statusID": 3, "supplyDate": "2026-04-19"},
+                "raw_detail": {"warehouseID": 507, "warehouseName": "Коледино"},
+                "raw_goods": [{"nmID": int(nm_id), "quantity": float(quantity)}],
+                "raw_package": [],
+            }
+        ],
+        warehouses=[{"warehouse_id": "507", "warehouse_name": "Коледино"}],
+        synced_at=ACTIVATED_AT,
+    )
 
 
 def _assert(condition: object, message: str) -> None:
