@@ -10,6 +10,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 from typing import Any, Mapping, Sequence
+from urllib.error import HTTPError
 from urllib import request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -189,6 +190,57 @@ def _run_backend_unit_smokes() -> None:
         )
         if len(plan["plan"]["initial_points"]) != 3 or plan["plan"]["refinement_budget"] != 2:
             raise AssertionError(f"plan preview mismatch: {plan}")
+        plan_30 = block.build_plan(
+            {
+                "nmID": PRIMARY_NM,
+                "range_min_discounted": 700,
+                "range_max_discounted": 900,
+                "precision_rub": 2,
+                "max_measurements": 30,
+            }
+        )
+        plan_30_payload = plan_30["plan"]
+        if (
+            plan_30_payload["max_measurements"] != 30
+            or plan_30_payload["refinement_budget"] != 27
+            or plan_30_payload["request_budget"]["wb_uploads"] != 30
+            or plan_30_payload["request_budget"]["public_reads"] != 90
+        ):
+            raise AssertionError(f"max_measurements=30 plan budget mismatch: {plan_30_payload}")
+        duration_source = FakeSppPricesSource()
+        duration_block = _build_block(
+            runtime,
+            runtime_dir / "duration",
+            duration_source,
+            FakePublicSource(duration_source),
+            zero_cadence=False,
+        )
+        duration_plan = duration_block.build_plan(
+            {
+                "nmID": PRIMARY_NM,
+                "range_min_discounted": 700,
+                "range_max_discounted": 900,
+                "precision_rub": 2,
+                "max_measurements": 30,
+            }
+        )["plan"]
+        if duration_plan["estimated_duration_seconds"] != 27600:
+            raise AssertionError(f"max_measurements=30 duration mismatch: {duration_plan}")
+        try:
+            block.build_plan(
+                {
+                    "nmID": PRIMARY_NM,
+                    "range_min_discounted": 700,
+                    "range_max_discounted": 900,
+                    "precision_rub": 2,
+                    "max_measurements": 31,
+                }
+            )
+        except WbSppTesterError as exc:
+            if exc.http_status != 422 or "between 3 and 30" not in str(exc):
+                raise
+        else:
+            raise AssertionError("max_measurements=31 must be rejected")
         started = block.start(_start_payload(700, 900, max_measurements=5), actor="smoke")
         job = started["job"]
         if job["result_status"] != "threshold_detected":
@@ -292,10 +344,18 @@ def _run_http_smoke() -> None:
                 raise AssertionError(f"baseline route failed: {status} {baseline}")
             status, plan = _post_json(
                 f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_PLAN_PATH}",
-                _start_payload(700, 900, max_measurements=3),
+                _start_payload(700, 900, max_measurements=30),
             )
             if status != 200 or plan["contract_name"] != "sheet_vitrina_v1_prices_spp_test_plan":
                 raise AssertionError(f"plan route failed: {status} {plan}")
+            if plan["plan"]["max_measurements"] != 30 or plan["plan"]["request_budget"]["wb_uploads"] != 30:
+                raise AssertionError(f"plan route must accept max_measurements=30: {plan}")
+            status, rejected = _post_json(
+                f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_PLAN_PATH}",
+                _start_payload(700, 900, max_measurements=31),
+            )
+            if status != 422 or "between 3 and 30" not in str(rejected.get("error") or ""):
+                raise AssertionError(f"plan route must reject max_measurements=31: {status} {rejected}")
             status, started = _post_json(
                 f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_START_PATH}",
                 _start_payload(700, 900, max_measurements=3),
@@ -322,17 +382,11 @@ def _build_block(
     runtime_dir: Path,
     prices_source: FakeSppPricesSource,
     public_source: FakePublicSource,
+    *,
+    zero_cadence: bool = True,
 ) -> WbSppTesterBlock:
-    return WbSppTesterBlock(
-        runtime=runtime,
-        runtime_dir=runtime_dir,
-        prices_source=prices_source,
-        public_source=public_source,
-        now_factory=lambda: NOW,
-        timestamp_factory=lambda: "2026-07-07T07:00:00Z",
-        sleep=lambda _seconds: None,
-        safety_config=WbSppTesterSafetyConfig(spp_test_enabled=True, prices_write_enabled=True),
-        cadence_config=WbSppTesterCadenceConfig(
+    cadence_config = (
+        WbSppTesterCadenceConfig(
             run_async=False,
             measurement_upload_cooldown_seconds=0,
             first_public_poll_delay_seconds=0,
@@ -344,7 +398,20 @@ def _build_block(
             readback_max_polls=2,
             rate_limit_min_cooldown_seconds=0,
             active_lock_ttl_seconds=60,
-        ),
+        )
+        if zero_cadence
+        else WbSppTesterCadenceConfig(run_async=False)
+    )
+    return WbSppTesterBlock(
+        runtime=runtime,
+        runtime_dir=runtime_dir,
+        prices_source=prices_source,
+        public_source=public_source,
+        now_factory=lambda: NOW,
+        timestamp_factory=lambda: "2026-07-07T07:00:00Z",
+        sleep=lambda _seconds: None,
+        safety_config=WbSppTesterSafetyConfig(spp_test_enabled=True, prices_write_enabled=True),
+        cadence_config=cadence_config,
     )
 
 
@@ -379,8 +446,11 @@ def _post_json(url: str, payload: Mapping[str, Any]) -> tuple[int, Mapping[str, 
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with request.urlopen(req, timeout=15) as response:
-        return int(response.status), json.loads(response.read().decode("utf-8"))
+    try:
+        with request.urlopen(req, timeout=15) as response:
+            return int(response.status), json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        return int(exc.status), json.loads(exc.read().decode("utf-8"))
 
 
 if __name__ == "__main__":

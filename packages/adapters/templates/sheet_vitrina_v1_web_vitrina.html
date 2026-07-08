@@ -5368,7 +5368,7 @@
                   <input class="input" type="number" min="1" step="1" value="2" data-spp-test-input="precision_rub">
                 </label>
                 <label class="spp-test-field">Макс. измерений
-                  <input class="input" type="number" min="3" max="12" step="1" value="8" data-spp-test-input="max_measurements">
+                  <input class="input" type="number" min="3" max="30" step="1" value="8" data-spp-test-input="max_measurements">
                 </label>
               </div>
               <span class="prices-badge">Безопасный медленный</span>
@@ -5379,6 +5379,7 @@
                 <button class="button primary" type="button" data-spp-test-start disabled>Запустить</button>
                 <button class="button danger" type="button" data-spp-test-restore hidden>Восстановить baseline</button>
               </div>
+              <p class="research-result-note" data-spp-test-start-reason>сначала построить план</p>
               <p class="research-error" data-spp-test-error></p>
             </section>
           </div>
@@ -5789,6 +5790,7 @@
     const sppTestRestoreButton = document.querySelector("[data-spp-test-restore]");
     const sppTestConfirmLiveNode = document.querySelector("[data-spp-test-confirm-live]");
     const sppTestRestoreBaselineNode = document.querySelector("[data-spp-test-restore-baseline]");
+    const sppTestStartReasonNode = document.querySelector("[data-spp-test-start-reason]");
     const sppTestErrorNode = document.querySelector("[data-spp-test-error]");
     const sppTestPlanPreviewNode = document.querySelector("[data-spp-test-plan-preview]");
     const sppTestMeasurementsNode = document.querySelector("[data-spp-test-measurements]");
@@ -16368,6 +16370,49 @@
       return payload;
     }
 
+    function sppTestInputValue(name) {
+      const input = document.querySelector('[data-spp-test-input="' + name + '"]');
+      return input ? String(input.value || "").trim() : "";
+    }
+
+    function sppTestNumericInput(name) {
+      const raw = sppTestInputValue(name);
+      if (!raw) {
+        return NaN;
+      }
+      return Number(raw.replace(",", "."));
+    }
+
+    function sppTestInputsAreValid() {
+      const rangeMin = sppTestNumericInput("range_min_discounted");
+      const rangeMax = sppTestNumericInput("range_max_discounted");
+      const precision = sppTestNumericInput("precision_rub");
+      const maxMeasurements = sppTestNumericInput("max_measurements");
+      return Number.isFinite(rangeMin)
+        && Number.isFinite(rangeMax)
+        && Number.isFinite(precision)
+        && Number.isInteger(maxMeasurements)
+        && rangeMin > 0
+        && rangeMax > 0
+        && rangeMin < rangeMax
+        && precision > 0
+        && maxMeasurements >= 3
+        && maxMeasurements <= 30;
+    }
+
+    function sppTestPlanMatchesInputs(plan) {
+      if (!plan) {
+        return false;
+      }
+      const selectedNmId = Number(state.prices.sppTest.selectedNmId || 0);
+      const sameNmId = Number(plan.nmID || 0) === selectedNmId;
+      const sameMin = Number(plan.range_min_discounted) === sppTestNumericInput("range_min_discounted");
+      const sameMax = Number(plan.range_max_discounted) === sppTestNumericInput("range_max_discounted");
+      const samePrecision = Number(plan.precision_rub) === sppTestNumericInput("precision_rub");
+      const sameMaxMeasurements = Number(plan.max_measurements) === sppTestNumericInput("max_measurements");
+      return sameNmId && sameMin && sameMax && samePrecision && sameMaxMeasurements;
+    }
+
     async function buildSppTestPlan() {
       if (!WEB_VITRINA_CONFIG.prices_spp_test_plan_path || state.prices.sppTest.planLoading) {
         return;
@@ -16468,21 +16513,46 @@
       }, force ? 1200 : 6000);
     }
 
-    function sppTestCanStart() {
+    function sppTestStartEligibility() {
       const baseline = state.prices.sppTest.baseline || {};
       const activeJob = state.prices.sppTest.activeJob || {};
-      const blockingStatus = ["planning", "measuring", "cooldown", "restoring", "manual_restore_required"].indexOf(String(activeJob.status || "")) !== -1;
-      return !!(
-        state.prices.sppTest.plan
-        && baseline.can_start !== false
-        && baseline._writeEnabled
-        && baseline._sppTestEnabled
-        && sppTestConfirmLiveNode
-        && sppTestConfirmLiveNode.checked
-        && sppTestRestoreBaselineNode
-        && sppTestRestoreBaselineNode.checked
-        && !blockingStatus
-      );
+      const job = state.prices.sppTest.job || {};
+      const activeStatus = String(activeJob.status || "");
+      const localStatus = String(job.status || "");
+      const blockingStatuses = ["planning", "measuring", "cooldown", "restoring", "running", "manual_restore_required"];
+      const blockingStatus = blockingStatuses.indexOf(activeStatus) !== -1 || blockingStatuses.indexOf(localStatus) !== -1;
+      if (!state.prices.sppTest.selectedNmId) {
+        return {canStart: false, reason: "выберите SKU/nmID"};
+      }
+      if (!sppTestInputsAreValid()) {
+        return {canStart: false, reason: "диапазон невалиден"};
+      }
+      if (!state.prices.sppTest.plan || !sppTestPlanMatchesInputs(state.prices.sppTest.plan)) {
+        return {canStart: false, reason: "сначала построить план"};
+      }
+      if (blockingStatus) {
+        return {canStart: false, reason: "есть active job"};
+      }
+      if (baseline.can_start === false) {
+        return {canStart: false, reason: "baseline недоступен"};
+      }
+      if (!baseline._sppTestEnabled) {
+        return {canStart: false, reason: "включите WB_SPP_TEST_ENABLED"};
+      }
+      if (!baseline._writeEnabled) {
+        return {canStart: false, reason: "включите WB_PRICES_WRITE_ENABLED"};
+      }
+      if (!sppTestConfirmLiveNode || !sppTestConfirmLiveNode.checked) {
+        return {canStart: false, reason: "подтвердите live изменение цены"};
+      }
+      if (!sppTestRestoreBaselineNode || !sppTestRestoreBaselineNode.checked) {
+        return {canStart: false, reason: "подтвердите restore baseline"};
+      }
+      return {canStart: true, reason: ""};
+    }
+
+    function sppTestCanStart() {
+      return sppTestStartEligibility().canStart;
     }
 
     function renderSppTest() {
@@ -16511,7 +16581,9 @@
             sppTestFact("Цена покупателя", pricesMoney(baseline.publicBuyerPrice, "RUB")),
             sppTestFact("SPP-прокси", baseline.sppProxyLabel || "н/д"),
             sppTestFact("Карантин", baseline.quarantine && baseline.quarantine.is_quarantined ? "есть" : "нет"),
-            sppTestFact("Тип цены", baseline.editableSizePriceLabel || "—")
+            sppTestFact("Тип цены", baseline.editableSizePriceLabel || "—"),
+            sppTestFact("WB writes", baseline._writeEnabled ? "вкл" : "выкл"),
+            sppTestFact("SPP guard", baseline._sppTestEnabled ? "вкл" : "выкл")
           ].join("");
         }
       }
@@ -16523,8 +16595,14 @@
         sppTestPlanButton.textContent = state.prices.sppTest.planLoading ? "План…" : "Построить план";
       }
       if (sppTestStartButton) {
-        sppTestStartButton.disabled = state.prices.sppTest.startLoading || !sppTestCanStart();
+        const eligibility = sppTestStartEligibility();
+        sppTestStartButton.disabled = state.prices.sppTest.startLoading || !eligibility.canStart;
         sppTestStartButton.textContent = state.prices.sppTest.startLoading ? "Запуск…" : "Запустить";
+        sppTestStartButton.title = eligibility.reason || "";
+        if (sppTestStartReasonNode) {
+          sppTestStartReasonNode.textContent = eligibility.canStart ? "" : eligibility.reason;
+          sppTestStartReasonNode.hidden = eligibility.canStart;
+        }
       }
       renderSppRestoreButton();
       renderSppPlanPreview();
@@ -17054,8 +17132,12 @@
         }
         return;
       }
-      if (target.getAttribute("data-spp-test-input") || target === sppTestConfirmLiveNode || target === sppTestRestoreBaselineNode) {
+      if (target.getAttribute("data-spp-test-input")) {
         state.prices.sppTest.plan = null;
+        renderSppTest();
+        return;
+      }
+      if (target === sppTestConfirmLiveNode || target === sppTestRestoreBaselineNode) {
         renderSppTest();
         return;
       }

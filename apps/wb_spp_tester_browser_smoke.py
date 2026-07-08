@@ -40,46 +40,71 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 def main() -> None:
-    with _LocalSppUiServer() as base_url:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
-            page = browser.new_page(viewport={"width": 1440, "height": 940})
-            page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
-            page.locator('[data-unified-tab-button="prices"]').click()
-            page.locator('[data-prices-subtab="spp-test"]').click()
-            page.locator("[data-spp-test-nm]").select_option(str(PRIMARY_NM))
-            page.wait_for_function(
-                "() => document.querySelector('[data-spp-test-baseline]')?.innerText.includes('900')",
-                timeout=7000,
-            )
-            page.locator('[data-spp-test-input="range_min_discounted"]').fill("700")
-            page.locator('[data-spp-test-input="range_max_discounted"]').fill("900")
-            page.locator('[data-spp-test-input="precision_rub"]').fill("2")
-            page.locator('[data-spp-test-input="max_measurements"]').fill("5")
-            page.locator("[data-spp-test-plan]").click()
-            page.wait_for_function(
-                "() => document.querySelector('[data-spp-test-plan-preview]')?.innerText.includes('WB uploads')",
-                timeout=7000,
-            )
-            page.locator("[data-spp-test-confirm-live]").check()
-            if not page.locator("[data-spp-test-start]").is_disabled():
-                raise AssertionError("SPP start must remain disabled when server guards are off")
-            panel_text = page.locator('[data-prices-subpanel="spp-test"]').inner_text()
-            for expected in ("Проверка СПП", "Baseline", "План и измерения", "Измерений пока нет"):
-                if expected not in panel_text and expected != "Проверка СПП":
-                    raise AssertionError(f"SPP tester panel missing text {expected!r}: {panel_text}")
-            if "Текущие цены" not in page.locator("[data-prices-panel]").inner_text():
-                raise AssertionError("prices subtabs must include current prices")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            with _LocalSppUiServer(spp_test_enabled=True, prices_write_enabled=True) as base_url:
+                page = browser.new_page(viewport={"width": 1440, "height": 940})
+                _prepare_spp_page(page, base_url)
+                if page.locator("[data-spp-test-start]").is_disabled():
+                    raise AssertionError("SPP start must become enabled after successful plan and confirmations")
+                if page.locator("[data-spp-test-start-reason]").inner_text().strip():
+                    raise AssertionError("enabled SPP start must not show disabled reason")
+                page.close()
+
+            with _LocalSppUiServer(spp_test_enabled=False, prices_write_enabled=True) as base_url:
+                page = browser.new_page(viewport={"width": 1440, "height": 940})
+                _prepare_spp_page(page, base_url)
+                if not page.locator("[data-spp-test-start]").is_disabled():
+                    raise AssertionError("SPP start must remain disabled when WB_SPP_TEST_ENABLED is off")
+                reason = page.locator("[data-spp-test-start-reason]").inner_text().strip()
+                if "включите WB_SPP_TEST_ENABLED" not in reason:
+                    raise AssertionError(f"disabled SPP guard reason missing: {reason!r}")
+                page.close()
+        finally:
             browser.close()
     print("wb_spp_tester_browser_smoke: OK")
 
 
+def _prepare_spp_page(page, base_url: str) -> None:
+    page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
+    page.locator('[data-unified-tab-button="prices"]').click()
+    page.locator('[data-prices-subtab="spp-test"]').click()
+    page.locator("[data-spp-test-nm]").select_option(str(PRIMARY_NM))
+    page.wait_for_function(
+        "() => document.querySelector('[data-spp-test-baseline]')?.innerText.includes('900')",
+        timeout=7000,
+    )
+    page.locator('[data-spp-test-input="range_min_discounted"]').fill("700")
+    page.locator('[data-spp-test-input="range_max_discounted"]').fill("900")
+    page.locator('[data-spp-test-input="precision_rub"]').fill("2")
+    page.locator('[data-spp-test-input="max_measurements"]').fill("30")
+    page.locator("[data-spp-test-plan]").click()
+    page.wait_for_function(
+        "() => document.querySelector('[data-spp-test-plan-preview]')?.innerText.includes('WB uploads')",
+        timeout=7000,
+    )
+    page.wait_for_function(
+        "() => document.querySelector('[data-spp-test-plan-preview]')?.innerText.includes('30')",
+        timeout=7000,
+    )
+    page.locator("[data-spp-test-confirm-live]").check()
+    panel_text = page.locator('[data-prices-subpanel="spp-test"]').inner_text()
+    for expected in ("Baseline", "План и измерения", "Измерений пока нет", "WB writes", "SPP guard"):
+        if expected not in panel_text:
+            raise AssertionError(f"SPP tester panel missing text {expected!r}: {panel_text}")
+    if "Текущие цены" not in page.locator("[data-prices-panel]").inner_text():
+        raise AssertionError("prices subtabs must include current prices")
+
+
 class _LocalSppUiServer:
-    def __init__(self) -> None:
+    def __init__(self, *, spp_test_enabled: bool, prices_write_enabled: bool) -> None:
         self.tmp: TemporaryDirectory[str] | None = None
         self.server = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
+        self.spp_test_enabled = spp_test_enabled
+        self.prices_write_enabled = prices_write_enabled
 
     def __enter__(self) -> str:
         self.tmp = TemporaryDirectory(prefix="wb-spp-browser-")
@@ -95,7 +120,10 @@ class _LocalSppUiServer:
             now_factory=lambda: NOW,
             timestamp_factory=lambda: "2026-07-07T07:00:00Z",
             sleep=lambda _seconds: None,
-            safety_config=WbSppTesterSafetyConfig(spp_test_enabled=False, prices_write_enabled=False),
+            safety_config=WbSppTesterSafetyConfig(
+                spp_test_enabled=self.spp_test_enabled,
+                prices_write_enabled=self.prices_write_enabled,
+            ),
             cadence_config=WbSppTesterCadenceConfig(run_async=False),
         )
         entrypoint = RegistryUploadHttpEntrypoint(
@@ -103,7 +131,7 @@ class _LocalSppUiServer:
             runtime=runtime,
             now_factory=lambda: NOW,
             activated_at_factory=lambda: "2026-07-07T07:00:00Z",
-            prices_block=_build_prices_block(runtime, runtime_dir, prices_source, write_enabled=False),
+            prices_block=_build_prices_block(runtime, runtime_dir, prices_source, write_enabled=self.prices_write_enabled),
             spp_tester_block=spp_block,
         )
         config = RegistryUploadHttpEntrypointConfig(

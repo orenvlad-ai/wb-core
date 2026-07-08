@@ -91,7 +91,7 @@ Inputs:
 - `range_min_discounted`;
 - `range_max_discounted`;
 - `precision_rub`, default `2`;
-- `max_measurements`, default `8`, allowed `3..12`;
+- `max_measurements`, default `8`, allowed `3..30`;
 - mode `safe_slow` only.
 
 Measurement conversion keeps current discount and changes only integer `price`. After upload, the runner uses WB readback `discountedPrice`, not target price, as actual seller discounted price.
