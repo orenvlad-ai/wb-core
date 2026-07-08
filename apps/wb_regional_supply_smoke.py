@@ -234,6 +234,51 @@ def main() -> None:
 
         _seed_wb_regional_overlay_fixture(
             runtime,
+            supply_id="wb-regional-planned",
+            nm_id=MAIN_NM_ID,
+            quantity=50.0,
+            supply_date="2026-04-20",
+            warehouse_name="Коледино",
+            district_key=DISTRICT_CENTRAL,
+            status_id=2,
+            status_label="Запланировано",
+        )
+        _seed_wb_regional_overlay_fixture(
+            runtime,
+            supply_id="wb-regional-accepted",
+            nm_id=MAIN_NM_ID,
+            quantity=50.0,
+            supply_date="2026-04-20",
+            warehouse_name="Коледино",
+            district_key=DISTRICT_CENTRAL,
+            status_id=5,
+            status_label="Принято",
+        )
+        skipped_status_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days": 2,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "selected_wb_supply_ids": ["wb-regional-planned", "wb-regional-accepted"],
+            }
+        )
+        skipped_status_overlay = skipped_status_result.wb_supply_overlay or {}
+        skipped_status_stock = skipped_status_overlay.get("stock_ff", {})
+        skipped_status_regional = skipped_status_overlay.get("wb_regional", {})
+        if skipped_status_stock.get("by_nm_id", {}).get(str(MAIN_NM_ID), {}).get("effective_stock_ff") != 120.0:
+            raise AssertionError(f"status 2/5 must not reduce regional available FF, got {skipped_status_stock}")
+        if skipped_status_regional.get("added_qty_total") != 0.0:
+            raise AssertionError(f"status 2/5 must not add regional projected stock, got {skipped_status_regional}")
+        if not any("Запланировано" in warning for warning in skipped_status_result.warnings) or not any(
+            "Принято" in warning for warning in skipped_status_result.warnings
+        ):
+            raise AssertionError(f"status 2/5 direct payload skips must be warned, got {skipped_status_result.warnings}")
+
+        _seed_wb_regional_overlay_fixture(
+            runtime,
             supply_id="wb-regional-provider-mapped",
             nm_id=MAIN_NM_ID,
             quantity=25.0,
@@ -485,6 +530,8 @@ def _seed_wb_regional_overlay_fixture(
     district_key: str,
     actual_warehouse_name: str = "",
     transit_warehouse_name: str = "",
+    status_id: int = 3,
+    status_label: str = "Отгрузка разрешена",
 ) -> None:
     warehouse_display = (
         f"{warehouse_name} → {transit_warehouse_name}"
@@ -499,8 +546,8 @@ def _seed_wb_regional_overlay_fixture(
                 "wb_supply_id": supply_id,
                 "preorder_id": "pre-" + supply_id,
                 "number_label": supply_id,
-                "status_id": 2,
-                "status_label": "Запланировано",
+                "status_id": status_id,
+                "status_label": status_label,
                 "warehouse_id": supply_id,
                 "warehouse_name": warehouse_name,
                 "planned_warehouse_id": supply_id,
@@ -523,7 +570,7 @@ def _seed_wb_regional_overlay_fixture(
                 "district_key": district_key,
                 "district_label_ru": "",
                 "quantity_for_size_filter": quantity,
-                "raw_list": {"supplyID": supply_id, "statusID": 2, "supplyDate": supply_date},
+                "raw_list": {"supplyID": supply_id, "statusID": status_id, "supplyDate": supply_date},
                 "raw_detail": {
                     "warehouseName": warehouse_name,
                     "actualWarehouseName": actual_warehouse_name,

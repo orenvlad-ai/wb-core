@@ -137,6 +137,8 @@ If composition changes before the first writeoff, the current cached composition
 
 Factory-order and WB regional calculations resolve `ff_stock_ledger` into the same row contract as the other sources. Negative balances are passed through with warnings instead of being treated as missing or fatal.
 
+For calculation-only `Учесть WB-поставки`, statuses `3/4/6` still add future inbound/projection evidence, but selected WB supplies do not reduce `stock_ff` again when `stock_ff_source=ff_stock_ledger`: the ledger balance is already current after WB auto writeoffs. Manual Excel and `1С / Фулфилмент` keep the older transfer behavior where selected WB supplies reduce available ФФ stock and add the same quantity to inbound/projection. Ledger auto writeoff remains broader than calculation overlay and still records statuses `3/4/5/6`, while statuses `1/2` and `Допринято` are skipped.
+
 The existing manual Excel and `1С / Фулфилмент` sources remain valid.
 
 # 8. Smokes
@@ -145,7 +147,7 @@ Targeted smoke:
 - `python3 apps/ff_stock_ledger_smoke.py`
 - `python3 apps/ff_stock_ledger_http_smoke.py`
 
-The smoke covers manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB status writeoff idempotency, statuses `1/2` skip, `Допринято` skip, factory-order ledger source and WB regional ledger source.
+The smoke covers manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB status writeoff idempotency, statuses `1/2` skip, `Допринято` skip, factory-order ledger source without duplicate selected-WB deduction, selected-WB inbound/projection for ledger source and WB regional ledger source.
 
 # 9. Explicit Non-Scope
 

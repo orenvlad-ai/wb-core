@@ -10,8 +10,8 @@ from packages.contracts.factory_order_supply import FactoryOrderInboundRow, Fact
 from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
 
 
-ELIGIBLE_WB_SUPPLY_STATUS_IDS = {2, 3, 4, 6}
-INELIGIBLE_WB_SUPPLY_STATUS_IDS = {1, 5}
+ELIGIBLE_WB_SUPPLY_STATUS_IDS = {3, 4, 6}
+INELIGIBLE_WB_SUPPLY_STATUS_IDS = {1, 2, 5}
 DISTRICT_UNMAPPED = "unmapped"
 WB_SUPPLY_OVERLAY_REQUEST_KEYS = (
     "selected_wb_supply_ids",
@@ -368,7 +368,7 @@ def build_wb_supply_overlay_options(
         normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
         status_id = _optional_int(normalized.get("status_id"))
         status_label = str(normalized.get("status_label") or _status_label(status_id))
-        if not _status_is_eligible(status_id, status_label):
+        if _record_is_doprinato(record, normalized) or not _status_is_eligible(status_id, status_label):
             excluded_status_count += 1
             continue
         options.append(_candidate_from_record(record, active_sku_map=active_sku_map, mapping=mapping))
@@ -519,6 +519,7 @@ def apply_stock_ff_overlay(
     stock_ff_rows: list[FactoryOrderStockFfRow],
     active_skus: list[tuple[int, str]],
     overlay: Mapping[str, Any],
+    deduct_selected_supplies: bool = True,
 ) -> tuple[list[FactoryOrderStockFfRow], dict[str, Any], tuple[str, ...]]:
     qty_by_nm = {int(nm_id): float(qty) for nm_id, qty in _numeric_items(overlay.get("qty_by_nm_id"))}
     stock_rows_by_nm = {row.nm_id: row for row in stock_ff_rows}
@@ -533,8 +534,12 @@ def apply_stock_ff_overlay(
         row = stock_rows_by_nm.get(int(nm_id))
         base_stock = float(row.stock_ff if row is not None else 0.0)
         selected_qty = float(qty_by_nm.get(int(nm_id), 0.0))
-        effective_stock = base_stock if selected_qty <= 0 else max(base_stock - selected_qty, 0.0)
-        over_reserved = max(selected_qty - base_stock, 0.0)
+        effective_stock = (
+            base_stock
+            if selected_qty <= 0 or not deduct_selected_supplies
+            else max(base_stock - selected_qty, 0.0)
+        )
+        over_reserved = max(selected_qty - base_stock, 0.0) if deduct_selected_supplies else 0.0
         total_base += base_stock
         total_selected += selected_qty
         total_effective += effective_stock
@@ -577,6 +582,7 @@ def apply_stock_ff_overlay(
         "total_selected_wb_supply_qty": total_selected,
         "total_effective_stock_ff": total_effective,
         "total_over_reserved_qty": total_over_reserved,
+        "stock_deduction_applied": bool(deduct_selected_supplies),
     }
     return effective_rows, diagnostics, tuple(warnings)
 
@@ -716,6 +722,8 @@ def _candidate_from_record(
     status_id = _optional_int(normalized.get("status_id"))
     status_label = str(normalized.get("status_label") or _status_label(status_id))
     disabled_reasons: list[str] = []
+    if _record_is_doprinato(record, normalized):
+        disabled_reasons.append("тип «Допринято» не учитывается")
     if not _status_is_eligible(status_id, status_label):
         disabled_reasons.append(_status_disabled_reason(status_id, status_label))
     if not selected_date:
@@ -962,20 +970,36 @@ def _collect_target_warehouse_names(
 
 
 def _status_is_eligible(status_id: int | None, label: str) -> bool:
-    if status_id in ELIGIBLE_WB_SUPPLY_STATUS_IDS:
-        return True
-    if status_id in INELIGIBLE_WB_SUPPLY_STATUS_IDS:
-        return False
-    normalized_label = _normalize_text(label)
-    return "отгруж" in normalized_label and "принят" not in normalized_label
+    del label
+    return status_id in ELIGIBLE_WB_SUPPLY_STATUS_IDS
 
 
 def _status_disabled_reason(status_id: int | None, label: str) -> str:
     if status_id == 1:
         return "статус «Не запланировано» не учитывается"
+    if status_id == 2:
+        return "статус «Запланировано» не учитывается: это бронь слота WB"
     if status_id == 5:
         return "статус «Принято» не учитывается"
     return "статус не входит в eligible WB-поставки: " + (label or _status_label(status_id))
+
+
+def _is_doprinato_supply(normalized: Mapping[str, Any]) -> bool:
+    virtual_type_id = _optional_int(_first_value(normalized, "virtual_type_id", "virtualTypeID"))
+    if virtual_type_id == 5:
+        return True
+    type_label = _normalize_text(_first_value(normalized, "type_label", "typeLabel"))
+    return type_label == "допринято"
+
+
+def _record_is_doprinato(record: Mapping[str, Any], normalized: Mapping[str, Any]) -> bool:
+    if _is_doprinato_supply(normalized):
+        return True
+    for key in ("raw_list", "raw_detail"):
+        raw = record.get(key)
+        if isinstance(raw, Mapping) and _is_doprinato_supply(raw):
+            return True
+    return False
 
 
 def _status_label(status_id: int | None) -> str:

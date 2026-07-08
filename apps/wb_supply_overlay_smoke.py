@@ -43,6 +43,15 @@ class FakeRuntime:
                 warehouse_name="Коледино",
                 supply_date="2026-04-20",
                 district_key="central",
+                raw_goods=[{"nmID": 101, "quantity": 30}],
+            ),
+            _record(
+                "s3-central",
+                status_id=3,
+                status_label="Отгрузка разрешена",
+                warehouse_name="Коледино",
+                supply_date="2026-04-20",
+                district_key="central",
                 raw_goods=[
                     {"nmID": 101, "quantity": 30},
                     {"nmID": 999, "quantity": 7},
@@ -96,8 +105,8 @@ class FakeRuntime:
             ),
             _record(
                 "s-no-goods",
-                status_id=2,
-                status_label="Запланировано",
+                status_id=3,
+                status_label="Отгрузка разрешена",
                 warehouse_name="Коледино",
                 supply_date="2026-04-25",
                 district_key="central",
@@ -105,12 +114,22 @@ class FakeRuntime:
             ),
             _record(
                 "s-no-usable",
-                status_id=2,
-                status_label="Запланировано",
+                status_id=3,
+                status_label="Отгрузка разрешена",
                 warehouse_name="Коледино",
                 supply_date="2026-04-26",
                 district_key="central",
                 raw_goods=[{"nmID": 999, "quantity": 20}],
+            ),
+            _record(
+                "s-dopr",
+                status_id=3,
+                status_label="Отгрузка разрешена",
+                warehouse_name="Коледино",
+                supply_date="2026-04-27",
+                district_key="central",
+                raw_goods=[{"nmID": 101, "quantity": 20}],
+                type_label="Допринято",
             ),
         ]
 
@@ -260,11 +279,13 @@ def _assert_overlay_selector_and_math() -> None:
     payload = build_wb_supply_overlay_options(runtime=runtime, active_skus=ACTIVE_SKUS)
     options = {item["supply_id"]: item for item in payload["options"]}
     eligible = {item["supply_id"] for item in payload["options"] if item["eligible_for_overlay"]}
-    if eligible != {"s2", "s3", "s6-unmapped"}:
+    if eligible != {"s3-central", "s3", "s6-unmapped"}:
         raise AssertionError(f"eligible statuses/composition/date set mismatch: {eligible}")
-    if "s1" in options or "s5" in options:
-        raise AssertionError(f"status 1/5 must not be returned to the calculation selector, got {options.keys()}")
-    if payload.get("summary", {}).get("excluded_by_status") != 2:
+    if {"s1", "s2", "s5", "s-dopr"} & set(options):
+        raise AssertionError(f"status 1/2/5 and Допринято must not be returned to the selector, got {options.keys()}")
+    if payload.get("eligible_status_ids") != [3, 4, 6]:
+        raise AssertionError(f"calculation overlay eligible status ids must be 3/4/6, got {payload.get('eligible_status_ids')}")
+    if payload.get("summary", {}).get("excluded_by_status") != 4:
         raise AssertionError(f"selector must count status-excluded rows, got {payload.get('summary')}")
     if "нет расчётной даты поставки" not in options["s4-no-date"]["disabled_reasons"]:
         raise AssertionError("no-date supplies must be disabled")
@@ -272,12 +293,12 @@ def _assert_overlay_selector_and_math() -> None:
         raise AssertionError("no-composition supplies must be disabled")
     if "нет usable active SKU quantity" not in options["s-no-usable"]["disabled_reasons"]:
         raise AssertionError("supplies without active SKU quantity must be disabled")
-    if {item["reason"] for item in options["s2"]["skipped_goods"]} != {"nm_id_not_active", "missing_nm_id"}:
-        raise AssertionError(f"unknown/missing nmId goods must be diagnosed, got {options['s2']['skipped_goods']}")
+    if {item["reason"] for item in options["s3-central"]["skipped_goods"]} != {"nm_id_not_active", "missing_nm_id"}:
+        raise AssertionError(f"unknown/missing nmId goods must be diagnosed, got {options['s3-central']['skipped_goods']}")
 
     overlay = build_selected_wb_supply_overlay(
         runtime=runtime,
-        selected_supply_ids=("s2", "s3", "s6-unmapped", "s1", "s4-no-date", "missing"),
+        selected_supply_ids=("s3-central", "s3", "s6-unmapped", "s2", "s5", "s1", "s4-no-date", "s-dopr", "missing"),
         active_skus=ACTIVE_SKUS,
     )
     if overlay["qty_by_nm_id"] != {"101": 35.0, "102": 50.0}:
@@ -300,6 +321,20 @@ def _assert_overlay_selector_and_math() -> None:
         raise AssertionError(f"selected WB qty must subtract from stock_ff with floor zero, got {effective_by_nm}")
     if stock_diagnostics["by_nm_id"]["101"]["over_reserved_qty"] != 15.0 or not stock_warnings:
         raise AssertionError(f"over-reserved diagnostics/warning missing: {stock_diagnostics}, {stock_warnings}")
+    if not stock_diagnostics["stock_deduction_applied"]:
+        raise AssertionError(f"default stock overlay must deduct selected WB supplies, got {stock_diagnostics}")
+
+    ledger_effective_rows, ledger_stock_diagnostics, ledger_stock_warnings = apply_stock_ff_overlay(
+        stock_ff_rows=stock_rows,
+        active_skus=ACTIVE_SKUS,
+        overlay=overlay,
+        deduct_selected_supplies=False,
+    )
+    ledger_effective_by_nm = {row.nm_id: row.stock_ff for row in ledger_effective_rows}
+    if ledger_effective_by_nm != {101: 20.0, 102: 60.0}:
+        raise AssertionError(f"ledger source must not deduct selected WB qty from stock_ff, got {ledger_effective_by_nm}")
+    if ledger_stock_diagnostics["stock_deduction_applied"] or ledger_stock_warnings:
+        raise AssertionError(f"ledger source must diagnose selected qty without over-reserve warnings, got {ledger_stock_diagnostics}, {ledger_stock_warnings}")
 
     regional_qty, regional_diagnostics, regional_warnings = regional_overlay_quantities(overlay=overlay)
     if regional_qty != {101: {"central": 30.0}, 102: {"volga": 50.0}}:
@@ -334,6 +369,8 @@ def _record(
     supply_date: str,
     district_key: str,
     raw_goods: list[dict[str, object]],
+    virtual_type_id: int | None = None,
+    type_label: str = "",
 ) -> dict[str, object]:
     normalized = {
         "supply_id": supply_id,
@@ -343,6 +380,8 @@ def _record(
         "number_label": supply_id,
         "status_id": status_id,
         "status_label": status_label,
+        "virtual_type_id": virtual_type_id,
+        "type_label": type_label,
         "warehouse_id": supply_id,
         "warehouse_name": warehouse_name,
         "warehouse_display": warehouse_name,

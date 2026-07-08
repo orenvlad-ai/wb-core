@@ -447,6 +447,7 @@ class FactoryOrderSupplyBlock:
             stock_ff_rows=stock_ff_rows,
             active_skus=active_skus,
             overlay=wb_supply_overlay,
+            deduct_selected_supplies=stock_ff_source != STOCK_FF_SOURCE_LEDGER,
         )
         (
             wb_inbound_ff_to_wb_rows,
@@ -484,6 +485,7 @@ class FactoryOrderSupplyBlock:
             )
         result_warnings = (
             result_warnings
+            + tuple(str(item) for item in wb_supply_overlay.get("warnings", []) if str(item or "").strip())
             + tuple(str(item) for item in ledger_stock_ff_state.get("warnings", []) if str(item or "").strip())
             + tuple(wb_stock_ff_warnings)
             + tuple(wb_factory_overlay_warnings)

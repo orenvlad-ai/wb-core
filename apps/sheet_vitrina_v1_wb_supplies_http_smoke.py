@@ -518,18 +518,18 @@ def main() -> None:
                 raise AssertionError(f"volga district preset filter must not use transit Казань for Коледино rows, got {volga_payload}")
 
             overlay_status, overlay_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH}")
-            if overlay_status != 200 or overlay_payload.get("eligible_status_ids") != [2, 3, 4, 6]:
+            if overlay_status != 200 or overlay_payload.get("eligible_status_ids") != [3, 4, 6]:
                 raise AssertionError(f"overlay options route must expose eligible status contract, got {overlay_status} {overlay_payload}")
             if [item.get("label") for item in overlay_payload.get("district_options", [])] != ["ЦФО", "СЗФО", "ПФО", "УрФО", "Юг+СК", "Сиб+ДВ"]:
                 raise AssertionError(f"overlay options route must expose six district presets, got {overlay_payload}")
             overlay_options = {item.get("supply_id"): item for item in overlay_payload.get("options", [])}
-            if not overlay_options.get("1002", {}).get("eligible_for_overlay"):
-                raise AssertionError(f"planned supply with date/composition/active SKU must be selectable, got {overlay_options.get('1002')}")
+            if "1002" in overlay_options:
+                raise AssertionError(f"status 2 planned supply must not be selectable for calculation overlay, got {overlay_options.get('1002')}")
             if overlay_options.get("1003", {}).get("district_key") != "central":
                 raise AssertionError(f"transit overlay option must use planned warehouse district, got {overlay_options.get('1003')}")
             if "1001" in overlay_options or "1005" in overlay_options:
                 raise AssertionError(f"status 1/5 supplies must not be returned to overlay selector, got {overlay_options.keys()}")
-            if overlay_payload.get("summary", {}).get("excluded_by_status") != 4:
+            if overlay_payload.get("summary", {}).get("excluded_by_status") != 5:
                 raise AssertionError(f"overlay selector must count status-excluded rows, got {overlay_payload.get('summary')}")
 
             sort_desc_status, sort_desc_payload = _get_json(
