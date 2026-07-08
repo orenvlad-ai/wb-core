@@ -3,10 +3,60 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence
 from urllib import error, parse, request as urllib_request
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
+
+
+SAFE_RESPONSE_HEADER_NAMES = {
+    "content-type",
+    "date",
+    "retry-after",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "x-rate-limit-limit",
+    "x-rate-limit-remaining",
+    "x-rate-limit-reset",
+}
+
+
+@dataclass(frozen=True)
+class WbPricesApiError(RuntimeError):
+    """Structured non-secret WB Prices API error."""
+
+    method: str
+    url: str
+    http_status: int | None = None
+    headers: Mapping[str, str] = field(default_factory=dict)
+    body_summary: str = ""
+    retry_after_seconds: int | None = None
+    transport_error: str = ""
+
+    def __post_init__(self) -> None:
+        RuntimeError.__init__(self, self._message())
+
+    def _message(self) -> str:
+        endpoint = _safe_endpoint(self.url)
+        if self.http_status is not None:
+            detail = f"WB Prices API {self.method} {endpoint} failed with status {self.http_status}"
+            if self.body_summary:
+                detail = f"{detail}: {self.body_summary}"
+            return detail
+        return f"WB Prices API {self.method} {endpoint} transport failed: {self.transport_error}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "endpoint": _safe_endpoint(self.url),
+            "http_status": self.http_status,
+            "headers": dict(self.headers),
+            "body_summary": self.body_summary,
+            "retry_after_seconds": self.retry_after_seconds,
+            "transport_error": self.transport_error,
+        }
 
 
 class WbPricesManagementSource(Protocol):
@@ -153,9 +203,47 @@ class HttpBackedWbPricesManagementSource:
                     return result
                 return {"data": parsed, "_http_status": int(response.status)}
         except error.HTTPError as exc:
-            body_text = exc.read().decode("utf-8")
-            raise RuntimeError(
-                f"WB Prices API {method} {url} failed with status {exc.code}: {body_text}"
+            body_text = exc.read().decode("utf-8", errors="replace")
+            headers = _safe_headers(dict(exc.headers.items()))
+            raise WbPricesApiError(
+                method=method,
+                url=url,
+                http_status=int(exc.code),
+                headers=headers,
+                body_summary=_body_summary(body_text),
+                retry_after_seconds=_retry_after_seconds(headers),
             ) from exc
         except error.URLError as exc:
-            raise RuntimeError(f"WB Prices API {method} {url} transport failed: {exc}") from exc
+            raise WbPricesApiError(method=method, url=url, transport_error=str(exc)) from exc
+
+
+def _safe_endpoint(url: str) -> str:
+    parsed = parse.urlparse(url)
+    path = parsed.path or "/"
+    return path if not parsed.query else f"{path}?{parsed.query}"
+
+
+def _safe_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        normalized = str(key).strip().lower()
+        if normalized in SAFE_RESPONSE_HEADER_NAMES or "ratelimit" in normalized or "rate-limit" in normalized:
+            result[str(key)] = str(value)
+    return result
+
+
+def _body_summary(body: str) -> str:
+    normalized = " ".join(str(body or "").replace("\x00", "").split())
+    return normalized[:800]
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> int | None:
+    for key, value in headers.items():
+        if str(key).strip().lower() != "retry-after":
+            continue
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return max(0, parsed)
+    return None

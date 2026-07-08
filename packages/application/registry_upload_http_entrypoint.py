@@ -31,6 +31,7 @@ from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import Shee
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitrinaV1FeedbacksComplaintsBlock
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.wb_prices_management import WbPricesManagementBlock
+from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -633,6 +634,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
         ads_block: SheetVitrinaV1AdsBlock | None = None,
         prices_block: WbPricesManagementBlock | None = None,
+        spp_tester_block: WbSppTesterBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -693,6 +695,12 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.prices_block = prices_block or WbPricesManagementBlock(
+            runtime=self.runtime,
+            runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.spp_tester_block = spp_tester_block or WbSppTesterBlock(
             runtime=self.runtime,
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
@@ -1149,6 +1157,21 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_prices_quarantine_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.prices_block.get_quarantine_goods(params or {})
+
+    def handle_sheet_prices_spp_test_baseline_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.spp_tester_block.build_baseline(params or {})
+
+    def handle_sheet_prices_spp_test_plan_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.spp_tester_block.build_plan(payload)
+
+    def handle_sheet_prices_spp_test_start_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+        return self.spp_tester_block.start(payload, actor=actor)
+
+    def handle_sheet_prices_spp_test_status_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.spp_tester_block.status(params or {})
+
+    def handle_sheet_prices_spp_test_restore_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+        return self.spp_tester_block.restore(payload, actor=actor)
 
     def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()

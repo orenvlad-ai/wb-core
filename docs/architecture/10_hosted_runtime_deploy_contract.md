@@ -37,6 +37,11 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/prices/upload-task/{upload_id}`
 - `GET /v1/sheet-vitrina-v1/prices/upload-task/{upload_id}/goods`
 - `GET /v1/sheet-vitrina-v1/prices/quarantine`
+- `GET /v1/sheet-vitrina-v1/prices/spp-test/baseline?nmID=...`
+- `POST /v1/sheet-vitrina-v1/prices/spp-test/plan`
+- `POST /v1/sheet-vitrina-v1/prices/spp-test/start`
+- `GET /v1/sheet-vitrina-v1/prices/spp-test/status`
+- `POST /v1/sheet-vitrina-v1/prices/spp-test/restore`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/job`
@@ -275,6 +280,7 @@ Hosted service должна предоставлять current repo entrypoint e
 - `WB_CORE_SUPPLIER_AUTH_PASSWORD_HASH` (optional supplier-only account)
 - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME` (optional)
 - `WB_PRICES_WRITE_ENABLED` (optional safety gate; default false)
+- `WB_SPP_TEST_ENABLED` (optional SPP tester safety gate; default false)
 
 Production WebCore auth is app-level session auth, not nginx basic auth. The password hash uses the entrypoint PBKDF2-HMAC format `pbkdf2_sha256$iterations$salt_b64$digest_b64`; plaintext credentials must stay outside Git/docs/logs and are handed to the owner separately. `WB_CORE_WEB_AUTH_REQUIRED=1` may be set to fail closed when auth env is incomplete. The env web principal is the bootstrap/fallback `admin`; runtime users are stored server-side in SQLite `sheet_vitrina_v1_users` and may have legacy technical roles `admin`, `operator`, `supply_operator` or `supplier`, but shell/API authorization is section-based through `allowed_sections` plus internal `manage_users`. Supplier env credentials are optional and remain backward-compatible supplier-only; when absent, supplier login is unavailable, but users with the `supply` section can access `Поставки -> От поставщика` through the shell.
 

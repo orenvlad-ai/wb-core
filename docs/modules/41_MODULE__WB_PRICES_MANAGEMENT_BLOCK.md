@@ -3,12 +3,14 @@ title: "Модуль: wb_prices_management_block"
 doc_id: "WB-CORE-MODULE-41-WB-PRICES-MANAGEMENT-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать канонический reference по operator-разделу `Цены` для чтения и guarded изменения цен/скидок через WB Prices and Discounts API."
-scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: compact current goods price/discount table, browser-local column visibility, read-only `SPP-прокси`/promo summary enrichment from existing server-owned read-side sources, inline price/discount edits, backend preview with diff/quarantine risk, env-guarded explicit upload task commit, upload status/goods error readback and quarantine read-only diagnostics. The module reuses canonical `WB_API_TOKEN`, keeps browser state transient and does not create a new business truth layer."
+purpose: "Зафиксировать канонический reference по operator-разделу `Цены` для чтения, guarded изменения цен/скидок и bounded `Проверка СПП` через WB Prices and Discounts API."
+scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: подтабы `Текущие цены` и `Проверка СПП`; compact current goods price/discount table, browser-local column visibility, read-only `SPP-прокси`/promo summary enrichment from existing server-owned read-side sources, inline price/discount edits, backend preview with diff/quarantine risk, env-guarded explicit upload task commit, upload status/goods error readback and quarantine read-only diagnostics; bounded server-owned SPP tester for one nmID with user-specified discounted-price range, safe-slow plan/start/status/restore routes, runtime lock/journal, fake-upstream smokes and staged baseline restore. The module reuses canonical `WB_API_TOKEN`, keeps browser state transient and does not create a new business truth layer."
 source_basis:
   - "packages/contracts/wb_prices_management.py"
+  - "packages/contracts/wb_spp_tester.py"
   - "packages/adapters/wb_prices_management.py"
   - "packages/application/wb_prices_management.py"
+  - "packages/application/wb_spp_tester.py"
   - "packages/application/registry_upload_http_entrypoint.py"
   - "packages/adapters/registry_upload_http_entrypoint.py"
   - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
@@ -30,9 +32,16 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/prices/upload-task/{upload_id}"
   - "GET /v1/sheet-vitrina-v1/prices/upload-task/{upload_id}/goods"
   - "GET /v1/sheet-vitrina-v1/prices/quarantine"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/baseline?nmID=..."
+  - "POST /v1/sheet-vitrina-v1/prices/spp-test/plan"
+  - "POST /v1/sheet-vitrina-v1/prices/spp-test/start"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/status"
+  - "POST /v1/sheet-vitrina-v1/prices/spp-test/restore"
 related_runners:
   - "apps/wb_prices_management_smoke.py"
   - "apps/wb_prices_management_browser_smoke.py"
+  - "apps/wb_spp_tester_smoke.py"
+  - "apps/wb_spp_tester_browser_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
   - "apps/registry_upload_http_entrypoint_public_routes_smoke.py"
 related_docs:
@@ -41,7 +50,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Prices table uses a simplified toolbar, browser-local column visibility, read-only `СПП` and `Акции` columns from existing `spp_proxy`/`promo_by_price` read-side data, and keeps the guarded manual preview+upload-task workflow controlled by `WB_PRICES_WRITE_ENABLED`. `Акции` now renders eligible-by-price count over global current promo count (`X / Y`), not per-SKU candidate count."
+update_note: "Prices table uses a simplified toolbar, browser-local column visibility, read-only `СПП` and `Акции` columns from existing `spp_proxy`/`promo_by_price` read-side data, and keeps the guarded manual preview+upload-task workflow controlled by `WB_PRICES_WRITE_ENABLED`. `Цены -> Проверка СПП` is now an in-scope production MVP: one nmID, user-specified discounted-price range, `WB_SPP_TEST_ENABLED` + `WB_PRICES_WRITE_ENABLED` guards, server-owned runtime job/audit, safe-slow measurements and staged baseline restore."
 ---
 
 # 1. Идентификатор и статус
@@ -49,11 +58,15 @@ update_note: "Prices table uses a simplified toolbar, browser-local column visib
 - `module_id`: `wb_prices_management_block`
 - `family`: `sheet_vitrina_v1/operator/official-api/prices`
 - `status_main`: active implementation target
-- `status_write_path`: guarded backend-only; disabled unless `WB_PRICES_WRITE_ENABLED=true`
+- `status_write_path`: guarded backend-only; ordinary price commit disabled unless `WB_PRICES_WRITE_ENABLED=true`; SPP tester live run/restore disabled unless both `WB_SPP_TEST_ENABLED=true` and `WB_PRICES_WRITE_ENABLED=true`
 
 # 2. Product Semantics
 
 Раздел `Цены` приближен по смыслу к WB Partners `Товары и цены -> Цена и скидка`, but it is not a pixel-perfect clone.
+
+Раздел имеет два подтаба:
+- `Текущие цены` — текущая таблица цен/скидок и ручной guarded upload-task workflow.
+- `Проверка СПП` — bounded live tool for one SKU/nmID that temporarily changes seller discounted price across an operator-specified range, measures anonymous public buyer price, calculates `SPP-прокси`, detects suspicious adjacent thresholds and restores baseline through staged proof.
 
 Top-level UI shows one row per active `nmID` where possible:
 - photo/name/our SKU/vendorCode/nmID;
@@ -67,6 +80,8 @@ Top-level UI shows one row per active `nmID` where possible:
 - inline draft price/discount controls.
 
 Browser state is only transient editing/modal state plus presentation-only column visibility in localStorage. Current price truth is read from WB via backend routes; SPP/promo values are read from current server-owned runtime/read-side sources; preview and upload status are server-owned readback surfaces.
+
+For `Проверка СПП`, browser state is only form draft and presentation. Baseline, plan, job status, measurements, thresholds, audit and restore proof are server-owned runtime state under `sheet_vitrina_v1_prices/spp_tests/`.
 
 # 3. WB Prices API Boundary
 
@@ -137,6 +152,24 @@ Commit route:
 - returns `uploadID` and `alreadyExists` when WB returns them;
 - treats upload response as task creation only, not final price application.
 
+SPP tester route:
+- accepts only one `nmID` per job;
+- rejects `editableSizePrice=true` and existing quarantine at baseline;
+- requires `WB_SPP_TEST_ENABLED=true`, `WB_PRICES_WRITE_ENABLED=true`, explicit live-change confirmation and `restore_baseline=true`;
+- changes only integer seller `price` while preserving current discount during measurements;
+- uses WB readback `discountedPrice` as actual seller price truth;
+- polls public anonymous buyer price slowly and excludes low-confidence/stale/429 points from threshold detection;
+- writes upload/readback/public/quarantine events to JSONL audit;
+- allows only one active/unrestored SPP test job at a time through runtime `current_job.json` lock/heartbeat.
+
+Restore:
+- is always required at the end of an MVP run;
+- uses direct restore only for small moves;
+- splits large downward discounted restore moves through bridge steps;
+- requires upload success, WB readback and quarantine absence for bridge/final steps;
+- final proof requires WB price/discount/discountedPrice equal baseline, quarantine absent and public buyer price/SPP captured;
+- failed restore or quarantine yields `manual_restore_required` and keeps emergency restore visible.
+
 # 6. Status Readback
 
 Status routes map WB upload task statuses to UI labels:
@@ -161,6 +194,7 @@ These files are operational evidence, not accepted business truth. Current price
 # 8. UI
 
 The `Цены` tab is a sibling section in the unified operator shell. It renders:
+- inner tabs `Текущие цены` / `Проверка СПП`;
 - dense current prices table;
 - search by nmID/vendorCode/name when available;
 - compact `Колонки` menu with browser-local visibility for optional columns;
@@ -172,11 +206,20 @@ The `Цены` tab is a sibling section in the unified operator shell. It render
 - uploadID/status polling after commit;
 - row-level WB error overlay after status/detail readback.
 
+`Проверка СПП` renders a minimal operator surface:
+- SKU/nmID selector sourced from current price rows / active registry;
+- baseline card with seller price, discount, discounted price, public buyer price, current `SPP-прокси`, quarantine and `editableSizePrice`;
+- inputs for discounted price min/max, threshold precision, max measurements, safe-slow mode, live-change confirmation and restore confirmation;
+- plan preview with route, estimated duration, request budget, restore route and live warning;
+- current job status, compact timeline, measurements table and threshold table.
+
 # 9. Verification
 
 Targeted local smokes:
 - `python3 apps/wb_prices_management_smoke.py`
 - `python3 apps/wb_prices_management_browser_smoke.py`
+- `python3 apps/wb_spp_tester_smoke.py`
+- `python3 apps/wb_spp_tester_browser_smoke.py`
 
 Regression smokes:
 - `python3 apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py`
@@ -184,14 +227,14 @@ Regression smokes:
 - `python3 apps/sheet_vitrina_v1_ads_browser_smoke.py`
 - `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`
 
-All prices management smokes use fake upstreams and must not call live `POST /api/v2/upload/task`.
+All prices management and SPP tester smokes use fake upstreams and must not call live `POST /api/v2/upload/task`.
 
 Public/live verification may open the page, read goods, run preview and inspect commit enabled/disabled state, but must not click live commit.
 
 # 10. Out Of Scope
 
 - Excel import/export of prices.
-- `Проверка СПП`, SPP threshold tester and scheduled SPP probes.
+- Scheduled SPP probes.
 - Automatic price experiments.
 - WB Club discount writes.
 - B2B wholesale discount writes.
