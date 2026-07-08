@@ -1826,6 +1826,11 @@
           ];
         }
         if (type === "bank_control_statement") {
+          const paymentOperations = Array.isArray(normalized.payment_operations) ? normalized.payment_operations : [];
+          const matchedOperation = normalized.matched_payment_operation || {};
+          const matchedOperationLabel = matchedOperation.row_index
+            ? ["строка " + matchedOperation.row_index, formatAmount(matchedOperation.payment_amount, matchedOperation.payment_currency_code || matchedOperation.contract_currency_code), matchedOperation.operation_date].filter(Boolean).join(" · ")
+            : "";
           return [
             { label: "УНК", value: normalized.unique_contract_registration_number || document.document_number },
             { label: "Дата ведомости", value: normalized.document_date || document.document_date },
@@ -1834,8 +1839,10 @@
             { label: "Контракт", value: [normalized.contract_number, normalized.contract_date ? "от " + normalized.contract_date : ""].filter(Boolean).join(" ") },
             { label: "Валюта контракта", value: [normalized.contract_currency, normalized.contract_currency_code].filter(Boolean).join(" / ") },
             { label: "Сумма контракта", value: formatAmount(normalized.contract_amount, normalized.contract_currency_code || normalized.contract_currency) },
+            { label: "Операций в ВБК", value: paymentOperations.length || normalized.payment_operations_count || "" },
             { label: "Дата операции", value: normalized.payment_operation_date },
             { label: "Сумма операции", value: formatAmount(normalized.payment_operation_amount, normalized.payment_operation_currency_code || normalized.contract_currency_code) },
+            { label: "Строка под invoice", value: matchedOperationLabel },
             { label: "Сальдо", value: formatAmount(normalized.calculated_balance, normalized.contract_currency_code || normalized.contract_currency) }
           ];
         }

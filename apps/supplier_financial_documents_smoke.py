@@ -342,6 +342,36 @@ Co., Ltd КИТАЙ 156
 04.06.2026 156 0.00 785087.50 0.00 0.00 0.00 0.00 -785087.50
 """
 
+BANK_CONTROL_MULTI_PAYMENT_TEXT = """
+Документ сформирован системой дистанционного банковского обслуживания Банка ВТБ (ПАО)
+ВЕДОМОСТЬ БАНКОВСКОГО КОНТРОЛЯ ПО КОНТРАКТУ
+Уникальный номер контракта 2 6 0 6 2 7 4 3 / 1 0 0 0 / 0 0 8 1 / 2 / 2 от 11.06.2026
+Раздел I. Учетная информация
+1.Сведения о резиденте
+Индивидуальный предприниматель ТЕСТОВ ВЛАДИСЛАВ РАДИКОВИЧ
+1.2 Адрес: Субъект Российской Федерации
+2.Реквизиты нерезидента (нерезидентов)
+Наименование
+Страна
+Признак аффилированного лица
+Наименование Код
+1 2 3 4
+Guangzhou Zifriend Communicate Technology
+Co., Ltd КИТАЙ 156
+3.Общие сведения о контракте
+№ Дата
+Валюта контракта
+Сумма контракта Дата завершения исполнения обязательств по
+контрактунаименование код
+1 2 3 4 5 6
+FR-001/26 08.06.2026 ЮАНЬ 156 БС 07.06.2027
+Раздел II. Сведения о платежах
+1 11.06.2026 2 11100 156 345 337,50 156 345337.50 07.06.2027 156 4
+2 30.06.2026 2 11100 156 59921.25 156 59921.25 31.07.2026 156 4
+Раздел V. Итоговые данные расчетов по контракту
+30.06.2026 156 0.00 405258.75 0.00 0.00 0.00 0.00 -405258.75
+"""
+
 BANK_TRANSFER_TEXT = """
 Филиал "Центральный" Банка ВТБ (ПАО)
 044525411
@@ -563,10 +593,47 @@ def _assert_parser_smoke() -> None:
         or bank_control.get("contract_amount") != 785087.5
         or bank_control.get("payment_operation_date") != "2026-05-13"
         or bank_control.get("payment_operation_amount") != 785087.5
+        or len(bank_control.get("payment_operations") or []) != 1
+        or (bank_control.get("payment_operations") or [{}])[0].get("operation_type_code") != "11100"
         or bank_control.get("calculated_balance") != -785087.5
         or bank_control_payload.get("errors")
     ):
         raise AssertionError(f"bank control parser fields mismatch: {bank_control_payload}")
+
+    bank_control_multi_payload = parse_financial_document_text(
+        BANK_CONTROL_MULTI_PAYMENT_TEXT,
+        filename="bank-control-multi-payment.txt",
+    )
+    bank_control_multi = bank_control_multi_payload["normalized_parse"]
+    payment_operations = bank_control_multi.get("payment_operations") or []
+    if (
+        bank_control_multi.get("document_type") != "bank_control_statement"
+        or bank_control_multi.get("unique_contract_registration_number") != "26062743/1000/0081/2/2"
+        or bank_control_multi.get("document_date") != "2026-06-11"
+        or bank_control_multi.get("contract_number") != "FR-001/26"
+        or bank_control_multi.get("contract_date") != "2026-06-08"
+        or bank_control_multi.get("contract_currency_code") != "156"
+        or bank_control_multi.get("contract_amount") is not None
+        or bank_control_multi.get("contract_amount_raw") != "БС"
+        or bank_control_multi.get("total_payment_operations_amount") != 405258.75
+        or bank_control_multi.get("total_amount") != 405258.75
+        or len(payment_operations) != 2
+        or payment_operations[0].get("row_index") != 1
+        or payment_operations[0].get("operation_date") != "2026-06-11"
+        or payment_operations[0].get("payment_direction") != "2"
+        or payment_operations[0].get("operation_type_code") != "11100"
+        or payment_operations[0].get("payment_currency_code") != "156"
+        or payment_operations[0].get("payment_amount") != 345337.5
+        or payment_operations[0].get("contract_currency_code") != "156"
+        or payment_operations[0].get("contract_amount") != 345337.5
+        or payment_operations[0].get("expected_repatriation_date") != "2027-06-07"
+        or payment_operations[1].get("row_index") != 2
+        or payment_operations[1].get("payment_amount") != 59921.25
+        or payment_operations[1].get("expected_repatriation_date") != "2026-07-31"
+        or bank_control_multi.get("calculated_balance") != -405258.75
+        or bank_control_multi_payload.get("errors")
+    ):
+        raise AssertionError(f"multi-payment bank control parser fields mismatch: {bank_control_multi_payload}")
 
     bank_transfer_payload = parse_financial_document_text(BANK_TRANSFER_TEXT, filename="bank-transfer.txt")
     _assert_bank_transfer_payload(bank_transfer_payload, label="bank transfer pypdf-layout")
@@ -576,6 +643,7 @@ def _assert_parser_smoke() -> None:
     )
     _assert_bank_transfer_payload(bank_transfer_pdftotext_payload, label="bank transfer pdftotext-layout")
     _assert_packing_list_parser_smoke()
+    _assert_bank_control_multi_payment_match_smoke(bank_control_multi_payload)
     _assert_order_document_verification_smoke(bank_transfer_payload)
     _assert_summary_metrics_smoke()
     _assert_missing_customs_data_summary_smoke()
@@ -686,6 +754,78 @@ def _assert_incomplete_quote_summary_smoke() -> None:
         raise AssertionError(f"incomplete quote match status mismatch: {match}")
     if summary.get("quote", {}).get("required_amounts_complete") is not False:
         raise AssertionError(f"summary must expose incomplete quote base: {summary}")
+
+
+def _assert_bank_control_multi_payment_match_smoke(bank_control_payload: dict[str, Any]) -> None:
+    document = {
+        "document_type": "bank_control_statement",
+        "parse_status": "parsed",
+        "normalized_parse": dict(bank_control_payload.get("normalized_parse") or {}),
+        "warnings": [],
+    }
+    first_invoice_match = apply_supplier_order_document_match(
+        document,
+        {
+            "contract_no": "FR-001/26",
+            "contract_date": "2026-06-08",
+            "invoice_no": "26GN462",
+            "invoice_date": "2026-06-09",
+            "invoice_amount_total": 345337.5,
+            "currency": "RMB/CNY",
+            "supplier_name": "Guangzhou Zifriend Communicate Technology Co., Ltd",
+        },
+    )
+    if (
+        first_invoice_match.get("order_match_status") != "matched"
+        or first_invoice_match.get("payment_operation_match_status") != "matched"
+        or first_invoice_match.get("matched_payment_operation_row_index") != 1
+        or first_invoice_match.get("parse_status") != "parsed"
+    ):
+        raise AssertionError(f"first invoice must match bank control payment row 1: {first_invoice_match}")
+    first_normalized = first_invoice_match.get("normalized_parse") or {}
+    first_operation = first_normalized.get("matched_payment_operation") or {}
+    if first_operation.get("payment_amount") != 345337.5 or first_operation.get("operation_date") != "2026-06-11":
+        raise AssertionError(f"first invoice matched operation payload mismatch: {first_invoice_match}")
+
+    second_invoice_match = apply_supplier_order_document_match(
+        document,
+        {
+            "contract_no": "FR-001/26",
+            "contract_date": "2026-06-08",
+            "invoice_no": "26GN463",
+            "invoice_date": "2026-06-29",
+            "invoice_amount_total": 59921.25,
+            "currency": "CNY",
+            "supplier_name": "Guangzhou Zifriend Communicate Technology Co., Ltd",
+        },
+    )
+    if (
+        second_invoice_match.get("order_match_status") != "matched"
+        or second_invoice_match.get("payment_operation_match_status") != "matched"
+        or second_invoice_match.get("matched_payment_operation_row_index") != 2
+        or second_invoice_match.get("parse_status") != "parsed"
+    ):
+        raise AssertionError(f"second invoice must match bank control payment row 2: {second_invoice_match}")
+
+    missing_payment_match = apply_supplier_order_document_match(
+        document,
+        {
+            "contract_no": "FR-001/26",
+            "contract_date": "2026-06-08",
+            "invoice_no": "26GN464",
+            "invoice_date": "2026-06-09",
+            "invoice_amount_total": 111111.0,
+            "currency": "CNY",
+            "supplier_name": "Guangzhou Zifriend Communicate Technology Co., Ltd",
+        },
+    )
+    if (
+        missing_payment_match.get("order_match_status") != "needs_review"
+        or missing_payment_match.get("payment_operation_match_status") != "needs_review"
+        or missing_payment_match.get("parse_status") != "needs_review"
+        or not any("нет платёжной строки" in warning for warning in missing_payment_match.get("warnings", []))
+    ):
+        raise AssertionError(f"missing bank control payment row must require review: {missing_payment_match}")
 
 
 def _assert_order_document_verification_smoke(bank_transfer_payload: dict[str, Any]) -> None:
