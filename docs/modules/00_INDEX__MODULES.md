@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–41`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–42`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -47,6 +47,7 @@ source_basis:
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
+  - "docs/modules/42_MODULE__WB_SPP_TESTER_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -93,8 +94,9 @@ related_docs:
   - "39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
   - "40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
+  - "42_MODULE__WB_SPP_TESTER_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под Google Sheets decommission, Fulfillment services contour, management proxy WB cost model and guarded WB prices management: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, module 40 owns our WB cost/proxy3 model, module 41 owns guarded WB Prices and Discounts management, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
+update_note: "Обновлён под Google Sheets decommission, Fulfillment services contour, management proxy WB cost model, guarded WB prices management and `Цены -> Проверка СПП`: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, module 40 owns our WB cost/proxy3 model, module 41 owns guarded WB Prices and Discounts management, module 42 owns bounded WB SPP tester with runtime lock/audit/staged restore, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
 
 # 1. Назначение индекса
@@ -111,7 +113,7 @@ update_note: "Обновлён под Google Sheets decommission, Fulfillment se
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–40`; текущая feature-линия добавляет module `41` for guarded WB Prices and Discounts management. Module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`, module `40` implements management proxy WB cost/proxy3 contour.
+На текущем `main` main-confirmed модульные блоки доходят до `01–40`; текущая feature-линия добавляет module `41` for guarded WB Prices and Discounts management and module `42` for bounded `Цены -> Проверка СПП`. Module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`, module `40` implements management proxy WB cost/proxy3 contour.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -142,6 +144,7 @@ update_note: "Обновлён под Google Sheets decommission, Fulfillment se
 - `wb_supplies_block` как active bounded read-only WB/FBW supplies registry: official WB Supplies API adapter, server-side runtime cache/state/run/warehouse tables, protected list/incremental sync/full backfill/sync-status/detail routes, targeted active-status reconciliation with hard-delete for confirmed removed active rows and preservation of accepted/historical rows, numeric `Основные от 250 шт` / `Мелкие до 249 шт` size filters without status overrides, checkbox multi-status filters with persisted UI state, route/warehouse/quantity/cost evidence normalization, empty-date-bottom supply-date server sort, year-aware date display, compact operator table and pagination without WB mutations.
 - `sheet_vitrina_v1_ads_operator_block` как active SKU-first operator-раздел `Реклама`: active SKU/nm_id universe from `registry_upload_config_v2`, enrichment from `sheet_vitrina_v1_nomenclature_items`, WB Promotion reverse index `nm_id -> campaigns[] -> placements[]`, read routes for SKU table/drawer, guarded backend-only bid `preview -> commit -> audit -> delayed refresh` workflow over one nm_id/advert_id/placement, and explicit no-bulk/no-auto-bidding/no-direct-frontend-PATCH boundary.
 - `wb_prices_management_block` как guarded operator-раздел `Цены`: WB Prices and Discounts read table, server-side preview diff/quarantine-risk calculation, `WB_PRICES_WRITE_ENABLED` commit guard, upload task status/detail/quarantine readback and fake-upstream smokes without live price mutations.
+- `wb_spp_tester_block` как bounded operator-инструмент `Цены -> Проверка СПП`: one-nmID safe-slow live SPP-proxy tester over user-specified discounted-price range, separate `WB_SPP_TEST_ENABLED` guard plus `WB_PRICES_WRITE_ENABLED`, runtime `current_job/jobs/audit`, stale/429 handling, high-confidence threshold detection and staged baseline restore with proof.
 - `webcore_data_mcp_block` как repo-implemented/live-gated read-only MCP gateway: standalone HTTP MCP server over SQLite `mode=ro` + `PRAGMA query_only=ON`, allowlisted business tools and separate `webcore.ops.read` diagnostics tools with `readOnlyHint: true`, OAuth 2.1/PKCE connector auth, bounded universal persisted `DATA_VITRINA` metric projections by key/Russian label/date/SKU, fixed-unit sanitized ops health/log/refresh/snapshot/deploy summaries, redaction/audit/limits, no arbitrary SQL/shell/SSH/sync/backfill/refresh/load/raw files/secrets and explicit revenue metric ambiguity handling.
 - `fulfillment_services_block` как server-owned operator supply contour: PNG-derived XLSX template, protected upload/list/detail/PDF routes, SQLite upload/line persistence, stable PDF-виза payment validation and approved-only `Поставки -> Wildberries` overlay without changing WB official evidence, 1C cost truth, ЕБД metric truth or final товарная себестоимость.
 
@@ -234,7 +237,8 @@ update_note: "Обновлён под Google Sheets decommission, Fulfillment se
 | `38_MODULE__WEBCORE_DATA_MCP_BLOCK.md` | `webcore_data_mcp_block` | `production-facing-integration/read-only-data-gateway` | repo-implemented/live-gated standalone WebCore Data MCP: read-only SQLite projections, strict allowlisted business tools plus `webcore.ops.read` diagnostics, `readOnlyHint`, OAuth 2.1/PKCE auth, universal persisted ready-snapshot metrics, fixed-unit sanitized health/log/refresh/snapshot/deploy summaries, redaction/audit/limits, explicit no SQL/shell/SSH/sync/backfill/refresh/load/raw files/secrets boundary |
 | `39_MODULE__FULFILLMENT_SERVICES_BLOCK.md` | `fulfillment_services_block` | `web/operator/supply/runtime-upload` | server-owned `Поставки -> Услуги ФФ`: PNG-derived XLSX template with `Склад`, protected XLSX upload/parser, `STORAGE` row allocation across ordinary matched WB supplies, SQLite upload/line persistence with soft-delete, accepted-only `Загруженные документы`, OK-only PDF-виза на оплату and active approved-only `Услуги ФФ` overlay in `Поставки -> Wildberries`; no final cost truth, no 1C/ЕБД truth switch |
 | `40_MODULE__OUR_WB_COST_MODEL_BLOCK.md` | `our_wb_cost_model` | `web/operator/supply/runtime-cost` | Management proxy WB cost contour: SKU-level FF cost layers on `actual_ff_acceptance_date`, direct-zero/transit classifier, WB supply cost layers, opening baseline `2026-07-01`, rolling weighted average state and vitrina metrics `Себестоимость WB наша`, `Доля подтверждённой себестоимости`, `proxy прибыль 3`; no strict FIFO/accounting truth and no proxy2 replacement |
-| `41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md` | `wb_prices_management_block` | `web/operator/official-api/prices` | Guarded `Цены` tab over WB Prices and Discounts API: active nmID price/discount table, inline drafts, server preview with quarantine risk, explicit env-gated upload-task commit, status/detail/quarantine readback; no size-price writes, WB Club writes, B2B writes or live writes in tests |
+| `41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md` | `wb_prices_management_block` | `web/operator/official-api/prices` | Guarded `Цены` tab over WB Prices and Discounts API: active nmID price/discount table, inline drafts, server preview with quarantine risk, explicit env-gated upload-task commit, status/detail/quarantine readback and SPP tester subtab boundary; no size-price writes, WB Club writes, B2B writes or live writes in tests |
+| `42_MODULE__WB_SPP_TESTER_BLOCK.md` | `wb_spp_tester_block` | `web/operator/official-api/prices/spp-test` | Bounded `Цены -> Проверка СПП` MVP: one-nmID safe-slow range tester with `WB_SPP_TEST_ENABLED` + `WB_PRICES_WRITE_ENABLED`, runtime lock/audit, stale/429 handling and staged baseline restore |
 
 # 5. Как эта папка используется дальше
 

@@ -3995,6 +3995,165 @@
       font-size: 12px;
     }
 
+    .prices-subtabs {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    .prices-subtab-button {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      color: var(--muted-strong);
+      padding: 7px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .prices-subtab-button.is-active {
+      border-color: var(--accent);
+      color: var(--text);
+      background: var(--panel-subtle);
+      font-weight: 600;
+    }
+
+    .prices-subpanel[hidden] {
+      display: none;
+    }
+
+    .prices-subpanel {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .spp-test-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .spp-test-card {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .spp-test-card h3 {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.25;
+    }
+
+    .spp-test-field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .spp-test-field {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+      color: var(--muted-strong);
+      font-size: 11px;
+    }
+
+    .spp-test-field strong {
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .spp-test-input-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .spp-test-input-row .input,
+    .spp-test-card .input,
+    .spp-test-card select {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .spp-test-checkbox {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      color: var(--muted-strong);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .spp-test-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .spp-test-warning {
+      margin: 0;
+      border: 1px solid rgba(245, 158, 11, 0.32);
+      border-radius: 6px;
+      background: var(--warning-bg);
+      color: var(--warning-text);
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+
+    .spp-test-main {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .spp-test-main-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .spp-test-main-head h3 {
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .spp-test-table {
+      width: 100%;
+      min-width: 980px;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 12px;
+    }
+
+    .spp-test-table th,
+    .spp-test-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .ads-workspace {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(360px, 42vw);
@@ -4352,6 +4511,12 @@
       .prices-actions .column-manager,
       .prices-actions .button {
         width: 100%;
+      }
+
+      .spp-test-summary-grid,
+      .spp-test-field-grid,
+      .spp-test-input-row {
+        grid-template-columns: minmax(0, 1fr);
       }
 
       .ads-fact-grid {
@@ -5135,24 +5300,136 @@
             <button class="button primary" type="button" data-prices-preview disabled>Сохранить изменения</button>
           </div>
         </div>
-        <p class="prices-guard" data-prices-guard>Проверяем server write guard…</p>
-        <p class="research-error" data-prices-error></p>
-        <div class="prices-table-shell">
-          <div class="prices-table-scroll">
-            <table class="prices-table" data-prices-table>
-              <thead data-prices-head>
-                <tr>
-                  <th style="width:260px">Товар</th>
-                  <th style="width:110px">nmID</th>
-                  <th style="width:180px">Редактирование</th>
-                </tr>
-              </thead>
-              <tbody data-prices-body>
-                <tr><td colspan="3">Загрузка…</td></tr>
-              </tbody>
-            </table>
-          </div>
+        <div class="prices-subtabs" role="tablist" aria-label="Цены">
+          <button class="prices-subtab-button is-active" type="button" data-prices-subtab="current" role="tab" aria-selected="true">Текущие цены</button>
+          <button class="prices-subtab-button" type="button" data-prices-subtab="spp-test" role="tab" aria-selected="false">Проверка СПП</button>
         </div>
+        <section class="prices-subpanel" data-prices-subpanel="current">
+          <p class="prices-guard" data-prices-guard>Проверяем server write guard…</p>
+          <p class="research-error" data-prices-error></p>
+          <div class="prices-table-shell">
+            <div class="prices-table-scroll">
+              <table class="prices-table" data-prices-table>
+                <thead data-prices-head>
+                  <tr>
+                    <th style="width:260px">Товар</th>
+                    <th style="width:110px">nmID</th>
+                    <th style="width:180px">Редактирование</th>
+                  </tr>
+                </thead>
+                <tbody data-prices-body>
+                  <tr><td colspan="3">Загрузка…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section class="prices-subpanel" data-prices-subpanel="spp-test" hidden>
+          <p class="spp-test-warning">Тест временно меняет live цену на WB. План, запуск, restore и результат сохраняются на сервере.</p>
+          <div class="spp-test-summary-grid">
+            <section class="spp-test-card">
+              <h3>SKU / nmID</h3>
+              <label class="spp-test-field">Товар
+                <select class="input" data-spp-test-nm>
+                  <option value="">Выберите SKU</option>
+                </select>
+              </label>
+              <div class="spp-test-field-grid" data-spp-test-product>
+                <span class="spp-test-field">Название<strong>—</strong></span>
+                <span class="spp-test-field">Наш SKU<strong>—</strong></span>
+                <span class="spp-test-field">nmID<strong>—</strong></span>
+                <span class="spp-test-field">vendorCode<strong>—</strong></span>
+              </div>
+            </section>
+            <section class="spp-test-card">
+              <h3>Baseline</h3>
+              <div class="spp-test-field-grid" data-spp-test-baseline>
+                <span class="spp-test-field">Цена<strong>—</strong></span>
+                <span class="spp-test-field">Скидка<strong>—</strong></span>
+                <span class="spp-test-field">Со скидкой<strong>—</strong></span>
+                <span class="spp-test-field">Цена покупателя<strong>—</strong></span>
+                <span class="spp-test-field">SPP-прокси<strong>—</strong></span>
+                <span class="spp-test-field">Карантин<strong>—</strong></span>
+                <span class="spp-test-field">Тип цены<strong>—</strong></span>
+              </div>
+            </section>
+            <section class="spp-test-card">
+              <h3>Тест</h3>
+              <div class="spp-test-input-row">
+                <label class="spp-test-field">Мин. цена со скидкой
+                  <input class="input" type="number" min="1" step="1" data-spp-test-input="range_min_discounted">
+                </label>
+                <label class="spp-test-field">Макс. цена со скидкой
+                  <input class="input" type="number" min="1" step="1" data-spp-test-input="range_max_discounted">
+                </label>
+              </div>
+              <div class="spp-test-input-row">
+                <label class="spp-test-field">Точность порога
+                  <input class="input" type="number" min="1" step="1" value="2" data-spp-test-input="precision_rub">
+                </label>
+                <label class="spp-test-field">Макс. измерений
+                  <input class="input" type="number" min="3" max="12" step="1" value="8" data-spp-test-input="max_measurements">
+                </label>
+              </div>
+              <span class="prices-badge">Безопасный медленный</span>
+              <label class="spp-test-checkbox"><input type="checkbox" data-spp-test-confirm-live>Понимаю, что тест временно меняет live цену на WB</label>
+              <label class="spp-test-checkbox"><input type="checkbox" checked data-spp-test-restore-baseline>После теста восстановить baseline</label>
+              <div class="spp-test-actions">
+                <button class="button secondary" type="button" data-spp-test-plan>Построить план</button>
+                <button class="button primary" type="button" data-spp-test-start disabled>Запустить</button>
+                <button class="button danger" type="button" data-spp-test-restore hidden>Восстановить baseline</button>
+              </div>
+              <p class="research-error" data-spp-test-error></p>
+            </section>
+          </div>
+          <div class="spp-test-main">
+            <div class="spp-test-main-head">
+              <h3 data-spp-test-status-title>План и измерения</h3>
+              <span class="prices-badge" data-spp-test-state>нет активного job</span>
+            </div>
+            <div class="spp-test-card" data-spp-test-plan-preview>
+              План ещё не построен.
+            </div>
+            <div class="prices-table-scroll">
+              <table class="spp-test-table">
+                <thead>
+                  <tr>
+                    <th style="width:110px">Цель</th>
+                    <th style="width:130px">WB факт</th>
+                    <th style="width:130px">Покупатель</th>
+                    <th style="width:110px">SPP-прокси</th>
+                    <th style="width:110px">Delta</th>
+                    <th style="width:110px">Уверенность</th>
+                    <th style="width:120px">uploadID</th>
+                    <th style="width:130px">Статус</th>
+                    <th style="width:180px">Примечание</th>
+                  </tr>
+                </thead>
+                <tbody data-spp-test-measurements>
+                  <tr><td colspan="9">Измерений пока нет.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="prices-table-scroll">
+              <table class="spp-test-table">
+                <thead>
+                  <tr>
+                    <th style="width:160px">Нижняя цена</th>
+                    <th style="width:160px">Верхняя цена</th>
+                    <th style="width:120px">SPP left</th>
+                    <th style="width:120px">SPP right</th>
+                    <th style="width:110px">Delta</th>
+                    <th style="width:130px">Ширина</th>
+                    <th style="width:130px">Уверенность</th>
+                  </tr>
+                </thead>
+                <tbody data-spp-test-thresholds>
+                  <tr><td colspan="7">Порогов пока нет.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
       </section>
     </section>
 
@@ -5502,6 +5779,22 @@
     const pricesModalNode = document.querySelector("[data-prices-modal]");
     const pricesModalBodyNode = document.querySelector("[data-prices-modal-body]");
     const pricesCommitButton = document.querySelector("[data-prices-commit]");
+    const pricesSubtabButtons = Array.from(document.querySelectorAll("[data-prices-subtab]"));
+    const pricesSubpanels = Array.from(document.querySelectorAll("[data-prices-subpanel]"));
+    const sppTestNmSelect = document.querySelector("[data-spp-test-nm]");
+    const sppTestProductNode = document.querySelector("[data-spp-test-product]");
+    const sppTestBaselineNode = document.querySelector("[data-spp-test-baseline]");
+    const sppTestPlanButton = document.querySelector("[data-spp-test-plan]");
+    const sppTestStartButton = document.querySelector("[data-spp-test-start]");
+    const sppTestRestoreButton = document.querySelector("[data-spp-test-restore]");
+    const sppTestConfirmLiveNode = document.querySelector("[data-spp-test-confirm-live]");
+    const sppTestRestoreBaselineNode = document.querySelector("[data-spp-test-restore-baseline]");
+    const sppTestErrorNode = document.querySelector("[data-spp-test-error]");
+    const sppTestPlanPreviewNode = document.querySelector("[data-spp-test-plan-preview]");
+    const sppTestMeasurementsNode = document.querySelector("[data-spp-test-measurements]");
+    const sppTestThresholdsNode = document.querySelector("[data-spp-test-thresholds]");
+    const sppTestStateNode = document.querySelector("[data-spp-test-state]");
+    const sppTestStatusTitleNode = document.querySelector("[data-spp-test-status-title]");
     const vitrinaAutoAddButton = document.querySelector("[data-vitrina-auto-add]");
     const vitrinaAutoSaveButton = document.querySelector("[data-vitrina-auto-save]");
     const vitrinaAutoMetaNode = document.querySelector("[data-vitrina-auto-schedule-meta]");
@@ -5954,6 +6247,7 @@
         commitError: ""
       },
       prices: {
+        activeSubtab: "current",
         loading: false,
         loaded: false,
         rows: [],
@@ -5971,7 +6265,21 @@
         preview: null,
         commitLoading: false,
         commitResult: null,
-        statusPollSequence: 0
+        statusPollSequence: 0,
+        sppTest: {
+          selectedNmId: "",
+          baselineLoading: false,
+          baseline: null,
+          planLoading: false,
+          plan: null,
+          startLoading: false,
+          restoring: false,
+          statusLoading: false,
+          job: null,
+          activeJob: null,
+          pollSequence: 0,
+          error: ""
+        }
       },
       vitrinaAuto: {
         loading: false,
@@ -6052,6 +6360,7 @@
     if (pricesPanelNode) {
       pricesPanelNode.addEventListener("input", handlePricesInput);
       pricesPanelNode.addEventListener("change", handlePricesInput);
+      pricesPanelNode.addEventListener("click", handlePricesPanelClick);
     }
     if (pricesModalNode) {
       pricesModalNode.addEventListener("click", handlePricesModalClick);
@@ -15852,6 +16161,8 @@
     function ensurePricesLoaded() {
       if (!state.prices.loaded && !state.prices.loading) {
         loadPricesGoods({force: false});
+      } else if (state.prices.activeSubtab === "spp-test") {
+        ensureSppTestReady();
       }
     }
 
@@ -15887,6 +16198,9 @@
       } finally {
         state.prices.loading = false;
         renderPricesTable();
+        if (state.prices.activeSubtab === "spp-test") {
+          renderSppTest();
+        }
       }
     }
 
@@ -15909,6 +16223,494 @@
       } catch (error) {
         // Quarantine is optional row diagnostics; list prices remains usable if this endpoint is unavailable.
       }
+    }
+
+    function handlePricesPanelClick(event) {
+      const subtab = event.target.closest("[data-prices-subtab]");
+      if (subtab) {
+        activatePricesSubtab(subtab.getAttribute("data-prices-subtab") || "current");
+        return;
+      }
+      if (event.target.closest("[data-spp-test-plan]")) {
+        buildSppTestPlan();
+        return;
+      }
+      if (event.target.closest("[data-spp-test-start]")) {
+        startSppTest();
+        return;
+      }
+      if (event.target.closest("[data-spp-test-restore]")) {
+        restoreSppTestBaseline();
+      }
+    }
+
+    function activatePricesSubtab(value) {
+      const normalized = value === "spp-test" ? "spp-test" : "current";
+      state.prices.activeSubtab = normalized;
+      syncPricesSubtabs();
+      if (normalized === "spp-test") {
+        ensureSppTestReady();
+      }
+    }
+
+    function syncPricesSubtabs() {
+      pricesSubtabButtons.forEach(function(button) {
+        const selected = String(button.getAttribute("data-prices-subtab") || "") === state.prices.activeSubtab;
+        button.classList.toggle("is-active", selected);
+        button.setAttribute("aria-selected", selected ? "true" : "false");
+      });
+      pricesSubpanels.forEach(function(panel) {
+        panel.hidden = String(panel.getAttribute("data-prices-subpanel") || "") !== state.prices.activeSubtab;
+      });
+    }
+
+    function ensureSppTestReady() {
+      renderSppTestSelector();
+      renderSppTest();
+      loadSppTestStatus({silent: true});
+    }
+
+    function renderSppTestSelector() {
+      if (!sppTestNmSelect) {
+        return;
+      }
+      const selected = String(state.prices.sppTest.selectedNmId || "");
+      const options = ['<option value="">Выберите SKU</option>'].concat((state.prices.rows || []).map(function(row) {
+        const nmId = String(row.nmID || "");
+        const title = row.title || row.displayName || row.vendorCode || ("nmID " + nmId);
+        const sku = row.ourSku ? " · " + row.ourSku : "";
+        return '<option value="' + escapeHtml(nmId) + '"' + (nmId === selected ? " selected" : "") + ">" + escapeHtml(title + " · " + nmId + sku) + "</option>";
+      }));
+      sppTestNmSelect.innerHTML = options.join("");
+    }
+
+    function selectedSppTestRow() {
+      const selected = String(state.prices.sppTest.selectedNmId || "");
+      if (!selected) {
+        return null;
+      }
+      return (state.prices.rows || []).find(function(row) {
+        return String(row.nmID || "") === selected;
+      }) || null;
+    }
+
+    async function loadSppBaseline(nmId) {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_baseline_path || !nmId) {
+        return;
+      }
+      state.prices.sppTest.baselineLoading = true;
+      state.prices.sppTest.error = "";
+      state.prices.sppTest.baseline = null;
+      state.prices.sppTest.plan = null;
+      renderSppTest();
+      try {
+        const url = new URL(WEB_VITRINA_CONFIG.prices_spp_test_baseline_path, window.location.origin);
+        url.searchParams.set("nmID", String(nmId));
+        const response = await fetch(url.toString(), {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from SPP baseline route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP baseline route returned " + response.status);
+        }
+        if (!payload || payload.contract_name !== "sheet_vitrina_v1_prices_spp_test_baseline") {
+          throw new Error("unexpected SPP baseline payload");
+        }
+        const baseline = payload.baseline || null;
+        if (baseline) {
+          baseline._writeEnabled = !!payload.write_enabled;
+          baseline._sppTestEnabled = !!payload.spp_test_enabled;
+        }
+        state.prices.sppTest.baseline = baseline;
+      } catch (error) {
+        state.prices.sppTest.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.baselineLoading = false;
+        renderSppTest();
+      }
+    }
+
+    async function loadSppTestStatus(options) {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_status_path || state.prices.sppTest.statusLoading) {
+        return;
+      }
+      state.prices.sppTest.statusLoading = true;
+      if (!options || !options.silent) {
+        renderSppTest();
+      }
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_status_path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from SPP status route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP status route returned " + response.status);
+        }
+        state.prices.sppTest.activeJob = payload.active_job || null;
+        state.prices.sppTest.job = payload.job || state.prices.sppTest.job;
+        pollSppTestIfActive();
+      } catch (error) {
+        if (!options || !options.silent) {
+          state.prices.sppTest.error = String(error && error.message ? error.message : error);
+        }
+      } finally {
+        state.prices.sppTest.statusLoading = false;
+        renderSppTest();
+      }
+    }
+
+    function collectSppTestPayload() {
+      const payload = {
+        nmID: Number(state.prices.sppTest.selectedNmId || 0),
+        mode: "safe_slow",
+        confirm_live_price_change: !!(sppTestConfirmLiveNode && sppTestConfirmLiveNode.checked),
+        restore_baseline: !!(sppTestRestoreBaselineNode && sppTestRestoreBaselineNode.checked)
+      };
+      document.querySelectorAll("[data-spp-test-input]").forEach(function(input) {
+        payload[input.getAttribute("data-spp-test-input")] = String(input.value || "").trim();
+      });
+      return payload;
+    }
+
+    async function buildSppTestPlan() {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_plan_path || state.prices.sppTest.planLoading) {
+        return;
+      }
+      state.prices.sppTest.planLoading = true;
+      state.prices.sppTest.error = "";
+      renderSppTest();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_plan_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(collectSppTestPayload())
+        });
+        const payload = await readJsonResponse(response, "non-json response from SPP plan route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP plan route returned " + response.status);
+        }
+        state.prices.sppTest.plan = payload.plan || null;
+        state.prices.sppTest.activeJob = payload.active_job || null;
+      } catch (error) {
+        state.prices.sppTest.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.planLoading = false;
+        renderSppTest();
+      }
+    }
+
+    async function startSppTest() {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_start_path || state.prices.sppTest.startLoading || !sppTestCanStart()) {
+        return;
+      }
+      state.prices.sppTest.startLoading = true;
+      state.prices.sppTest.error = "";
+      renderSppTest();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_start_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(collectSppTestPayload())
+        });
+        const payload = await readJsonResponse(response, "non-json response from SPP start route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP start route returned " + response.status);
+        }
+        state.prices.sppTest.job = payload.job || null;
+        pollSppTestIfActive(true);
+      } catch (error) {
+        state.prices.sppTest.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.startLoading = false;
+        renderSppTest();
+      }
+    }
+
+    async function restoreSppTestBaseline() {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_restore_path || state.prices.sppTest.restoring) {
+        return;
+      }
+      const job = state.prices.sppTest.job || state.prices.sppTest.activeJob || {};
+      state.prices.sppTest.restoring = true;
+      state.prices.sppTest.error = "";
+      renderSppTest();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_restore_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({job_id: job.job_id || "", confirm_restore: true})
+        });
+        const payload = await readJsonResponse(response, "non-json response from SPP restore route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP restore route returned " + response.status);
+        }
+        state.prices.sppTest.job = payload.job || state.prices.sppTest.job;
+      } catch (error) {
+        state.prices.sppTest.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.restoring = false;
+        renderSppTest();
+      }
+    }
+
+    function pollSppTestIfActive(force) {
+      const job = state.prices.sppTest.job || {};
+      const status = String(job.status || "");
+      const active = ["planning", "measuring", "cooldown", "restoring", "running"].indexOf(status) !== -1;
+      if (!active && !force) {
+        return;
+      }
+      const pollId = ++state.prices.sppTest.pollSequence;
+      window.setTimeout(async function() {
+        if (pollId !== state.prices.sppTest.pollSequence) {
+          return;
+        }
+        await loadSppTestStatus({silent: true});
+      }, force ? 1200 : 6000);
+    }
+
+    function sppTestCanStart() {
+      const baseline = state.prices.sppTest.baseline || {};
+      const activeJob = state.prices.sppTest.activeJob || {};
+      const blockingStatus = ["planning", "measuring", "cooldown", "restoring", "manual_restore_required"].indexOf(String(activeJob.status || "")) !== -1;
+      return !!(
+        state.prices.sppTest.plan
+        && baseline.can_start !== false
+        && baseline._writeEnabled
+        && baseline._sppTestEnabled
+        && sppTestConfirmLiveNode
+        && sppTestConfirmLiveNode.checked
+        && sppTestRestoreBaselineNode
+        && sppTestRestoreBaselineNode.checked
+        && !blockingStatus
+      );
+    }
+
+    function renderSppTest() {
+      syncPricesSubtabs();
+      renderSppTestSelector();
+      const selectedRow = selectedSppTestRow();
+      if (sppTestProductNode) {
+        sppTestProductNode.innerHTML = [
+          sppTestFact("Название", selectedRow ? (selectedRow.title || selectedRow.displayName || "—") : "—"),
+          sppTestFact("Наш SKU", selectedRow ? (selectedRow.ourSku || "—") : "—"),
+          sppTestFact("nmID", selectedRow ? (selectedRow.nmID || "—") : "—"),
+          sppTestFact("vendorCode", selectedRow ? (selectedRow.vendorCode || "—") : "—")
+        ].join("");
+      }
+      const baseline = state.prices.sppTest.baseline || null;
+      if (sppTestBaselineNode) {
+        if (state.prices.sppTest.baselineLoading) {
+          sppTestBaselineNode.innerHTML = '<span class="spp-test-field">Baseline<strong>Загрузка…</strong></span>';
+        } else if (!baseline) {
+          sppTestBaselineNode.innerHTML = '<span class="spp-test-field">Baseline<strong>—</strong></span>';
+        } else {
+          sppTestBaselineNode.innerHTML = [
+            sppTestFact("Цена", pricesMoney(baseline.price, baseline.currencyIsoCode4217 || "RUB")),
+            sppTestFact("Скидка", pricesDiscount(baseline.discount)),
+            sppTestFact("Со скидкой", pricesMoney(baseline.discountedPrice, baseline.currencyIsoCode4217 || "RUB")),
+            sppTestFact("Цена покупателя", pricesMoney(baseline.publicBuyerPrice, "RUB")),
+            sppTestFact("SPP-прокси", baseline.sppProxyLabel || "н/д"),
+            sppTestFact("Карантин", baseline.quarantine && baseline.quarantine.is_quarantined ? "есть" : "нет"),
+            sppTestFact("Тип цены", baseline.editableSizePriceLabel || "—")
+          ].join("");
+        }
+      }
+      if (sppTestErrorNode) {
+        sppTestErrorNode.textContent = state.prices.sppTest.error || "";
+      }
+      if (sppTestPlanButton) {
+        sppTestPlanButton.disabled = state.prices.sppTest.planLoading || !state.prices.sppTest.selectedNmId;
+        sppTestPlanButton.textContent = state.prices.sppTest.planLoading ? "План…" : "Построить план";
+      }
+      if (sppTestStartButton) {
+        sppTestStartButton.disabled = state.prices.sppTest.startLoading || !sppTestCanStart();
+        sppTestStartButton.textContent = state.prices.sppTest.startLoading ? "Запуск…" : "Запустить";
+      }
+      renderSppRestoreButton();
+      renderSppPlanPreview();
+      renderSppJobTables();
+    }
+
+    function renderSppRestoreButton() {
+      if (!sppTestRestoreButton) {
+        return;
+      }
+      const job = state.prices.sppTest.job || state.prices.sppTest.activeJob || {};
+      const status = String(job.status || "");
+      const visible = ["planning", "measuring", "cooldown", "restoring", "failed", "manual_restore_required"].indexOf(status) !== -1;
+      sppTestRestoreButton.hidden = !visible;
+      sppTestRestoreButton.disabled = state.prices.sppTest.restoring || !visible;
+      sppTestRestoreButton.textContent = state.prices.sppTest.restoring ? "Restore…" : "Восстановить baseline";
+    }
+
+    function renderSppPlanPreview() {
+      if (!sppTestPlanPreviewNode) {
+        return;
+      }
+      const plan = state.prices.sppTest.plan;
+      const job = state.prices.sppTest.job;
+      if (!plan && !job) {
+        sppTestPlanPreviewNode.innerHTML = "План ещё не построен.";
+        return;
+      }
+      const currentPlan = plan || (job && job.plan) || {};
+      const route = (currentPlan.initial_points || []).map(function(point) {
+        return pricesMoney(point.target_discounted_price, "RUB") + " · " + valueOrDash(point.kind);
+      }).join(" → ");
+      const requestBudget = currentPlan.request_budget || {};
+      const warnings = (currentPlan.warnings || []).join(", ");
+      const jobLine = job ? ('<div class="research-result-note">job ' + escapeHtml(job.job_id || "—") + ' · ' + escapeHtml(sppStatusLabel(job.status)) + ' · ' + escapeHtml(job.result_status || "—") + "</div>") : "";
+      sppTestPlanPreviewNode.innerHTML = [
+        '<div class="spp-test-field-grid">',
+        sppTestFact("Маршрут", route || "—"),
+        sppTestFact("Оценка", formatDurationSeconds(currentPlan.estimated_duration_seconds || 0)),
+        sppTestFact("WB uploads", requestBudget.wb_uploads || "—"),
+        sppTestFact("Public reads", requestBudget.public_reads || "—"),
+        sppTestFact("Restore", "staged baseline proof"),
+        sppTestFact("Риск", warnings || "live test"),
+        "</div>",
+        jobLine,
+        renderSppTimeline(job)
+      ].join("");
+    }
+
+    function renderSppTimeline(job) {
+      if (!job || !Array.isArray(job.timeline) || !job.timeline.length) {
+        return "";
+      }
+      return '<div class="research-result-note">' + job.timeline.slice(-5).map(function(item) {
+        return escapeHtml(sppStatusLabel(item.status) + ": " + (item.note || ""));
+      }).join(" · ") + "</div>";
+    }
+
+    function renderSppJobTables() {
+      const job = state.prices.sppTest.job || {};
+      if (sppTestStateNode) {
+        sppTestStateNode.textContent = sppStatusLabel(job.status || (state.prices.sppTest.activeJob && state.prices.sppTest.activeJob.status) || "no_job");
+        sppTestStateNode.className = "prices-badge " + sppStatusTone(job.status || "");
+      }
+      if (sppTestStatusTitleNode) {
+        sppTestStatusTitleNode.textContent = job.result_status ? ("Результат: " + sppResultLabel(job.result_status)) : "План и измерения";
+      }
+      if (sppTestMeasurementsNode) {
+        const rows = Array.isArray(job.measurements) ? job.measurements : [];
+        if (!rows.length) {
+          sppTestMeasurementsNode.innerHTML = '<tr><td colspan="9">Измерений пока нет.</td></tr>';
+        } else {
+          sppTestMeasurementsNode.innerHTML = rows.map(function(row) {
+            return [
+              "<tr>",
+              "<td>" + escapeHtml(pricesMoney(row.target_discounted_price, "RUB")) + "</td>",
+              "<td>" + escapeHtml(pricesMoney(row.actual_wb_discounted_price, "RUB")) + "</td>",
+              "<td>" + escapeHtml(pricesMoney(row.public_buyer_price, "RUB")) + "</td>",
+              "<td>" + escapeHtml(formatRatioPercent(row.spp_proxy)) + "</td>",
+              "<td>" + escapeHtml(formatRatioPercent(row.delta_vs_previous_high_confidence)) + "</td>",
+              "<td>" + escapeHtml(valueOrDash(row.confidence)) + "</td>",
+              "<td>" + escapeHtml(valueOrDash(row.uploadID)) + "</td>",
+              '<td><span class="prices-badge ' + sppPointTone(row.status) + '">' + escapeHtml(sppPointStatusLabel(row.status)) + "</span></td>",
+              '<td title="' + escapeHtml(row.note || "") + '">' + escapeHtml(valueOrDash(row.note)) + "</td>",
+              "</tr>"
+            ].join("");
+          }).join("");
+        }
+      }
+      if (sppTestThresholdsNode) {
+        const thresholds = Array.isArray(job.thresholds) ? job.thresholds : [];
+        if (!thresholds.length) {
+          sppTestThresholdsNode.innerHTML = '<tr><td colspan="7">Порогов пока нет.</td></tr>';
+        } else {
+          sppTestThresholdsNode.innerHTML = thresholds.map(function(row) {
+            return [
+              "<tr>",
+              "<td>" + escapeHtml(pricesMoney(row.lower_actual_discounted_price, "RUB")) + "</td>",
+              "<td>" + escapeHtml(pricesMoney(row.upper_actual_discounted_price, "RUB")) + "</td>",
+              "<td>" + escapeHtml(formatRatioPercent(row.spp_left)) + "</td>",
+              "<td>" + escapeHtml(formatRatioPercent(row.spp_right)) + "</td>",
+              "<td>" + escapeHtml(formatRatioPercent(row.delta)) + "</td>",
+              "<td>" + escapeHtml(pricesMoney(row.bracket_width, "RUB")) + "</td>",
+              "<td>" + escapeHtml(valueOrDash(row.confidence)) + "</td>",
+              "</tr>"
+            ].join("");
+          }).join("");
+        }
+      }
+    }
+
+    function sppTestFact(label, value) {
+      return '<span class="spp-test-field">' + escapeHtml(label) + '<strong title="' + escapeHtml(valueOrDash(value)) + '">' + escapeHtml(valueOrDash(value)) + "</strong></span>";
+    }
+
+    function formatRatioPercent(value) {
+      if (value === null || value === undefined || value === "") {
+        return "—";
+      }
+      const numberValue = Number(value);
+      if (!Number.isFinite(numberValue)) {
+        return "—";
+      }
+      return formatNumber(numberValue * 100, Math.abs(numberValue) < 0.1 ? 2 : 1, true) + "%";
+    }
+
+    function formatDurationSeconds(value) {
+      const seconds = Number(value || 0);
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        return "—";
+      }
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 90) {
+        return String(minutes) + " мин";
+      }
+      return String(Math.round(minutes / 60 * 10) / 10) + " ч";
+    }
+
+    function sppStatusLabel(value) {
+      const normalized = String(value || "");
+      if (normalized === "planning") return "планирование";
+      if (normalized === "measuring") return "измерение";
+      if (normalized === "cooldown") return "пауза";
+      if (normalized === "restoring") return "restore";
+      if (normalized === "complete") return "готово";
+      if (normalized === "manual_restore_required") return "нужен restore";
+      if (normalized === "failed") return "ошибка";
+      if (normalized === "no_job") return "нет active job";
+      return normalized || "—";
+    }
+
+    function sppResultLabel(value) {
+      const normalized = String(value || "");
+      if (normalized === "threshold_detected") return "порог найден";
+      if (normalized === "threshold_not_detected") return "порог не найден";
+      if (normalized === "inconclusive") return "неубедительно";
+      if (normalized === "manual_restore_required") return "нужен restore";
+      return normalized || "—";
+    }
+
+    function sppStatusTone(value) {
+      const normalized = String(value || "");
+      if (normalized === "manual_restore_required" || normalized === "failed") return "error";
+      if (normalized === "cooldown" || normalized === "restoring") return "warning";
+      if (normalized === "complete") return "success";
+      return "";
+    }
+
+    function sppPointStatusLabel(value) {
+      const normalized = String(value || "");
+      if (normalized === "ok") return "ok";
+      if (normalized === "stale_public_price") return "stale";
+      if (normalized === "public_429") return "429";
+      if (normalized === "rate_limited_stop") return "429 stop";
+      if (normalized === "quarantine_detected") return "карантин";
+      if (normalized === "readback_mismatch") return "readback";
+      if (normalized === "upload_not_success") return "upload";
+      return normalized || "—";
+    }
+
+    function sppPointTone(value) {
+      const normalized = String(value || "");
+      if (normalized === "ok") return "success";
+      if (normalized === "stale_public_price" || normalized === "public_429" || normalized === "rate_limited_stop" || normalized === "quarantine_detected") return "warning";
+      if (normalized && normalized !== "started") return "error";
+      return "";
     }
 
     function pricesColumnById(columnId) {
@@ -16238,6 +17040,23 @@
     function handlePricesInput(event) {
       const target = event.target;
       if (!target) {
+        return;
+      }
+      if (target === sppTestNmSelect) {
+        const nmId = String(target.value || "");
+        state.prices.sppTest.selectedNmId = nmId;
+        state.prices.sppTest.plan = null;
+        state.prices.sppTest.job = null;
+        state.prices.sppTest.error = "";
+        renderSppTest();
+        if (nmId) {
+          loadSppBaseline(nmId);
+        }
+        return;
+      }
+      if (target.getAttribute("data-spp-test-input") || target === sppTestConfirmLiveNode || target === sppTestRestoreBaselineNode) {
+        state.prices.sppTest.plan = null;
+        renderSppTest();
         return;
       }
       if (target === pricesSearchNode) {
