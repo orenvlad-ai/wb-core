@@ -372,6 +372,86 @@ FR-001/26 08.06.2026 ЮАНЬ 156 БС 07.06.2027
 30.06.2026 156 0.00 405258.75 0.00 0.00 0.00 0.00 -405258.75
 """
 
+BANK_CONTROL_MULTI_PAYMENT_COLUMNAR_TEXT = """
+Документ сформирован системой дистанционного банковского обслуживания Банка ВТБ (ПАО)
+ВЕДОМОСТЬ БАНКОВСКОГО КОНТРОЛЯ ПО КОНТРАКТУ
+Уникальный номер контракта 2 6 0 6 2 7 4 3 / 1 0 0 0 / 0 0 8 1 / 2 / 2 от 11.06.2026
+Раздел I. Учетная информация
+1.Сведения о резиденте
+Индивидуальный предприниматель ТЕСТОВ ВЛАДИСЛАВ РАДИКОВИЧ
+1.2 Адрес: Субъект Российской Федерации
+2.Реквизиты нерезидента (нерезидентов)
+Наименование
+Страна
+Признак аффилированного лица
+Наименование Код
+1 2 3 4
+Guangzhou Zifriend Communicate Technology
+Co., Ltd КИТАЙ 156
+3.Общие сведения о контракте
+№ Дата
+Валюта контракта
+Сумма контракта Дата завершения исполнения обязательств по
+контрактунаименование код
+1 2 3 4 5 6
+FR-001/26 08.06.2026 ЮАНЬ 156 БС 07.06.2027
+\f
+                    2
+                                        1
+                                                            1
+                                                            № п/п
+
+                    6
+                                        6
+                                                            2
+                                                            Дата операции
+
+                    30.06.202
+                                        11.06.202
+
+                    2
+                                        2
+                                                            3
+                                                            Направление (признак) платежа
+
+                                                            4
+                                                            Код вида операции
+                    11100
+                                        11100
+
+                                                            5
+                                                            код валюты
+                    156
+                                        156
+
+                                                            6
+                                                            сумма
+                    59921.25
+                                        345337.50
+
+                                                            7
+                                                            код валюты
+                    156
+                                        156
+
+                                                            8
+                                                            сумма
+                    59921.25
+                                        345337.50
+
+                                                            9
+                                                            Ожидаемые сроки репатриации
+                    26
+                                        27
+                    31.07.20
+                                        07.06.20
+
+                                                            Раздел II. Сведения о платежах
+Раздел III. Сведения о подтверждающих документах
+Раздел V. Итоговые данные расчетов по контракту
+30.06.2026 156 0.00 405258.75 0.00 0.00 0.00 0.00 -405258.75
+"""
+
 BANK_TRANSFER_TEXT = """
 Филиал "Центральный" Банка ВТБ (ПАО)
 044525411
@@ -634,6 +714,27 @@ def _assert_parser_smoke() -> None:
         or bank_control_multi_payload.get("errors")
     ):
         raise AssertionError(f"multi-payment bank control parser fields mismatch: {bank_control_multi_payload}")
+
+    bank_control_columnar_payload = parse_financial_document_text(
+        BANK_CONTROL_MULTI_PAYMENT_COLUMNAR_TEXT,
+        filename="bank-control-multi-payment-columnar.txt",
+    )
+    bank_control_columnar = bank_control_columnar_payload["normalized_parse"]
+    columnar_payment_operations = bank_control_columnar.get("payment_operations") or []
+    if (
+        len(columnar_payment_operations) != 2
+        or columnar_payment_operations[0].get("row_index") != 1
+        or columnar_payment_operations[0].get("operation_date") != "2026-06-11"
+        or columnar_payment_operations[0].get("payment_amount") != 345337.5
+        or columnar_payment_operations[0].get("expected_repatriation_date") != "2027-06-07"
+        or columnar_payment_operations[1].get("row_index") != 2
+        or columnar_payment_operations[1].get("operation_date") != "2026-06-30"
+        or columnar_payment_operations[1].get("payment_amount") != 59921.25
+        or columnar_payment_operations[1].get("expected_repatriation_date") != "2026-07-31"
+        or bank_control_columnar.get("total_payment_operations_amount") != 405258.75
+        or bank_control_columnar_payload.get("errors")
+    ):
+        raise AssertionError(f"columnar bank control parser fields mismatch: {bank_control_columnar_payload}")
 
     bank_transfer_payload = parse_financial_document_text(BANK_TRANSFER_TEXT, filename="bank-transfer.txt")
     _assert_bank_transfer_payload(bank_transfer_payload, label="bank transfer pypdf-layout")
