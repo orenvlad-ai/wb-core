@@ -32,6 +32,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypointConfig,
     build_registry_upload_http_server,
 )
+from packages.contracts.supplier_financial_documents import FINANCIAL_DOCUMENT_PARSER_VERSION  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.supplier_financial_documents import (  # noqa: E402
@@ -735,6 +736,7 @@ def _assert_parser_smoke() -> None:
         or bank_control_columnar_payload.get("errors")
     ):
         raise AssertionError(f"columnar bank control parser fields mismatch: {bank_control_columnar_payload}")
+    _assert_bank_control_saved_parse_refresh_smoke(bank_control_columnar)
 
     bank_transfer_payload = parse_financial_document_text(BANK_TRANSFER_TEXT, filename="bank-transfer.txt")
     _assert_bank_transfer_payload(bank_transfer_payload, label="bank transfer pypdf-layout")
@@ -753,6 +755,29 @@ def _assert_parser_smoke() -> None:
     _assert_registry_lead_time_rows_smoke()
     _assert_approx_landed_cost_summary_smoke()
     _assert_incomplete_quote_summary_smoke()
+
+
+def _assert_bank_control_saved_parse_refresh_smoke(bank_control: dict[str, Any]) -> None:
+    block = SupplierFinancialDocumentsBlock.__new__(SupplierFinancialDocumentsBlock)
+    current_document = {
+        "document_type": "bank_control_statement",
+        "parse_status": "parsed",
+        "stored_file_path": "/tmp/vbc.pdf",
+        "parser_version": FINANCIAL_DOCUMENT_PARSER_VERSION,
+        "normalized_parse": bank_control,
+    }
+    if block._saved_document_needs_parse_refresh(current_document):  # noqa: SLF001
+        raise AssertionError("current bank control parser version should not force refresh")
+    stale_document = {
+        **current_document,
+        "parser_version": "supplier_financial_document_parser_v3",
+        "normalized_parse": {
+            **bank_control,
+            "payment_operations": [],
+        },
+    }
+    if not block._saved_document_needs_parse_refresh(stale_document):  # noqa: SLF001
+        raise AssertionError("stale bank control parser_v3 should refresh to recover payment operations")
 
 
 def _assert_bank_transfer_payload(payload: dict[str, Any], *, label: str) -> None:
