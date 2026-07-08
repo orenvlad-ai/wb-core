@@ -337,6 +337,36 @@
       "methods": ["GET", "DELETE"]
     },
     {
+      "name": "sheet_vitrina_supply_ff_stocks",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/ff-stocks",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supply_ff_stocks_export",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_supply_ff_stocks_preview",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/ff-stocks/preview",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_supply_ff_stocks_confirm",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/ff-stocks/confirm",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_supply_ff_stocks_operation_files",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/ff-stocks/operations/",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_supply_supplier_shipments_list",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/supply/supplier-shipments",
