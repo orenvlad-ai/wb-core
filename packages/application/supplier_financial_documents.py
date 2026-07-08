@@ -1473,7 +1473,7 @@ def parse_financial_document_text(
     elif document_type == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION:
         normalized, expense_lines, parser_warnings = _parse_customs_declaration(normalized_text)
     elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT:
-        normalized, expense_lines, parser_warnings = _parse_bank_control_statement(normalized_text)
+        normalized, expense_lines, parser_warnings = _parse_bank_control_statement(text)
     elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
         normalized, expense_lines, parser_warnings = _parse_bank_transfer_application(normalized_text)
     elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
@@ -3794,6 +3794,132 @@ def _extract_bank_control_payment_operations(text: str) -> list[dict[str, Any]]:
             "expected_repatriation_date": _parse_date(match.group("expected_repatriation_date") or ""),
         }
         operations.append({key: value for key, value in operation.items() if value not in (None, "")})
+    if operations:
+        return operations
+    return _extract_bank_control_payment_operations_columnar(text)
+
+
+def _extract_bank_control_payment_operations_columnar(text: str) -> list[dict[str, Any]]:
+    segment = _extract_bank_control_columnar_section(text)
+    if not segment:
+        return []
+    lines = segment.splitlines()
+    entries = _bank_control_layout_entries(lines)
+    row_label_index = _bank_control_first_line_index(lines, "№ п/п")
+    row_values = _bank_control_columnar_values_around(
+        entries,
+        row_label_index,
+        before=8,
+        after=0,
+        pattern=r"\d{1,3}",
+        known_columns=None,
+    )
+    if len(row_values) >= 3:
+        max_indent = max(row_values)
+        row_values.pop(max_indent, None)
+    if len(row_values) < 2:
+        return []
+    known_columns = sorted(row_values)
+    operation_date_index = _bank_control_first_line_index(lines, "Дата операции")
+    direction_index = _bank_control_first_line_index(lines, "Направление")
+    operation_type_index = _bank_control_first_line_index(lines, "Код вида операции")
+    currency_indices = _bank_control_line_indices(lines, "код валюты")
+    amount_indices = _bank_control_line_indices(lines, "сумма")
+    repatriation_index = _bank_control_first_line_index(lines, "Ожидаемые сроки репатриации")
+    if (
+        operation_date_index < 0
+        or direction_index < 0
+        or operation_type_index < 0
+        or len(currency_indices) < 2
+        or len(amount_indices) < 2
+    ):
+        return []
+
+    operation_dates = _bank_control_columnar_dates_around(
+        entries,
+        operation_date_index,
+        known_columns,
+        before=8,
+        after=12,
+    )
+    payment_directions = _bank_control_columnar_values_around(
+        entries,
+        direction_index,
+        before=8,
+        after=4,
+        pattern=r"\d+",
+        known_columns=known_columns,
+    )
+    operation_types = _bank_control_columnar_values_around(
+        entries,
+        operation_type_index,
+        before=0,
+        after=10,
+        pattern=r"\d{5}",
+        known_columns=known_columns,
+    )
+    payment_currency_codes = _bank_control_columnar_values_around(
+        entries,
+        currency_indices[0],
+        before=0,
+        after=10,
+        pattern=r"\d{3}",
+        known_columns=known_columns,
+    )
+    payment_amounts = _bank_control_columnar_values_around(
+        entries,
+        amount_indices[0],
+        before=0,
+        after=12,
+        pattern=r"-?(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)(?:[,.]\d{1,2})",
+        known_columns=known_columns,
+    )
+    contract_currency_codes = _bank_control_columnar_values_around(
+        entries,
+        currency_indices[1],
+        before=0,
+        after=10,
+        pattern=r"\d{3}",
+        known_columns=known_columns,
+    )
+    contract_amounts = _bank_control_columnar_values_around(
+        entries,
+        amount_indices[1],
+        before=0,
+        after=14,
+        pattern=r"-?(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)(?:[,.]\d{1,2})",
+        known_columns=known_columns,
+    )
+    repatriation_dates = (
+        _bank_control_columnar_dates_around(
+            entries,
+            repatriation_index,
+            known_columns,
+            before=0,
+            after=16,
+        )
+        if repatriation_index >= 0
+        else {}
+    )
+
+    operations: list[dict[str, Any]] = []
+    for column in known_columns:
+        payment_amount = _parse_decimal(payment_amounts.get(column))
+        contract_amount = _parse_decimal(contract_amounts.get(column))
+        operation = {
+            "row_index": _int_or_none(row_values.get(column)),
+            "operation_date": operation_dates.get(column) or "",
+            "payment_direction": _clean_value(payment_directions.get(column) or ""),
+            "operation_type_code": _clean_value(operation_types.get(column) or ""),
+            "payment_currency_code": _clean_value(payment_currency_codes.get(column) or ""),
+            "payment_amount": _decimal_to_float(payment_amount),
+            "contract_currency_code": _clean_value(contract_currency_codes.get(column) or ""),
+            "contract_amount": _decimal_to_float(contract_amount),
+            "expected_repatriation_date": repatriation_dates.get(column) or "",
+        }
+        if operation.get("row_index") and operation.get("payment_amount") is not None:
+            operations.append({key: value for key, value in operation.items() if value not in (None, "")})
+    operations.sort(key=lambda item: _int_or_none(item.get("row_index")) or 999999)
     return operations
 
 
@@ -3804,6 +3930,144 @@ def _extract_bank_control_section(text: str, section_roman: str) -> str:
         flags=re.I | re.S,
     )
     return match.group(0) if match else ""
+
+
+def _extract_bank_control_columnar_section(text: str) -> str:
+    heading = re.search(r"Раздел\s+II\b", text, flags=re.I)
+    if not heading:
+        return ""
+    start = text.rfind("\f", 0, heading.start())
+    if start < 0:
+        start = max(0, heading.start() - 8000)
+    end_match = re.search(r"Раздел\s+III\b", text[heading.end() :], flags=re.I)
+    end = heading.end() + end_match.start() if end_match else min(len(text), heading.end() + 9000)
+    return text[start:end]
+
+
+def _bank_control_layout_entries(lines: list[str]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for index, raw in enumerate(lines):
+        value = _clean_value(raw)
+        if not value:
+            continue
+        if not re.fullmatch(r"-?(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)(?:[,.]\d{1,2})|\d{1,2}\.\d{1,2}\.\d{2,4}|\d{1,5}", value):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        entries.append({"line_index": index, "indent": indent, "value": value})
+    return entries
+
+
+def _bank_control_first_line_index(lines: list[str], needle: str) -> int:
+    needle_key = needle.casefold()
+    for index, line in enumerate(lines):
+        if needle_key in _clean_value(line).casefold():
+            return index
+    return -1
+
+
+def _bank_control_line_indices(lines: list[str], needle: str) -> list[int]:
+    needle_key = needle.casefold()
+    return [
+        index
+        for index, line in enumerate(lines)
+        if needle_key in _clean_value(line).casefold()
+    ]
+
+
+def _bank_control_columnar_values_around(
+    entries: list[dict[str, Any]],
+    line_index: int,
+    *,
+    before: int,
+    after: int,
+    pattern: str,
+    known_columns: list[int] | None,
+) -> dict[int, str]:
+    if line_index < 0:
+        return {}
+    compiled = re.compile(rf"^{pattern}$", flags=re.I)
+    values: dict[int, str] = {}
+    distances: dict[int, int] = {}
+    for entry in entries:
+        entry_line = int(entry.get("line_index") or 0)
+        if entry_line < line_index - before or entry_line > line_index + after:
+            continue
+        value = str(entry.get("value") or "")
+        if not compiled.fullmatch(value):
+            continue
+        column = _bank_control_nearest_column(int(entry.get("indent") or 0), known_columns)
+        if column is None:
+            continue
+        distance = abs(entry_line - line_index)
+        if column not in values or distance < distances.get(column, 999999):
+            values[column] = value
+            distances[column] = distance
+    return values
+
+
+def _bank_control_columnar_dates_around(
+    entries: list[dict[str, Any]],
+    line_index: int,
+    known_columns: list[int],
+    *,
+    before: int,
+    after: int,
+) -> dict[int, str]:
+    parts_by_column: dict[int, list[str]] = {column: [] for column in known_columns}
+    for entry in entries:
+        entry_line = int(entry.get("line_index") or 0)
+        if entry_line < line_index - before or entry_line > line_index + after:
+            continue
+        value = str(entry.get("value") or "")
+        if not (re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{2,4}", value) or re.fullmatch(r"\d{1,2}", value)):
+            continue
+        column = _bank_control_nearest_column(int(entry.get("indent") or 0), known_columns)
+        if column is None:
+            continue
+        parts_by_column.setdefault(column, []).append(value)
+    result: dict[int, str] = {}
+    for column, parts in parts_by_column.items():
+        parsed = _bank_control_combine_date_fragments(parts)
+        if parsed:
+            result[column] = parsed
+    return result
+
+
+def _bank_control_nearest_column(indent: int, known_columns: list[int] | None) -> int | None:
+    if not known_columns:
+        return indent
+    nearest = min(known_columns, key=lambda column: abs(column - indent))
+    return nearest if abs(nearest - indent) <= 8 else None
+
+
+def _bank_control_combine_date_fragments(parts: list[str]) -> str:
+    date_index = next((index for index, part in enumerate(parts) if "." in part), -1)
+    date_part = parts[date_index] if date_index >= 0 else ""
+    suffix = ""
+    if date_index >= 0:
+        for part in reversed(parts[:date_index]):
+            if part.isdigit() and "." not in part:
+                suffix = part
+                break
+        if not suffix:
+            for part in parts[date_index + 1 :]:
+                if part.isdigit() and "." not in part:
+                    suffix = part
+                    break
+    match = re.fullmatch(r"(\d{1,2}\.\d{1,2}\.)(\d{2,3})", date_part)
+    if match:
+        prefix, year = match.groups()
+        needed = 4 - len(year)
+        if suffix and len(suffix) >= needed:
+            return _parse_date(prefix + year + suffix[:needed])
+    if re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", date_part):
+        return _parse_date(date_part)
+    for part in parts:
+        if re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", part):
+            parsed = _parse_date(part)
+            if parsed:
+                return parsed
+    return ""
 
 
 def _normalize_bank_control_table_text(value: Any) -> str:
