@@ -885,7 +885,10 @@ class WbSppTesterBlock:
             raise WbSppTesterError("precision_rub must be > 0", http_status=422)
         max_measurements = _optional_int(payload.get("max_measurements")) or SPP_TEST_DEFAULT_MAX_MEASUREMENTS
         if max_measurements < SPP_TEST_MAX_MEASUREMENTS_MIN or max_measurements > SPP_TEST_MAX_MEASUREMENTS_MAX:
-            raise WbSppTesterError("max_measurements must be between 3 and 12", http_status=422)
+            raise WbSppTesterError(
+                f"max_measurements must be between {SPP_TEST_MAX_MEASUREMENTS_MIN} and {SPP_TEST_MAX_MEASUREMENTS_MAX}",
+                http_status=422,
+            )
         mode = str(payload.get("mode") or SPP_TEST_MODE_SAFE_SLOW)
         if mode != SPP_TEST_MODE_SAFE_SLOW:
             raise WbSppTesterError("only safe_slow mode is supported in MVP", http_status=422)
