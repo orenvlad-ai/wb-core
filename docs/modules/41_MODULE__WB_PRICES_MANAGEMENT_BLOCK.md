@@ -41,7 +41,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Prices table now uses a simplified toolbar, browser-local column visibility, read-only `СПП` and `Акции` columns from existing `spp_proxy`/`promo_by_price` read-side data, and keeps the guarded manual preview+upload-task workflow controlled by `WB_PRICES_WRITE_ENABLED`."
+update_note: "Prices table uses a simplified toolbar, browser-local column visibility, read-only `СПП` and `Акции` columns from existing `spp_proxy`/`promo_by_price` read-side data, and keeps the guarded manual preview+upload-task workflow controlled by `WB_PRICES_WRITE_ENABLED`. `Акции` now renders eligible-by-price count over global current promo count (`X / Y`), not per-SKU candidate count."
 ---
 
 # 1. Идентификатор и статус
@@ -61,7 +61,7 @@ Top-level UI shows one row per active `nmID` where possible:
 - WB Club discount and club discounted price as read-only fields;
 - `editableSizePrice` badge;
 - read-only `СПП` from current server-owned `spp_proxy`/`SPP-прокси` data, rendered as `н/д` when unavailable rather than fake zero;
-- read-only `Акции` as `eligible / candidate` counts from existing promo current semantics (`promo_count_by_price` plus current/candidate campaign count when available), rendered as `н/д` when the source/denominator is absent;
+- read-only `Акции` as `eligible / total current promos` counts from existing promo current semantics (`promo_count_by_price` plus global `promo_by_price.current_promos`/diagnostic current counter), rendered as `н/д` when the source/denominator is absent;
 - quarantine badge when read-only quarantine endpoint reports the nmID;
 - last upload status and per-row WB error when available;
 - inline draft price/discount controls.
@@ -110,12 +110,13 @@ The application normalizes WB payload into a server-owned view model:
 - `sppProxyReason`
 - `promoEligibleCount`
 - `promoCandidateCount`
+- `promoCurrentCount`
 - `promoLabel`
 - `promoReason`
 
 Nomenclature names/barcodes/our SKU are enrichment from current runtime reference data and are not WB price truth.
 
-`sppProxy*` is derived from latest available `DATA_VITRINA` `spp_proxy` row for the `nmID`; missing current data stays `null`/`н/д` with a reason. `promoEligibleCount` is derived from latest available `promo_count_by_price`; `promoCandidateCount` is read from the current `promo_by_price` temporal source payload when that read-side field is available. Existing promo metrics (`promo_participation`, `promo_count_by_price`, `promo_entry_price_best`) keep their original meaning.
+`sppProxy*` is derived from latest available `DATA_VITRINA` `spp_proxy` row for the `nmID`; missing current data stays `null`/`н/д` with a reason. `promoEligibleCount` is derived from latest available `promo_count_by_price`. `promoCurrentCount` is the visible denominator and is read from current server-owned `promo_by_price` global counters: first `current_promos`, then compatible diagnostic counters such as `current_promo_count` / `covering_campaigns`, with `materializable_campaigns` / `usable_campaigns` only as bounded compatibility fallback when the primary current counters are absent. `promoCandidateCount` remains optional per-SKU debug/tooltip context from `items[].promo_candidate_count` and is not the visible denominator. Existing promo metrics (`promo_participation`, `promo_count_by_price`, `promo_entry_price_best`) keep their original meaning.
 
 # 5. Safety Workflow
 

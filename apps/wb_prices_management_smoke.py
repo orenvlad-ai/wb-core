@@ -169,17 +169,44 @@ def _run_unit_checks() -> None:
         if (
             primary_row["promoEligibleCount"] != 2.0
             or primary_row["promoCandidateCount"] != 3.0
-            or primary_row["promoLabel"] != "2 / 3"
+            or primary_row["promoCurrentCount"] != 4.0
+            or primary_row["promoLabel"] != "2 / 4"
         ):
             raise AssertionError(f"promo enrichment mismatch: {primary_row}")
+        if "total current promo campaigns=4" not in primary_row["promoReason"]:
+            raise AssertionError(f"promo reason must describe denominator: {primary_row}")
         size_row = rows_by_nm[SIZE_PRICE_NM]
         if (
             size_row["sppProxy"] is not None
             or size_row["sppProxyLabel"] != "н/д"
+            or size_row["promoCurrentCount"] is not None
             or size_row["promoCandidateCount"] is not None
             or size_row["promoLabel"] != "н/д"
         ):
-            raise AssertionError(f"missing read-side data must stay n/d, got: {size_row}")
+            raise AssertionError(f"missing ready-side promo data must stay n/d, got: {size_row}")
+        zero_runtime = _seed_runtime(Path(tmp) / "zero-runtime", promo_eligible_count=0, promo_current_promos=4)
+        zero_block = _build_block(zero_runtime, Path(tmp) / "zero-runtime", FakePricesSource(), write_enabled=False)
+        zero_row = {int(row["nmID"]): row for row in zero_block.build_goods_table()["rows"]}[PRIMARY_NM]
+        if zero_row["promoEligibleCount"] != 0.0 or zero_row["promoCurrentCount"] != 4.0 or zero_row["promoLabel"] != "0 / 4":
+            raise AssertionError(f"zero eligible promo label mismatch: {zero_row}")
+        missing_source_runtime = _seed_runtime(Path(tmp) / "missing-source-runtime", include_promo_source=False)
+        missing_source_block = _build_block(
+            missing_source_runtime,
+            Path(tmp) / "missing-source-runtime",
+            FakePricesSource(),
+            write_enabled=False,
+        )
+        missing_source_row = {int(row["nmID"]): row for row in missing_source_block.build_goods_table()["rows"]}[PRIMARY_NM]
+        if missing_source_row["promoLabel"] != "н/д" or "unavailable" not in missing_source_row["promoReason"]:
+            raise AssertionError(f"missing promo source must stay n/d, got: {missing_source_row}")
+        stale_runtime = _seed_runtime(
+            Path(tmp) / "stale-runtime",
+            stale_promo_source_without_denominator=True,
+        )
+        stale_block = _build_block(stale_runtime, Path(tmp) / "stale-runtime", FakePricesSource(), write_enabled=False)
+        stale_row = {int(row["nmID"]): row for row in stale_block.build_goods_table()["rows"]}[PRIMARY_NM]
+        if stale_row["promoLabel"] != "н/д" or "no current promo denominator" not in stale_row["promoReason"]:
+            raise AssertionError(f"stale promo payload must explain denominator refresh need, got: {stale_row}")
         preview = block.preview_changes({"changes": [{"nmID": PRIMARY_NM, "price": 200, "discount": 10}]})
         row = preview["preview"]["rows"][0]
         if row["new"]["discountedPrice"] != 180 or "quarantine_risk" not in ",".join(row["warnings"]):
@@ -252,7 +279,7 @@ def _run_http_smoke(*, write_enabled: bool) -> None:
                 raise AssertionError(f"goods route mismatch: {status} {goods}")
             goods_rows_by_nm = {int(row["nmID"]): row for row in goods.get("rows", [])}
             goods_primary = goods_rows_by_nm[PRIMARY_NM]
-            if goods_primary.get("sppProxyLabel") != "29%" or goods_primary.get("promoLabel") != "2 / 3":
+            if goods_primary.get("sppProxyLabel") != "29%" or goods_primary.get("promoLabel") != "2 / 4":
                 raise AssertionError(f"goods route must expose spp/promo labels: {goods_primary}")
             goods_size = goods_rows_by_nm[SIZE_PRICE_NM]
             if goods_size.get("sppProxyLabel") != "н/д" or goods_size.get("promoLabel") != "н/д":
@@ -307,7 +334,15 @@ def _build_block(
     )
 
 
-def _seed_runtime(runtime_dir: Path) -> RegistryUploadDbBackedRuntime:
+def _seed_runtime(
+    runtime_dir: Path,
+    *,
+    promo_eligible_count: float | int | str = 2,
+    promo_current_promos: int | None = 4,
+    promo_candidate_count: float | None = 3.0,
+    include_promo_source: bool = True,
+    stale_promo_source_without_denominator: bool = False,
+) -> RegistryUploadDbBackedRuntime:
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
     bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
     result = runtime.ingest_bundle(bundle, activated_at="2026-07-07T07:00:00Z")
@@ -342,11 +377,26 @@ def _seed_runtime(runtime_dir: Path) -> RegistryUploadDbBackedRuntime:
                 "updated_at": "2026-07-07T07:00:00Z",
             }
         )
-    _seed_prices_read_side(runtime)
+    _seed_prices_read_side(
+        runtime,
+        promo_eligible_count=promo_eligible_count,
+        promo_current_promos=promo_current_promos,
+        promo_candidate_count=promo_candidate_count,
+        include_promo_source=include_promo_source,
+        stale_promo_source_without_denominator=stale_promo_source_without_denominator,
+    )
     return runtime
 
 
-def _seed_prices_read_side(runtime: RegistryUploadDbBackedRuntime) -> None:
+def _seed_prices_read_side(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    promo_eligible_count: float | int | str,
+    promo_current_promos: int | None,
+    promo_candidate_count: float | None,
+    include_promo_source: bool,
+    stale_promo_source_without_denominator: bool,
+) -> None:
     as_of_date = "2026-07-07"
     current_state = runtime.load_current_state()
     plan = SheetVitrinaV1Envelope(
@@ -373,7 +423,7 @@ def _seed_prices_read_side(runtime: RegistryUploadDbBackedRuntime) -> None:
                 header=["label", "key", as_of_date],
                 rows=[
                     ["Primary SPP proxy", f"SKU:{PRIMARY_NM}|spp_proxy", "0.286"],
-                    ["Primary promo eligible count", f"SKU:{PRIMARY_NM}|promo_count_by_price", 2],
+                    ["Primary promo eligible count", f"SKU:{PRIMARY_NM}|promo_count_by_price", promo_eligible_count],
                     ["Size SPP proxy missing", f"SKU:{SIZE_PRICE_NM}|spp_proxy", ""],
                     ["Size promo eligible missing", f"SKU:{SIZE_PRICE_NM}|promo_count_by_price", ""],
                 ],
@@ -411,6 +461,31 @@ def _seed_prices_read_side(runtime: RegistryUploadDbBackedRuntime) -> None:
         refreshed_at="2026-07-07T07:00:00Z",
         plan=plan,
     )
+    if not include_promo_source:
+        return
+    if stale_promo_source_without_denominator:
+        runtime.save_temporal_source_snapshot(
+            source_key="promo_by_price",
+            snapshot_date=as_of_date,
+            captured_at="2026-07-07T07:00:00Z",
+            payload={
+                "kind": "success",
+                "snapshot_date": as_of_date,
+                "date_from": as_of_date,
+                "date_to": as_of_date,
+                "requested_count": 1,
+                "covered_count": 1,
+                "items": [
+                    {
+                        "snapshot_date": as_of_date,
+                        "nm_id": PRIMARY_NM,
+                        "promo_count_by_price": float(promo_eligible_count or 0),
+                        "promo_candidate_count": promo_candidate_count,
+                    }
+                ],
+            },
+        )
+        return
     runtime.save_temporal_source_snapshot(
         source_key="promo_by_price",
         snapshot_date=as_of_date,
@@ -427,16 +502,16 @@ def _seed_prices_read_side(runtime: RegistryUploadDbBackedRuntime) -> None:
                     PromoLiveSourceItem(
                         snapshot_date=as_of_date,
                         nm_id=PRIMARY_NM,
-                        promo_count_by_price=2.0,
+                        promo_count_by_price=float(promo_eligible_count or 0),
                         promo_entry_price_best=1100.0,
-                        promo_participation=1.0,
-                        promo_candidate_count=3.0,
+                        promo_participation=1.0 if float(promo_eligible_count or 0) > 0 else 0.0,
+                        promo_candidate_count=promo_candidate_count,
                     )
                 ],
                 detail="smoke",
                 trace_run_dir="",
-                current_promos=3,
-                current_promos_downloaded=3,
+                current_promos=int(promo_current_promos or 0),
+                current_promos_downloaded=int(promo_current_promos or 0),
                 current_promos_blocked=0,
                 future_promos=0,
                 skipped_past_promos=0,
