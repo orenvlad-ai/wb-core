@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–42`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–43`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -48,6 +48,7 @@ source_basis:
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "docs/modules/42_MODULE__WB_SPP_TESTER_BLOCK.md"
+  - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -95,8 +96,9 @@ related_docs:
   - "40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "42_MODULE__WB_SPP_TESTER_BLOCK.md"
+  - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под Google Sheets decommission, Fulfillment services contour, management proxy WB cost model, guarded WB prices management and `Цены -> Проверка СПП`: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, module 40 owns our WB cost/proxy3 model, module 41 owns guarded WB Prices and Discounts management, module 42 owns bounded WB SPP tester with runtime lock/audit/staged restore, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
+update_note: "Обновлён под Google Sheets decommission, Fulfillment services contour, management proxy WB cost model, guarded WB prices management, `Цены -> Проверка СПП` and `ФФ -> Остатки ФФ`: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, module 40 owns our WB cost/proxy3 model, module 41 owns guarded WB Prices and Discounts management, module 42 owns bounded WB SPP tester with runtime lock/audit/staged restore, module 43 owns server-side ФФ quantity ledger/current balances/manual documents/auto movements, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
 
 # 1. Назначение индекса
@@ -113,7 +115,7 @@ update_note: "Обновлён под Google Sheets decommission, Fulfillment se
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–40`; текущая feature-линия добавляет module `41` for guarded WB Prices and Discounts management and module `42` for bounded `Цены -> Проверка СПП`. Module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`, module `40` implements management proxy WB cost/proxy3 contour.
+На текущем `main` main-confirmed модульные блоки доходят до `01–40`; текущие feature-линии добавляют module `41` for guarded WB Prices and Discounts management, module `42` for bounded `Цены -> Проверка СПП` and module `43` for `ФФ -> Остатки ФФ`. Module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`, module `40` implements management proxy WB cost/proxy3 contour.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`

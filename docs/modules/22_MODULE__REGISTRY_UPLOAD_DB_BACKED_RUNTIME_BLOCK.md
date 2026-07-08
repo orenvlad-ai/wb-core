@@ -21,6 +21,7 @@ related_modules:
   - "packages/application/factory_order_sales_history.py"
   - "packages/application/supplier_shipments.py"
   - "packages/application/cny_ledger.py"
+  - "packages/application/ff_stock_ledger.py"
 related_tables:
   - "CONFIG_V2"
   - "METRICS_V2"
@@ -39,6 +40,9 @@ related_tables:
   - "sheet_vitrina_v1_cny_documents"
   - "sheet_vitrina_v1_cny_ledger_operations"
   - "sheet_vitrina_v1_cny_ledger_replay_state"
+  - "sheet_vitrina_v1_ff_stock_operation_previews"
+  - "sheet_vitrina_v1_ff_stock_operations"
+  - "sheet_vitrina_v1_ff_stock_operation_lines"
 related_endpoints: []
 related_runners:
   - "apps/registry_upload_bundle_v1_smoke.py"
@@ -48,14 +52,17 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_trade_documents_smoke.py"
   - "apps/cny_ledger_smoke.py"
+  - "apps/ff_stock_ledger_smoke.py"
+  - "apps/ff_stock_ledger_http_smoke.py"
 related_docs:
   - "migration/86_registry_upload_contract.md"
   - "migration/88_registry_upload_file_backed_service.md"
   - "migration/89_registry_upload_db_backed_runtime.md"
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
+  - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments, trade document registry and CNY account ledger: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state including legacy planned `shipment_date`, nullable fact dates `actual_shipment_date` / `actual_ff_acceptance_date`, nullable manual `approx_yuan_rate` and ledger-derived CNY calculation fields, trade document rows/links including parsed contract metadata/warnings/default supplier backfill, CNY currency documents/ledger operations/replay state, and a separate manual monthly baseline table used only by the plan-report."
+update_note: "Обновлён под current temporal closure seam, plan-report baseline, supplier shipments, trade document registry, CNY account ledger and ФФ stock ledger: SQLite-backed runtime теперь materialize-ит current registry state/version history, role-aware temporal slot snapshots, persisted closure retry state, operator-side factory-order dataset/result state, supplier invoice upload/header/line state including legacy planned `shipment_date`, nullable fact dates `actual_shipment_date` / `actual_ff_acceptance_date`, nullable manual `approx_yuan_rate` and ledger-derived CNY calculation fields, trade document rows/links including parsed contract metadata/warnings/default supplier backfill, CNY currency documents/ledger operations/replay state, ФФ quantity operation previews/headers/lines/source Excel blobs, and a separate manual monthly baseline table used only by the plan-report."
 ---
 
 # 1. Идентификатор и статус
@@ -125,6 +132,11 @@ update_note: "Обновлён под current temporal closure seam, plan-report
     - canonical currency documents in `sheet_vitrina_v1_cny_documents` with document type, source/order context, file metadata/hash, operation date/datetime, parse payload, status and natural key;
     - deterministic replay rows in `sheet_vitrina_v1_cny_ledger_operations` with operation type, document/order links, sequence key, CNY/RUB deltas, balances, effective/average rates and diagnostic status. Confirmed CNY-account bank statement fees create canonical `bank_fee` documents and `transfer_fee` operations through the existing ledger; RUB-account statement fees stay only in supplier financial expense lines;
     - last replay state in `sheet_vitrina_v1_cny_ledger_replay_state` with balance, average rate, counts and diagnostics.
+  - server-owned ФФ stock ledger state:
+    - manual operation previews in `sheet_vitrina_v1_ff_stock_operation_previews` with parsed lines, summary, warnings/errors and original Excel blob until explicit confirm/cancel;
+    - durable operation headers in `sheet_vitrina_v1_ff_stock_operations` with operation/source type, idempotency `source_key`, source object id/label, actor, warnings/diagnostics, SKU/quantity totals and optional source Excel metadata/blob;
+    - signed quantity lines in `sheet_vitrina_v1_ff_stock_operation_lines` keyed by operation and `nm_id`;
+    - current ФФ balance is read as grouped `SUM(quantity_delta)` over durable lines and is not persisted as an editable snapshot.
   - trade document files:
     - settings-uploaded files live under `<runtime_dir>/trade_documents/files/<document_type>/<document_id>/<safe_filename>`;
     - supplier shipment invoice documents may reference existing `<runtime_dir>/supplier_invoices/files/...` paths to preserve backward-compatible invoice downloads;
@@ -174,6 +186,8 @@ update_note: "Обновлён под current temporal closure seam, plan-report
   - `apps/registry_upload_db_backed_runtime_smoke.py`
   - `apps/factory_order_sales_history_smoke.py`
   - `apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py`
+  - `apps/ff_stock_ledger_smoke.py`
+  - `apps/ff_stock_ledger_http_smoke.py`
 
 # 6. Какой smoke подтверждён
 

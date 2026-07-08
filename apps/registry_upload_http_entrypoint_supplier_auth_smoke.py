@@ -24,6 +24,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
+    DEFAULT_FF_STOCKS_EXPORT_PATH,
+    DEFAULT_FF_STOCKS_PATH,
+    DEFAULT_FF_STOCKS_PREVIEW_PATH,
     DEFAULT_NOMENCLATURE_EXPORT_PATH,
     DEFAULT_NOMENCLATURE_IMPORT_PATH,
     DEFAULT_NOMENCLATURE_PATH,
@@ -136,7 +139,7 @@ def main() -> None:
                         raise AssertionError("supplier page must expose planned shipment date label")
                 if "实际出货日期 / Actual shipment date / Фактическая дата отгрузки" not in supplier_page:
                         raise AssertionError("supplier page must expose actual shipment date label")
-                if "实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ" not in supplier_page:
+                if "实际入仓日期 / Actual ФФ acceptance date / Фактическая дата приёмки на ФФ" not in supplier_page:
                         raise AssertionError("supplier page must expose actual FF acceptance date label")
                 if "预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥" not in supplier_page:
                         raise AssertionError("supplier page must expose approximate yuan rate label")
@@ -241,6 +244,27 @@ def main() -> None:
                 forbidden_api_code, forbidden_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SHEET_STATUS_PATH}")
                 if forbidden_api_code != 403 or forbidden_api_payload.get("error") != "forbidden":
                         raise AssertionError("supplier role must not access unrelated operator APIs")
+                forbidden_ff_stock_code, forbidden_ff_stock_payload = _opener_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_FF_STOCKS_PATH}",
+                )
+                if forbidden_ff_stock_code != 403 or forbidden_ff_stock_payload.get("error") != "forbidden":
+                        raise AssertionError("supplier role must not access ФФ stock ledger API")
+                forbidden_ff_export_code, _, _ = _opener_text(
+                        supplier,
+                        f"{base_url}{DEFAULT_FF_STOCKS_EXPORT_PATH}",
+                    )
+                if forbidden_ff_export_code != 403:
+                        raise AssertionError("supplier role must not export ФФ stock ledger XLSX")
+                forbidden_ff_preview_code, forbidden_ff_preview_payload = _opener_post_multipart(
+                        supplier,
+                        f"{base_url}{DEFAULT_FF_STOCKS_PREVIEW_PATH}",
+                        supplier_invoice_bytes,
+                        filename="ff-stock.xlsx",
+                        fields={"operation_type": "manual_receipt"},
+                    )
+                if forbidden_ff_preview_code != 403 or forbidden_ff_preview_payload.get("error") != "forbidden":
+                        raise AssertionError("supplier role must not preview ФФ stock manual documents")
                 forbidden_settings_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SETTINGS_UI_PATH}")
                 if forbidden_settings_code != 403:
                     raise AssertionError("supplier role must not access operator settings page")
@@ -386,17 +410,30 @@ def _opener_post_multipart(
     workbook_bytes: bytes,
     *,
     filename: str,
+    fields: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, object]]:
     boundary = "----wbcore-supplier-auth" + uuid4().hex
-    body = b"".join(
+    body_parts: list[bytes] = []
+    for key, value in (fields or {}).items():
+        body_parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    body_parts.extend(
         [
-            f"--{boundary}\r\n".encode("utf-8"),
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"),
-            b"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n",
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+            ).encode("utf-8"),
             workbook_bytes,
             f"\r\n--{boundary}--\r\n".encode("utf-8"),
         ]
     )
+    body = b"".join(body_parts)
     request = urllib_request.Request(
         url,
         data=body,

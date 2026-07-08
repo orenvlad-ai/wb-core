@@ -235,6 +235,11 @@ DEFAULT_OUR_WB_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/wb-cost/status"
 DEFAULT_FULFILLMENT_SERVICES_PATH = "/v1/sheet-vitrina-v1/supply/fulfillment-services"
 DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/template.xlsx"
 DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/uploads"
+DEFAULT_FF_STOCKS_PATH = "/v1/sheet-vitrina-v1/supply/ff-stocks"
+DEFAULT_FF_STOCKS_EXPORT_PATH = f"{DEFAULT_FF_STOCKS_PATH}/export.xlsx"
+DEFAULT_FF_STOCKS_PREVIEW_PATH = f"{DEFAULT_FF_STOCKS_PATH}/preview"
+DEFAULT_FF_STOCKS_CONFIRM_PATH = f"{DEFAULT_FF_STOCKS_PATH}/confirm"
+DEFAULT_FF_STOCKS_OPERATIONS_PATH = f"{DEFAULT_FF_STOCKS_PATH}/operations"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -1791,6 +1796,54 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if parsed.path == DEFAULT_FF_STOCKS_PREVIEW_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    upload_payload = _load_uploaded_file_payload(self)
+                    fields = upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {}
+                    operation_type = str(fields.get("operation_type") or "").strip()
+                    payload = entrypoint.handle_ff_stock_preview_request(
+                        upload_payload["workbook_bytes"],
+                        operation_type=operation_type,
+                        uploaded_filename=str(upload_payload.get("filename") or ""),
+                        uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": f"Остатки ФФ preview failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_FF_STOCKS_CONFIRM_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_ff_stock_confirm_request(
+                        payload,
+                        actor=_current_web_user_actor(self),
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": f"Остатки ФФ confirm failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if parsed.path == DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH:
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -2823,6 +2876,69 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == DEFAULT_FF_STOCKS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_ff_stock_status_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Остатки ФФ status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_FF_STOCKS_EXPORT_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    workbook_bytes, filename, content_type = entrypoint.handle_ff_stock_export_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Остатки ФФ export failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    workbook_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
+            if _is_ff_stock_operation_file_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    operation_id = _resolve_ff_stock_operation_id_from_file_path(parsed.path)
+                    file_bytes, filename, content_type = entrypoint.handle_ff_stock_operation_file_request(operation_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"Остатки ФФ source file download failed: {exc}"},
+                    )
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    file_bytes,
+                    content_type=content_type,
+                    filename=filename,
+                    as_attachment=True,
+                )
+                return
+
             if _is_fulfillment_payment_validation_pdf_path(parsed.path):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -3190,7 +3306,7 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"factory order 1C stock FF check failed: {exc}"},
+                        {"error": f"factory order 1C stock ФФ check failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3222,7 +3338,7 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"factory order 1C stock FF XLSX failed: {exc}"},
+                        {"error": f"factory order 1C stock ФФ XLSX failed: {exc}"},
                     )
                     return
                 _write_binary_response(
@@ -4432,6 +4548,18 @@ def _is_fulfillment_upload_detail_path(path: str) -> bool:
     return len(parts) == 1 and bool(parts[0])
 
 
+def _is_ff_stock_operation_file_path(path: str) -> bool:
+    parts = _ff_stock_operation_path_parts(path)
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "file"
+
+
+def _resolve_ff_stock_operation_id_from_file_path(path: str) -> str:
+    parts = _ff_stock_operation_path_parts(path)
+    if len(parts) != 2 or parts[1] != "file":
+        raise ValueError(f"unsupported Остатки ФФ operation file path: {path}")
+    return urllib_parse.unquote(parts[0])
+
+
 def _is_fulfillment_payment_validation_pdf_path(path: str) -> bool:
     parts = _fulfillment_upload_path_parts(path)
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "payment-validation.pdf"
@@ -4449,6 +4577,14 @@ def _resolve_fulfillment_upload_id_from_pdf_path(path: str) -> str:
     if len(parts) != 2 or parts[1] != "payment-validation.pdf":
         raise ValueError(f"unsupported Fulfillment PDF path: {path}")
     return urllib_parse.unquote(parts[0])
+
+
+def _ff_stock_operation_path_parts(path: str) -> list[str]:
+    prefix = DEFAULT_FF_STOCKS_OPERATIONS_PATH.rstrip("/") + "/"
+    if not path.startswith(prefix):
+        return []
+    suffix = path[len(prefix) :].strip("/")
+    return [part for part in suffix.split("/") if part]
 
 
 def _is_nomenclature_item_path(path: str) -> bool:
@@ -4863,6 +4999,16 @@ def _current_web_user_role(handler: BaseHTTPRequestHandler) -> str:
         return WEB_AUTH_ROLE_ADMIN
     user = _authenticated_web_user(handler, config) or {}
     return str(user.get("role") or "").strip() or WEB_AUTH_ROLE_ADMIN
+
+
+def _current_web_user_actor(handler: BaseHTTPRequestHandler) -> str:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return "local_operator"
+    user = _authenticated_web_user(handler, config) or {}
+    username = str(user.get("username") or "").strip()
+    role = str(user.get("role") or "").strip()
+    return username or role or "web_operator"
 
 
 def _current_web_user_allowed_sections(handler: BaseHTTPRequestHandler) -> list[str]:
@@ -6374,6 +6520,10 @@ def _render_sheet_vitrina_operator_ui(
         "wb_supplies_overlay_options_path": DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH,
         "fulfillment_services_template_path": DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH,
         "fulfillment_services_uploads_path": DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH,
+        "ff_stock_status_path": DEFAULT_FF_STOCKS_PATH,
+        "ff_stock_export_path": DEFAULT_FF_STOCKS_EXPORT_PATH,
+        "ff_stock_preview_path": DEFAULT_FF_STOCKS_PREVIEW_PATH,
+        "ff_stock_confirm_path": DEFAULT_FF_STOCKS_CONFIRM_PATH,
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "supplier_shipment_registry_path": DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH,

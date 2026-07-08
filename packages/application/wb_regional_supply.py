@@ -13,6 +13,7 @@ import zipfile
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.adapters.stocks_block import HttpBackedStocksSource
 from packages.application.factory_order_sales_history import FactoryOrderAuthoritativeSalesHistory
+from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
@@ -32,6 +33,7 @@ from packages.application.wb_regional_demand import (
 from packages.business_time import current_business_date_iso
 from packages.contracts.factory_order_supply import (
     DATASET_STOCK_FF,
+    STOCK_FF_SOURCE_LEDGER,
     STOCK_FF_SOURCE_MANUAL_EXCEL,
     STOCK_FF_SOURCE_ONEC_FF_STOCK,
     FactoryOrderDatasetState,
@@ -83,7 +85,8 @@ _VOLUME_DIVISOR = 204.38
 _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
 _DEFAULT_CYCLE_SUPPLY_DAYS = 7
 _METHODOLOGY_NOTE = (
-    "Расчёт использует общий источник «Остатки ФФ» из этой же вкладки: manual Excel или read-only 1C FF_STOCK. "
+    "Расчёт использует общий источник «Остатки ФФ» из этой же вкладки: manual Excel, read-only 1C FF_STOCK "
+    "или серверный ledger «Остатки ФФ». "
     "Сервер берёт общий спрос SKU из orderCount, а доли по округам восстанавливает по расширенной методологии: "
     "идеальные дни, частичные наблюдения по округам, похожие SKU, общий профиль и только затем тестовая поставка. "
     "Период усреднения продаж означает запрошенное число качественных дней; проблемная ячейка округа/дня не ломает "
@@ -151,8 +154,12 @@ class WbRegionalSupplyBlock:
                 "Для расчёта по федеральным округам нужен общий загруженный файл: Остатки ФФ"
             )
         shared_datasets = {DATASET_STOCK_FF: shared_state}
+        ledger_stock_ff_state: Mapping[str, Any] = {}
         if stock_ff_source == STOCK_FF_SOURCE_ONEC_FF_STOCK:
             stock_ff_rows, onec_stock_ff_state = self._load_onec_stock_ff_rows(require_ready=True)
+        elif stock_ff_source == STOCK_FF_SOURCE_LEDGER:
+            stock_ff_rows, ledger_stock_ff_state = self._load_ledger_stock_ff_rows(active_skus)
+            onec_stock_ff_state = self.build_onec_stock_ff_check()
         else:
             stock_ff_rows = self._load_stock_ff_rows()
             onec_stock_ff_state = self.build_onec_stock_ff_check()
@@ -446,6 +453,7 @@ class WbRegionalSupplyBlock:
             }
         )
         warnings = [str(item) for item in result_diagnostics.get("warnings", []) if item]
+        warnings.extend(str(item) for item in ledger_stock_ff_state.get("warnings", []) if str(item or "").strip())
         warnings.extend(str(item) for item in wb_stock_ff_warnings if item)
         warnings.extend(str(item) for item in wb_regional_overlay_warnings if item)
         if seed_unfulfilled_qty_total > 0:
@@ -622,6 +630,12 @@ class WbRegionalSupplyBlock:
                 + "; ".join(details)
             )
         return result.rows, result.state
+
+    def _load_ledger_stock_ff_rows(
+        self,
+        active_skus: list[tuple[int, str]],
+    ) -> tuple[list[FactoryOrderStockFfRow], Mapping[str, Any]]:
+        return resolve_ff_stock_ledger_rows(runtime=self.runtime, active_skus=active_skus)
 
     def _load_last_result(self) -> WbRegionalSupplyCalculationResult | None:
         payload = self.runtime.load_wb_regional_supply_result_state()
@@ -825,8 +839,8 @@ def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
 
 def _parse_stock_ff_source(value: Any) -> str:
     normalized = str(value or "").strip() or STOCK_FF_SOURCE_MANUAL_EXCEL
-    if normalized not in {STOCK_FF_SOURCE_MANUAL_EXCEL, STOCK_FF_SOURCE_ONEC_FF_STOCK}:
-        raise ValueError("Источник остатков ФФ должен быть manual_excel или onec_ff_stock")
+    if normalized not in {STOCK_FF_SOURCE_MANUAL_EXCEL, STOCK_FF_SOURCE_ONEC_FF_STOCK, STOCK_FF_SOURCE_LEDGER}:
+        raise ValueError("Источник остатков ФФ должен быть manual_excel, onec_ff_stock или ff_stock_ledger")
     return normalized
 
 

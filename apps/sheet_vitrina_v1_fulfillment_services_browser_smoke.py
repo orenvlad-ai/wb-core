@@ -75,6 +75,9 @@ def main() -> None:
                 page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
                 page.locator("[data-unified-tab-button='factory-order']").click()
                 operator_frame = page.frame_locator("iframe[title='Поставки']")
+                ff_tab = operator_frame.get_by_role("button", name="ФФ", exact=True)
+                expect(ff_tab).to_be_visible(timeout=10000)
+                ff_tab.click()
                 fulfillment_tab = operator_frame.get_by_role("button", name="Услуги ФФ", exact=True)
                 expect(fulfillment_tab).to_be_visible(timeout=10000)
                 fulfillment_tab.click()
@@ -168,7 +171,7 @@ def main() -> None:
                 if "Seller Portal" in row_real_text:
                     raise AssertionError(f"transit cell must show per-unit instead of Seller Portal source label: {row_real_text}")
 
-                fulfillment_tab.click()
+                ff_tab.click()
                 operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete]").first.click()
                 expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text(
                     "Удалить документ? Данные услуг ФФ по связанным WB-поставкам будут удалены из системы.",
@@ -204,7 +207,7 @@ def main() -> None:
                 if wb_real_after_status != 200 or wb_real_after_row.get("fulfillment_amount_with_vat_total") is not None:
                     raise AssertionError(f"deleted upload must disappear from WB API overlay, got {wb_real_after_status} {wb_real_after_payload}")
 
-                fulfillment_tab.click()
+                ff_tab.click()
                 unmatched_xlsx_path = Path(tmp) / "fulfillment-unmatched.xlsx"
                 _fill_downloaded_template(template_path, unmatched_xlsx_path, [_valid_row("9999")])
                 operator_frame.locator("#fulfillmentFileInput").set_input_files(str(unmatched_xlsx_path))

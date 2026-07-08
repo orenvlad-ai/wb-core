@@ -533,7 +533,7 @@ def apply_stock_ff_overlay(
         row = stock_rows_by_nm.get(int(nm_id))
         base_stock = float(row.stock_ff if row is not None else 0.0)
         selected_qty = float(qty_by_nm.get(int(nm_id), 0.0))
-        effective_stock = max(base_stock - selected_qty, 0.0)
+        effective_stock = base_stock if selected_qty <= 0 else max(base_stock - selected_qty, 0.0)
         over_reserved = max(selected_qty - base_stock, 0.0)
         total_base += base_stock
         total_selected += selected_qty

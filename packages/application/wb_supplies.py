@@ -26,6 +26,7 @@ from packages.adapters.seller_portal_transit_costs import (
     SellerPortalTransitCostNetworkJsonSource,
     SellerPortalTransitCostSourceError,
 )
+from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.wb_supply_overlay import (
     augment_supply_row_with_district,
@@ -165,6 +166,10 @@ class WbSuppliesBlock:
         self.transit_cost_source = transit_cost_source or SellerPortalTransitCostNetworkJsonSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
         self.fulfillment_overlay_provider: Callable[[], Mapping[str, Mapping[str, Any]]] | None = None
+        self.ff_stock_ledger = FfStockLedgerBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
         self._run_lock = threading.Lock()
         self._transit_cost_run_lock = threading.Lock()
 
@@ -447,6 +452,9 @@ class WbSuppliesBlock:
                     self.runtime.list_wb_supplies_cache_records(),
                     raw_rows,
                 )
+            ff_stock_debits = self.ff_stock_ledger.record_wb_supply_debits(
+                self.runtime.list_wb_supplies_cache_records()
+            )
         except Exception as exc:
             block_error = _to_block_error(exc)
             self.runtime.save_wb_supplies_sync_state(
@@ -538,6 +546,7 @@ class WbSuppliesBlock:
             "may_have_more": list_result.raw_count >= list_result.limit,
             "latest_window_only": True,
             "enrich": request["enrich"],
+            "ff_stock_debits": ff_stock_debits,
             "warnings": warnings,
         }
         return response
@@ -821,6 +830,7 @@ class WbSuppliesBlock:
         }
         if fetched_any or _normalized_row_public_fingerprint(normalized) != _normalized_row_public_fingerprint(next_normalized):
             self.runtime.save_wb_supply_rows(rows=[next_normalized], warehouses=[], synced_at=synced_at)
+        self.ff_stock_ledger.record_wb_supply_debit(next_record)
         return next_record
 
     def _select_transit_cost_enrichment_candidates(self, request: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1227,6 +1237,9 @@ class WbSuppliesBlock:
             )
         completed_at = self.timestamp_factory()
         status = "success" if backfill_complete and counters["failed_enrich"] == 0 else "partial"
+        ff_stock_debits = self.ff_stock_ledger.record_wb_supply_debits(
+            self.runtime.list_wb_supplies_cache_records()
+        )
         if backfill_complete:
             self.runtime.save_wb_supplies_sync_state(
                 last_synced_at=completed_at,
@@ -1243,7 +1256,13 @@ class WbSuppliesBlock:
                 may_have_more=False,
                 backfill_complete=True,
             )
-        logs = (logs + [_run_log(completed_at, f"full backfill {status}")])[-20:]
+        logs = (
+            logs
+            + [
+                _run_log(completed_at, f"full backfill {status}"),
+                _run_log(completed_at, f"ФФ stock debits created={ff_stock_debits.get('created_count', 0)}"),
+            ]
+        )[-20:]
         return self.runtime.update_wb_supplies_sync_run(
             run_id,
             status=status,

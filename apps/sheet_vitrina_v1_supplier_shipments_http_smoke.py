@@ -414,7 +414,6 @@ def main() -> None:
                     "upload_id": parse_payload["upload_id"],
                     "shipment_date": "2026-05-14",
                     "actual_shipment_date": "2026-05-16",
-                    "actual_ff_acceptance_date": "2026-05-28",
                     "approx_yuan_rate": "13,2",
                     "payload": parse_payload,
                 },
@@ -427,7 +426,7 @@ def main() -> None:
             if (
                 detail.get("planned_shipment_date") != "2026-05-14"
                 or detail.get("actual_shipment_date") != "2026-05-16"
-                or detail.get("actual_ff_acceptance_date") != "2026-05-28"
+                or detail.get("actual_ff_acceptance_date") not in {"", None}
             ):
                 raise AssertionError(f"created shipment must expose planned/fact dates, got {detail}")
             if detail.get("order_status") != "production":
@@ -474,7 +473,7 @@ def main() -> None:
             if (
                 loaded_detail.get("planned_shipment_date") != "2026-05-14"
                 or loaded_detail.get("actual_shipment_date") != "2026-05-16"
-                or loaded_detail.get("actual_ff_acceptance_date") != "2026-05-28"
+                or loaded_detail.get("actual_ff_acceptance_date") not in {"", None}
             ):
                 raise AssertionError("detail route must expose planned/fact shipment dates")
             if loaded_detail.get("product_lines", [{}])[0].get("price_conformity_checked_at") != "2026-05-30T08:00:00Z":
@@ -508,7 +507,6 @@ def main() -> None:
                 {
                     "shipment_date": "2026-05-15",
                     "actual_shipment_date": "2026-05-17",
-                    "actual_ff_acceptance_date": "2026-05-30",
                     "approx_yuan_rate": "14.5",
                     "payload": edited,
                 },
@@ -518,7 +516,7 @@ def main() -> None:
             if (
                 patched.get("planned_shipment_date") != "2026-05-15"
                 or patched.get("actual_shipment_date") != "2026-05-17"
-                or patched.get("actual_ff_acceptance_date") != "2026-05-30"
+                or patched.get("actual_ff_acceptance_date") not in {"", None}
             ):
                 raise AssertionError(f"patch route must update fact dates, got {patched}")
             if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 30.0:
@@ -541,7 +539,7 @@ def main() -> None:
                 or status_patched.get("source_file_sha256") != workbook_sha256
                 or status_patched.get("invoice_no") != "26GN390"
                 or status_patched.get("actual_shipment_date") != "2026-05-17"
-                or status_patched.get("actual_ff_acceptance_date") != "2026-05-30"
+                or status_patched.get("actual_ff_acceptance_date") not in {"", None}
                 or status_patched.get("approx_yuan_rate") != 14.5
                 or status_patched.get("approx_landed_cost_per_unit_rub") != 29.24
             ):
@@ -554,10 +552,15 @@ def main() -> None:
                 raise AssertionError(f"invalid order_status must be rejected, got {invalid_status} {invalid_payload}")
             accepted_status, accepted_patched = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
-                {"order_status": "accepted_ff"},
+                {"actual_ff_acceptance_date": "2026-05-30"},
             )
             if accepted_status != 200 or accepted_patched.get("order_status") != "accepted_ff":
-                raise AssertionError(f"status-only patch must persist accepted_ff, got {accepted_status} {accepted_patched}")
+                raise AssertionError(f"actual FF acceptance patch must persist accepted_ff, got {accepted_status} {accepted_patched}")
+            if accepted_patched.get("actual_ff_acceptance_date") != "2026-05-30":
+                raise AssertionError(f"actual FF acceptance patch must keep acceptance date, got {accepted_patched}")
+            ff_stock_keys = [str(item.get("source_key") or "") for item in runtime.list_ff_stock_operations()]
+            if ff_stock_keys.count(f"supplier_shipment_acceptance:{shipment_id}") != 1:
+                raise AssertionError(f"actual FF acceptance must create one idempotent ФФ stock operation, got {ff_stock_keys}")
 
             second_nom_status, second_nom_payload = _post_json(
                 f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",

@@ -2117,7 +2117,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "新增订单 / Add order / Добавить заказ",
             "计划出货日期 / Planned shipment date / Плановая дата отгрузки",
             "实际出货日期 / Actual shipment date / Фактическая дата отгрузки",
-            "实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ",
+            "实际入仓日期 / Actual ФФ acceptance date / Фактическая дата приёмки на ФФ",
             DEFAULT_SUPPLIER_SHIPMENTS_PATH,
             DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/parse",
         ]

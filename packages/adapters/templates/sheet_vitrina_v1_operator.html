@@ -3067,6 +3067,11 @@
       color: var(--warning-text);
     }
 
+    .wb-supplies-table tr.is-warning td {
+      background: #fff7ed;
+      color: var(--warning-text);
+    }
+
     .wb-supplies-summary {
       display: flex;
       flex-wrap: wrap;
@@ -3780,14 +3785,14 @@
         <a class="eyebrow eyebrow-link" href="__SHEET_VITRINA_V1_WEB_VITRINA_URL__" target="_blank" rel="noreferrer">sheet_vitrina_v1</a>
         <p class="section-lead">
           Внутри раздела «Поставки» текущие supply calculation blocks остаются в «Расчёты», WB/FBW registry живёт
-          в «Wildberries», услуги ФФ регистрируются в «Услуги ФФ», матрица поставок доступна в «Реестр поставок»,
+          в «Wildberries», услуги и остатки ФФ ведутся в «ФФ», матрица поставок доступна в «Реестр поставок»,
           а реестр заказов поставщика доступен в «От поставщика».
         </p>
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы поставок">
           <button class="subsection-button is-active" type="button" data-supply-mode-button="calculations" aria-selected="true">Расчёты</button>
           <button class="subsection-button" type="button" data-supply-mode-button="wildberries" aria-selected="false">Wildberries</button>
-          <button class="subsection-button" type="button" data-supply-mode-button="fulfillment" aria-selected="false">Услуги ФФ</button>
+          <button class="subsection-button" type="button" data-supply-mode-button="fulfillment" aria-selected="false">ФФ</button>
           <button class="subsection-button" type="button" data-supply-mode-button="shipment-registry" aria-selected="false">Реестр поставок</button>
           <button class="subsection-button" type="button" data-supply-mode-button="cny-account" aria-selected="false">Счёт CNY</button>
           <button class="subsection-button" type="button" data-supply-mode-button="supplier" aria-selected="false">От поставщика</button>
@@ -3819,6 +3824,13 @@
                   <span>
                     <strong>1С / Фулфилмент</strong>
                     <span>Использовать остатки ФФ из 1С stage FF_STOCK.</span>
+                  </span>
+                </label>
+                <label class="source-option">
+                  <input type="radio" name="stockFfSource" value="ff_stock_ledger">
+                  <span>
+                    <strong>Остатки ФФ</strong>
+                    <span>Использовать текущий balance из серверного ledger ФФ.</span>
                   </span>
                 </label>
               </div>
@@ -3866,6 +3878,9 @@
                   </div>
                 </dl>
                 <p class="dataset-status" id="stockFfOnecDiagnostics">Проверка 1С ещё не выполнялась.</p>
+              </div>
+              <div id="stockFfLedgerPanel" hidden>
+                <p class="dataset-upload-hint">Источник берёт текущий computed balance из подраздела «ФФ → Остатки ФФ».</p>
               </div>
               <div class="wb-supply-overlay-selector" aria-labelledby="wbSupplyOverlayTitle">
                 <div class="wb-supply-overlay-head">
@@ -4434,7 +4449,11 @@
         </section>
 
         <section class="supply-mode-panel" data-supply-mode-panel="fulfillment" hidden>
-          <section class="block fulfillment-services-block" aria-labelledby="fulfillmentServicesTitle">
+          <div class="subsection-strip" role="tablist" aria-label="Разделы ФФ">
+            <button class="subsection-button is-active" type="button" data-ff-section-button="services" aria-selected="true">Услуги ФФ</button>
+            <button class="subsection-button" type="button" data-ff-section-button="stocks" aria-selected="false">Остатки ФФ</button>
+          </div>
+          <section class="block fulfillment-services-block ff-section-panel" data-ff-section-panel="services" aria-labelledby="fulfillmentServicesTitle">
             <div class="wb-supplies-header">
               <div>
                 <h2 id="fulfillmentServicesTitle" class="wb-supplies-title">Услуги ФФ</h2>
@@ -4479,6 +4498,100 @@
                 </thead>
                 <tbody id="fulfillmentUploadsBody">
                   <tr><td colspan="8" class="wb-supplies-empty">Загруженных документов пока нет. Скачайте шаблон, заполните его и загрузите файл.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section class="block ff-section-panel" data-ff-section-panel="stocks" aria-labelledby="ffStockTitle" hidden>
+            <div class="wb-supplies-header">
+              <div>
+                <h2 id="ffStockTitle" class="wb-supplies-title">Остатки ФФ</h2>
+                <p class="wb-supplies-lead">Ledger текущих количественных остатков ФФ по активной номенклатуре.</p>
+              </div>
+              <div class="block-actions">
+                <button id="ffStockExportButton" class="action-button secondary-button" type="button">Скачать Excel</button>
+                <button id="ffStockReceiptButton" class="action-button primary-button" type="button">Оприходовать</button>
+                <button id="ffStockWriteoffButton" class="action-button secondary-button" type="button">Списать</button>
+                <input id="ffStockFileInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+              </div>
+            </div>
+            <p id="ffStockMessage" class="wb-supplies-message" hidden></p>
+            <dl class="summary-grid">
+              <div>
+                <dt>SKU</dt>
+                <dd id="ffStockSkuCount">-</dd>
+              </div>
+              <div>
+                <dt>Всего штук</dt>
+                <dd id="ffStockTotalQty">-</dd>
+              </div>
+              <div>
+                <dt>Отрицательных</dt>
+                <dd id="ffStockNegativeCount">-</dd>
+              </div>
+              <div>
+                <dt>Операций</dt>
+                <dd id="ffStockOperationCount">-</dd>
+              </div>
+            </dl>
+            <section id="ffStockPreviewBlock" class="fulfillment-errors-block" hidden>
+              <h3 class="block-title">Предпросмотр документа</h3>
+              <p id="ffStockPreviewSummary" class="dataset-status">-</p>
+              <p id="ffStockPreviewWarnings" class="dataset-status" hidden></p>
+              <div class="wb-supplies-table-wrap">
+                <table class="wb-supplies-table" aria-label="Ошибки документа остатков ФФ">
+                  <thead>
+                    <tr>
+                      <th>Строка</th>
+                      <th>Ошибка</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ffStockPreviewErrorsBody">
+                    <tr><td colspan="2" class="wb-supplies-empty">Ошибок строк нет.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="dataset-actions">
+                <button id="ffStockConfirmButton" class="action-button primary-button" type="button">Применить документ</button>
+                <button id="ffStockCancelPreviewButton" class="action-button secondary-button" type="button">Отменить</button>
+              </div>
+            </section>
+            <h3 class="block-title" style="margin-top: 18px;">Текущие остатки</h3>
+            <div class="wb-supplies-table-wrap">
+              <table class="wb-supplies-table" aria-label="Текущие остатки ФФ">
+                <thead>
+                  <tr>
+                    <th>Barcode</th>
+                    <th>nmId</th>
+                    <th>SKU / название / комментарий</th>
+                    <th>Группа</th>
+                    <th>Остаток ФФ</th>
+                    <th>Warning</th>
+                  </tr>
+                </thead>
+                <tbody id="ffStockBalancesBody">
+                  <tr><td colspan="6" class="wb-supplies-empty">Остатки ещё не загружены.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h3 class="block-title" style="margin-top: 18px;">Журнал операций</h3>
+            <div class="wb-supplies-table-wrap">
+              <table class="wb-supplies-table" aria-label="Журнал операций остатков ФФ">
+                <thead>
+                  <tr>
+                    <th>Дата</th>
+                    <th>Тип</th>
+                    <th>Источник</th>
+                    <th>Объект</th>
+                    <th>Пользователь</th>
+                    <th>SKU</th>
+                    <th>Штук</th>
+                    <th>Warnings</th>
+                    <th>Файл</th>
+                  </tr>
+                </thead>
+                <tbody id="ffStockOperationsBody">
+                  <tr><td colspan="9" class="wb-supplies-empty">Операций пока нет.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -4787,6 +4900,7 @@
       const stockFfOnecMissingSkuCount = document.getElementById("stockFfOnecMissingSkuCount");
       const stockFfOnecTotalStock = document.getElementById("stockFfOnecTotalStock");
       const stockFfOnecDiagnostics = document.getElementById("stockFfOnecDiagnostics");
+      const stockFfLedgerPanel = document.getElementById("stockFfLedgerPanel");
       const wbSupplyOverlayRefreshButton = document.getElementById("wbSupplyOverlayRefreshButton");
       const wbSupplyOverlaySelectEligibleButton = document.getElementById("wbSupplyOverlaySelectEligibleButton");
       const wbSupplyOverlayClearButton = document.getElementById("wbSupplyOverlayClearButton");
@@ -4904,6 +5018,25 @@
       const fulfillmentErrorsBlock = document.getElementById("fulfillmentErrorsBlock");
       const fulfillmentErrorsBody = document.getElementById("fulfillmentErrorsBody");
       const fulfillmentUploadsBody = document.getElementById("fulfillmentUploadsBody");
+      const ffSectionButtons = Array.from(document.querySelectorAll("[data-ff-section-button]"));
+      const ffSectionPanels = Array.from(document.querySelectorAll("[data-ff-section-panel]"));
+      const ffStockExportButton = document.getElementById("ffStockExportButton");
+      const ffStockReceiptButton = document.getElementById("ffStockReceiptButton");
+      const ffStockWriteoffButton = document.getElementById("ffStockWriteoffButton");
+      const ffStockFileInput = document.getElementById("ffStockFileInput");
+      const ffStockMessage = document.getElementById("ffStockMessage");
+      const ffStockSkuCount = document.getElementById("ffStockSkuCount");
+      const ffStockTotalQty = document.getElementById("ffStockTotalQty");
+      const ffStockNegativeCount = document.getElementById("ffStockNegativeCount");
+      const ffStockOperationCount = document.getElementById("ffStockOperationCount");
+      const ffStockPreviewBlock = document.getElementById("ffStockPreviewBlock");
+      const ffStockPreviewSummary = document.getElementById("ffStockPreviewSummary");
+      const ffStockPreviewWarnings = document.getElementById("ffStockPreviewWarnings");
+      const ffStockPreviewErrorsBody = document.getElementById("ffStockPreviewErrorsBody");
+      const ffStockConfirmButton = document.getElementById("ffStockConfirmButton");
+      const ffStockCancelPreviewButton = document.getElementById("ffStockCancelPreviewButton");
+      const ffStockBalancesBody = document.getElementById("ffStockBalancesBody");
+      const ffStockOperationsBody = document.getElementById("ffStockOperationsBody");
 
       const actionLabels = {
         refresh: {
@@ -4926,11 +5059,13 @@
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
       const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
       const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "fulfillment", "shipment-registry", "cny-account", "supplier"]);
+      const DEFAULT_FF_SECTION = "services";
+      const VALID_FF_SECTIONS = new Set(["services", "stocks"]);
       const VALID_SUPPLY_SECTIONS = new Set(["factory", "regional"]);
       const DEFAULT_FACTORY_INBOUND_SOURCE = "manual_excel";
       const VALID_FACTORY_INBOUND_SOURCES = new Set(["manual_excel", "supplier_registry"]);
       const DEFAULT_STOCK_FF_SOURCE = "manual_excel";
-      const VALID_STOCK_FF_SOURCES = new Set(["manual_excel", "onec_ff_stock"]);
+      const VALID_STOCK_FF_SOURCES = new Set(["manual_excel", "onec_ff_stock", "ff_stock_ledger"]);
       const WB_REGIONAL_DISTRICT_OPTIONS = Array.isArray(config.wb_regional_district_options)
         ? config.wb_regional_district_options
             .filter((item) => item && item.district_key)
@@ -5037,6 +5172,7 @@
       let persistedOperatorUiState = readPersistedOperatorUiState();
       let factoryInboundSource = normalizeFactoryInboundSource(persistedOperatorUiState.factory_inbound_source);
       let stockFfSource = normalizeStockFfSource(persistedOperatorUiState.stock_ff_source);
+      let activeFfSection = normalizePersistedSectionName(persistedOperatorUiState.ff_section, VALID_FF_SECTIONS, DEFAULT_FF_SECTION);
       let regionalIncludedDistrictKeys = sanitizeRegionalDistrictKeys(
         persistedOperatorUiState.wb_regional_included_district_keys,
         { fallbackToAll: true }
@@ -5078,6 +5214,13 @@
       let fulfillmentServicesPayload = null;
       let fulfillmentDeleteConfirmUploadId = "";
       let fulfillmentDeletingUploadId = "";
+      let ffStockPayload = null;
+      let ffStockInitialized = false;
+      let ffStockLoading = false;
+      let ffStockUploading = false;
+      let ffStockConfirming = false;
+      let ffStockPendingOperationType = "";
+      let ffStockPreviewPayload = null;
       let wbSuppliesPayload = null;
       let wbSuppliesInitialized = false;
       let wbSuppliesLoading = false;
@@ -5257,9 +5400,14 @@
       }
 
       function stockFfSourceLabel(value) {
-        return normalizeStockFfSource(value) === "onec_ff_stock"
-          ? "1С / Фулфилмент"
-          : "Ручной Excel";
+        const normalized = normalizeStockFfSource(value);
+        if (normalized === "onec_ff_stock") {
+          return "1С / Фулфилмент";
+        }
+        if (normalized === "ff_stock_ledger") {
+          return "Остатки ФФ";
+        }
+        return "Ручной Excel";
       }
 
       function sanitizeRegionalDistrictKeys(value, options) {
@@ -5354,6 +5502,9 @@
         }
         if (stockFfOnecPanel) {
           stockFfOnecPanel.hidden = stockFfSource !== "onec_ff_stock";
+        }
+        if (stockFfLedgerPanel) {
+          stockFfLedgerPanel.hidden = stockFfSource !== "ff_stock_ledger";
         }
         if (stockFfSourceResult) {
           stockFfSourceResult.textContent = stockFfSourceLabel(stockFfSource);
@@ -5621,7 +5772,7 @@
           ensureWbSuppliesLoaded();
         }
         if (activeModeName === "fulfillment") {
-          ensureFulfillmentServicesLoaded();
+          activateFfSection(activeFfSection, { persist: false });
         }
         if (activeModeName === "shipment-registry") {
           ensureShipmentRegistryLoaded();
@@ -5634,6 +5785,29 @@
         }
         scheduleEmbeddedHeightPost();
         return activeModeName;
+      }
+
+      function activateFfSection(sectionName, options) {
+        const activeSectionName = normalizePersistedSectionName(sectionName, VALID_FF_SECTIONS, DEFAULT_FF_SECTION);
+        activeFfSection = activeSectionName;
+        ffSectionButtons.forEach((button) => {
+          const selected = button.dataset.ffSectionButton === activeSectionName;
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-selected", selected ? "true" : "false");
+        });
+        ffSectionPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.ffSectionPanel !== activeSectionName;
+        });
+        if (activeSectionName === "stocks") {
+          ensureFfStockLedgerLoaded();
+        } else {
+          ensureFulfillmentServicesLoaded();
+        }
+        if (!options || options.persist !== false) {
+          writePersistedOperatorUiState({ ff_section: activeSectionName });
+        }
+        scheduleEmbeddedHeightPost();
+        return activeSectionName;
       }
 
       function activateSupplySection(sectionName, options) {
@@ -5874,6 +6048,10 @@
         button.addEventListener("click", () => activateSupplyMode(button.dataset.supplyModeButton));
       });
 
+      ffSectionButtons.forEach((button) => {
+        button.addEventListener("click", () => activateFfSection(button.dataset.ffSectionButton));
+      });
+
       supplySectionButtons.forEach((button) => {
         button.addEventListener("click", () => activateSupplySection(button.dataset.supplySectionButton));
       });
@@ -5921,6 +6099,43 @@
             fulfillmentDeleteConfirmUploadId = deleteButton.getAttribute("data-upload-id") || "";
             renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
           }
+        });
+      }
+
+      if (ffStockExportButton) {
+        ffStockExportButton.addEventListener("click", () => {
+          if (config.ff_stock_export_path) {
+            window.location.href = config.ff_stock_export_path;
+          }
+        });
+      }
+      if (ffStockReceiptButton && ffStockFileInput) {
+        ffStockReceiptButton.addEventListener("click", () => {
+          ffStockPendingOperationType = "manual_receipt";
+          ffStockFileInput.click();
+        });
+      }
+      if (ffStockWriteoffButton && ffStockFileInput) {
+        ffStockWriteoffButton.addEventListener("click", () => {
+          ffStockPendingOperationType = "manual_writeoff";
+          ffStockFileInput.click();
+        });
+      }
+      if (ffStockFileInput) {
+        ffStockFileInput.addEventListener("change", () => {
+          if (ffStockFileInput.files && ffStockFileInput.files[0]) {
+            previewFfStockWorkbook();
+          }
+        });
+      }
+      if (ffStockConfirmButton) {
+        ffStockConfirmButton.addEventListener("click", confirmFfStockPreview);
+      }
+      if (ffStockCancelPreviewButton) {
+        ffStockCancelPreviewButton.addEventListener("click", () => {
+          ffStockPreviewPayload = null;
+          renderFfStockPreview(null);
+          setFfStockMessage("", "");
         });
       }
 
@@ -9704,6 +9919,281 @@
           renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
           scheduleEmbeddedHeightPost();
         }
+      }
+
+      function setFfStockMessage(message, tone) {
+        if (!ffStockMessage) {
+          return;
+        }
+        const text = String(message || "").trim();
+        ffStockMessage.textContent = text;
+        ffStockMessage.hidden = !text;
+        ffStockMessage.className = "wb-supplies-message" + (tone ? " is-" + tone : "");
+      }
+
+      function updateFfStockBusyState() {
+        const busy = ffStockLoading || ffStockUploading || ffStockConfirming;
+        if (ffStockExportButton) {
+          ffStockExportButton.disabled = busy;
+        }
+        if (ffStockReceiptButton) {
+          ffStockReceiptButton.disabled = busy;
+          ffStockReceiptButton.textContent = ffStockUploading && ffStockPendingOperationType === "manual_receipt" ? "Читаем..." : "Оприходовать";
+        }
+        if (ffStockWriteoffButton) {
+          ffStockWriteoffButton.disabled = busy;
+          ffStockWriteoffButton.textContent = ffStockUploading && ffStockPendingOperationType === "manual_writeoff" ? "Читаем..." : "Списать";
+        }
+        if (ffStockConfirmButton) {
+          const preview = ffStockPreviewPayload && ffStockPreviewPayload.preview ? ffStockPreviewPayload.preview : null;
+          ffStockConfirmButton.disabled = busy || !preview || ffStockPreviewPayload.apply_allowed === false;
+          ffStockConfirmButton.textContent = ffStockConfirming ? "Применяем..." : "Применить документ";
+        }
+      }
+
+      function ensureFfStockLedgerLoaded() {
+        if (ffStockInitialized || ffStockLoading) {
+          return;
+        }
+        ffStockInitialized = true;
+        loadFfStockLedger();
+      }
+
+      async function loadFfStockLedger(options) {
+        if (!config.ff_stock_status_path || ffStockLoading) {
+          return;
+        }
+        ffStockLoading = true;
+        updateFfStockBusyState();
+        if (!options || !options.preserveMessage) {
+          setFfStockMessage("", "");
+        }
+        try {
+          const response = await fetch(config.ff_stock_status_path, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          ffStockPayload = payload;
+          renderFfStockLedger(payload);
+        } catch (error) {
+          ffStockPayload = null;
+          renderFfStockLedger(null);
+          setFfStockMessage(
+            "Остатки ФФ не удалось прочитать: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          ffStockLoading = false;
+          updateFfStockBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      async function previewFfStockWorkbook() {
+        const file = ffStockFileInput && ffStockFileInput.files ? ffStockFileInput.files[0] : null;
+        const operationType = ffStockPendingOperationType || "manual_receipt";
+        if (!file || ffStockUploading) {
+          setFfStockMessage("Сначала выберите XLSX-файл.", "error");
+          return;
+        }
+        ffStockUploading = true;
+        updateFfStockBusyState();
+        setFfStockMessage("Читаем документ...", "");
+        try {
+          const formData = new FormData();
+          formData.append("operation_type", operationType);
+          formData.append("file", file, file.name || "ff-stock-operation.xlsx");
+          const response = await fetch(config.ff_stock_preview_path, {
+            method: "POST",
+            headers: { "Accept": "application/json" },
+            body: formData
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          ffStockPreviewPayload = payload;
+          renderFfStockPreview(payload);
+          setFfStockMessage(payload.apply_allowed ? "Документ прочитан. Проверьте preview и примените документ." : "Документ прочитан с ошибками.", payload.apply_allowed ? "success" : "warning");
+        } catch (error) {
+          ffStockPreviewPayload = null;
+          renderFfStockPreview(null);
+          setFfStockMessage(
+            "Документ не прочитан: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          if (ffStockFileInput) {
+            ffStockFileInput.value = "";
+          }
+          ffStockUploading = false;
+          updateFfStockBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      async function confirmFfStockPreview() {
+        const preview = ffStockPreviewPayload && ffStockPreviewPayload.preview ? ffStockPreviewPayload.preview : null;
+        const previewId = preview ? String(preview.preview_id || "").trim() : "";
+        if (!previewId || ffStockConfirming) {
+          return;
+        }
+        ffStockConfirming = true;
+        updateFfStockBusyState();
+        setFfStockMessage("Применяем документ...", "");
+        try {
+          const response = await fetch(config.ff_stock_confirm_path, {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ preview_id: previewId })
+          });
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          ffStockPreviewPayload = null;
+          renderFfStockPreview(null);
+          setFfStockMessage("Документ применён. Остатки ФФ пересчитаны.", "success");
+          await loadFfStockLedger({ preserveMessage: true });
+        } catch (error) {
+          setFfStockMessage(
+            "Документ не применён: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          ffStockConfirming = false;
+          updateFfStockBusyState();
+          scheduleEmbeddedHeightPost();
+        }
+      }
+
+      function renderFfStockLedger(payload) {
+        const registry = payload && payload.registry && typeof payload.registry === "object" ? payload.registry : {};
+        const summary = registry.summary && typeof registry.summary === "object" ? registry.summary : {};
+        const rows = Array.isArray(registry.rows) ? registry.rows : [];
+        const operations = Array.isArray(payload && payload.operations) ? payload.operations : [];
+        if (ffStockSkuCount) {
+          ffStockSkuCount.textContent = valueOrDash(summary.sku_count !== undefined ? summary.sku_count : rows.length);
+        }
+        if (ffStockTotalQty) {
+          ffStockTotalQty.textContent = formatNumber(Number(summary.total_quantity || 0));
+        }
+        if (ffStockNegativeCount) {
+          ffStockNegativeCount.textContent = valueOrDash(summary.negative_sku_count || 0);
+        }
+        if (ffStockOperationCount) {
+          ffStockOperationCount.textContent = valueOrDash(operations.length);
+        }
+        renderFfStockBalances(rows);
+        renderFfStockOperations(operations);
+      }
+
+      function renderFfStockBalances(rows) {
+        if (!ffStockBalancesBody) {
+          return;
+        }
+        if (!rows.length) {
+          ffStockBalancesBody.innerHTML = "<tr><td colspan=\"6\" class=\"wb-supplies-empty\">Активных SKU для остатков ФФ пока нет.</td></tr>";
+          return;
+        }
+        ffStockBalancesBody.innerHTML = rows.map((row) => {
+          const negative = Boolean(row.negative_balance);
+          const warning = negative ? "Отрицательный остаток ФФ" : String(row.warning || "").trim();
+          return [
+            "<tr" + (negative ? " class=\"is-warning\"" : "") + ">",
+            "<td>" + escapeHtml(valueOrDash(row.barcode)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(row.nm_id)) + "</td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(valueOrDash(row.sku_display || row.sku_comment || row.sku)) + "</span></td>",
+            "<td>" + escapeHtml(valueOrDash(row.group_name)) + "</td>",
+            "<td>" + escapeHtml(formatNumber(Number(row.current_stock_ff || row.quantity || 0))) + "</td>",
+            "<td>" + escapeHtml(warning) + "</td>",
+            "</tr>"
+          ].join("");
+        }).join("");
+      }
+
+      function renderFfStockOperations(operations) {
+        if (!ffStockOperationsBody) {
+          return;
+        }
+        if (!operations.length) {
+          ffStockOperationsBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">Операций пока нет.</td></tr>";
+          return;
+        }
+        ffStockOperationsBody.innerHTML = operations.map((operation) => {
+          const warnings = Array.isArray(operation.warnings) ? operation.warnings.filter(Boolean) : [];
+          const downloadPath = String(operation.download_path || "").trim();
+          const fileCell = downloadPath
+            ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(downloadPath) + "\" target=\"_blank\" rel=\"noreferrer\">Скачать</a>"
+            : "—";
+          return [
+            "<tr>",
+            "<td>" + escapeHtml(formatFulfillmentUploadedAt(operation.created_at)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(operation.operation_type_label || operation.operation_type)) + "</td>",
+            "<td>" + escapeHtml(ffStockSourceTypeLabel(operation.source_type)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(operation.source_object_label || operation.source_object_id || operation.source_key)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(operation.created_by)) + "</td>",
+            "<td>" + escapeHtml(valueOrDash(operation.sku_count)) + "</td>",
+            "<td>" + escapeHtml(formatNumber(Number(operation.total_quantity_abs || 0))) + "</td>",
+            "<td>" + escapeHtml(warnings.length ? warnings.join("; ") : "") + "</td>",
+            "<td>" + fileCell + "</td>",
+            "</tr>"
+          ].join("");
+        }).join("");
+      }
+
+      function renderFfStockPreview(payload) {
+        const preview = payload && payload.preview ? payload.preview : null;
+        if (!ffStockPreviewBlock) {
+          return;
+        }
+        if (!preview) {
+          ffStockPreviewBlock.hidden = true;
+          if (ffStockPreviewErrorsBody) {
+            ffStockPreviewErrorsBody.innerHTML = "<tr><td colspan=\"2\" class=\"wb-supplies-empty\">Ошибок строк нет.</td></tr>";
+          }
+          updateFfStockBusyState();
+          return;
+        }
+        const summary = preview.summary && typeof preview.summary === "object" ? preview.summary : {};
+        const warnings = Array.isArray(preview.warnings) ? preview.warnings.filter(Boolean) : [];
+        const errors = Array.isArray(preview.errors) ? preview.errors : [];
+        ffStockPreviewBlock.hidden = false;
+        if (ffStockPreviewSummary) {
+          ffStockPreviewSummary.textContent = [
+            "SKU: " + valueOrDash(summary.sku_count),
+            "штук: " + formatNumber(Math.abs(Number(summary.total_quantity_delta || summary.total_quantity_abs || 0))),
+            "warnings: " + valueOrDash(summary.warning_count || warnings.length),
+            "ошибок: " + valueOrDash(summary.error_count || errors.length)
+          ].join(" · ");
+        }
+        if (ffStockPreviewWarnings) {
+          ffStockPreviewWarnings.hidden = !warnings.length;
+          ffStockPreviewWarnings.textContent = warnings.join("; ");
+        }
+        if (ffStockPreviewErrorsBody) {
+          ffStockPreviewErrorsBody.innerHTML = errors.length
+            ? errors.map((error) => [
+                "<tr>",
+                "<td>" + escapeHtml(valueOrDash(error.row_index)) + "</td>",
+                "<td>" + escapeHtml(valueOrDash(error.error)) + "</td>",
+                "</tr>"
+              ].join("")).join("")
+            : "<tr><td colspan=\"2\" class=\"wb-supplies-empty\">Ошибок строк нет.</td></tr>";
+        }
+        updateFfStockBusyState();
+      }
+
+      function ffStockSourceTypeLabel(value) {
+        const source = String(value || "").trim();
+        if (source === "manual_excel" || source === "supplier_shipment" || source === "wb_supply") {
+          return source;
+        }
+        return valueOrDash(source);
       }
 
       function setWbSuppliesMessage(message, tone) {
