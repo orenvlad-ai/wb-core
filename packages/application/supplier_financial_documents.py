@@ -874,6 +874,8 @@ class SupplierFinancialDocumentsBlock:
         elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT:
             if any(not normalized.get(field) for field in BANK_CONTROL_REFRESH_FIELDS):
                 return True
+            if "payment_operations" not in normalized:
+                return True
         else:
             return False
         if str(document.get("parser_version") or "") != FINANCIAL_DOCUMENT_PARSER_VERSION:
@@ -2914,8 +2916,15 @@ def _parse_bank_control_statement(text: str) -> tuple[dict[str, Any], list[dict[
     )))
     resident_name = _extract_bank_control_resident(text)
     non_resident = _extract_bank_control_non_resident(text)
-    contract_number, contract_date, contract_currency, contract_currency_code, contract_amount = _extract_bank_control_contract(text)
-    payment_date, payment_amount, payment_currency_code = _extract_bank_control_payment(text)
+    contract_number, contract_date, contract_currency, contract_currency_code, contract_amount, contract_amount_raw = _extract_bank_control_contract(text)
+    payment_operations = _extract_bank_control_payment_operations(text)
+    first_payment_operation = payment_operations[0] if payment_operations else {}
+    payment_date = str(first_payment_operation.get("operation_date") or "")
+    payment_amount = _parse_decimal(first_payment_operation.get("payment_amount"))
+    payment_currency_code = str(first_payment_operation.get("payment_currency_code") or "")
+    total_payment_operations_amount = _sum_decimal(
+        operation.get("payment_amount") for operation in payment_operations if isinstance(operation, Mapping)
+    )
     balance_date, calculated_balance = _extract_bank_control_balance(text)
     normalized = {
         "vendor": non_resident,
@@ -2930,8 +2939,12 @@ def _parse_bank_control_statement(text: str) -> tuple[dict[str, Any], list[dict[
         "contract_currency": contract_currency,
         "contract_currency_code": contract_currency_code,
         "contract_amount": _decimal_to_float(contract_amount),
+        "contract_amount_raw": contract_amount_raw,
         "currency": contract_currency_code or contract_currency,
-        "total_amount": _decimal_to_float(contract_amount),
+        "total_amount": _decimal_to_float(total_payment_operations_amount if total_payment_operations_amount is not None else contract_amount),
+        "payment_operations": payment_operations,
+        "payment_operations_count": len(payment_operations),
+        "total_payment_operations_amount": _decimal_to_float(total_payment_operations_amount),
         "payment_operation_date": payment_date,
         "payment_operation_amount": _decimal_to_float(payment_amount),
         "payment_operation_currency_code": payment_currency_code,
@@ -2949,9 +2962,7 @@ def _parse_bank_control_statement(text: str) -> tuple[dict[str, Any], list[dict[
             "contract_number": "contract number",
             "contract_date": "contract date",
             "contract_currency_code": "contract currency code",
-            "contract_amount": "contract amount",
-            "payment_operation_date": "payment operation date",
-            "payment_operation_amount": "payment operation amount",
+            "payment_operations": "payment operations",
             "calculated_balance": "calculated balance",
         },
     )
@@ -3737,28 +3748,80 @@ def _extract_bank_control_non_resident(text: str) -> str:
     return cleaned
 
 
-def _extract_bank_control_contract(text: str) -> tuple[str, str, str, str, Decimal | None]:
+def _extract_bank_control_contract(text: str) -> tuple[str, str, str, str, Decimal | None, str]:
+    amount_pattern = r"(?:-?(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)(?:[,.]\d{1,2})|[A-Za-zА-Яа-я]+)"
     match = re.search(
-        r"\b([A-Za-zА-Яа-я0-9/-]+)\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+([А-Яа-яA-Za-z]+)\s+(\d{3})\s+([\d .,\-]+)\s+\d{1,2}\.\d{1,2}\.\d{4}",
+        rf"\b([A-Za-zА-Яа-я0-9/-]+)\s+(\d{{1,2}}\.\d{{1,2}}\.\d{{4}})\s+([А-Яа-яA-Za-z]+)\s+(\d{{3}})\s+({amount_pattern})\s+\d{{1,2}}\.\d{{1,2}}\.\d{{4}}",
         text,
         flags=re.I,
     )
     if not match:
-        return "", "", "", "", None
+        return "", "", "", "", None, ""
     number, raw_date, currency, currency_code, amount = match.groups()
-    return number, _parse_date(raw_date), currency.upper(), currency_code, _parse_decimal(amount)
+    amount_raw = _clean_value(amount)
+    return number, _parse_date(raw_date), currency.upper(), currency_code, _parse_decimal(amount_raw), amount_raw
+
+
+def _extract_bank_control_payment_operations(text: str) -> list[dict[str, Any]]:
+    segment = _extract_bank_control_section(text, "II")
+    table_text = _normalize_bank_control_table_text(segment or text)
+    amount_pattern = r"-?(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)(?:[,.]\d{1,2})"
+    pattern = re.compile(
+        rf"(?:^|\s)(?P<row_index>\d{{1,3}})\s+"
+        rf"(?P<operation_date>\d{{1,2}}\.\d{{1,2}}\.\d{{4}})\s+"
+        rf"(?P<payment_direction>\d+)\s+"
+        rf"(?P<operation_type_code>\d{{5}})\s+"
+        rf"(?P<payment_currency_code>\d{{3}})\s+"
+        rf"(?P<payment_amount>{amount_pattern})\s+"
+        rf"(?P<contract_currency_code>\d{{3}})\s+"
+        rf"(?P<contract_amount>{amount_pattern})"
+        rf"(?:\s+(?P<expected_repatriation_date>\d{{1,2}}\.\d{{1,2}}\.\d{{4}}))?",
+        flags=re.I,
+    )
+    operations: list[dict[str, Any]] = []
+    for match in pattern.finditer(table_text):
+        payment_amount = _parse_decimal(match.group("payment_amount"))
+        contract_amount = _parse_decimal(match.group("contract_amount"))
+        operation = {
+            "row_index": _int_or_none(match.group("row_index")),
+            "operation_date": _parse_date(match.group("operation_date")),
+            "payment_direction": _clean_value(match.group("payment_direction")),
+            "operation_type_code": _clean_value(match.group("operation_type_code")),
+            "payment_currency_code": _clean_value(match.group("payment_currency_code")),
+            "payment_amount": _decimal_to_float(payment_amount),
+            "contract_currency_code": _clean_value(match.group("contract_currency_code")),
+            "contract_amount": _decimal_to_float(contract_amount),
+            "expected_repatriation_date": _parse_date(match.group("expected_repatriation_date") or ""),
+        }
+        operations.append({key: value for key, value in operation.items() if value not in (None, "")})
+    return operations
+
+
+def _extract_bank_control_section(text: str, section_roman: str) -> str:
+    match = re.search(
+        rf"Раздел\s+{re.escape(section_roman)}\b.*?(?=\n\s*Раздел\s+[IVXLC]+\b|$)",
+        text,
+        flags=re.I | re.S,
+    )
+    return match.group(0) if match else ""
+
+
+def _normalize_bank_control_table_text(value: Any) -> str:
+    text = _clean_value(value)
+    for _ in range(3):
+        text = re.sub(r"(\d{1,2}\.\d{1,2}\.\d{2})\s+(\d{2})(?=\D|$)", r"\1\2", text)
+        text = re.sub(r"(\d{1,2}\.\d{1,2}\.\d{3})\s+(\d)(?=\D|$)", r"\1\2", text)
+    return text
 
 
 def _extract_bank_control_payment(text: str) -> tuple[str, Decimal | None, str]:
-    match = re.search(
-        r"\b(\d{1,2}\.\d{1,2}\.\s*\d\s*\d\s*\d\s*\d)\s+\d+\s+\d+\s+(\d{3})\s+([\d .,\-]+)\s+\d{3}\s+[\d .,\-]+",
-        text,
-        flags=re.I,
+    operations = _extract_bank_control_payment_operations(text)
+    first_operation = operations[0] if operations else {}
+    return (
+        str(first_operation.get("operation_date") or ""),
+        _parse_decimal(first_operation.get("payment_amount")),
+        str(first_operation.get("payment_currency_code") or ""),
     )
-    if not match:
-        return "", None, ""
-    raw_date, currency_code, amount = match.groups()
-    return _parse_date(_compact_spaced_date(raw_date)), _parse_decimal(amount), currency_code
 
 
 def _extract_bank_control_balance(text: str) -> tuple[str, Decimal | None]:
@@ -4330,12 +4393,24 @@ def verify_supplier_order_document_match(document: Mapping[str, Any], shipment: 
     matched_contract_date = order_contract_date if date_matches else ""
     if normalized.get("unique_contract_registration_number"):
         reasons.append("УНК распознан: " + str(normalized.get("unique_contract_registration_number")))
+    payment_operation_match: dict[str, Any] = {}
+    if document_type == FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT:
+        payment_operation_match = _bank_control_payment_operation_match(order_identity, normalized)
+        reasons.extend(_string_list(payment_operation_match.get("payment_operation_match_reasons")))
+        warnings.extend(_string_list(payment_operation_match.get("payment_operation_match_warnings")))
+        if (
+            payment_operation_match.get("payment_operation_match_status") != ORDER_MATCH_STATUS_MATCHED
+            and status not in {ORDER_MATCH_STATUS_MISMATCH, ORDER_MATCH_STATUS_NEEDS_REVIEW}
+        ):
+            status = ORDER_MATCH_STATUS_NEEDS_REVIEW
+
     return {
         "order_match_status": status,
         "order_match_reasons": _dedupe_strings(reasons),
         "order_match_warnings": _dedupe_strings(warnings),
         "matched_contract_number": matched_contract_number,
         "matched_contract_date": matched_contract_date,
+        **payment_operation_match,
     }
 
 
@@ -4355,6 +4430,7 @@ def _supplier_order_identity(shipment: Mapping[str, Any]) -> dict[str, Any]:
 
 def _supplier_order_document_identity(document: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(document.get("normalized_parse") or {})
+    document_type = str(document.get("document_type") or normalized.get("document_type") or "")
     contract_number = str(normalized.get("contract_number") or "")
     contract_date = _optional_iso_date(normalized.get("contract_date"))
     if not contract_number or not contract_date:
@@ -4363,13 +4439,16 @@ def _supplier_order_document_identity(document: Mapping[str, Any]) -> dict[str, 
         )
         contract_number = contract_number or extracted_number
         contract_date = contract_date or extracted_date
-    amount = (
-        _parse_decimal(normalized.get("transfer_amount"))
-        or _parse_decimal(normalized.get("payment_operation_amount"))
-        or _parse_decimal(normalized.get("contract_amount"))
-        or _parse_decimal(normalized.get("total_amount"))
-        or _parse_decimal(document.get("total_amount"))
-    )
+    if document_type == FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT:
+        amount = None
+    else:
+        amount = (
+            _parse_decimal(normalized.get("transfer_amount"))
+            or _parse_decimal(normalized.get("payment_operation_amount"))
+            or _parse_decimal(normalized.get("contract_amount"))
+            or _parse_decimal(normalized.get("total_amount"))
+            or _parse_decimal(document.get("total_amount"))
+        )
     vendor = str(
         normalized.get("beneficiary_customer")
         or normalized.get("non_resident_vendor")
@@ -4403,8 +4482,8 @@ def _supplier_order_amount_match_reason(order_identity: Mapping[str, Any], docum
     document_amount = _parse_decimal(document_identity.get("amount"))
     if order_amount is None or document_amount is None or order_amount <= 0 or document_amount <= 0:
         return ""
-    order_currency = str(order_identity.get("currency") or "").upper()
-    document_currency = str(document_identity.get("currency") or "").upper()
+    order_currency = _currency_match_key(order_identity.get("currency"))
+    document_currency = _currency_match_key(document_identity.get("currency"))
     if order_currency and document_currency and order_currency != document_currency:
         return ""
     tolerance = max(Decimal("0.01"), order_amount.copy_abs() * Decimal("0.001"))
@@ -4425,6 +4504,141 @@ def _supplier_order_vendor_match_reason(order_identity: Mapping[str, Any], docum
 
 def _party_key(value: str) -> str:
     return re.sub(r"[^0-9A-ZА-Я]+", "", str(value or "").upper())
+
+
+def _bank_control_payment_operation_match(order_identity: Mapping[str, Any], normalized: Mapping[str, Any]) -> dict[str, Any]:
+    operations = [dict(item) for item in normalized.get("payment_operations") or [] if isinstance(item, Mapping)]
+    reasons: list[str] = []
+    warnings: list[str] = []
+    empty_result = {
+        "payment_operation_match_status": ORDER_MATCH_STATUS_NEEDS_REVIEW,
+        "payment_operation_match_reasons": reasons,
+        "payment_operation_match_warnings": warnings,
+        "matched_payment_operation": {},
+        "matched_payment_operation_row_index": None,
+        "matched_payment_operation_date": "",
+        "matched_payment_operation_amount": None,
+        "matched_payment_operation_currency": "",
+    }
+    order_amount = _parse_decimal(order_identity.get("invoice_amount"))
+    order_currency = _currency_match_key(order_identity.get("currency"))
+    if not operations:
+        warnings.append("Не удалось проверить ВБК по invoice: платёжные строки Section II не распознаны.")
+        return empty_result
+    if order_amount is None or order_amount <= 0:
+        warnings.append("Не удалось проверить ВБК по invoice: в заказе нет положительной суммы invoice.")
+        return empty_result
+    if not order_currency:
+        warnings.append("Не удалось проверить ВБК по invoice: в заказе не указана валюта invoice.")
+        return empty_result
+
+    candidates: list[tuple[int, int, dict[str, Any], list[str]]] = []
+    amount_matches_wrong_currency = False
+    currency_matches_wrong_amount = False
+    for operation in operations:
+        operation_amount = _parse_decimal(operation.get("payment_amount"))
+        operation_currency = _currency_match_key(operation.get("payment_currency_code") or operation.get("contract_currency_code"))
+        amount_matches = _money_amount_matches(order_amount, operation_amount)
+        currency_matches = bool(operation_currency and operation_currency == order_currency)
+        if amount_matches and not currency_matches:
+            amount_matches_wrong_currency = True
+        if currency_matches and not amount_matches:
+            currency_matches_wrong_amount = True
+        if not amount_matches or not currency_matches:
+            continue
+        score, distance, support_reasons = _bank_control_payment_operation_score(operation, order_identity)
+        candidates.append((score, distance, operation, support_reasons))
+
+    if not candidates:
+        currency_label = str(order_identity.get("currency") or "").upper()
+        warnings.append(
+            "В ВБК нет платёжной строки, совпадающей с invoice "
+            f"{_decimal_to_display(order_amount)} {currency_label}."
+        )
+        if amount_matches_wrong_currency:
+            warnings.append("В ВБК есть строка с такой суммой, но валюта не совпадает с invoice.")
+        elif currency_matches_wrong_amount:
+            warnings.append("В ВБК есть строки в валюте invoice, но суммы не совпадают.")
+        return empty_result
+
+    candidates.sort(key=lambda item: (-item[0], item[1], _int_or_none(item[2].get("row_index")) or 999999))
+    best_score, _distance, best_operation, support = candidates[0]
+    equally_good = [item for item in candidates if item[0] == best_score and item[1] == _distance]
+    if len(equally_good) > 1:
+        warnings.append("В ВБК найдено несколько платёжных строк с одинаково сильным совпадением invoice; требуется проверка.")
+        status = ORDER_MATCH_STATUS_NEEDS_REVIEW
+    else:
+        status = ORDER_MATCH_STATUS_MATCHED
+    amount_display = _decimal_to_display(_parse_decimal(best_operation.get("payment_amount")))
+    currency_display = _bank_control_operation_currency_display(best_operation)
+    row_index = _int_or_none(best_operation.get("row_index"))
+    reasons.append(
+        "Платёжная строка ВБК совпадает с invoice: "
+        f"строка {row_index}, {amount_display} {currency_display}."
+    )
+    reasons.extend(support)
+    return {
+        "payment_operation_match_status": status,
+        "payment_operation_match_reasons": _dedupe_strings(reasons),
+        "payment_operation_match_warnings": _dedupe_strings(warnings),
+        "matched_payment_operation": dict(best_operation),
+        "matched_payment_operation_row_index": row_index,
+        "matched_payment_operation_date": str(best_operation.get("operation_date") or ""),
+        "matched_payment_operation_amount": _decimal_to_float(_parse_decimal(best_operation.get("payment_amount"))),
+        "matched_payment_operation_currency": currency_display,
+    }
+
+
+def _bank_control_payment_operation_score(operation: Mapping[str, Any], order_identity: Mapping[str, Any]) -> tuple[int, int, list[str]]:
+    score = 100
+    reasons: list[str] = []
+    if str(operation.get("payment_direction") or "") == "2":
+        score += 5
+        reasons.append("Направление платежа ВБК: 2.")
+    if str(operation.get("operation_type_code") or "") == "11100":
+        score += 5
+        reasons.append("Код операции ВБК: 11100.")
+    distance = 999999
+    invoice_date = _optional_iso_date(order_identity.get("invoice_date"))
+    operation_date = _optional_iso_date(operation.get("operation_date"))
+    if invoice_date and operation_date:
+        try:
+            delta_days = (date.fromisoformat(operation_date) - date.fromisoformat(invoice_date)).days
+            distance = abs(delta_days)
+            if delta_days >= 0:
+                score += max(0, 30 - min(delta_days, 30))
+                reasons.append("Дата операции ВБК не раньше даты invoice.")
+        except ValueError:
+            pass
+    return score, distance, reasons
+
+
+def _money_amount_matches(left: Decimal | None, right: Decimal | None) -> bool:
+    if left is None or right is None or left <= 0 or right <= 0:
+        return False
+    tolerance = max(Decimal("0.01"), left.copy_abs() * Decimal("0.001"))
+    return abs(left - right) <= tolerance
+
+
+def _currency_match_key(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    if raw == "156" or "CNY" in raw or "RMB" in raw or "ЮАН" in raw or "YUAN" in raw:
+        return "CNY"
+    if raw == "643" or raw in {"RUB", "RUR"} or "РУБ" in raw:
+        return "RUB"
+    if raw == "840" or "USD" in raw or "ДОЛЛ" in raw:
+        return "USD"
+    return raw
+
+
+def _bank_control_operation_currency_display(operation: Mapping[str, Any]) -> str:
+    code = str(operation.get("payment_currency_code") or operation.get("contract_currency_code") or "")
+    key = _currency_match_key(code)
+    if key and code and key != code:
+        return f"{key}/{code}"
+    return key or code
 
 
 def _compact_spaced_code(value: Any) -> str:
@@ -5105,6 +5319,7 @@ def _parse_status_for_payload(
             "non_resident_vendor",
             "contract_number",
             "contract_date",
+            "payment_operations",
         ],
         FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION: [
             "transfer_application_number",
