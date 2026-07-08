@@ -336,6 +336,7 @@ class WbPricesManagementBlock:
             "sppProxyReason": str(read_side.get("sppProxyReason") or ""),
             "promoEligibleCount": read_side.get("promoEligibleCount"),
             "promoCandidateCount": read_side.get("promoCandidateCount"),
+            "promoCurrentCount": read_side.get("promoCurrentCount"),
             "promoLabel": str(read_side.get("promoLabel") or "н/д"),
             "promoReason": str(read_side.get("promoReason") or ""),
             "lastUploadStatus": "",
@@ -375,6 +376,7 @@ class WbPricesManagementBlock:
                 "sppProxyReason": "spp_proxy source is unavailable",
                 "promoEligibleCount": None,
                 "promoCandidateCount": None,
+                "promoCurrentCount": None,
                 "promoLabel": "н/д",
                 "promoReason": "promo source is unavailable",
             }
@@ -405,7 +407,7 @@ class WbPricesManagementBlock:
             for row in getattr(data_sheet, "rows", [])
             if isinstance(row, list) and len(row) >= 2
         }
-        promo_candidate_cache: dict[str, tuple[dict[int, float] | None, set[int], str, str | None]] = {}
+        promo_context_cache: dict[str, tuple[float | None, str, dict[int, float], set[int], str, str | None]] = {}
 
         for nm_id in requested:
             spp_value, spp_date = _latest_metric_value(
@@ -427,82 +429,94 @@ class WbPricesManagementBlock:
                 result[nm_id]["promoReason"] = "promo_count_by_price value is unavailable in latest ready snapshot"
                 continue
 
-            candidate_count, candidate_reason = self._load_promo_candidate_count(
+            current_count, current_count_source, candidate_count, candidate_reason = self._load_promo_current_count(
                 nm_id=nm_id,
                 snapshot_date=promo_date,
-                cache=promo_candidate_cache,
+                cache=promo_context_cache,
             )
             result[nm_id]["promoEligibleCount"] = promo_eligible
             result[nm_id]["promoCandidateCount"] = candidate_count
-            if candidate_count is None:
+            result[nm_id]["promoCurrentCount"] = current_count
+            if current_count is None:
                 result[nm_id]["promoLabel"] = "н/д"
                 result[nm_id]["promoReason"] = candidate_reason
             else:
-                result[nm_id]["promoLabel"] = f"{_format_count_label(promo_eligible)} / {_format_count_label(candidate_count)}"
+                result[nm_id]["promoLabel"] = f"{_format_count_label(promo_eligible)} / {_format_count_label(current_count)}"
+                candidate_part = (
+                    f"; candidate campaigns for SKU={_format_count_label(candidate_count)}"
+                    if candidate_count is not None
+                    else ""
+                )
                 result[nm_id]["promoReason"] = (
                     f"eligible by price={_format_count_label(promo_eligible)}; "
-                    f"current candidate campaigns={_format_count_label(candidate_count)}; "
-                    f"source=promo_by_price date={promo_date}"
+                    f"total current promo campaigns={_format_count_label(current_count)}; "
+                    f"denominator_source={current_count_source}; "
+                    f"source=promo_by_price date={promo_date}{candidate_part}"
                 )
         return result
 
-    def _load_promo_candidate_count(
+    def _load_promo_current_count(
         self,
         *,
         nm_id: int,
         snapshot_date: str,
-        cache: dict[str, tuple[dict[int, float] | None, set[int], str, str | None]],
-    ) -> tuple[float | None, str]:
+        cache: dict[str, tuple[float | None, str, dict[int, float], set[int], str, str | None]],
+    ) -> tuple[float | None, str, float | None, str]:
         if snapshot_date not in cache:
-            cache[snapshot_date] = self._load_promo_candidate_counts(snapshot_date=snapshot_date)
-        counts, missing_count_nm_ids, reason, captured_at = cache[snapshot_date]
-        if counts is None:
-            return None, reason
-        if nm_id in counts:
-            captured_part = f"; captured_at={captured_at}" if captured_at else ""
-            return counts[nm_id], f"source=promo_by_price date={snapshot_date}{captured_part}"
+            cache[snapshot_date] = self._load_promo_context(snapshot_date=snapshot_date)
+        current_count, current_count_source, candidate_counts, missing_count_nm_ids, reason, captured_at = cache[snapshot_date]
+        if current_count is None:
+            return None, "", None, reason
+        candidate_count = candidate_counts.get(nm_id)
+        captured_part = f"; captured_at={captured_at}" if captured_at else ""
         if nm_id in missing_count_nm_ids:
-            return None, (
+            return current_count, current_count_source, None, (
                 f"promo source payload for {snapshot_date} has no candidate count; "
-                "run a fresh promo source refresh to populate denominator"
+                f"using global current promo denominator{captured_part}"
             )
-        return None, f"promo source payload has no item for nmID {nm_id} on {snapshot_date}"
+        if candidate_count is None:
+            return current_count, current_count_source, None, (
+                f"promo source payload has no item for nmID {nm_id} on {snapshot_date}; "
+                f"using global current promo denominator{captured_part}"
+            )
+        return current_count, current_count_source, candidate_count, f"source=promo_by_price date={snapshot_date}{captured_part}"
 
-    def _load_promo_candidate_counts(
+    def _load_promo_context(
         self,
         *,
         snapshot_date: str,
-    ) -> tuple[dict[int, float] | None, set[int], str, str | None]:
+    ) -> tuple[float | None, str, dict[int, float], set[int], str, str | None]:
         try:
             payload, captured_at = self.runtime.load_temporal_source_snapshot(
                 source_key="promo_by_price",
                 snapshot_date=snapshot_date,
             )
         except Exception as exc:
-            return None, set(), f"promo source payload is unavailable for {snapshot_date}: {exc}", None
+            return None, "", {}, set(), f"promo source payload is unavailable for {snapshot_date}: {exc}", None
         if payload is None:
-            return None, set(), f"promo source payload is unavailable for {snapshot_date}", None
-        result_payload = getattr(payload, "result", None)
-        items = getattr(result_payload, "items", None)
+            return None, "", {}, set(), f"promo source payload is unavailable for {snapshot_date}", None
+        result_payload = _promo_result_payload(payload)
+        current_count, current_count_source = _promo_current_count(result_payload)
+        if current_count is None:
+            return None, "", {}, set(), (
+                f"promo source payload for {snapshot_date} has no current promo denominator; "
+                "run a fresh promo source refresh/backfill"
+            ), captured_at
+        items = _promo_payload_field(result_payload, "items")
         if not isinstance(items, list):
-            return None, set(), f"promo source payload has no item list for {snapshot_date}", captured_at
+            return current_count, current_count_source, {}, set(), "", captured_at
         counts: dict[int, float] = {}
         missing_count_nm_ids: set[int] = set()
         for item in items:
-            item_nm_id = _optional_int(getattr(item, "nm_id", None))
+            item_nm_id = _optional_int(_promo_payload_field(item, "nm_id"))
             if item_nm_id is None:
                 continue
-            count = _number_or_none(getattr(item, "promo_candidate_count", None))
+            count = _number_or_none(_promo_payload_field(item, "promo_candidate_count"))
             if count is None:
                 missing_count_nm_ids.add(item_nm_id)
                 continue
             counts[item_nm_id] = float(count)
-        if not counts and missing_count_nm_ids:
-            return None, missing_count_nm_ids, (
-                f"promo source payload for {snapshot_date} has no candidate count; "
-                "run a fresh promo source refresh to populate denominator"
-            ), captured_at
-        return counts, missing_count_nm_ids, "", captured_at
+        return current_count, current_count_source, counts, missing_count_nm_ids, "", captured_at
 
     def _save_preview(self, preview: Mapping[str, Any]) -> None:
         self._preview_dir.mkdir(parents=True, exist_ok=True)
@@ -754,6 +768,42 @@ def _number_or_none(value: Any) -> float | None:
     except InvalidOperation:
         return None
     return _decimal_to_json(number)
+
+
+def _promo_result_payload(payload: Any) -> Any:
+    result = _promo_payload_field(payload, "result")
+    if result is not None:
+        return result
+    return payload
+
+
+def _promo_current_count(payload: Any) -> tuple[float | None, str]:
+    for field_name in ("current_promos", "current_promo_count", "covering_campaigns"):
+        value = _number_or_none(_promo_payload_field(payload, field_name))
+        if value is not None:
+            return float(value), field_name
+
+    diagnostics = _promo_payload_field(payload, "diagnostics")
+    for field_name in ("current_promo_count", "covering_campaigns", "materializable_campaigns", "usable_campaigns"):
+        value = _number_or_none(_promo_payload_field(diagnostics, field_name))
+        if value is not None:
+            return float(value), f"diagnostics.{field_name}"
+
+    counters = _promo_payload_field(diagnostics, "counters")
+    for field_name in ("current_promo_count", "covering_campaigns", "materializable_campaigns", "usable_campaigns"):
+        value = _number_or_none(_promo_payload_field(counters, field_name))
+        if value is not None:
+            return float(value), f"diagnostics.counters.{field_name}"
+
+    return None, ""
+
+
+def _promo_payload_field(payload: Any, field_name: str) -> Any:
+    if payload is None:
+        return None
+    if isinstance(payload, Mapping):
+        return payload.get(field_name)
+    return getattr(payload, field_name, None)
 
 
 def _latest_metric_value(row: list[Any] | None, *, date_columns: Sequence[str]) -> tuple[float | None, str]:

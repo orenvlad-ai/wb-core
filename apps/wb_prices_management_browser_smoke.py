@@ -52,7 +52,7 @@ def main() -> None:
             table_text = page.locator("[data-prices-table]").inner_text()
             if "СПП" not in table_text or "29%" not in table_text:
                 raise AssertionError(f"SPP column must render by default, got: {table_text}")
-            if "Акции" not in table_text or "2 / 3" not in table_text:
+            if "Акции" not in table_text or "2 / 4" not in table_text:
                 raise AssertionError(f"promo column must render by default, got: {table_text}")
             page.locator("[data-prices-column-manager] summary").click()
             if not page.locator("[data-prices-column-controls]").is_visible():
