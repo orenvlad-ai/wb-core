@@ -28,6 +28,7 @@ from packages.adapters.wb_content import (
     WbContentTransportError,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.supplier_invoice_parser import (
     extract_iphone_model_keys,
     normalize_invoice_model,
@@ -350,6 +351,7 @@ class SupplierShipmentsBlock:
         }
         self.runtime.save_supplier_shipment(header=header, lines=lines)
         if actual_ff_acceptance_date:
+            self._record_ff_stock_receipt({"header": header, "lines": lines})
             self._materialize_ff_cost_layer(shipment_id)
         self._autolink_invoice_contract_from_metadata(
             invoice_document_id=str(invoice_document.get("document_id") or ""),
@@ -382,7 +384,7 @@ class SupplierShipmentsBlock:
         if existing_ff_acceptance_date and actual_ff_acceptance_date != existing_ff_acceptance_date:
             if self._has_current_ff_cost_layer(shipment_id):
                 raise ValueError(
-                    "actual_ff_acceptance_date cannot be cleared or changed after FF cost layer materialization"
+                    "actual_ff_acceptance_date cannot be cleared or changed after ФФ cost layer materialization"
                 )
         approx_yuan_rate = _resolve_optional_positive_decimal_field(payload, edited_payload, existing_header, "approx_yuan_rate")
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
@@ -424,6 +426,7 @@ class SupplierShipmentsBlock:
         }
         self.runtime.save_supplier_shipment(header=header, lines=lines)
         if actual_ff_acceptance_date:
+            self._record_ff_stock_receipt({"header": header, "lines": lines})
             self._materialize_ff_cost_layer(shipment_id)
         if "contract_document_id" in payload:
             contract_document_id = str(payload.get("contract_document_id") or "").strip()
@@ -470,6 +473,12 @@ class SupplierShipmentsBlock:
         cost_block.materialize_wb_supply_cost_layers()
         cost_block.materialize_opening_baseline()
         cost_block.materialize_daily_state()
+
+    def _record_ff_stock_receipt(self, shipment_detail: Mapping[str, Any]) -> dict[str, Any] | None:
+        return FfStockLedgerBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).record_supplier_acceptance(shipment_detail)
 
     def _has_current_ff_cost_layer(self, shipment_id: str) -> bool:
         from packages.application.our_wb_costs import OurWbCostBlock

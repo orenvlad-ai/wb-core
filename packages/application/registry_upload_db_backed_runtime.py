@@ -1703,6 +1703,384 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return cursor.rowcount > 0
 
+    def save_ff_stock_operation_preview(
+        self,
+        *,
+        preview_id: str,
+        operation_type: str,
+        created_at: str,
+        uploaded_filename: str,
+        uploaded_content_type: str,
+        source_file_sha256: str,
+        workbook_bytes: bytes,
+        parsed_lines: list[Mapping[str, Any]],
+        summary: Mapping[str, Any],
+        warnings: list[str],
+        errors: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        normalized_preview_id = str(preview_id or "").strip()
+        if not normalized_preview_id:
+            raise ValueError("preview_id is required")
+        _validate_timestamp(created_at, field_name="created_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_ff_stock_operation_previews(
+                    preview_id,
+                    operation_type,
+                    created_at,
+                    uploaded_filename,
+                    uploaded_content_type,
+                    source_file_sha256,
+                    source_file_blob,
+                    parsed_lines_json,
+                    summary_json,
+                    warnings_json,
+                    errors_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(preview_id) DO UPDATE SET
+                    operation_type = excluded.operation_type,
+                    created_at = excluded.created_at,
+                    uploaded_filename = excluded.uploaded_filename,
+                    uploaded_content_type = excluded.uploaded_content_type,
+                    source_file_sha256 = excluded.source_file_sha256,
+                    source_file_blob = excluded.source_file_blob,
+                    parsed_lines_json = excluded.parsed_lines_json,
+                    summary_json = excluded.summary_json,
+                    warnings_json = excluded.warnings_json,
+                    errors_json = excluded.errors_json
+                """,
+                (
+                    normalized_preview_id,
+                    str(operation_type or "").strip(),
+                    created_at,
+                    str(uploaded_filename or "").strip(),
+                    str(uploaded_content_type or "").strip(),
+                    str(source_file_sha256 or "").strip(),
+                    sqlite3.Binary(workbook_bytes or b""),
+                    json.dumps(list(parsed_lines), ensure_ascii=False),
+                    json.dumps(dict(summary), ensure_ascii=False),
+                    json.dumps(list(warnings), ensure_ascii=False),
+                    json.dumps(list(errors), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        preview = self.load_ff_stock_operation_preview(normalized_preview_id, include_file_blob=False)
+        if preview is None:
+            raise ValueError(f"ФФ stock preview was not saved: {normalized_preview_id}")
+        return preview
+
+    def load_ff_stock_operation_preview(
+        self,
+        preview_id: str,
+        *,
+        include_file_blob: bool = False,
+    ) -> dict[str, Any] | None:
+        normalized_preview_id = str(preview_id or "").strip()
+        if not normalized_preview_id:
+            return None
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            select_columns = [
+                "preview_id",
+                "operation_type",
+                "created_at",
+                "uploaded_filename",
+                "uploaded_content_type",
+                "source_file_sha256",
+                "source_file_blob IS NOT NULL AS file_available",
+                "parsed_lines_json",
+                "summary_json",
+                "warnings_json",
+                "errors_json",
+            ]
+            if include_file_blob:
+                select_columns.append("source_file_blob")
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(select_columns)}
+                FROM sheet_vitrina_v1_ff_stock_operation_previews
+                WHERE preview_id = ?
+                """,
+                (normalized_preview_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = _ff_stock_preview_to_dict(row)
+            if include_file_blob:
+                payload["workbook_bytes"] = bytes(row["source_file_blob"] or b"")
+            return payload
+
+    def delete_ff_stock_operation_preview(self, preview_id: str) -> bool:
+        normalized_preview_id = str(preview_id or "").strip()
+        if not normalized_preview_id:
+            return False
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                DELETE FROM sheet_vitrina_v1_ff_stock_operation_previews
+                WHERE preview_id = ?
+                """,
+                (normalized_preview_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def load_ff_stock_operation_by_source_key(self, source_key: str) -> dict[str, Any] | None:
+        normalized_source_key = str(source_key or "").strip()
+        if not normalized_source_key:
+            return None
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_operations
+                WHERE source_key = ?
+                """,
+                (normalized_source_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            return _ff_stock_operation_to_dict(row)
+
+    def create_ff_stock_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_type: str,
+        source_type: str,
+        source_key: str,
+        source_object_id: str = "",
+        source_object_label: str = "",
+        created_at: str,
+        created_by: str = "",
+        warnings: list[str] | None = None,
+        diagnostics: Mapping[str, Any] | None = None,
+        source_filename: str = "",
+        source_content_type: str = "",
+        source_file_sha256: str = "",
+        source_file_bytes: bytes | None = None,
+        lines: list[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        normalized_operation_id = str(operation_id or "").strip()
+        if not normalized_operation_id:
+            raise ValueError("operation_id is required")
+        normalized_source_key = str(source_key or "").strip()
+        if not normalized_source_key:
+            raise ValueError("source_key is required")
+        _validate_timestamp(created_at, field_name="created_at")
+        normalized_lines = [dict(item) for item in (lines or [])]
+        sku_ids = {
+            int(item.get("nm_id"))
+            for item in normalized_lines
+            if item.get("nm_id") is not None
+        }
+        total_quantity_delta = sum(float(item.get("quantity_delta") or 0.0) for item in normalized_lines)
+        total_quantity_abs = sum(abs(float(item.get("quantity_delta") or 0.0)) for item in normalized_lines)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            existing = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_operations
+                WHERE source_key = ?
+                """,
+                (normalized_source_key,),
+            ).fetchone()
+            if existing is not None:
+                payload = _ff_stock_operation_to_dict(existing)
+                payload["idempotent"] = True
+                return payload
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_ff_stock_operations(
+                    operation_id,
+                    operation_type,
+                    source_type,
+                    source_key,
+                    source_object_id,
+                    source_object_label,
+                    created_at,
+                    created_by,
+                    sku_count,
+                    total_quantity_delta,
+                    total_quantity_abs,
+                    warnings_json,
+                    diagnostics_json,
+                    source_filename,
+                    source_content_type,
+                    source_file_sha256,
+                    source_file_blob
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_operation_id,
+                    str(operation_type or "").strip(),
+                    str(source_type or "").strip(),
+                    normalized_source_key,
+                    str(source_object_id or "").strip(),
+                    str(source_object_label or "").strip(),
+                    created_at,
+                    str(created_by or "").strip(),
+                    len(sku_ids),
+                    total_quantity_delta,
+                    total_quantity_abs,
+                    json.dumps(list(warnings or []), ensure_ascii=False),
+                    json.dumps(dict(diagnostics or {}), ensure_ascii=False),
+                    str(source_filename or "").strip(),
+                    str(source_content_type or "").strip(),
+                    str(source_file_sha256 or "").strip(),
+                    sqlite3.Binary(source_file_bytes or b"") if source_file_bytes is not None else None,
+                ),
+            )
+            conn.executemany(
+                """
+                INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(
+                    operation_id,
+                    line_no,
+                    nm_id,
+                    barcode,
+                    sku,
+                    nomenclature_name,
+                    comment,
+                    group_name,
+                    quantity_delta,
+                    raw_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        normalized_operation_id,
+                        index,
+                        int(item.get("nm_id") or 0),
+                        str(item.get("barcode") or "").strip(),
+                        str(item.get("sku") or item.get("our_sku") or "").strip(),
+                        str(item.get("nomenclature_name") or "").strip(),
+                        str(item.get("comment") or "").strip(),
+                        str(item.get("group_name") or "").strip(),
+                        float(item.get("quantity_delta") or 0.0),
+                        json.dumps(dict(item.get("raw") or item), ensure_ascii=False),
+                    )
+                    for index, item in enumerate(normalized_lines, start=1)
+                ],
+            )
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_operations
+                WHERE operation_id = ?
+                """,
+                (normalized_operation_id,),
+            ).fetchone()
+            payload = _ff_stock_operation_to_dict(row)
+            payload["idempotent"] = False
+            return payload
+
+    def list_ff_stock_operations(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        normalized_limit = max(1, min(int(limit or 100), 500))
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_operations
+                ORDER BY created_at DESC, operation_id DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+            return [_ff_stock_operation_to_dict(row) for row in rows]
+
+    def load_ff_stock_operation(
+        self,
+        operation_id: str,
+        *,
+        include_file_blob: bool = False,
+    ) -> dict[str, Any] | None:
+        normalized_operation_id = str(operation_id or "").strip()
+        if not normalized_operation_id:
+            return None
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            select_columns = ["*"] if include_file_blob else [
+                "operation_id",
+                "operation_type",
+                "source_type",
+                "source_key",
+                "source_object_id",
+                "source_object_label",
+                "created_at",
+                "created_by",
+                "sku_count",
+                "total_quantity_delta",
+                "total_quantity_abs",
+                "warnings_json",
+                "diagnostics_json",
+                "source_filename",
+                "source_content_type",
+                "source_file_sha256",
+                "source_file_blob IS NOT NULL AS file_available",
+            ]
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(select_columns)}
+                FROM sheet_vitrina_v1_ff_stock_operations
+                WHERE operation_id = ?
+                """,
+                (normalized_operation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = _ff_stock_operation_to_dict(row)
+            line_rows = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_operation_lines
+                WHERE operation_id = ?
+                ORDER BY line_no ASC
+                """,
+                (normalized_operation_id,),
+            ).fetchall()
+            payload["lines"] = [_ff_stock_operation_line_to_dict(line_row) for line_row in line_rows]
+            if include_file_blob:
+                payload["source_file_bytes"] = bytes(row["source_file_blob"] or b"")
+            return payload
+
+    def list_ff_stock_balances(self) -> list[dict[str, Any]]:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT nm_id,
+                       SUM(quantity_delta) AS balance
+                FROM sheet_vitrina_v1_ff_stock_operation_lines
+                GROUP BY nm_id
+                ORDER BY nm_id ASC
+                """
+            ).fetchall()
+            return [
+                {
+                    "nm_id": int(row["nm_id"]),
+                    "balance": float(row["balance"] or 0.0),
+                }
+                for row in rows
+            ]
+
     def upsert_wb_supplies(
         self,
         *,
@@ -5893,6 +6271,63 @@ def _cny_ledger_operation_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _ff_stock_preview_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "preview_id": row["preview_id"],
+        "operation_type": row["operation_type"] or "",
+        "created_at": row["created_at"] or "",
+        "uploaded_filename": row["uploaded_filename"] or "",
+        "uploaded_content_type": row["uploaded_content_type"] or "",
+        "source_file_sha256": row["source_file_sha256"] or "",
+        "file_available": bool(row["file_available"]),
+        "parsed_lines": _loads_json_list(row["parsed_lines_json"]),
+        "summary": _loads_json_object(row["summary_json"]),
+        "warnings": _loads_json_list(row["warnings_json"]),
+        "errors": _loads_json_list(row["errors_json"]),
+    }
+
+
+def _ff_stock_operation_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    keys = set(row.keys())
+    file_available = bool(row["file_available"]) if "file_available" in keys else bool(row["source_file_blob"])
+    return {
+        "operation_id": row["operation_id"],
+        "operation_type": row["operation_type"] or "",
+        "source_type": row["source_type"] or "",
+        "source_key": row["source_key"] or "",
+        "source_object_id": row["source_object_id"] or "",
+        "source_object_label": row["source_object_label"] or "",
+        "created_at": row["created_at"] or "",
+        "created_by": row["created_by"] or "",
+        "sku_count": int(row["sku_count"] or 0),
+        "total_quantity_delta": float(row["total_quantity_delta"] or 0.0),
+        "total_quantity_abs": float(row["total_quantity_abs"] or 0.0),
+        "warnings": _loads_json_list(row["warnings_json"]),
+        "diagnostics": _loads_json_object(row["diagnostics_json"]),
+        "source_filename": row["source_filename"] or "",
+        "source_content_type": row["source_content_type"] or "",
+        "source_file_sha256": row["source_file_sha256"] or "",
+        "file_available": file_available,
+    }
+
+
+def _ff_stock_operation_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "operation_id": row["operation_id"],
+        "line_no": int(row["line_no"] or 0),
+        "nm_id": int(row["nm_id"] or 0),
+        "barcode": row["barcode"] or "",
+        "sku": row["sku"] or "",
+        "nomenclature_name": row["nomenclature_name"] or "",
+        "comment": row["comment"] or "",
+        "group_name": row["group_name"] or "",
+        "quantity_delta": float(row["quantity_delta"] or 0.0),
+        "raw": _loads_json_object(row["raw_json"]),
+    }
+
+
 def _first_existing_value(mapping: Mapping[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in mapping and mapping.get(key) is not None:
@@ -6640,6 +7075,66 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             uploaded_content_type TEXT,
             workbook_blob BLOB
         );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_operation_previews (
+            preview_id TEXT PRIMARY KEY,
+            operation_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            uploaded_filename TEXT NOT NULL,
+            uploaded_content_type TEXT,
+            source_file_sha256 TEXT NOT NULL,
+            source_file_blob BLOB NOT NULL,
+            parsed_lines_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            errors_json TEXT NOT NULL DEFAULT '[]'
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_operation_previews_by_created
+        ON sheet_vitrina_v1_ff_stock_operation_previews(created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_operations (
+            operation_id TEXT PRIMARY KEY,
+            operation_type TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_key TEXT NOT NULL UNIQUE,
+            source_object_id TEXT,
+            source_object_label TEXT,
+            created_at TEXT NOT NULL,
+            created_by TEXT,
+            sku_count INTEGER NOT NULL DEFAULT 0,
+            total_quantity_delta REAL NOT NULL DEFAULT 0,
+            total_quantity_abs REAL NOT NULL DEFAULT 0,
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            diagnostics_json TEXT NOT NULL DEFAULT '{}',
+            source_filename TEXT,
+            source_content_type TEXT,
+            source_file_sha256 TEXT,
+            source_file_blob BLOB
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_operations_by_created
+        ON sheet_vitrina_v1_ff_stock_operations(created_at DESC, operation_id DESC);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_operations_by_source
+        ON sheet_vitrina_v1_ff_stock_operations(source_type, source_object_id);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_operation_lines (
+            operation_id TEXT NOT NULL REFERENCES sheet_vitrina_v1_ff_stock_operations(operation_id) ON DELETE CASCADE,
+            line_no INTEGER NOT NULL,
+            nm_id INTEGER NOT NULL,
+            barcode TEXT,
+            sku TEXT,
+            nomenclature_name TEXT,
+            comment TEXT,
+            group_name TEXT,
+            quantity_delta REAL NOT NULL,
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(operation_id, line_no)
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_operation_lines_by_nm
+        ON sheet_vitrina_v1_ff_stock_operation_lines(nm_id);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_plan_report_monthly_baseline (
             month TEXT PRIMARY KEY,

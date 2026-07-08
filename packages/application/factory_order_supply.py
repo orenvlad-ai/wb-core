@@ -19,6 +19,7 @@ from packages.application.demand_estimation import (
     sales_lookup_days as _sales_lookup_days,
 )
 from packages.application.factory_order_sales_history import FactoryOrderAuthoritativeSalesHistory
+from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
@@ -42,6 +43,7 @@ from packages.contracts.factory_order_supply import (
     DATASET_STOCK_FF,
     FACTORY_INBOUND_SOURCE_MANUAL_EXCEL,
     FACTORY_INBOUND_SOURCE_SUPPLIER_REGISTRY,
+    STOCK_FF_SOURCE_LEDGER,
     STOCK_FF_SOURCE_MANUAL_EXCEL,
     STOCK_FF_SOURCE_ONEC_FF_STOCK,
     SUPPLIER_REGISTRY_FACTORY_TO_FF_ACCEPTANCE_DAYS,
@@ -127,8 +129,9 @@ _COVERAGE_CONTRACT_NOTE = (
     "до полного target window: производство + фабрика→ФФ + ФФ→WB + safety MP + safety ФФ + цикл заказа. "
     "В пути ФФ -> Wildberries учитываются только из отдельного загруженного шаблона, "
     "потому что в текущем wb-core нет другого authoritative source для этого члена формулы. "
-    "Для «Остатки ФФ» оператор может выбрать manual Excel или read-only 1C source "
-    f"по materialized metric {ONEC_FF_STOCK_QTY_METRIC_KEY}; общий onec_total_qty не используется. "
+    "Для «Остатки ФФ» оператор может выбрать manual Excel, read-only 1C source "
+    f"по materialized metric {ONEC_FF_STOCK_QTY_METRIC_KEY} или серверный ledger «Остатки ФФ»; "
+    "общий onec_total_qty не используется. "
     "Для «Товары в пути от фабрики» оператор может выбрать manual Excel или read-only source из supplier registry; "
     "supplier registry uses only production/in_transit orders, excludes accepted_ff orders, "
     "and applies shipment_date + 30 days as current bounded factory-to-FF acceptance default. "
@@ -354,7 +357,10 @@ class FactoryOrderSupplyBlock:
             for state in datasets.values()
             if state.required
             and state.status != "uploaded"
-            and not (state.dataset_type == DATASET_STOCK_FF and stock_ff_source == STOCK_FF_SOURCE_ONEC_FF_STOCK)
+            and not (
+                state.dataset_type == DATASET_STOCK_FF
+                and stock_ff_source in {STOCK_FF_SOURCE_ONEC_FF_STOCK, STOCK_FF_SOURCE_LEDGER}
+            )
         ]
         if missing_required:
             raise ValueError(
@@ -362,11 +368,13 @@ class FactoryOrderSupplyBlock:
             )
 
         onec_stock_ff_state = self.build_onec_stock_ff_check()
-        stock_ff_rows = (
-            self._load_onec_stock_ff_rows(require_ready=True)[0]
-            if stock_ff_source == STOCK_FF_SOURCE_ONEC_FF_STOCK
-            else self._load_stock_ff_rows()
-        )
+        ledger_stock_ff_state: Mapping[str, Any] = {}
+        if stock_ff_source == STOCK_FF_SOURCE_ONEC_FF_STOCK:
+            stock_ff_rows = self._load_onec_stock_ff_rows(require_ready=True)[0]
+        elif stock_ff_source == STOCK_FF_SOURCE_LEDGER:
+            stock_ff_rows, ledger_stock_ff_state = self._load_ledger_stock_ff_rows(active_skus)
+        else:
+            stock_ff_rows = self._load_stock_ff_rows()
         factory_inbound_source = settings.factory_inbound_source
         supplier_registry_state = self._build_supplier_registry_inbound_state()
         inbound_factory_rows = (
@@ -474,7 +482,12 @@ class FactoryOrderSupplyBlock:
             result_warnings = result_warnings + (
                 "Источник supplier registry выбран, но usable matched supplier rows внутри расчётного окна = 0.",
             )
-        result_warnings = result_warnings + tuple(wb_stock_ff_warnings) + tuple(wb_factory_overlay_warnings)
+        result_warnings = (
+            result_warnings
+            + tuple(str(item) for item in ledger_stock_ff_state.get("warnings", []) if str(item or "").strip())
+            + tuple(wb_stock_ff_warnings)
+            + tuple(wb_factory_overlay_warnings)
+        )
         wb_supply_overlay_payload = overlay_to_public_payload(
             overlay=wb_supply_overlay,
             stock_ff_diagnostics=wb_stock_ff_diagnostics,
@@ -666,6 +679,12 @@ class FactoryOrderSupplyBlock:
                 + "; ".join(details)
             )
         return result.rows, result.state
+
+    def _load_ledger_stock_ff_rows(
+        self,
+        active_skus: list[tuple[int, str]],
+    ) -> tuple[list[FactoryOrderStockFfRow], Mapping[str, Any]]:
+        return resolve_ff_stock_ledger_rows(runtime=self.runtime, active_skus=active_skus)
 
     def _load_inbound_rows(self, dataset_type: str) -> list[FactoryOrderInboundRow]:
         payload = self.runtime.load_factory_order_dataset_state(dataset_type)
@@ -1119,9 +1138,9 @@ def _normalize_factory_inbound_source(value: Any) -> str:
 
 def _parse_stock_ff_source(value: Any) -> str:
     normalized = str(value or "").strip() or STOCK_FF_SOURCE_MANUAL_EXCEL
-    if normalized not in {STOCK_FF_SOURCE_MANUAL_EXCEL, STOCK_FF_SOURCE_ONEC_FF_STOCK}:
+    if normalized not in {STOCK_FF_SOURCE_MANUAL_EXCEL, STOCK_FF_SOURCE_ONEC_FF_STOCK, STOCK_FF_SOURCE_LEDGER}:
         raise ValueError(
-            "Источник остатков ФФ должен быть manual_excel или onec_ff_stock"
+            "Источник остатков ФФ должен быть manual_excel, onec_ff_stock или ff_stock_ledger"
         )
     return normalized
 

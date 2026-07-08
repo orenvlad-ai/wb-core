@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
+from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
@@ -736,6 +737,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.fulfillment_services_block = FulfillmentServicesBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.ff_stock_ledger_block = FfStockLedgerBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -2378,6 +2383,36 @@ class RegistryUploadHttpEntrypoint:
         upload_id: str,
     ) -> tuple[bytes, str, str]:
         return self.fulfillment_services_block.download_pdf(upload_id)
+
+    def handle_ff_stock_status_request(self) -> dict[str, Any]:
+        return self.ff_stock_ledger_block.get_status()
+
+    def handle_ff_stock_export_request(self) -> tuple[bytes, str, str]:
+        return self.ff_stock_ledger_block.export_current_balances_xlsx()
+
+    def handle_ff_stock_preview_request(
+        self,
+        workbook_bytes: bytes,
+        *,
+        operation_type: str,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        return self.ff_stock_ledger_block.parse_manual_operation_preview(
+            workbook_bytes,
+            operation_type=operation_type,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+        )
+
+    def handle_ff_stock_confirm_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+        preview_id = str(payload.get("preview_id") or "").strip()
+        if not preview_id:
+            raise ValueError("preview_id is required")
+        return self.ff_stock_ledger_block.confirm_manual_operation(preview_id, created_by=actor)
+
+    def handle_ff_stock_operation_file_request(self, operation_id: str) -> tuple[bytes, str, str]:
+        return self.ff_stock_ledger_block.download_operation_source_file(operation_id)
 
     def handle_nomenclature_list_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}

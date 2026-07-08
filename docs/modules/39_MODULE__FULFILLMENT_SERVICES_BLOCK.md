@@ -3,7 +3,7 @@ title: "Модуль: fulfillment_services_block"
 doc_id: "WB-CORE-MODULE-39-FULFILLMENT-SERVICES-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для `Поставки -> Услуги ФФ`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату, accepted-only documents table, delete flow and overlay расходов ФФ в `Поставки -> Wildberries`."
+purpose: "Зафиксировать canonical contract для `ФФ -> Услуги ФФ`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату, accepted-only documents table, delete flow and overlay расходов ФФ в `Поставки -> Wildberries`."
 scope: "Operator supply contour for Fulfillment service expenses only: PNG-derived XLSX template, protected HTTP routes, openpyxl parser, STORAGE row handling with storage allocation, SQLite upload/line persistence with soft-delete, PDF payment-validation artifact, accepted-only UI list and approved-only WB supplies overlay. Final product cost, 1C cost truth, ЕБД metric truth and global cost-source switching are out of scope."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
@@ -38,14 +38,17 @@ related_runners:
 related_docs:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
+  - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Fulfillment uploads are server-owned runtime truth for uploaded service-expense files and payment validation only. They are not official WB evidence, not 1C cost truth, not ЕБД metric truth and not final товарная себестоимость. The operator UI is user-facing as `Услуги ФФ`, shows only accepted uploads in `Загруженные документы`, keeps failed uploads out of the accepted list/overlay, supports `STORAGE` rows in `Номер поставки` for storage allocation across ordinary matched rows, and soft-deletes accepted uploads so their PDF and WB supplies overlay amounts become unavailable."
+update_note: "Fulfillment uploads are server-owned runtime truth for uploaded service-expense files and payment validation only. They are not official WB evidence, not 1C cost truth, not ЕБД metric truth and not final товарная себестоимость. The operator UI top-level supply section is `ФФ`; this module owns the inner subsection `Услуги ФФ`, while `43_MODULE__FF_STOCK_LEDGER_BLOCK.md` owns inner subsection `Остатки ФФ`. `Услуги ФФ` shows only accepted uploads in `Загруженные документы`, keeps failed uploads out of the accepted list/overlay, supports `STORAGE` rows in `Номер поставки` for storage allocation across ordinary matched rows, and soft-deletes accepted uploads so their PDF and WB supplies overlay amounts become unavailable."
 ---
 
 # 1. Contract
 
-`Поставки` exposes the inner section `Услуги ФФ`.
+`Поставки` exposes top-level section `ФФ` with inner subsections `Услуги ФФ` and `Остатки ФФ`.
+
+This module owns only `ФФ -> Услуги ФФ`. The `Остатки ФФ` quantity ledger/current balances contour is documented in `43_MODULE__FF_STOCK_LEDGER_BLOCK.md`.
 
 The section is server-owned/runtime-backed and contains:
 - `Скачать шаблон`;
