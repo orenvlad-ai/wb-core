@@ -235,10 +235,12 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - optional explicit `as_of_date` keeps strict exact-read on the same persisted closed-day seam and does not fallback or trigger refresh/upstream fetch
     - row set = full active `config_v2` SKU table; legacy `<50` threshold remains diagnostic only and no longer filters rows
     - default order follows active `config_v2` display order, while the operator table provides browser-local sorting
-    - immediately after `Акция`, the visible table columns are `поставки ВБ`, `ост. ФФ`, `ост. ВБ`
-    - `поставки ВБ` is read-only aggregation from existing WB supplies runtime cache `raw_goods` by `nmId`, excluding only status ids `1/2/5` (`Не запланировано` / `Запланировано` / `Принято`); all other WB supply statuses are included when goods composition has positive active-SKU quantity
+    - immediately after `Акция`, the visible table columns are `на произв.`, `в пути Китай`, `ост. ФФ`, `поставки ВБ`, `ост. ВБ`
+    - `на произв.` / `в пути Китай` are read-only aggregations from existing supplier shipment registry product lines by `internal_nm_id`, including only positive matched / matched-by-compatibility quantities in statuses `production` (`На производстве`) and `in_transit` (`В пути`) respectively
     - `ост. ФФ` reads current server-owned `ff_stock_ledger` balances by active SKU
+    - `поставки ВБ` is read-only aggregation from existing WB supplies runtime cache `raw_goods` by `nmId`, excluding only status ids `1/2/5` (`Не запланировано` / `Запланировано` / `Принято`); all other WB supply statuses are included when goods composition has positive active-SKU quantity
     - `ост. ВБ` is the existing `stock_total` WB stock value from the persisted ready snapshot, exposed with alias `stock_wb` for the report table without changing the source semantics
+    - the table has an `Итого` row before SKU rows; quantitative stock/supply columns are summed, total sales/day is summed from row demand, and days-left is calculated from aggregate stock / aggregate demand or burn rather than as a simple average
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
   - plan-report block `Выполнение плана` остаётся read-only и server-owned:

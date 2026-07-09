@@ -25,6 +25,14 @@ from packages.business_time import (
     default_business_as_of_date,
 )
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
+from packages.contracts.supplier_shipments import (
+    LINE_TYPE_PRODUCT,
+    MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+    ORDER_STATUS_IN_TRANSIT,
+    ORDER_STATUS_LABELS_RU,
+    ORDER_STATUS_PRODUCTION,
+)
 
 TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 STOCK_ALERT_THRESHOLD = 50.0
@@ -45,6 +53,11 @@ WB_SUPPLY_EXCLUDED_STATUS_LABELS = {
     "не запланировано",
     "незапланировано",
 }
+SUPPLIER_SHIPMENT_CYCLE_STATUS_KEYS = (ORDER_STATUS_PRODUCTION, ORDER_STATUS_IN_TRANSIT)
+SUPPLIER_SHIPMENT_LINE_MATCH_STATUSES = {
+    MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+}
 STOCK_REPORT_DISTRICTS = (
     ("stock_ru_central", "Центральный"),
     ("stock_ru_northwest", "Северо-Западный"),
@@ -58,9 +71,11 @@ REPORT_NOTES = (
     "Строки отчёта строятся по всем active SKU из current config_v2; legacy threshold <50 больше не является критерием включения.",
     "Период усреднения продаж означает целевое число валидных торговых дней; отчёт читает только persisted sales_funnel_history.",
     "Участие в акции читается из canonical metric promo_participation: numeric >0 = Да, numeric 0 = Нет, missing = н/д.",
+    "На произв. и в пути Китай читаются из current supplier shipment registry по product lines internal_nm_id -> qty: статусы production = На производстве, in_transit = В пути.",
     "Поставки ВБ считаются из current WB supplies cache по goods composition nmId -> quantity; исключены только статусы 1/2/5 = Не запланировано/Запланировано/Принято.",
     "Ост. ФФ читается из server-owned ФФ stock ledger current balances по active SKU.",
     "Ост. ВБ = прежний stock_total из WB stocks ready snapshot; semantics данных не меняется.",
+    "Строка Итого агрегирует количественные остатки/поставки суммой, продажи/день — суммой SKU daily demand, дни — как aggregate stock / aggregate burn.",
     "Дней по округам считается по positive stock depletion между consecutive persisted ready snapshots; restock/increase и gaps не превращаются в расход.",
     "Merged bucket `ДВ и Сибирь` целиком исключён из текущего report contour: current truth не делит его на отдельный Дальний Восток и Сибирь.",
 )
@@ -154,6 +169,20 @@ class SheetVitrinaV1StockReportBlock:
                 "temporal_slot": TEMPORAL_SLOT_YESTERDAY_CLOSED,
                 "slot_date": effective_as_of_date,
                 "sales_history_source": SALES_HISTORY_SOURCE_KEY,
+                "supplier_shipments_source": "sheet_vitrina_v1_supplier_shipments runtime registry",
+                "supplier_shipments_quantity_source": "product lines internal_nm_id -> qty",
+                "supplier_shipments_included_statuses": [
+                    {
+                        "code": ORDER_STATUS_PRODUCTION,
+                        "label_ru": ORDER_STATUS_LABELS_RU[ORDER_STATUS_PRODUCTION],
+                        "report_column": "на произв.",
+                    },
+                    {
+                        "code": ORDER_STATUS_IN_TRANSIT,
+                        "label_ru": ORDER_STATUS_LABELS_RU[ORDER_STATUS_IN_TRANSIT],
+                        "report_column": "в пути Китай",
+                    },
+                ],
                 "wb_supplies_source": "sheet_vitrina_v1_wb_supplies runtime cache",
                 "wb_supplies_quantity_source": "raw_goods nmId -> quantity",
                 "wb_supplies_excluded_status_ids": sorted(WB_SUPPLY_EXCLUDED_STATUS_IDS),
@@ -228,6 +257,7 @@ class SheetVitrinaV1StockReportBlock:
         active_nm_ids = [int(item.nm_id) for item in active_items]
         active_sku_pairs = [(int(item.nm_id), str(getattr(item, "display_name"))) for item in active_items]
         nomenclature_by_nm = _load_active_nomenclature_by_nm(self.runtime)
+        supplier_cycle_projection = _load_supplier_shipment_cycle_quantities_by_nm(self.runtime, active_nm_ids)
         wb_supplies_projection = _load_wb_supplies_inbound_by_nm(self.runtime, active_nm_ids)
         ff_stock_by_nm = _load_ff_stock_balances_by_nm(self.runtime, active_sku_pairs)
         demand_reference_date = date.fromisoformat(closed_view.slot_date) + timedelta(days=1)
@@ -304,6 +334,9 @@ class SheetVitrinaV1StockReportBlock:
             promotion_payload = _promotion_participation_payload(
                 sku_values.get(PROMO_PARTICIPATION_METRIC_KEY)
             )
+            supplier_cycle_quantities = supplier_cycle_projection["quantity_by_nm_id"].get(nm_id, {})
+            supplier_production_qty = float(supplier_cycle_quantities.get(ORDER_STATUS_PRODUCTION, 0.0))
+            supplier_in_transit_qty = float(supplier_cycle_quantities.get(ORDER_STATUS_IN_TRANSIT, 0.0))
             rows.append(
                 {
                     "nm_id": nm_id,
@@ -313,6 +346,8 @@ class SheetVitrinaV1StockReportBlock:
                     "active_order": active_order,
                     "promotion_participation": promotion_payload["value"],
                     "promotion_participation_label": promotion_payload["label"],
+                    "supplier_production_qty": supplier_production_qty,
+                    "supplier_in_transit_qty": supplier_in_transit_qty,
                     "wb_supplies_inbound_qty": float(wb_supplies_projection["quantity_by_nm_id"].get(nm_id, 0.0)),
                     "stock_ff": float(ff_stock_by_nm.get(nm_id, 0.0)),
                     "stock_wb": None if stock_total is None else float(stock_total),
@@ -332,6 +367,13 @@ class SheetVitrinaV1StockReportBlock:
                             "coverage_snapshot_count": sales_window.coverage_snapshot_count,
                         },
                         "promotion": promotion_payload["diagnostics"],
+                        "supplier_shipments": {
+                            "source": "supplier_shipments_registry",
+                            "quantity_source": "product lines internal_nm_id -> qty",
+                            "included_statuses": list(SUPPLIER_SHIPMENT_CYCLE_STATUS_KEYS),
+                            "production_quantity": supplier_production_qty,
+                            "in_transit_quantity": supplier_in_transit_qty,
+                        },
                         "wb_supplies": {
                             "source": "wb_supplies_cache",
                             "excluded_status_ids": sorted(WB_SUPPLY_EXCLUDED_STATUS_IDS),
@@ -356,6 +398,7 @@ class SheetVitrinaV1StockReportBlock:
             insufficient_district_rows=insufficient_district_rows,
             sales_avg_period_days=parsed_sales_avg_period_days,
         )
+        summary_row = _build_stock_report_summary_row(rows)
 
         return {
             **base_payload,
@@ -364,6 +407,7 @@ class SheetVitrinaV1StockReportBlock:
             "row_count": len(rows),
             "active_sku_count": len(rows),
             "rows": rows,
+            "summary_row": summary_row,
             "warnings": warnings,
             "notes": list(REPORT_NOTES) + warnings,
             "sales_history_window": {
@@ -376,6 +420,7 @@ class SheetVitrinaV1StockReportBlock:
                 "coverage_latest_date": sales_window.coverage_latest_date,
                 "coverage_snapshot_count": sales_window.coverage_snapshot_count,
             },
+            "supplier_shipments_cycle_summary": supplier_cycle_projection["summary"],
             "wb_supplies_inbound_summary": wb_supplies_projection["summary"],
             "source_of_truth": {
                 **base_payload["source_of_truth"],
@@ -496,6 +541,95 @@ def _load_ff_stock_balances_by_nm(
     return balances
 
 
+def _load_supplier_shipment_cycle_quantities_by_nm(
+    runtime: RegistryUploadDbBackedRuntime,
+    active_nm_ids: list[int],
+) -> dict[str, Any]:
+    active_set = {int(nm_id) for nm_id in active_nm_ids}
+    quantity_by_nm_id = {
+        int(nm_id): {status_key: 0.0 for status_key in SUPPLIER_SHIPMENT_CYCLE_STATUS_KEYS}
+        for nm_id in active_nm_ids
+    }
+    summary: dict[str, Any] = {
+        "source": "sheet_vitrina_v1_supplier_shipments runtime registry",
+        "quantity_source": "product lines internal_nm_id -> qty",
+        "included_statuses": [
+            {
+                "code": status_key,
+                "label_ru": ORDER_STATUS_LABELS_RU.get(status_key, status_key),
+            }
+            for status_key in SUPPLIER_SHIPMENT_CYCLE_STATUS_KEYS
+        ],
+        "status": "unavailable",
+        "shipments_total": 0,
+        "shipments_included": 0,
+        "shipments_skipped_by_status": 0,
+        "shipments_missing_detail": 0,
+        "lines_counted": 0,
+        "lines_skipped": 0,
+        "lines_skipped_by_match_status": 0,
+        "quantity_by_status": {status_key: 0.0 for status_key in SUPPLIER_SHIPMENT_CYCLE_STATUS_KEYS},
+    }
+    try:
+        shipments = runtime.list_supplier_shipments()
+    except Exception as exc:
+        summary["reason"] = str(exc)
+        return {"quantity_by_nm_id": quantity_by_nm_id, "summary": summary}
+
+    summary["status"] = "available"
+    summary["shipments_total"] = len(shipments)
+    for shipment in shipments:
+        if not isinstance(shipment, Mapping):
+            summary["shipments_skipped_by_status"] += 1
+            continue
+        shipment_status = str(shipment.get("order_status") or ORDER_STATUS_PRODUCTION).strip()
+        if shipment_status not in SUPPLIER_SHIPMENT_CYCLE_STATUS_KEYS:
+            summary["shipments_skipped_by_status"] += 1
+            continue
+        shipment_id = str(shipment.get("shipment_id") or "").strip()
+        if not shipment_id:
+            summary["shipments_missing_detail"] += 1
+            continue
+        try:
+            detail = runtime.load_supplier_shipment(shipment_id)
+        except Exception:
+            summary["shipments_missing_detail"] += 1
+            continue
+        if not isinstance(detail, Mapping):
+            summary["shipments_missing_detail"] += 1
+            continue
+        lines = detail.get("lines")
+        if not isinstance(lines, list):
+            summary["shipments_missing_detail"] += 1
+            continue
+        summary["shipments_included"] += 1
+        for line in lines:
+            if not isinstance(line, Mapping):
+                summary["lines_skipped"] += 1
+                continue
+            if str(line.get("line_type") or "") != LINE_TYPE_PRODUCT:
+                summary["lines_skipped"] += 1
+                continue
+            match_status = str(line.get("match_status") or "")
+            if match_status not in SUPPLIER_SHIPMENT_LINE_MATCH_STATUSES:
+                summary["lines_skipped"] += 1
+                summary["lines_skipped_by_match_status"] += 1
+                continue
+            nm_id = _optional_int(_first_value(line, "internal_nm_id", "nm_id", "nmId", "nmID"))
+            quantity = _optional_number(_first_value(line, "qty", "quantity"))
+            if nm_id is None or nm_id not in active_set or quantity is None or quantity <= 0:
+                summary["lines_skipped"] += 1
+                continue
+            quantity_by_nm_id[nm_id][shipment_status] = (
+                quantity_by_nm_id.get(nm_id, {}).get(shipment_status, 0.0) + float(quantity)
+            )
+            summary["quantity_by_status"][shipment_status] = (
+                float(summary["quantity_by_status"].get(shipment_status, 0.0)) + float(quantity)
+            )
+            summary["lines_counted"] += 1
+    return {"quantity_by_nm_id": quantity_by_nm_id, "summary": summary}
+
+
 def _load_wb_supplies_inbound_by_nm(
     runtime: RegistryUploadDbBackedRuntime,
     active_nm_ids: list[int],
@@ -567,6 +701,84 @@ def _load_wb_supplies_inbound_by_nm(
             summary["goods_rows_counted"] += 1
     summary["included_status_ids"] = sorted(included_status_ids)
     return {"quantity_by_nm_id": quantity_by_nm_id, "summary": summary}
+
+
+def _build_stock_report_summary_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    total_avg_sales_per_day = _sum_row_numbers(rows, "avg_sales_per_day")
+    total_stock_wb = _sum_row_numbers(rows, "stock_wb")
+    districts: list[dict[str, Any]] = []
+    for metric_key, label in STOCK_REPORT_DISTRICTS:
+        district_rows = [_stock_report_row_district(row, metric_key) for row in rows]
+        stock_sum = _sum_mapping_numbers(district_rows, "stock")
+        burn_sum = _sum_mapping_numbers(district_rows, "avg_daily_burn")
+        districts.append(
+            {
+                "metric_key": metric_key,
+                "label": label,
+                "stock": stock_sum,
+                "avg_daily_burn": burn_sum,
+                "days_left": _days_left(stock_sum, burn_sum),
+                "diagnostics": {
+                    "source": "summary_row_aggregate",
+                    "row_count": len(rows),
+                    "aggregation": "sum stock and burn, then stock / burn",
+                },
+            }
+        )
+
+    return {
+        "is_summary": True,
+        "nm_id": None,
+        "display_name": "Итого",
+        "nomenclature_name": "",
+        "identity_label": "Итого",
+        "active_order": -1,
+        "promotion_participation": None,
+        "promotion_participation_label": "—",
+        "supplier_production_qty": _sum_row_numbers(rows, "supplier_production_qty"),
+        "supplier_in_transit_qty": _sum_row_numbers(rows, "supplier_in_transit_qty"),
+        "wb_supplies_inbound_qty": _sum_row_numbers(rows, "wb_supplies_inbound_qty"),
+        "stock_ff": _sum_row_numbers(rows, "stock_ff"),
+        "stock_wb": total_stock_wb,
+        "stock_total": total_stock_wb,
+        "zero_district_count": _sum_row_numbers(rows, "zero_district_count"),
+        "avg_sales_per_day": total_avg_sales_per_day,
+        "days_left_total": _days_left(total_stock_wb, total_avg_sales_per_day),
+        "districts": districts,
+        "diagnostics": {
+            "source": "stock_report_summary_row",
+            "row_count": len(rows),
+            "days_left_total_formula": "sum(stock_wb) / sum(avg_sales_per_day)",
+        },
+    }
+
+
+def _stock_report_row_district(row: Mapping[str, Any], metric_key: str) -> Mapping[str, Any]:
+    districts = row.get("districts")
+    if not isinstance(districts, list):
+        return {}
+    for district in districts:
+        if isinstance(district, Mapping) and str(district.get("metric_key") or "") == metric_key:
+            return district
+    return {}
+
+
+def _sum_row_numbers(rows: list[Mapping[str, Any]], key: str) -> float | None:
+    return _sum_mapping_numbers(rows, key)
+
+
+def _sum_mapping_numbers(rows: list[Mapping[str, Any]], key: str) -> float | None:
+    total = 0.0
+    seen = False
+    for row in rows:
+        value = _optional_number(row.get(key))
+        if value is None:
+            continue
+        total += float(value)
+        seen = True
+    return total if seen else None
 
 
 def _optional_int(value: Any) -> int | None:
