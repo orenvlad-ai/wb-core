@@ -876,6 +876,11 @@ class SupplierFinancialDocumentsBlock:
                 return True
             if "payment_operations" not in normalized:
                 return True
+        elif document_type == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE:
+            return (
+                _positive_decimal(normalized.get("estimated_cargo_value_usd")) is None
+                and str(document.get("parser_version") or "") != FINANCIAL_DOCUMENT_PARSER_VERSION
+            )
         else:
             return False
         if str(document.get("parser_version") or "") != FINANCIAL_DOCUMENT_PARSER_VERSION:
@@ -1930,8 +1935,8 @@ def _comparison_sections(
                 _comparison_row(
                     "cargo_value_usd",
                     "Стоимость груза, USD",
-                    _registry_money(_summary_path(quote_context, "quote", "estimated_cargo_value_usd"), "USD"),
-                    _registry_money(_summary_path(shipment_context, "quote", "estimated_cargo_value_usd"), "USD"),
+                    _quote_cargo_usd_cell(quote_context),
+                    _quote_cargo_usd_cell(shipment_context),
                     suffix=" USD",
                 ),
             ],
@@ -1943,48 +1948,48 @@ def _comparison_sections(
                 _comparison_row(
                     "quote_logistics_usd",
                     "Услуги логиста, USD",
-                    _registry_money(_summary_path(quote_context, "quote", "logistics_usd"), "USD"),
-                    _registry_money(_summary_path(shipment_context, "quote", "logistics_usd"), "USD"),
+                    _quote_money_cell(quote_context, _summary_path(quote_context, "quote", "logistics_usd"), "USD", "logistics_usd"),
+                    _quote_money_cell(shipment_context, _summary_path(shipment_context, "quote", "logistics_usd"), "USD", "logistics_usd"),
                     suffix=" USD",
                     direction="lower_is_better",
                 ),
                 _comparison_row(
                     "quote_customs_usd",
                     "Таможня по КП/оценке, USD",
-                    _registry_money(_summary_path(quote_context, "quote", "customs_payments_usd"), "USD"),
-                    _registry_money(_summary_path(shipment_context, "quote", "customs_payments_usd"), "USD"),
+                    _quote_money_cell(quote_context, _summary_path(quote_context, "quote", "customs_payments_usd"), "USD", "customs_payments_usd"),
+                    _quote_money_cell(shipment_context, _summary_path(shipment_context, "quote", "customs_payments_usd"), "USD", "customs_payments_usd"),
                     suffix=" USD",
                     direction="lower_is_better",
                 ),
                 _comparison_row(
                     "quote_total_usd",
                     "Всего доставка+таможня, USD",
-                    _registry_money(_summary_path(quote_context, "quote", "total_usd"), "USD"),
-                    _registry_money(_summary_path(shipment_context, "quote", "total_usd"), "USD"),
+                    _quote_money_cell(quote_context, _summary_path(quote_context, "quote", "total_usd"), "USD", "total_usd"),
+                    _quote_money_cell(shipment_context, _summary_path(shipment_context, "quote", "total_usd"), "USD", "total_usd"),
                     suffix=" USD",
                     direction="lower_is_better",
                 ),
                 _comparison_row(
                     "quote_logistics_pct",
                     "КП: услуги логиста, % от стоимости груза",
-                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "logistics_pct")),
-                    _registry_percent(_summary_path(shipment_context, "percent_of_value", "quote_cargo_value", "logistics_pct")),
+                    _quote_percent_of_cargo_value_cell(quote_context, "logistics_pct"),
+                    _quote_percent_of_cargo_value_cell(shipment_context, "logistics_pct"),
                     suffix="%",
                     direction="lower_is_better",
                 ),
                 _comparison_row(
                     "quote_customs_pct",
                     "КП: таможня, % от стоимости груза",
-                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "customs_pct")),
-                    _registry_percent(_summary_path(shipment_context, "percent_of_value", "quote_cargo_value", "customs_pct")),
+                    _quote_percent_of_cargo_value_cell(quote_context, "customs_pct"),
+                    _quote_percent_of_cargo_value_cell(shipment_context, "customs_pct"),
                     suffix="%",
                     direction="lower_is_better",
                 ),
                 _comparison_row(
                     "quote_total_pct",
                     "КП: доставка+таможня, % от стоимости груза",
-                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "delivery_customs_pct")),
-                    _registry_percent(_summary_path(shipment_context, "percent_of_value", "quote_cargo_value", "delivery_customs_pct")),
+                    _quote_percent_of_cargo_value_cell(quote_context, "delivery_customs_pct"),
+                    _quote_percent_of_cargo_value_cell(shipment_context, "delivery_customs_pct"),
                     suffix="%",
                     direction="lower_is_better",
                 ),
@@ -2029,7 +2034,7 @@ def _comparison_sections(
                 _comparison_row(
                     "delivery_customs_pct_of_value",
                     "Доставка+таможня, % от стоимости",
-                    _registry_percent(_summary_path(quote_context, "percent_of_value", "quote_cargo_value", "delivery_customs_pct")),
+                    _quote_percent_of_cargo_value_cell(quote_context, "delivery_customs_pct"),
                     _registry_percent(_summary_path(shipment_context, "percent_of_value", "fact_customs_value", "delivery_customs_pct")),
                     suffix="%",
                     direction="lower_is_better",
@@ -2223,7 +2228,29 @@ def _quote_delivery_days_cell(context: Mapping[str, Any]) -> dict[str, Any]:
     max_days = _int_or_none(quote.get("delivery_days_max"))
     value = max_days or min_days
     display = _quote_delivery_days_display(context)
-    return _registry_cell(_decimal_to_float(Decimal(str(value))) if value is not None else None, display or "—")
+    if value is None:
+        return _quote_field_unavailable_cell(context, "delivery_days")
+    return _registry_cell(_decimal_to_float(Decimal(str(value))), display or "—")
+
+
+def _quote_percent_of_cargo_value_cell(context: Mapping[str, Any], field_key: str) -> dict[str, Any]:
+    value = _summary_path(context, "percent_of_value", "quote_cargo_value", field_key)
+    cell = _registry_percent(value)
+    if cell.get("value") is not None:
+        return cell
+    if not _quote_document_present(context):
+        return _quote_document_missing_cell()
+    if _positive_decimal(_summary_path(context, "quote", "estimated_cargo_value_usd")) is None:
+        source_status = _quote_field_source_status(context, "estimated_cargo_value_usd")
+        return _registry_status_cell(
+            "нет стоимости груза в КП",
+            status="warning" if source_status == QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR else "",
+            quality="quote_cargo_value_missing",
+            source_status=source_status or "quote_cargo_value_missing",
+            reason="quote_cargo_value_missing",
+            note="Процент не рассчитан, потому что в КП нет/не распознана стоимость груза",
+        )
+    return _quote_field_unavailable_cell(context, field_key)
 
 
 def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Callable[[Mapping[str, Any]], dict[str, Any]]]]]]:
@@ -2245,27 +2272,27 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
             "quote_logistics",
             "B. КП логиста",
             [
-                ("quote_total_usd", "КП всего USD", lambda item: _registry_money(_summary_path(item, "quote", "total_usd"), "USD")),
+                ("quote_total_usd", "КП всего USD", lambda item: _quote_money_cell(item, _summary_path(item, "quote", "total_usd"), "USD", "total_usd")),
                 ("quote_total_rub", "КП всего ₽", lambda item: _quote_rub_cell(item, _summary_path(item, "quote", "total_rub_equivalent"), "₽")),
-                ("quote_logistics_usd", "КП логистика USD", lambda item: _registry_money(_summary_path(item, "quote", "logistics_usd"), "USD")),
-                ("quote_customs_usd", "КП таможня USD", lambda item: _registry_money(_summary_path(item, "quote", "customs_payments_usd"), "USD")),
-                ("quote_cargo_usd", "стоимость груза USD по КП", lambda item: _registry_money(_summary_path(item, "quote", "estimated_cargo_value_usd"), "USD")),
-                ("quote_cargo_cny", "стоимость груза CNY по КП", lambda item: _registry_money(_registry_quote_meta(item).get("estimated_cargo_value_cny"), "CNY")),
-                ("quote_weight", "вес по КП", lambda item: _registry_number(_summary_path(item, "quote", "gross_weight_kg"), suffix=" кг")),
-                ("quote_volume", "объём по КП", lambda item: _registry_number(_summary_path(item, "logistics_efficiency", "volume_m3"), suffix=" м³")),
-                ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _registry_text(_quote_delivery_days_display(item))),
+                ("quote_logistics_usd", "КП логистика USD", lambda item: _quote_money_cell(item, _summary_path(item, "quote", "logistics_usd"), "USD", "logistics_usd")),
+                ("quote_customs_usd", "КП таможня USD", lambda item: _quote_money_cell(item, _summary_path(item, "quote", "customs_payments_usd"), "USD", "customs_payments_usd")),
+                ("quote_cargo_usd", "стоимость груза USD по КП", lambda item: _quote_cargo_usd_cell(item)),
+                ("quote_cargo_cny", "стоимость груза CNY по КП", lambda item: _quote_cargo_cny_cell(item)),
+                ("quote_weight", "вес по КП", lambda item: _quote_number_cell(item, _summary_path(item, "quote", "gross_weight_kg"), "gross_weight_kg", suffix=" кг")),
+                ("quote_volume", "объём по КП", lambda item: _quote_number_cell(item, _summary_path(item, "logistics_efficiency", "volume_m3"), "volume_m3", suffix=" м³")),
+                ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _quote_delivery_days_cell(item)),
             ],
         ),
         (
             "quote_normalized",
             "C. Нормализованные метрики по КП",
             [
-                ("quote_logistics_pct", "КП: услуги логиста, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "logistics_pct"))),
-                ("quote_customs_pct", "КП: таможня, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "customs_pct"))),
-                ("quote_total_pct", "КП: доставка+таможня, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "delivery_customs_pct"))),
-                ("quote_logistics_usd_per_quote_kg", "КП: услуги логиста, USD/кг по весу КП", lambda item: _registry_money(_quote_component_per_quote_kg_usd(item, "logistics"), "USD")),
-                ("quote_customs_usd_per_quote_kg", "КП: таможня, USD/кг по весу КП", lambda item: _registry_money(_quote_component_per_quote_kg_usd(item, "customs"), "USD")),
-                ("quote_total_usd_per_quote_kg", "КП: доставка+таможня, USD/кг по весу КП", lambda item: _registry_money(_quote_component_per_quote_kg_usd(item, "total"), "USD")),
+                ("quote_logistics_pct", "КП: услуги логиста, % от стоимости груза по КП", lambda item: _quote_percent_of_cargo_value_cell(item, "logistics_pct")),
+                ("quote_customs_pct", "КП: таможня, % от стоимости груза по КП", lambda item: _quote_percent_of_cargo_value_cell(item, "customs_pct")),
+                ("quote_total_pct", "КП: доставка+таможня, % от стоимости груза по КП", lambda item: _quote_percent_of_cargo_value_cell(item, "delivery_customs_pct")),
+                ("quote_logistics_usd_per_quote_kg", "КП: услуги логиста, USD/кг по весу КП", lambda item: _quote_money_cell(item, _quote_component_per_quote_kg_usd(item, "logistics"), "USD", "logistics_usd_per_quote_kg")),
+                ("quote_customs_usd_per_quote_kg", "КП: таможня, USD/кг по весу КП", lambda item: _quote_money_cell(item, _quote_component_per_quote_kg_usd(item, "customs"), "USD", "customs_usd_per_quote_kg")),
+                ("quote_total_usd_per_quote_kg", "КП: доставка+таможня, USD/кг по весу КП", lambda item: _quote_money_cell(item, _quote_component_per_quote_kg_usd(item, "total"), "USD", "total_usd_per_quote_kg")),
                 ("quote_total_rub_per_unit", "КП: доставка+таможня, ₽/шт по количеству поставки", lambda item: _quote_rub_cell(item, _summary_path(item, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽", waiting_status=True, waiting_allowed=_quote_total_per_unit_waiting_available(item))),
                 ("quote_logistics_rub_per_quote_kg", "КП: услуги логиста, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "logistics"), "₽", waiting_status=True, waiting_allowed=_quote_component_per_quote_kg_waiting_available(item, "logistics"))),
                 ("quote_customs_rub_per_quote_kg", "КП: таможня, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "customs"), "₽", waiting_status=True, waiting_allowed=_quote_component_per_quote_kg_waiting_available(item, "customs"))),
@@ -2284,7 +2311,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("shipment_date", "Плановая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("shipment_date"))),
                 ("actual_shipment_date", "Фактическая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("actual_shipment_date"))),
                 ("actual_ff_acceptance_date", "Фактическая дата приёмки на ФФ", lambda item: _registry_strict_date(_registry_header(item).get("actual_ff_acceptance_date"))),
-                ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _registry_text(_quote_delivery_days_display(item))),
+                ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _quote_delivery_days_cell(item)),
                 ("planned_production_days", "Плановый срок производства", lambda item: _production_duration_cell(item, "planned")),
                 ("actual_production_days", "Фактический срок производства", lambda item: _production_duration_cell(item, "actual")),
                 ("actual_delivery_days", "Фактический срок доставки", lambda item: _registry_number(_actual_delivery_days(item), suffix=" дн.", decimals=0)),
@@ -2474,27 +2501,37 @@ def _quote_rub_cell(
     waiting_status: bool = False,
     waiting_allowed: bool = True,
 ) -> dict[str, Any]:
+    if not _quote_document_present(context):
+        return _quote_document_missing_cell()
     cell = _registry_money(value, currency)
     if cell.get("value") is None:
         note = _quote_rub_unavailable_note(context)
         if note:
-            if waiting_status and waiting_allowed and _quote_rate_sanity_rejected(context):
-                cell = _registry_cell(None, "ждём счета")
-                cell["status"] = "warning"
-                cell["quality"] = "quote_rate_unavailable"
-                note = (
-                    f"{note} Рублёвый расчёт КП появится после загрузки всех счетов логиста "
-                    "и прохождения sanity-check курса."
-                )
+            sanity_rejected = _quote_rate_sanity_rejected(context)
+            if sanity_rejected:
+                cell = _registry_cell(None, "ждём счета" if waiting_status and waiting_allowed else "курс не подтверждён")
+                if waiting_status and waiting_allowed:
+                    note = (
+                        f"{note} Рублёвый расчёт КП появится после загрузки всех счетов логиста "
+                        "и прохождения sanity-check курса."
+                    )
             else:
-                cell["quality"] = "missing"
+                cell = _registry_cell(None, "ждём счета")
+            cell["status"] = "warning"
+            cell["quality"] = "quote_rate_unavailable"
             cell["source_status"] = "quote_rate_unavailable"
+            cell["reason"] = _quote_rate_unavailable_reason(context)
             cell["note"] = note
     return cell
 
 
 def _quote_rate_sanity_rejected(context: Mapping[str, Any]) -> bool:
     return dict(_summary_path(context, "quote_invoice_match") or {}).get("rate_sanity_status") == "rejected"
+
+
+def _quote_rate_unavailable_reason(context: Mapping[str, Any]) -> str:
+    match = dict(_summary_path(context, "quote_invoice_match") or {})
+    return str(match.get("rate_sanity_reason") or match.get("status") or "quote_rate_unavailable")
 
 
 def _quote_rub_unavailable_note(context: Mapping[str, Any]) -> str:
@@ -2540,6 +2577,105 @@ def _registry_doc(context: Mapping[str, Any], document_type: str) -> dict[str, A
 
 def _registry_quote_meta(context: Mapping[str, Any]) -> dict[str, Any]:
     return dict(_registry_doc(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE).get("normalized_parse") or {})
+
+
+def _quote_document_present(context: Mapping[str, Any]) -> bool:
+    return bool(_registry_doc(context, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE))
+
+
+def _registry_status_cell(
+    display: str,
+    *,
+    status: str = "",
+    quality: str = "",
+    source_status: str = "",
+    reason: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    cell = _registry_cell(None, display)
+    if status:
+        cell["status"] = status
+    if quality:
+        cell["quality"] = quality
+    if source_status:
+        cell["source_status"] = source_status
+    if reason:
+        cell["reason"] = reason
+    if note:
+        cell["note"] = note
+    return cell
+
+
+def _quote_document_missing_cell() -> dict[str, Any]:
+    return _registry_status_cell(
+        "нет КП",
+        quality="quote_document_missing",
+        source_status="quote_document_missing",
+        reason="quote_document_missing",
+        note="КП или финансовый документ не загружен / не сопоставлен с заказом",
+    )
+
+
+def _quote_field_source_status(context: Mapping[str, Any], field_key: str) -> str:
+    return str(_registry_quote_meta(context).get(f"{field_key}_source_status") or "")
+
+
+def _quote_field_unavailable_cell(context: Mapping[str, Any], field_key: str, *, cny: bool = False) -> dict[str, Any]:
+    if not _quote_document_present(context):
+        return _quote_document_missing_cell()
+    source_status = _quote_field_source_status(context, field_key)
+    if source_status == QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR:
+        return _registry_status_cell(
+            "ошибка парсинга КП",
+            status="warning",
+            quality="quote_parse_error",
+            source_status=source_status,
+            reason=f"{field_key}_parse_error",
+            note="Поле найдено в КП, но не распознано parser-ом",
+        )
+    note = "В КП не указана стоимость груза в CNY/юанях" if cny else "В КП не указано это значение"
+    return _registry_status_cell(
+        "нет в КП",
+        quality="quote_field_missing",
+        source_status=source_status or "quote_field_missing",
+        reason=f"{field_key}_missing",
+        note=note,
+    )
+
+
+def _quote_money_cell(context: Mapping[str, Any], value: Any, currency: str, field_key: str) -> dict[str, Any]:
+    cell = _registry_money(value, currency)
+    if cell.get("value") is not None:
+        return cell
+    return _quote_field_unavailable_cell(context, field_key)
+
+
+def _quote_number_cell(
+    context: Mapping[str, Any],
+    value: Any,
+    field_key: str,
+    *,
+    suffix: str = "",
+    decimals: int = 2,
+) -> dict[str, Any]:
+    cell = _registry_number(value, suffix=suffix, decimals=decimals)
+    if cell.get("value") is not None:
+        return cell
+    return _quote_field_unavailable_cell(context, field_key)
+
+
+def _quote_cargo_usd_cell(context: Mapping[str, Any]) -> dict[str, Any]:
+    cell = _registry_money(_summary_path(context, "quote", "estimated_cargo_value_usd"), "USD")
+    if cell.get("value") is not None:
+        return cell
+    return _quote_field_unavailable_cell(context, "estimated_cargo_value_usd")
+
+
+def _quote_cargo_cny_cell(context: Mapping[str, Any]) -> dict[str, Any]:
+    cell = _registry_money(_registry_quote_meta(context).get("estimated_cargo_value_cny"), "CNY")
+    if cell.get("value") is not None:
+        return cell
+    return _quote_field_unavailable_cell(context, "estimated_cargo_value_cny", cny=True)
 
 
 def _registry_customs_meta(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -2900,6 +3036,64 @@ def financial_document_download_path(supplier_order_id: str, document_id: str) -
     return f"{financial_document_path(supplier_order_id, document_id)}/file"
 
 
+QUOTE_CARGO_VALUE_SOURCE_PARSED = "parsed"
+QUOTE_CARGO_VALUE_SOURCE_MISSING = "missing"
+QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR = "parse_error"
+
+_QUOTE_CARGO_VALUE_NUMBER_PATTERN = r"([0-9][0-9\s.,]*[0-9]|[0-9])"
+_QUOTE_CARGO_VALUE_USD_ALIAS_PATTERN = r"(?:USD|US\$|долл\.?\s*(?:США)?|доллар(?:ов|а|ы)?)"
+_QUOTE_CARGO_VALUE_CNY_ALIAS_PATTERN = r"(?:CNY|RMB|CN¥|¥|юан(?:ей|я|ь)?|юань)"
+
+
+def _quote_estimated_cargo_value_segment(text: str) -> str:
+    match = re.search(r"(Оценочная\s+стоимость\s+груза[^\n\r]*)", text, flags=re.I)
+    return _clean_value(match.group(1)) if match else ""
+
+
+def _parse_quote_estimated_cargo_value_usd(segment: str) -> tuple[Decimal | None, str]:
+    if not segment:
+        return None, QUOTE_CARGO_VALUE_SOURCE_MISSING
+    if not re.search(_QUOTE_CARGO_VALUE_USD_ALIAS_PATTERN, segment, flags=re.I):
+        return None, QUOTE_CARGO_VALUE_SOURCE_MISSING
+    alias_before_amount = re.search(
+        rf"{_QUOTE_CARGO_VALUE_USD_ALIAS_PATTERN}\s*[:\-]?\s*{_QUOTE_CARGO_VALUE_NUMBER_PATTERN}(?=\s*(?:USD|US\$|или|$))",
+        segment,
+        flags=re.I,
+    )
+    amount_before_alias = re.search(
+        rf"{_QUOTE_CARGO_VALUE_NUMBER_PATTERN}\s*(?:USD|US\$)(?=\s*(?:или|$))",
+        segment,
+        flags=re.I,
+    )
+    match = alias_before_amount or amount_before_alias
+    if not match:
+        return None, QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR
+    value = _parse_decimal(match.group(1))
+    return value, QUOTE_CARGO_VALUE_SOURCE_PARSED if value is not None else QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR
+
+
+def _parse_quote_estimated_cargo_value_cny(segment: str) -> tuple[Decimal | None, str]:
+    if not segment:
+        return None, QUOTE_CARGO_VALUE_SOURCE_MISSING
+    if not re.search(_QUOTE_CARGO_VALUE_CNY_ALIAS_PATTERN, segment, flags=re.I):
+        return None, QUOTE_CARGO_VALUE_SOURCE_MISSING
+    amount_before_alias = re.search(
+        rf"(?:или\s*)?{_QUOTE_CARGO_VALUE_NUMBER_PATTERN}\s*{_QUOTE_CARGO_VALUE_CNY_ALIAS_PATTERN}",
+        segment,
+        flags=re.I,
+    )
+    alias_before_amount = re.search(
+        rf"{_QUOTE_CARGO_VALUE_CNY_ALIAS_PATTERN}\s*[:\-]?\s*{_QUOTE_CARGO_VALUE_NUMBER_PATTERN}",
+        segment,
+        flags=re.I,
+    )
+    match = amount_before_alias or alias_before_amount
+    if not match:
+        return None, QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR
+    value = _parse_decimal(match.group(1))
+    return value, QUOTE_CARGO_VALUE_SOURCE_PARSED if value is not None else QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR
+
+
 def _parse_logistics_quote(text: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
     quote_date = _parse_date(_first_match(text, r"г\.\s*Москва\s+(\d{1,2}\.\d{1,2}\.\d{4})"))
@@ -2915,6 +3109,13 @@ def _parse_logistics_quote(text: str) -> tuple[dict[str, Any], list[dict[str, An
     quote_logistics_component = _sum_decimal(amounts.get(key) for key in QUOTE_LOGISTICS_COMPONENT_CATEGORIES)
     quote_customs_component = _parse_decimal(amounts.get(EXPENSE_CATEGORY_CUSTOMS_PAYMENTS))
     quote_core_sum = _sum_decimal(amounts.get(key) for key in QUOTE_CORE_AMOUNT_CATEGORIES)
+    cargo_value_segment = _quote_estimated_cargo_value_segment(text)
+    estimated_cargo_value_usd, estimated_cargo_value_usd_status = _parse_quote_estimated_cargo_value_usd(cargo_value_segment)
+    estimated_cargo_value_cny, estimated_cargo_value_cny_status = _parse_quote_estimated_cargo_value_cny(cargo_value_segment)
+    if estimated_cargo_value_usd_status == QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR:
+        warnings.append("Оценочная стоимость груза USD найдена в КП, но не распознана")
+    if estimated_cargo_value_cny_status == QUOTE_CARGO_VALUE_SOURCE_PARSE_ERROR:
+        warnings.append("Оценочная стоимость груза CNY найдена в КП, но не распознана")
     normalized = {
         "vendor": "Transitplus International Ltd" if "Transitplus International Ltd" in text else "Transitplus",
         "quote_date": quote_date,
@@ -2928,8 +3129,10 @@ def _parse_logistics_quote(text: str) -> tuple[dict[str, Any], list[dict[str, An
         "gross_weight_kg": _decimal_to_float(_parse_decimal(_first_match(text, r"Вес брутто,\s*кг\.?\s*([\d .,]+)"))),
         "net_weight_kg": _decimal_to_float(_parse_decimal(_first_match(text, r"Вес нетто,\s*кг:?\s*([\d .,]+)"))),
         "volume_m3": _decimal_to_float(_parse_decimal(_first_match(text, r"Объем,\s*м3\s*([\d .,]+)"))),
-        "estimated_cargo_value_usd": _decimal_to_float(_parse_decimal(_first_match(text, r"Оценочная стоимость груза,\s*долл\.\s*([\d .,]+)\s*USD"))),
-        "estimated_cargo_value_cny": _decimal_to_float(_parse_decimal(_first_match(text, r"или\s*([\d .,]+)\s*юан"))),
+        "estimated_cargo_value_usd": _decimal_to_float(estimated_cargo_value_usd),
+        "estimated_cargo_value_usd_source_status": estimated_cargo_value_usd_status,
+        "estimated_cargo_value_cny": _decimal_to_float(estimated_cargo_value_cny),
+        "estimated_cargo_value_cny_source_status": estimated_cargo_value_cny_status,
         "total_amount": _decimal_to_float(total_quote_usd),
         "total_quote_usd": _decimal_to_float(total_quote_usd),
         "currency": "USD",
