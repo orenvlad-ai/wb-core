@@ -1300,15 +1300,20 @@ def _assert_bad_quote_rate_guardrail_smoke() -> None:
     )
     if _registry_cell_display(registry, "quote_logistics", "quote_total_usd", "bad_rate") != "40 720.00 USD":
         raise AssertionError(f"bad-rate registry must still show USD quote total: {registry}")
+    if _registry_cell_display(registry, "quote_logistics", "quote_total_rub", "bad_rate") != "—":
+        raise AssertionError(f"bad-rate registry row quote_total_rub must render blank: {registry}")
+    if "sanity-check" not in str(_registry_cell(registry, "quote_logistics", "quote_total_rub", "bad_rate").get("note") or ""):
+        raise AssertionError(f"bad-rate registry must explain hidden quote RUB total: {registry}")
     for row_id in (
-        "quote_total_rub",
         "quote_total_rub_per_unit",
         "quote_logistics_rub_per_quote_kg",
         "quote_customs_rub_per_quote_kg",
         "quote_total_rub_per_quote_kg",
     ):
-        if _registry_cell_display(registry, "quote_logistics", row_id, "bad_rate") != "—":
+        if _registry_cell_display(registry, "quote_normalized", row_id, "bad_rate") != "—":
             raise AssertionError(f"bad-rate registry row {row_id} must render blank: {registry}")
+        if "sanity-check" not in str(_registry_cell(registry, "quote_normalized", row_id, "bad_rate").get("note") or ""):
+            raise AssertionError(f"bad-rate registry row {row_id} must explain hidden quote RUB metric: {registry}")
 
 
 def _assert_registry_data_source_sections_smoke() -> None:
@@ -1406,6 +1411,88 @@ def _assert_registry_data_source_sections_smoke() -> None:
     )
     if _registry_cell(complete_registry, "cargo_value", "exact_landed_cost_per_unit_rub", "source_sections_done").get("status") != "complete":
         raise AssertionError(f"exact cost must be green/complete after persisted flag: {complete_registry}")
+    _assert_registry_normalized_quality_smoke()
+
+
+def _assert_registry_normalized_quality_smoke() -> None:
+    quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
+    documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=True)
+    incomplete_shipment = {
+        "header": {
+            "shipment_id": "normalized_incomplete",
+            "product_qty_total": 116250,
+            "expenses_complete": False,
+        },
+        "lines": [],
+    }
+    complete_shipment = {
+        "header": {
+            "shipment_id": "normalized_complete",
+            "product_qty_total": 116250,
+            "expenses_complete": True,
+        },
+        "lines": [],
+    }
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "normalized_incomplete",
+                "header": incomplete_shipment["header"],
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": build_financial_summary(documents, lines, shipment=incomplete_shipment),
+            },
+            {
+                "shipment_id": "normalized_complete",
+                "header": complete_shipment["header"],
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": build_financial_summary(documents, lines, shipment=complete_shipment),
+            },
+        ]
+    )
+    section_ids = [section.get("section_id") for section in registry.get("sections", [])]
+    expected_sections = [
+        "passport",
+        "quote_logistics",
+        "quote_normalized",
+        "lead_times",
+        "cargo_physics",
+        "cargo_value",
+        "fact_expenses",
+        "fact_normalized",
+        "documents",
+    ]
+    if section_ids != expected_sections:
+        raise AssertionError(f"normalized registry section order mismatch: expected {expected_sections}, got {section_ids}")
+    logistics_dependent = [
+        ("quote_normalized", "fact_logistics_per_quote_kg"),
+        ("quote_normalized", "fact_total_per_quote_kg"),
+        ("fact_normalized", "fact_logistics_per_dt_kg"),
+        ("fact_normalized", "fact_total_per_dt_kg"),
+        ("fact_normalized", "fact_logistics_pct"),
+        ("fact_normalized", "fact_total_pct"),
+    ]
+    for section_id, row_id in logistics_dependent:
+        incomplete_cell = _registry_cell(registry, section_id, row_id, "normalized_incomplete")
+        complete_cell = _registry_cell(registry, section_id, row_id, "normalized_complete")
+        if incomplete_cell.get("status") != "partial" or incomplete_cell.get("quality") != "partial_expenses":
+            raise AssertionError(f"{section_id}/{row_id} must be partial while expenses are incomplete: {incomplete_cell}")
+        if complete_cell.get("status") == "partial" or complete_cell.get("quality") == "partial_expenses":
+            raise AssertionError(f"{section_id}/{row_id} must return to normal color when expenses are complete: {complete_cell}")
+    for section_id, row_id in [
+        ("quote_normalized", "quote_logistics_pct"),
+        ("quote_normalized", "quote_customs_pct"),
+        ("quote_normalized", "fact_customs_per_quote_kg"),
+        ("fact_normalized", "fact_customs_per_dt_kg"),
+        ("fact_normalized", "fact_customs_without_vat_pct"),
+        ("fact_normalized", "fact_customs_with_vat_pct"),
+    ]:
+        cell = _registry_cell(registry, section_id, row_id, "normalized_incomplete")
+        if cell.get("status") == "partial" or cell.get("quality") == "partial_expenses":
+            raise AssertionError(f"{section_id}/{row_id} must not become yellow from incomplete logistics expenses: {cell}")
 
 
 def _assert_registry_lead_time_rows_smoke() -> None:
@@ -1635,6 +1722,7 @@ def _assert_http_api_smoke() -> None:
             expected_sections = [
                 "passport",
                 "quote_logistics",
+                "quote_normalized",
                 "lead_times",
                 "cargo_physics",
                 "cargo_value",
@@ -1660,7 +1748,7 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"registry actual delivery days mismatch: {registry}")
             if _registry_cell_display(registry, "lead_times", "days_to_customs_declaration", "sup_financial") != "8 дн.":
                 raise AssertionError(f"registry days-to-customs-declaration mismatch: {registry}")
-            if _registry_cell_display(registry, "quote_logistics", "quote_total_rub_per_unit", "sup_financial") != "35.17 ₽":
+            if _registry_cell_display(registry, "quote_normalized", "quote_total_rub_per_unit", "sup_financial") != "35.17 ₽":
                 raise AssertionError(f"registry quote ₽/шт mismatch: {registry}")
             if _registry_cell_display(registry, "fact_expenses", "fact_total_rub_per_unit", "sup_financial") != "35.34 ₽":
                 raise AssertionError(f"registry fact ₽/шт mismatch: {registry}")

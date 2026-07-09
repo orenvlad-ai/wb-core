@@ -2663,6 +2663,11 @@
       color: var(--warning-text);
     }
 
+    .shipment-registry-cell-main.is-expenses-partial {
+      color: var(--warning-text);
+      font-weight: 750;
+    }
+
     .shipment-registry-section-row th {
       position: sticky;
       left: 0;
@@ -5258,6 +5263,14 @@
       let shipmentRegistrySelectedShipmentId = "";
       let shipmentRegistryComparisonPayload = null;
       let shipmentRegistryDetailShipmentId = "";
+      const shipmentRegistryLogisticsExpenseRowIds = new Set([
+        "fact_logistics_per_quote_kg",
+        "fact_total_per_quote_kg",
+        "fact_logistics_per_dt_kg",
+        "fact_total_per_dt_kg",
+        "fact_logistics_pct",
+        "fact_total_pct"
+      ]);
       let cnyAccountInitialized = false;
       let cnyAccountLoading = false;
       let cnyAccountUploading = false;
@@ -9151,6 +9164,9 @@
         if (cell.status === "incomplete") {
           return " is-expenses-incomplete";
         }
+        if (cell.status === "partial") {
+          return " is-expenses-partial";
+        }
         return "";
       }
 
@@ -9328,6 +9344,29 @@
             }
             if (row.row_id === "exact_landed_cost_per_unit_rub" && cell.value !== null && cell.value !== undefined) {
               cell.status = nextValue ? "complete" : "incomplete";
+            }
+            if (
+              shipmentRegistryLogisticsExpenseRowIds.has(String(row.row_id || ""))
+              && cell.value !== null
+              && cell.value !== undefined
+            ) {
+              cell.depends_on_expenses_complete = true;
+              cell.expense_dependency = "logistics";
+              if (nextValue) {
+                if (cell.status === "partial") {
+                  delete cell.status;
+                }
+                if (cell.quality === "partial_expenses") {
+                  delete cell.quality;
+                }
+                if (String(cell.note || "").indexOf("неполной базе расходов") !== -1) {
+                  delete cell.note;
+                }
+              } else {
+                cell.status = "partial";
+                cell.quality = "partial_expenses";
+                cell.note = "Значение рассчитано на неполной базе расходов: услуги логиста ещё не отмечены полными.";
+              }
             }
           });
         });

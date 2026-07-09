@@ -2246,7 +2246,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
             "B. КП логиста",
             [
                 ("quote_total_usd", "КП всего USD", lambda item: _registry_money(_summary_path(item, "quote", "total_usd"), "USD")),
-                ("quote_total_rub", "КП всего ₽", lambda item: _registry_money(_summary_path(item, "quote", "total_rub_equivalent"), "₽")),
+                ("quote_total_rub", "КП всего ₽", lambda item: _quote_rub_cell(item, _summary_path(item, "quote", "total_rub_equivalent"), "₽")),
                 ("quote_logistics_usd", "КП логистика USD", lambda item: _registry_money(_summary_path(item, "quote", "logistics_usd"), "USD")),
                 ("quote_customs_usd", "КП таможня USD", lambda item: _registry_money(_summary_path(item, "quote", "customs_payments_usd"), "USD")),
                 ("quote_cargo_usd", "стоимость груза USD по КП", lambda item: _registry_money(_summary_path(item, "quote", "estimated_cargo_value_usd"), "USD")),
@@ -2254,18 +2254,27 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("quote_weight", "вес по КП", lambda item: _registry_number(_summary_path(item, "quote", "gross_weight_kg"), suffix=" кг")),
                 ("quote_volume", "объём по КП", lambda item: _registry_number(_summary_path(item, "logistics_efficiency", "volume_m3"), suffix=" м³")),
                 ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _registry_text(_quote_delivery_days_display(item))),
-                ("quote_logistics_pct", "КП: услуги логиста, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "logistics_pct"))),
-                ("quote_customs_pct", "КП: таможня, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "customs_pct"))),
-                ("quote_total_pct", "КП: доставка+таможня, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "delivery_customs_pct"))),
-                ("quote_total_rub_per_unit", "КП: доставка+таможня, ₽/шт", lambda item: _registry_money(_summary_path(item, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽")),
-                ("quote_logistics_rub_per_quote_kg", "КП: услуги логиста, ₽/кг по весу КП", lambda item: _registry_money(_quote_component_per_kg(item, "logistics"), "₽")),
-                ("quote_customs_rub_per_quote_kg", "КП: таможня, ₽/кг по весу КП", lambda item: _registry_money(_quote_component_per_kg(item, "customs"), "₽")),
-                ("quote_total_rub_per_quote_kg", "КП: доставка+таможня, ₽/кг по весу КП", lambda item: _registry_money(_quote_component_per_kg(item, "total"), "₽")),
+            ],
+        ),
+        (
+            "quote_normalized",
+            "C. Нормализованные метрики по КП",
+            [
+                ("quote_logistics_pct", "КП: услуги логиста, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "logistics_pct"))),
+                ("quote_customs_pct", "КП: таможня, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "customs_pct"))),
+                ("quote_total_pct", "КП: доставка+таможня, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "delivery_customs_pct"))),
+                ("quote_total_rub_per_unit", "КП: доставка+таможня, ₽/шт по количеству поставки", lambda item: _quote_rub_cell(item, _summary_path(item, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽")),
+                ("quote_logistics_rub_per_quote_kg", "КП: услуги логиста, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "logistics"), "₽")),
+                ("quote_customs_rub_per_quote_kg", "КП: таможня, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "customs"), "₽")),
+                ("quote_total_rub_per_quote_kg", "КП: доставка+таможня, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "total"), "₽")),
+                ("fact_logistics_per_quote_kg", "факт: услуги логиста ₽/кг по весу КП", lambda item: _logistics_expense_quality_cell(item, _registry_money(_summary_path(item, "per_kg", "quote_weight", "logistics_invoice_rub_per_kg"), "₽"))),
+                ("fact_customs_per_quote_kg", "факт: таможня ₽/кг по весу КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "customs_payments_rub_per_kg"), "₽")),
+                ("fact_total_per_quote_kg", "факт: доставка+таможня ₽/кг по весу КП", lambda item: _logistics_expense_quality_cell(item, _registry_money(_summary_path(item, "per_kg", "quote_weight", "delivery_customs_rub_per_kg"), "₽"))),
             ],
         ),
         (
             "lead_times",
-            "C. Сроки",
+            "D. Сроки",
             [
                 ("order_date", "дата заказа", lambda item: _registry_date(_date_part(_registry_header(item).get("created_at")))),
                 ("invoice_date", "дата invoice", lambda item: _registry_date(_registry_header(item).get("invoice_date"))),
@@ -2279,7 +2288,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
         ),
         (
             "cargo_physics",
-            "D. Физика груза",
+            "E. Физика груза",
             [
                 ("packing_list_units", "количество штук по packing list", lambda item: _registry_number(_summary_path(item, "packing_list", "total_quantity"), decimals=0)),
                 ("packing_list_weight", "вес по packing list", lambda item: _registry_number(_summary_path(item, "packing_list", "total_gross_weight_kg"), suffix=" кг")),
@@ -2292,7 +2301,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
         ),
         (
             "cargo_value",
-            "E. Стоимость товара",
+            "F. Стоимость товара",
             [
                 ("invoice_amount", "инвойсная стоимость", lambda item: _invoice_amount_cell(item)),
                 ("factory_paid_rub", "оплачено фабрике, ₽", lambda item: _registry_money(_summary_path(item, "per_unit", "exact_currency_payment_cost_rub"), "₽")),
@@ -2304,7 +2313,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
         ),
         (
             "fact_expenses",
-            "F. Факт расходов",
+            "G. Факт расходов",
             [
                 ("expenses_completeness_status", "полнота расходов", lambda item: _expenses_completeness_cell(item)),
                 ("invoice_fact_rub", "счета логиста ₽", lambda item: _registry_money(_summary_path(item, "invoices", "fact_rub"), "₽")),
@@ -2321,23 +2330,20 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
         ),
         (
             "fact_normalized",
-            "G. Нормализованные метрики факта",
+            "H. Нормализованные метрики факта / по ДТ",
             [
-                ("fact_logistics_per_quote_kg", "услуги логиста ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "logistics_invoice_rub_per_kg"), "₽")),
-                ("fact_customs_per_quote_kg", "таможня ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "customs_payments_rub_per_kg"), "₽")),
-                ("fact_total_per_quote_kg", "доставка+таможня ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "delivery_customs_rub_per_kg"), "₽")),
-                ("fact_logistics_per_dt_kg", "услуги логиста ₽/кг · вес ДТ", lambda item: _registry_money(_summary_path(item, "per_kg", "customs_weight", "logistics_invoice_rub_per_kg"), "₽")),
-                ("fact_customs_per_dt_kg", "таможня ₽/кг · вес ДТ", lambda item: _registry_money(_summary_path(item, "per_kg", "customs_weight", "customs_payments_rub_per_kg"), "₽")),
-                ("fact_total_per_dt_kg", "доставка+таможня ₽/кг · вес ДТ", lambda item: _registry_money(_summary_path(item, "per_kg", "customs_weight", "delivery_customs_rub_per_kg"), "₽")),
-                ("fact_logistics_pct", "факт: услуги логиста, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "logistics_pct"))),
+                ("fact_logistics_per_dt_kg", "факт: услуги логиста ₽/кг по весу ДТ", lambda item: _logistics_expense_quality_cell(item, _registry_money(_summary_path(item, "per_kg", "customs_weight", "logistics_invoice_rub_per_kg"), "₽"))),
+                ("fact_customs_per_dt_kg", "факт: таможня ₽/кг по весу ДТ", lambda item: _registry_money(_summary_path(item, "per_kg", "customs_weight", "customs_payments_rub_per_kg"), "₽")),
+                ("fact_total_per_dt_kg", "факт: доставка+таможня ₽/кг по весу ДТ", lambda item: _logistics_expense_quality_cell(item, _registry_money(_summary_path(item, "per_kg", "customs_weight", "delivery_customs_rub_per_kg"), "₽"))),
+                ("fact_logistics_pct", "факт: услуги логиста, % от таможенной стоимости", lambda item: _logistics_expense_quality_cell(item, _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "logistics_pct")))),
                 ("fact_customs_without_vat_pct", "факт: таможня без НДС, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "customs_without_vat_pct"))),
                 ("fact_customs_with_vat_pct", "факт: таможня с НДС, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "customs_with_vat_pct"))),
-                ("fact_total_pct", "факт: доставка+таможня, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "delivery_customs_pct"))),
+                ("fact_total_pct", "факт: доставка+таможня, % от таможенной стоимости", lambda item: _logistics_expense_quality_cell(item, _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "delivery_customs_pct")))),
             ],
         ),
         (
             "documents",
-            "H. Документы",
+            "I. Документы",
             [
                 ("has_quote", "есть КП", lambda item: _registry_bool(bool(_registry_doc(item, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE)))),
                 ("has_invoices", "есть счета логиста", lambda item: _registry_bool(bool(_registry_docs(item, FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE)))),
@@ -2440,6 +2446,45 @@ def _exact_landed_cost_cell(context: Mapping[str, Any]) -> dict[str, Any]:
     if cell.get("value") is not None:
         cell["status"] = "complete" if _expenses_complete(context) else "incomplete"
     return cell
+
+
+def _logistics_expense_quality_cell(context: Mapping[str, Any], cell: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(cell or _registry_blank())
+    if payload.get("value") is None:
+        return payload
+    payload["depends_on_expenses_complete"] = True
+    payload["expense_dependency"] = "logistics"
+    if not _expenses_complete(context):
+        payload["status"] = "partial"
+        payload["quality"] = "partial_expenses"
+        payload["note"] = "Значение рассчитано на неполной базе расходов: услуги логиста ещё не отмечены полными."
+    return payload
+
+
+def _quote_rub_cell(context: Mapping[str, Any], value: Any, currency: str) -> dict[str, Any]:
+    cell = _registry_money(value, currency)
+    if cell.get("value") is None:
+        note = _quote_rub_unavailable_note(context)
+        if note:
+            cell["quality"] = "missing"
+            cell["source_status"] = "quote_rate_unavailable"
+            cell["note"] = note
+    return cell
+
+
+def _quote_rub_unavailable_note(context: Mapping[str, Any]) -> str:
+    match = dict(_summary_path(context, "quote_invoice_match") or {})
+    if match.get("rate_sanity_status") == "rejected":
+        reason = str(match.get("rate_sanity_reason") or "rate_sanity_rejected")
+        rejected = _registry_number(match.get("rejected_implied_rate"), decimals=2).get("display") or "—"
+        cbr = _registry_number(match.get("cbr_usd_rate_on_invoice_date"), decimals=2).get("display") or "—"
+        return f"Рублёвые КП-метрики скрыты: расчётный курс не прошёл sanity-check ({reason}; implied {rejected} против CBR {cbr})."
+    status = str(match.get("status") or "")
+    if status in {"rate_pending", "needs_review"}:
+        warnings = _string_list(match.get("warnings"))
+        if warnings:
+            return warnings[0]
+    return ""
 
 
 def _registry_summary(context: Mapping[str, Any]) -> dict[str, Any]:
