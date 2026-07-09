@@ -1851,6 +1851,24 @@ class RegistryUploadDbBackedRuntime:
                 return None
             return _ff_stock_operation_to_dict(row)
 
+    def load_ff_stock_activation_operation(self) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_operations
+                WHERE source_type <> 'wb_supply'
+                  AND total_quantity_delta > 0
+                ORDER BY created_at ASC, operation_id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            return _ff_stock_operation_to_dict(row)
+
     def create_ff_stock_operation(
         self,
         *,

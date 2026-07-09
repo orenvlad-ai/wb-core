@@ -38,7 +38,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are now computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier/WB movements are idempotent by source key, negative balances are allowed with warnings, and calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
+update_note: "`Остатки ФФ` are computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier movements are idempotent by source key, WB auto writeoffs are guarded by ledger activation/opening balance and no-negative-balance checks, negative balances are shown with critical calculation warnings, and calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
 ---
 
 # 1. Contract
@@ -51,9 +51,9 @@ update_note: "`Остатки ФФ` are now computed from an append-only quantit
 - manual receipt documents add quantity;
 - manual writeoff documents subtract quantity;
 - supplier shipment acceptance on ФФ adds quantity;
-- eligible WB supplies subtract quantity.
+- eligible WB supplies subtract quantity only after the ledger is activated by a positive non-WB receipt/correction and only when the movement would not make the SKU balance negative.
 
-Negative balances are valid runtime state and must be shown as `Отрицательный остаток ФФ`; calculations must not fail only because the ledger balance is negative.
+Negative balances can still exist from explicit manual documents or older incidents and must be shown as `Отрицательный остаток ФФ`; calculations must not crash only because the ledger balance is negative, but they must surface a clear warning that recommendations are limited by available ФФ stock.
 
 # 2. Operator UI
 
@@ -87,7 +87,7 @@ Upload flow:
 - `POST .../ff-stocks/confirm` applies only a clean non-empty preview and creates the durable operation/document;
 - the original uploaded Excel file is stored on the operation and can be downloaded later from `GET .../operations/{operation_id}/file`.
 
-There is no cell-level balance editing. Corrections are represented by new reverse manual documents.
+There is no cell-level balance editing. Corrections are represented by new reverse manual documents or bounded runtime repair/correction operations with their own source keys.
 
 # 4. Runtime Persistence
 
@@ -128,6 +128,12 @@ Idempotency key:
 
 If composition changes before the first writeoff, the current cached composition is used. After a writeoff exists, the backend does not auto-recalculate historical movement; correction is a manual document.
 
+Activation and balance guards:
+- WB auto writeoff is blocked until the ledger has at least one positive non-WB operation (`manual_excel`, supplier auto receipt or explicit runtime correction). This is the activation/opening-balance boundary.
+- A WB record whose business date (`source_created_at` / API `createDate`, then `supply_date` / `fact_date`) is earlier than the activation operation is skipped as historical cache/backfill evidence.
+- If the cached WB goods composition would make any SKU balance negative, the whole automatic writeoff is skipped with diagnostics instead of silently creating a negative balance.
+- Repeated sync/backfill/detail enrichment remains idempotent by `wb_supply_debit:<cache_key or supply_id>` and does not duplicate an existing writeoff.
+
 # 7. Calculation Source
 
 `Поставки -> Расчёты` supports three mutually exclusive `stock_ff_source` values:
@@ -135,7 +141,7 @@ If composition changes before the first writeoff, the current cached composition
 - `onec_ff_stock` — existing read-only `1С / Фулфилмент`;
 - `ff_stock_ledger` — new server ledger source labeled `Остатки ФФ`.
 
-Factory-order and WB regional calculations resolve `ff_stock_ledger` into the same row contract as the other sources. Negative balances are passed through with warnings instead of being treated as missing or fatal.
+Factory-order and WB regional calculations resolve `ff_stock_ledger` into the same row contract as the other sources. Negative balances are passed through with warnings instead of being treated as missing or fatal. WB regional result diagnostics also include the ledger source state (`total_stock_ff`, `negative_sku_count`, warnings) so a zero recommendation caused by invalid/negative ФФ balances is explainable from `last_result`.
 
 For calculation-only `Учесть WB-поставки`, statuses `3/4/6` still add future inbound/projection evidence, but selected WB supplies do not reduce `stock_ff` again when `stock_ff_source=ff_stock_ledger`: the ledger balance is already current after WB auto writeoffs. Manual Excel and `1С / Фулфилмент` keep the older transfer behavior where selected WB supplies reduce available ФФ stock and add the same quantity to inbound/projection. Ledger auto writeoff remains broader than calculation overlay and still records statuses `3/4/5/6`, while statuses `1/2` and `Допринято` are skipped.
 

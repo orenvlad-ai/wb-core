@@ -517,6 +517,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "supplier_registry_refresh": persistence_result["supplier_registry_refresh"],
         "factory_source_persistence": persistence_result["factory_source_persistence"],
         "regional_planning": persistence_result["regional_planning"],
+        "ff_stock_negative_row_style": persistence_result["ff_stock_negative_row_style"],
         "sku_persistence": persistence_result["sku_persistence"],
         "plan_input_defaults": persistence_result["plan_input_defaults"],
         "plan_input_persistence": persistence_result["plan_input_persistence"],
@@ -531,6 +532,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page = context.new_page()
     operator_url = base_url + DEFAULT_SHEET_OPERATOR_UI_PATH
     page.goto(operator_url, wait_until="domcontentloaded")
+    ff_stock_negative_row_style = _assert_ff_stock_negative_row_dark_style(page)
 
     default_state = {
         "top_tab": _selected_data_attr(page, "[data-tab-button][aria-selected=\"true\"]", "data-tab-button"),
@@ -1513,6 +1515,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "supplier_registry_refresh": supplier_refresh_state,
         "factory_source_persistence": factory_source_state,
         "regional_planning": regional_planning_state,
+        "ff_stock_negative_row_style": ff_stock_negative_row_style,
         "sku_persistence": {
             "kept_label": kept_label,
             "selected_labels_after_reload": selected_labels_after_reload,
@@ -1777,6 +1780,58 @@ def _selected_data_attr(page, selector: str, attribute_name: str) -> str:
     return value
 
 
+def _assert_ff_stock_negative_row_dark_style(page) -> dict[str, object]:
+    style = page.evaluate(
+        """() => {
+            const body = document.getElementById("ffStockBalancesBody");
+            if (!body) {
+                return {missing: true};
+            }
+            body.innerHTML = [
+                "<tr class=\\"is-warning\\">",
+                "<td>4600000000000</td>",
+                "<td>1001</td>",
+                "<td>SKU Alpha</td>",
+                "<td>Clear</td>",
+                "<td>-10</td>",
+                "<td>Отрицательный остаток ФФ</td>",
+                "</tr>"
+            ].join("");
+            const cell = body.querySelector("tr.is-warning td");
+            const computed = cell ? window.getComputedStyle(cell) : null;
+            return {
+                missing: false,
+                backgroundColor: computed ? computed.backgroundColor : "",
+                color: computed ? computed.color : ""
+            };
+        }"""
+    )
+    if style.get("missing"):
+        raise AssertionError("FF stock balances table must be present in operator UI")
+    rgb = _parse_rgb_triplet(str(style.get("backgroundColor") or ""))
+    if rgb is None:
+        raise AssertionError(f"negative FF stock row must have computed background color, got {style}")
+    if min(rgb) >= 230:
+        raise AssertionError(f"negative FF stock row must not use light/white background, got {style}")
+    return style
+
+
+def _parse_rgb_triplet(value: str) -> tuple[int, int, int] | None:
+    if not value.startswith("rgb"):
+        return None
+    start = value.find("(")
+    end = value.find(")", start + 1)
+    if start < 0 or end < 0:
+        return None
+    parts = [part.strip() for part in value[start + 1 : end].split(",")]
+    if len(parts) < 3:
+        return None
+    try:
+        return int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
+    except ValueError:
+        return None
+
+
 def _nm_id_from_label(label: str) -> str:
     marker = "nmId "
     if marker not in label:
@@ -1807,6 +1862,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("operator_ui_sku_restore: ok ->", result["sku_persistence"])
     print("operator_ui_factory_source_restore: ok ->", result["factory_source_persistence"])
     print("operator_ui_regional_planning: ok ->", result["regional_planning"])
+    print("operator_ui_ff_stock_negative_row_style: ok ->", result["ff_stock_negative_row_style"])
     print("operator_ui_plan_input_defaults: ok ->", result["plan_input_defaults"])
     print("operator_ui_plan_input_restore: ok ->", result["plan_input_persistence"])
     print("operator_ui_zero_guard: ok ->", result["zero_selection_guard"])

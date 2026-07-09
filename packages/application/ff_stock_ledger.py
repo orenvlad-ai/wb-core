@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 from typing import Any, Mapping
 from uuid import uuid4
@@ -24,10 +24,12 @@ FF_STOCK_OPERATION_MANUAL_RECEIPT = "manual_receipt"
 FF_STOCK_OPERATION_MANUAL_WRITEOFF = "manual_writeoff"
 FF_STOCK_OPERATION_AUTO_RECEIPT = "auto_receipt"
 FF_STOCK_OPERATION_AUTO_WRITEOFF = "auto_writeoff"
+FF_STOCK_OPERATION_CORRECTION_RECEIPT = "correction_receipt"
 
 FF_STOCK_SOURCE_MANUAL_EXCEL = "manual_excel"
 FF_STOCK_SOURCE_SUPPLIER_SHIPMENT = "supplier_shipment"
 FF_STOCK_SOURCE_WB_SUPPLY = "wb_supply"
+FF_STOCK_SOURCE_RUNTIME_REPAIR = "runtime_repair"
 
 FF_STOCK_LEDGER_SOURCE_KEY_PREFIX = "ff_stock_ledger"
 
@@ -48,6 +50,7 @@ _MANUAL_OPERATION_LABELS = {
     FF_STOCK_OPERATION_MANUAL_WRITEOFF: "ручное списание",
     FF_STOCK_OPERATION_AUTO_RECEIPT: "автооприходование",
     FF_STOCK_OPERATION_AUTO_WRITEOFF: "автосписание",
+    FF_STOCK_OPERATION_CORRECTION_RECEIPT: "корректировка",
 }
 
 
@@ -285,6 +288,8 @@ class FfStockLedgerBlock:
             "created_count": len(created),
             "created_operation_ids": [str(item.get("operation_id") or "") for item in created],
             "skipped_count": len(skipped),
+            "skipped_total_quantity": sum(float(item.get("total_quantity") or 0.0) for item in skipped),
+            "skipped_reasons": _count_by_key(skipped, "skip_reason"),
             "skipped": skipped[:20],
         }
 
@@ -312,6 +317,46 @@ class FfStockLedgerBlock:
         lines, warnings = _wb_supply_goods_lines(raw_goods, self._nomenclature_by_nm())
         if not lines:
             return {"skip_reason": "wb_supply_goods_without_usable_qty", "supply_id": supply_id, "source_key": source_key}
+        activation = self.runtime.load_ff_stock_activation_operation()
+        if activation is None:
+            return {
+                "skip_reason": "wb_supply_ledger_not_activated",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "total_quantity": sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines),
+            }
+        activation_dt = _parse_datetime_like(activation.get("created_at"))
+        source_dt, source_dt_field = _wb_supply_business_timestamp(record=record, normalized=normalized)
+        if activation_dt is None or source_dt is None:
+            return {
+                "skip_reason": "wb_supply_source_date_missing",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "activation_created_at": str(activation.get("created_at") or ""),
+            }
+        if source_dt < activation_dt:
+            return {
+                "skip_reason": "wb_supply_before_ledger_activation",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "source_timestamp": source_dt.isoformat(),
+                "source_timestamp_field": source_dt_field,
+                "activation_created_at": activation_dt.isoformat(),
+                "activation_operation_id": str(activation.get("operation_id") or ""),
+                "total_quantity": sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines),
+            }
+        negative_preview = _negative_balance_preview(lines, self.runtime.list_ff_stock_balances())
+        if negative_preview:
+            return {
+                "skip_reason": "wb_supply_would_make_negative_balance",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "source_timestamp": source_dt.isoformat(),
+                "source_timestamp_field": source_dt_field,
+                "activation_created_at": activation_dt.isoformat(),
+                "negative_nm_ids": negative_preview[:20],
+                "total_quantity": sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines),
+            }
         total_quantity = sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines)
         if 0 < total_quantity < 250:
             warnings.append(f"WB-поставка меньше 250 шт: {total_quantity:g}")
@@ -331,6 +376,10 @@ class FfStockLedgerBlock:
                 "status_id": status_id,
                 "virtual_type_id": normalized.get("virtual_type_id"),
                 "type_label": normalized.get("type_label"),
+                "source_timestamp": source_dt.isoformat(),
+                "source_timestamp_field": source_dt_field,
+                "ledger_activation_operation_id": str(activation.get("operation_id") or ""),
+                "ledger_activation_created_at": activation_dt.isoformat(),
             },
             lines=lines,
         )
@@ -446,17 +495,25 @@ def resolve_ff_stock_ledger_rows(
         for item in balance_rows
     ]
     negative_rows = [item for item in balance_rows if bool(item.get("negative_balance"))]
+    total_stock_ff = sum(float(item.get("current_stock_ff") or 0.0) for item in balance_rows)
+    warnings: list[str] = []
+    if negative_rows:
+        warnings.append(f"Отрицательный остаток ФФ по {len(negative_rows)} SKU")
+        warnings.append(
+            "Остатки ФФ отрицательные/некорректные, рекомендации к поставке ограничены доступным ФФ-остатком"
+        )
+    if total_stock_ff <= 0 and active_skus:
+        warnings.append("Остатки ФФ <= 0, рекомендации к поставке ограничены доступным ФФ-остатком")
     state = {
         "status": "ready",
         "source": FF_STOCK_LEDGER_SOURCE_KEY_PREFIX,
         "source_label_ru": "Остатки ФФ",
         "active_sku_count": len(active_skus),
         "covered_sku_count": len(rows),
-        "total_stock_ff": sum(float(item.get("current_stock_ff") or 0.0) for item in balance_rows),
+        "total_stock_ff": total_stock_ff,
         "negative_sku_count": len(negative_rows),
-        "warnings": [
-            f"Отрицательный остаток ФФ по {len(negative_rows)} SKU"
-        ] if negative_rows else [],
+        "warnings": warnings,
+        "requires_manual_review": bool(negative_rows or (total_stock_ff <= 0 and active_skus)),
     }
     return rows, state
 
@@ -520,6 +577,99 @@ def _wb_supply_goods_lines(raw_goods: list[Mapping[str, Any]], nomenclature_by_n
         )
         target["quantity_delta"] -= float(quantity)
     return list(grouped.values()), warnings
+
+
+def _negative_balance_preview(
+    lines: list[Mapping[str, Any]],
+    current_balances: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    balances_by_nm = {
+        int(item.get("nm_id") or 0): float(item.get("balance") or 0.0)
+        for item in current_balances
+    }
+    result: list[dict[str, Any]] = []
+    for line in lines:
+        nm_id = _optional_int(line.get("nm_id"))
+        if nm_id is None:
+            continue
+        delta = float(line.get("quantity_delta") or 0.0)
+        next_balance = float(balances_by_nm.get(nm_id, 0.0)) + delta
+        if next_balance < 0:
+            result.append(
+                {
+                    "nm_id": nm_id,
+                    "current_balance": float(balances_by_nm.get(nm_id, 0.0)),
+                    "quantity_delta": delta,
+                    "next_balance": next_balance,
+                }
+            )
+    return result
+
+
+def _count_by_key(items: list[Mapping[str, Any]], key: str) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "").strip()
+        if not value:
+            continue
+        result[value] = result.get(value, 0) + 1
+    return result
+
+
+def _wb_supply_business_timestamp(
+    *,
+    record: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+) -> tuple[datetime | None, str]:
+    sources: list[tuple[str, Mapping[str, Any]]] = [
+        ("normalized", normalized),
+        ("record", record),
+    ]
+    for raw_key in ("raw_list", "raw_detail"):
+        raw_value = record.get(raw_key)
+        if isinstance(raw_value, Mapping):
+            sources.append((raw_key, raw_value))
+    fields = (
+        "source_created_at",
+        "createDate",
+        "createdAt",
+        "supply_date",
+        "supplyDate",
+        "fact_date",
+        "factDate",
+    )
+    for source_name, source in sources:
+        for field in fields:
+            if field not in source:
+                continue
+            parsed = _parse_datetime_like(source.get(field))
+            if parsed is not None:
+                return parsed, f"{source_name}.{field}"
+    return None, ""
+
+
+def _parse_datetime_like(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime(value.year, value.month, value.day)
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                parsed_date = date.fromisoformat(text[:10])
+            except ValueError:
+                return None
+            parsed = datetime(parsed_date.year, parsed_date.month, parsed_date.day)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _nomenclature_public_fields(item: Mapping[str, Any]) -> dict[str, Any]:
