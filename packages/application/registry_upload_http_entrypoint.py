@@ -1940,6 +1940,13 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         return self.supplier_shipments_block.update_order_status(shipment_id, payload.get("order_status"))
 
+    def handle_supplier_shipments_expenses_complete_patch_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.supplier_shipments_block.update_expenses_complete(shipment_id, payload.get("expenses_complete"))
+
     def handle_our_wb_cost_recalculate_request(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         result = self.our_wb_cost_block.rebuild_all()
         return {

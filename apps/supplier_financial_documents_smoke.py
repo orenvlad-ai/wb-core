@@ -11,7 +11,7 @@ import socket
 import sys
 import threading
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Mapping
 from urllib import request as urllib_request
 import zipfile
 
@@ -753,6 +753,7 @@ def _assert_parser_smoke() -> None:
     _assert_new_quote_parser_smoke()
     _assert_bad_quote_rate_guardrail_smoke()
     _assert_registry_lead_time_rows_smoke()
+    _assert_registry_data_source_sections_smoke()
     _assert_approx_landed_cost_summary_smoke()
     _assert_incomplete_quote_summary_smoke()
 
@@ -1179,8 +1180,8 @@ def _assert_approx_landed_cost_summary_smoke() -> None:
             }
         ]
     )
-    if _registry_cell_display(registry, "cargo_value", "approx_landed_cost_per_unit_rub", "approx_formula") != "300.00 ₽":
-        raise AssertionError(f"registry matrix must expose approximate landed cost row: {registry}")
+    if "approx_landed_cost_per_unit_rub" in _registry_row_ids(registry, "cargo_value"):
+        raise AssertionError(f"registry matrix must not expose approximate landed cost row: {registry}")
 
 
 def _assert_summary_metrics_smoke() -> None:
@@ -1310,6 +1311,103 @@ def _assert_bad_quote_rate_guardrail_smoke() -> None:
             raise AssertionError(f"bad-rate registry row {row_id} must render blank: {registry}")
 
 
+def _assert_registry_data_source_sections_smoke() -> None:
+    documents = [
+        {
+            "document_id": "packing",
+            "document_type": "packing_list",
+            "parse_status": "parsed",
+            "normalized_parse": {
+                "total_quantity": 100.0,
+                "total_gross_weight_kg": 50.0,
+                "total_volume_m3": 0.25,
+            },
+        },
+        {
+            "document_id": "quote",
+            "document_type": "logistics_quote",
+            "parse_status": "parsed",
+            "normalized_parse": {
+                "gross_weight_kg": 999.0,
+                "volume_m3": 9.99,
+                "estimated_cargo_value_usd": 1000.0,
+                "estimated_cargo_value_cny": 7000.0,
+                "delivery_days_min": 25,
+                "delivery_days_max": 30,
+            },
+            "total_amount": 300.0,
+            "cbr_usd_rate_value": 90.0,
+        },
+        {
+            "document_id": "customs",
+            "document_type": "customs_declaration",
+            "parse_status": "parsed",
+            "normalized_parse": {
+                "gross_weight_kg": 40.0,
+                "total_customs_value_rub": 9000.0,
+            },
+        },
+    ]
+    shipment = {
+        "header": {
+            "shipment_id": "source_sections",
+            "product_qty_total": 200.0,
+            "invoice_amount_total": 1000.0,
+            "currency": "CNY",
+            "cny_payment_currency_rub_cost": "13000",
+            "cny_ledger_effective_rate": "13.0",
+        },
+        "lines": [],
+    }
+    summary = build_financial_summary(documents, [], shipment=shipment)
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "source_sections",
+                "header": shipment["header"],
+                "lines": [],
+                "documents": documents,
+                "expense_lines": [],
+                "summary": summary,
+            }
+        ]
+    )
+    if _registry_cell_display(registry, "cargo_physics", "packing_list_units", "source_sections") != "100":
+        raise AssertionError(f"physics quantity must come from packing list, not invoice quantity: {registry}")
+    if _registry_cell_display(registry, "cargo_physics", "packing_list_weight", "source_sections") != "50.00 кг":
+        raise AssertionError(f"physics weight must come from packing list: {registry}")
+    if _registry_cell_display(registry, "cargo_physics", "packing_list_volume", "source_sections") != "0.25 м³":
+        raise AssertionError(f"physics volume must come from packing list: {registry}")
+    if _registry_cell_display(registry, "cargo_physics", "packing_list_density", "source_sections") != "200.00 кг/м³":
+        raise AssertionError(f"packing-list density mismatch: {registry}")
+    if _registry_cell_display(registry, "cargo_physics", "units_per_customs_kg", "source_sections") != "2.50":
+        raise AssertionError(f"DT units/kg must use packing-list quantity over DT weight: {registry}")
+    if _registry_cell_display(registry, "cargo_value", "invoice_goods_value_rub_per_unit", "source_sections") != "130.00 ₽":
+        raise AssertionError(f"invoice unit goods value must use matched CNY payment over packing/invoice qty: {registry}")
+    if _registry_cell_display(registry, "cargo_value", "customs_value_rub", "source_sections") != "9 000.00 ₽":
+        raise AssertionError(f"customs value must remain only a comparison reference: {registry}")
+    if _registry_cell_display(registry, "fact_expenses", "expenses_completeness_status", "source_sections") != "Расходы не учтены полностью":
+        raise AssertionError(f"expenses completeness default mismatch: {registry}")
+    exact_cell = _registry_cell(registry, "cargo_value", "exact_landed_cost_per_unit_rub", "source_sections")
+    if exact_cell.get("status") != "incomplete":
+        raise AssertionError(f"exact cost must be yellow/incomplete by default when value exists: {exact_cell}")
+    complete_header = {**shipment["header"], "shipment_id": "source_sections_done", "expenses_complete": True}
+    complete_registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "source_sections_done",
+                "header": complete_header,
+                "lines": [],
+                "documents": documents,
+                "expense_lines": [],
+                "summary": build_financial_summary(documents, [], shipment={"header": complete_header, "lines": []}),
+            }
+        ]
+    )
+    if _registry_cell(complete_registry, "cargo_value", "exact_landed_cost_per_unit_rub", "source_sections_done").get("status") != "complete":
+        raise AssertionError(f"exact cost must be green/complete after persisted flag: {complete_registry}")
+
+
 def _assert_registry_lead_time_rows_smoke() -> None:
     quote_payload = parse_financial_document_text(QUOTE_TEXT, filename="quote.txt")
     documents, lines = _summary_fixture_documents_and_lines(quote_payload, include_customs=False)
@@ -1347,9 +1445,9 @@ def _assert_registry_lead_time_rows_smoke() -> None:
         ]
     )
     labels = _registry_row_labels(registry, "lead_times")
-    if "Срок до ДТ" not in labels:
+    if "Срок до ДТ / таможни" not in labels:
         raise AssertionError(f"registry lead-times must expose Срок до ДТ: {labels}")
-    if "Фактический срок поставки" not in labels:
+    if "Фактический срок доставки" not in labels:
         raise AssertionError(f"registry lead-times must expose actual delivery days: {labels}")
     forbidden = " ".join(labels).lower()
     if "отклонение срока" in forbidden:
@@ -1358,12 +1456,12 @@ def _assert_registry_lead_time_rows_smoke() -> None:
         raise AssertionError(f"missing fact shipment dates must render actual delivery days as unavailable: {registry}")
     if _registry_cell_display(registry, "lead_times", "days_to_customs_declaration", "missing_dates") != "—":
         raise AssertionError(f"missing lead-time dates must render as unavailable: {registry}")
-    if _registry_cell_display(registry, "cargo_value", "approx_landed_cost_per_unit_rub", "missing_dates") != "—":
-        raise AssertionError(f"missing approx_yuan_rate must render approximate landed cost as unavailable: {registry}")
+    if "approx_landed_cost_per_unit_rub" in _registry_row_ids(registry, "cargo_value"):
+        raise AssertionError(f"registry cargo value must not expose approximate landed cost: {registry}")
     if (
-        _registry_cell_display(registry, "passport", "shipment_date", "invalid_fact_dates") != "—"
-        or _registry_cell_display(registry, "passport", "actual_shipment_date", "invalid_fact_dates") != "—"
-        or _registry_cell_display(registry, "passport", "actual_ff_acceptance_date", "invalid_fact_dates") != "—"
+        _registry_cell_display(registry, "lead_times", "shipment_date", "invalid_fact_dates") != "—"
+        or _registry_cell_display(registry, "lead_times", "actual_shipment_date", "invalid_fact_dates") != "—"
+        or _registry_cell_display(registry, "lead_times", "actual_ff_acceptance_date", "invalid_fact_dates") != "—"
         or _registry_cell_display(registry, "lead_times", "actual_delivery_days", "invalid_fact_dates") != "—"
     ):
         raise AssertionError(f"invalid registry dates must render as unavailable: {registry}")
@@ -1534,13 +1632,26 @@ def _assert_http_api_smoke() -> None:
             if "NaN" in registry_json or "Infinity" in registry_json:
                 raise AssertionError(f"shipment registry must not expose invalid numeric output: {registry}")
             section_ids = [section.get("section_id") for section in registry.get("sections", [])]
-            for expected_section in ("passport", "cargo_physics", "quote_logistics", "fact_expenses", "fact_normalized", "documents"):
-                if expected_section not in section_ids:
-                    raise AssertionError(f"shipment registry missing section {expected_section}: {section_ids}")
+            expected_sections = [
+                "passport",
+                "quote_logistics",
+                "lead_times",
+                "cargo_physics",
+                "cargo_value",
+                "fact_expenses",
+                "fact_normalized",
+                "documents",
+            ]
+            if section_ids != expected_sections:
+                raise AssertionError(f"shipment registry section order mismatch: expected {expected_sections}, got {section_ids}")
+            if any(row_id.startswith("quote_") for row_id in _registry_row_ids(registry, "cargo_physics")):
+                raise AssertionError(f"cargo physics must not expose quote/KP source rows: {registry}")
+            if any(row_id.startswith("quote_") or row_id.startswith("approx_") for row_id in _registry_row_ids(registry, "cargo_value")):
+                raise AssertionError(f"cargo value must not expose quote/KP or approximate rows: {registry}")
             lead_time_labels = _registry_row_labels(registry, "lead_times")
-            if "Срок до ДТ" not in lead_time_labels:
+            if "Срок до ДТ / таможни" not in lead_time_labels:
                 raise AssertionError(f"shipment registry lead-time row missing: {lead_time_labels}")
-            if "Фактический срок поставки" not in lead_time_labels:
+            if "Фактический срок доставки" not in lead_time_labels:
                 raise AssertionError(f"shipment registry actual delivery row missing: {lead_time_labels}")
             forbidden_lead_time_labels = " ".join(lead_time_labels).lower()
             if "отклонение срока" in forbidden_lead_time_labels:
@@ -1553,10 +1664,24 @@ def _assert_http_api_smoke() -> None:
                 raise AssertionError(f"registry quote ₽/шт mismatch: {registry}")
             if _registry_cell_display(registry, "fact_expenses", "fact_total_rub_per_unit", "sup_financial") != "35.34 ₽":
                 raise AssertionError(f"registry fact ₽/шт mismatch: {registry}")
-            if _registry_cell_display(registry, "cargo_value", "approx_landed_cost_per_unit_rub", "sup_financial") != "36.48 ₽":
-                raise AssertionError(f"registry approximate landed cost mismatch: {registry}")
+            if "approx_landed_cost_per_unit_rub" in _registry_row_ids(registry, "cargo_value"):
+                raise AssertionError(f"registry must not expose approximate landed cost in cargo value: {registry}")
             if _registry_cell_display(registry, "cargo_physics", "customs_weight", "sup_financial") != "9 784.60 кг":
                 raise AssertionError(f"registry customs weight mismatch: {registry}")
+            if _registry_cell_display(registry, "fact_expenses", "expenses_completeness_status", "sup_financial") != "Расходы не учтены полностью":
+                raise AssertionError(f"registry expenses completeness must default to incomplete: {registry}")
+            completeness_status, completeness_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_financial/expense-completeness",
+                {"expenses_complete": True},
+            )
+            if completeness_status != 200 or completeness_payload.get("expenses_complete") is not True:
+                raise AssertionError(f"expense completeness patch failed: {completeness_status} {completeness_payload}")
+            patched_registry_status, patched_registry = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}")
+            if (
+                patched_registry_status != 200
+                or _registry_cell_display(patched_registry, "fact_expenses", "expenses_completeness_status", "sup_financial") != "Расходы учтены"
+            ):
+                raise AssertionError(f"patched expense completeness must persist into registry: {patched_registry_status} {patched_registry}")
             compare_status, compare_payload = _post_multipart(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH}",
                 b"%PDF-1.4\n% synthetic quote comparison smoke\n",
@@ -1926,19 +2051,31 @@ def _zip_manifest(archive_bytes: bytes) -> dict[str, Any]:
 
 
 def _registry_cell_display(registry: Mapping[str, Any], section_id: str, row_id: str, shipment_id: str) -> str:
+    return str(_registry_cell(registry, section_id, row_id, shipment_id).get("display") or "")
+
+
+def _registry_cell(registry: Mapping[str, Any], section_id: str, row_id: str, shipment_id: str) -> dict[str, Any]:
     for section in registry.get("sections", []):
         if section.get("section_id") != section_id:
             continue
         for row in section.get("rows", []):
             if row.get("row_id") == row_id:
-                return str((row.get("cells", {}).get(shipment_id) or {}).get("display") or "")
-    return ""
+                cell = row.get("cells", {}).get(shipment_id) or {}
+                return dict(cell) if isinstance(cell, Mapping) else {}
+    return {}
 
 
 def _registry_row_labels(registry: Mapping[str, Any], section_id: str) -> list[str]:
     for section in registry.get("sections", []):
         if section.get("section_id") == section_id:
             return [str(row.get("label") or "") for row in section.get("rows", [])]
+    return []
+
+
+def _registry_row_ids(registry: Mapping[str, Any], section_id: str) -> list[str]:
+    for section in registry.get("sections", []):
+        if section.get("section_id") == section_id:
+            return [str(row.get("row_id") or "") for row in section.get("rows", [])]
     return []
 
 
@@ -1983,6 +2120,20 @@ def _get_bytes(url: str) -> tuple[int, bytes, dict[str, str]]:
 
 def _delete_json(url: str) -> tuple[int, dict[str, Any]]:
     request = urllib_request.Request(url, method="DELETE", headers={"Accept": "application/json"})
+    try:
+        with urllib_request.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib_request.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _patch_json(url: str, payload: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    request = urllib_request.Request(
+        url,
+        data=json.dumps(dict(payload)).encode("utf-8"),
+        method="PATCH",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
     try:
         with urllib_request.urlopen(request, timeout=20) as response:
             return response.status, json.loads(response.read().decode("utf-8"))

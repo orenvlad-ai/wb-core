@@ -3693,6 +3693,26 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if _is_supplier_shipment_expenses_complete_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_expenses_complete_path(parsed.path)
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_supplier_shipments_expenses_complete_patch_request(shipment_id, payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier shipment expenses completeness patch failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if _is_supplier_shipment_detail_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
@@ -4463,6 +4483,14 @@ def _is_supplier_shipment_price_check_path(path: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "price-check"
 
 
+def _is_supplier_shipment_expenses_complete_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return len(parts) == 2 and bool(parts[0]) and parts[1] == "expense-completeness"
+
+
 def _supplier_order_documents_path_parts(path: str) -> list[str]:
     if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
         return []
@@ -4689,6 +4717,13 @@ def _resolve_supplier_shipment_id_from_rematch_path(path: str) -> str:
 def _resolve_supplier_shipment_id_from_price_check_path(path: str) -> str:
     if not _is_supplier_shipment_price_check_path(path):
         raise ValueError(f"unsupported supplier shipment price check path: {path}")
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/", 1)[0]
+
+
+def _resolve_supplier_shipment_id_from_expenses_complete_path(path: str) -> str:
+    if not _is_supplier_shipment_expenses_complete_path(path):
+        raise ValueError(f"unsupported supplier shipment expense-completeness path: {path}")
     suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
     return suffix.split("/", 1)[0]
 

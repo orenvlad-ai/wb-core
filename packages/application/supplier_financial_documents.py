@@ -2234,53 +2234,26 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
             [
                 ("shipment_id", "order id / supplier order id", lambda item: _registry_text(_registry_header(item).get("shipment_id"))),
                 ("invoice_no", "номер заказа / инвойса", lambda item: _registry_text(_registry_header(item).get("invoice_no"))),
-                ("order_date", "дата заказа", lambda item: _registry_date(_date_part(_registry_header(item).get("created_at")))),
-                ("invoice_date", "дата инвойса", lambda item: _registry_date(_registry_header(item).get("invoice_date"))),
-                ("shipment_date", "Плановая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("shipment_date"))),
-                ("actual_shipment_date", "Фактическая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("actual_shipment_date"))),
-                ("actual_ff_acceptance_date", "Фактическая дата приёмки на ФФ", lambda item: _registry_strict_date(_registry_header(item).get("actual_ff_acceptance_date"))),
-                ("customs_date", "дата ДТ", lambda item: _registry_date(_registry_customs_meta(item).get("document_date") or _registry_customs_meta(item).get("declaration_date"))),
+                ("contract_no", "номер контракта", lambda item: _registry_text(_registry_header(item).get("contract_no"))),
                 ("supplier", "поставщик", lambda item: _registry_text(_registry_header(item).get("supplier_name"))),
                 ("logistics_vendor", "логист", lambda item: _registry_text(_registry_logistics_vendor(item))),
                 ("route", "маршрут", lambda item: _registry_text(_registry_route(item))),
-                ("delivery_type", "тип доставки / сценарий", lambda item: _registry_text(_registry_quote_meta(item).get("tariff"))),
                 ("document_status", "статус документов / warnings", lambda item: _registry_text(_registry_document_status(item))),
             ],
         ),
         (
-            "cargo_physics",
-            "B. Физика груза",
-            [
-                ("units", "количество штук", lambda item: _registry_number(_summary_path(item, "per_unit", "total_units"), decimals=0)),
-                ("quote_weight", "вес КП", lambda item: _registry_number(_summary_path(item, "quote", "gross_weight_kg"), suffix=" кг")),
-                ("customs_weight", "вес ДТ", lambda item: _registry_number(_summary_path(item, "customs_declaration", "gross_weight_kg"), suffix=" кг")),
-                ("quote_volume", "объём КП", lambda item: _registry_number(_summary_path(item, "logistics_efficiency", "volume_m3"), suffix=" м³")),
-                ("density", "плотность кг/м³", lambda item: _registry_number(_safe_div(_dec(_summary_path(item, "quote", "gross_weight_kg")), _dec(_summary_path(item, "logistics_efficiency", "volume_m3"))), suffix=" кг/м³")),
-                ("units_per_quote_kg", "штук/кг по КП", lambda item: _registry_number(_safe_div(_dec(_summary_path(item, "per_unit", "total_units")), _dec(_summary_path(item, "quote", "gross_weight_kg"))))),
-                ("units_per_customs_kg", "штук/кг по ДТ", lambda item: _registry_number(_safe_div(_dec(_summary_path(item, "per_unit", "total_units")), _dec(_summary_path(item, "customs_declaration", "gross_weight_kg"))))),
-            ],
-        ),
-        (
-            "cargo_value",
-            "C. Стоимость товара",
-            [
-                ("quote_cargo_usd", "стоимость груза USD по КП", lambda item: _registry_money(_summary_path(item, "quote", "estimated_cargo_value_usd"), "USD")),
-                ("quote_cargo_cny", "стоимость груза CNY по КП", lambda item: _registry_money(_registry_quote_meta(item).get("estimated_cargo_value_cny"), "CNY")),
-                ("customs_value_rub", "таможенная стоимость ₽ из ДТ", lambda item: _registry_money(_summary_path(item, "customs_declaration", "total_customs_value_rub"), "₽")),
-                ("goods_value_rub", "стоимость товара ₽ по курсу/ДТ", lambda item: _registry_blank()),
-                ("goods_value_rub_per_unit", "стоимость товара ₽/шт", lambda item: _registry_money(_safe_div(_dec(_summary_path(item, "customs_declaration", "total_customs_value_rub")), _dec(_summary_path(item, "per_unit", "total_units"))), "₽")),
-                ("approx_landed_cost_per_unit_rub", "Ориентировочная себестоимость на ФФ, ₽/шт", lambda item: _registry_money(_summary_path(item, "per_unit", "approx_landed_cost_per_unit_rub"), "₽")),
-                ("exact_landed_cost_per_unit_rub", "Точная себестоимость, ₽/шт", lambda item: _registry_money(_summary_path(item, "per_unit", "exact_landed_cost_per_unit_rub"), "₽")),
-            ],
-        ),
-        (
             "quote_logistics",
-            "D. КП логиста",
+            "B. КП логиста",
             [
                 ("quote_total_usd", "КП всего USD", lambda item: _registry_money(_summary_path(item, "quote", "total_usd"), "USD")),
                 ("quote_total_rub", "КП всего ₽", lambda item: _registry_money(_summary_path(item, "quote", "total_rub_equivalent"), "₽")),
                 ("quote_logistics_usd", "КП логистика USD", lambda item: _registry_money(_summary_path(item, "quote", "logistics_usd"), "USD")),
                 ("quote_customs_usd", "КП таможня USD", lambda item: _registry_money(_summary_path(item, "quote", "customs_payments_usd"), "USD")),
+                ("quote_cargo_usd", "стоимость груза USD по КП", lambda item: _registry_money(_summary_path(item, "quote", "estimated_cargo_value_usd"), "USD")),
+                ("quote_cargo_cny", "стоимость груза CNY по КП", lambda item: _registry_money(_registry_quote_meta(item).get("estimated_cargo_value_cny"), "CNY")),
+                ("quote_weight", "вес по КП", lambda item: _registry_number(_summary_path(item, "quote", "gross_weight_kg"), suffix=" кг")),
+                ("quote_volume", "объём по КП", lambda item: _registry_number(_summary_path(item, "logistics_efficiency", "volume_m3"), suffix=" м³")),
+                ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _registry_text(_quote_delivery_days_display(item))),
                 ("quote_logistics_pct", "КП: услуги логиста, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "logistics_pct"))),
                 ("quote_customs_pct", "КП: таможня, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "customs_pct"))),
                 ("quote_total_pct", "КП: доставка+таможня, % от стоимости груза", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "delivery_customs_pct"))),
@@ -2291,9 +2264,49 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
             ],
         ),
         (
-            "fact_expenses",
-            "E. Факт расходов",
+            "lead_times",
+            "C. Сроки",
             [
+                ("order_date", "дата заказа", lambda item: _registry_date(_date_part(_registry_header(item).get("created_at")))),
+                ("invoice_date", "дата invoice", lambda item: _registry_date(_registry_header(item).get("invoice_date"))),
+                ("shipment_date", "Плановая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("shipment_date"))),
+                ("actual_shipment_date", "Фактическая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("actual_shipment_date"))),
+                ("actual_ff_acceptance_date", "Фактическая дата приёмки на ФФ", lambda item: _registry_strict_date(_registry_header(item).get("actual_ff_acceptance_date"))),
+                ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _registry_text(_quote_delivery_days_display(item))),
+                ("actual_delivery_days", "Фактический срок доставки", lambda item: _registry_number(_actual_delivery_days(item), suffix=" дн.", decimals=0)),
+                ("days_to_customs_declaration", "Срок до ДТ / таможни", lambda item: _registry_number(_days_to_customs_declaration(item), suffix=" дн.", decimals=0)),
+            ],
+        ),
+        (
+            "cargo_physics",
+            "D. Физика груза",
+            [
+                ("packing_list_units", "количество штук по packing list", lambda item: _registry_number(_summary_path(item, "packing_list", "total_quantity"), decimals=0)),
+                ("packing_list_weight", "вес по packing list", lambda item: _registry_number(_summary_path(item, "packing_list", "total_gross_weight_kg"), suffix=" кг")),
+                ("packing_list_volume", "объём по packing list", lambda item: _registry_number(_summary_path(item, "packing_list", "total_volume_m3"), suffix=" м³")),
+                ("packing_list_density", "плотность кг/м³ по packing list", lambda item: _registry_number(_packing_list_density(item), suffix=" кг/м³")),
+                ("packing_list_units_per_kg", "штук/кг по packing list", lambda item: _registry_number(_packing_list_units_per_kg(item))),
+                ("customs_weight", "вес по ДТ", lambda item: _registry_number(_summary_path(item, "customs_declaration", "gross_weight_kg"), suffix=" кг")),
+                ("units_per_customs_kg", "штук/кг по ДТ", lambda item: _registry_number(_customs_units_per_kg_from_packing_list(item))),
+            ],
+        ),
+        (
+            "cargo_value",
+            "E. Стоимость товара",
+            [
+                ("invoice_amount", "инвойсная стоимость", lambda item: _invoice_amount_cell(item)),
+                ("factory_paid_rub", "оплачено фабрике, ₽", lambda item: _registry_money(_summary_path(item, "per_unit", "exact_currency_payment_cost_rub"), "₽")),
+                ("cny_payment_rate", "курс оплаты CNY/RUB", lambda item: _registry_number(_registry_header(item).get("cny_ledger_effective_rate"), suffix=" ₽/CNY", decimals=4)),
+                ("customs_value_rub", "таможенная стоимость по ДТ, ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "total_customs_value_rub"), "₽")),
+                ("invoice_goods_value_rub_per_unit", "стоимость товара по инвойсу, ₽/шт", lambda item: _registry_money(_invoice_goods_value_rub_per_unit(item), "₽")),
+                ("exact_landed_cost_per_unit_rub", "Точная себестоимость, ₽/шт", lambda item: _exact_landed_cost_cell(item)),
+            ],
+        ),
+        (
+            "fact_expenses",
+            "F. Факт расходов",
+            [
+                ("expenses_completeness_status", "полнота расходов", lambda item: _expenses_completeness_cell(item)),
                 ("invoice_fact_rub", "счета логиста ₽", lambda item: _registry_money(_summary_path(item, "invoices", "fact_rub"), "₽")),
                 ("invoice_vat_rub", "НДС по счетам ₽", lambda item: _registry_money(_summary_path(item, "invoices", "vat_rub"), "₽")),
                 ("customs_fee_rub", "ДТ сбор ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "customs_fee_1010_rub"), "₽")),
@@ -2308,7 +2321,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
         ),
         (
             "fact_normalized",
-            "F. Нормализованные метрики факта",
+            "G. Нормализованные метрики факта",
             [
                 ("fact_logistics_per_quote_kg", "услуги логиста ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "logistics_invoice_rub_per_kg"), "₽")),
                 ("fact_customs_per_quote_kg", "таможня ₽/кг · вес КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "customs_payments_rub_per_kg"), "₽")),
@@ -2320,15 +2333,6 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("fact_customs_without_vat_pct", "факт: таможня без НДС, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "customs_without_vat_pct"))),
                 ("fact_customs_with_vat_pct", "факт: таможня с НДС, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "customs_with_vat_pct"))),
                 ("fact_total_pct", "факт: доставка+таможня, % от таможенной стоимости", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "fact_customs_value", "delivery_customs_pct"))),
-            ],
-        ),
-        (
-            "lead_times",
-            "G. Сроки",
-            [
-                ("quote_delivery_days", "срок доставки по КП", lambda item: _registry_text(_quote_delivery_days_display(item))),
-                ("actual_delivery_days", "Фактический срок поставки", lambda item: _registry_number(_actual_delivery_days(item), suffix=" дн.", decimals=0)),
-                ("days_to_customs_declaration", "Срок до ДТ", lambda item: _registry_number(_days_to_customs_declaration(item), suffix=" дн.", decimals=0)),
             ],
         ),
         (
@@ -2371,11 +2375,71 @@ def _registry_column(context: Mapping[str, Any]) -> dict[str, Any]:
         "actual_shipment_date": _strict_date_part(header.get("actual_shipment_date")),
         "actual_ff_acceptance_date": _strict_date_part(header.get("actual_ff_acceptance_date")),
         "order_status": header.get("order_status") or "",
+        "expenses_complete": bool(header.get("expenses_complete")),
     }
 
 
 def _registry_header(context: Mapping[str, Any]) -> dict[str, Any]:
     return dict(context.get("header") or {})
+
+
+def _invoice_amount_cell(context: Mapping[str, Any]) -> dict[str, Any]:
+    header = _registry_header(context)
+    currency = str(header.get("currency") or "").strip() or "CNY"
+    return _registry_money(header.get("invoice_amount_total"), currency)
+
+
+def _goods_quantity_for_invoice_cost(context: Mapping[str, Any]) -> Decimal | None:
+    packing_quantity = _positive_decimal(_summary_path(context, "packing_list", "total_quantity"))
+    if packing_quantity is not None:
+        return packing_quantity
+    return _positive_decimal(_summary_path(context, "per_unit", "total_units"))
+
+
+def _invoice_goods_value_rub_per_unit(context: Mapping[str, Any]) -> Decimal | None:
+    payment_cost = _positive_decimal(_summary_path(context, "per_unit", "exact_currency_payment_cost_rub"))
+    quantity = _goods_quantity_for_invoice_cost(context)
+    return _safe_div(payment_cost, quantity)
+
+
+def _packing_list_density(context: Mapping[str, Any]) -> Decimal | None:
+    weight = _positive_decimal(_summary_path(context, "packing_list", "total_gross_weight_kg"))
+    volume = _positive_decimal(_summary_path(context, "packing_list", "total_volume_m3"))
+    return _safe_div(weight, volume)
+
+
+def _packing_list_units_per_kg(context: Mapping[str, Any]) -> Decimal | None:
+    quantity = _positive_decimal(_summary_path(context, "packing_list", "total_quantity"))
+    weight = _positive_decimal(_summary_path(context, "packing_list", "total_gross_weight_kg"))
+    return _safe_div(quantity, weight)
+
+
+def _customs_units_per_kg_from_packing_list(context: Mapping[str, Any]) -> Decimal | None:
+    quantity = _positive_decimal(_summary_path(context, "packing_list", "total_quantity"))
+    weight = _positive_decimal(_summary_path(context, "customs_declaration", "gross_weight_kg"))
+    return _safe_div(quantity, weight)
+
+
+def _expenses_complete(context: Mapping[str, Any]) -> bool:
+    return bool(_registry_header(context).get("expenses_complete"))
+
+
+def _expenses_completeness_cell(context: Mapping[str, Any]) -> dict[str, Any]:
+    is_complete = _expenses_complete(context)
+    cell = _registry_cell(
+        is_complete,
+        "Расходы учтены" if is_complete else "Расходы не учтены полностью",
+    )
+    cell["type"] = "expenses-completeness"
+    cell["status"] = "complete" if is_complete else "incomplete"
+    return cell
+
+
+def _exact_landed_cost_cell(context: Mapping[str, Any]) -> dict[str, Any]:
+    cell = _registry_money(_summary_path(context, "per_unit", "exact_landed_cost_per_unit_rub"), "₽")
+    if cell.get("value") is not None:
+        cell["status"] = "complete" if _expenses_complete(context) else "incomplete"
+    return cell
 
 
 def _registry_summary(context: Mapping[str, Any]) -> dict[str, Any]:
