@@ -1869,6 +1869,108 @@ class RegistryUploadDbBackedRuntime:
                 return None
             return _ff_stock_operation_to_dict(row)
 
+    def load_ff_stock_wb_auto_writeoff_checkpoint(self, *, slot: str = "current") -> dict[str, Any] | None:
+        normalized_slot = str(slot or "current").strip() or "current"
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint
+                WHERE slot = ?
+                """,
+                (normalized_slot,),
+            ).fetchone()
+            if row is None:
+                return None
+            return _ff_stock_wb_auto_writeoff_checkpoint_to_dict(row)
+
+    def save_ff_stock_wb_auto_writeoff_checkpoint(
+        self,
+        *,
+        checkpoint_id: str,
+        created_at: str,
+        created_by: str = "",
+        reason: str = "",
+        slot: str = "current",
+        baseline_cache_keys: list[str] | None = None,
+        baseline_source_keys: list[str] | None = None,
+        baseline_supply_ids: list[str] | None = None,
+        watermark_source_created_at: str = "",
+        watermark_supply_date: str = "",
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_slot = str(slot or "current").strip() or "current"
+        normalized_checkpoint_id = str(checkpoint_id or "").strip()
+        if not normalized_checkpoint_id:
+            raise ValueError("checkpoint_id is required")
+        _validate_timestamp(created_at, field_name="created_at")
+        if watermark_source_created_at:
+            _validate_timestamp(watermark_source_created_at, field_name="watermark_source_created_at")
+        cache_keys = sorted({str(item).strip() for item in (baseline_cache_keys or []) if str(item or "").strip()})
+        source_keys = sorted({str(item).strip() for item in (baseline_source_keys or []) if str(item or "").strip()})
+        supply_ids = sorted({str(item).strip() for item in (baseline_supply_ids or []) if str(item or "").strip()})
+        baseline_record_count = max(len(cache_keys), len(source_keys), len(supply_ids))
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint(
+                    slot,
+                    checkpoint_id,
+                    created_at,
+                    created_by,
+                    reason,
+                    baseline_cache_keys_json,
+                    baseline_source_keys_json,
+                    baseline_supply_ids_json,
+                    baseline_record_count,
+                    watermark_source_created_at,
+                    watermark_supply_date,
+                    diagnostics_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(slot) DO UPDATE SET
+                    checkpoint_id = excluded.checkpoint_id,
+                    created_at = excluded.created_at,
+                    created_by = excluded.created_by,
+                    reason = excluded.reason,
+                    baseline_cache_keys_json = excluded.baseline_cache_keys_json,
+                    baseline_source_keys_json = excluded.baseline_source_keys_json,
+                    baseline_supply_ids_json = excluded.baseline_supply_ids_json,
+                    baseline_record_count = excluded.baseline_record_count,
+                    watermark_source_created_at = excluded.watermark_source_created_at,
+                    watermark_supply_date = excluded.watermark_supply_date,
+                    diagnostics_json = excluded.diagnostics_json
+                """,
+                (
+                    normalized_slot,
+                    normalized_checkpoint_id,
+                    created_at,
+                    str(created_by or "").strip(),
+                    str(reason or "").strip(),
+                    json.dumps(cache_keys, ensure_ascii=False),
+                    json.dumps(source_keys, ensure_ascii=False),
+                    json.dumps(supply_ids, ensure_ascii=False),
+                    baseline_record_count,
+                    watermark_source_created_at,
+                    str(watermark_supply_date or "").strip(),
+                    json.dumps(dict(diagnostics or {}), ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT *
+                FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint
+                WHERE slot = ?
+                """,
+                (normalized_slot,),
+            ).fetchone()
+            return _ff_stock_wb_auto_writeoff_checkpoint_to_dict(row)
+
     def create_ff_stock_operation(
         self,
         *,
@@ -6363,6 +6465,25 @@ def _ff_stock_operation_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
     }
 
 
+def _ff_stock_wb_auto_writeoff_checkpoint_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    return {
+        "slot": row["slot"] or "",
+        "checkpoint_id": row["checkpoint_id"] or "",
+        "created_at": row["created_at"] or "",
+        "created_by": row["created_by"] or "",
+        "reason": row["reason"] or "",
+        "baseline_cache_keys": [str(item) for item in _loads_json_list(row["baseline_cache_keys_json"])],
+        "baseline_source_keys": [str(item) for item in _loads_json_list(row["baseline_source_keys_json"])],
+        "baseline_supply_ids": [str(item) for item in _loads_json_list(row["baseline_supply_ids_json"])],
+        "baseline_record_count": int(row["baseline_record_count"] or 0),
+        "watermark_source_created_at": row["watermark_source_created_at"] or "",
+        "watermark_supply_date": row["watermark_supply_date"] or "",
+        "diagnostics": _loads_json_object(row["diagnostics_json"]),
+    }
+
+
 def _ff_stock_operation_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "operation_id": row["operation_id"],
@@ -7193,6 +7314,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_ff_stock_operation_lines_by_nm
         ON sheet_vitrina_v1_ff_stock_operation_lines(nm_id);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint (
+            slot TEXT PRIMARY KEY,
+            checkpoint_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            created_by TEXT,
+            reason TEXT,
+            baseline_cache_keys_json TEXT NOT NULL DEFAULT '[]',
+            baseline_source_keys_json TEXT NOT NULL DEFAULT '[]',
+            baseline_supply_ids_json TEXT NOT NULL DEFAULT '[]',
+            baseline_record_count INTEGER NOT NULL DEFAULT 0,
+            watermark_source_created_at TEXT,
+            watermark_supply_date TEXT,
+            diagnostics_json TEXT NOT NULL DEFAULT '{}'
+        );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_plan_report_monthly_baseline (
             month TEXT PRIMARY KEY,

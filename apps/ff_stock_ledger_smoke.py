@@ -91,8 +91,14 @@ def main() -> None:
         cold_block = FfStockLedgerBlock(runtime=cold_runtime, timestamp_factory=lambda: ACTIVATED_AT)
         cold_skip = cold_block.record_wb_supply_debit(_wb_record("wb-cold-ledger", 5, second_nm_id, 1))
         _assert(
-            cold_skip and cold_skip.get("skip_reason") == "wb_supply_ledger_not_activated",
-            f"WB auto writeoff must wait for opening receipt/activation, got {cold_skip}",
+            cold_skip and cold_skip.get("skip_reason") == "wb_supply_auto_writeoff_checkpoint_missing",
+            f"WB auto writeoff must fail closed until checkpoint exists, got {cold_skip}",
+        )
+        cold_block.ensure_wb_supply_auto_writeoff_checkpoint([], reason="smoke_cold_checkpoint", created_by="smoke")
+        cold_after_checkpoint = cold_block.record_wb_supply_debit(_wb_record("wb-cold-after-checkpoint", 5, second_nm_id, 1))
+        _assert(
+            cold_after_checkpoint and cold_after_checkpoint.get("skip_reason") == "wb_supply_ledger_not_activated",
+            f"WB auto writeoff must wait for opening receipt/activation after checkpoint, got {cold_after_checkpoint}",
         )
 
         block = FfStockLedgerBlock(runtime=runtime, timestamp_factory=lambda: ACTIVATED_AT)
@@ -157,6 +163,27 @@ def main() -> None:
         _assert(not supplier_op.get("idempotent") and supplier_op_repeat.get("idempotent"), "supplier auto receipt must be idempotent")
         _assert(_balance(block, second_nm_id) == 10.0, "supplier auto receipt must add accepted quantity")
 
+        checkpoint = block.ensure_wb_supply_auto_writeoff_checkpoint(
+            [_wb_record("wb-baseline-known", 5, second_nm_id, 1)],
+            reason="smoke_baseline",
+            created_by="smoke",
+        )
+        checkpoint_repeat = block.ensure_wb_supply_auto_writeoff_checkpoint([], reason="smoke_repeat", created_by="smoke")
+        _assert(
+            checkpoint.get("baseline_record_count") == 1 and not checkpoint.get("idempotent"),
+            f"checkpoint must capture baseline known WB supply, got {checkpoint}",
+        )
+        _assert(checkpoint_repeat.get("idempotent"), f"checkpoint ensure must be idempotent, got {checkpoint_repeat}")
+        baseline_known = block.record_wb_supply_debit(_wb_record("wb-baseline-known", 5, second_nm_id, 1))
+        _assert(
+            baseline_known and baseline_known.get("skip_reason") == "wb_supply_before_auto_writeoff_checkpoint",
+            f"baseline-known WB supply must not backfill into ledger, got {baseline_known}",
+        )
+        _assert(
+            "source_key" in (baseline_known.get("checkpoint_match_fields") or []),
+            f"baseline-known skip must report matched checkpoint identity, got {baseline_known}",
+        )
+
         for status_id in (1, 2):
             result = block.record_wb_supply_debit(_wb_record(f"wb-skip-{status_id}", status_id, second_nm_id, 5))
             _assert(result is None, f"WB status {status_id} must not debit ФФ")
@@ -170,13 +197,24 @@ def main() -> None:
             _wb_record("wb-before-ledger", 5, second_nm_id, 1, source_created_at=BEFORE_ACTIVATION)
         )
         _assert(
-            historical_debit and historical_debit.get("skip_reason") == "wb_supply_before_ledger_activation",
-            f"historical WB supply must not backfill into activated ledger, got {historical_debit}",
+            historical_debit and historical_debit.get("skip_reason") == "wb_supply_before_auto_writeoff_checkpoint",
+            f"historical WB supply must not backfill across checkpoint, got {historical_debit}",
         )
         oversized_debit = block.record_wb_supply_debit(_wb_record("wb-too-large", 5, second_nm_id, 100))
         _assert(
             oversized_debit and oversized_debit.get("skip_reason") == "wb_supply_would_make_negative_balance",
             f"WB auto writeoff must not create negative balance, got {oversized_debit}",
+        )
+        bulk_repeat = block.record_wb_supply_debits(
+            [
+                _wb_record("wb-baseline-known", 5, second_nm_id, 1),
+                _wb_record("wb-debit-5", 5, second_nm_id, 1),
+            ]
+        )
+        _assert(
+            bulk_repeat["created_count"] == 0
+            and bulk_repeat["skipped_reasons"].get("wb_supply_before_auto_writeoff_checkpoint") == 1,
+            f"repeated baseline/existing WB sync must not create duplicate debits, got {bulk_repeat}",
         )
         _assert(_balance(block, second_nm_id) == 6.0, "skipped WB debits must not change balance")
         doprinato_virtual = block.record_wb_supply_debit(_wb_record("wb-dopr-virtual", 5, second_nm_id, 100, virtual_type_id=5))

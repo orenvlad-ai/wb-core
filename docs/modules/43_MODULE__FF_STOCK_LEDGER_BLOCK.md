@@ -24,6 +24,7 @@ related_tables:
   - "sheet_vitrina_v1_ff_stock_operation_previews"
   - "sheet_vitrina_v1_ff_stock_operations"
   - "sheet_vitrina_v1_ff_stock_operation_lines"
+  - "sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/export.xlsx"
@@ -38,7 +39,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier movements are idempotent by source key, WB auto writeoffs are guarded by ledger activation/opening balance and no-negative-balance checks, negative balances are shown with critical calculation warnings, and calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
+update_note: "`Остатки ФФ` are computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier movements are idempotent by source key, WB auto writeoffs are guarded by an explicit repair/mechanics checkpoint with baseline-known WB cache/source/supply keys, ledger activation/opening balance and no-negative-balance checks, negative balances are shown with critical calculation warnings, and calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
 ---
 
 # 1. Contract
@@ -51,7 +52,7 @@ update_note: "`Остатки ФФ` are computed from an append-only quantity le
 - manual receipt documents add quantity;
 - manual writeoff documents subtract quantity;
 - supplier shipment acceptance on ФФ adds quantity;
-- eligible WB supplies subtract quantity only after the ledger is activated by a positive non-WB receipt/correction and only when the movement would not make the SKU balance negative.
+- eligible WB supplies subtract quantity only after the WB auto-writeoff checkpoint exists, the supply is not part of the baseline-known historical cache, the ledger is activated by a positive non-WB receipt/correction and the movement would not make the SKU balance negative.
 
 Negative balances can still exist from explicit manual documents or older incidents and must be shown as `Отрицательный остаток ФФ`; calculations must not crash only because the ledger balance is negative, but they must surface a clear warning that recommendations are limited by available ФФ stock.
 
@@ -95,6 +96,7 @@ Runtime SQLite tables:
 - `sheet_vitrina_v1_ff_stock_operation_previews` stores pending manual preview payload, summary, warnings/errors and original Excel blob until confirm/cancel.
 - `sheet_vitrina_v1_ff_stock_operations` stores durable operation header: operation id, operation type, source type, idempotency/source key, source object id/label, created time, actor, SKU/quantity totals, warnings/diagnostics and optional source file metadata/blob.
 - `sheet_vitrina_v1_ff_stock_operation_lines` stores signed quantity deltas by `nmId`, plus barcode/SKU/group display fields and raw row/source metadata.
+- `sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint` stores the current WB auto-writeoff boundary: checkpoint id/time, actor/reason, baseline-known `cache_key`, `source_key` and `supply_id` sets, source-date watermark and diagnostics.
 
 Balance is read as `SUM(quantity_delta)` grouped by `nmId` over durable lines. There is no separate balance snapshot source of truth.
 
@@ -129,6 +131,9 @@ Idempotency key:
 If composition changes before the first writeoff, the current cached composition is used. After a writeoff exists, the backend does not auto-recalculate historical movement; correction is a manual document.
 
 Activation and balance guards:
+- WB supply sync/backfill/detail enrichment first ensures a WB auto-writeoff checkpoint against the current cache. This captures already-known historical supplies as baseline by `cache_key`, `wb_supply_debit:<cache_key or supply_id>` and `supply_id`.
+- Direct WB debit calls without a checkpoint fail closed with `wb_supply_auto_writeoff_checkpoint_missing`; they do not create operations.
+- A WB record matching the checkpoint baseline, or whose business timestamp is not later than the checkpoint time, is skipped as `wb_supply_before_auto_writeoff_checkpoint`. This is the repair/mechanics boundary: historical/cache-known WB supplies must not be debited retroactively.
 - WB auto writeoff is blocked until the ledger has at least one positive non-WB operation (`manual_excel`, supplier auto receipt or explicit runtime correction). This is the activation/opening-balance boundary.
 - A WB record whose business date (`source_created_at` / API `createDate`, then `supply_date` / `fact_date`) is earlier than the activation operation is skipped as historical cache/backfill evidence.
 - If the cached WB goods composition would make any SKU balance negative, the whole automatic writeoff is skipped with diagnostics instead of silently creating a negative balance.
@@ -153,7 +158,7 @@ Targeted smoke:
 - `python3 apps/ff_stock_ledger_smoke.py`
 - `python3 apps/ff_stock_ledger_http_smoke.py`
 
-The smoke covers manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB status writeoff idempotency, statuses `1/2` skip, `Допринято` skip, factory-order ledger source without duplicate selected-WB deduction, selected-WB inbound/projection for ledger source and WB regional ledger source.
+The smoke covers manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB checkpoint fail-closed behavior, baseline-known historical WB skip, post-checkpoint WB status writeoff idempotency, statuses `1/2` skip, `Допринято` skip, factory-order ledger source without duplicate selected-WB deduction, selected-WB inbound/projection for ledger source and WB regional ledger source.
 
 # 9. Explicit Non-Scope
 

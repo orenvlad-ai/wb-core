@@ -68,6 +68,7 @@ class FfStockLedgerBlock:
         registry_rows = self.current_balance_rows()
         operations = self.runtime.list_ff_stock_operations(limit=operations_limit)
         operations = [_with_operation_public_fields(operation) for operation in operations]
+        checkpoint = self.runtime.load_ff_stock_wb_auto_writeoff_checkpoint()
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -77,6 +78,7 @@ class FfStockLedgerBlock:
                 "summary": _balance_summary(registry_rows),
             },
             "operations": operations,
+            "wb_auto_writeoff_checkpoint": checkpoint,
         }
 
     def current_balance_rows(self) -> list[dict[str, Any]]:
@@ -293,6 +295,60 @@ class FfStockLedgerBlock:
             "skipped": skipped[:20],
         }
 
+    def ensure_wb_supply_auto_writeoff_checkpoint(
+        self,
+        records: list[Mapping[str, Any]],
+        *,
+        reason: str,
+        created_by: str = "system",
+    ) -> dict[str, Any]:
+        existing = self.runtime.load_ff_stock_wb_auto_writeoff_checkpoint()
+        if existing is not None:
+            existing["idempotent"] = True
+            return existing
+        cache_keys: set[str] = set()
+        source_keys: set[str] = set()
+        supply_ids: set[str] = set()
+        source_timestamps: list[datetime] = []
+        supply_dates: list[str] = []
+        for record in records:
+            normalized = dict(record.get("normalized") or record)
+            cache_key, supply_id, source_key = _wb_supply_debit_identity(record=record, normalized=normalized)
+            if cache_key:
+                cache_keys.add(cache_key)
+            if source_key:
+                source_keys.add(source_key)
+            if supply_id:
+                supply_ids.add(supply_id)
+            source_dt, _ = _wb_supply_business_timestamp(record=record, normalized=normalized)
+            if source_dt is not None:
+                source_timestamps.append(source_dt)
+            supply_date = str(
+                _first_present(normalized, "supply_date", "supplyDate")
+                or _first_present(record, "supply_date", "supplyDate")
+                or ""
+            ).strip()[:10]
+            if supply_date:
+                supply_dates.append(supply_date)
+        watermark_source_created_at = _format_utc_z(max(source_timestamps)) if source_timestamps else ""
+        return self.runtime.save_ff_stock_wb_auto_writeoff_checkpoint(
+            checkpoint_id="ffswc_" + uuid4().hex[:20],
+            created_at=self.timestamp_factory(),
+            created_by=created_by,
+            reason=reason,
+            baseline_cache_keys=sorted(cache_keys),
+            baseline_source_keys=sorted(source_keys),
+            baseline_supply_ids=sorted(supply_ids),
+            watermark_source_created_at=watermark_source_created_at,
+            watermark_supply_date=max(supply_dates) if supply_dates else "",
+            diagnostics={
+                "baseline_input_record_count": len(records),
+                "baseline_cache_key_count": len(cache_keys),
+                "baseline_source_key_count": len(source_keys),
+                "baseline_supply_id_count": len(supply_ids),
+            },
+        )
+
     def record_wb_supply_debit(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
         normalized = dict(record.get("normalized") or record)
         status_id = _optional_int(normalized.get("status_id"))
@@ -302,9 +358,9 @@ class FfStockLedgerBlock:
             return {"skip_reason": "wb_supply_doprinato_virtual_type", "supply_id": str(normalized.get("supply_id") or "")}
         if str(normalized.get("type_label") or "").strip() == WB_SKIP_TYPE_LABEL:
             return {"skip_reason": "wb_supply_doprinato_type_label", "supply_id": str(normalized.get("supply_id") or "")}
-        supply_id = str(normalized.get("supply_id") or record.get("supply_id") or "").strip()
-        cache_key = str(normalized.get("cache_key") or record.get("cache_key") or supply_id).strip()
-        source_key = f"wb_supply_debit:{cache_key or supply_id}"
+        cache_key, supply_id, source_key = _wb_supply_debit_identity(record=record, normalized=normalized)
+        if not source_key:
+            return {"skip_reason": "wb_supply_identity_missing", "supply_id": supply_id}
         existing = self.runtime.load_ff_stock_operation_by_source_key(source_key)
         if existing is not None:
             existing["idempotent"] = True
@@ -317,22 +373,70 @@ class FfStockLedgerBlock:
         lines, warnings = _wb_supply_goods_lines(raw_goods, self._nomenclature_by_nm())
         if not lines:
             return {"skip_reason": "wb_supply_goods_without_usable_qty", "supply_id": supply_id, "source_key": source_key}
+        total_quantity = sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines)
+        checkpoint = self.runtime.load_ff_stock_wb_auto_writeoff_checkpoint()
+        if checkpoint is None:
+            return {
+                "skip_reason": "wb_supply_auto_writeoff_checkpoint_missing",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "total_quantity": total_quantity,
+            }
+        source_dt, source_dt_field = _wb_supply_business_timestamp(record=record, normalized=normalized)
+        checkpoint_dt = _parse_datetime_like(checkpoint.get("created_at"))
+        if checkpoint_dt is None:
+            return {
+                "skip_reason": "wb_supply_auto_writeoff_checkpoint_invalid",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+                "checkpoint_created_at": str(checkpoint.get("created_at") or ""),
+                "total_quantity": total_quantity,
+            }
+        if source_dt is None:
+            return {
+                "skip_reason": "wb_supply_source_date_missing",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+                "checkpoint_created_at": checkpoint_dt.isoformat(),
+                "total_quantity": total_quantity,
+            }
+        baseline_match_fields = _wb_supply_checkpoint_match_fields(
+            checkpoint=checkpoint,
+            cache_key=cache_key,
+            supply_id=supply_id,
+            source_key=source_key,
+        )
+        if baseline_match_fields or source_dt <= checkpoint_dt:
+            return {
+                "skip_reason": "wb_supply_before_auto_writeoff_checkpoint",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "cache_key": cache_key,
+                "source_timestamp": source_dt.isoformat(),
+                "source_timestamp_field": source_dt_field,
+                "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+                "checkpoint_created_at": checkpoint_dt.isoformat(),
+                "checkpoint_match_fields": baseline_match_fields,
+                "total_quantity": total_quantity,
+            }
         activation = self.runtime.load_ff_stock_activation_operation()
         if activation is None:
             return {
                 "skip_reason": "wb_supply_ledger_not_activated",
                 "supply_id": supply_id,
                 "source_key": source_key,
-                "total_quantity": sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines),
+                "total_quantity": total_quantity,
             }
         activation_dt = _parse_datetime_like(activation.get("created_at"))
-        source_dt, source_dt_field = _wb_supply_business_timestamp(record=record, normalized=normalized)
-        if activation_dt is None or source_dt is None:
+        if activation_dt is None:
             return {
-                "skip_reason": "wb_supply_source_date_missing",
+                "skip_reason": "wb_supply_ledger_activation_invalid",
                 "supply_id": supply_id,
                 "source_key": source_key,
                 "activation_created_at": str(activation.get("created_at") or ""),
+                "total_quantity": total_quantity,
             }
         if source_dt < activation_dt:
             return {
@@ -343,7 +447,7 @@ class FfStockLedgerBlock:
                 "source_timestamp_field": source_dt_field,
                 "activation_created_at": activation_dt.isoformat(),
                 "activation_operation_id": str(activation.get("operation_id") or ""),
-                "total_quantity": sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines),
+                "total_quantity": total_quantity,
             }
         negative_preview = _negative_balance_preview(lines, self.runtime.list_ff_stock_balances())
         if negative_preview:
@@ -355,9 +459,8 @@ class FfStockLedgerBlock:
                 "source_timestamp_field": source_dt_field,
                 "activation_created_at": activation_dt.isoformat(),
                 "negative_nm_ids": negative_preview[:20],
-                "total_quantity": sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines),
+                "total_quantity": total_quantity,
             }
-        total_quantity = sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines)
         if 0 < total_quantity < 250:
             warnings.append(f"WB-поставка меньше 250 шт: {total_quantity:g}")
         label = str(normalized.get("visible_number") or normalized.get("number_label") or supply_id or cache_key)
@@ -378,6 +481,8 @@ class FfStockLedgerBlock:
                 "type_label": normalized.get("type_label"),
                 "source_timestamp": source_dt.isoformat(),
                 "source_timestamp_field": source_dt_field,
+                "auto_writeoff_checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+                "auto_writeoff_checkpoint_created_at": checkpoint_dt.isoformat(),
                 "ledger_activation_operation_id": str(activation.get("operation_id") or ""),
                 "ledger_activation_created_at": activation_dt.isoformat(),
             },
@@ -616,6 +721,44 @@ def _count_by_key(items: list[Mapping[str, Any]], key: str) -> dict[str, int]:
     return result
 
 
+def _wb_supply_debit_identity(
+    *,
+    record: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    supply_id = str(
+        _first_present(normalized, "supply_id", "wb_supply_id", "preorder_id")
+        or _first_present(record, "supply_id", "wb_supply_id", "preorder_id")
+        or ""
+    ).strip()
+    cache_key = str(
+        _first_present(normalized, "cache_key")
+        or _first_present(record, "cache_key")
+        or supply_id
+        or ""
+    ).strip()
+    identity_key = cache_key or supply_id
+    source_key = f"wb_supply_debit:{identity_key}" if identity_key else ""
+    return cache_key, supply_id, source_key
+
+
+def _wb_supply_checkpoint_match_fields(
+    *,
+    checkpoint: Mapping[str, Any],
+    cache_key: str,
+    supply_id: str,
+    source_key: str,
+) -> list[str]:
+    match_fields: list[str] = []
+    if source_key and source_key in {str(item) for item in checkpoint.get("baseline_source_keys") or []}:
+        match_fields.append("source_key")
+    if cache_key and cache_key in {str(item) for item in checkpoint.get("baseline_cache_keys") or []}:
+        match_fields.append("cache_key")
+    if supply_id and supply_id in {str(item) for item in checkpoint.get("baseline_supply_ids") or []}:
+        match_fields.append("supply_id")
+    return match_fields
+
+
 def _wb_supply_business_timestamp(
     *,
     record: Mapping[str, Any],
@@ -670,6 +813,10 @@ def _parse_datetime_like(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_z(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _nomenclature_public_fields(item: Mapping[str, Any]) -> dict[str, Any]:
