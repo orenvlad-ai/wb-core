@@ -3442,6 +3442,35 @@
       background: rgba(31, 34, 42, 0.58);
     }
 
+    .ff-stock-operations-wrap {
+      max-height: 430px;
+    }
+
+    .ff-stock-archive-toggle,
+    .ff-stock-operation-page-nav {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .ff-stock-archive-toggle input {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
+    }
+
+    .ff-stock-operation-page-info {
+      min-width: 180px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .ff-stock-operations-archive-hint {
+      margin-top: 8px;
+    }
+
     .wb-supplies-table tbody tr[data-wb-supply-id] {
       cursor: pointer;
     }
@@ -4686,7 +4715,7 @@
               </table>
             </div>
             <h3 class="block-title" style="margin-top: 18px;">Журнал операций</h3>
-            <div class="wb-supplies-table-wrap">
+            <div class="wb-supplies-table-wrap ff-stock-operations-wrap">
               <table class="wb-supplies-table" aria-label="Журнал операций остатков ФФ">
                 <thead>
                   <tr>
@@ -4706,6 +4735,26 @@
                 </tbody>
               </table>
             </div>
+            <div class="wb-supplies-pagination" aria-label="Навигация журнала операций ФФ">
+              <label class="wb-supplies-page-size" for="ffStockOperationsPageSizeSelect">
+                <span>Показать записей</span>
+                <select id="ffStockOperationsPageSizeSelect">
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                  <option value="200">200</option>
+                </select>
+              </label>
+              <label class="ff-stock-archive-toggle" for="ffStockShowTechnicalArchiveToggle">
+                <input id="ffStockShowTechnicalArchiveToggle" type="checkbox">
+                <span>Показать технический архив</span>
+              </label>
+              <div class="ff-stock-operation-page-nav">
+                <button id="ffStockOperationsPrevButton" class="wb-supplies-page-button" type="button">Назад</button>
+                <span id="ffStockOperationsPageInfo" class="ff-stock-operation-page-info">Страница 1 из 1</span>
+                <button id="ffStockOperationsNextButton" class="wb-supplies-page-button" type="button">Вперёд</button>
+              </div>
+            </div>
+            <p id="ffStockOperationsArchiveHint" class="dataset-status ff-stock-operations-archive-hint" hidden></p>
           </section>
         </section>
 
@@ -5150,6 +5199,12 @@
       const ffStockCancelPreviewButton = document.getElementById("ffStockCancelPreviewButton");
       const ffStockBalancesBody = document.getElementById("ffStockBalancesBody");
       const ffStockOperationsBody = document.getElementById("ffStockOperationsBody");
+      const ffStockOperationsPageSizeSelect = document.getElementById("ffStockOperationsPageSizeSelect");
+      const ffStockShowTechnicalArchiveToggle = document.getElementById("ffStockShowTechnicalArchiveToggle");
+      const ffStockOperationsPrevButton = document.getElementById("ffStockOperationsPrevButton");
+      const ffStockOperationsNextButton = document.getElementById("ffStockOperationsNextButton");
+      const ffStockOperationsPageInfo = document.getElementById("ffStockOperationsPageInfo");
+      const ffStockOperationsArchiveHint = document.getElementById("ffStockOperationsArchiveHint");
 
       const actionLabels = {
         refresh: {
@@ -5202,6 +5257,8 @@
         far_siberia: "ДВФО/СФО"
       };
       const DEFAULT_WB_REGIONAL_LEAD_TIME_DAYS = 15;
+      const FF_STOCK_OPERATION_DEFAULT_LIMIT = 50;
+      const FF_STOCK_OPERATION_PAGE_SIZES = [50, 100, 200];
       const WB_SUPPLIES_DEFAULT_SIZE_FILTER = "main_250";
       const WB_SUPPLIES_DEFAULT_LIMIT = 20;
       const WB_SUPPLIES_OFFICIAL_STATUS_IDS = [1, 2, 3, 4, 5, 6];
@@ -5348,6 +5405,11 @@
       let ffStockConfirming = false;
       let ffStockPendingOperationType = "";
       let ffStockPreviewPayload = null;
+      const ffStockOperationsState = {
+        limit: normalizeFfStockOperationsLimit(persistedOperatorUiState.ff_stock_operations_limit),
+        page: 1,
+        showTechnicalArchive: persistedOperatorUiState.ff_stock_show_technical_archive === true
+      };
       let wbSuppliesPayload = null;
       let wbSuppliesInitialized = false;
       let wbSuppliesLoading = false;
@@ -5456,6 +5518,18 @@
       function normalizeWbSuppliesLimit(value) {
         const numeric = Number(value || WB_SUPPLIES_DEFAULT_LIMIT);
         return [20, 50, 100].includes(numeric) ? numeric : WB_SUPPLIES_DEFAULT_LIMIT;
+      }
+
+      function normalizeFfStockOperationsLimit(value) {
+        const numeric = Number(value || FF_STOCK_OPERATION_DEFAULT_LIMIT);
+        return FF_STOCK_OPERATION_PAGE_SIZES.includes(numeric) ? numeric : FF_STOCK_OPERATION_DEFAULT_LIMIT;
+      }
+
+      function persistFfStockOperationsState() {
+        writePersistedOperatorUiState({
+          ff_stock_operations_limit: ffStockOperationsState.limit,
+          ff_stock_show_technical_archive: Boolean(ffStockOperationsState.showTechnicalArchive)
+        });
       }
 
       function normalizeWbSuppliesSortDir(value) {
@@ -6349,6 +6423,40 @@
           ffStockPreviewPayload = null;
           renderFfStockPreview(null);
           setFfStockMessage("", "");
+        });
+      }
+      if (ffStockOperationsPageSizeSelect) {
+        ffStockOperationsPageSizeSelect.addEventListener("change", () => {
+          ffStockOperationsState.limit = normalizeFfStockOperationsLimit(ffStockOperationsPageSizeSelect.value);
+          ffStockOperationsState.page = 1;
+          persistFfStockOperationsState();
+          loadFfStockLedger();
+        });
+      }
+      if (ffStockShowTechnicalArchiveToggle) {
+        ffStockShowTechnicalArchiveToggle.addEventListener("change", () => {
+          ffStockOperationsState.showTechnicalArchive = Boolean(ffStockShowTechnicalArchiveToggle.checked);
+          ffStockOperationsState.page = 1;
+          persistFfStockOperationsState();
+          loadFfStockLedger();
+        });
+      }
+      if (ffStockOperationsPrevButton) {
+        ffStockOperationsPrevButton.addEventListener("click", () => {
+          if (ffStockLoading) {
+            return;
+          }
+          ffStockOperationsState.page = Math.max(1, Number(ffStockOperationsState.page || 1) - 1);
+          loadFfStockLedger();
+        });
+      }
+      if (ffStockOperationsNextButton) {
+        ffStockOperationsNextButton.addEventListener("click", () => {
+          if (ffStockLoading) {
+            return;
+          }
+          ffStockOperationsState.page = Math.max(1, Number(ffStockOperationsState.page || 1) + 1);
+          loadFfStockLedger();
         });
       }
 
@@ -10359,6 +10467,15 @@
           ffStockConfirmButton.disabled = busy || !preview || ffStockPreviewPayload.apply_allowed === false;
           ffStockConfirmButton.textContent = ffStockConfirming ? "Применяем..." : "Применить документ";
         }
+        if (ffStockOperationsPageSizeSelect) {
+          ffStockOperationsPageSizeSelect.disabled = busy;
+        }
+        if (ffStockShowTechnicalArchiveToggle) {
+          ffStockShowTechnicalArchiveToggle.disabled = busy;
+        }
+        renderFfStockOperationsPagination(
+          ffStockPayload && ffStockPayload.operations_page ? ffStockPayload.operations_page : null
+        );
       }
 
       function ensureFfStockLedgerLoaded() {
@@ -10373,13 +10490,17 @@
         if (!config.ff_stock_status_path || ffStockLoading) {
           return;
         }
+        if (options && options.page) {
+          ffStockOperationsState.page = Math.max(1, Number(options.page || 1));
+        }
         ffStockLoading = true;
         updateFfStockBusyState();
+        renderFfStockOperationsLoading();
         if (!options || !options.preserveMessage) {
           setFfStockMessage("", "");
         }
         try {
-          const response = await fetch(config.ff_stock_status_path, {
+          const response = await fetch(ffStockLedgerStatusUrl(), {
             method: "GET",
             headers: { "Accept": "application/json" }
           });
@@ -10392,6 +10513,7 @@
         } catch (error) {
           ffStockPayload = null;
           renderFfStockLedger(null);
+          renderFfStockOperationsError("Журнал операций не удалось загрузить.");
           setFfStockMessage(
             "Остатки ФФ не удалось прочитать: " + (error instanceof Error ? error.message : String(error)),
             "error"
@@ -10401,6 +10523,16 @@
           updateFfStockBusyState();
           scheduleEmbeddedHeightPost();
         }
+      }
+
+      function ffStockLedgerStatusUrl() {
+        const path = String(config.ff_stock_status_path || "");
+        const params = new URLSearchParams();
+        params.set("operations_limit", String(normalizeFfStockOperationsLimit(ffStockOperationsState.limit)));
+        params.set("operations_page", String(Math.max(1, Number(ffStockOperationsState.page || 1))));
+        params.set("show_technical_archive", ffStockOperationsState.showTechnicalArchive ? "1" : "0");
+        const separator = path.includes("?") ? "&" : "?";
+        return path + separator + params.toString();
       }
 
       async function previewFfStockWorkbook() {
@@ -10468,6 +10600,7 @@
           ffStockPreviewPayload = null;
           renderFfStockPreview(null);
           setFfStockMessage("Документ применён. Остатки ФФ пересчитаны.", "success");
+          ffStockOperationsState.page = 1;
           await loadFfStockLedger({ preserveMessage: true });
         } catch (error) {
           setFfStockMessage(
@@ -10486,6 +10619,10 @@
         const summary = registry.summary && typeof registry.summary === "object" ? registry.summary : {};
         const rows = Array.isArray(registry.rows) ? registry.rows : [];
         const operations = Array.isArray(payload && payload.operations) ? payload.operations : [];
+        const operationsPage = normalizeFfStockOperationsPage(payload && payload.operations_page, operations.length);
+        ffStockOperationsState.limit = operationsPage.limit;
+        ffStockOperationsState.page = operationsPage.current_page;
+        ffStockOperationsState.showTechnicalArchive = Boolean(operationsPage.show_technical_archive);
         if (ffStockSkuCount) {
           ffStockSkuCount.textContent = valueOrDash(summary.sku_count !== undefined ? summary.sku_count : rows.length);
         }
@@ -10496,10 +10633,11 @@
           ffStockNegativeCount.textContent = valueOrDash(summary.negative_sku_count || 0);
         }
         if (ffStockOperationCount) {
-          ffStockOperationCount.textContent = valueOrDash(operations.length);
+          ffStockOperationCount.textContent = ffStockOperationCountLabel(operationsPage);
         }
         renderFfStockBalances(rows);
-        renderFfStockOperations(operations);
+        renderFfStockOperations(operations, operationsPage);
+        renderFfStockOperationsPagination(operationsPage);
       }
 
       function renderFfStockBalances(rows) {
@@ -10526,12 +10664,17 @@
         }).join("");
       }
 
-      function renderFfStockOperations(operations) {
+      function renderFfStockOperations(operations, pageInfo) {
         if (!ffStockOperationsBody) {
           return;
         }
         if (!operations.length) {
-          ffStockOperationsBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">Операций пока нет.</td></tr>";
+          const hiddenCount = Number((pageInfo || {}).hidden_archive_count || 0);
+          const showArchive = Boolean((pageInfo || {}).show_technical_archive);
+          const message = !showArchive && hiddenCount > 0
+            ? "В рабочем виде операций нет. Включите технический архив, чтобы увидеть операции до checkpoint и runtime_repair."
+            : "Операций пока нет.";
+          ffStockOperationsBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">" + escapeHtml(message) + "</td></tr>";
           return;
         }
         ffStockOperationsBody.innerHTML = operations.map((operation) => {
@@ -10540,12 +10683,16 @@
           const fileCell = downloadPath
             ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(downloadPath) + "\" target=\"_blank\" rel=\"noreferrer\">Скачать</a>"
             : "—";
+          const objectLabel = valueOrDash(operation.source_object_label || operation.source_object_id || operation.source_key);
+          const objectSubtext = ffStockOperationObjectSubtext(operation, objectLabel);
           return [
             "<tr>",
             "<td>" + escapeHtml(formatFulfillmentUploadedAt(operation.created_at)) + "</td>",
             "<td>" + escapeHtml(valueOrDash(operation.operation_type_label || operation.operation_type)) + "</td>",
             "<td>" + escapeHtml(ffStockSourceTypeLabel(operation.source_type)) + "</td>",
-            "<td>" + escapeHtml(valueOrDash(operation.source_object_label || operation.source_object_id || operation.source_key)) + "</td>",
+            "<td><span class=\"wb-supplies-main\">" + escapeHtml(objectLabel) + "</span>"
+              + (objectSubtext ? "<span class=\"wb-supplies-sub\">" + escapeHtml(objectSubtext) + "</span>" : "")
+              + "</td>",
             "<td>" + escapeHtml(valueOrDash(operation.created_by)) + "</td>",
             "<td>" + escapeHtml(valueOrDash(operation.sku_count)) + "</td>",
             "<td>" + escapeHtml(formatNumber(Number(operation.total_quantity_abs || 0))) + "</td>",
@@ -10554,6 +10701,107 @@
             "</tr>"
           ].join("");
         }).join("");
+      }
+
+      function renderFfStockOperationsLoading() {
+        if (ffStockOperationsBody) {
+          ffStockOperationsBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">Загружаем журнал операций...</td></tr>";
+        }
+      }
+
+      function renderFfStockOperationsError(message) {
+        if (ffStockOperationsBody) {
+          ffStockOperationsBody.innerHTML = "<tr><td colspan=\"9\" class=\"wb-supplies-empty\">" + escapeHtml(message || "Журнал операций не удалось загрузить.") + "</td></tr>";
+        }
+      }
+
+      function normalizeFfStockOperationsPage(pageInfo, fallbackCount) {
+        const source = pageInfo && typeof pageInfo === "object" ? pageInfo : {};
+        const limit = normalizeFfStockOperationsLimit(source.limit || ffStockOperationsState.limit);
+        const totalCount = Number(source.total_count !== undefined ? source.total_count : fallbackCount || 0);
+        const totalAllCount = Number(source.total_all_count !== undefined ? source.total_all_count : totalCount);
+        const pageCount = Math.max(1, Number(source.page_count || Math.ceil(totalCount / limit) || 1));
+        const currentPage = Math.min(
+          pageCount,
+          Math.max(1, Number(source.current_page || source.page || ffStockOperationsState.page || 1))
+        );
+        return {
+          limit,
+          total_count: Math.max(0, totalCount),
+          total_all_count: Math.max(0, totalAllCount),
+          hidden_archive_count: Math.max(0, Number(source.hidden_archive_count || Math.max(0, totalAllCount - totalCount))),
+          page_count: pageCount,
+          current_page: currentPage,
+          current_offset: Math.max(0, Number(source.current_offset || source.offset || (currentPage - 1) * limit)),
+          has_next: Boolean(source.has_next),
+          has_previous: Boolean(source.has_previous),
+          show_technical_archive: source.show_technical_archive === undefined ? Boolean(ffStockOperationsState.showTechnicalArchive) : Boolean(source.show_technical_archive),
+          archive_cutoff_created_at: String(source.archive_cutoff_created_at || "")
+        };
+      }
+
+      function ffStockOperationCountLabel(pageInfo) {
+        const visible = Number((pageInfo || {}).total_count || 0);
+        const total = Number((pageInfo || {}).total_all_count || visible);
+        if (total > visible) {
+          return formatNumber(visible) + " / " + formatNumber(total);
+        }
+        return formatNumber(visible);
+      }
+
+      function renderFfStockOperationsPagination(pageInfo) {
+        const normalized = normalizeFfStockOperationsPage(pageInfo, Array.isArray((ffStockPayload || {}).operations) ? ffStockPayload.operations.length : 0);
+        if (ffStockOperationsPageSizeSelect) {
+          ffStockOperationsPageSizeSelect.value = String(normalized.limit);
+          ffStockOperationsPageSizeSelect.disabled = ffStockLoading || ffStockUploading || ffStockConfirming;
+        }
+        if (ffStockShowTechnicalArchiveToggle) {
+          ffStockShowTechnicalArchiveToggle.checked = Boolean(normalized.show_technical_archive);
+          ffStockShowTechnicalArchiveToggle.disabled = ffStockLoading || ffStockUploading || ffStockConfirming;
+        }
+        if (ffStockOperationsPrevButton) {
+          ffStockOperationsPrevButton.disabled = ffStockLoading || !normalized.has_previous;
+        }
+        if (ffStockOperationsNextButton) {
+          ffStockOperationsNextButton.disabled = ffStockLoading || !normalized.has_next;
+        }
+        if (ffStockOperationsPageInfo) {
+          const countText = normalized.total_all_count > normalized.total_count
+            ? "операций " + formatNumber(normalized.total_count) + " / " + formatNumber(normalized.total_all_count)
+            : "операций " + formatNumber(normalized.total_count);
+          ffStockOperationsPageInfo.textContent = "Страница " + formatNumber(normalized.current_page) + " из " + formatNumber(normalized.page_count) + " · " + countText;
+        }
+        if (ffStockOperationsArchiveHint) {
+          const hiddenCount = Number(normalized.hidden_archive_count || 0);
+          ffStockOperationsArchiveHint.hidden = !(hiddenCount > 0 && !normalized.show_technical_archive);
+          ffStockOperationsArchiveHint.textContent = hiddenCount > 0 && !normalized.show_technical_archive
+            ? "Скрыто в техническом архиве: " + formatNumber(hiddenCount) + ". Включите архив, чтобы увидеть операции до checkpoint и runtime_repair."
+            : "";
+        }
+      }
+
+      function ffStockOperationObjectSubtext(operation, objectLabel) {
+        const diagnostics = operation && operation.diagnostics && typeof operation.diagnostics === "object" ? operation.diagnostics : {};
+        const parts = [];
+        const sourceKey = String((operation || {}).source_key || "").trim();
+        if (sourceKey && sourceKey !== String(objectLabel || "").trim()) {
+          parts.push("source_key: " + sourceKey);
+        }
+        const cacheKey = String(diagnostics.cache_key || "").trim();
+        if (cacheKey && cacheKey !== sourceKey) {
+          parts.push("cache_key: " + cacheKey);
+        }
+        const reversedIds = Array.isArray(diagnostics.reversed_operation_ids)
+          ? diagnostics.reversed_operation_ids.filter(Boolean)
+          : [];
+        if (reversedIds.length) {
+          parts.push("reversed: " + reversedIds.slice(0, 3).join(", ") + (reversedIds.length > 3 ? " +" + (reversedIds.length - 3) : ""));
+        }
+        const reason = String(diagnostics.reason || "").trim();
+        if (reason) {
+          parts.push("reason: " + reason);
+        }
+        return parts.slice(0, 3).join(" · ");
       }
 
       function renderFfStockPreview(payload) {

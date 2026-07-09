@@ -2108,19 +2108,56 @@ class RegistryUploadDbBackedRuntime:
             payload["idempotent"] = False
             return payload
 
-    def list_ff_stock_operations(self, *, limit: int = 100) -> list[dict[str, Any]]:
+    def count_ff_stock_operations(
+        self,
+        *,
+        include_technical_archive: bool = True,
+        archive_cutoff_created_at: str = "",
+    ) -> int:
+        where_sql, params = _ff_stock_operations_archive_where(
+            include_technical_archive=include_technical_archive,
+            archive_cutoff_created_at=archive_cutoff_created_at,
+        )
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM sheet_vitrina_v1_ff_stock_operations
+                {where_sql}
+                """,
+                params,
+            ).fetchone()
+            return int(row["count"] or 0) if row is not None else 0
+
+    def list_ff_stock_operations(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        include_technical_archive: bool = True,
+        archive_cutoff_created_at: str = "",
+    ) -> list[dict[str, Any]]:
         normalized_limit = max(1, min(int(limit or 100), 500))
+        normalized_offset = max(0, int(offset or 0))
+        where_sql, params = _ff_stock_operations_archive_where(
+            include_technical_archive=include_technical_archive,
+            archive_cutoff_created_at=archive_cutoff_created_at,
+        )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             rows = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM sheet_vitrina_v1_ff_stock_operations
+                {where_sql}
                 ORDER BY created_at DESC, operation_id DESC
                 LIMIT ?
+                OFFSET ?
                 """,
-                (normalized_limit,),
+                [*params, normalized_limit, normalized_offset],
             ).fetchall()
             return [_ff_stock_operation_to_dict(row) for row in rows]
 
@@ -6437,6 +6474,22 @@ def _ff_stock_preview_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "warnings": _loads_json_list(row["warnings_json"]),
         "errors": _loads_json_list(row["errors_json"]),
     }
+
+
+def _ff_stock_operations_archive_where(
+    *,
+    include_technical_archive: bool,
+    archive_cutoff_created_at: str = "",
+) -> tuple[str, list[Any]]:
+    if include_technical_archive:
+        return "", []
+    predicates = ["COALESCE(source_type, '') != 'runtime_repair'"]
+    params: list[Any] = []
+    cutoff = str(archive_cutoff_created_at or "").strip()
+    if cutoff:
+        predicates.append("COALESCE(created_at, '') > ?")
+        params.append(cutoff)
+    return "WHERE " + " AND ".join(predicates), params
 
 
 def _ff_stock_operation_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:

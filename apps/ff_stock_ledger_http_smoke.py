@@ -29,6 +29,14 @@ from packages.adapters.registry_upload_http_entrypoint import (
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.ff_stock_ledger import (
+    FF_STOCK_OPERATION_AUTO_WRITEOFF,
+    FF_STOCK_OPERATION_CORRECTION_RECEIPT,
+    FF_STOCK_OPERATION_MANUAL_RECEIPT,
+    FF_STOCK_SOURCE_MANUAL_EXCEL,
+    FF_STOCK_SOURCE_RUNTIME_REPAIR,
+    FF_STOCK_SOURCE_WB_SUPPLY,
+)
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
@@ -114,6 +122,46 @@ def main() -> None:
             _assert(file_code == 200, f"source-file route must return 200, got {file_code}")
             _assert(file_bytes == upload_bytes, "source-file download must preserve original XLSX bytes")
             _assert("receipt.xlsx" in file_headers.get("Content-Disposition", ""), "source-file filename missing")
+
+            balance_summary_before_pagination = dict(status_after_payload["registry"]["summary"])
+            runtime.save_ff_stock_wb_auto_writeoff_checkpoint(
+                checkpoint_id="ffswc_http_smoke",
+                created_at=ACTIVATED_AT,
+                created_by="smoke",
+                reason="http pagination smoke",
+            )
+            _seed_operation_journal_pagination_fixture(runtime)
+            page_1_code, page_1_payload = _get_json(
+                f"{base_url}{DEFAULT_FF_STOCKS_PATH}?operations_limit=50&operations_page=1&show_technical_archive=0"
+            )
+            page_2_code, page_2_payload = _get_json(
+                f"{base_url}{DEFAULT_FF_STOCKS_PATH}?operations_limit=50&operations_page=2&show_technical_archive=0"
+            )
+            _assert(page_1_code == 200 and page_2_code == 200, "paginated status routes must return 200")
+            _assert(page_1_payload["operations_page"]["total_count"] >= 60, "paginated status must return total_count")
+            _assert(page_1_payload["operations_page"]["has_next"] is True, "first operations page must report has_next")
+            _assert(page_2_payload["operations_page"]["current_page"] == 2, "second operations page must be reachable")
+            _assert(page_2_payload["operations"], "second operations page must return rows")
+            _assert(
+                page_1_payload["operations_page"]["hidden_archive_count"] >= 2,
+                f"archive-off status must report hidden rows, got {page_1_payload['operations_page']}",
+            )
+            archive_code, archive_payload = _get_json(
+                f"{base_url}{DEFAULT_FF_STOCKS_PATH}?operations_limit=200&operations_page=1&show_technical_archive=1"
+            )
+            _assert(archive_code == 200, "archive-on status must return 200")
+            _assert(
+                any(item["source_type"] == FF_STOCK_SOURCE_RUNTIME_REPAIR for item in archive_payload["operations"]),
+                "archive-on status must expose runtime_repair rows",
+            )
+            _assert(
+                any(item["source_type"] == FF_STOCK_SOURCE_WB_SUPPLY for item in archive_payload["operations"]),
+                "archive-on status must expose old WB auto_writeoff rows",
+            )
+            _assert(
+                page_1_payload["registry"]["summary"] == balance_summary_before_pagination,
+                "archive-off pagination must not change FF balance summary",
+            )
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -159,6 +207,45 @@ def _seed_nomenclature(runtime: RegistryUploadDbBackedRuntime, active_nm_ids: li
             }
             for index, nm_id in enumerate(active_nm_ids, start=1)
         ]
+    )
+
+
+def _seed_operation_journal_pagination_fixture(runtime: RegistryUploadDbBackedRuntime) -> None:
+    for index in range(60):
+        runtime.create_ff_stock_operation(
+            operation_id=f"ffso_http_page_visible_{index:03d}",
+            operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
+            source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+            source_key=f"manual_excel:http-page-visible:{index:03d}",
+            source_object_id=f"http-page-visible-{index:03d}",
+            source_object_label=f"HTTP pagination visible {index:03d}",
+            created_at=f"2026-04-18T09:10:{index:02d}Z",
+            created_by="smoke",
+            lines=[],
+        )
+    runtime.create_ff_stock_operation(
+        operation_id="ffso_http_page_repair_archive",
+        operation_type=FF_STOCK_OPERATION_CORRECTION_RECEIPT,
+        source_type=FF_STOCK_SOURCE_RUNTIME_REPAIR,
+        source_key="runtime_repair:http-page-archive",
+        source_object_id="repair-http-page-archive",
+        source_object_label="runtime_repair HTTP archive",
+        created_at="2026-04-18T09:59:59Z",
+        created_by="smoke",
+        diagnostics={"reason": "http pagination smoke"},
+        lines=[],
+    )
+    runtime.create_ff_stock_operation(
+        operation_id="ffso_http_page_old_wb_archive",
+        operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
+        source_type=FF_STOCK_SOURCE_WB_SUPPLY,
+        source_key="wb_supply:http-page-old-auto-writeoff",
+        source_object_id="http-page-old-auto-writeoff",
+        source_object_label="old HTTP WB auto_writeoff",
+        created_at="2026-04-18T08:59:59Z",
+        created_by="system",
+        diagnostics={"cache_key": "http-page-old-auto-writeoff"},
+        lines=[],
     )
 
 

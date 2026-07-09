@@ -67,7 +67,16 @@ The `Остатки ФФ` subsection shows:
 
 The registry row fields are barcode when available, `nmId`, SKU/name/comment from active nomenclature, SKU group when available, current ФФ balance and negative-balance warning.
 
-The operation journal shows operation datetime, operation type, source type, linked source object label/id, actor when available, SKU count, total quantity, warnings and source-file link for manual Excel documents. Auto operations link to their source object by label/id and do not have a file.
+The operation journal shows operation datetime, operation type, source type, linked source object label/id, actor when available, SKU count, total quantity, warnings and source-file link for manual Excel documents. Auto operations link to their source object by label/id and do not have a file. When diagnostics are present, the object cell may also show technical identifiers such as `source_key`, WB `cache_key` or repair reversal ids so archived incidents remain auditable without a physical delete.
+
+The journal is paginated server-side. Operator UI requests `GET .../ff-stocks?operations_limit=50&operations_page=1&show_technical_archive=0` by default and supports page sizes `50`, `100` and `200`. Navigation changes only the ФФ status/journal block, not the whole operator UI.
+
+`show_technical_archive=0` is a soft view filter only:
+- hides `runtime_repair` operations;
+- when a WB auto-writeoff checkpoint exists, hides operations with `created_at <= checkpoint.created_at`;
+- returns `hidden_archive_count`, `total_count` and `total_all_count` so the operator can see that archived rows exist.
+
+Enabling `Показать технический архив` requests `show_technical_archive=1` and exposes old erroneous WB `auto_writeoff` rows, runtime repair/correction rows and their source diagnostics. It does not mutate balances. Physical delete is not part of this UI.
 
 Access uses the same supply-operator boundary as `Поставки`: owner/admin and users with access to `Поставки`. Supplier-only users are not granted this contour.
 
@@ -99,6 +108,8 @@ Runtime SQLite tables:
 - `sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint` stores the current WB auto-writeoff boundary: checkpoint id/time, actor/reason, baseline-known `cache_key`, `source_key` and `supply_id` sets, source-date watermark and diagnostics.
 
 Balance is read as `SUM(quantity_delta)` grouped by `nmId` over durable lines. There is no separate balance snapshot source of truth.
+
+`RegistryUploadDbBackedRuntime.list_ff_stock_operations` supports bounded pagination with `limit`, `offset`, total counting via `count_ff_stock_operations`, sorting by `created_at DESC, operation_id DESC`, and the same soft archive filter used by the operator UI. The legacy `limit`-only call still returns the first page.
 
 # 5. Auto Receipt From Supplier Shipments
 
@@ -159,6 +170,7 @@ Targeted smoke:
 - `python3 apps/ff_stock_ledger_http_smoke.py`
 
 The smoke covers manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB checkpoint fail-closed behavior, baseline-known historical WB skip, post-checkpoint WB status writeoff idempotency, statuses `1/2` skip, `Допринято` skip, factory-order ledger source without duplicate selected-WB deduction, selected-WB inbound/projection for ledger source and WB regional ledger source.
+It also covers operation journal pagination metadata/second page retrieval, default status backward compatibility, archive-off visibility versus archive-on retrieval, and verifies that the archive view filter does not change computed balances.
 
 # 9. Explicit Non-Scope
 

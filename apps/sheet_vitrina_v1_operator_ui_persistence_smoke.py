@@ -518,6 +518,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "factory_source_persistence": persistence_result["factory_source_persistence"],
         "regional_planning": persistence_result["regional_planning"],
         "ff_stock_negative_row_style": persistence_result["ff_stock_negative_row_style"],
+        "ff_stock_operations_controls": persistence_result["ff_stock_operations_controls"],
         "sku_persistence": persistence_result["sku_persistence"],
         "plan_input_defaults": persistence_result["plan_input_defaults"],
         "plan_input_persistence": persistence_result["plan_input_persistence"],
@@ -533,6 +534,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     operator_url = base_url + DEFAULT_SHEET_OPERATOR_UI_PATH
     page.goto(operator_url, wait_until="domcontentloaded")
     ff_stock_negative_row_style = _assert_ff_stock_negative_row_dark_style(page)
+    ff_stock_operations_controls = _assert_ff_stock_operations_controls(page)
 
     default_state = {
         "top_tab": _selected_data_attr(page, "[data-tab-button][aria-selected=\"true\"]", "data-tab-button"),
@@ -1516,6 +1518,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "factory_source_persistence": factory_source_state,
         "regional_planning": regional_planning_state,
         "ff_stock_negative_row_style": ff_stock_negative_row_style,
+        "ff_stock_operations_controls": ff_stock_operations_controls,
         "sku_persistence": {
             "kept_label": kept_label,
             "selected_labels_after_reload": selected_labels_after_reload,
@@ -1816,6 +1819,41 @@ def _assert_ff_stock_negative_row_dark_style(page) -> dict[str, object]:
     return style
 
 
+def _assert_ff_stock_operations_controls(page) -> dict[str, object]:
+    controls = page.evaluate(
+        """() => {
+            const pageSize = document.getElementById("ffStockOperationsPageSizeSelect");
+            const archiveToggle = document.getElementById("ffStockShowTechnicalArchiveToggle");
+            const prevButton = document.getElementById("ffStockOperationsPrevButton");
+            const nextButton = document.getElementById("ffStockOperationsNextButton");
+            const pageInfo = document.getElementById("ffStockOperationsPageInfo");
+            const archiveHint = document.getElementById("ffStockOperationsArchiveHint");
+            return {
+                hasPageSize: Boolean(pageSize),
+                pageSizeOptions: pageSize ? Array.from(pageSize.options).map((option) => option.value) : [],
+                pageSizeDefault: pageSize ? pageSize.value : "",
+                hasArchiveToggle: Boolean(archiveToggle),
+                archiveToggleChecked: archiveToggle ? archiveToggle.checked : null,
+                prevText: prevButton ? prevButton.textContent.trim() : "",
+                nextText: nextButton ? nextButton.textContent.trim() : "",
+                pageInfoText: pageInfo ? pageInfo.textContent.trim() : "",
+                hasArchiveHint: Boolean(archiveHint)
+            };
+        }"""
+    )
+    if not controls.get("hasPageSize") or controls.get("pageSizeOptions") != ["50", "100", "200"]:
+        raise AssertionError(f"FF stock operations page-size control must expose 50/100/200, got {controls}")
+    if controls.get("pageSizeDefault") != "50":
+        raise AssertionError(f"FF stock operations page-size default must be 50, got {controls}")
+    if not controls.get("hasArchiveToggle") or controls.get("archiveToggleChecked") is not False:
+        raise AssertionError(f"FF stock operations archive toggle must default off in UI, got {controls}")
+    if controls.get("prevText") != "Назад" or controls.get("nextText") != "Вперёд":
+        raise AssertionError(f"FF stock operations pagination buttons changed, got {controls}")
+    if "Страница" not in str(controls.get("pageInfoText") or "") or not controls.get("hasArchiveHint"):
+        raise AssertionError(f"FF stock operations page info/archive hint missing, got {controls}")
+    return controls
+
+
 def _parse_rgb_triplet(value: str) -> tuple[int, int, int] | None:
     if not value.startswith("rgb"):
         return None
@@ -1863,6 +1901,7 @@ def _print_summary(result: dict[str, object]) -> None:
     print("operator_ui_factory_source_restore: ok ->", result["factory_source_persistence"])
     print("operator_ui_regional_planning: ok ->", result["regional_planning"])
     print("operator_ui_ff_stock_negative_row_style: ok ->", result["ff_stock_negative_row_style"])
+    print("operator_ui_ff_stock_operations_controls: ok ->", result["ff_stock_operations_controls"])
     print("operator_ui_plan_input_defaults: ok ->", result["plan_input_defaults"])
     print("operator_ui_plan_input_restore: ok ->", result["plan_input_persistence"])
     print("operator_ui_zero_guard: ok ->", result["zero_selection_guard"])
