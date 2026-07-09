@@ -2391,8 +2391,17 @@ class RegistryUploadHttpEntrypoint:
     ) -> tuple[bytes, str, str]:
         return self.fulfillment_services_block.download_pdf(upload_id)
 
-    def handle_ff_stock_status_request(self) -> dict[str, Any]:
-        return self.ff_stock_ledger_block.get_status()
+    def handle_ff_stock_status_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        query = dict(params or {})
+        return self.ff_stock_ledger_block.get_status(
+            operations_limit=_first_query_value(query, "operations_limit", "limit", default=50),
+            operations_page=_first_query_value(query, "operations_page", "page", default=1),
+            operations_offset=_first_query_value(query, "operations_offset", "offset", default=None),
+            show_technical_archive=_coerce_query_bool(
+                _first_query_value(query, "show_technical_archive", default=None),
+                default=True,
+            ),
+        )
 
     def handle_ff_stock_export_request(self) -> tuple[bytes, str, str]:
         return self.ff_stock_ledger_block.export_current_balances_xlsx()
@@ -8807,6 +8816,31 @@ def _join_activity_reason_clauses(primary: str, secondary: str) -> str:
     if first and second:
         return f"{first}, а {second}"
     return first or second
+
+
+def _first_query_value(mapping: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, list):
+            value = value[-1] if value else None
+        if value not in ("", None):
+            return value
+    return default
+
+
+def _coerce_query_bool(value: Any, *, default: bool) -> bool:
+    if value in ("", None):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _apply_activity_reason_prefix(reason: str, prefix: str) -> str:

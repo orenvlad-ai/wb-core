@@ -16,8 +16,13 @@ if str(ROOT) not in sys.path:
 from packages.application.factory_order_sales_history import persist_sales_history_result_exact_dates
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.ff_stock_ledger import (
+    FF_STOCK_OPERATION_AUTO_WRITEOFF,
+    FF_STOCK_OPERATION_CORRECTION_RECEIPT,
     FF_STOCK_OPERATION_MANUAL_RECEIPT,
     FF_STOCK_OPERATION_MANUAL_WRITEOFF,
+    FF_STOCK_SOURCE_MANUAL_EXCEL,
+    FF_STOCK_SOURCE_RUNTIME_REPAIR,
+    FF_STOCK_SOURCE_WB_SUPPLY,
     FfStockLedgerBlock,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -279,6 +284,36 @@ def main() -> None:
             "WB regional ledger source must still add selected WB supply to district projection",
         )
 
+        balance_before_pagination_status = _balance(block, second_nm_id)
+        _seed_operation_journal_pagination_fixture(runtime)
+        default_page = block.get_status()
+        _assert(default_page["operations_page"]["current_page"] == 1, "default status must return first operations page")
+        _assert(default_page["operations_page"]["limit"] == 50, "default operations page size must remain 50")
+        _assert(
+            default_page["operations_page"]["show_technical_archive"] is True,
+            "block status must keep technical archive visible by default for backwards compatibility",
+        )
+        working_page_1 = block.get_status(operations_limit=50, operations_page=1, show_technical_archive=False)
+        working_page_2 = block.get_status(operations_limit=50, operations_page=2, show_technical_archive=False)
+        _assert(working_page_1["operations_page"]["total_count"] >= 60, "working journal page must count visible operations")
+        _assert(working_page_1["operations_page"]["has_next"], "working journal first page must expose next page")
+        _assert(working_page_2["operations_page"]["current_page"] == 2, "working journal must return requested second page")
+        _assert(working_page_2["operations"], "working journal second page must include rows")
+        _assert(
+            working_page_1["operations_page"]["hidden_archive_count"] >= 2,
+            f"archive-off view must report hidden technical rows, got {working_page_1['operations_page']}",
+        )
+        archive_page = block.get_status(operations_limit=200, operations_page=1, show_technical_archive=True)
+        _assert(
+            any(item["source_type"] == FF_STOCK_SOURCE_RUNTIME_REPAIR for item in archive_page["operations"]),
+            "archive-on view must retrieve runtime_repair operations",
+        )
+        _assert(
+            any(item["source_type"] == FF_STOCK_SOURCE_WB_SUPPLY for item in archive_page["operations"]),
+            "archive-on view must retrieve old WB auto_writeoff operations",
+        )
+        _assert(_balance(block, second_nm_id) == balance_before_pagination_status, "journal pagination/archive status must not change balances")
+
     print("ff_stock_ledger_smoke: ok")
 
 
@@ -487,6 +522,45 @@ def _seed_wb_supply_overlay_fixture(
         ],
         warehouses=[{"warehouse_id": "507", "warehouse_name": "Коледино"}],
         synced_at=ACTIVATED_AT,
+    )
+
+
+def _seed_operation_journal_pagination_fixture(runtime: RegistryUploadDbBackedRuntime) -> None:
+    for index in range(60):
+        runtime.create_ff_stock_operation(
+            operation_id=f"ffso_page_visible_{index:03d}",
+            operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
+            source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+            source_key=f"manual_excel:page-visible:{index:03d}",
+            source_object_id=f"page-visible-{index:03d}",
+            source_object_label=f"pagination visible {index:03d}",
+            created_at=f"2026-04-18T09:{10 + (index // 60):02d}:{index % 60:02d}Z",
+            created_by="smoke",
+            lines=[],
+        )
+    runtime.create_ff_stock_operation(
+        operation_id="ffso_page_repair_archive",
+        operation_type=FF_STOCK_OPERATION_CORRECTION_RECEIPT,
+        source_type=FF_STOCK_SOURCE_RUNTIME_REPAIR,
+        source_key="runtime_repair:page-archive",
+        source_object_id="repair-page-archive",
+        source_object_label="runtime_repair archive",
+        created_at="2026-04-18T09:59:59Z",
+        created_by="smoke",
+        diagnostics={"reason": "pagination smoke"},
+        lines=[],
+    )
+    runtime.create_ff_stock_operation(
+        operation_id="ffso_page_old_wb_archive",
+        operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
+        source_type=FF_STOCK_SOURCE_WB_SUPPLY,
+        source_key="wb_supply:page-old-auto-writeoff",
+        source_object_id="page-old-auto-writeoff",
+        source_object_label="old WB auto_writeoff",
+        created_at=BEFORE_ACTIVATION,
+        created_by="system",
+        diagnostics={"cache_key": "page-old-auto-writeoff"},
+        lines=[],
     )
 
 

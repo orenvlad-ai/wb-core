@@ -2880,7 +2880,10 @@ def _build_handler(
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_ff_stock_status_request()
+                    payload = entrypoint.handle_ff_stock_status_request(_flatten_query_params(parsed.query))
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,

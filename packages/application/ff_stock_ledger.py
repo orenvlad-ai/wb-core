@@ -32,6 +32,8 @@ FF_STOCK_SOURCE_WB_SUPPLY = "wb_supply"
 FF_STOCK_SOURCE_RUNTIME_REPAIR = "runtime_repair"
 
 FF_STOCK_LEDGER_SOURCE_KEY_PREFIX = "ff_stock_ledger"
+FF_STOCK_OPERATION_DEFAULT_PAGE_SIZE = 50
+FF_STOCK_OPERATION_PAGE_SIZES = (50, 100, 200)
 
 WB_DEBIT_STATUS_IDS = {3, 4, 5, 6}
 WB_SKIP_VIRTUAL_TYPE_ID = 5
@@ -64,11 +66,40 @@ class FfStockLedgerBlock:
         self.runtime = runtime
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
 
-    def get_status(self, *, operations_limit: int = 50) -> dict[str, Any]:
+    def get_status(
+        self,
+        *,
+        operations_limit: Any = FF_STOCK_OPERATION_DEFAULT_PAGE_SIZE,
+        operations_page: Any = 1,
+        operations_offset: Any | None = None,
+        show_technical_archive: bool = True,
+    ) -> dict[str, Any]:
         registry_rows = self.current_balance_rows()
-        operations = self.runtime.list_ff_stock_operations(limit=operations_limit)
-        operations = [_with_operation_public_fields(operation) for operation in operations]
         checkpoint = self.runtime.load_ff_stock_wb_auto_writeoff_checkpoint()
+        archive_cutoff_created_at = str((checkpoint or {}).get("created_at") or "").strip()
+        limit = _normalize_operation_page_size(operations_limit)
+        include_archive = bool(show_technical_archive)
+        total_count = self.runtime.count_ff_stock_operations(
+            include_technical_archive=include_archive,
+            archive_cutoff_created_at=archive_cutoff_created_at,
+        )
+        total_all_count = self.runtime.count_ff_stock_operations(include_technical_archive=True)
+        page_count = max(1, (total_count + limit - 1) // limit)
+        if operations_offset is not None:
+            offset = _normalize_operation_offset(operations_offset)
+            if total_count:
+                offset = min(offset, (page_count - 1) * limit)
+            page = (offset // limit) + 1
+        else:
+            page = min(_normalize_operation_page(operations_page), page_count)
+            offset = (page - 1) * limit
+        operations = self.runtime.list_ff_stock_operations(
+            limit=limit,
+            offset=offset,
+            include_technical_archive=include_archive,
+            archive_cutoff_created_at=archive_cutoff_created_at,
+        )
+        operations = [_with_operation_public_fields(operation) for operation in operations]
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -78,6 +109,23 @@ class FfStockLedgerBlock:
                 "summary": _balance_summary(registry_rows),
             },
             "operations": operations,
+            "operations_page": {
+                "limit": limit,
+                "allowed_page_sizes": list(FF_STOCK_OPERATION_PAGE_SIZES),
+                "offset": offset,
+                "current_offset": offset,
+                "page": page,
+                "current_page": page,
+                "page_count": page_count,
+                "total_count": total_count,
+                "total": total_count,
+                "total_all_count": total_all_count,
+                "hidden_archive_count": max(0, total_all_count - total_count),
+                "has_next": offset + limit < total_count,
+                "has_previous": offset > 0,
+                "show_technical_archive": include_archive,
+                "archive_cutoff_created_at": archive_cutoff_created_at,
+            },
             "wb_auto_writeoff_checkpoint": checkpoint,
         }
 
@@ -894,6 +942,30 @@ def _normalize_manual_operation_type(value: Any) -> str:
     if normalized in {FF_STOCK_OPERATION_MANUAL_WRITEOFF, "writeoff"}:
         return FF_STOCK_OPERATION_MANUAL_WRITEOFF
     raise ValueError("Тип операции ФФ должен быть manual_receipt или manual_writeoff")
+
+
+def _normalize_operation_page_size(value: Any) -> int:
+    try:
+        normalized = int(float(str(value or FF_STOCK_OPERATION_DEFAULT_PAGE_SIZE).strip()))
+    except (TypeError, ValueError):
+        return FF_STOCK_OPERATION_DEFAULT_PAGE_SIZE
+    return normalized if normalized in FF_STOCK_OPERATION_PAGE_SIZES else FF_STOCK_OPERATION_DEFAULT_PAGE_SIZE
+
+
+def _normalize_operation_page(value: Any) -> int:
+    try:
+        normalized = int(float(str(value or 1).strip()))
+    except (TypeError, ValueError):
+        return 1
+    return max(1, normalized)
+
+
+def _normalize_operation_offset(value: Any) -> int:
+    try:
+        normalized = int(float(str(value or 0).strip()))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, normalized)
 
 
 def _safe_xlsx_filename(value: str) -> str:
