@@ -2263,10 +2263,13 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("quote_logistics_pct", "КП: услуги логиста, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "logistics_pct"))),
                 ("quote_customs_pct", "КП: таможня, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "customs_pct"))),
                 ("quote_total_pct", "КП: доставка+таможня, % от стоимости груза по КП", lambda item: _registry_percent(_summary_path(item, "percent_of_value", "quote_cargo_value", "delivery_customs_pct"))),
-                ("quote_total_rub_per_unit", "КП: доставка+таможня, ₽/шт по количеству поставки", lambda item: _quote_rub_cell(item, _summary_path(item, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽")),
-                ("quote_logistics_rub_per_quote_kg", "КП: услуги логиста, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "logistics"), "₽")),
-                ("quote_customs_rub_per_quote_kg", "КП: таможня, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "customs"), "₽")),
-                ("quote_total_rub_per_quote_kg", "КП: доставка+таможня, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "total"), "₽")),
+                ("quote_logistics_usd_per_quote_kg", "КП: услуги логиста, USD/кг по весу КП", lambda item: _registry_money(_quote_component_per_quote_kg_usd(item, "logistics"), "USD")),
+                ("quote_customs_usd_per_quote_kg", "КП: таможня, USD/кг по весу КП", lambda item: _registry_money(_quote_component_per_quote_kg_usd(item, "customs"), "USD")),
+                ("quote_total_usd_per_quote_kg", "КП: доставка+таможня, USD/кг по весу КП", lambda item: _registry_money(_quote_component_per_quote_kg_usd(item, "total"), "USD")),
+                ("quote_total_rub_per_unit", "КП: доставка+таможня, ₽/шт по количеству поставки", lambda item: _quote_rub_cell(item, _summary_path(item, "per_unit", "quote_delivery_customs_rub_per_unit"), "₽", waiting_status=True, waiting_allowed=_quote_total_per_unit_waiting_available(item))),
+                ("quote_logistics_rub_per_quote_kg", "КП: услуги логиста, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "logistics"), "₽", waiting_status=True, waiting_allowed=_quote_component_per_quote_kg_waiting_available(item, "logistics"))),
+                ("quote_customs_rub_per_quote_kg", "КП: таможня, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "customs"), "₽", waiting_status=True, waiting_allowed=_quote_component_per_quote_kg_waiting_available(item, "customs"))),
+                ("quote_total_rub_per_quote_kg", "КП: доставка+таможня, ₽/кг по весу КП", lambda item: _quote_rub_cell(item, _quote_component_per_kg(item, "total"), "₽", waiting_status=True, waiting_allowed=_quote_component_per_quote_kg_waiting_available(item, "total"))),
                 ("fact_logistics_per_quote_kg", "факт: услуги логиста ₽/кг по весу КП", lambda item: _logistics_expense_quality_cell(item, _registry_money(_summary_path(item, "per_kg", "quote_weight", "logistics_invoice_rub_per_kg"), "₽"))),
                 ("fact_customs_per_quote_kg", "факт: таможня ₽/кг по весу КП", lambda item: _registry_money(_summary_path(item, "per_kg", "quote_weight", "customs_payments_rub_per_kg"), "₽")),
                 ("fact_total_per_quote_kg", "факт: доставка+таможня ₽/кг по весу КП", lambda item: _logistics_expense_quality_cell(item, _registry_money(_summary_path(item, "per_kg", "quote_weight", "delivery_customs_rub_per_kg"), "₽"))),
@@ -2463,15 +2466,35 @@ def _logistics_expense_quality_cell(context: Mapping[str, Any], cell: Mapping[st
     return payload
 
 
-def _quote_rub_cell(context: Mapping[str, Any], value: Any, currency: str) -> dict[str, Any]:
+def _quote_rub_cell(
+    context: Mapping[str, Any],
+    value: Any,
+    currency: str,
+    *,
+    waiting_status: bool = False,
+    waiting_allowed: bool = True,
+) -> dict[str, Any]:
     cell = _registry_money(value, currency)
     if cell.get("value") is None:
         note = _quote_rub_unavailable_note(context)
         if note:
-            cell["quality"] = "missing"
+            if waiting_status and waiting_allowed and _quote_rate_sanity_rejected(context):
+                cell = _registry_cell(None, "ждём счета")
+                cell["status"] = "warning"
+                cell["quality"] = "quote_rate_unavailable"
+                note = (
+                    f"{note} Рублёвый расчёт КП появится после загрузки всех счетов логиста "
+                    "и прохождения sanity-check курса."
+                )
+            else:
+                cell["quality"] = "missing"
             cell["source_status"] = "quote_rate_unavailable"
             cell["note"] = note
     return cell
+
+
+def _quote_rate_sanity_rejected(context: Mapping[str, Any]) -> bool:
+    return dict(_summary_path(context, "quote_invoice_match") or {}).get("rate_sanity_status") == "rejected"
 
 
 def _quote_rub_unavailable_note(context: Mapping[str, Any]) -> str:
@@ -2729,6 +2752,34 @@ def _quote_component_per_kg(context: Mapping[str, Any], component: str) -> Decim
     else:
         usd = _parse_decimal(quote.get("total_usd"))
     return _safe_div(usd * rate if usd is not None else None, weight)
+
+
+def _quote_component_per_quote_kg_usd(context: Mapping[str, Any], component: str) -> Decimal | None:
+    usd = _quote_component_usd(context, component)
+    weight = _positive_decimal(_summary_path(context, "quote", "gross_weight_kg"))
+    return _safe_div(usd, weight)
+
+
+def _quote_component_usd(context: Mapping[str, Any], component: str) -> Decimal | None:
+    if component == "logistics":
+        return _parse_decimal(_summary_path(context, "quote", "logistics_usd"))
+    if component == "customs":
+        return _parse_decimal(_summary_path(context, "quote", "customs_payments_usd"))
+    return _parse_decimal(_summary_path(context, "quote", "total_usd"))
+
+
+def _quote_component_per_quote_kg_waiting_available(context: Mapping[str, Any], component: str) -> bool:
+    return (
+        _quote_component_usd(context, component) is not None
+        and _positive_decimal(_summary_path(context, "quote", "gross_weight_kg")) is not None
+    )
+
+
+def _quote_total_per_unit_waiting_available(context: Mapping[str, Any]) -> bool:
+    return (
+        _quote_component_usd(context, "total") is not None
+        and _positive_decimal(_summary_path(context, "per_unit", "total_units")) is not None
+    )
 
 
 def _needs_review_count(context: Mapping[str, Any]) -> int:

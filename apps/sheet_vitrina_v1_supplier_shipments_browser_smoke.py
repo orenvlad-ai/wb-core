@@ -537,7 +537,19 @@ def main() -> None:
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("H. Нормализованные метрики факта / по ДТ", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("I. Документы", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("26GN390", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: услуги логиста, USD/кг по весу КП", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: таможня, USD/кг по весу КП", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: доставка+таможня, USD/кг по весу КП", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: доставка+таможня, ₽/шт", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("ждём счета", timeout=5000)
+                waiting_quote_cell = operator_frame.locator(
+                    ".shipment-registry-cell-main.is-registry-warning",
+                    has_text="ждём счета",
+                ).first
+                expect(waiting_quote_cell).to_be_visible(timeout=5000)
+                waiting_quote_title = waiting_quote_cell.locator("xpath=..").get_attribute("title") or ""
+                if "sanity-check" not in waiting_quote_title or "после загрузки всех счетов логиста" not in waiting_quote_title:
+                    raise AssertionError(f"waiting quote RUB cell must keep explanatory tooltip, got {waiting_quote_title!r}")
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("факт доставка+таможня ₽/шт", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Плановая дата отгрузки", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("Фактическая дата отгрузки", timeout=5000)
@@ -811,6 +823,7 @@ def _seed_first_supplier_factual_expense(runtime: RegistryUploadDbBackedRuntime,
             "currency": "RUB",
             "total_amount": amount_rub,
             "total_amount_rub": amount_rub,
+            "cbr_usd_rate_value": 75.0,
             "normalized_parse": {"document_type": "logistics_invoice", "amount_rub": amount_rub},
             "raw_parse": {},
             "parser_version": "browser-smoke",
