@@ -7,7 +7,7 @@ import re
 from typing import Any, Mapping
 
 from packages.contracts.factory_order_supply import FactoryOrderInboundRow, FactoryOrderStockFfRow
-from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
+from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU, DISTRICT_SHORT_LABELS_RU
 
 
 ELIGIBLE_WB_SUPPLY_STATUS_IDS = {3, 4, 6}
@@ -18,15 +18,6 @@ WB_SUPPLY_OVERLAY_REQUEST_KEYS = (
     "selected_wb_supplies",
     "wb_supply_ids",
 )
-
-DISTRICT_SHORT_LABELS_RU = {
-    "central": "ЦФО",
-    "northwest": "СЗФО",
-    "volga": "ПФО",
-    "ural": "УрФО",
-    "south_caucasus": "Юг+СК",
-    "far_siberia": "Сиб+ДВ",
-}
 
 _MANUAL_WAREHOUSE_DISTRICT_FALLBACKS: dict[str, tuple[str, str]] = {
     "Коледино": ("central", "manual_known_wb_warehouse: Moscow region"),

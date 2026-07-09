@@ -90,7 +90,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.business_time import current_business_date_iso
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
-from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
+from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU, DISTRICT_SHORT_LABELS_RU
 
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_http_entrypoint"
 INPUT_BUNDLE_FIXTURE = ARTIFACTS_DIR / "input" / "registry_upload_bundle__fixture.json"
@@ -334,6 +334,7 @@ def main() -> None:
                     {
                         "district_key": key,
                         "district_name_ru": DISTRICT_LABELS_RU[key],
+                        "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[key],
                     }
                     for key in DISTRICT_KEYS
                 ],

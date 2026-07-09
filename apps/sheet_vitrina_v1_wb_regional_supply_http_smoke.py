@@ -49,6 +49,7 @@ from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSu
 from packages.contracts.wb_regional_supply import (
     DISTRICT_CENTRAL,
     DISTRICT_FAR_SIBERIA,
+    DISTRICT_KEYS,
     DISTRICT_NORTHWEST,
 )
 
@@ -171,11 +172,11 @@ def main() -> None:
                 "Общий вход для двух расчётов",
                 "Поставка на Wildberries",
                 "Цикл поставок, дней",
-                "Доставка до склада Wildberries, дней",
                 "Рассчитать поставку на Wildberries",
                 "Сводка по федеральным округам",
                 "Диагностика методологии появится после расчёта.",
                 "Округа для расчёта пропорций",
+                "Доставка, дней",
                 "Без ДВ/Сибирь",
                 "Скачать все рекомендации",
                 "Скачать Excel",
@@ -189,9 +190,16 @@ def main() -> None:
                 "wb_regional_planning_options_path",
                 "data-regional-district-download",
                 "data-regional-planning-district",
+                "data-regional-lead-time-district",
+                "lead_time_to_region_days_by_district",
             ):
                 if expected not in operator_html:
                     raise AssertionError(f"operator page must expose {expected!r}")
+            for abbreviation in ("ЦФО", "СЗФО", "ПФО", "УФО", "ЮФО/СКФО", "ДВФО/СФО"):
+                if abbreviation not in operator_html:
+                    raise AssertionError(f"operator page must expose district abbreviation {abbreviation!r}")
+            if "leadTimeToRegionDays" in operator_html or "Доставка до склада Wildberries, дней" in operator_html:
+                raise AssertionError("operator UI must not expose global lead-time field as an editable source of truth")
             for removed in ("XLSX по округам", "Excel по округам", "regionalDistrictDownloads", "district-download-list"):
                 if removed in operator_html:
                     raise AssertionError(f"regional UI must not render duplicated district download block token {removed!r}")
@@ -261,6 +269,8 @@ def main() -> None:
                 raise AssertionError("regional diagnostics must expose requested depletion day count")
             if diagnostics.get("district_selection_mode") != "all_districts":
                 raise AssertionError(f"old calculate payload must default to all districts, got {diagnostics}")
+            if calc_payload.get("settings", {}).get("lead_time_to_region_days_by_district") != {key: 2 for key in DISTRICT_KEYS}:
+                raise AssertionError("old calculate payload must expand scalar lead time to all district keys")
             districts = {item["district_key"]: item for item in calc_payload.get("districts", [])}
             if districts["central"]["total_qty"] != 50 or districts["central"]["deficit_qty"] != 100:
                 raise AssertionError("regional summary must expose truthful central allocation and deficit")
@@ -276,6 +286,8 @@ def main() -> None:
                 raise AssertionError("main SKU must use 14 selected stock-depletion days")
             if abs(float(central_main_row.get("daily_demand_total", 0.0)) - 60.0) > 1e-9:
                 raise AssertionError("main SKU total daily demand must remain based on orderCount")
+            if int(central_main_row.get("lead_time_to_region_days", 0)) != 2:
+                raise AssertionError("legacy scalar lead time must be exposed on HTTP district rows")
 
             _seed_planning_nomenclature(runtime, active_nm_ids=active_nm_ids)
             planning_status, planning_payload = _post_json(
@@ -311,6 +323,32 @@ def main() -> None:
                 raise AssertionError(f"planning-options mismatch path must be a structured blocker, got {mismatch_payload}")
             if len(planning_source.acceptance_requests) != acceptance_request_count_before_mismatch:
                 raise AssertionError("planning-options mismatch path must not call acceptance/options")
+
+            mixed_lead_times = {key: 2 for key in DISTRICT_KEYS}
+            mixed_lead_times[DISTRICT_NORTHWEST] = 10
+            mixed_status, mixed_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days_by_district": mixed_lead_times,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                    "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST],
+                },
+            )
+            if mixed_status != 200:
+                raise AssertionError(f"regional per-district lead-time calculate must succeed, got {mixed_status} {mixed_payload}")
+            mixed_districts = {item["district_key"]: item for item in mixed_payload.get("districts", [])}
+            mixed_central_row = next(row for row in mixed_districts[DISTRICT_CENTRAL]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
+            mixed_northwest_row = next(row for row in mixed_districts[DISTRICT_NORTHWEST]["rows"] if int(row["nm_id"]) == MAIN_NM_ID)
+            if int(mixed_central_row.get("lead_time_to_region_days", 0)) != 2 or int(mixed_northwest_row.get("lead_time_to_region_days", 0)) != 10:
+                raise AssertionError("HTTP rows must expose the district-specific lead times")
+            if float(mixed_central_row.get("projected_stock_on_eta", 0.0)) <= float(mixed_northwest_row.get("projected_stock_on_eta", 0.0)):
+                raise AssertionError("different lead times must change projected_stock_on_eta by district")
+            if (mixed_payload.get("diagnostics") or {}).get("lead_time_to_region_days_by_district") != mixed_lead_times:
+                raise AssertionError("HTTP diagnostics must expose applied lead-time map")
 
             _seed_wb_regional_overlay_fixture(
                 runtime,
@@ -372,6 +410,39 @@ def main() -> None:
             selected_districts = {item["district_key"]: item for item in selected_payload.get("districts", [])}
             if sorted(selected_districts) != [DISTRICT_CENTRAL, DISTRICT_NORTHWEST]:
                 raise AssertionError(f"selected district response must include selected districts only, got {sorted(selected_districts)}")
+
+            unknown_lead_status, unknown_lead_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days_by_district": {
+                        **{key: 2 for key in DISTRICT_KEYS},
+                        "unknown": 3,
+                    },
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                },
+            )
+            if unknown_lead_status != 422 or "Неизвестный федеральный округ в сроках доставки" not in str(unknown_lead_payload.get("error", "")):
+                raise AssertionError(f"unknown lead-time key must return controlled 422, got {unknown_lead_status} {unknown_lead_payload}")
+
+            incomplete_lead_times = {key: 2 for key in DISTRICT_KEYS}
+            incomplete_lead_times.pop(DISTRICT_NORTHWEST)
+            missing_lead_status, missing_lead_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days_by_district": incomplete_lead_times,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                },
+            )
+            if missing_lead_status != 422 or "Не задан срок доставки для федерального округа" not in str(missing_lead_payload.get("error", "")):
+                raise AssertionError(f"missing lead-time key must return controlled 422, got {missing_lead_status} {missing_lead_payload}")
 
             invalid_status, invalid_payload = _post_json(
                 f"{base_url}{DEFAULT_WB_REGIONAL_CALCULATE_PATH}",
@@ -522,6 +593,7 @@ def main() -> None:
             print(f"regional_status_shared_stock: ok -> {shared_dataset.get('uploaded_filename')}")
             print(f"regional_summary_total: ok -> {calc_payload.get('summary', {}).get('total_qty')}")
             print(f"regional_central_deficit: ok -> {districts['central']['deficit_qty']}")
+            print(f"regional_lead_times: ok -> central {mixed_central_row.get('lead_time_to_region_days')}, northwest {mixed_northwest_row.get('lead_time_to_region_days')}")
             print(f"regional_district_xlsx_sum: ok -> {district_qty_sum}")
             print(f"regional_district_xlsx_deficit_sum: ok -> {district_deficit_sum}")
             print(f"regional_recommendations_zip: ok -> {archive_names}")

@@ -6707,6 +6707,14 @@ def _build_wb_regional_supply_calculation_audit_row(
                 settings.get("cycle_supply_days", settings.get("supply_horizon_days"))
             ),
             "lead_time_to_region_days": _audit_int(settings.get("lead_time_to_region_days")),
+            "lead_time_to_region_days_by_district": {
+                str(key): _audit_int(value)
+                for key, value in _mapping_or_empty(
+                    settings.get("lead_time_to_region_days_by_district")
+                    or settings.get("district_lead_time_days")
+                ).items()
+                if str(key or "").strip()
+            },
             "safety_days": _audit_int(settings.get("safety_days")),
             "order_batch_qty": _audit_int(settings.get("order_batch_qty")),
             "included_district_keys": included_district_keys,

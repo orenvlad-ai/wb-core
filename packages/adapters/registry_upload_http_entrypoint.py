@@ -50,7 +50,7 @@ from packages.contracts.factory_order_supply import (
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
-from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
+from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU, DISTRICT_SHORT_LABELS_RU
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -6542,6 +6542,7 @@ def _render_sheet_vitrina_operator_ui(
             {
                 "district_key": key,
                 "district_name_ru": DISTRICT_LABELS_RU[key],
+                "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[key],
             }
             for key in DISTRICT_KEYS
         ],

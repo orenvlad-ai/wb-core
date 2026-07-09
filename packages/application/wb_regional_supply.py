@@ -47,6 +47,7 @@ from packages.contracts.wb_regional_supply import (
     DISTRICT_KEYS,
     DISTRICT_LABELS_RU,
     DISTRICT_NORTHWEST,
+    DISTRICT_SHORT_LABELS_RU,
     DISTRICT_SOUTH_CAUCASUS,
     DISTRICT_URAL,
     DISTRICT_VOLGA,
@@ -84,6 +85,7 @@ _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
 _DEFAULT_SALES_AVG_PERIOD_DAYS = 14
 _DEFAULT_CYCLE_SUPPLY_DAYS = 7
+_DEFAULT_LEAD_TIME_TO_REGION_DAYS = 15
 _METHODOLOGY_NOTE = (
     "Расчёт использует общий источник «Остатки ФФ» из этой же вкладки: manual Excel, read-only 1C FF_STOCK "
     "или серверный ledger «Остатки ФФ». "
@@ -91,6 +93,8 @@ _METHODOLOGY_NOTE = (
     "идеальные дни, частичные наблюдения по округам, похожие SKU, общий профиль и только затем тестовая поставка. "
     "Период усреднения продаж означает запрошенное число качественных дней; проблемная ячейка округа/дня не ломает "
     "наблюдения других округов. Старый резервный способ по текущим остаткам не является нормальным путём. "
+    "Поле «Доставка, дней» по каждому округу означает лаг до доступности товара на WB: доставка, приёмка, "
+    "разбор и появление в продаже. "
     "Ограниченный stock_ff распределяется по коробам сначала по спасённым штукам, затем по дням покрытия и спросу округа. "
     "Тестовая поставка нужна для сбора будущего сигнала, а не как расчётная доля спроса."
 )
@@ -251,13 +255,14 @@ class WbRegionalSupplyBlock:
             for district_key in DISTRICT_KEYS:
                 current_stock = district_stock_by_key[district_key]
                 district_daily_demand = district_daily_demand_by_key[district_key]
+                district_lead_time_days = int(settings.lead_time_to_region_days_by_district[district_key])
                 selected_wb_supply_qty = float(
                     wb_regional_qty_by_nm_district.get(nm_id, {}).get(district_key, 0.0)
                 )
                 projected_stock_on_eta = max(
                     current_stock
                     + selected_wb_supply_qty
-                    - (district_daily_demand * settings.lead_time_to_region_days),
+                    - (district_daily_demand * district_lead_time_days),
                     0.0,
                 )
                 target_stock_after_arrival = district_daily_demand * (
@@ -280,6 +285,7 @@ class WbRegionalSupplyBlock:
                     "raw_recommendation_qty": raw_recommendation,
                     "daily_demand_total": daily_demand_total,
                     "district_daily_demand": district_daily_demand,
+                    "lead_time_to_region_days": district_lead_time_days,
                     "full_recommendation_qty": full_recommendation_qty,
                     "selected_wb_supply_qty": selected_wb_supply_qty,
                 }
@@ -394,6 +400,9 @@ class WbRegionalSupplyBlock:
                 row_diagnostics["share_source"] = share_source
                 row_diagnostics["share_confidence"] = share_confidence
                 row_diagnostics["demand_recommendation_qty"] = demand_recommendation_qty
+                row_diagnostics["lead_time_to_region_days"] = int(
+                    row_payloads_by_key[district_key]["lead_time_to_region_days"]
+                )
                 row_diagnostics["seed_qty"] = seed_qty
                 row_diagnostics["selected_wb_supply_qty"] = float(
                     row_payloads_by_key[district_key].get("selected_wb_supply_qty", 0.0)
@@ -421,6 +430,9 @@ class WbRegionalSupplyBlock:
                         daily_demand_total=float(row_payloads_by_key[district_key]["daily_demand_total"]),
                         district_daily_demand=float(
                             row_payloads_by_key[district_key]["district_daily_demand"]
+                        ),
+                        lead_time_to_region_days=int(
+                            row_payloads_by_key[district_key]["lead_time_to_region_days"]
                         ),
                         raw_recommendation_qty=float(
                             row_payloads_by_key[district_key]["raw_recommendation_qty"]
@@ -450,6 +462,11 @@ class WbRegionalSupplyBlock:
                 "seed_allocated_qty_total": int(seed_allocated_qty_total),
                 "seed_unfulfilled_qty_total": int(seed_unfulfilled_qty_total),
                 "seed_by_nm_id": seed_by_nm_id,
+                "lead_time_to_region_days": int(settings.lead_time_to_region_days),
+                "lead_time_to_region_days_by_district": {
+                    key: int(settings.lead_time_to_region_days_by_district[key])
+                    for key in DISTRICT_KEYS
+                },
                 "wb_supply_overlay": wb_regional_overlay_diagnostics,
             }
         )
@@ -480,6 +497,7 @@ class WbRegionalSupplyBlock:
                 deficit_qty=sum(row.deficit_qty for row in district_rows_by_key[district_key]),
                 filename=_district_filename(district_key),
                 rows=district_rows_by_key[district_key],
+                lead_time_to_region_days=int(settings.lead_time_to_region_days_by_district[district_key]),
             )
             for district_key in settings.included_district_keys
         ]
@@ -652,6 +670,37 @@ class WbRegionalSupplyBlock:
         stock_ff_source = _normalize_stock_ff_source(
             payload.get("stock_ff_source", settings_payload.get("stock_ff_source"))
         )
+        settings_lead_time_to_region_days = _coerce_positive_int(
+            settings_payload.get("lead_time_to_region_days"),
+            _DEFAULT_LEAD_TIME_TO_REGION_DAYS,
+        )
+        settings_lead_time_to_region_days_by_district = _coerce_lead_time_map_from_saved_settings(
+            settings_payload,
+            settings_lead_time_to_region_days,
+        )
+        result_settings = WbRegionalSupplySettings(
+            sales_avg_period_days=int(
+                settings_payload.get("sales_avg_period_days", _DEFAULT_SALES_AVG_PERIOD_DAYS)
+            ),
+            cycle_supply_days=int(
+                settings_payload.get(
+                    "cycle_supply_days",
+                    settings_payload.get("supply_horizon_days", _DEFAULT_CYCLE_SUPPLY_DAYS),
+                )
+            ),
+            lead_time_to_region_days=settings_lead_time_to_region_days,
+            lead_time_to_region_days_by_district=settings_lead_time_to_region_days_by_district,
+            safety_days=int(settings_payload.get("safety_days", 0)),
+            order_batch_qty=int(settings_payload.get("order_batch_qty", 0)),
+            report_date_override=(
+                str(settings_payload.get("report_date_override"))
+                if settings_payload.get("report_date_override")
+                else None
+            ),
+            stock_ff_source=stock_ff_source,
+            included_district_keys=_parse_included_district_keys(settings_payload.get("included_district_keys")),
+            selected_wb_supply_ids=_parse_selected_wb_supply_ids_from_settings(settings_payload),
+        )
         shared_datasets = {
             key: FactoryOrderDatasetState(
                 dataset_type=str(value.get("dataset_type", key)),
@@ -675,28 +724,7 @@ class WbRegionalSupplyBlock:
             horizon_days=int(payload.get("horizon_days", 0)),
             active_sku_count=int(payload.get("active_sku_count", 0)),
             methodology_note=str(payload.get("methodology_note", _METHODOLOGY_NOTE)),
-            settings=WbRegionalSupplySettings(
-                sales_avg_period_days=int(
-                    settings_payload.get("sales_avg_period_days", _DEFAULT_SALES_AVG_PERIOD_DAYS)
-                ),
-                cycle_supply_days=int(
-                    settings_payload.get(
-                        "cycle_supply_days",
-                        settings_payload.get("supply_horizon_days", 0),
-                    )
-                ),
-                lead_time_to_region_days=int(settings_payload.get("lead_time_to_region_days", 0)),
-                safety_days=int(settings_payload.get("safety_days", 0)),
-                order_batch_qty=int(settings_payload.get("order_batch_qty", 0)),
-                report_date_override=(
-                    str(settings_payload.get("report_date_override"))
-                    if settings_payload.get("report_date_override")
-                    else None
-                ),
-                stock_ff_source=stock_ff_source,
-                included_district_keys=_parse_included_district_keys(settings_payload.get("included_district_keys")),
-                selected_wb_supply_ids=_parse_selected_wb_supply_ids_from_settings(settings_payload),
-            ),
+            settings=result_settings,
             stock_ff_source=stock_ff_source,
             shared_datasets=shared_datasets,
             manual_stock_ff_dataset=manual_stock_ff_dataset,
@@ -727,6 +755,13 @@ class WbRegionalSupplyBlock:
                             target_stock_after_arrival=float(row.get("target_stock_after_arrival", 0.0)),
                             daily_demand_total=float(row.get("daily_demand_total", 0.0)),
                             district_daily_demand=float(row.get("district_daily_demand", 0.0)),
+                            lead_time_to_region_days=_coerce_positive_int(
+                                row.get("lead_time_to_region_days"),
+                                settings_lead_time_to_region_days_by_district.get(
+                                    str(item.get("district_key", "") or "").strip().lower(),
+                                    settings_lead_time_to_region_days,
+                                ),
+                            ),
                             raw_recommendation_qty=float(row.get("raw_recommendation_qty", 0.0)),
                             demand_diagnostics=(
                                 dict(row.get("demand_diagnostics"))
@@ -751,6 +786,10 @@ class WbRegionalSupplyBlock:
                         for row in item.get("rows", [])
                         if isinstance(row, Mapping)
                     ],
+                    lead_time_to_region_days=settings_lead_time_to_region_days_by_district.get(
+                        str(item.get("district_key", "") or "").strip().lower(),
+                        settings_lead_time_to_region_days,
+                    ),
                 )
                 for item in districts_payload
                 if isinstance(item, Mapping)
@@ -820,13 +859,20 @@ def _default_timestamp_factory() -> str:
 
 
 def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
+    lead_time_to_region_days = _parse_positive_int_with_default(
+        payload.get("lead_time_to_region_days"),
+        "Срок доставки до склада Wildberries",
+        _DEFAULT_LEAD_TIME_TO_REGION_DAYS,
+    )
+    lead_time_to_region_days_by_district = _parse_lead_time_to_region_days_by_district(
+        payload,
+        lead_time_to_region_days,
+    )
     return WbRegionalSupplySettings(
         sales_avg_period_days=_parse_sales_avg_period_days(payload.get("sales_avg_period_days")),
         cycle_supply_days=_parse_cycle_supply_days(payload),
-        lead_time_to_region_days=_parse_positive_int(
-            payload.get("lead_time_to_region_days"),
-            "Срок доставки до склада Wildberries",
-        ),
+        lead_time_to_region_days=lead_time_to_region_days,
+        lead_time_to_region_days_by_district=lead_time_to_region_days_by_district,
         safety_days=_parse_nonnegative_int(payload.get("safety_days"), "Страховой запас"),
         order_batch_qty=_parse_positive_int(payload.get("order_batch_qty"), "Кратность штук в коробке"),
         report_date_override=_parse_optional_date(
@@ -886,9 +932,70 @@ def _district_options() -> tuple[dict[str, str], ...]:
         {
             "district_key": key,
             "district_name_ru": _DISTRICT_NAME_BY_KEY[key],
+            "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[key],
         }
         for key in DISTRICT_KEYS
     )
+
+
+def _parse_lead_time_to_region_days_by_district(
+    payload: Mapping[str, Any],
+    scalar_fallback_days: int,
+) -> dict[str, int]:
+    raw_map = payload.get("lead_time_to_region_days_by_district")
+    if raw_map in ("", None):
+        raw_map = payload.get("district_lead_time_days")
+    if raw_map in ("", None):
+        return {key: int(scalar_fallback_days) for key in DISTRICT_KEYS}
+    if not isinstance(raw_map, Mapping):
+        raise ValueError("Доставка по федеральным округам должна быть объектом district_key -> days")
+    requested_keys = {str(key or "").strip().lower() for key in raw_map.keys()}
+    unknown = sorted(key for key in requested_keys if key not in DISTRICT_KEYS)
+    if unknown:
+        raise ValueError("Неизвестный федеральный округ в сроках доставки: " + ", ".join(unknown))
+    missing = [key for key in DISTRICT_KEYS if key not in requested_keys]
+    if missing:
+        raise ValueError("Не задан срок доставки для федерального округа: " + ", ".join(missing))
+    normalized_payload = {str(key or "").strip().lower(): value for key, value in raw_map.items()}
+    return {
+        key: _parse_positive_int(
+            normalized_payload.get(key),
+            f"Доставка до WB для округа {DISTRICT_SHORT_LABELS_RU.get(key, key)}",
+        )
+        for key in DISTRICT_KEYS
+    }
+
+
+def _coerce_lead_time_map_from_saved_settings(
+    settings_payload: Mapping[str, Any],
+    scalar_fallback_days: int,
+) -> dict[str, int]:
+    raw_map = settings_payload.get("lead_time_to_region_days_by_district")
+    if raw_map in ("", None):
+        raw_map = settings_payload.get("district_lead_time_days")
+    if not isinstance(raw_map, Mapping):
+        return {key: int(scalar_fallback_days) for key in DISTRICT_KEYS}
+    normalized_payload = {str(key or "").strip().lower(): value for key, value in raw_map.items()}
+    return {
+        key: _coerce_positive_int(normalized_payload.get(key), scalar_fallback_days)
+        for key in DISTRICT_KEYS
+    }
+
+
+def _parse_positive_int_with_default(value: Any, label: str, default: int) -> int:
+    if value in ("", None):
+        return int(default)
+    return _parse_positive_int(value, label)
+
+
+def _coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        numeric = int(str(value).strip())
+    except Exception:
+        return int(default)
+    if numeric <= 0:
+        return int(default)
+    return numeric
 
 
 def _parse_onec_stock_ff_state(value: Any) -> FactoryOrderStockFfOnecState:

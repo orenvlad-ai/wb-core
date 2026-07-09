@@ -483,7 +483,7 @@ def main() -> None:
             if [item.get("value") for item in status_options] != [1, 2, 3, 4, 5, 6]:
                 raise AssertionError(f"status selector must expose official statuses 1..6, got {status_options}")
             district_options = all_payload.get("filters", {}).get("options", {}).get("districts", [])
-            if [item.get("label") for item in district_options] != ["ЦФО", "СЗФО", "ПФО", "УрФО", "Юг+СК", "Сиб+ДВ"]:
+            if [item.get("label") for item in district_options] != ["ЦФО", "СЗФО", "ПФО", "УФО", "ЮФО/СКФО", "ДВФО/СФО"]:
                 raise AssertionError(f"district presets must expose six WB regional districts, got {district_options}")
 
             central_status, central_payload = _get_json(
@@ -520,7 +520,7 @@ def main() -> None:
             overlay_status, overlay_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH}")
             if overlay_status != 200 or overlay_payload.get("eligible_status_ids") != [3, 4, 6]:
                 raise AssertionError(f"overlay options route must expose eligible status contract, got {overlay_status} {overlay_payload}")
-            if [item.get("label") for item in overlay_payload.get("district_options", [])] != ["ЦФО", "СЗФО", "ПФО", "УрФО", "Юг+СК", "Сиб+ДВ"]:
+            if [item.get("label") for item in overlay_payload.get("district_options", [])] != ["ЦФО", "СЗФО", "ПФО", "УФО", "ЮФО/СКФО", "ДВФО/СФО"]:
                 raise AssertionError(f"overlay options route must expose six district presets, got {overlay_payload}")
             overlay_options = {item.get("supply_id"): item for item in overlay_payload.get("options", [])}
             if "1002" in overlay_options:
@@ -686,7 +686,7 @@ def main() -> None:
                 "Выбрать eligible",
                 "ФО",
                 "ЦФО",
-                "Сиб+ДВ",
+                "ДВФО/СФО",
                 "wb_supplies_path",
                 "wb_supplies_overlay_options_path",
                 "wb_supplies_backfill_path",
