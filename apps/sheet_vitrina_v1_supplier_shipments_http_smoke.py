@@ -703,10 +703,20 @@ def main() -> None:
             if "NaN" in shipment_registry_json or "Infinity" in shipment_registry_json:
                 raise AssertionError(f"shipment registry matrix must not expose invalid numbers: {shipment_registry}")
             section_ids = [section.get("section_id") for section in shipment_registry.get("sections", [])]
-            expected_section_ids = ["passport", "quote_logistics", "lead_times", "cargo_physics", "cargo_value", "fact_expenses", "fact_normalized", "documents"]
+            expected_section_ids = [
+                "passport",
+                "quote_logistics",
+                "quote_normalized",
+                "lead_times",
+                "cargo_physics",
+                "cargo_value",
+                "fact_expenses",
+                "fact_normalized",
+                "documents",
+            ]
             if section_ids != expected_section_ids:
                 raise AssertionError(f"shipment registry matrix missing sections: {section_ids}")
-            if _registry_cell_display(shipment_registry, "quote_logistics", "quote_total_rub_per_unit", shipment_id) != "—":
+            if _registry_cell_display(shipment_registry, "quote_normalized", "quote_total_rub_per_unit", shipment_id) != "—":
                 raise AssertionError(f"shipment registry without financial docs must keep quote ₽/шт unavailable: {shipment_registry}")
             if _registry_cell_display(shipment_registry, "fact_expenses", "fact_total_rub_per_unit", shipment_id) != "—":
                 raise AssertionError(f"shipment registry without financial docs must keep fact ₽/шт unavailable: {shipment_registry}")

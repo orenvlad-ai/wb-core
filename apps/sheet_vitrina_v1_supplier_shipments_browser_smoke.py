@@ -494,6 +494,23 @@ def main() -> None:
                 expect(active_row.locator("[data-delete-shipment]").first).to_have_text("Удалить")
                 active_row.click()
                 expect(active_row).to_have_class(re.compile(r"(^|\\s)is-active(\\s|$)"))
+                active_row_style = active_row.locator("td").first.evaluate(
+                    """(node) => {
+                        const styles = window.getComputedStyle(node);
+                        return {
+                            backgroundColor: styles.backgroundColor,
+                            boxShadow: styles.boxShadow,
+                            outlineStyle: styles.outlineStyle,
+                            outlineWidth: styles.outlineWidth
+                        };
+                    }"""
+                )
+                if active_row_style.get("boxShadow") not in ("none", ""):
+                    raise AssertionError(f"active supplier row must not use per-cell blue inset shadow: {active_row_style}")
+                if "56, 189, 248" in str(active_row_style.get("backgroundColor") or ""):
+                    raise AssertionError(f"active supplier row must not use bright cyan background: {active_row_style}")
+                if active_row_style.get("outlineStyle") not in ("none", "") and active_row_style.get("outlineWidth") != "0px":
+                    raise AssertionError(f"active supplier row must not use per-cell outline: {active_row_style}")
                 expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-16")
                 expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("")
                 expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("13.2")
@@ -506,17 +523,19 @@ def main() -> None:
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_role("button", name="Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
+                _seed_first_supplier_quote_and_customs_documents(runtime)
 
                 operator_frame.get_by_role("button", name="Реестр поставок").click()
                 expect(operator_frame.locator("#shipmentRegistryTitle")).to_be_visible(timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("A. Паспорт поставки", timeout=10000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("B. КП логиста", timeout=5000)
-                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("C. Сроки", timeout=5000)
-                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("D. Физика груза", timeout=5000)
-                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("E. Стоимость товара", timeout=5000)
-                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("F. Факт расходов", timeout=5000)
-                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("G. Нормализованные метрики факта", timeout=5000)
-                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("H. Документы", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("C. Нормализованные метрики по КП", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("D. Сроки", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("E. Физика груза", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("F. Стоимость товара", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("G. Факт расходов", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("H. Нормализованные метрики факта / по ДТ", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("I. Документы", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("26GN390", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: доставка+таможня, ₽/шт", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("факт доставка+таможня ₽/шт", timeout=5000)
@@ -548,10 +567,13 @@ def main() -> None:
                 expect(operator_frame.locator("#shipmentRegistryCompareButton")).to_be_enabled(timeout=5000)
                 expense_select = operator_frame.locator("[data-shipment-registry-expenses]").first
                 expect(expense_select).to_have_value("false")
+                expect(operator_frame.locator(".shipment-registry-cell-main.is-expenses-partial").first).to_be_visible(timeout=5000)
                 expense_select.select_option("true")
                 expect(operator_frame.locator("#shipmentRegistryMessage")).to_contain_text("Статус полноты расходов сохранён.", timeout=5000)
+                expect(operator_frame.locator(".shipment-registry-cell-main.is-expenses-partial")).to_have_count(0)
                 operator_frame.locator("#shipmentRegistryRefreshButton").click()
                 expect(operator_frame.locator("[data-shipment-registry-expenses]").first).to_have_value("true", timeout=5000)
+                expect(operator_frame.locator(".shipment-registry-cell-main.is-expenses-partial")).to_have_count(0)
                 operator_frame.locator("[data-shipment-registry-detail]").first.click()
                 expect(operator_frame.locator("#shipmentRegistryDetailBlock")).to_be_visible(timeout=10000)
                 detail_frame = operator_frame.frame_locator("iframe[title='Детализация поставки']")
@@ -604,7 +626,7 @@ def main() -> None:
                 expect(supplier_page.get_by_role("button", name="Проверить цены")).to_have_count(0)
                 expect(supplier_page.locator(".registry-wrap thead")).to_contain_text("预估成本 / Est. cost / Ориент. себестоимость, ₽/шт")
                 expect(supplier_page.get_by_text("26GN390")).to_be_visible()
-                expect(supplier_page.locator("#shipmentRows")).to_contain_text("25,45", timeout=5000)
+                expect(supplier_page.locator("#shipmentRows")).to_contain_text(re.compile(r"10\s*560,42"), timeout=5000)
                 expect(supplier_page.locator("[data-order-status-shipment]")).to_have_count(0)
                 frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first.locator("[data-delete-shipment]").click()
                 expect(frame.locator("[data-delete-confirmation]")).to_be_visible()
@@ -805,6 +827,181 @@ def _seed_first_supplier_factual_expense(runtime: RegistryUploadDbBackedRuntime,
                 "confidence": 1.0,
                 "raw": {},
             }
+        ],
+    )
+
+
+def _seed_first_supplier_quote_and_customs_documents(runtime: RegistryUploadDbBackedRuntime) -> None:
+    shipments = runtime.list_supplier_shipments()
+    if not shipments:
+        raise AssertionError("cannot seed quote/customs documents without a supplier shipment")
+    shipment_id = str(shipments[0].get("shipment_id") or "")
+    if not shipment_id:
+        raise AssertionError(f"cannot seed quote/customs documents for shipment without id: {shipments[0]}")
+    runtime.save_supplier_financial_document(
+        document={
+            "document_id": f"fdoc_{shipment_id}_browser_quote",
+            "supplier_order_id": shipment_id,
+            "document_type": "logistics_quote",
+            "original_filename": "browser-quote.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": "",
+            "uploaded_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+            "parse_status": "parsed",
+            "vendor": "Browser Logistics",
+            "document_number": "BROWSER-QUOTE",
+            "document_date": "2026-05-14",
+            "currency": "USD",
+            "total_amount": 300.0,
+            "total_amount_rub": 22500.0,
+            "cbr_usd_rate_value": 75.0,
+            "normalized_parse": {
+                "document_type": "logistics_quote",
+                "quote_date": "2026-05-14",
+                "gross_weight_kg": 100.0,
+                "volume_m3": 1.0,
+                "estimated_cargo_value_usd": 1000.0,
+                "estimated_cargo_value_cny": 7000.0,
+                "delivery_days_min": 25,
+                "delivery_days_max": 30,
+                "quote_required_amounts_complete": True,
+                "quote_missing_required_amounts": [],
+            },
+            "raw_parse": {},
+            "parser_version": "browser-smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        expense_lines=[
+            {
+                "line_id": f"fline_{shipment_id}_browser_quote_delivery",
+                "financial_document_id": f"fdoc_{shipment_id}_browser_quote",
+                "supplier_order_id": shipment_id,
+                "sort_order": 1,
+                "category": "delivery_cost",
+                "stage": "quote",
+                "description": "Browser smoke quote delivery",
+                "amount": 100.0,
+                "currency": "USD",
+                "amount_rub": 7500.0,
+                "vat_rate": None,
+                "vat_amount_rub": None,
+                "included_in_logistics_efficiency": True,
+                "included_in_customs_total": False,
+                "status": "parsed",
+                "confidence": 1.0,
+                "raw": {},
+            },
+            {
+                "line_id": f"fline_{shipment_id}_browser_quote_customs",
+                "financial_document_id": f"fdoc_{shipment_id}_browser_quote",
+                "supplier_order_id": shipment_id,
+                "sort_order": 2,
+                "category": "customs_payments_and_fees",
+                "stage": "quote",
+                "description": "Browser smoke quote customs",
+                "amount": 200.0,
+                "currency": "USD",
+                "amount_rub": 15000.0,
+                "vat_rate": None,
+                "vat_amount_rub": None,
+                "included_in_logistics_efficiency": False,
+                "included_in_customs_total": True,
+                "status": "parsed",
+                "confidence": 1.0,
+                "raw": {},
+            },
+        ],
+    )
+    runtime.save_supplier_financial_document(
+        document={
+            "document_id": f"fdoc_{shipment_id}_browser_customs",
+            "supplier_order_id": shipment_id,
+            "document_type": "customs_declaration",
+            "original_filename": "browser-customs.pdf",
+            "stored_file_path": "",
+            "file_content_type": "application/pdf",
+            "file_sha256": "",
+            "uploaded_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+            "parse_status": "parsed",
+            "vendor": "ФТС",
+            "document_number": "BROWSER-CUSTOMS",
+            "document_date": "2026-05-22",
+            "currency": "RUB",
+            "total_amount": 600.0,
+            "total_amount_rub": 600.0,
+            "normalized_parse": {
+                "document_type": "customs_declaration",
+                "declaration_date": "2026-05-22",
+                "gross_weight_kg": 120.0,
+                "total_customs_value_rub": 10000.0,
+            },
+            "raw_parse": {},
+            "parser_version": "browser-smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        expense_lines=[
+            {
+                "line_id": f"fline_{shipment_id}_browser_customs_fee",
+                "financial_document_id": f"fdoc_{shipment_id}_browser_customs",
+                "supplier_order_id": shipment_id,
+                "sort_order": 1,
+                "category": "customs_fee_1010",
+                "stage": "fact",
+                "description": "Browser smoke customs fee",
+                "amount": 100.0,
+                "currency": "RUB",
+                "amount_rub": 100.0,
+                "vat_rate": None,
+                "vat_amount_rub": None,
+                "included_in_logistics_efficiency": False,
+                "included_in_customs_total": True,
+                "status": "parsed",
+                "confidence": 1.0,
+                "raw": {},
+            },
+            {
+                "line_id": f"fline_{shipment_id}_browser_customs_duty",
+                "financial_document_id": f"fdoc_{shipment_id}_browser_customs",
+                "supplier_order_id": shipment_id,
+                "sort_order": 2,
+                "category": "import_duty_2010",
+                "stage": "fact",
+                "description": "Browser smoke import duty",
+                "amount": 200.0,
+                "currency": "RUB",
+                "amount_rub": 200.0,
+                "vat_rate": None,
+                "vat_amount_rub": None,
+                "included_in_logistics_efficiency": False,
+                "included_in_customs_total": True,
+                "status": "parsed",
+                "confidence": 1.0,
+                "raw": {},
+            },
+            {
+                "line_id": f"fline_{shipment_id}_browser_customs_vat",
+                "financial_document_id": f"fdoc_{shipment_id}_browser_customs",
+                "supplier_order_id": shipment_id,
+                "sort_order": 3,
+                "category": "import_vat_5010",
+                "stage": "fact",
+                "description": "Browser smoke import VAT",
+                "amount": 300.0,
+                "currency": "RUB",
+                "amount_rub": 300.0,
+                "vat_rate": None,
+                "vat_amount_rub": None,
+                "included_in_logistics_efficiency": False,
+                "included_in_customs_total": True,
+                "status": "parsed",
+                "confidence": 1.0,
+                "raw": {},
+            },
         ],
     )
 

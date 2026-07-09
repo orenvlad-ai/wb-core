@@ -167,8 +167,11 @@
     tr[data-row] { cursor: pointer; }
     tr[data-row]:hover td { background: rgba(167, 139, 250, 0.08); }
     tr[data-row].is-active td {
-      background: rgba(56, 189, 248, 0.12);
-      box-shadow: inset 3px 0 0 rgba(56, 189, 248, 0.78);
+      background: rgba(139, 92, 246, 0.14);
+      box-shadow: none;
+    }
+    tr[data-row].is-active:hover td {
+      background: rgba(139, 92, 246, 0.18);
     }
     .exact-cost-complete { color: var(--success); font-weight: 800; }
     .exact-cost-incomplete { color: var(--warning); font-weight: 800; }
