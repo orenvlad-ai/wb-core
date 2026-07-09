@@ -5273,7 +5273,9 @@
       const STOCK_REPORT_TABLE_COLUMNS = [
         { key: "identity_label", label: "SKU", title: "SKU", kind: "string", required: true, defaultVisible: true },
         { key: "promotion_participation", label: "Акция", title: "Участие в акции", kind: "promo", defaultVisible: true },
-        { key: "stock_total", label: "Ост. всего", title: "Остаток всего", kind: "number", format: "stock", defaultVisible: true },
+        { key: "wb_supplies_inbound_qty", label: "поставки ВБ", title: "Поставки ВБ", kind: "number", format: "stock", defaultVisible: true },
+        { key: "stock_ff", label: "ост. ФФ", title: "Остаток ФФ", kind: "number", format: "stock", defaultVisible: true },
+        { key: "stock_wb", label: "ост. ВБ", title: "Остаток ВБ", kind: "number", format: "stock", defaultVisible: true },
         { key: "zero_district_count", label: "Ноль", title: "Ноль в округах", kind: "number", format: "integer", defaultVisible: true },
         ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({
           key: "stock:" + item.metric_key,

@@ -88,7 +88,9 @@ def main() -> None:
         "Столбцы",
         "Столбцы: база",
         "Настройте SKU, период и столбцы, затем нажмите «Рассчитать».",
-        "Ост. всего",
+        "поставки ВБ",
+        "ост. ФФ",
+        "ост. ВБ",
         "Дн. всего",
         "Прод./дн.",
         "stock-report-table",
@@ -296,7 +298,7 @@ def main() -> None:
     print("reports_ui_sections: ok -> Обновление данных / Поставки / Отчёты")
     print("reports_ui_subsections: ok -> daily / stock / plan")
     print("reports_ui_plan_baseline_controls: ok -> template / upload / status")
-    print("reports_ui_stock_table: ok -> period input, sortable table, promo column, no old low-stock list")
+    print("reports_ui_stock_table: ok -> period input, sortable table, promo/WB/FF columns, no old low-stock list")
     print("reports_ui_heading_dedup: ok -> no panel-body h1 duplicates")
 
 

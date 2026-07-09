@@ -14,6 +14,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.ff_stock_ledger import (
+    FF_STOCK_OPERATION_MANUAL_RECEIPT,
+    FF_STOCK_SOURCE_MANUAL_EXCEL,
+)
 from packages.application.sheet_vitrina_v1_stock_report import (
     STOCK_REPORT_DISTRICTS,
     SheetVitrinaV1StockReportBlock,
@@ -64,6 +68,8 @@ def main() -> None:
         metric_labels = {item.metric_key: item.label_ru for item in current_state.metrics_v2 if item.enabled}
         _seed_nomenclature(runtime, nm_ids[0])
         _seed_sales_history(runtime, nm_ids)
+        _seed_wb_supplies(runtime, nm_ids)
+        _seed_ff_stock_balances(runtime, nm_ids)
         for snapshot_date in ["2026-04-15", "2026-04-16", "2026-04-17", "2026-04-18"]:
             runtime.save_sheet_vitrina_ready_snapshot(
                 current_state=current_state,
@@ -96,6 +102,10 @@ def main() -> None:
             raise AssertionError(f"stock report must disclose persisted ready snapshot source, got {source_of_truth}")
         if source_of_truth.get("temporal_slot") != "yesterday_closed" or source_of_truth.get("slot_date") != "2026-04-18":
             raise AssertionError(f"stock report must read yesterday_closed for the selected date, got {source_of_truth}")
+        if source_of_truth.get("wb_supplies_excluded_status_ids") != [1, 2, 5]:
+            raise AssertionError(f"stock report must disclose WB supply status exclusions, got {source_of_truth}")
+        if source_of_truth.get("stock_ff_source") != "ff_stock_ledger current balances":
+            raise AssertionError(f"stock report must disclose ФФ ledger source, got {source_of_truth}")
 
         district_map = {
             item["metric_key"]: item["label"]
@@ -120,6 +130,15 @@ def main() -> None:
             raise AssertionError(f"nomenclature name must enrich identity when active item exists, got {first_row}")
         if first_row["stock_total"] != 150.0:
             raise AssertionError(f"stock_total must come from yesterday_closed, not today_current, got {first_row}")
+        if first_row["stock_wb"] != 150.0:
+            raise AssertionError(f"stock_wb alias must preserve current stock_total semantics, got {first_row}")
+        if first_row["wb_supplies_inbound_qty"] != 48.0:
+            raise AssertionError(
+                "WB supplies inbound must count statuses 3/4/6 and other non-excluded statuses, "
+                f"excluding 1/2/5 and excluded labels, got {first_row}"
+            )
+        if first_row["stock_ff"] != 33.0:
+            raise AssertionError(f"stock_ff must come from current ФФ ledger balance, got {first_row}")
         if first_row["zero_district_count"] != 1:
             raise AssertionError(f"zero_district_count must count numeric zero only, got {first_row}")
         if first_row["promotion_participation"] is not True or first_row["promotion_participation_label"] != "Да":
@@ -149,12 +168,22 @@ def main() -> None:
             raise AssertionError(f"promo_participation 0 must map to Нет, got {second_row}")
         if second_row["zero_district_count"] != 1:
             raise AssertionError(f"numeric zero in one district must be counted once, got {second_row}")
+        if second_row["wb_supplies_inbound_qty"] != 5.0 or second_row["stock_ff"] != -4.0:
+            raise AssertionError(f"second row must expose WB inbound and negative ФФ ledger balance, got {second_row}")
 
         third_row = rows[2]
         if third_row["promotion_participation"] is not None or third_row["promotion_participation_label"] != "н/д":
             raise AssertionError(f"missing promo metric must stay unavailable, got {third_row}")
         if third_row["avg_sales_per_day"] is not None or third_row["days_left_total"] is not None:
             raise AssertionError(f"missing/zero denominator must keep API null, got {third_row}")
+        if third_row["wb_supplies_inbound_qty"] != 0.0 or third_row["stock_ff"] != 0.0:
+            raise AssertionError(f"missing WB/FF rows must render as numeric zero, got {third_row}")
+
+        wb_summary = payload.get("wb_supplies_inbound_summary") or {}
+        if wb_summary.get("records_excluded_by_status") != 4:
+            raise AssertionError(f"WB summary must exclude accepted/planned/unplanned statuses and labels, got {wb_summary}")
+        if wb_summary.get("included_status_ids") != [3, 4, 6, 99]:
+            raise AssertionError(f"WB summary must include every non-excluded status id, got {wb_summary}")
 
         period_2_payload = SheetVitrinaV1StockReportBlock(
             runtime=runtime,
@@ -201,6 +230,8 @@ def main() -> None:
         print("stock_report_status: ok ->", payload["status"])
         print("stock_report_rows: ok ->", payload["row_count"], "active SKU")
         print("stock_report_promo: ok -> Да / Нет / н/д")
+        print("stock_report_wb_supplies: ok -> status exclusions 1/2/5, qty", first_row["wb_supplies_inbound_qty"])
+        print("stock_report_stock_ff: ok -> ledger qty", first_row["stock_ff"])
         print("stock_report_demand: ok -> period 3 avg", first_row["avg_sales_per_day"])
         print("stock_report_district_days: ok -> central", central["days_left"])
         print("stock_report_override: ok ->", override_payload["report_date"])
@@ -265,6 +296,76 @@ def _seed_sales_history(runtime: RegistryUploadDbBackedRuntime, nm_ids: list[int
                 items=items,
             ),
         )
+
+
+def _seed_ff_stock_balances(runtime: RegistryUploadDbBackedRuntime, nm_ids: list[int]) -> None:
+    runtime.create_ff_stock_operation(
+        operation_id="stock_report_ff_seed",
+        operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
+        source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+        source_key="stock_report_smoke_ff_seed",
+        source_object_id="stock_report_smoke_ff_seed",
+        source_object_label="stock report smoke FF balance seed",
+        created_at=CAPTURED_AT,
+        created_by="smoke",
+        lines=[
+            {
+                "nm_id": nm_ids[0],
+                "sku": "alpha",
+                "nomenclature_name": "Nomenclature Alpha",
+                "quantity_delta": 33.0,
+            },
+            {
+                "nm_id": nm_ids[1],
+                "sku": "beta",
+                "quantity_delta": -4.0,
+            },
+        ],
+    )
+
+
+def _seed_wb_supplies(runtime: RegistryUploadDbBackedRuntime, nm_ids: list[int]) -> None:
+    rows = [
+        _wb_supply_row("wb-status-3", 3, "Отгрузка разрешена", [{"nmID": nm_ids[0], "quantity": 7}, {"nmID": nm_ids[1], "quantity": 5}]),
+        _wb_supply_row("wb-status-4", 4, "Идёт приёмка", [{"nmID": nm_ids[0], "quantity": 11}]),
+        _wb_supply_row("wb-status-6", 6, "Отгружено на воротах", [{"nmID": nm_ids[0], "quantity": 13}]),
+        _wb_supply_row("wb-status-99", 99, "На сортировке", [{"nmID": nm_ids[0], "quantity": 17}]),
+        _wb_supply_row("wb-status-1", 1, "Не запланировано", [{"nmID": nm_ids[0], "quantity": 100}]),
+        _wb_supply_row("wb-status-2", 2, "Запланировано", [{"nmID": nm_ids[0], "quantity": 100}]),
+        _wb_supply_row("wb-status-5", 5, "Принято", [{"nmID": nm_ids[0], "quantity": 100}]),
+        _wb_supply_row("wb-status-label-excluded", None, "Незапланировано", [{"nmID": nm_ids[0], "quantity": 100}]),
+    ]
+    runtime.save_wb_supply_rows(
+        rows=rows,
+        warehouses=[{"warehouse_id": "507", "warehouse_name": "Коледино"}],
+        synced_at=CAPTURED_AT,
+    )
+
+
+def _wb_supply_row(
+    supply_id: str,
+    status_id: int | None,
+    status_label: str,
+    raw_goods: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "supply_id": supply_id,
+        "cache_key": supply_id,
+        "wb_supply_id": supply_id,
+        "preorder_id": "pre-" + supply_id,
+        "number_label": supply_id,
+        "status_id": status_id,
+        "status_label": status_label,
+        "warehouse_id": "507",
+        "warehouse_name": "Коледино",
+        "warehouse_display": "Коледино",
+        "supply_date": "2026-04-19",
+        "quantity_for_size_filter": sum(float(item.get("quantity") or 0.0) for item in raw_goods),
+        "raw_list": {"supplyID": supply_id, "statusID": status_id, "supplyDate": "2026-04-19"},
+        "raw_detail": {"warehouseID": 507, "warehouseName": "Коледино"},
+        "raw_goods": raw_goods,
+        "raw_package": [],
+    }
 
 
 def _closed_sku_values(snapshot_date: str, nm_ids: list[int]) -> dict[int, dict[str, float]]:

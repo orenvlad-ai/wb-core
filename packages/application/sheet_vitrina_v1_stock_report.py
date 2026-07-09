@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from packages.application.demand_estimation import (
     estimate_availability_adjusted_demand,
     parse_sales_avg_period_days,
     sales_lookup_days as calculate_sales_lookup_days,
 )
+from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.factory_order_sales_history import (
     SALES_HISTORY_SOURCE_KEY,
     describe_runtime_sales_history_coverage,
@@ -29,6 +30,21 @@ TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 STOCK_ALERT_THRESHOLD = 50.0
 PROMO_PARTICIPATION_METRIC_KEY = "promo_participation"
 EPS = 1e-9
+WB_SUPPLY_EXCLUDED_STATUS_IDS = {1, 2, 5}
+WB_SUPPLY_STATUS_LABELS_RU = {
+    1: "Не запланировано",
+    2: "Запланировано",
+    3: "Отгрузка разрешена",
+    4: "Идёт приёмка",
+    5: "Принято",
+    6: "Отгружено на воротах",
+}
+WB_SUPPLY_EXCLUDED_STATUS_LABELS = {
+    "принято",
+    "запланировано",
+    "не запланировано",
+    "незапланировано",
+}
 STOCK_REPORT_DISTRICTS = (
     ("stock_ru_central", "Центральный"),
     ("stock_ru_northwest", "Северо-Западный"),
@@ -42,6 +58,9 @@ REPORT_NOTES = (
     "Строки отчёта строятся по всем active SKU из current config_v2; legacy threshold <50 больше не является критерием включения.",
     "Период усреднения продаж означает целевое число валидных торговых дней; отчёт читает только persisted sales_funnel_history.",
     "Участие в акции читается из canonical metric promo_participation: numeric >0 = Да, numeric 0 = Нет, missing = н/д.",
+    "Поставки ВБ считаются из current WB supplies cache по goods composition nmId -> quantity; исключены только статусы 1/2/5 = Не запланировано/Запланировано/Принято.",
+    "Ост. ФФ читается из server-owned ФФ stock ledger current balances по active SKU.",
+    "Ост. ВБ = прежний stock_total из WB stocks ready snapshot; semantics данных не меняется.",
     "Дней по округам считается по positive stock depletion между consecutive persisted ready snapshots; restock/increase и gaps не превращаются в расход.",
     "Merged bucket `ДВ и Сибирь` целиком исключён из текущего report contour: current truth не делит его на отдельный Дальний Восток и Сибирь.",
 )
@@ -135,6 +154,15 @@ class SheetVitrinaV1StockReportBlock:
                 "temporal_slot": TEMPORAL_SLOT_YESTERDAY_CLOSED,
                 "slot_date": effective_as_of_date,
                 "sales_history_source": SALES_HISTORY_SOURCE_KEY,
+                "wb_supplies_source": "sheet_vitrina_v1_wb_supplies runtime cache",
+                "wb_supplies_quantity_source": "raw_goods nmId -> quantity",
+                "wb_supplies_excluded_status_ids": sorted(WB_SUPPLY_EXCLUDED_STATUS_IDS),
+                "wb_supplies_excluded_status_labels": [
+                    WB_SUPPLY_STATUS_LABELS_RU[1],
+                    WB_SUPPLY_STATUS_LABELS_RU[2],
+                    WB_SUPPLY_STATUS_LABELS_RU[5],
+                ],
+                "stock_ff_source": "ff_stock_ledger current balances",
                 "district_burn_source": "persisted_ready_snapshot_consecutive_depletion",
             },
         }
@@ -198,7 +226,10 @@ class SheetVitrinaV1StockReportBlock:
 
         active_items = _active_config_items(current_state.config_v2)
         active_nm_ids = [int(item.nm_id) for item in active_items]
+        active_sku_pairs = [(int(item.nm_id), str(getattr(item, "display_name"))) for item in active_items]
         nomenclature_by_nm = _load_active_nomenclature_by_nm(self.runtime)
+        wb_supplies_projection = _load_wb_supplies_inbound_by_nm(self.runtime, active_nm_ids)
+        ff_stock_by_nm = _load_ff_stock_balances_by_nm(self.runtime, active_sku_pairs)
         demand_reference_date = date.fromisoformat(closed_view.slot_date) + timedelta(days=1)
         sales_window = _load_persisted_order_count_samples(
             runtime=self.runtime,
@@ -282,6 +313,9 @@ class SheetVitrinaV1StockReportBlock:
                     "active_order": active_order,
                     "promotion_participation": promotion_payload["value"],
                     "promotion_participation_label": promotion_payload["label"],
+                    "wb_supplies_inbound_qty": float(wb_supplies_projection["quantity_by_nm_id"].get(nm_id, 0.0)),
+                    "stock_ff": float(ff_stock_by_nm.get(nm_id, 0.0)),
+                    "stock_wb": None if stock_total is None else float(stock_total),
                     "stock_total": None if stock_total is None else float(stock_total),
                     "zero_district_count": zero_district_count,
                     "avg_sales_per_day": avg_sales_per_day,
@@ -298,6 +332,19 @@ class SheetVitrinaV1StockReportBlock:
                             "coverage_snapshot_count": sales_window.coverage_snapshot_count,
                         },
                         "promotion": promotion_payload["diagnostics"],
+                        "wb_supplies": {
+                            "source": "wb_supplies_cache",
+                            "excluded_status_ids": sorted(WB_SUPPLY_EXCLUDED_STATUS_IDS),
+                            "quantity": float(wb_supplies_projection["quantity_by_nm_id"].get(nm_id, 0.0)),
+                        },
+                        "stock_ff": {
+                            "source": "ff_stock_ledger",
+                            "quantity": float(ff_stock_by_nm.get(nm_id, 0.0)),
+                        },
+                        "stock_wb": {
+                            "source": "persisted_ready_snapshot.stock_total",
+                            "metric_key": "stock_total",
+                        },
                     },
                 }
             )
@@ -329,6 +376,7 @@ class SheetVitrinaV1StockReportBlock:
                 "coverage_latest_date": sales_window.coverage_latest_date,
                 "coverage_snapshot_count": sales_window.coverage_snapshot_count,
             },
+            "wb_supplies_inbound_summary": wb_supplies_projection["summary"],
             "source_of_truth": {
                 **base_payload["source_of_truth"],
                 "slot_date": closed_view.slot_date,
@@ -434,6 +482,93 @@ def _load_active_nomenclature_by_nm(runtime: RegistryUploadDbBackedRuntime) -> d
     return by_nm
 
 
+def _load_ff_stock_balances_by_nm(
+    runtime: RegistryUploadDbBackedRuntime,
+    active_skus: list[tuple[int, str]],
+) -> dict[int, float]:
+    rows = FfStockLedgerBlock(runtime=runtime).current_balance_rows_for_active_skus(active_skus)
+    balances: dict[int, float] = {}
+    for row in rows:
+        nm_id = _optional_int(row.get("nm_id"))
+        if nm_id is None:
+            continue
+        balances[nm_id] = float(_optional_number(row.get("current_stock_ff")) or 0.0)
+    return balances
+
+
+def _load_wb_supplies_inbound_by_nm(
+    runtime: RegistryUploadDbBackedRuntime,
+    active_nm_ids: list[int],
+) -> dict[str, Any]:
+    active_set = {int(nm_id) for nm_id in active_nm_ids}
+    quantity_by_nm_id = {int(nm_id): 0.0 for nm_id in active_nm_ids}
+    summary: dict[str, Any] = {
+        "source": "sheet_vitrina_v1_wb_supplies runtime cache",
+        "quantity_source": "raw_goods nmId -> quantity",
+        "excluded_status_ids": sorted(WB_SUPPLY_EXCLUDED_STATUS_IDS),
+        "excluded_status_labels": [
+            WB_SUPPLY_STATUS_LABELS_RU[1],
+            WB_SUPPLY_STATUS_LABELS_RU[2],
+            WB_SUPPLY_STATUS_LABELS_RU[5],
+        ],
+        "records_total": 0,
+        "records_included": 0,
+        "records_excluded_by_status": 0,
+        "records_without_goods": 0,
+        "goods_rows_counted": 0,
+        "goods_rows_skipped": 0,
+        "included_status_ids": [],
+        "unknown_status_records": 0,
+    }
+    included_status_ids: set[int] = set()
+    try:
+        records = runtime.list_wb_supplies_cache_records()
+    except Exception as exc:
+        summary["status"] = "unavailable"
+        summary["reason"] = str(exc)
+        return {"quantity_by_nm_id": quantity_by_nm_id, "summary": summary}
+    summary["status"] = "available"
+    summary["records_total"] = len(records)
+    for record in records:
+        normalized = record.get("normalized") if isinstance(record.get("normalized"), Mapping) else {}
+        status_id = _optional_int(
+            _first_value(normalized, "status_id", "statusID", "statusId")
+            if isinstance(normalized, Mapping)
+            else None
+        )
+        status_label = str(
+            _first_value(normalized, "status_label", "statusLabel", "status")
+            or _wb_supply_status_label(status_id)
+        )
+        if _wb_supply_status_is_excluded(status_id, status_label):
+            summary["records_excluded_by_status"] += 1
+            continue
+        summary["records_included"] += 1
+        if status_id is None:
+            summary["unknown_status_records"] += 1
+        else:
+            included_status_ids.add(status_id)
+        raw_goods = record.get("raw_goods")
+        if not isinstance(raw_goods, list) and isinstance(normalized, Mapping):
+            raw_goods = normalized.get("raw_goods")
+        if not isinstance(raw_goods, list) or not raw_goods:
+            summary["records_without_goods"] += 1
+            continue
+        for goods_row in raw_goods:
+            if not isinstance(goods_row, Mapping):
+                summary["goods_rows_skipped"] += 1
+                continue
+            nm_id = _optional_int(_first_value(goods_row, "nmID", "nmId", "nm_id", "nm"))
+            quantity = _optional_number(_first_value(goods_row, "quantity", "qty"))
+            if nm_id is None or nm_id not in active_set or quantity is None or quantity <= 0:
+                summary["goods_rows_skipped"] += 1
+                continue
+            quantity_by_nm_id[nm_id] = quantity_by_nm_id.get(nm_id, 0.0) + float(quantity)
+            summary["goods_rows_counted"] += 1
+    summary["included_status_ids"] = sorted(included_status_ids)
+    return {"quantity_by_nm_id": quantity_by_nm_id, "summary": summary}
+
+
 def _optional_int(value: Any) -> int | None:
     try:
         if value in ("", None):
@@ -441,6 +576,39 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        if value in ("", None):
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric
+
+
+def _first_value(mapping: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping and mapping.get(key) not in (None, ""):
+            return mapping.get(key)
+    return None
+
+
+def _wb_supply_status_label(status_id: int | None) -> str:
+    if status_id is None:
+        return ""
+    return WB_SUPPLY_STATUS_LABELS_RU.get(status_id, f"Статус {status_id}")
+
+
+def _normalize_status_label(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().replace("ё", "е").split())
+
+
+def _wb_supply_status_is_excluded(status_id: int | None, status_label: str) -> bool:
+    if status_id in WB_SUPPLY_EXCLUDED_STATUS_IDS:
+        return True
+    return _normalize_status_label(status_label) in WB_SUPPLY_EXCLUDED_STATUS_LABELS
 
 
 def _load_persisted_order_count_samples(
