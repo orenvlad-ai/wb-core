@@ -37,6 +37,8 @@ INPUT_BUNDLE_FIXTURE = (
 )
 NOW = datetime(2026, 4, 18, 9, 0, tzinfo=timezone.utc)
 ACTIVATED_AT = "2026-04-18T09:00:00Z"
+AFTER_ACTIVATION = "2026-04-18T09:01:00Z"
+BEFORE_ACTIVATION = "2026-04-18T08:59:59Z"
 XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -82,6 +84,16 @@ def main() -> None:
         _seed_nomenclature(runtime, active_nm_ids)
         _seed_sales_history(runtime, active_nm_ids)
         _seed_stock_history(runtime, active_nm_ids)
+
+        cold_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "cold-runtime")
+        cold_runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
+        _seed_nomenclature(cold_runtime, active_nm_ids)
+        cold_block = FfStockLedgerBlock(runtime=cold_runtime, timestamp_factory=lambda: ACTIVATED_AT)
+        cold_skip = cold_block.record_wb_supply_debit(_wb_record("wb-cold-ledger", 5, second_nm_id, 1))
+        _assert(
+            cold_skip and cold_skip.get("skip_reason") == "wb_supply_ledger_not_activated",
+            f"WB auto writeoff must wait for opening receipt/activation, got {cold_skip}",
+        )
 
         block = FfStockLedgerBlock(runtime=runtime, timestamp_factory=lambda: ACTIVATED_AT)
         barcode = f"460{probe_nm_id}"
@@ -154,6 +166,19 @@ def main() -> None:
             _assert(result and not result.get("idempotent"), f"WB status {status_id} must debit ФФ")
             _assert(repeat and repeat.get("idempotent"), f"WB status {status_id} debit must be idempotent")
         _assert(_balance(block, second_nm_id) == 6.0, "WB debits must subtract supply composition quantity")
+        historical_debit = block.record_wb_supply_debit(
+            _wb_record("wb-before-ledger", 5, second_nm_id, 1, source_created_at=BEFORE_ACTIVATION)
+        )
+        _assert(
+            historical_debit and historical_debit.get("skip_reason") == "wb_supply_before_ledger_activation",
+            f"historical WB supply must not backfill into activated ledger, got {historical_debit}",
+        )
+        oversized_debit = block.record_wb_supply_debit(_wb_record("wb-too-large", 5, second_nm_id, 100))
+        _assert(
+            oversized_debit and oversized_debit.get("skip_reason") == "wb_supply_would_make_negative_balance",
+            f"WB auto writeoff must not create negative balance, got {oversized_debit}",
+        )
+        _assert(_balance(block, second_nm_id) == 6.0, "skipped WB debits must not change balance")
         doprinato_virtual = block.record_wb_supply_debit(_wb_record("wb-dopr-virtual", 5, second_nm_id, 100, virtual_type_id=5))
         doprinato_label = block.record_wb_supply_debit(_wb_record("wb-dopr-label", 5, second_nm_id, 100, type_label="Допринято"))
         _assert(doprinato_virtual and doprinato_virtual.get("skip_reason"), "virtual_type_id=5 must skip debit")
@@ -196,6 +221,14 @@ def main() -> None:
         ).calculate(_regional_settings(selected_wb_supply_ids=["wb-ledger-overlay"]))
         _assert(regional_result.stock_ff_source == STOCK_FF_SOURCE_LEDGER, "WB regional calculation must keep ledger source")
         _assert(regional_result.summary.total_qty >= 0, "WB regional calculation with ledger source must complete")
+        _assert(
+            any("рекомендации к поставке ограничены доступным ФФ-остатком" in warning for warning in regional_result.warnings),
+            f"WB regional calculation must expose critical ledger stock warning, got {regional_result.warnings}",
+        )
+        _assert(
+            (regional_result.diagnostics.get("stock_ff_source_state") or {}).get("negative_sku_count") >= 1,
+            f"WB regional diagnostics must expose ledger stock state, got {regional_result.diagnostics}",
+        )
         regional_overlay = regional_result.wb_supply_overlay or {}
         regional_overlay_stock = regional_overlay.get("stock_ff", {})
         regional_overlay_projection = regional_overlay.get("wb_regional", {})
@@ -318,6 +351,7 @@ def _wb_record(
     *,
     virtual_type_id: int | None = None,
     type_label: str = "",
+    source_created_at: str = AFTER_ACTIVATION,
 ) -> dict[str, object]:
     return {
         "cache_key": cache_key,
@@ -329,6 +363,8 @@ def _wb_record(
             "status_id": status_id,
             "virtual_type_id": virtual_type_id,
             "type_label": type_label,
+            "source_created_at": source_created_at,
+            "supply_date": source_created_at[:10],
         },
         "raw_goods": [{"nmID": int(nm_id), "quantity": float(quantity)}],
     }

@@ -467,6 +467,7 @@ class WbRegionalSupplyBlock:
                     key: int(settings.lead_time_to_region_days_by_district[key])
                     for key in DISTRICT_KEYS
                 },
+                "stock_ff_source_state": dict(ledger_stock_ff_state) if stock_ff_source == STOCK_FF_SOURCE_LEDGER else {},
                 "wb_supply_overlay": wb_regional_overlay_diagnostics,
             }
         )
