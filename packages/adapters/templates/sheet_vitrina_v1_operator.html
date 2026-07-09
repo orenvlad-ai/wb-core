@@ -801,6 +801,20 @@
       background: var(--control-bg-hover);
     }
 
+    .stock-report-table tbody tr.stock-report-summary-row td {
+      background: var(--panel-subtle);
+      font-weight: 800;
+    }
+
+    .stock-report-table tbody tr.stock-report-summary-row td:first-child {
+      background: var(--panel-subtle);
+    }
+
+    .stock-report-table tbody tr.stock-report-summary-row:hover td,
+    .stock-report-table tbody tr.stock-report-summary-row:hover td:first-child {
+      background: var(--panel-subtle);
+    }
+
     .stock-report-sort-button {
       width: 100%;
       border: 0;
@@ -5285,8 +5299,10 @@
       const STOCK_REPORT_TABLE_COLUMNS = [
         { key: "identity_label", label: "SKU", title: "SKU", kind: "string", required: true, defaultVisible: true },
         { key: "promotion_participation", label: "Акция", title: "Участие в акции", kind: "promo", defaultVisible: true },
-        { key: "wb_supplies_inbound_qty", label: "поставки ВБ", title: "Поставки ВБ", kind: "number", format: "stock", defaultVisible: true },
+        { key: "supplier_production_qty", label: "на произв.", title: "На производстве", kind: "number", format: "stock", defaultVisible: true },
+        { key: "supplier_in_transit_qty", label: "в пути Китай", title: "В пути Китай", kind: "number", format: "stock", defaultVisible: true },
         { key: "stock_ff", label: "ост. ФФ", title: "Остаток ФФ", kind: "number", format: "stock", defaultVisible: true },
+        { key: "wb_supplies_inbound_qty", label: "поставки ВБ", title: "Поставки ВБ", kind: "number", format: "stock", defaultVisible: true },
         { key: "stock_wb", label: "ост. ВБ", title: "Остаток ВБ", kind: "number", format: "stock", defaultVisible: true },
         { key: "zero_district_count", label: "Ноль", title: "Ноль в округах", kind: "number", format: "integer", defaultVisible: true },
         ...STOCK_REPORT_DISTRICT_COLUMNS.map((item) => ({
@@ -7065,6 +7081,71 @@
         return items.sort((left, right) => compareStockReportRows(left, right, column, stockReportSortState.direction));
       }
 
+      function sumStockReportNumber(rows, getter) {
+        let total = 0;
+        let seen = false;
+        (Array.isArray(rows) ? rows : []).forEach((item) => {
+          const value = stockReportNumericValue(getter(item));
+          if (value === null) {
+            return;
+          }
+          total += value;
+          seen = true;
+        });
+        return seen ? total : null;
+      }
+
+      function stockReportDaysLeft(stock, burn) {
+        const stockValue = stockReportNumericValue(stock);
+        const burnValue = stockReportNumericValue(burn);
+        if (stockValue === null || burnValue === null || burnValue <= 0.000000001) {
+          return null;
+        }
+        return stockValue / burnValue;
+      }
+
+      function buildStockReportSummaryRow(rows, fallbackSummaryRow) {
+        const items = Array.isArray(rows) ? rows.filter((item) => item && !item.is_summary) : [];
+        if (!items.length) {
+          return null;
+        }
+        const totalAvgSalesPerDay = sumStockReportNumber(items, (item) => item.avg_sales_per_day);
+        const totalStockWb = sumStockReportNumber(items, (item) => item.stock_wb);
+        const districts = STOCK_REPORT_DISTRICT_COLUMNS.map((districtColumn) => {
+          const stock = sumStockReportNumber(items, (item) => getStockReportDistrict(item, districtColumn.metric_key).stock);
+          const burn = sumStockReportNumber(items, (item) => getStockReportDistrict(item, districtColumn.metric_key).avg_daily_burn);
+          return {
+            metric_key: districtColumn.metric_key,
+            label: districtColumn.title,
+            stock,
+            avg_daily_burn: burn,
+            days_left: stockReportDaysLeft(stock, burn)
+          };
+        });
+        const fallback = fallbackSummaryRow && typeof fallbackSummaryRow === "object" ? fallbackSummaryRow : {};
+        return {
+          ...fallback,
+          is_summary: true,
+          nm_id: null,
+          identity_label: "Итого",
+          display_name: "Итого",
+          nomenclature_name: "",
+          active_order: -1,
+          promotion_participation: null,
+          promotion_participation_label: "—",
+          supplier_production_qty: sumStockReportNumber(items, (item) => item.supplier_production_qty),
+          supplier_in_transit_qty: sumStockReportNumber(items, (item) => item.supplier_in_transit_qty),
+          stock_ff: sumStockReportNumber(items, (item) => item.stock_ff),
+          wb_supplies_inbound_qty: sumStockReportNumber(items, (item) => item.wb_supplies_inbound_qty),
+          stock_wb: totalStockWb,
+          stock_total: totalStockWb,
+          zero_district_count: sumStockReportNumber(items, (item) => item.zero_district_count),
+          avg_sales_per_day: totalAvgSalesPerDay,
+          days_left_total: stockReportDaysLeft(totalStockWb, totalAvgSalesPerDay),
+          districts
+        };
+      }
+
       function formatStockReportNumber(value, formatKind) {
         const numeric = stockReportNumericValue(value);
         if (numeric === null) {
@@ -7106,10 +7187,12 @@
         return "<th aria-sort=\"" + ariaSort + "\" title=\"" + escapeHtml(column.title || column.label) + "\"><button class=\"stock-report-sort-button" + (isActive ? " is-active" : "") + "\" type=\"button\" data-stock-report-sort=\"" + escapeHtml(column.key) + "\">" + escapeHtml(column.label + indicator) + "</button></th>";
       }
 
-      function renderStockReportRows(rows) {
-        const sortedRows = sortedStockReportRows(rows);
+      function renderStockReportRows(rows, summaryRow) {
+        const detailRows = (Array.isArray(rows) ? rows : []).filter((item) => item && !item.is_summary);
+        const sortedRows = sortedStockReportRows(detailRows);
+        const tableRows = summaryRow ? [summaryRow].concat(sortedRows) : sortedRows;
         const visibleColumns = visibleStockReportColumns();
-        if (!Array.isArray(sortedRows) || !sortedRows.length) {
+        if (!tableRows.length) {
           const emptyMessage = stockReportActiveSkus.length
             && stockReportAppliedSkuIds.length
             && stockReportAppliedSkuIds.length < stockReportActiveSkus.length
@@ -7126,8 +7209,8 @@
           visibleColumns.map(stockReportHeaderMarkup).join(""),
           "</tr></thead>",
           "<tbody>",
-          sortedRows.map((item) => [
-            "<tr>",
+          tableRows.map((item) => [
+            "<tr" + (item && item.is_summary ? " class=\"stock-report-summary-row\"" : "") + ">",
             visibleColumns.map((column) => "<td>" + stockReportCellMarkup(item, column) + "</td>").join(""),
             "</tr>"
           ].join("")).join(""),
@@ -7152,7 +7235,7 @@
         stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
         stockReportStatus.className = "section-message";
         stockReportContent.hidden = false;
-        renderStockReportRows(filteredRows);
+        renderStockReportRows(filteredRows, buildStockReportSummaryRow(filteredRows, payload.summary_row));
         renderStockReportNotes(payload.notes);
       }
 

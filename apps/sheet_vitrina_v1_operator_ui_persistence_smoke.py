@@ -205,6 +205,7 @@ class LocalOperatorFixtureServer:
                             "temporal_slot": "yesterday_closed",
                             "slot_date": "2026-04-19",
                             "wb_supplies_source": "sheet_vitrina_v1_wb_supplies runtime cache",
+                            "supplier_shipments_source": "sheet_vitrina_v1_supplier_shipments runtime registry",
                             "stock_ff_source": "ff_stock_ledger current balances",
                         },
                         "row_count": 3,
@@ -216,6 +217,8 @@ class LocalOperatorFixtureServer:
                                 "active_order": 0,
                                 "promotion_participation": True,
                                 "promotion_participation_label": "Да",
+                                "supplier_production_qty": 5.0,
+                                "supplier_in_transit_qty": 2.0,
                                 "wb_supplies_inbound_qty": 9.0,
                                 "stock_ff": 31.0,
                                 "stock_wb": 21.0,
@@ -232,6 +235,8 @@ class LocalOperatorFixtureServer:
                                 "active_order": 1,
                                 "promotion_participation": False,
                                 "promotion_participation_label": "Нет",
+                                "supplier_production_qty": 0.0,
+                                "supplier_in_transit_qty": 3.0,
                                 "wb_supplies_inbound_qty": 0.0,
                                 "stock_ff": 0.0,
                                 "stock_wb": 13.0,
@@ -248,6 +253,8 @@ class LocalOperatorFixtureServer:
                                 "active_order": 2,
                                 "promotion_participation": None,
                                 "promotion_participation_label": "н/д",
+                                "supplier_production_qty": 4.0,
+                                "supplier_in_transit_qty": 0.0,
                                 "wb_supplies_inbound_qty": 4.0,
                                 "stock_ff": -2.0,
                                 "stock_wb": 7.0,
@@ -1301,6 +1308,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("stock report reload must keep manual-calculate idle state before explicit apply")
     page.click("#stockReportApplyButton")
     page.wait_for_function("() => document.querySelectorAll('#stockReportRows .stock-report-table tbody tr').length > 0")
+    if page.locator("#stockReportRows .stock-report-table tbody tr").first.locator("td").first.inner_text().strip() != "Итого":
+        raise AssertionError("stock report must keep Итого as the first rendered table row")
     visible_rows = _visible_stock_report_titles(page)
     if len(visible_rows) < 1:
         raise AssertionError("stock report must render at least one row for the persistence smoke")
@@ -1773,7 +1782,7 @@ def _visible_stock_report_titles(page) -> list[str]:
     return page.evaluate(
         """() => Array.from(document.querySelectorAll('#stockReportRows .stock-report-table tbody tr td:first-child'))
             .map((item) => item.textContent.trim())
-            .filter(Boolean)"""
+            .filter((item) => item && item !== 'Итого')"""
     )
 
 

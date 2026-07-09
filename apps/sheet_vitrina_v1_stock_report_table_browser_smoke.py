@@ -24,6 +24,7 @@ from apps.sheet_vitrina_v1_stock_report_smoke import (  # noqa: E402
     _seed_ff_stock_balances,
     _seed_nomenclature,
     _seed_sales_history,
+    _seed_supplier_shipments,
     _seed_wb_supplies,
 )
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
@@ -82,19 +83,23 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
             if len(stock_report_requests) != 1:
                 raise AssertionError(f"manual calculation must fetch stock-report exactly once, got {stock_report_requests}")
             row_count = page.locator("#stockReportRows tbody tr").count()
-            if row_count < 4:
+            if row_count < 5:
                 raise AssertionError(f"stock report table must render active SKU rows, got {row_count}")
-            for token in ("SKU", "Акция", "поставки ВБ", "ост. ФФ", "ост. ВБ", "Ноль", "Центр", "СЗ", "Прив.", "Урал", "Юг", "Прод./дн.", "Дн. всего"):
+            if _row_cell_text(page, 0, 0) != "Итого":
+                raise AssertionError("stock report table must render Итого as the first body row")
+            for token in ("SKU", "Акция", "на произв.", "в пути Китай", "ост. ФФ", "поставки ВБ", "ост. ВБ", "Ноль", "Центр", "СЗ", "Прив.", "Урал", "Юг", "Прод./дн.", "Дн. всего"):
                 page.locator("#stockReportRows thead", has_text=token).wait_for(timeout=10000)
             header_text = page.locator("#stockReportRows thead").inner_text()
             if "Остаток всего" in header_text or "Ост. всего" in header_text or "Дней: Центральный" in header_text:
                 raise AssertionError(f"stock report table must use short visible labels, got {header_text!r}")
             if not (
-                header_text.find("Акция") < header_text.find("поставки ВБ")
+                header_text.find("Акция") < header_text.find("на произв.")
+                < header_text.find("в пути Китай")
                 < header_text.find("ост. ФФ")
+                < header_text.find("поставки ВБ")
                 < header_text.find("ост. ВБ")
             ):
-                raise AssertionError(f"new WB/FF columns must render immediately after promo column, got {header_text!r}")
+                raise AssertionError(f"stock cycle columns must render immediately after promo column in order, got {header_text!r}")
             if page.locator("#stockReportRows tbody", has_text="Да").count() < 1:
                 raise AssertionError("promotion participation column must render Да")
             if page.locator("#stockReportRows tbody", has_text="Нет").count() < 1:
@@ -124,13 +129,15 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
             if scroll_evidence["headerLeft"] != "0px" or scroll_evidence["cellLeft"] != "0px":
                 raise AssertionError(f"SKU sticky left must be 0px, got {scroll_evidence}")
 
-            before_sort_first = _first_sku_cell_text(page)
+            before_sort_first = _first_detail_sku_cell_text(page)
             page.locator('[data-stock-report-sort="stock_wb"]').click()
             page.wait_for_timeout(250)
             if len(stock_report_requests) != 1:
                 raise AssertionError("stock report sort must re-render locally without fetch")
-            stock_sort_first = _first_sku_cell_text(page)
-            stock_sort_value = _first_row_cell_text(page, 4)
+            if _row_cell_text(page, 0, 0) != "Итого":
+                raise AssertionError("summary row must stay first after stock sort")
+            stock_sort_first = _first_detail_sku_cell_text(page)
+            stock_sort_value = _row_cell_text(page, 1, 6)
             if stock_sort_first == before_sort_first or stock_sort_value != "40":
                 raise AssertionError(
                     "stock_wb ascending sort must reorder rows by raw numeric WB stock; "
@@ -141,13 +148,15 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
             page.wait_for_timeout(250)
             if len(stock_report_requests) != 1:
                 raise AssertionError("stock report promo sort must not fetch")
-            promo_sort_first = _first_sku_cell_text(page)
-            promo_sort_value = _first_row_cell_text(page, 1)
+            if _row_cell_text(page, 0, 0) != "Итого":
+                raise AssertionError("summary row must stay first after promo sort")
+            promo_sort_first = _first_detail_sku_cell_text(page)
+            promo_sort_value = _row_cell_text(page, 1, 1)
             if promo_sort_value != "Нет":
                 raise AssertionError(f"promo ascending sort must put Нет before Да/null, got {promo_sort_first!r} / {promo_sort_value!r}")
             page.locator('[data-stock-report-sort="promotion_participation"]').click()
-            promo_desc_first = _first_sku_cell_text(page)
-            promo_desc_value = _first_row_cell_text(page, 1)
+            promo_desc_first = _first_detail_sku_cell_text(page)
+            promo_desc_value = _row_cell_text(page, 1, 1)
             if promo_desc_value != "Да":
                 raise AssertionError(f"promo descending sort must put Да first, got {promo_desc_first!r} / {promo_desc_value!r}")
             page.wait_for_timeout(250)
@@ -192,12 +201,12 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
     }
 
 
-def _first_sku_cell_text(page: object) -> str:
-    return str(page.locator("#stockReportRows tbody tr").first.locator("td").first.inner_text()).strip()
+def _first_detail_sku_cell_text(page: object) -> str:
+    return _row_cell_text(page, 1, 0)
 
 
-def _first_row_cell_text(page: object, index: int) -> str:
-    return str(page.locator("#stockReportRows tbody tr").first.locator("td").nth(index).inner_text()).strip()
+def _row_cell_text(page: object, row_index: int, cell_index: int) -> str:
+    return str(page.locator("#stockReportRows tbody tr").nth(row_index).locator("td").nth(cell_index).inner_text()).strip()
 
 
 class _StockReportFixtureServer:
@@ -216,6 +225,7 @@ class _StockReportFixtureServer:
         metric_labels = {item.metric_key: item.label_ru for item in current_state.metrics_v2 if item.enabled}
         _seed_nomenclature(runtime, nm_ids[0])
         _seed_sales_history(runtime, nm_ids)
+        _seed_supplier_shipments(runtime, nm_ids)
         _seed_wb_supplies(runtime, nm_ids)
         _seed_ff_stock_balances(runtime, nm_ids)
         for snapshot_date in ["2026-04-15", "2026-04-16", "2026-04-17", "2026-04-18"]:
