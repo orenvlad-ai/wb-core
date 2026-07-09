@@ -174,6 +174,13 @@ class WbSuppliesBlock:
         self._run_lock = threading.Lock()
         self._transit_cost_run_lock = threading.Lock()
 
+    def _ensure_ff_stock_wb_auto_writeoff_checkpoint(self, *, reason: str) -> dict[str, Any]:
+        return self.ff_stock_ledger.ensure_wb_supply_auto_writeoff_checkpoint(
+            self.runtime.list_wb_supplies_cache_records(),
+            reason=reason,
+            created_by="system",
+        )
+
     def list_supplies(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_list_request(params or {})
         rows = self.runtime.list_wb_supplies()
@@ -347,7 +354,11 @@ class WbSuppliesBlock:
             offset=0,
             logs=[_run_log(synced_at, "latest-window sync started")],
         )
+        ff_auto_writeoff_checkpoint: dict[str, Any] = {}
         try:
+            ff_auto_writeoff_checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
+                reason="wb_supplies_incremental_refresh"
+            )
             warehouses = self._fetch_warehouses(warnings)
             list_result = _coerce_list_result(
                 self.source.list_supplies(
@@ -548,6 +559,7 @@ class WbSuppliesBlock:
             "latest_window_only": True,
             "enrich": request["enrich"],
             "ff_stock_debits": ff_stock_debits,
+            "ff_auto_writeoff_checkpoint": ff_auto_writeoff_checkpoint,
             "warnings": warnings,
         }
         return response
@@ -831,6 +843,7 @@ class WbSuppliesBlock:
         }
         if fetched_any or _normalized_row_public_fingerprint(normalized) != _normalized_row_public_fingerprint(next_normalized):
             self.runtime.save_wb_supply_rows(rows=[next_normalized], warehouses=[], synced_at=synced_at)
+        self._ensure_ff_stock_wb_auto_writeoff_checkpoint(reason="wb_supply_detail_enrichment")
         self.ff_stock_ledger.record_wb_supply_debit(next_record)
         return next_record
 
@@ -1059,6 +1072,7 @@ class WbSuppliesBlock:
             "failed_enrich": 0,
         }
         logs = [_run_log(started_at, f"full backfill started at offset {offset}")]
+        self._ensure_ff_stock_wb_auto_writeoff_checkpoint(reason="wb_supplies_full_backfill")
         self.runtime.update_wb_supplies_sync_run(
             run_id,
             status="running",

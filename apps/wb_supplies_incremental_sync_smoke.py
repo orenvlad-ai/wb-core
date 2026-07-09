@@ -152,6 +152,39 @@ class ActiveUpdateSource(IncrementalSource):
         ]
 
 
+class LedgerDebitSource(IncrementalSource):
+    def __init__(self, nm_id: int) -> None:
+        super().__init__()
+        self.nm_id = int(nm_id)
+        self.rows = [
+            {
+                "supplyID": 9101,
+                "preorderID": 9701,
+                "supplyDate": "2026-06-10T14:00:00Z",
+                "updatedDate": "2026-06-10T14:00:00Z",
+                "statusID": 5,
+                "warehouseID": 507,
+                "warehouseName": "Коледино",
+                "quantity": 3,
+            },
+            {
+                "supplyID": 9102,
+                "preorderID": 9702,
+                "supplyDate": "2026-06-10T15:00:03Z",
+                "updatedDate": "2026-06-10T15:00:03Z",
+                "statusID": 5,
+                "warehouseID": 507,
+                "warehouseName": "Коледино",
+                "quantity": 4,
+            },
+        ]
+
+    def fetch_supply_goods(self, supply_id, *, limit=1000, offset=0, is_preorder_id=False):
+        self.goods_calls.append(str(supply_id))
+        row = next(item for item in self.rows if str(item["supplyID"]) == str(supply_id))
+        return [{"nmID": self.nm_id, "quantity": row.get("quantity", 0)}]
+
+
 def main() -> None:
     with TemporaryDirectory(prefix="wb-supplies-incremental-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
@@ -315,6 +348,76 @@ def main() -> None:
         ):
             raise AssertionError(f"explicit missing-critical enrichment must skip already repaired rows, got {explicit_sync}")
 
+    with TemporaryDirectory(prefix="wb-supplies-ledger-checkpoint-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        nm_id = 123456
+        runtime.create_ff_stock_operation(
+            operation_id="ffso_opening_smoke",
+            operation_type="manual_receipt",
+            source_type="manual_excel",
+            source_key="manual_excel:opening-smoke",
+            source_object_id="opening-smoke",
+            source_object_label="opening-smoke.xlsx",
+            created_at="2026-06-10T14:59:00Z",
+            created_by="smoke",
+            lines=[{"nm_id": nm_id, "quantity_delta": 20}],
+        )
+        runtime.save_wb_supply_rows(
+            rows=[
+                {
+                    "supply_id": "9101",
+                    "cache_key": "supply:9101",
+                    "wb_supply_id": "9101",
+                    "preorder_id": "9701",
+                    "number_label": "9101",
+                    "status_id": 5,
+                    "status_label": "Принято",
+                    "warehouse_id": "507",
+                    "warehouse_name": "Коледино",
+                    "supply_date": "2026-06-10T14:00:00Z",
+                    "source_created_at": "2026-06-10T14:00:00Z",
+                    "raw_list": {
+                        "supplyID": 9101,
+                        "preorderID": 9701,
+                        "supplyDate": "2026-06-10T14:00:00Z",
+                        "updatedDate": "2026-06-10T14:00:00Z",
+                        "statusID": 5,
+                    },
+                    "raw_goods": [{"nmID": nm_id, "quantity": 3}],
+                    "raw_package": [],
+                }
+            ],
+            warehouses=[{"warehouse_id": "507", "warehouse_name": "Коледино"}],
+            synced_at="2026-06-10T14:58:00Z",
+        )
+        source = LedgerDebitSource(nm_id)
+        block = WbSuppliesBlock(runtime=runtime, source=source, timestamp_factory=_timestamp_factory())
+
+        first = block.sync_supplies({"limit": 1000})
+        first_sync = first.get("sync", {})
+        first_debits = first_sync.get("ff_stock_debits") or {}
+        checkpoint = first_sync.get("ff_auto_writeoff_checkpoint") or {}
+        balance_after_first = _balance(runtime, nm_id)
+        if (
+            checkpoint.get("baseline_record_count") != 1
+            or first_debits.get("created_count") != 1
+            or first_debits.get("skipped_reasons", {}).get("wb_supply_before_auto_writeoff_checkpoint") != 1
+            or balance_after_first != 16.0
+        ):
+            raise AssertionError(
+                f"sync must skip baseline-known WB supply and debit one post-checkpoint supply, "
+                f"got checkpoint={checkpoint} debits={first_debits} balance={balance_after_first}"
+            )
+        operations = runtime.list_ff_stock_operations(limit=20)
+        wb_ops = [item for item in operations if item.get("source_type") == "wb_supply"]
+        if len(wb_ops) != 1 or wb_ops[0].get("source_object_id") != "9102":
+            raise AssertionError(f"only post-checkpoint supply 9102 must create WB debit, got {wb_ops}")
+
+        second = block.sync_supplies({"limit": 1000})
+        second_debits = (second.get("sync") or {}).get("ff_stock_debits") or {}
+        if second_debits.get("created_count") != 0 or _balance(runtime, nm_id) != 16.0:
+            raise AssertionError(f"repeated sync must not duplicate WB debit, got {second_debits}")
+
     print("wb_supplies_incremental_sync_smoke: OK")
 
 
@@ -326,6 +429,14 @@ def _timestamp_factory():
         return f"2026-06-10T15:00:{counter['value']:02d}Z"
 
     return _next
+
+
+def _balance(runtime: RegistryUploadDbBackedRuntime, nm_id: int) -> float:
+    balances = {
+        int(item.get("nm_id") or 0): float(item.get("balance") or 0.0)
+        for item in runtime.list_ff_stock_balances()
+    }
+    return float(balances.get(int(nm_id), 0.0))
 
 
 if __name__ == "__main__":
