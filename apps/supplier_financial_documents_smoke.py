@@ -312,6 +312,27 @@ CN   107.250 ОООО-ОО
 4000 000 96.530
 """
 
+CUSTOMS_WITH_REFERENCED_OLD_DECLARATION_TEXT = """
+ИМ 40 ЭД
+1 1
+321
+CN 6220930.50
+CNY 541962.50 11.4693 010 00
+ИУ 1010-49240.00-643-0000000000
+2010-622093.05-643-0000000000
+5010-1505465.18-643-0000000000
+2176798.23
+04011/2 3 ОТ 02.03.2022 10720010/130226/5011959; СМ.ДОПОЛНЕНИЕ
+РАЗРЕШЕН 030726 ЛНП 036
+10228010/030726/5211187
+ДЕКЛАРАЦИЯ НА ТОВАРЫ
+04031/0 121 от 29.06.2026
+09999/2 2 от 02.03.2022 10720010/130226/5011959
+1 7020008000 С N
+CN   6713.450 ОООО-ОО
+4000 000 6042.160
+"""
+
 BANK_CONTROL_TEXT = """
 Документ сформирован системой дистанционного банковского обслуживания Банка ВТБ (ПАО)
 ВЕДОМОСТЬ БАНКОВСКОГО КОНТРОЛЯ ПО КОНТРАКТУ
@@ -660,6 +681,18 @@ def _assert_parser_smoke() -> None:
     ):
         raise AssertionError(f"customs parser fields mismatch: {customs}")
 
+    customs_with_old_ref = parse_financial_document_text(
+        CUSTOMS_WITH_REFERENCED_OLD_DECLARATION_TEXT,
+        filename="GTD_10228010_030726_5211187.txt",
+    )["normalized_parse"]
+    if (
+        customs_with_old_ref.get("document_type") != "customs_declaration"
+        or customs_with_old_ref.get("declaration_number") != "10228010/030726/5211187"
+        or customs_with_old_ref.get("document_date") != "2026-07-03"
+        or customs_with_old_ref.get("declaration_date") != "2026-07-03"
+    ):
+        raise AssertionError(f"customs parser must prefer header declaration over old referenced DT: {customs_with_old_ref}")
+
     bank_control_payload = parse_financial_document_text(BANK_CONTROL_TEXT, filename="bank-control.txt")
     bank_control = bank_control_payload["normalized_parse"]
     if (
@@ -753,6 +786,8 @@ def _assert_parser_smoke() -> None:
     _assert_new_quote_parser_smoke()
     _assert_bad_quote_rate_guardrail_smoke()
     _assert_registry_lead_time_rows_smoke()
+    _assert_registry_production_lead_time_rows_smoke()
+    _assert_registry_negative_customs_lead_time_smoke()
     _assert_registry_data_source_sections_smoke()
     _assert_approx_landed_cost_summary_smoke()
     _assert_incomplete_quote_summary_smoke()
@@ -1534,6 +1569,8 @@ def _assert_registry_lead_time_rows_smoke() -> None:
     labels = _registry_row_labels(registry, "lead_times")
     if "Срок до ДТ / таможни" not in labels:
         raise AssertionError(f"registry lead-times must expose Срок до ДТ: {labels}")
+    if "Плановый срок производства" not in labels or "Фактический срок производства" not in labels:
+        raise AssertionError(f"registry lead-times must expose production duration rows: {labels}")
     if "Фактический срок доставки" not in labels:
         raise AssertionError(f"registry lead-times must expose actual delivery days: {labels}")
     forbidden = " ".join(labels).lower()
@@ -1554,6 +1591,152 @@ def _assert_registry_lead_time_rows_smoke() -> None:
         raise AssertionError(f"invalid registry dates must render as unavailable: {registry}")
     if len(registry.get("warnings", [])) < 3:
         raise AssertionError(f"invalid registry dates must surface warnings: {registry}")
+
+
+def _assert_registry_production_lead_time_rows_smoke() -> None:
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "production_invoice_start",
+                "header": {
+                    "shipment_id": "production_invoice_start",
+                    "created_at": "2026-05-01T08:00:00Z",
+                    "invoice_date": "2026-05-14",
+                    "shipment_date": "2026-06-15",
+                    "actual_shipment_date": "2026-07-25",
+                },
+                "lines": [],
+                "documents": [],
+                "expense_lines": [],
+                "summary": {},
+            },
+            {
+                "shipment_id": "production_created_fallback",
+                "header": {
+                    "shipment_id": "production_created_fallback",
+                    "created_at": "2026-05-01T08:00:00Z",
+                    "shipment_date": "2026-05-11",
+                    "actual_shipment_date": "2026-05-15",
+                },
+                "lines": [],
+                "documents": [],
+                "expense_lines": [],
+                "summary": {},
+            },
+            {
+                "shipment_id": "production_missing",
+                "header": {"shipment_id": "production_missing"},
+                "lines": [],
+                "documents": [],
+                "expense_lines": [],
+                "summary": {},
+            },
+            {
+                "shipment_id": "production_negative",
+                "header": {
+                    "shipment_id": "production_negative",
+                    "invoice_no": "PROD-NEG",
+                    "invoice_date": "2026-06-20",
+                    "shipment_date": "2026-06-15",
+                    "actual_shipment_date": "2026-06-19",
+                },
+                "lines": [],
+                "documents": [],
+                "expense_lines": [],
+                "summary": {},
+            },
+        ]
+    )
+    if _registry_cell_display(registry, "lead_times", "planned_production_days", "production_invoice_start") != "32 дн.":
+        raise AssertionError(f"planned production must use invoice_date as start when available: {registry}")
+    if _registry_cell_display(registry, "lead_times", "actual_production_days", "production_invoice_start") != "72 дн.":
+        raise AssertionError(f"actual production must use invoice_date as start when available: {registry}")
+    if _registry_cell_display(registry, "lead_times", "planned_production_days", "production_created_fallback") != "10 дн.":
+        raise AssertionError(f"planned production must fall back to created_at start: {registry}")
+    if _registry_cell_display(registry, "lead_times", "actual_production_days", "production_created_fallback") != "14 дн.":
+        raise AssertionError(f"actual production must fall back to created_at start: {registry}")
+    if _registry_cell_display(registry, "lead_times", "planned_production_days", "production_missing") != "—":
+        raise AssertionError(f"missing production source dates must render blank: {registry}")
+    negative_planned = _registry_cell(registry, "lead_times", "planned_production_days", "production_negative")
+    negative_actual = _registry_cell(registry, "lead_times", "actual_production_days", "production_negative")
+    if (
+        negative_planned.get("display") != "—"
+        or negative_planned.get("quality") != "suspicious_negative_duration"
+        or negative_actual.get("display") != "—"
+        or negative_actual.get("quality") != "suspicious_negative_duration"
+    ):
+        raise AssertionError(f"negative production durations must be warning blanks: {registry}")
+    warning_text = " ".join(str(item) for item in registry.get("warnings", []))
+    if "Плановый срок производства" not in warning_text or "Фактический срок производства" not in warning_text:
+        raise AssertionError(f"negative production durations must surface registry warnings: {registry.get('warnings')}")
+
+
+def _assert_registry_negative_customs_lead_time_smoke() -> None:
+    fixed_customs_payload = parse_financial_document_text(
+        CUSTOMS_WITH_REFERENCED_OLD_DECLARATION_TEXT,
+        filename="GTD_10228010_030726_5211187.txt",
+    )
+    fixed_documents, fixed_lines = _summary_documents_and_lines_from_payloads([("customs", fixed_customs_payload)])
+    fixed_shipment = {
+        "header": {
+            "shipment_id": "customs_header_date",
+            "shipment_date": "2026-06-15",
+            "invoice_date": "2026-05-14",
+        },
+        "lines": [],
+    }
+    fixed_registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "customs_header_date",
+                "header": fixed_shipment["header"],
+                "lines": [],
+                "documents": fixed_documents,
+                "expense_lines": fixed_lines,
+                "summary": build_financial_summary(fixed_documents, fixed_lines, shipment=fixed_shipment),
+            }
+        ]
+    )
+    if _registry_cell_display(fixed_registry, "lead_times", "days_to_customs_declaration", "customs_header_date") != "18 дн.":
+        raise AssertionError(f"fixed customs parser must use 2026-07-03 header date for days-to-DT: {fixed_registry}")
+
+    stale_customs_doc = {
+        "document_id": "stale_customs",
+        "document_type": "customs_declaration",
+        "parse_status": "parsed",
+        "document_date": "2026-02-13",
+        "normalized_parse": {
+            "document_type": "customs_declaration",
+            "declaration_number": "10720010/130226/5011959",
+            "document_date": "2026-02-13",
+            "declaration_date": "2026-02-13",
+        },
+    }
+    stale_registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "customs_negative",
+                "header": {
+                    "shipment_id": "customs_negative",
+                    "invoice_no": "26GN390",
+                    "shipment_date": "2026-06-15",
+                },
+                "lines": [],
+                "documents": [stale_customs_doc],
+                "expense_lines": [],
+                "summary": build_financial_summary([stale_customs_doc], [], shipment={"header": {"shipment_id": "customs_negative", "shipment_date": "2026-06-15"}, "lines": []}),
+            }
+        ]
+    )
+    negative_cell = _registry_cell(stale_registry, "lead_times", "days_to_customs_declaration", "customs_negative")
+    if (
+        negative_cell.get("display") != "—"
+        or negative_cell.get("quality") != "suspicious_negative_duration"
+        or "start=2026-06-15" not in str(negative_cell.get("note") or "")
+    ):
+        raise AssertionError(f"negative days-to-DT must be a warning blank, not a negative value: {stale_registry}")
+    if not any("Срок до ДТ / таможни is negative" in str(warning) for warning in stale_registry.get("warnings", [])):
+        raise AssertionError(f"negative days-to-DT must surface registry warning: {stale_registry.get('warnings')}")
 
 
 def _assert_current_financial_metrics(summary: dict[str, Any]) -> None:

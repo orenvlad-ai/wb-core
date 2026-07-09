@@ -35,7 +35,7 @@ FINANCIAL_DOCUMENT_PARSE_STATUSES = {
 FINANCIAL_DOCUMENT_ALLOWED_EXTENSIONS = {".pdf", ".xls", ".xlsx"}
 FINANCIAL_DOCUMENT_CONTENT_TYPE = "application/pdf"
 
-FINANCIAL_DOCUMENT_PARSER_VERSION = "supplier_financial_document_parser_v4"
+FINANCIAL_DOCUMENT_PARSER_VERSION = "supplier_financial_document_parser_v5"
 
 FX_RATE_SOURCE_CBR = "cbr"
 FX_RATE_STATUS_OK = "ok"
