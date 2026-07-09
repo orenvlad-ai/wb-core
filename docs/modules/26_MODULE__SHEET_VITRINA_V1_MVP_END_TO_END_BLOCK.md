@@ -241,6 +241,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - `поставки ВБ` is read-only aggregation from existing WB supplies runtime cache `raw_goods` by `nmId`, excluding only status ids `1/2/5` (`Не запланировано` / `Запланировано` / `Принято`); all other WB supply statuses are included when goods composition has positive active-SKU quantity
     - `ост. ВБ` is the existing `stock_total` WB stock value from the persisted ready snapshot, exposed with alias `stock_wb` for the report table without changing the source semantics
     - the table has an `Итого` row before SKU rows; quantitative stock/supply columns are summed, total sales/day is summed from row demand, and days-left is calculated from aggregate stock / aggregate demand or burn rather than as a simple average
+    - header sorting is browser-local and preserves the current `scrollLeft` of the horizontal table wrapper across the synchronous table rebuild for both ascending and descending clicks, including the far-left and far-right positions
     - compact district labels remain truthful to current repo buckets: `Центральный ФО`, `Северо-Западный ФО`, `Приволжский ФО`, `Уральский ФО`, `Юг и СКФО`
     - merged bucket `stock_ru_far_siberia` / `ДВ и Сибирь` stays fully excluded from stock-report filter/display because current truth does not split Far East from Siberia
   - plan-report block `Выполнение плана` остаётся read-only и server-owned:
