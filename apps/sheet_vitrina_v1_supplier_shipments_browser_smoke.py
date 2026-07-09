@@ -637,6 +637,22 @@ def main() -> None:
                 )
                 if sticky_style.get("position") != "sticky" or sticky_style.get("left") != "0px":
                     raise AssertionError(f"shipment registry row labels must stay sticky, got {sticky_style}")
+                section_sticky_style = operator_frame.locator("#shipmentRegistryBody th.shipment-registry-section-sticky").first.evaluate(
+                    """(node) => {
+                        const styles = window.getComputedStyle(node);
+                        return {position: styles.position, left: styles.left, zIndex: styles.zIndex};
+                    }"""
+                )
+                if section_sticky_style.get("position") != "sticky" or section_sticky_style.get("left") != "0px":
+                    raise AssertionError(f"shipment registry section labels must stay sticky, got {section_sticky_style}")
+                if operator_frame.locator("#shipmentRegistryBody td.shipment-registry-section-fill").count() < 1:
+                    raise AssertionError("shipment registry section rows must keep scrollable filler cells for order columns")
+                registry_wrap = operator_frame.locator(".shipment-registry-table-wrap").first
+                registry_wrap.evaluate("(node) => { node.scrollLeft = 240; }")
+                sticky_box = operator_frame.locator("#shipmentRegistryBody td.shipment-registry-sticky").first.bounding_box()
+                section_box = operator_frame.locator("#shipmentRegistryBody th.shipment-registry-section-sticky").first.bounding_box()
+                if not sticky_box or not section_box or abs(float(sticky_box["x"]) - float(section_box["x"])) > 2:
+                    raise AssertionError(f"shipment registry section labels must align with sticky metric labels: sticky={sticky_box}, section={section_box}")
                 operator_frame.get_by_role("button", name="От поставщика").click()
                 expect(operator_frame.locator("iframe[title='От поставщика']")).to_be_visible(timeout=5000)
 

@@ -2723,10 +2723,10 @@
       font-weight: 750;
     }
 
-    .shipment-registry-section-row th {
+    .shipment-registry-section-row .shipment-registry-section-sticky {
       position: sticky;
       left: 0;
-      z-index: 2;
+      z-index: 5;
       padding: 10px;
       background: #242832;
       color: var(--muted-strong);
@@ -2734,6 +2734,11 @@
       font-size: 11px;
       letter-spacing: 0;
       text-transform: uppercase;
+    }
+
+    .shipment-registry-section-row .shipment-registry-section-fill {
+      padding: 10px;
+      background: #242832;
     }
 
     .shipment-registry-empty {
@@ -2811,11 +2816,18 @@
       color: var(--text);
     }
 
-    .shipment-registry-comparison-section th {
+    .shipment-registry-comparison-section .shipment-registry-comparison-section-sticky {
+      position: sticky;
+      left: 0;
+      z-index: 2;
       color: var(--muted-strong);
       font-size: 11px;
       letter-spacing: 0;
       text-transform: uppercase;
+    }
+
+    .shipment-registry-comparison-section .shipment-registry-comparison-section-fill {
+      background: #1b1e26;
     }
 
     .shipment-registry-comparison-status {
@@ -9369,7 +9381,12 @@
         sections.forEach((section) => {
           const sectionRows = Array.isArray(section && section.rows) ? section.rows : [];
           bodyRows.push(
-            "<tr class=\"shipment-registry-section-row\"><th colspan=\"" + columnCount + "\">" + escapeHtml(registryDisplayValue(section.title)) + "</th></tr>"
+            [
+              "<tr class=\"shipment-registry-section-row\">",
+              "<th class=\"shipment-registry-sticky shipment-registry-section-sticky\" scope=\"rowgroup\">" + escapeHtml(registryDisplayValue(section.title)) + "</th>",
+              columns.map(() => "<td class=\"shipment-registry-section-fill\" aria-hidden=\"true\"></td>").join(""),
+              "</tr>"
+            ].join("")
           );
           sectionRows.forEach((row) => {
             const cells = row && row.cells ? row.cells : {};
@@ -9467,7 +9484,12 @@
         sections.forEach((section) => {
           const rows = Array.isArray(section && section.rows) ? section.rows : [];
           bodyRows.push(
-            "<tr class=\"shipment-registry-comparison-section\"><th colspan=\"5\">" + escapeHtml(registryDisplayValue(section.title)) + "</th></tr>"
+            [
+              "<tr class=\"shipment-registry-comparison-section\">",
+              "<th class=\"shipment-registry-comparison-section-sticky\" scope=\"rowgroup\">" + escapeHtml(registryDisplayValue(section.title)) + "</th>",
+              "<td class=\"shipment-registry-comparison-section-fill\" colspan=\"4\" aria-hidden=\"true\"></td>",
+              "</tr>"
+            ].join("")
           );
           rows.forEach((row) => {
             const statusDisplay = registryCellDisplay(row && row.status);

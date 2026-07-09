@@ -157,6 +157,32 @@ Transitplus International Ltd
 Предложение действительно в течение 5 календарных дней
 """
 
+QUOTE_2026_06_09_TEXT = """
+Коммерческое предложение на транспортно-экспедиционные услуги по тарифу «Авто стандарт 25-30 дней»
+Transitplus International Ltd
+Наименование груза: СТЕКЛА ДЛЯ СМАРТФОНА
+г. Москва 09.06.2026
+Город отправки: Guangzhou (Гуанчжоу)
+Пункт назначения: Москва
+Сроки доставки: 25-30 дней
+Вес брутто, кг. 4680,45
+Вес нетто, кг: 4680,45
+Объем, м3 21,54
+Оценочная стоимость груза, долл.                            49333,93
+1. Предварительный расчет стоимости:
+№ Перечень услуг Общая стоимость
+1 Стоимость доставки 9495
+2 Таможенные платежи и сборы 17130
+3 Экологический сбор 0
+4 Брокерские услуги 350
+5 Комиссия компании 0
+6 Страховая ставка, % 412
+ИТОГО: 27387 USD
+Оформление разрешительной документации 0 USD
+Оплата за доставку производится: по курсу Банка ВТБ (на дату выставления счета)
+Предложение действительно в течение 5 календарных дней
+"""
+
 BROKEN_QUOTE_TEXT = """
 Коммерческое предложение на транспортно-экспедиционные услуги по тарифу «Авто стандарт 25-30 дней»
 Transitplus International Ltd
@@ -784,7 +810,9 @@ def _assert_parser_smoke() -> None:
     _assert_summary_metrics_smoke()
     _assert_missing_customs_data_summary_smoke()
     _assert_new_quote_parser_smoke()
+    _assert_quote_cargo_value_currency_aliases_smoke()
     _assert_bad_quote_rate_guardrail_smoke()
+    _assert_quote_parse_error_reason_smoke()
     _assert_registry_lead_time_rows_smoke()
     _assert_registry_production_lead_time_rows_smoke()
     _assert_registry_negative_customs_lead_time_smoke()
@@ -814,6 +842,21 @@ def _assert_bank_control_saved_parse_refresh_smoke(bank_control: dict[str, Any])
     }
     if not block._saved_document_needs_parse_refresh(stale_document):  # noqa: SLF001
         raise AssertionError("stale bank control parser_v3 should refresh to recover payment operations")
+    stale_quote_missing_cargo = {
+        "document_type": "logistics_quote",
+        "parse_status": "parsed",
+        "stored_file_path": "/tmp/quote.pdf",
+        "parser_version": "supplier_financial_document_parser_v5",
+        "normalized_parse": {"estimated_cargo_value_usd": None},
+    }
+    if not block._saved_document_needs_parse_refresh(stale_quote_missing_cargo):  # noqa: SLF001
+        raise AssertionError("stale logistics quote without cargo USD should refresh after parser v6")
+    stale_quote_with_cargo = {
+        **stale_quote_missing_cargo,
+        "normalized_parse": {"estimated_cargo_value_usd": 49333.93},
+    }
+    if block._saved_document_needs_parse_refresh(stale_quote_with_cargo):  # noqa: SLF001
+        raise AssertionError("stale logistics quote with cargo USD should not refresh only because parser version changed")
 
 
 def _assert_bank_transfer_payload(payload: dict[str, Any], *, label: str) -> None:
@@ -1288,6 +1331,72 @@ def _assert_new_quote_parser_smoke() -> None:
         raise AssertionError(f"new Transitplus quote percent metrics mismatch: {quote_percent}")
 
 
+def _assert_quote_cargo_value_currency_aliases_smoke() -> None:
+    original_line = "Оценочная стоимость груза, долл.                            49333,93"
+    variants = [
+        "Оценочная стоимость груза, долл. 49333,93",
+        "Оценочная стоимость груза, долл 49333,93",
+        "Оценочная стоимость груза, долларов 49333,93",
+        "Оценочная стоимость груза, долл. США 49333,93",
+        "Оценочная стоимость груза, долл. 49 333,93",
+        "Оценочная стоимость груза, долл. 49333,93 USD",
+    ]
+    for variant in variants:
+        payload = parse_financial_document_text(QUOTE_2026_06_09_TEXT.replace(original_line, variant), filename="quote-2026-06-09.txt")
+        quote = payload["normalized_parse"]
+        if quote.get("estimated_cargo_value_usd") != 49333.93:
+            raise AssertionError(f"quote cargo USD alias must parse {variant!r}: {quote}")
+        if quote.get("estimated_cargo_value_usd_source_status") != "parsed":
+            raise AssertionError(f"quote cargo USD alias must expose parsed source status {variant!r}: {quote}")
+        if quote.get("estimated_cargo_value_cny") is not None:
+            raise AssertionError(f"quote cargo CNY must not be synthesized when raw КП has no CNY {variant!r}: {quote}")
+        if quote.get("estimated_cargo_value_cny_source_status") != "missing":
+            raise AssertionError(f"quote cargo CNY missing source status mismatch {variant!r}: {quote}")
+
+    quote_payload = parse_financial_document_text(QUOTE_2026_06_09_TEXT, filename="quote-2026-06-09.txt")
+    documents, lines = _summary_documents_and_lines_from_payloads([("quote-2026-06-09", quote_payload)])
+    summary = build_financial_summary(documents, lines)
+    quote = summary.get("quote") or {}
+    quote_percent = summary.get("percent_of_value", {}).get("quote_cargo_value", {})
+    if quote.get("estimated_cargo_value_usd") != 49333.93:
+        raise AssertionError(f"26GN462-like quote cargo USD must reach summary: {summary}")
+    if quote_payload["normalized_parse"].get("estimated_cargo_value_cny") is not None:
+        raise AssertionError(f"26GN462-like quote cargo CNY must stay missing: {quote_payload}")
+    if (
+        not _approx(quote_percent.get("logistics_pct"), 20.79, tolerance=0.01)
+        or not _approx(quote_percent.get("customs_pct"), 34.72, tolerance=0.01)
+        or not _approx(quote_percent.get("delivery_customs_pct"), 55.51, tolerance=0.01)
+    ):
+        raise AssertionError(f"26GN462-like quote percent metrics mismatch: {quote_percent}")
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "26GN462",
+                "header": {"shipment_id": "26GN462", "product_qty_total": 55250},
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": summary,
+            }
+        ]
+    )
+    if _registry_cell_display(registry, "quote_logistics", "quote_cargo_usd", "26GN462") != "49 333.93 USD":
+        raise AssertionError(f"26GN462-like quote cargo USD must render from КП: {registry}")
+    cny_cell = _registry_cell(registry, "quote_logistics", "quote_cargo_cny", "26GN462")
+    if cny_cell.get("display") != "нет в КП" or "CNY/юанях" not in str(cny_cell.get("note") or ""):
+        raise AssertionError(f"26GN462-like missing quote cargo CNY must explain raw absence: {cny_cell}")
+    if _registry_cell_display(registry, "quote_normalized", "quote_logistics_pct", "26GN462") != "20.79%":
+        raise AssertionError(f"26GN462-like quote logistics percent must render: {registry}")
+    usd_per_kg = {
+        "quote_logistics_usd_per_quote_kg": "2.19 USD",
+        "quote_customs_usd_per_quote_kg": "3.66 USD",
+        "quote_total_usd_per_quote_kg": "5.85 USD",
+    }
+    for row_id, expected_display in usd_per_kg.items():
+        if _registry_cell_display(registry, "quote_normalized", row_id, "26GN462") != expected_display:
+            raise AssertionError(f"26GN462-like USD/kg row {row_id} must stay based on КП USD and КП weight: {registry}")
+
+
 def _assert_bad_quote_rate_guardrail_smoke() -> None:
     quote_payload = parse_financial_document_text(QUOTE_2026_06_19_TEXT, filename="quote-2026-06-19.txt")
     invoice_121 = parse_financial_document_text(INVOICE_121_TEXT, filename="invoice-121.txt")
@@ -1335,9 +1444,12 @@ def _assert_bad_quote_rate_guardrail_smoke() -> None:
     )
     if _registry_cell_display(registry, "quote_logistics", "quote_total_usd", "bad_rate") != "40 720.00 USD":
         raise AssertionError(f"bad-rate registry must still show USD quote total: {registry}")
-    if _registry_cell_display(registry, "quote_logistics", "quote_total_rub", "bad_rate") != "—":
-        raise AssertionError(f"bad-rate registry row quote_total_rub must render blank: {registry}")
-    if "sanity-check" not in str(_registry_cell(registry, "quote_logistics", "quote_total_rub", "bad_rate").get("note") or ""):
+    quote_total_rub_cell = _registry_cell(registry, "quote_logistics", "quote_total_rub", "bad_rate")
+    if quote_total_rub_cell.get("display") != "курс не подтверждён":
+        raise AssertionError(f"bad-rate registry row quote_total_rub must render known rate guard status: {quote_total_rub_cell}")
+    if quote_total_rub_cell.get("status") != "warning" or quote_total_rub_cell.get("source_status") != "quote_rate_unavailable":
+        raise AssertionError(f"bad-rate registry row quote_total_rub must carry warning quote_rate_unavailable metadata: {quote_total_rub_cell}")
+    if "sanity-check" not in str(quote_total_rub_cell.get("note") or ""):
         raise AssertionError(f"bad-rate registry must explain hidden quote RUB total: {registry}")
     usd_per_kg_expectations = {
         "quote_logistics_usd_per_quote_kg": "2.02 USD",
@@ -1377,8 +1489,66 @@ def _assert_bad_quote_rate_guardrail_smoke() -> None:
             }
         ]
     )
-    if _registry_cell_display(missing_registry, "quote_normalized", "quote_total_rub_per_unit", "missing_quote") != "—":
-        raise AssertionError(f"true missing КП data must stay blank, not waiting-for-invoices: {missing_registry}")
+    missing_quote_cell = _registry_cell(missing_registry, "quote_normalized", "quote_total_rub_per_unit", "missing_quote")
+    if missing_quote_cell.get("display") != "нет КП" or missing_quote_cell.get("source_status") != "quote_document_missing":
+        raise AssertionError(f"true missing КП data must explain missing КП, not wait for invoices: {missing_quote_cell}")
+
+
+def _assert_quote_parse_error_reason_smoke() -> None:
+    documents = [
+        {
+            "document_id": "quote",
+            "document_type": "logistics_quote",
+            "parse_status": "parsed",
+            "normalized_parse": {
+                "document_type": "logistics_quote",
+                "gross_weight_kg": 100.0,
+                "estimated_cargo_value_usd": None,
+                "estimated_cargo_value_usd_source_status": "parse_error",
+                "quote_required_amounts_complete": True,
+            },
+            "total_amount": 30.0,
+            "cbr_usd_rate_value": 78.0,
+        }
+    ]
+    lines = [
+        {
+            "line_id": "delivery",
+            "financial_document_id": "quote",
+            "category": "delivery_cost",
+            "currency": "USD",
+            "amount": 10.0,
+            "included_in_logistics_efficiency": True,
+        },
+        {
+            "line_id": "customs",
+            "financial_document_id": "quote",
+            "category": "customs_payments_and_fees",
+            "currency": "USD",
+            "amount": 20.0,
+            "included_in_logistics_efficiency": False,
+            "included_in_customs_total": True,
+        },
+    ]
+    summary = build_financial_summary(documents, lines)
+    registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "quote_parse_error",
+                "header": {"shipment_id": "quote_parse_error"},
+                "lines": [],
+                "documents": documents,
+                "expense_lines": lines,
+                "summary": summary,
+            }
+        ]
+    )
+    cargo_cell = _registry_cell(registry, "quote_logistics", "quote_cargo_usd", "quote_parse_error")
+    if cargo_cell.get("display") != "ошибка парсинга КП" or cargo_cell.get("status") != "warning":
+        raise AssertionError(f"parser failure reason must render as warning status: {cargo_cell}")
+    percent_cell = _registry_cell(registry, "quote_normalized", "quote_logistics_pct", "quote_parse_error")
+    if percent_cell.get("display") != "нет стоимости груза в КП" or percent_cell.get("status") != "warning":
+        raise AssertionError(f"dependent quote percent must explain missing cargo denominator: {percent_cell}")
 
 
 def _assert_registry_data_source_sections_smoke() -> None:
@@ -1836,6 +2006,7 @@ def _summary_documents_and_lines_from_payloads(payloads: list[tuple[str, dict[st
         "invoice-121": 77.06,
         "customs": None,
         "quote-2026-06-19": 78.0,
+        "quote-2026-06-09": 78.0,
     }
     documents = [_document_from_parsed(document_id, payload, cbr_rate=rates.get(document_id)) for document_id, payload in payloads]
     lines: list[dict[str, Any]] = []
