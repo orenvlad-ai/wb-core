@@ -2282,8 +2282,10 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("actual_shipment_date", "Фактическая дата отгрузки", lambda item: _registry_strict_date(_registry_header(item).get("actual_shipment_date"))),
                 ("actual_ff_acceptance_date", "Фактическая дата приёмки на ФФ", lambda item: _registry_strict_date(_registry_header(item).get("actual_ff_acceptance_date"))),
                 ("quote_delivery_days", "срок доставки по КП / обещанный срок логиста", lambda item: _registry_text(_quote_delivery_days_display(item))),
+                ("planned_production_days", "Плановый срок производства", lambda item: _production_duration_cell(item, "planned")),
+                ("actual_production_days", "Фактический срок производства", lambda item: _production_duration_cell(item, "actual")),
                 ("actual_delivery_days", "Фактический срок доставки", lambda item: _registry_number(_actual_delivery_days(item), suffix=" дн.", decimals=0)),
-                ("days_to_customs_declaration", "Срок до ДТ / таможни", lambda item: _registry_number(_days_to_customs_declaration(item), suffix=" дн.", decimals=0)),
+                ("days_to_customs_declaration", "Срок до ДТ / таможни", lambda item: _days_to_customs_declaration_cell(item)),
             ],
         ),
         (
@@ -2566,10 +2568,82 @@ def _quote_delivery_days_display(context: Mapping[str, Any]) -> str:
     return ""
 
 
-def _days_to_customs_declaration(context: Mapping[str, Any]) -> Decimal | None:
+def _production_start_date(context: Mapping[str, Any]) -> str:
     header = _registry_header(context)
-    start = _date_part(header.get("shipment_date"))
-    end = _date_part(_registry_customs_meta(context).get("document_date") or _registry_customs_meta(context).get("declaration_date"))
+    return _date_part(header.get("invoice_date")) or _date_part(header.get("created_at"))
+
+
+def _production_duration_cell(context: Mapping[str, Any], kind: str) -> dict[str, Any]:
+    header = _registry_header(context)
+    start = _production_start_date(context)
+    if kind == "actual":
+        end = _strict_date_part(header.get("actual_shipment_date"))
+        label = "Фактический срок производства"
+    else:
+        end = _strict_date_part(header.get("shipment_date"))
+        label = "Плановый срок производства"
+    return _duration_cell(
+        start,
+        end,
+        label=label,
+        negative_note="Отрицательный срок производства: проверьте дату invoice/order и дату отгрузки.",
+    )
+
+
+def _days_to_customs_declaration(context: Mapping[str, Any]) -> Decimal | None:
+    duration = _days_to_customs_declaration_raw(context)
+    if duration is None or duration < 0:
+        return None
+    return duration
+
+
+def _days_to_customs_declaration_cell(context: Mapping[str, Any]) -> dict[str, Any]:
+    header = _registry_header(context)
+    start = _strict_date_part(header.get("shipment_date"))
+    end = _customs_declaration_date(context)
+    return _duration_cell(
+        start,
+        end,
+        label="Срок до ДТ / таможни",
+        negative_note="Отрицательный срок до ДТ: проверьте match/date ДТ и плановую дату отгрузки.",
+    )
+
+
+def _days_to_customs_declaration_raw(context: Mapping[str, Any]) -> Decimal | None:
+    header = _registry_header(context)
+    start = _strict_date_part(header.get("shipment_date"))
+    end = _customs_declaration_date(context)
+    return _duration_days(start, end)
+
+
+def _customs_declaration_date(context: Mapping[str, Any]) -> str:
+    customs = _registry_customs_meta(context)
+    return _date_part(customs.get("document_date") or customs.get("declaration_date"))
+
+
+def _duration_cell(
+    start: str,
+    end: str,
+    *,
+    label: str,
+    negative_note: str,
+) -> dict[str, Any]:
+    duration = _duration_days(start, end)
+    if duration is None:
+        return _registry_blank()
+    if duration < 0:
+        cell = _registry_blank()
+        cell["status"] = "warning"
+        cell["quality"] = "suspicious_negative_duration"
+        cell["note"] = f"{negative_note} Использованы даты: start={start}, end={end}."
+        cell["source_dates"] = {"start": start, "end": end, "label": label}
+        return cell
+    cell = _registry_number(duration, suffix=" дн.", decimals=0)
+    cell["source_dates"] = {"start": start, "end": end, "label": label}
+    return cell
+
+
+def _duration_days(start: str, end: str) -> Decimal | None:
     if not start or not end:
         return None
     try:
@@ -2606,6 +2680,38 @@ def _registry_date_warnings(contexts: list[Mapping[str, Any]]) -> list[str]:
                 continue
             if not _strict_date_part(raw):
                 warnings.append(f"{shipment_label}: {label} has invalid date value {raw!r}; cell rendered as —.")
+        production_start = _production_start_date(context)
+        planned_production_end = _strict_date_part(header.get("shipment_date"))
+        actual_production_end = _strict_date_part(header.get("actual_shipment_date"))
+        days_to_customs_start = _strict_date_part(header.get("shipment_date"))
+        days_to_customs_end = _customs_declaration_date(context)
+        negative_checks = [
+            (
+                "Плановый срок производства",
+                production_start,
+                planned_production_end,
+                "invoice_date/created_at -> shipment_date",
+            ),
+            (
+                "Фактический срок производства",
+                production_start,
+                actual_production_end,
+                "invoice_date/created_at -> actual_shipment_date",
+            ),
+            (
+                "Срок до ДТ / таможни",
+                days_to_customs_start,
+                days_to_customs_end,
+                "shipment_date -> customs declaration date",
+            ),
+        ]
+        for label, start, end, source in negative_checks:
+            duration = _duration_days(start, end)
+            if duration is not None and duration < 0:
+                warnings.append(
+                    f"{shipment_label}: {label} is negative ({duration} дн.; {source}; "
+                    f"start={start}, end={end}); cell rendered as — and requires source-date review."
+                )
     return _dedupe_strings(warnings)
 
 
@@ -2935,7 +3041,7 @@ def _parse_logistics_invoice(text: str) -> tuple[dict[str, Any], list[dict[str, 
 
 def _parse_customs_declaration(text: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
-    declaration_number = _first_match(text, r"\b(\d{8}/\d{6}/\d{6,})\b")
+    declaration_number = _extract_customs_declaration_number(text)
     declaration_date = _date_from_declaration_number(declaration_number) or _parse_date(_first_match(text, r"\b(\d{1,2}\.\d{1,2}\.\d{2,4})\s+\d{1,2}:\d{2}"))
     total_goods_count, total_places = _extract_customs_goods_places(text)
     gross_weight_kg, net_weight_kg, weight_item_count = _extract_customs_item_weights(text)
@@ -6014,6 +6120,27 @@ def _date_from_declaration_number(value: Any) -> str:
         return ""
     day, month, year = match.groups()
     return _safe_iso_date(2000 + int(year), int(month), int(day))
+
+
+def _extract_customs_declaration_number(text: str) -> str:
+    header_inline = _first_match(
+        text,
+        r"ДЕКЛАРАЦИЯ\s+НА\s+ТОВАРЫ[^\n\r]*(?:[AА]\s*)?(\d{8}/\d{6}/\d{6,})",
+    )
+    if header_inline:
+        return header_inline
+    lines = _text_to_lines(text)
+    for index, line in enumerate(lines):
+        if "ДЕКЛАРАЦИЯ НА ТОВАРЫ" not in line.upper():
+            continue
+        for offset in (0, -1, 1, -2, 2, -3, 3, -4, 4):
+            candidate_index = index + offset
+            if candidate_index < 0 or candidate_index >= len(lines):
+                continue
+            candidate = _first_match(lines[candidate_index], r"\b(\d{8}/\d{6}/\d{6,})\b")
+            if candidate:
+                return candidate
+    return _first_match(text, r"\b(\d{8}/\d{6}/\d{6,})\b")
 
 
 def _parse_delivery_days(value: str) -> tuple[int | None, int | None]:

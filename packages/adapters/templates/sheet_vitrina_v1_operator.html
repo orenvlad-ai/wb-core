@@ -2655,6 +2655,20 @@
       font-size: 12px;
     }
 
+    .shipment-registry-expenses-select.is-expenses-complete {
+      border-color: rgba(34, 197, 94, 0.58);
+      background: rgba(34, 197, 94, 0.16);
+      color: var(--success-text);
+      font-weight: 750;
+    }
+
+    .shipment-registry-expenses-select.is-expenses-incomplete {
+      border-color: rgba(245, 158, 11, 0.62);
+      background: rgba(245, 158, 11, 0.17);
+      color: var(--warning-text);
+      font-weight: 750;
+    }
+
     .shipment-registry-cell-main.is-expenses-complete {
       color: var(--success-text);
     }
@@ -2664,6 +2678,11 @@
     }
 
     .shipment-registry-cell-main.is-expenses-partial {
+      color: var(--warning-text);
+      font-weight: 750;
+    }
+
+    .shipment-registry-cell-main.is-registry-warning {
       color: var(--warning-text);
       font-weight: 750;
     }
@@ -9137,9 +9156,10 @@
         const payload = cell && typeof cell === "object" ? cell : {};
         if (payload.type === "expenses-completeness") {
           const isComplete = payload.value === true;
+          const stateClass = isComplete ? " is-expenses-complete" : " is-expenses-incomplete";
           return [
             "<td>",
-            "<select class=\"shipment-registry-expenses-select\" data-shipment-registry-expenses=\"" + escapeHtml(shipmentId) + "\" aria-label=\"Полнота расходов\">",
+            "<select class=\"shipment-registry-expenses-select" + stateClass + "\" data-shipment-registry-expenses=\"" + escapeHtml(shipmentId) + "\" aria-label=\"Полнота расходов\">",
             "<option value=\"true\"" + (isComplete ? " selected" : "") + ">Расходы учтены</option>",
             "<option value=\"false\"" + (!isComplete ? " selected" : "") + ">Расходы не учтены полностью</option>",
             "</select>",
@@ -9155,7 +9175,13 @@
       }
 
       function registryCellStatusClass(cell) {
-        if (!cell || typeof cell !== "object" || cell.value === null || cell.value === undefined) {
+        if (!cell || typeof cell !== "object") {
+          return "";
+        }
+        if (cell.status === "warning") {
+          return " is-registry-warning";
+        }
+        if (cell.value === null || cell.value === undefined) {
           return "";
         }
         if (cell.status === "complete") {
