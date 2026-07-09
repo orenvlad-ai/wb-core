@@ -3033,6 +3033,7 @@ class RegistryUploadDbBackedRuntime:
                     actual_shipment_date,
                     actual_ff_acceptance_date,
                     order_status,
+                    expenses_complete,
                     invoice_no,
                     invoice_date,
                     contract_no,
@@ -3055,13 +3056,14 @@ class RegistryUploadDbBackedRuntime:
                     warnings_json,
                     errors_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     shipment_date = excluded.shipment_date,
                     actual_shipment_date = excluded.actual_shipment_date,
                     actual_ff_acceptance_date = excluded.actual_ff_acceptance_date,
                     order_status = excluded.order_status,
+                    expenses_complete = excluded.expenses_complete,
                     invoice_no = excluded.invoice_no,
                     invoice_date = excluded.invoice_date,
                     contract_no = excluded.contract_no,
@@ -3092,6 +3094,7 @@ class RegistryUploadDbBackedRuntime:
                     header.get("actual_shipment_date") or None,
                     header.get("actual_ff_acceptance_date") or None,
                     header.get("order_status") or ORDER_STATUS_DEFAULT,
+                    1 if bool(header.get("expenses_complete")) else 0,
                     header.get("invoice_no") or "",
                     header.get("invoice_date") or "",
                     header.get("contract_no") or "",
@@ -3205,6 +3208,7 @@ class RegistryUploadDbBackedRuntime:
                        actual_shipment_date,
                        actual_ff_acceptance_date,
                        order_status,
+                       expenses_complete,
                        invoice_no,
                        invoice_date,
                        contract_no,
@@ -3284,6 +3288,32 @@ class RegistryUploadDbBackedRuntime:
                 WHERE shipment_id = ?
                 """,
                 (str(order_status or ""), updated_at, shipment_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def update_supplier_shipment_expenses_complete(
+        self,
+        *,
+        shipment_id: str,
+        expenses_complete: bool,
+        updated_at: str,
+    ) -> bool:
+        shipment_id = str(shipment_id or "").strip()
+        if not shipment_id:
+            raise ValueError("supplier shipment_id is required")
+        _validate_timestamp(str(updated_at or ""), field_name="updated_at")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_supplier_shipments
+                SET expenses_complete = ?,
+                    updated_at = ?
+                WHERE shipment_id = ?
+                """,
+                (1 if expenses_complete else 0, updated_at, shipment_id),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -6055,6 +6085,7 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "actual_shipment_date": row["actual_shipment_date"] or "",
         "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
+        "expenses_complete": bool(row["expenses_complete"]),
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
         "contract_no": row["contract_no"] or "",
@@ -6091,6 +6122,7 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "actual_shipment_date": row["actual_shipment_date"] or "",
         "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
+        "expenses_complete": bool(row["expenses_complete"]),
         "invoice_no": row["invoice_no"] or "",
         "invoice_date": row["invoice_date"] or "",
         "contract_no": row["contract_no"] or "",
@@ -7316,6 +7348,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             actual_shipment_date TEXT,
             actual_ff_acceptance_date TEXT,
             order_status TEXT NOT NULL DEFAULT 'production',
+            expenses_complete INTEGER NOT NULL DEFAULT 0,
             invoice_no TEXT,
             invoice_date TEXT,
             contract_no TEXT,
@@ -7881,6 +7914,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipments",
         column_name="order_status",
         column_sql="TEXT NOT NULL DEFAULT 'production'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="expenses_complete",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
     )
     _ensure_column(
         conn,

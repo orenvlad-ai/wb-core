@@ -702,18 +702,19 @@ def main() -> None:
             shipment_registry_json = json.dumps(shipment_registry, ensure_ascii=False)
             if "NaN" in shipment_registry_json or "Infinity" in shipment_registry_json:
                 raise AssertionError(f"shipment registry matrix must not expose invalid numbers: {shipment_registry}")
-            section_ids = {section.get("section_id") for section in shipment_registry.get("sections", [])}
-            if not {"passport", "cargo_physics", "quote_logistics", "fact_expenses", "fact_normalized", "documents"}.issubset(section_ids):
+            section_ids = [section.get("section_id") for section in shipment_registry.get("sections", [])]
+            expected_section_ids = ["passport", "quote_logistics", "lead_times", "cargo_physics", "cargo_value", "fact_expenses", "fact_normalized", "documents"]
+            if section_ids != expected_section_ids:
                 raise AssertionError(f"shipment registry matrix missing sections: {section_ids}")
             if _registry_cell_display(shipment_registry, "quote_logistics", "quote_total_rub_per_unit", shipment_id) != "—":
                 raise AssertionError(f"shipment registry without financial docs must keep quote ₽/шт unavailable: {shipment_registry}")
             if _registry_cell_display(shipment_registry, "fact_expenses", "fact_total_rub_per_unit", shipment_id) != "—":
                 raise AssertionError(f"shipment registry without financial docs must keep fact ₽/шт unavailable: {shipment_registry}")
-            if _registry_cell_display(shipment_registry, "passport", "shipment_date", shipment_id) != "2026-05-15":
+            if _registry_cell_display(shipment_registry, "lead_times", "shipment_date", shipment_id) != "2026-05-15":
                 raise AssertionError(f"shipment registry must expose planned shipment date: {shipment_registry}")
-            if _registry_cell_display(shipment_registry, "passport", "actual_shipment_date", shipment_id) != "2026-05-17":
+            if _registry_cell_display(shipment_registry, "lead_times", "actual_shipment_date", shipment_id) != "2026-05-17":
                 raise AssertionError(f"shipment registry must expose actual shipment date: {shipment_registry}")
-            if _registry_cell_display(shipment_registry, "passport", "actual_ff_acceptance_date", shipment_id) != "2026-05-30":
+            if _registry_cell_display(shipment_registry, "lead_times", "actual_ff_acceptance_date", shipment_id) != "2026-05-30":
                 raise AssertionError(f"shipment registry must expose actual FF acceptance date: {shipment_registry}")
             if _registry_cell_display(shipment_registry, "lead_times", "actual_delivery_days", shipment_id) != "13 дн.":
                 raise AssertionError(f"shipment registry must calculate actual delivery days: {shipment_registry}")

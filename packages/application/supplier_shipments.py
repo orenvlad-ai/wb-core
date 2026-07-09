@@ -462,6 +462,20 @@ class SupplierShipmentsBlock:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         return self.get_shipment(shipment_id)
 
+    def update_expenses_complete(self, shipment_id: str, expenses_complete: Any) -> dict[str, Any]:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        normalized = _normalize_bool_field(expenses_complete, field_name="expenses_complete")
+        updated = self.runtime.update_supplier_shipment_expenses_complete(
+            shipment_id=shipment_id,
+            expenses_complete=normalized,
+            updated_at=self.timestamp_factory(),
+        )
+        if not updated:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        return self.get_shipment(shipment_id)
+
     def _materialize_ff_cost_layer(self, shipment_id: str) -> None:
         from packages.application.our_wb_costs import OurWbCostBlock
 
@@ -4612,6 +4626,20 @@ def _normalize_order_status(value: Any) -> str:
     if normalized not in ORDER_STATUSES:
         raise ValueError(f"unsupported supplier order_status: {normalized}")
     return normalized
+
+
+def _normalize_bool_field(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "да"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "нет", ""}:
+            return False
+    raise ValueError(f"{field_name} must be boolean")
 
 
 def _resolve_optional_positive_decimal_field(

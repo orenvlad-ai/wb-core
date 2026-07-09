@@ -166,6 +166,12 @@
     tbody tr:last-child td { border-bottom: 0; }
     tr[data-row] { cursor: pointer; }
     tr[data-row]:hover td { background: rgba(167, 139, 250, 0.08); }
+    tr[data-row].is-active td {
+      background: rgba(56, 189, 248, 0.12);
+      box-shadow: inset 3px 0 0 rgba(56, 189, 248, 0.78);
+    }
+    .exact-cost-complete { color: var(--success); font-weight: 800; }
+    .exact-cost-incomplete { color: var(--warning); font-weight: 800; }
     .document-row-missing td {
       color: var(--muted);
       background: rgba(170, 176, 197, 0.05);
@@ -328,6 +334,8 @@
     }
     .finance-row-selected td { background: rgba(56, 189, 248, 0.09); }
     .document-row-warning td { background: rgba(245, 158, 11, 0.08); }
+    .document-label-primary { display: block; font-weight: 700; color: var(--text); }
+    .document-label-secondary { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
     .line-input { min-width: 100px; }
     .line-input.small { min-width: 72px; }
     .line-input.wide { min-width: 180px; }
@@ -614,6 +622,7 @@
   <script>
     (() => {
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-supplier-config").textContent);
+      const queryParams = new URLSearchParams(window.location.search || "");
       const shipmentsPath = config.supplier_shipments_path;
       const parsePath = config.supplier_shipments_parse_path;
       const tradeDocumentsPath = config.trade_documents_path;
@@ -708,6 +717,8 @@
       let financialSummary = null;
       let pendingBankFeePreview = null;
       let selectedFinancialDocumentId = "";
+      let pendingDeepLinkShipmentId = String(queryParams.get("shipment_id") || "").trim();
+      let pendingDeepLinkTab = String(queryParams.get("tab") || "").trim();
 
       function uiText(trilingual, russian) {
         return useRussianLabels ? russian : trilingual;
@@ -841,6 +852,15 @@
         }
         const blockers = Array.isArray(row && row.exact_cost_blockers) ? row.exact_cost_blockers : [];
         return blockers.length ? blockers.join("; ") : "точная себестоимость недоступна";
+      }
+
+      function renderExactCostValue(row) {
+        const display = formatRegistryMoney(row && row.exact_landed_cost_per_unit_rub);
+        if (display === "—") {
+          return escapeHtml(display);
+        }
+        const className = row && row.expenses_complete ? "exact-cost-complete" : "exact-cost-incomplete";
+        return '<span class="' + className + '">' + escapeHtml(display) + '</span>';
       }
 
       function formatAmount(value, currency) {
@@ -1072,6 +1092,13 @@
           allShipments = Array.isArray(payload.shipments) ? payload.shipments : [];
           renderRegistry(applyOrderStatusFilter(allShipments));
           setMessage(registryMessage, "", "");
+          if (pendingDeepLinkShipmentId) {
+            const shipmentId = pendingDeepLinkShipmentId;
+            const tab = pendingDeepLinkTab;
+            pendingDeepLinkShipmentId = "";
+            pendingDeepLinkTab = "";
+            openShipment(shipmentId, { tab });
+          }
         } catch (error) {
           renderRegistryError(error.message);
           setMessage(registryMessage, error.message, "error");
@@ -1105,8 +1132,9 @@
             shipmentRows.dataset.registryState = registryLoadState;
             shipmentRows.innerHTML = rows.map((row) => {
               const status = statusLabels[row.match_status] || statusLabels.has_unmatched || "Проверить";
+              const isActive = currentShipment && currentShipment.shipment_id === row.shipment_id;
               const cells = [
-                '<tr data-row="' + escapeHtml(row.shipment_id) + '">',
+                '<tr data-row="' + escapeHtml(row.shipment_id) + '"' + (isActive ? ' class="is-active"' : '') + '>',
                 '<td>' + escapeHtml(row.planned_shipment_date || row.shipment_date || "-") + '</td>',
                 '<td>' + escapeHtml(row.actual_shipment_date || "-") + '</td>',
                 '<td>' + escapeHtml(row.actual_ff_acceptance_date || "-") + '</td>',
@@ -1118,7 +1146,7 @@
                 '<td>' + escapeHtml(formatNumber(row.extras_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatNumber(row.invoice_amount_total)) + '</td>',
                 '<td>' + escapeHtml(formatRegistryMoney(row.approx_landed_cost_per_unit_rub)) + '</td>',
-                '<td title="' + escapeHtml(exactCostTooltip(row)) + '">' + escapeHtml(formatRegistryMoney(row.exact_landed_cost_per_unit_rub)) + '</td>',
+                '<td title="' + escapeHtml(exactCostTooltip(row)) + '">' + renderExactCostValue(row) + '</td>',
               ];
               if (!canEditOrderStatus) {
                 cells.push('<td data-currency-column>' + escapeHtml(row.currency || "-") + '</td>');
@@ -1149,6 +1177,14 @@
             });
             bindOrderStatusControls();
             bindDeleteButtons();
+            syncActiveRegistryRow();
+          }
+
+          function syncActiveRegistryRow() {
+            const activeShipmentId = currentShipment && currentShipment.shipment_id ? String(currentShipment.shipment_id) : "";
+            Array.from(shipmentRows.querySelectorAll("tr[data-row]")).forEach((row) => {
+              row.classList.toggle("is-active", Boolean(activeShipmentId) && row.dataset.row === activeShipmentId);
+            });
           }
 
           function renderRegistryDocumentCell(row) {
@@ -1317,12 +1353,13 @@
         activeCardTab = "supply";
         resetFinancialState();
         renderCard();
+        syncActiveRegistryRow();
         updateSelectedFileLabel(null);
         shipmentCard.hidden = false;
         shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
       }
 
-      async function openShipment(shipmentId) {
+      async function openShipment(shipmentId, options) {
         try {
           currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
             headers: { Accept: "application/json" }
@@ -1330,7 +1367,9 @@
           currentUploadId = "";
           isNewShipment = false;
           cardDirty = false;
+          activeCardTab = options && options.tab === "documents" ? "financial" : "supply";
           renderCard();
+          syncActiveRegistryRow();
           shipmentCard.hidden = false;
           shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
           if (canManageFinancialDocuments) {
@@ -1416,9 +1455,20 @@
         const invoicePath = shipment.invoice_download_path || "";
         documentInvoiceDownloadLink.hidden = !invoicePath;
         documentInvoiceDownloadLink.href = invoicePath || "#";
-        invoiceDocumentLabel.textContent = shipment.invoice_document_id
-          ? (uiText("Document ID: ", "ID документа: ") + shipment.invoice_document_id)
-          : (shipment.shipment_id ? uiText("Legacy invoice file", "Файл invoice из заказа") : "Invoice не сохранён");
+        const invoiceNo = String((shipment.metadata && shipment.metadata.invoice_no) || shipment.invoice_no || "").trim();
+        const invoiceDocumentId = String(shipment.invoice_document_id || "").trim();
+        if (invoiceDocumentId || shipment.shipment_id) {
+          const primary = invoiceNo || "Номер invoice не распознан";
+          const secondary = invoiceDocumentId
+            ? (uiText("Document ID: ", "ID документа: ") + invoiceDocumentId)
+            : uiText("Legacy invoice file", "Файл invoice из заказа");
+          invoiceDocumentLabel.innerHTML = [
+            '<span class="document-label-primary">' + escapeHtml(primary) + '</span>',
+            '<span class="document-label-secondary">' + escapeHtml(secondary) + '</span>'
+          ].join("");
+        } else {
+          invoiceDocumentLabel.textContent = "Invoice не сохранён";
+        }
         const contractPath = shipment.contract_download_path || "";
         contractDownloadLink.hidden = !contractPath;
         contractDownloadLink.href = contractPath || "#";
@@ -1596,7 +1646,12 @@
             items: [
               ["КП: доставка+таможня, ₽/шт", formatAmount(perUnit.quote_delivery_customs_rub_per_unit, "₽")],
               ["Факт: доставка+таможня, ₽/шт", formatAmount(perUnit.fact_delivery_customs_rub_per_unit, "₽")],
-              ["Себестоимость на единицу товара", formatAmount(perUnit.exact_landed_cost_per_unit_rub, "₽"), exactCostTooltip(perUnit)]
+              [
+                "Себестоимость на единицу товара",
+                formatAmount(perUnit.exact_landed_cost_per_unit_rub, "₽"),
+                exactCostTooltip(perUnit),
+                perUnit.exact_landed_cost_per_unit_rub == null ? "" : (currentShipment && currentShipment.expenses_complete ? "exact-cost-complete" : "exact-cost-incomplete")
+              ]
             ]
           },
           {
@@ -1640,7 +1695,7 @@
             '<h4>' + escapeHtml(group.title) + '</h4>' +
             '<div class="finance-summary-grid">' +
               group.items.map((item) => (
-                '<div class="total"' + (item[2] ? ' title="' + escapeHtml(item[2]) + '"' : '') + '><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(financeValueOrDash(item[1])) + '</strong></div>'
+                '<div class="total"' + (item[2] ? ' title="' + escapeHtml(item[2]) + '"' : '') + '><span>' + escapeHtml(item[0]) + '</span><strong' + (item[3] ? ' class="' + escapeHtml(item[3]) + '"' : '') + '>' + escapeHtml(financeValueOrDash(item[1])) + '</strong></div>'
               )).join("") +
             '</div>' +
           '</section>'
@@ -2243,6 +2298,10 @@
         cnyBankFeeRub.textContent = shipment.cny_bank_fee_rub ? formatAmount(shipment.cny_bank_fee_rub, "RUB") : "-";
         cnyCalculationStatus.textContent = cnyCalculationStatusLabel(shipment.cny_calculation_status, shipment.cny_calculation_error);
         exactLandedCostPerUnit.textContent = formatRegistryMoney(shipment.exact_landed_cost_per_unit_rub);
+        exactLandedCostPerUnit.classList.remove("exact-cost-complete", "exact-cost-incomplete");
+        if (exactLandedCostPerUnit.textContent !== "—") {
+          exactLandedCostPerUnit.classList.add(shipment.expenses_complete ? "exact-cost-complete" : "exact-cost-incomplete");
+        }
         exactLandedCostPerUnit.parentElement.title = exactCostTooltip(shipment);
         const hasDate = Boolean(shipmentDateInput.value);
         shipmentDateField.classList.toggle("required-missing", !hasDate);
@@ -2443,6 +2502,7 @@
         activeCardTab = "supply";
         resetFinancialState();
         setMessage(cardMessage, "", "");
+        syncActiveRegistryRow();
       }
 
           async function deleteShipment(shipmentId) {
@@ -2471,6 +2531,7 @@
         activeCardTab = "supply";
         resetFinancialState();
         setMessage(cardMessage, "", "");
+        syncActiveRegistryRow();
       }
 
       addShipmentButton.addEventListener("click", openNewShipment);
