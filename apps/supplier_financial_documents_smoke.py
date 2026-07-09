@@ -1339,16 +1339,46 @@ def _assert_bad_quote_rate_guardrail_smoke() -> None:
         raise AssertionError(f"bad-rate registry row quote_total_rub must render blank: {registry}")
     if "sanity-check" not in str(_registry_cell(registry, "quote_logistics", "quote_total_rub", "bad_rate").get("note") or ""):
         raise AssertionError(f"bad-rate registry must explain hidden quote RUB total: {registry}")
+    usd_per_kg_expectations = {
+        "quote_logistics_usd_per_quote_kg": "2.02 USD",
+        "quote_customs_usd_per_quote_kg": "4.05 USD",
+        "quote_total_usd_per_quote_kg": "6.07 USD",
+    }
+    for row_id, expected_display in usd_per_kg_expectations.items():
+        cell = _registry_cell(registry, "quote_normalized", row_id, "bad_rate")
+        if cell.get("display") != expected_display:
+            raise AssertionError(f"bad-rate registry row {row_id} must calculate USD/кг without RUB rate: {cell}")
+        if cell.get("status") in {"partial", "warning"} or cell.get("quality") == "partial_expenses":
+            raise AssertionError(f"pure USD quote metric {row_id} must not inherit expenses/rate warning state: {cell}")
     for row_id in (
         "quote_total_rub_per_unit",
         "quote_logistics_rub_per_quote_kg",
         "quote_customs_rub_per_quote_kg",
         "quote_total_rub_per_quote_kg",
     ):
-        if _registry_cell_display(registry, "quote_normalized", row_id, "bad_rate") != "—":
-            raise AssertionError(f"bad-rate registry row {row_id} must render blank: {registry}")
-        if "sanity-check" not in str(_registry_cell(registry, "quote_normalized", row_id, "bad_rate").get("note") or ""):
-            raise AssertionError(f"bad-rate registry row {row_id} must explain hidden quote RUB metric: {registry}")
+        cell = _registry_cell(registry, "quote_normalized", row_id, "bad_rate")
+        if cell.get("display") != "ждём счета":
+            raise AssertionError(f"bad-rate registry row {row_id} must render waiting-for-invoices status: {cell}")
+        if cell.get("status") != "warning" or cell.get("source_status") != "quote_rate_unavailable":
+            raise AssertionError(f"bad-rate registry row {row_id} must carry warning quote_rate_unavailable metadata: {cell}")
+        note = str(cell.get("note") or "")
+        if "sanity-check" not in note or "после загрузки всех счетов логиста" not in note:
+            raise AssertionError(f"bad-rate registry row {row_id} must explain hidden quote RUB metric and invoice wait: {cell}")
+
+    missing_registry = build_supplier_shipment_registry(
+        [
+            {
+                "shipment_id": "missing_quote",
+                "header": {"shipment_id": "missing_quote", "product_qty_total": 80250},
+                "lines": [],
+                "documents": [],
+                "expense_lines": [],
+                "summary": build_financial_summary([], [], shipment={"header": {"shipment_id": "missing_quote", "product_qty_total": 80250}, "lines": []}),
+            }
+        ]
+    )
+    if _registry_cell_display(missing_registry, "quote_normalized", "quote_total_rub_per_unit", "missing_quote") != "—":
+        raise AssertionError(f"true missing КП data must stay blank, not waiting-for-invoices: {missing_registry}")
 
 
 def _assert_registry_data_source_sections_smoke() -> None:
@@ -1520,6 +1550,9 @@ def _assert_registry_normalized_quality_smoke() -> None:
     for section_id, row_id in [
         ("quote_normalized", "quote_logistics_pct"),
         ("quote_normalized", "quote_customs_pct"),
+        ("quote_normalized", "quote_logistics_usd_per_quote_kg"),
+        ("quote_normalized", "quote_customs_usd_per_quote_kg"),
+        ("quote_normalized", "quote_total_usd_per_quote_kg"),
         ("quote_normalized", "fact_customs_per_quote_kg"),
         ("fact_normalized", "fact_customs_per_dt_kg"),
         ("fact_normalized", "fact_customs_without_vat_pct"),
