@@ -149,7 +149,7 @@ def main() -> None:
 
 def _assert_district_mapping() -> None:
     options = district_filter_options()
-    if [item["label"] for item in options] != ["ЦФО", "СЗФО", "ПФО", "УрФО", "Юг+СК", "Сиб+ДВ"]:
+    if [item["label"] for item in options] != ["ЦФО", "СЗФО", "ПФО", "УФО", "ЮФО/СКФО", "ДВФО/СФО"]:
         raise AssertionError(f"district preset labels changed: {options}")
     expected = {
         "Центральный федеральный округ": "central",

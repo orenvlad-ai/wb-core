@@ -37,12 +37,22 @@ DISTRICT_LABELS_RU = {
     DISTRICT_FAR_SIBERIA: "Дальневосточный и Сибирский федеральный округ",
 }
 
+DISTRICT_SHORT_LABELS_RU = {
+    DISTRICT_CENTRAL: "ЦФО",
+    DISTRICT_NORTHWEST: "СЗФО",
+    DISTRICT_VOLGA: "ПФО",
+    DISTRICT_URAL: "УФО",
+    DISTRICT_SOUTH_CAUCASUS: "ЮФО/СКФО",
+    DISTRICT_FAR_SIBERIA: "ДВФО/СФО",
+}
+
 
 @dataclass(frozen=True)
 class WbRegionalSupplySettings:
     sales_avg_period_days: int
     cycle_supply_days: int
     lead_time_to_region_days: int
+    lead_time_to_region_days_by_district: dict[str, int]
     safety_days: int
     order_batch_qty: int
     report_date_override: str | None
@@ -63,6 +73,7 @@ class WbRegionalSupplyDistrictRow:
     target_stock_after_arrival: float
     daily_demand_total: float
     district_daily_demand: float
+    lead_time_to_region_days: int = 0
     raw_recommendation_qty: float = 0.0
     demand_diagnostics: dict[str, Any] | None = None
     demand_recommendation_qty: int = 0
@@ -85,6 +96,7 @@ class WbRegionalSupplyDistrictResult:
     deficit_qty: int
     filename: str
     rows: list[WbRegionalSupplyDistrictRow]
+    lead_time_to_region_days: int = 0
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 import json
@@ -29,6 +30,7 @@ from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSu
 from packages.contracts.wb_regional_supply import (
     DISTRICT_CENTRAL,
     DISTRICT_FAR_SIBERIA,
+    DISTRICT_KEYS,
     DISTRICT_NORTHWEST,
     DISTRICT_SOUTH_CAUCASUS,
 )
@@ -159,6 +161,8 @@ def main() -> None:
             raise AssertionError("result diagnostics must expose requested valid depletion day count")
         if result.settings.included_district_keys != regional_status.default_included_district_keys:
             raise AssertionError("old payload without included_district_keys must default to all districts")
+        if result.settings.lead_time_to_region_days_by_district != {key: 2 for key in DISTRICT_KEYS}:
+            raise AssertionError("legacy scalar lead_time_to_region_days must expand to every district")
         if result.diagnostics.get("district_selection_mode") != "all_districts":
             raise AssertionError("default district selection must be all_districts")
         if legacy_alias_result.summary.total_qty != result.summary.total_qty:
@@ -181,6 +185,116 @@ def main() -> None:
             raise AssertionError("main SKU must use 14 selected stock-depletion days")
         if abs(central_main_row.daily_demand_total - 60.0) > 1e-9:
             raise AssertionError("total demand must remain based on orderCount, not absolute depletion")
+        if central_main_row.lead_time_to_region_days != 2:
+            raise AssertionError("legacy scalar lead time must be exposed on district rows")
+        if central_main_row.demand_diagnostics.get("lead_time_to_region_days") != 2:
+            raise AssertionError("row diagnostics must expose the lead time used by the formula")
+
+        legacy_saved_payload = asdict(result)
+        legacy_saved_payload["settings"].pop("lead_time_to_region_days_by_district", None)
+        legacy_saved_payload["diagnostics"].pop("lead_time_to_region_days_by_district", None)
+        for district_payload in legacy_saved_payload.get("districts", []):
+            district_payload.pop("lead_time_to_region_days", None)
+            for row_payload in district_payload.get("rows", []):
+                row_payload.pop("lead_time_to_region_days", None)
+                diagnostics_payload = row_payload.get("demand_diagnostics")
+                if isinstance(diagnostics_payload, dict):
+                    diagnostics_payload.pop("lead_time_to_region_days", None)
+        runtime.save_wb_regional_supply_result_state(
+            calculated_at=result.calculated_at,
+            payload=legacy_saved_payload,
+        )
+        legacy_loaded_status = regional_block.build_status()
+        if legacy_loaded_status.last_result is None:
+            raise AssertionError("legacy saved regional result must load without falling")
+        legacy_loaded_map = legacy_loaded_status.last_result.settings.lead_time_to_region_days_by_district
+        if legacy_loaded_map != {key: 2 for key in DISTRICT_KEYS}:
+            raise AssertionError(f"legacy saved result must restore lead-time map from scalar, got {legacy_loaded_map}")
+        legacy_loaded_central = next(
+            row
+            for district in legacy_loaded_status.last_result.districts
+            if district.district_key == DISTRICT_CENTRAL
+            for row in district.rows
+            if row.nm_id == MAIN_NM_ID
+        )
+        if legacy_loaded_central.lead_time_to_region_days != 2:
+            raise AssertionError("legacy saved row without lead-time must use scalar fallback on status load")
+
+        mixed_lead_times = {key: 2 for key in DISTRICT_KEYS}
+        mixed_lead_times[DISTRICT_NORTHWEST] = 10
+        mixed_lead_time_result = regional_block.calculate(
+            {
+                "sales_avg_period_days": 14,
+                "cycle_supply_days": 5,
+                "lead_time_to_region_days_by_district": mixed_lead_times,
+                "safety_days": 1,
+                "order_batch_qty": 50,
+                "report_date_override": "2026-04-18",
+                "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST],
+            }
+        )
+        mixed_districts = {item.district_key: item for item in mixed_lead_time_result.districts}
+        mixed_central_row = next(row for row in mixed_districts[DISTRICT_CENTRAL].rows if row.nm_id == MAIN_NM_ID)
+        mixed_northwest_row = next(row for row in mixed_districts[DISTRICT_NORTHWEST].rows if row.nm_id == MAIN_NM_ID)
+        expected_central_eta = max(
+            mixed_central_row.current_stock
+            - mixed_central_row.district_daily_demand * mixed_central_row.lead_time_to_region_days,
+            0.0,
+        )
+        expected_northwest_eta = max(
+            mixed_northwest_row.current_stock
+            - mixed_northwest_row.district_daily_demand * mixed_northwest_row.lead_time_to_region_days,
+            0.0,
+        )
+        if mixed_central_row.lead_time_to_region_days != 2 or mixed_northwest_row.lead_time_to_region_days != 10:
+            raise AssertionError("per-district lead times must be exposed on result rows")
+        if abs(mixed_central_row.projected_stock_on_eta - expected_central_eta) > 1e-9:
+            raise AssertionError("central projected_stock_on_eta must use central lead time")
+        if abs(mixed_northwest_row.projected_stock_on_eta - expected_northwest_eta) > 1e-9:
+            raise AssertionError("northwest projected_stock_on_eta must use northwest lead time")
+        if mixed_central_row.projected_stock_on_eta <= mixed_northwest_row.projected_stock_on_eta:
+            raise AssertionError("longer northwest lead time must lower projected stock in the same-demand fixture")
+        if (mixed_lead_time_result.diagnostics or {}).get("lead_time_to_region_days_by_district") != mixed_lead_times:
+            raise AssertionError("result diagnostics must expose the applied lead-time map")
+
+        try:
+            regional_block.calculate(
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days_by_district": {
+                        **mixed_lead_times,
+                        "unknown": 3,
+                    },
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                }
+            )
+        except ValueError as exc:
+            if "Неизвестный федеральный округ в сроках доставки" not in str(exc):
+                raise AssertionError(f"unknown lead-time district key must return clear error, got {exc}") from exc
+        else:
+            raise AssertionError("unknown lead-time district key must be rejected")
+
+        incomplete_lead_times = dict(mixed_lead_times)
+        incomplete_lead_times.pop(DISTRICT_NORTHWEST)
+        try:
+            regional_block.calculate(
+                {
+                    "sales_avg_period_days": 14,
+                    "cycle_supply_days": 5,
+                    "lead_time_to_region_days_by_district": incomplete_lead_times,
+                    "safety_days": 1,
+                    "order_batch_qty": 50,
+                    "report_date_override": "2026-04-18",
+                }
+            )
+        except ValueError as exc:
+            if "Не задан срок доставки для федерального округа" not in str(exc):
+                raise AssertionError(f"incomplete lead-time map must return clear error, got {exc}") from exc
+        else:
+            raise AssertionError("incomplete lead-time map must be rejected")
 
         _seed_wb_regional_overlay_fixture(
             runtime,
@@ -512,6 +626,7 @@ def main() -> None:
         print(f"regional_total_qty: ok -> {result.summary.total_qty}")
         print(f"central_deficit: ok -> {districts['central'].deficit_qty}")
         print(f"northwest_deficit: ok -> {districts['northwest'].deficit_qty}")
+        print(f"regional_lead_times: ok -> central {mixed_central_row.lead_time_to_region_days}, northwest {mixed_northwest_row.lead_time_to_region_days}")
         print(f"seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
         print(f"regional_audit: ok -> {latest_audit.get('calculation_id')}")
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")

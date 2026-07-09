@@ -668,6 +668,17 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError("regional district selector must render six district checkboxes")
     if page.locator('input[name="regionalIncludedDistrict"]:checked').count() != 6:
         raise AssertionError("regional district selector must default to all districts")
+    if page.locator("[data-regional-lead-time-district]").count() != 6:
+        raise AssertionError("regional district selector must render six district delivery inputs")
+    for district_key in ("central", "northwest", "volga", "ural", "south_caucasus", "far_siberia"):
+        if page.locator(f'[data-regional-lead-time-district="{district_key}"]').input_value() != "15":
+            raise AssertionError("regional district delivery inputs must default to 15")
+    selector_text = page.locator("#regionalDistrictSelectorList").inner_text()
+    for abbreviation in ("ЦФО", "СЗФО", "ПФО", "УФО", "ЮФО/СКФО", "ДВФО/СФО"):
+        if abbreviation not in selector_text:
+            raise AssertionError(f"regional selector must use district abbreviation {abbreviation!r}")
+    if "Центральный федеральный округ" in selector_text:
+        raise AssertionError("regional selector must not use full district names as primary card labels")
     page.click("#regionalDistrictExcludeFarSiberiaButton")
     page.wait_for_function(
         """(storageKey) => {
@@ -680,6 +691,16 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         }""",
         arg=STORAGE_KEY,
     )
+    page.fill('[data-regional-lead-time-district="central"]', "2")
+    page.dispatch_event('[data-regional-lead-time-district="central"]', "change")
+    page.fill('[data-regional-lead-time-district="northwest"]', "10")
+    page.dispatch_event('[data-regional-lead-time-district="northwest"]', "change")
+    page.click("#regionalDistrictSelectAllButton")
+    page.click("#regionalDistrictExcludeFarSiberiaButton")
+    if page.locator('[data-regional-lead-time-district="central"]').input_value() != "2":
+        raise AssertionError("regional select-all/exclude buttons must not reset central delivery days")
+    if page.locator('[data-regional-lead-time-district="northwest"]').input_value() != "10":
+        raise AssertionError("regional select-all/exclude buttons must not reset northwest delivery days")
     regional_requests: list[dict[str, object]] = []
     regional_planning_requests: list[dict[str, object]] = []
     regional_result_payload: dict[str, object] = {}
@@ -725,7 +746,8 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     def _capture_regional_calculate(route) -> None:
         nonlocal regional_result_payload
         body = route.request.post_data or "{}"
-        regional_requests.append(json.loads(body))
+        request_payload = json.loads(body)
+        regional_requests.append(request_payload)
         regional_result_payload = {
             "status": "success",
             "calculation_id": "calc-browser-regional",
@@ -736,6 +758,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             "methodology_note": "test methodology note",
             "settings": {
                 "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
+                "lead_time_to_region_days_by_district": request_payload.get("lead_time_to_region_days_by_district") or {},
             },
             "summary": {"total_qty": 0, "estimated_weight": 0.0, "estimated_volume": 0.0},
             "diagnostics": {
@@ -776,6 +799,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 "max_inspected_day_count": 120,
                 "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
                 "excluded_district_keys": ["far_siberia"],
+                "lead_time_to_region_days_by_district": request_payload.get("lead_time_to_region_days_by_district") or {},
                 "excluded_day_reason_counts": {
                     "district_out_of_stock_risk": 1397,
                     "district_restock_or_upward_correction": 30,
@@ -1035,6 +1059,17 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('Расчёт выполнен')")
     if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central", "northwest", "volga", "ural", "south_caucasus"]:
         raise AssertionError(f"regional calculate payload must include selected districts, got {regional_requests}")
+    lead_time_payload = regional_requests[-1].get("lead_time_to_region_days_by_district")
+    expected_lead_times = {
+        "central": 2,
+        "northwest": 10,
+        "volga": 15,
+        "ural": 15,
+        "south_caucasus": 15,
+        "far_siberia": 15,
+    }
+    if lead_time_payload != expected_lead_times:
+        raise AssertionError(f"regional calculate payload must include per-district delivery days, got {regional_requests}")
     regional_message = page.locator("#regionalMessage").inner_text()
     if "100000001" in regional_message:
         raise AssertionError("regional main result message must not include long fallback nmIds")
@@ -1061,6 +1096,10 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if district_rows.count() != 5:
         raise AssertionError(f"regional district table must show only included districts, got {district_rows.count()} rows")
     district_table_text = page.locator("#regionalDistrictTableBody").inner_text()
+    if "ЦФО" not in district_table_text or "СЗФО" not in district_table_text:
+        raise AssertionError(f"regional district table must use short district labels, got {district_table_text!r}")
+    if "Центральный федеральный округ" in district_table_text:
+        raise AssertionError(f"regional district table must not use full district names as primary labels, got {district_table_text!r}")
     if "Дальневосточный и Сибирский" in district_table_text or "far_siberia" in district_table_text:
         raise AssertionError(f"excluded far_siberia must not be visible in summary/download table, got {district_table_text!r}")
     if not page.locator('input[name="regionalIncludedDistrict"][value="far_siberia"]').count():
@@ -1092,7 +1131,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "Частичные наблюдения по округам",
         "пополнение или скачок остатка вверх",
         "Нулевой остаток без сигнала по округам",
-        "Исключённые округа: Дальневосточный и Сибирский федеральный округ",
+        "Исключённые округа: ДВФО/СФО",
         "тестовая поставка",
     ):
         if expected not in details_text:

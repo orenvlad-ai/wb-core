@@ -1754,9 +1754,7 @@
 
     .district-check {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      gap: 8px;
-      align-items: start;
+      gap: 10px;
       min-width: 0;
       border: 1px solid var(--border);
       border-radius: 7px;
@@ -1766,18 +1764,56 @@
       font-size: 12px;
       font-weight: 700;
       line-height: 1.35;
+      cursor: default;
+    }
+
+    .district-check-toggle {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      min-width: 0;
       cursor: pointer;
     }
 
-    .district-check input {
+    .district-check-toggle input {
       width: 15px;
       height: 15px;
       margin: 1px 0 0;
     }
 
-    .district-check span {
+    .district-check-name {
       min-width: 0;
       overflow-wrap: anywhere;
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .district-lead-time-field {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 76px;
+      gap: 6px;
+      align-items: center;
+      min-width: 0;
+      color: var(--muted-strong);
+      cursor: default;
+    }
+
+    .district-lead-time-field span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .district-lead-time-field input {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 6px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 800;
     }
 
     .regional-diagnostics-details {
@@ -4209,10 +4245,6 @@
                   <input id="cycleSupplyDays" type="number" min="1" step="1" value="7">
                 </div>
                 <div class="field">
-                  <label for="leadTimeToRegionDays">Доставка до склада Wildberries, дней</label>
-                  <input id="leadTimeToRegionDays" type="number" min="1" step="1" value="15">
-                </div>
-                <div class="field">
                   <label for="regionalSafetyDays">Страховой запас, дней</label>
                   <input id="regionalSafetyDays" type="number" min="0" step="1" value="15">
                 </div>
@@ -4994,7 +5026,6 @@
       const regionalFields = {
         sales_avg_period_days: document.getElementById("regionalSalesAvgPeriodDays"),
         cycle_supply_days: document.getElementById("cycleSupplyDays"),
-        lead_time_to_region_days: document.getElementById("leadTimeToRegionDays"),
         safety_days: document.getElementById("regionalSafetyDays"),
         order_batch_qty: document.getElementById("regionalOrderBatchQty"),
         report_date_override: document.getElementById("regionalReportDateOverride")
@@ -5149,7 +5180,8 @@
             .filter((item) => item && item.district_key)
             .map((item) => ({
               district_key: String(item.district_key || "").trim(),
-              district_name_ru: String(item.district_name_ru || item.district_key || "").trim()
+              district_name_ru: String(item.district_name_ru || item.district_key || "").trim(),
+              district_short_label_ru: String(item.district_short_label_ru || item.district_key || "").trim()
             }))
         : [];
       const WB_REGIONAL_DISTRICT_KEYS = WB_REGIONAL_DISTRICT_OPTIONS.map((item) => item.district_key);
@@ -5161,10 +5193,11 @@
         central: "ЦФО",
         northwest: "СЗФО",
         volga: "ПФО",
-        ural: "УрФО",
-        south_caucasus: "Юг+СК",
-        far_siberia: "Сиб+ДВ"
+        ural: "УФО",
+        south_caucasus: "ЮФО/СКФО",
+        far_siberia: "ДВФО/СФО"
       };
+      const DEFAULT_WB_REGIONAL_LEAD_TIME_DAYS = 15;
       const WB_SUPPLIES_DEFAULT_SIZE_FILTER = "main_250";
       const WB_SUPPLIES_DEFAULT_LIMIT = 20;
       const WB_SUPPLIES_OFFICIAL_STATUS_IDS = [1, 2, 3, 4, 5, 6];
@@ -5254,6 +5287,9 @@
       let regionalIncludedDistrictKeys = sanitizeRegionalDistrictKeys(
         persistedOperatorUiState.wb_regional_included_district_keys,
         { fallbackToAll: true }
+      );
+      let regionalLeadTimeDaysByDistrict = sanitizeRegionalLeadTimeDaysByDistrict(
+        persistedOperatorUiState.wb_regional_lead_time_days_by_district
       );
       let regionalLastResultPayload = null;
       let regionalPlanningPayload = null;
@@ -5524,6 +5560,78 @@
         return match ? match.district_name_ru : key;
       }
 
+      function regionalDistrictShortLabel(key) {
+        const normalized = String(key || "").trim();
+        const match = WB_REGIONAL_DISTRICT_OPTIONS.find((item) => item.district_key === normalized);
+        if (match && match.district_short_label_ru) {
+          return match.district_short_label_ru;
+        }
+        return WB_DISTRICT_SHORT_LABELS[normalized] || regionalDistrictLabel(normalized);
+      }
+
+      function sanitizeRegionalLeadTimeDaysByDistrict(value) {
+        const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+        return WB_REGIONAL_DISTRICT_KEYS.reduce((acc, key) => {
+          const rawValue = Object.prototype.hasOwnProperty.call(source, key)
+            ? source[key]
+            : DEFAULT_WB_REGIONAL_LEAD_TIME_DAYS;
+          const numeric = Number(String(rawValue || "").trim());
+          acc[key] = Number.isInteger(numeric) && numeric > 0
+            ? numeric
+            : DEFAULT_WB_REGIONAL_LEAD_TIME_DAYS;
+          return acc;
+        }, {});
+      }
+
+      function persistRegionalLeadTimeDays() {
+        writePersistedOperatorUiState({
+          wb_regional_lead_time_days_by_district: { ...regionalLeadTimeDaysByDistrict }
+        });
+      }
+
+      function setRegionalLeadTimeDaysForDistrict(key, value, options) {
+        if (!WB_REGIONAL_DISTRICT_KEYS.includes(key)) {
+          return;
+        }
+        const numeric = Number(String(value || "").trim());
+        if (!Number.isInteger(numeric) || numeric <= 0) {
+          return;
+        }
+        regionalLeadTimeDaysByDistrict = {
+          ...regionalLeadTimeDaysByDistrict,
+          [key]: numeric
+        };
+        const input = regionalDistrictSelectorList
+          ? Array.from(regionalDistrictSelectorList.querySelectorAll("[data-regional-lead-time-district]"))
+              .find((item) => item.getAttribute("data-regional-lead-time-district") === key)
+          : null;
+        if (input && String(input.value) !== String(numeric)) {
+          input.value = String(numeric);
+        }
+        if (!options || options.persist !== false) {
+          persistRegionalLeadTimeDays();
+        }
+      }
+
+      function readRegionalLeadTimeDaysByDistrict() {
+        const result = {};
+        for (const key of WB_REGIONAL_DISTRICT_KEYS) {
+          const input = regionalDistrictSelectorList
+            ? Array.from(regionalDistrictSelectorList.querySelectorAll("[data-regional-lead-time-district]"))
+                .find((item) => item.getAttribute("data-regional-lead-time-district") === key)
+            : null;
+          const rawValue = input ? String(input.value || "").trim() : String(regionalLeadTimeDaysByDistrict[key] || "");
+          const numeric = Number(rawValue);
+          if (!Number.isInteger(numeric) || numeric <= 0) {
+            throw new Error("Доставка, дней должна быть целым числом больше нуля: " + regionalDistrictShortLabel(key));
+          }
+          result[key] = numeric;
+        }
+        regionalLeadTimeDaysByDistrict = { ...result };
+        persistRegionalLeadTimeDays();
+        return result;
+      }
+
       function setRegionalIncludedDistrictKeys(value, options) {
         regionalIncludedDistrictKeys = sanitizeRegionalDistrictKeys(value, { fallbackToAll: false });
         Array.from(document.querySelectorAll("input[name='regionalIncludedDistrict']")).forEach((input) => {
@@ -5539,7 +5647,7 @@
           } else {
             const excluded = WB_REGIONAL_DISTRICT_KEYS
               .filter((key) => !regionalIncludedDistrictKeys.includes(key))
-              .map(regionalDistrictLabel);
+              .map(regionalDistrictShortLabel);
             regionalDistrictSelectorMessage.textContent = "Исключены из методологии: " + excluded.join(", ") + ".";
             regionalDistrictSelectorMessage.className = "field-note";
           }
@@ -5554,16 +5662,30 @@
           return;
         }
         regionalDistrictSelectorList.innerHTML = WB_REGIONAL_DISTRICT_OPTIONS.map((item) => [
-          "<label class=\"district-check\">",
+          "<div class=\"district-check\" title=\"" + escapeHtml(regionalDistrictLabel(item.district_key)) + "\" aria-label=\"" + escapeHtml(regionalDistrictLabel(item.district_key)) + "\">",
+          "<label class=\"district-check-toggle\">",
           "<input type=\"checkbox\" name=\"regionalIncludedDistrict\" value=\"" + escapeHtml(item.district_key) + "\">",
-          "<span>" + escapeHtml(item.district_name_ru) + "</span>",
-          "</label>"
+          "<span class=\"district-check-name\">" + escapeHtml(regionalDistrictShortLabel(item.district_key)) + "</span>",
+          "</label>",
+          "<label class=\"district-lead-time-field\">",
+          "<span>Доставка, дней</span>",
+          "<input type=\"number\" min=\"1\" step=\"1\" value=\"" + escapeHtml(regionalLeadTimeDaysByDistrict[item.district_key] || DEFAULT_WB_REGIONAL_LEAD_TIME_DAYS) + "\" data-regional-lead-time-district=\"" + escapeHtml(item.district_key) + "\" aria-label=\"" + escapeHtml("Доставка, дней: " + regionalDistrictLabel(item.district_key)) + "\" title=\"" + escapeHtml("Доставка + приёмка до доступности на WB: " + regionalDistrictLabel(item.district_key)) + "\">",
+          "</label>",
+          "</div>"
         ].join("")).join("");
         Array.from(regionalDistrictSelectorList.querySelectorAll("input[name='regionalIncludedDistrict']")).forEach((input) => {
           input.addEventListener("change", () => {
             const selected = Array.from(document.querySelectorAll("input[name='regionalIncludedDistrict']:checked"))
               .map((item) => item.value);
             setRegionalIncludedDistrictKeys(selected);
+          });
+        });
+        Array.from(regionalDistrictSelectorList.querySelectorAll("[data-regional-lead-time-district]")).forEach((input) => {
+          input.addEventListener("change", () => {
+            setRegionalLeadTimeDaysForDistrict(
+              input.getAttribute("data-regional-lead-time-district") || "",
+              input.value
+            );
           });
         });
         setRegionalIncludedDistrictKeys(regionalIncludedDistrictKeys.length ? regionalIncludedDistrictKeys : DEFAULT_WB_REGIONAL_INCLUDED_DISTRICTS, { persist: false });
@@ -7537,6 +7659,7 @@
         Object.keys(regionalFields).forEach((key) => {
           payload[key] = regionalFields[key].value;
         });
+        payload.lead_time_to_region_days_by_district = readRegionalLeadTimeDaysByDistrict();
         payload.stock_ff_source = stockFfSource;
         payload.included_district_keys = regionalIncludedDistrictKeys.slice();
         payload.selected_wb_supply_ids = selectedWbSupplyIds.slice();
@@ -8057,6 +8180,7 @@
           const filename = valueOrDash(item.filename);
           const districtKey = valueOrDash(item.district_key);
           const districtName = valueOrDash(item.district_name_ru);
+          const districtShortName = districtShortLabel(districtKey);
           const planningQty = regionalDistrictPlanningQty(item);
           const isPlanningInFlight = regionalPlanningInFlightDistrictKey && regionalPlanningInFlightDistrictKey === districtKey;
           const planningDisabledReason = regionalPlanningDisabledReason(planningQty, isPlanningInFlight);
@@ -8066,7 +8190,7 @@
           const planningReason = planningQty > 0 ? "" : "<div class=\"field-note regional-planning-disabled-reason\">Нет количества к поставке</div>";
           return [
             "<tr>",
-            "<td>" + districtName + "</td>",
+            "<td><span title=\"" + escapeHtml(districtName) + "\" aria-label=\"" + escapeHtml(districtName) + "\">" + escapeHtml(districtShortName) + "</span></td>",
             "<td>" + valueOrDash(item.total_qty) + "</td>",
             "<td>" + valueOrDash(item.deficit_qty) + "</td>",
             "<td><button class=\"action-button secondary-button regional-download-button\" type=\"button\" data-regional-district-download=\"" + escapeHtml(districtKey) + "\" data-download-path=\"" + escapeHtml(downloadPath) + "\" data-download-filename=\"" + escapeHtml(filename) + "\"" + disabled + ">Скачать Excel</button></td>",
@@ -8158,7 +8282,7 @@
             regionalPlanningPanel.hidden = false;
           }
           if (regionalPlanningTitle) {
-            regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictLabel(normalizedDistrictKey);
+            regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictShortLabel(normalizedDistrictKey);
           }
           setRegionalPlanningMessage("Подбор завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)), "error");
           if (regionalPlanningTableBody) {
@@ -8212,7 +8336,7 @@
           regionalPlanningPanel.hidden = false;
         }
         if (regionalPlanningTitle) {
-          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictLabel(districtKey);
+          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictShortLabel(districtKey);
         }
         setRegionalPlanningMessage("Запрашиваем WB acceptance/options и тарифную evidence...", "");
         if (regionalPlanningSummary) {
@@ -8243,7 +8367,7 @@
           regionalPlanningPanel.hidden = false;
         }
         if (regionalPlanningTitle) {
-          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictLabel(payload && payload.district_key);
+          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictShortLabel(payload && payload.district_key);
         }
         const status = String(payload && payload.status || "");
         const blockers = Array.isArray(payload && payload.blockers) ? payload.blockers : [];
@@ -8599,7 +8723,7 @@
         }
         const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
         if (excluded.length) {
-          parts.push("Исключённые округа: " + excluded.map(regionalDistrictLabel).join(", ") + ".");
+          parts.push("Исключённые округа: " + excluded.map(regionalDistrictShortLabel).join(", ") + ".");
         }
         if (Number(diagnostics.seed_sku_count || 0) > 0 || Number(diagnostics.seed_allocated_qty_total || 0) > 0) {
           parts.push(
@@ -8657,8 +8781,8 @@
           renderRegionalDiagnosticsList(formatReasonCountRows(neutralizedCounts, { districtLabels: true })),
           "<h4>Округа</h4>",
           renderRegionalDiagnosticsList([
-            "В методологии: " + (included.length ? included.map(regionalDistrictLabel).join(", ") : "-"),
-            "Исключённые округа: " + (excluded.length ? excluded.map(regionalDistrictLabel).join(", ") : "нет")
+            "В методологии: " + (included.length ? included.map(regionalDistrictShortLabel).join(", ") : "-"),
+            "Исключённые округа: " + (excluded.length ? excluded.map(regionalDistrictShortLabel).join(", ") : "нет")
           ]),
           "<h4>Fallback и тестовые коробки</h4>",
           renderRegionalDiagnosticsList([
@@ -8719,7 +8843,7 @@
         return keys.map((nmId) => {
           const item = seedByNmId[nmId] || {};
           const districts = Array.isArray(item.seed_district_keys)
-            ? item.seed_district_keys.map(regionalDistrictLabel).join(", ")
+            ? item.seed_district_keys.map(regionalDistrictShortLabel).join(", ")
             : "нет";
           const qtyByDistrict = item.seed_qty_by_district && typeof item.seed_qty_by_district === "object"
             ? formatReasonCounts(item.seed_qty_by_district, { districtLabels: true })
@@ -8786,7 +8910,7 @@
           .sort((a, b) => b[1] - a[1]);
         const limited = opts.limit ? items.slice(0, opts.limit) : items;
         return limited.map((item) => {
-          const label = opts.districtLabels ? regionalDistrictLabel(item[0]) : regionalDiagnosticLabel(item[0]);
+          const label = opts.districtLabels ? regionalDistrictShortLabel(item[0]) : regionalDiagnosticLabel(item[0]);
           return label + ": " + item[1];
         });
       }
@@ -10973,7 +11097,7 @@
       }
 
       function districtShortLabel(key) {
-        return WB_DISTRICT_SHORT_LABELS[String(key || "")] || regionalDistrictLabel(key);
+        return regionalDistrictShortLabel(key);
       }
 
       function wbSuppliesWarehouseSummary(warehouseOptions) {

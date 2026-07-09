@@ -87,7 +87,7 @@ def main() -> None:
                 expect(operator_frame.locator(".wb-supplies-district-presets")).to_have_count(0)
                 operator_frame.locator("#wbSuppliesWarehouseMenuButton").click()
                 expect(operator_frame.locator("#wbSuppliesDistrictPresetList")).to_contain_text("ЦФО")
-                expect(operator_frame.locator("#wbSuppliesDistrictPresetList")).to_contain_text("Сиб+ДВ")
+                expect(operator_frame.locator("#wbSuppliesDistrictPresetList")).to_contain_text("ДВФО/СФО")
                 operator_frame.locator("#wbSuppliesWarehouseMenuButton").click()
                 expect(operator_frame.locator("#wbSuppliesStatusMenuButton")).to_contain_text("Статусы: все")
                 expect(operator_frame.locator("#wbSuppliesSizeFilterSelect")).to_be_visible()
@@ -301,7 +301,8 @@ def main() -> None:
                 expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text("39265540", timeout=10000)
                 operator_frame.get_by_role("button", name="Расчёты").click()
                 expect(operator_frame.locator("#wbSupplyOverlayTitle")).to_contain_text("Учесть WB-поставки")
-                expect(operator_frame.locator("#wbSupplyOverlayOptions")).to_contain_text("1002", timeout=10000)
+                expect(operator_frame.locator("#wbSupplyOverlayOptions")).to_contain_text("1003", timeout=10000)
+                expect(operator_frame.locator("#wbSupplyOverlayOptions")).not_to_contain_text("1002")
                 expect(operator_frame.locator("#wbSupplyOverlayOptions")).not_to_contain_text("статус «Принято» не учитывается")
                 expect(operator_frame.locator("#wbSupplyOverlayMessage")).not_to_contain_text("Склад WB не сопоставлен")
                 if operator_frame.locator("#wbSupplyOverlayWarningDetails").is_visible():

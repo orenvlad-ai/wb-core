@@ -450,7 +450,7 @@ Per-unit denominator priority for both `Транзит` and `Услуги ФФ`:
 Filters:
 - search placeholder `Номер поставки`;
 - warehouse dropdown summary `Склады: все` / `ФО: ...` / `Склад: ...`;
-- federal district presets `Все · ЦФО · СЗФО · ПФО · УрФО · Юг+СК · Сиб+ДВ` live inside the `Склад` dropdown; one or many district checkboxes filter by mapped warehouse district while unmapped warehouses remain available only through the concrete warehouse list;
+- federal district presets `Все · ЦФО · СЗФО · ПФО · УФО · ЮФО/СКФО · ДВФО/СФО` live inside the `Склад` dropdown; one or many district checkboxes filter by mapped warehouse district while unmapped warehouses remain available only through the concrete warehouse list;
 - choosing a district preset clears a concrete warehouse filter, choosing a concrete warehouse clears district presets, and `Все` clears both to avoid stale false-empty combinations;
 - status checkbox popup with summary `Статусы: все` or `Статусы: N`;
 - status quick actions `Все`, `Активные` and `Сброс`; `Активные` selects all official statuses except `Не запланировано`;
