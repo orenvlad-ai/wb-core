@@ -45,6 +45,12 @@ def main() -> None:
     print("stock_report_table_browser: ok ->", result["row_count"], "rows")
     print("stock_report_table_sort_stock: ok ->", result["stock_sort_first"])
     print("stock_report_table_sort_promo: ok ->", result["promo_sort_first"])
+    print(
+        "stock_report_table_sort_scroll: ok ->",
+        result["right_scroll_before"],
+        result["right_scroll_after_asc"],
+        result["right_scroll_after_desc"],
+    )
 
 
 def run_browser_checks(base_url: str) -> dict[str, object]:
@@ -129,7 +135,54 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
             if scroll_evidence["headerLeft"] != "0px" or scroll_evidence["cellLeft"] != "0px":
                 raise AssertionError(f"SKU sticky left must be 0px, got {scroll_evidence}")
 
-            before_sort_first = _first_detail_sku_cell_text(page)
+            initial_detail_first = _first_detail_sku_cell_text(page)
+            right_scroll_before = page.locator("[data-stock-report-table-wrap]").evaluate(
+                "node => { node.scrollLeft = node.scrollWidth - node.clientWidth; return node.scrollLeft; }"
+            )
+            if right_scroll_before <= 0:
+                raise AssertionError(f"stock report must reach a non-zero right scroll position, got {right_scroll_before}")
+            page.locator('[data-stock-report-sort="days_left_total"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-stock-report-sort=\"days_left_total\"]')"
+                ".closest('th').getAttribute('aria-sort') === 'ascending'"
+            )
+            right_scroll_after_asc = page.locator("[data-stock-report-table-wrap]").evaluate("node => node.scrollLeft")
+            if abs(right_scroll_after_asc - right_scroll_before) > 1:
+                raise AssertionError(
+                    "stock report ascending sort must preserve the far-right horizontal scroll position; "
+                    f"before={right_scroll_before}, after={right_scroll_after_asc}"
+                )
+            asc_detail_order = _detail_sku_order(page)
+
+            page.locator('[data-stock-report-sort="days_left_total"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-stock-report-sort=\"days_left_total\"]')"
+                ".closest('th').getAttribute('aria-sort') === 'descending'"
+            )
+            right_scroll_after_desc = page.locator("[data-stock-report-table-wrap]").evaluate("node => node.scrollLeft")
+            if abs(right_scroll_after_desc - right_scroll_before) > 1:
+                raise AssertionError(
+                    "stock report descending sort must preserve the far-right horizontal scroll position; "
+                    f"before={right_scroll_before}, after={right_scroll_after_desc}"
+                )
+            desc_detail_order = _detail_sku_order(page)
+            if asc_detail_order == desc_detail_order:
+                raise AssertionError(
+                    "days-left sort direction toggle must reorder detail rows while preserving horizontal scroll"
+                )
+
+            page.locator("[data-stock-report-table-wrap]").evaluate("node => { node.scrollLeft = 0; }")
+            page.locator('[data-stock-report-sort="supplier_production_qty"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-stock-report-sort=\"supplier_production_qty\"]')"
+                ".closest('th').getAttribute('aria-sort') === 'ascending'"
+            )
+            left_scroll_after_sort = page.locator("[data-stock-report-table-wrap]").evaluate("node => node.scrollLeft")
+            if abs(left_scroll_after_sort) > 1:
+                raise AssertionError(
+                    f"stock report sort must preserve the far-left horizontal scroll position, got {left_scroll_after_sort}"
+                )
+
             page.locator('[data-stock-report-sort="stock_wb"]').click()
             page.wait_for_timeout(250)
             if len(stock_report_requests) != 1:
@@ -138,10 +191,10 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
                 raise AssertionError("summary row must stay first after stock sort")
             stock_sort_first = _first_detail_sku_cell_text(page)
             stock_sort_value = _row_cell_text(page, 1, 6)
-            if stock_sort_first == before_sort_first or stock_sort_value != "40":
+            if stock_sort_first == initial_detail_first or stock_sort_value != "40":
                 raise AssertionError(
                     "stock_wb ascending sort must reorder rows by raw numeric WB stock; "
-                    f"before={before_sort_first!r}, after={stock_sort_first!r}, stock={stock_sort_value!r}"
+                    f"before={initial_detail_first!r}, after={stock_sort_first!r}, stock={stock_sort_value!r}"
                 )
 
             page.locator('[data-stock-report-sort="promotion_participation"]').click()
@@ -198,11 +251,23 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
         "promo_sort_first": promo_sort_first,
         "stock_report_request_count": len(stock_report_requests),
         "scroll_evidence": scroll_evidence,
+        "right_scroll_before": right_scroll_before,
+        "right_scroll_after_asc": right_scroll_after_asc,
+        "right_scroll_after_desc": right_scroll_after_desc,
+        "left_scroll_after_sort": left_scroll_after_sort,
     }
 
 
 def _first_detail_sku_cell_text(page: object) -> str:
     return _row_cell_text(page, 1, 0)
+
+
+def _detail_sku_order(page: object) -> list[str]:
+    rows = page.locator("#stockReportRows tbody tr")
+    return [
+        str(rows.nth(index).locator("td").nth(0).inner_text()).strip()
+        for index in range(1, rows.count())
+    ]
 
 
 def _row_cell_text(page: object, row_index: int, cell_index: int) -> str:

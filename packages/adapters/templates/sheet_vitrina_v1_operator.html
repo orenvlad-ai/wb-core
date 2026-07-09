@@ -7187,7 +7187,24 @@
         return "<th aria-sort=\"" + ariaSort + "\" title=\"" + escapeHtml(column.title || column.label) + "\"><button class=\"stock-report-sort-button" + (isActive ? " is-active" : "") + "\" type=\"button\" data-stock-report-sort=\"" + escapeHtml(column.key) + "\">" + escapeHtml(column.label + indicator) + "</button></th>";
       }
 
-      function renderStockReportRows(rows, summaryRow) {
+      function readStockReportHorizontalScrollLeft() {
+        const tableWrap = stockReportRows.querySelector("[data-stock-report-table-wrap]");
+        return tableWrap ? tableWrap.scrollLeft : 0;
+      }
+
+      function restoreStockReportHorizontalScrollLeft(scrollLeft) {
+        if (!Number.isFinite(scrollLeft)) {
+          return;
+        }
+        const tableWrap = stockReportRows.querySelector("[data-stock-report-table-wrap]");
+        if (!tableWrap) {
+          return;
+        }
+        const maxScrollLeft = Math.max(0, tableWrap.scrollWidth - tableWrap.clientWidth);
+        tableWrap.scrollLeft = Math.min(Math.max(0, scrollLeft), maxScrollLeft);
+      }
+
+      function renderStockReportRows(rows, summaryRow, horizontalScrollLeft) {
         const detailRows = (Array.isArray(rows) ? rows : []).filter((item) => item && !item.is_summary);
         const sortedRows = sortedStockReportRows(detailRows);
         const tableRows = summaryRow ? [summaryRow].concat(sortedRows) : sortedRows;
@@ -7218,13 +7235,17 @@
           "</table>",
           "</div>"
         ].join("");
+        restoreStockReportHorizontalScrollLeft(horizontalScrollLeft);
       }
 
-      function renderStockReport(payload) {
+      function renderStockReport(payload, options) {
         if (!payload || payload.status !== "available") {
           renderStockReportUnavailable(payload, "Отчёт по остаткам пока недоступен.");
           return;
         }
+        const horizontalScrollLeft = options && options.preserveHorizontalScroll
+          ? readStockReportHorizontalScrollLeft()
+          : null;
         const filteredRows = filterStockReportRows(payload.rows);
         const selectedCount = stockReportActiveSkus.length ? stockReportAppliedSkuIds.length : 0;
         const selectionSummary = stockReportActiveSkus.length
@@ -7235,7 +7256,11 @@
         stockReportStatus.textContent = "Source of truth: persisted ready snapshot / DATA_VITRINA / yesterday_closed.";
         stockReportStatus.className = "section-message";
         stockReportContent.hidden = false;
-        renderStockReportRows(filteredRows, buildStockReportSummaryRow(filteredRows, payload.summary_row));
+        renderStockReportRows(
+          filteredRows,
+          buildStockReportSummaryRow(filteredRows, payload.summary_row),
+          horizontalScrollLeft
+        );
         renderStockReportNotes(payload.notes);
       }
 
@@ -13173,7 +13198,7 @@
         stockReportSortState = stockReportSortState.key === key
           ? { key, direction: stockReportSortState.direction === "asc" ? "desc" : "asc" }
           : { key, direction: "asc" };
-        renderStockReport(stockReportPayload);
+        renderStockReport(stockReportPayload, { preserveHorizontalScroll: true });
       });
       stockReportApplyButton.addEventListener("click", applyStockReportSelection);
       planReportApplyButton.addEventListener("click", loadPlanReport);
