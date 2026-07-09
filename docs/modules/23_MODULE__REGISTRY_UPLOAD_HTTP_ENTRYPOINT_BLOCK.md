@@ -615,10 +615,14 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - persisted state restore stays defensive:
     - broken/unknown storage payload falls back to the existing default tab/section/filter state
     - obsolete `nmId` values are silently dropped against the current active SKU catalog before restore
-  - `Рассчитать` applies only the current selected SKU subset to the already loaded read-only report rows; deselected SKU are excluded from the final rendered result set before the low-stock row list is shown
-  - if the selected subset has no breached rows under the existing threshold, operator page must show an honest empty result instead of stale rows; zero selected SKU is rejected client-side with `Выберите хотя бы один SKU`
-  - threshold = include only SKU where at least one supported district stock is `< 50`
-  - sort = `min breached stock asc`, then `breached district count desc`, then `stock_total asc`
+  - `Рассчитать` applies only the current selected SKU subset to the already loaded read-only report rows; deselected SKU are excluded from the final rendered result set before the table is shown
+  - if the selected subset has no rows, operator page must show an honest empty result instead of stale rows; zero selected SKU is rejected client-side with `Выберите хотя бы один SKU`
+  - threshold `<50` is disclosed only as historical/diagnostic alert context; it no longer filters rows
+  - default row order follows active `config_v2` display order; table sorting is browser-local over raw numeric/string fields
+  - visible stock-report column order after `Акция` is `поставки ВБ`, `ост. ФФ`, `ост. ВБ`
+  - `поставки ВБ` reads the existing WB supplies runtime cache (`sheet_vitrina_v1_wb_supplies`), aggregates cached goods composition `nmId -> quantity` by active SKU, excludes only status ids `1/2/5` (`Не запланировано` / `Запланировано` / `Принято`) and counts every other status id/label when goods quantity is positive; it does not fetch upstream and does not create a second WB supplies source
+  - `ост. ФФ` reads current balances from server-owned `ff_stock_ledger` / `ФФ -> Остатки ФФ`; missing balance is numeric `0`, negative balance remains numeric and visible
+  - `ост. ВБ` is the renamed display of the existing `stock_total` WB stock value from persisted ready snapshot; the API also exposes alias `stock_wb` while keeping `stock_total` for compatibility
   - supported district labels stay compact and truthful to current merged buckets:
     - `stock_ru_central` -> `Центральный ФО`
     - `stock_ru_northwest` -> `Северо-Западный ФО`

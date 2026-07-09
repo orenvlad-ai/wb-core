@@ -192,7 +192,7 @@ def main() -> None:
             if stock_payload.get("threshold_lt") != 50:
                 raise AssertionError(f"stock report must disclose threshold <50, got {stock_payload}")
             if not stock_payload.get("rows"):
-                raise AssertionError(f"stock report must publish breached SKU rows, got {stock_payload}")
+                raise AssertionError(f"stock report must publish active SKU rows, got {stock_payload}")
             stock_source = stock_payload.get("source_of_truth") or {}
             if stock_source.get("temporal_slot") != "yesterday_closed" or stock_source.get("slot_date") != "2026-04-18":
                 raise AssertionError(f"stock report must disclose yesterday_closed seam, got {stock_payload}")
