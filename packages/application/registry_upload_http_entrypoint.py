@@ -76,6 +76,17 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
     onec_stage_metric_key,
     onec_stage_total_metric_key,
 )
+from packages.application.sheet_vitrina_v1_our_wb_costs import (
+    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
+    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    extend_metrics_with_our_wb_cost_metrics,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policy,
     reduce_source_temporal_semantics,
@@ -346,6 +357,14 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
         "stock_ru_south_caucasus",
         "stock_ru_ural",
         "stock_ru_far_siberia",
+        TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+        TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+        OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+        OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
+        OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+        OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+        OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+        OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
     ),
     ONEC_STOCKS_SOURCE_KEY: ONEC_STOCKS_METRIC_KEYS,
     "ads_compact": (
@@ -959,8 +978,10 @@ class RegistryUploadHttpEntrypoint:
             preferred_date=current_business_date_iso(self.now_factory()),
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_onec_stock_metrics(
-                getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            extend_metrics_with_our_wb_cost_metrics(
+                extend_metrics_with_onec_stock_metrics(
+                    getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                )
             )
         )
         activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
@@ -1674,8 +1695,10 @@ class RegistryUploadHttpEntrypoint:
             preferred_date=current_business_date,
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_onec_stock_metrics(
-                getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            extend_metrics_with_our_wb_cost_metrics(
+                extend_metrics_with_onec_stock_metrics(
+                    getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                )
             )
         )
         upload_summary = _build_web_vitrina_endpoint_summary_block(
@@ -3243,7 +3266,9 @@ class RegistryUploadHttpEntrypoint:
 
                 current_state = self.runtime.load_current_state()
                 metric_keys = _metric_keys_for_source_keys(
-                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2),
+                    extend_metrics_with_our_wb_cost_metrics(
+                        extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                    ),
                     source_keys=source_keys,
                 )
                 if not metric_keys:

@@ -30,12 +30,15 @@ from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
     _MetricEvaluator,
 )
 from packages.application.sheet_vitrina_v1_onec_stocks import (  # noqa: E402
+    ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
     ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY,
     ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_onec_stock_metrics,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
@@ -94,6 +97,7 @@ def main() -> None:
         if block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") != 3:
             raise AssertionError("non-final WB quantities must still materialize as non-confirmed layers")
         _assert_wb_quantity_source_status(runtime)
+        _assert_physical_inbound_gate_and_idempotency()
         _assert_daily_state_rolls_iso_timestamp_inbound(runtime, block)
         _assert_confirmed_share_partial_bucket_math()
         _assert_total_confirmed_share_is_quantity_weighted()
@@ -408,6 +412,165 @@ def _assert_wb_quantity_source_status(runtime: RegistryUploadDbBackedRuntime) ->
         raise AssertionError(f"status 6 planned-only quantity must not be final accepted, got {shipped_planned_components}")
 
 
+def _assert_physical_inbound_gate_and_idempotency() -> None:
+    with TemporaryDirectory(prefix="our-wb-costs-physical-inbound-smoke-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
+        accepted = runtime.ingest_bundle(bundle, activated_at="2026-07-01T00:00:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"physical-inbound fixture bundle must be accepted, got {accepted}")
+        current_state = runtime.load_current_state()
+        transitioned_nm = 888200001
+        status6_nm = 888200002
+        unknown_cost_nm = 888200003
+        opening_stocks = {
+            transitioned_nm: 100,
+            status6_nm: 100,
+            unknown_cost_nm: 100,
+        }
+        for as_of_date in ("2026-07-01", "2026-07-02"):
+            runtime.save_sheet_vitrina_ready_snapshot(
+                current_state=current_state,
+                refreshed_at=f"{as_of_date}T06:00:00Z",
+                plan=_daily_stock_plan_many(as_of_date=as_of_date, stock_by_nm=opening_stocks),
+            )
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            for nm_id, label in (
+                (transitioned_nm, "status 4 to 5"),
+                (status6_nm, "status 6 planned"),
+                (unknown_cost_nm, "accepted unknown cost"),
+            ):
+                _insert_opening_baseline(
+                    conn,
+                    nm_id=nm_id,
+                    display_name=label,
+                    stock_qty=100,
+                    unit_cost=100,
+                    source_status="opening_confirmed_supply",
+                    confirmed_qty=100,
+                    estimated_qty=0,
+                    fallback_qty=0,
+                )
+            _insert_wb_cost_layer(
+                conn,
+                layer_id="planned_status4_v1",
+                supply_id="planned_status4",
+                nm_id=transitioned_nm,
+                qty=20,
+                supply_date="2026-07-02",
+                accepted_date="2026-07-02T08:00:00+03:00",
+                unit_cost=110,
+                source_status=WB_COST_STATUS_ESTIMATED,
+                status_id=4,
+                final_accepted=False,
+            )
+            _insert_wb_cost_layer(
+                conn,
+                layer_id="planned_status6_v1",
+                supply_id="planned_status6",
+                nm_id=status6_nm,
+                qty=20,
+                supply_date="2026-07-02",
+                accepted_date="2026-07-02T08:00:00+03:00",
+                unit_cost=110,
+                source_status=WB_COST_STATUS_ESTIMATED,
+                status_id=6,
+                quantity_source="quantity",
+                final_accepted=False,
+            )
+        block = OurWbCostBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        block.materialize_daily_state(opening_date="2026-07-01")
+        july2 = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-02")
+        for nm_id in (transitioned_nm, status6_nm):
+            _assert_close(float(july2[nm_id]["confirmed_qty"]), 100.0, "planned/open confirmed bucket")
+            _assert_close(float(july2[nm_id]["estimated_qty"]), 0.0, "planned/open estimated bucket")
+
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at="2026-07-03T06:00:00Z",
+            plan=_daily_stock_plan_many(
+                as_of_date="2026-07-03",
+                stock_by_nm={
+                    transitioned_nm: 120,
+                    status6_nm: 100,
+                    unknown_cost_nm: 120,
+                },
+            ),
+        )
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_wb_supply_cost_layers
+                SET is_current = 0, superseded_at = ?
+                WHERE wb_supply_cost_layer_id = 'planned_status4_v1'
+                """,
+                (NOW,),
+            )
+            _insert_wb_cost_layer(
+                conn,
+                layer_id="planned_status4_v2",
+                supply_id="planned_status4",
+                nm_id=transitioned_nm,
+                qty=20,
+                supply_date="2026-07-02",
+                accepted_date="2026-07-03T08:00:00+03:00",
+                unit_cost=110,
+                source_status=WB_COST_STATUS_CONFIRMED,
+                status_id=5,
+                final_accepted=True,
+                version=2,
+            )
+            _insert_wb_cost_layer(
+                conn,
+                layer_id="accepted_unknown_cost_v1",
+                supply_id="accepted_unknown_cost",
+                nm_id=unknown_cost_nm,
+                qty=20,
+                supply_date="2026-07-03",
+                accepted_date="2026-07-03T09:00:00+03:00",
+                unit_cost=None,
+                source_status="needs_review",
+                status_id=5,
+                final_accepted=True,
+            )
+        first_rebuild_count = block.materialize_daily_state(opening_date="2026-07-01")
+        july3 = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-03")
+        transitioned = july3[transitioned_nm]
+        _assert_close(float(transitioned["confirmed_qty"]), 120.0, "status 4 to 5 confirmed once")
+        _assert_close(float(transitioned["estimated_qty"]), 0.0, "status 4 to 5 no stale estimate")
+        status6 = july3[status6_nm]
+        _assert_close(float(status6["confirmed_qty"]), 100.0, "status 6 no physical inbound")
+        _assert_close(float(status6["estimated_qty"]), 0.0, "status 6 no estimated inbound")
+        unknown = july3[unknown_cost_nm]
+        _assert_close(float(unknown["confirmed_qty"]), 100.0, "unknown cost preserves confirmed base")
+        _assert_close(float(unknown["estimated_qty"]), 20.0, "unknown cost explicit estimated bucket")
+        _assert_close(
+            float(unknown["stock_qty"])
+            - float(unknown["confirmed_qty"])
+            - float(unknown["estimated_qty"])
+            - float(unknown["fallback_qty"]),
+            0.0,
+            "unknown cost unbucketed quantity",
+        )
+        if first_rebuild_count <= 0:
+            raise AssertionError("physical inbound transition must update daily state")
+        if block.materialize_daily_state(opening_date="2026-07-01") != 0:
+            raise AssertionError("unchanged physical daily rebuild must be idempotent")
+        block.rebuild_all(opening_date="2026-07-01")
+        second_full_rebuild = block.rebuild_all(opening_date="2026-07-01")
+        if any(
+            (
+                second_full_rebuild.supplier_layers_materialized,
+                second_full_rebuild.wb_supply_layers_materialized,
+                second_full_rebuild.opening_rows_materialized,
+                second_full_rebuild.daily_state_rows_materialized,
+            )
+        ):
+            raise AssertionError(f"unchanged full our-WB rebuild must be idempotent, got {second_full_rebuild}")
+
+
 def _assert_daily_state_rolls_iso_timestamp_inbound(
     runtime: RegistryUploadDbBackedRuntime,
     block: OurWbCostBlock,
@@ -492,7 +655,7 @@ def _assert_daily_state_rolls_iso_timestamp_inbound(
                 0,
                 110,
                 'confirmed',
-                '{"wb_quantity_final_accepted": true}',
+                '{"wb_quantity_final_accepted": true, "wb_quantity_source": "acceptedQuantity", "wb_supply_status_id": 5}',
                 ?,
                 'iso-ts-layer',
                 1,
@@ -812,8 +975,14 @@ def _insert_wb_cost_layer(
     nm_id: int,
     qty: float,
     supply_date: str,
-    unit_cost: float,
+    unit_cost: float | None,
     source_status: str,
+    accepted_date: str | None = None,
+    status_id: int = 5,
+    quantity_source: str = "acceptedQuantity",
+    final_accepted: bool = True,
+    version: int = 1,
+    is_current: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -839,7 +1008,7 @@ def _insert_wb_cost_layer(
             inputs_hash,
             version,
             is_current
-        ) VALUES (?, ?, ?, ?, ?, ?, substr(?, 1, 10), ?, 'direct_zero_confirmed', 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, 1, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'direct_zero_confirmed', 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             layer_id,
@@ -848,13 +1017,23 @@ def _insert_wb_cost_layer(
             qty,
             qty,
             supply_date,
-            supply_date,
+            accepted_date or str(supply_date)[:10],
             unit_cost,
             unit_cost,
             source_status,
-            json.dumps({"fixture_source_status": source_status}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "fixture_source_status": source_status,
+                    "wb_supply_status_id": status_id,
+                    "wb_quantity_source": quantity_source,
+                    "wb_quantity_final_accepted": final_accepted,
+                },
+                ensure_ascii=False,
+            ),
             NOW,
-            f"layer-{layer_id}",
+            f"layer-{layer_id}-v{version}",
+            version,
+            1 if is_current else 0,
         ),
     )
 
@@ -885,14 +1064,53 @@ def _assert_supplier_ff_reconciliation(runtime: RegistryUploadDbBackedRuntime) -
 
 
 def _assert_proxy_profit_3_evaluator() -> None:
-    config = [ConfigV2Item(nm_id=497413000, enabled=True, display_name="SKU 1", group="A", display_order=1)]
+    config = [
+        ConfigV2Item(nm_id=497413000, enabled=True, display_name="SKU 1", group="A", display_order=1),
+        ConfigV2Item(nm_id=497413001, enabled=True, display_name="SKU 2", group="A", display_order=2),
+    ]
     base_metrics = [
         _metric("orderSum"),
         _metric("orderCount"),
         _metric("ads_sum"),
+        MetricV2Item(
+            metric_key="total_orderSum",
+            enabled=True,
+            scope="TOTAL",
+            label_ru="total_orderSum",
+            calc_type="metric",
+            calc_ref="orderSum",
+            show_in_data=True,
+            format="number",
+            display_order=1,
+            section="test",
+        ),
     ]
     metrics = extend_metrics_with_our_wb_cost_metrics(extend_metrics_with_onec_stock_metrics(base_metrics))
     metrics_by_key = {item.metric_key: item for item in metrics}
+    sku_margin_metric = metrics_by_key[OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY]
+    total_margin_metric = metrics_by_key[OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY]
+    if (
+        sku_margin_metric.label_ru != "Прокси маржинальность 3, %"
+        or total_margin_metric.label_ru != "Прокси маржинальность 3 всего, %"
+        or sku_margin_metric.format != "percent"
+        or total_margin_metric.format != "percent"
+        or sku_margin_metric.section != "Экономика"
+        or total_margin_metric.section != "Экономика"
+        or sku_margin_metric.calc_type != "metric"
+        or total_margin_metric.calc_type != "metric"
+        or not sku_margin_metric.enabled
+        or not total_margin_metric.enabled
+        or not sku_margin_metric.show_in_data
+        or not total_margin_metric.show_in_data
+    ):
+        raise AssertionError(f"proxy margin 3 catalog metadata mismatch: {sku_margin_metric}, {total_margin_metric}")
+    if (
+        sku_margin_metric.display_order
+        != metrics_by_key[OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY].display_order + 1
+        or total_margin_metric.display_order
+        != metrics_by_key[OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY].display_order + 1
+    ):
+        raise AssertionError("proxy margin 3 rows must immediately follow proxy profit 3 in each scope")
     temporal_slots = [
         SheetVitrinaV1TemporalSlot(slot_key="before", slot_label="before", column_date="2026-06-30"),
         SheetVitrinaV1TemporalSlot(slot_key="after", slot_label="after", column_date="2026-07-02"),
@@ -928,9 +1146,72 @@ def _assert_proxy_profit_3_evaluator() -> None:
     expected_after = 1000.0 * 0.5096 - 2.0 * 0.91 * 80.0 - 10.0
     if abs(float(after_proxy3 or 0.0) - expected_after) > 0.000001:
         raise AssertionError(f"proxy3 after opening must use our WB cost, got {after_proxy3}")
+    after_margin3 = evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "after")
+    _assert_close(float(after_margin3 or 0.0), expected_after / 1000.0, "SKU proxy margin 3")
+    before_margin2 = evaluator.resolve_sku(ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY, 497413000, "before")
+    before_margin3 = evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "before")
+    if before_margin3 != before_margin2:
+        raise AssertionError(f"margin3 before opening must equal margin2, got {before_margin3} vs {before_margin2}")
     total_after = evaluator.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, "after")
-    if total_after != after_proxy3:
-        raise AssertionError(f"total proxy3 must sum SKU proxy3, got {total_after} vs {after_proxy3}")
+    second_after = evaluator.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413001, "after")
+    _assert_close(float(total_after or 0.0), float(after_proxy3 or 0.0) + float(second_after or 0.0), "total proxy3")
+    total_margin3 = evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "after")
+    expected_total_margin = float(total_after or 0.0) / 1100.0
+    _assert_close(float(total_margin3 or 0.0), expected_total_margin, "TOTAL proxy margin 3 ratio of aggregates")
+    row_average = (
+        float(after_margin3 or 0.0)
+        + float(evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413001, "after") or 0.0)
+    ) / 2.0
+    if abs(float(total_margin3 or 0.0) - row_average) < 0.000001:
+        raise AssertionError("TOTAL proxy margin 3 must not average SKU percentages")
+
+    zero_evaluator = _MetricEvaluator(
+        enabled_config=config[:1],
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="zero", slot_label="zero", column_date="2026-07-02")],
+            statuses=[],
+            slot_lookups={
+                "zero": _slot_lookup(
+                    column_date="2026-07-02",
+                    onec_cost=100.0,
+                    our_cost=80.0,
+                    first_order_sum=0.0,
+                    first_order_count=0.0,
+                    first_ads_sum=0.0,
+                )
+            },
+            source_temporal_policies={},
+        ),
+    )
+    if zero_evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "zero") != 0.0:
+        raise AssertionError("SKU proxy margin 3 zero denominator must return 0.0")
+    if zero_evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "zero") != 0.0:
+        raise AssertionError("TOTAL proxy margin 3 zero denominator must return 0.0")
+
+    missing_evaluator = _MetricEvaluator(
+        enabled_config=config[:1],
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="missing", slot_label="missing", column_date="2026-07-02")],
+            statuses=[],
+            slot_lookups={
+                "missing": _slot_lookup(
+                    column_date="2026-07-02",
+                    onec_cost=100.0,
+                    our_cost=80.0,
+                    first_order_sum=None,
+                )
+            },
+            source_temporal_policies={},
+        ),
+    )
+    if missing_evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "missing") is not None:
+        raise AssertionError("SKU proxy margin 3 missing operand must return None")
+    if missing_evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "missing") is not None:
+        raise AssertionError("TOTAL proxy margin 3 missing operand must return None")
 
 
 def _metric(metric_key: str) -> MetricV2Item:
@@ -948,18 +1229,38 @@ def _metric(metric_key: str) -> MetricV2Item:
     )
 
 
-def _slot_lookup(*, column_date: str, onec_cost: float, our_cost: float) -> SlotLookups:
+def _slot_lookup(
+    *,
+    column_date: str,
+    onec_cost: float,
+    our_cost: float,
+    first_order_sum: float | None = 1000.0,
+    first_order_count: float = 2.0,
+    first_ads_sum: float = 10.0,
+) -> SlotLookups:
+    first_history = {"orderCount": first_order_count}
+    if first_order_sum is not None:
+        first_history["orderSum"] = first_order_sum
     return SlotLookups(
         seller_funnel_lookup={},
-        history_lookup={497413000: {"orderSum": 1000.0, "orderCount": 2.0}},
+        history_lookup={
+            497413000: first_history,
+            497413001: {"orderSum": 100.0, "orderCount": 1.0},
+        },
         web_lookup={},
         prices_lookup={},
         sf_period_lookup={},
         spp_lookup={},
         ads_bids_lookup={},
         stocks_lookup={},
-        onec_stocks_lookup={497413000: {ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY: onec_cost}},
-        ads_compact_lookup={497413000: SimpleNamespace(ads_sum=10.0)},
+        onec_stocks_lookup={
+            497413000: {ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY: onec_cost},
+            497413001: {ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY: onec_cost},
+        },
+        ads_compact_lookup={
+            497413000: SimpleNamespace(ads_sum=first_ads_sum),
+            497413001: SimpleNamespace(ads_sum=5.0),
+        },
         fin_lookup={},
         fin_storage_fee_total=None,
         cost_price_lookup={},
@@ -970,7 +1271,13 @@ def _slot_lookup(*, column_date: str, onec_cost: float, our_cost: float) -> Slot
                 "stock_qty": 5.0,
                 "confirmed_qty": 5.0,
                 "confirmed_share_pct": 1.0,
-            }
+            },
+            497413001: {
+                "our_wb_unit_cost_rub": our_cost,
+                "stock_qty": 5.0,
+                "confirmed_qty": 5.0,
+                "confirmed_share_pct": 1.0,
+            },
         },
         column_date=column_date,
     )

@@ -63,6 +63,8 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_COST_OPENING_DATE,
+    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_UNIT_COST_RUB_METRIC_KEY,
@@ -2602,6 +2604,11 @@ class _MetricEvaluator:
                     self.enabled_config,
                     temporal_slot,
                 )
+            elif metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY:
+                value = _divide_or_zero(
+                    self.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, temporal_slot),
+                    self.resolve_total("total_orderSum", temporal_slot),
+                )
             elif metric.metric_key == TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY:
                 value = self._aggregate_our_wb_unit_cost(temporal_slot)
             elif metric.metric_key == TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY:
@@ -2662,7 +2669,12 @@ class _MetricEvaluator:
             raise ValueError(f"metric_key missing in current registry: {metric_key}")
         group_items = self.grouped_config.get(group_name, [])
         if metric.calc_type == "metric":
-            if metric.metric_key == SEARCH_CTR_AVG_TOTAL_METRIC_KEY:
+            if metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY:
+                value = _divide_or_zero(
+                    self._aggregate_sum(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, group_items, temporal_slot),
+                    self._aggregate_sum("orderSum", group_items, temporal_slot),
+                )
+            elif metric.metric_key == SEARCH_CTR_AVG_TOTAL_METRIC_KEY:
                 value = self._aggregate_weighted_avg(
                     SEARCH_CTR_SKU_METRIC_KEY,
                     SEARCH_VIEWS_SKU_METRIC_KEY,
@@ -2849,6 +2861,11 @@ class _MetricEvaluator:
                 float(order_sum) * 0.5096
                 - float(order_count) * 0.91 * float(our_wb_unit_cost)
                 - float(ads_sum)
+            )
+        if metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY:
+            return _divide_or_zero(
+                self.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, nm_id, temporal_slot),
+                self.resolve_sku("orderSum", nm_id, temporal_slot),
             )
         if metric_key == ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY:
             return _divide_or_zero(

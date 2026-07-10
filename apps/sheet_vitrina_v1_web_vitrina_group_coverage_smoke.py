@@ -33,6 +33,17 @@ from packages.application.sheet_vitrina_v1_onec_stocks import (  # noqa: E402
     ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY,
     extend_metrics_with_onec_stock_metrics,
 )
+from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
+    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
+    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    extend_metrics_with_our_wb_cost_metrics,
+)
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
@@ -72,6 +83,16 @@ DERIVED_ONEC_SOURCE_METRICS = {
     ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
 }
+DERIVED_OUR_WB_SOURCE_METRICS = {
+    TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
+    OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+}
 
 
 def main() -> None:
@@ -82,22 +103,24 @@ def main() -> None:
 
 def _assert_group_metric_coverage() -> None:
     bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
-    visible_metrics = extend_metrics_with_onec_stock_metrics(
-        [
-            MetricV2Item(
-                metric_key=str(item["metric_key"]),
-                enabled=bool(item["enabled"]),
-                scope=str(item["scope"]),
-                label_ru=str(item["label_ru"]),
-                calc_type=item["calc_type"],
-                calc_ref=str(item["calc_ref"]),
-                show_in_data=bool(item["show_in_data"]),
-                format=str(item["format"]),
-                display_order=int(item["display_order"]),
-                section=str(item["section"]),
-            )
-            for item in bundle["metrics_v2"]
-        ]
+    visible_metrics = extend_metrics_with_our_wb_cost_metrics(
+        extend_metrics_with_onec_stock_metrics(
+            [
+                MetricV2Item(
+                    metric_key=str(item["metric_key"]),
+                    enabled=bool(item["enabled"]),
+                    scope=str(item["scope"]),
+                    label_ru=str(item["label_ru"]),
+                    calc_type=item["calc_type"],
+                    calc_ref=str(item["calc_ref"]),
+                    show_in_data=bool(item["show_in_data"]),
+                    format=str(item["format"]),
+                    display_order=int(item["display_order"]),
+                    section=str(item["section"]),
+                )
+                for item in bundle["metrics_v2"]
+            ]
+        )
     )
     visible_metric_keys = [
         str(item.metric_key)
@@ -127,24 +150,40 @@ def _assert_group_metric_coverage() -> None:
     }
     missing_derived = sorted(DERIVED_OTHER_SOURCE_METRICS - other_source_metrics)
     missing_onec_derived = sorted(DERIVED_ONEC_SOURCE_METRICS - onec_source_metrics)
+    stocks_source_metrics = set(WEB_VITRINA_SOURCE_METRIC_KEYS.get("stocks", ()))
+    missing_our_wb_derived = sorted(DERIVED_OUR_WB_SOURCE_METRICS - stocks_source_metrics)
     if (
         missing
         or duplicate
         or missing_derived
         or missing_onec_derived
+        or missing_our_wb_derived
         or not any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
     ):
         raise AssertionError(
             "web-vitrina loading group metric coverage failed: "
             f"missing={missing}, duplicate={duplicate}, missing_derived={missing_derived}, "
             f"missing_onec_derived={missing_onec_derived}, "
+            f"missing_our_wb_derived={missing_our_wb_derived}, "
             f"onec_group={ONEC_STOCKS_SOURCE_GROUP_ID}"
         )
+    if _groups_for_metric(metric_to_groups, OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY) != _groups_for_metric(
+        metric_to_groups, OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY
+    ) or _groups_for_metric(
+        metric_to_groups, OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY
+    ) != _groups_for_metric(
+        metric_to_groups, OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY
+    ):
+        raise AssertionError("proxy margin 3 must refresh in the same source group as proxy profit 3")
     print(
         "web_vitrina_group_metric_coverage: ok ->",
         len(visible_metric_keys),
         {group_id: sum(1 for groups in metric_to_groups.values() if groups == [group_id]) for group_id in WEB_VITRINA_SOURCE_GROUPS},
     )
+
+
+def _groups_for_metric(metric_to_groups: dict[str, list[str]], metric_key: str) -> list[str]:
+    return list(metric_to_groups.get(metric_key) or [])
 
 
 def _assert_other_sources_recomputes_derived_metrics() -> None:

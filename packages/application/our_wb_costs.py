@@ -977,7 +977,7 @@ class OurWbCostBlock:
             "supplier_ff_cost_layer_line_id": None,
             "metric11_value": None,
             "confirmed_qty": 0.0,
-            "estimated_qty": 0.0,
+            "estimated_qty": opening_stock_qty,
             "fallback_qty": 0.0,
             "missing_reason": "missing_known_cost_and_metric11_fallback",
             "component_status": {
@@ -1011,18 +1011,18 @@ class OurWbCostBlock:
                 SELECT *
                 FROM sheet_vitrina_v1_wb_supply_cost_layers
                 WHERE is_current = 1
-                  AND supply_date >= ?
                   AND accepted_qty > 0
-                ORDER BY supply_date ASC, wb_supply_id ASC
+                ORDER BY accepted_date ASC, wb_supply_id ASC
                 """,
-                (opening_date,),
             ).fetchall()
         by_date: dict[str, dict[int, list[dict[str, Any]]]] = {}
         for row in rows:
             row_dict = dict(row)
-            supply_date = _wb_supply_business_date_key(row_dict.get("supply_date"))
+            if not _wb_supply_cost_layer_is_physical_inbound(row_dict):
+                continue
+            supply_date = _wb_supply_business_date_key(row_dict.get("accepted_date"))
             nm_id = _optional_int(row_dict.get("nm_id"))
-            if not supply_date or nm_id is None:
+            if not supply_date or supply_date < opening_date or nm_id is None:
                 continue
             by_date.setdefault(supply_date, {}).setdefault(nm_id, []).append(row_dict)
         return by_date
@@ -1348,10 +1348,12 @@ def _roll_daily_state(
     previous_fallback_qty = _number_or_zero(previous.get("_carry_fallback_qty", previous.get("fallback_qty")))
     previous_bucket_qty = previous_confirmed_qty + previous_estimated_qty + previous_fallback_qty
     previous_basis_qty = prev_stock if prev_stock > 0 else previous_bucket_qty
-    scale = base_stock_qty / previous_basis_qty if previous_basis_qty > 0 else 0.0
+    preserved_base_qty = min(base_stock_qty, previous_basis_qty)
+    scale = preserved_base_qty / previous_basis_qty if previous_basis_qty > 0 else 0.0
+    unexplained_base_growth_qty = max(base_stock_qty - previous_basis_qty, 0.0)
     base_cost = _optional_float(previous.get("our_wb_unit_cost_rub"))
     confirmed_qty = previous_confirmed_qty * scale
-    estimated_qty = previous_estimated_qty * scale
+    estimated_qty = previous_estimated_qty * scale + unexplained_base_growth_qty
     fallback_qty = previous_fallback_qty * scale
     weighted_cost_sum = (base_cost or 0.0) * base_stock_qty if base_cost is not None else 0.0
     cost_weight_qty = base_stock_qty if base_cost is not None else 0.0
@@ -1360,14 +1362,15 @@ def _roll_daily_state(
     for row in inbound_rows:
         qty = _number_or_zero(row.get("accepted_qty"))
         unit_cost = _optional_float(row.get("our_wb_unit_cost_rub"))
-        if qty <= 0 or unit_cost is None:
+        if qty <= 0:
             continue
-        weighted_cost_sum += qty * unit_cost
-        cost_weight_qty += qty
         source_status = str(row.get("source_status") or "")
-        if source_status == WB_COST_STATUS_CONFIRMED:
+        if unit_cost is not None:
+            weighted_cost_sum += qty * unit_cost
+            cost_weight_qty += qty
+        if source_status == WB_COST_STATUS_CONFIRMED and unit_cost is not None:
             confirmed_qty += qty
-        elif source_status == WB_COST_STATUS_FALLBACK:
+        elif source_status == WB_COST_STATUS_FALLBACK and unit_cost is not None:
             fallback_qty += qty
         else:
             estimated_qty += qty
@@ -1409,7 +1412,7 @@ def _empty_daily_state(stock_qty: float) -> dict[str, float | str | None | dict[
         "stock_qty": stock_qty,
         "our_wb_unit_cost_rub": None,
         "confirmed_qty": 0.0,
-        "estimated_qty": 0.0,
+        "estimated_qty": stock_qty,
         "fallback_qty": 0.0,
         "source_status": WB_COST_STATUS_NEEDS_REVIEW,
         "component_status": {"missing": "opening_baseline"},
@@ -1421,6 +1424,17 @@ class _WbGoodQuantity:
     qty: float
     source: str
     is_final_accepted: bool
+
+
+def _wb_supply_cost_layer_is_physical_inbound(row: Mapping[str, Any]) -> bool:
+    component_status = _json_loads(row.get("component_status_json"))
+    return bool(
+        _optional_int(component_status.get("wb_supply_status_id")) == WB_SUPPLY_STATUS_ACCEPTED
+        and component_status.get("wb_quantity_final_accepted") is True
+        and str(component_status.get("wb_quantity_source") or "")
+        in {"acceptedQuantity", "accepted_quantity"}
+        and _wb_supply_business_date_key(row.get("accepted_date"))
+    )
 
 
 def _normalized_wb_row(supply: Mapping[str, Any]) -> dict[str, Any]:
