@@ -13,6 +13,7 @@ source_basis:
 related_modules:
   - "packages/application/our_wb_costs.py"
   - "packages/application/sheet_vitrina_v1_our_wb_costs.py"
+  - "packages/application/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"
   - "packages/application/supplier_shipments.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
@@ -30,13 +31,15 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/wb-cost/status"
 related_runners:
   - "apps/our_wb_costs_smoke.py"
+  - "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"
+  - "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"
 related_docs:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Fixes physical rolling to admit final acceptedQuantity only on accepted status 5 and the confirmed acceptance fact date, buckets accepted NULL-cost inbound explicitly as estimated/unknown, and adds runtime-only proxy margin 3 as a ratio of aggregates for TOTAL."
+update_note: "Adds the guarded one-off historical ready-snapshot backfill for runtime-only proxy margin 3 with full-range discovery, dry-run fingerprint, verified SQLite backup, atomic optimistic apply, non-target digest and idempotent public-period completion."
 ---
 
 # 1. Contract
@@ -178,7 +181,18 @@ These routes do not sync/enrich WB data and do not upload/delete files. They onl
 
 The ordinary web-vitrina refresh path persists the freshly built ready snapshot, runs this idempotent recalculation from runtime truth, and rebuilds/saves the ready snapshot again only when recalculation changed supplier/WB/opening/daily cost state. This keeps cost metrics updated with normal refresh/auto-refresh without coupling them to WB sync/enrich/upload jobs and without recursive refresh loops.
 
-Backfill is performed by the same safe routines: rebuild cost state from existing runtime truth, then rebuild ready snapshots for selected historical dates. `proxy_profit_3_rub` is expected for the whole available analysis period wherever `proxy_profit_2_rub` is available; `our_wb_unit_cost_rub` and confirmed share start from `2026-07-01` where closed-day stock/input state exists.
+Cost-state rebuilding and historical ready-snapshot completion are separate operations. The margin-3 historical completion must not run cost recalculation, upstream fetch, group/full refresh, workbook importer or a replace-existing snapshot rebuild.
+
+The only approved one-off path for completing already frozen `proxy_margin_3_pct` / `proxy_margin_3_pct_total` rows is `apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py`:
+- it discovers every persisted ready snapshot across all bundle generations and uses only date columns and SKU scopes already stored in each snapshot;
+- dry-run is the default and produces the complete coverage, conflicts, blank operands, zero denominators, pre-boundary margin-2 fallbacks, non-target digest and expected fingerprint;
+- apply requires `--all-available --apply --expected-fingerprint ...`, creates and verifies a SQLite backup, repeats the full preflight inside one `BEGIN IMMEDIATE` transaction and uses optimistic `plan_json` updates;
+- a nonblank mismatching margin-3 value, NaN/Infinity, fingerprint drift, optimistic conflict or preservation mismatch rolls back the whole transaction; there is no force/partial mode;
+- only the two target row families plus required `DATA_VITRINA.row_count`, `write_rect` and target timestamp-map entries may change. Snapshot identity, refresh timestamps, STATUS, confirmed share, profit 3, margin 2, order sums, source policies, source snapshots and WB cost state remain preserved outside the excluded target rows;
+- before `2026-07-01`, persisted profit-3/orderSum is primary; when historical profit 3 is absent, persisted margin 2 may be copied as the exact contract consequence. Missing profit 3 and margin 2 stays an explicit blank;
+- a second dry-run and apply must report zero changes and perform no database write.
+
+`proxy_profit_3_rub` remains expected for the available analysis period wherever its historical runtime extension was materialized; `our_wb_unit_cost_rub` and confirmed share still start from `2026-07-01`. This one-off margin completion never changes those metrics.
 
 # 8. Explicit Non-Goals
 
