@@ -27,6 +27,7 @@ related_modules:
   - "packages/application/sheet_vitrina_v1_plan_report.py"
   - "packages/application/sheet_vitrina_v1_research.py"
   - "packages/application/sheet_vitrina_v1_live_plan.py"
+  - "packages/application/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"
   - "packages/application/sheet_vitrina_v1.py"
   - "packages/application/sheet_vitrina_v1_load_bridge.py"
   - "packages/application/sheet_vitrina_v1_web_vitrina.py"
@@ -116,6 +117,8 @@ related_runners:
   - "apps/sheet_vitrina_v1_reports_ui_smoke.py"
   - "apps/sheet_vitrina_v1_research_sku_group_comparison_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"
+  - "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"
+  - "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"
   - "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py"
@@ -370,6 +373,13 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - dry-run compares server-side ready snapshots against accepted temporal slots for bounded windows and reports insert/skip/diff actions;
   - apply inserts only missing `fin_report_daily` / `ads_compact` accepted slots from daily SKU values already present in server-side ready snapshots;
   - existing accepted snapshots are not overwritten, blank ready values are not fabricated as zero, and the path is not a recurring Google Sheets/GAS source.
+- One-off completion of historical `proxy_margin_3_pct` / `proxy_margin_3_pct_total` rows is handled only by `apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py`:
+  - the runner scans `sheet_vitrina_v1_ready_snapshots` across every bundle generation and processes only actually stored date columns, including multi-date tails, using the SKU scope universe of each frozen snapshot;
+  - dry-run is the default; apply requires the exact fresh fingerprint, verified SQLite backup, one transaction and optimistic equality on the original `plan_json`;
+  - only the two target row families and their necessary DATA dimensions/timestamp-map entries may change; normalized deep digest after excluding those targets proves all other plan content and row order are preserved;
+  - persisted profit 3 divided by orderSum is primary. Before `2026-07-01`, a missing profit-3 cell may use persisted margin 2; otherwise missing operands remain blank. Zero denominators with present numerator become `0.0`, TOTAL stays a ratio of aggregates, and nonfinite/conflicting values block the entire apply;
+  - this path never calls historical refresh/rebuild/import, source fetch, group refresh, cost recalculate or stock backfill and never changes STATUS, snapshot identity, confirmed share, profit 3, margin 2, orderSum or temporal/source state;
+  - repeated dry-run/apply is a true no-op with no SQLite write.
 - User-facing term `ЕБД` / `единая база данных` names the shared server-side accepted truth/runtime layer for this contour: persisted accepted closed-day temporal source slots, ready snapshots and related runtime state produced by repo-owned refresh/group-refresh/reconcile paths. Web-vitrina, plan-report and future reports consume this server-side layer; Google Sheets/GAS, the HTML UI, browser `localStorage` and report-private manual tables are not the EBD.
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`
@@ -496,6 +506,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
 - Preliminary WB supply cost layers may exist for status `4/6` or planned quantity, but physical daily rolling admits only final `acceptedQuantity` / `accepted_quantity` on status `5` and groups it by normalized local `accepted_date` derived from the fact date. Planned `supply_date`, status `4/6`, and `quantity/qty` do not move physical buckets. Final accepted NULL-cost quantity enters explicit estimated/unknown, `confirmed + estimated + fallback` closes to stock, and zero-stock inbound carry remains internal to recalculation while persisted buckets stay capped to stock.
 - Web-vitrina read contract uses the same runtime-extended metric catalog as the DATA snapshot builder, so SKU/TOTAL our-WB rows must expose Russian labels and format metadata; confirmed share rows use `format=percent`, not raw number rendering.
 - Ordinary manual/auto refresh saves the ready snapshot, runs idempotent our-WB cost recalculation from runtime truth, and rebuilds/saves the ready snapshot again only if recalculation changed supplier/WB/opening/daily state. This post-refresh hook must not call legacy Google Sheets/GAS and must not depend on WB sync/enrich/upload.
+- Frozen snapshots created before margin 3 entered the runtime catalog are completed only by the guarded margin-3 one-off runner described above. Ordinary historical refresh, replace-existing materialization and workbook/stock importers are prohibited for this repair because they can rewrite unrelated frozen cells.
 - Management proxy WB cost rows are not strict accounting FIFO and do not replace `proxy_profit_2_rub`; source/component statuses must stay explicit when values come from fallback, estimates or pending components.
 - `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
 - `Прибыль прокси всего` из operator wording фиксируется на canonical row `total_proxy_profit_rub` с текущим repo label `Прибыль прокси всего, ₽`.
