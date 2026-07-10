@@ -13,10 +13,14 @@ OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY = "our_wb_cost_confirmed_share_pct"
 TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY = "total_our_wb_cost_confirmed_share_pct"
 OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY = "proxy_profit_3_rub"
 OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY = "total_proxy_profit_3_rub"
+OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY = "proxy_margin_3_pct"
+OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY = "proxy_margin_3_pct_total"
 
 OUR_WB_UNIT_COST_RUB_LABEL = "Себестоимость WB наша, ₽/шт"
 OUR_WB_COST_CONFIRMED_SHARE_PCT_LABEL = "Доля подтверждённой себестоимости, %"
 OUR_WB_PROXY_PROFIT_3_RUB_LABEL = "proxy прибыль 3"
+OUR_WB_PROXY_MARGIN_3_PCT_LABEL = "Прокси маржинальность 3, %"
+OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_LABEL = "Прокси маржинальность 3 всего, %"
 
 
 def extend_metrics_with_our_wb_cost_metrics(metrics: Iterable[MetricV2Item]) -> list[MetricV2Item]:
@@ -112,6 +116,34 @@ def extend_metrics_with_our_wb_cost_metrics(metrics: Iterable[MetricV2Item]) -> 
             show_in_data=True,
             format="rub",
             display_order=24,
+            section="Экономика",
+        )
+    )
+    _append(
+        MetricV2Item(
+            metric_key=OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+            enabled=True,
+            scope="SKU",
+            label_ru=OUR_WB_PROXY_MARGIN_3_PCT_LABEL,
+            calc_type="metric",
+            calc_ref=OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+            show_in_data=True,
+            format="percent",
+            display_order=26,
+            section="Экономика",
+        )
+    )
+    _append(
+        MetricV2Item(
+            metric_key=OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
+            enabled=True,
+            scope="TOTAL",
+            label_ru=OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_LABEL,
+            calc_type="metric",
+            calc_ref=OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
+            show_in_data=True,
+            format="percent",
+            display_order=25,
             section="Экономика",
         )
     )

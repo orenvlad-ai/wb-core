@@ -3,7 +3,7 @@ title: "Модуль: our_wb_cost_model"
 doc_id: "WB-CORE-MODULE-40-OUR-WB-COST-MODEL-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для управленческой proxy-модели нашей себестоимости WB, SKU-level FF cost layers, transit classifier, opening baseline, rolling weighted average state and proxy profit 3."
+purpose: "Зафиксировать canonical contract для управленческой proxy-модели нашей себестоимости WB, SKU-level FF cost layers, transit classifier, opening baseline, physical accepted-inbound rolling weighted average state, proxy profit 3 and proxy margin 3."
 scope: "Server-owned runtime contour inside wb-core. This is management proxy cost, not strict accounting FIFO/cost truth. It uses supplier shipments, supplier financial documents/CNY ledger fields, WB supplies, accepted Fulfillment service uploads and ready snapshots; it does not replace 1C/proxy profit 2 and does not use Google Sheets/GAS/browser/localStorage as truth."
 source_basis:
   - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
@@ -36,7 +36,7 @@ related_docs:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
   - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
 source_of_truth_level: "module_canonical"
-update_note: "Introduces bounded management proxy WB cost model with explicit source/component statuses, direct-zero transit handling, opening baseline 2026-07-01, rolling weighted average state, and proxy profit 3 metrics. It is not strict accounting FIFO and does not replace proxy profit 2."
+update_note: "Fixes physical rolling to admit final acceptedQuantity only on accepted status 5 and the confirmed acceptance fact date, buckets accepted NULL-cost inbound explicitly as estimated/unknown, and adds runtime-only proxy margin 3 as a ratio of aggregates for TOTAL."
 ---
 
 # 1. Contract
@@ -120,9 +120,11 @@ Quantity evidence rule:
 - partial receiving/open statuses such as `4` (`Идёт приёмка`) remain `estimated` even if WB already reports a non-zero accepted quantity;
 - outbound/gate status `6` (`Отгружено на воротах`) is not receiving-complete evidence and cannot create confirmed cost from planned quantity.
 
+Preliminary rows remain valid cost-estimation evidence, but they are not physical inbound. Daily rolling admits a row exactly once only when all gates hold: status `5`, final `acceptedQuantity` / `accepted_quantity`, and non-empty confirmed `accepted_date` derived from the WB fact date. The physical roll day is the normalized local date of `accepted_date`, not the planned `supply_date`. Status `4/6`, `quantity/qty`, or missing acceptance fact can never change current-stock buckets.
+
 Every current confirmed row must satisfy `our_wb_unit_cost_rub >= sku_ff_unit_cost_rub`; direct-zero transit remains a confirmed zero component only when the direct-route classifier has explicit zero evidence.
 
-Rolling daily state groups WB supply cost layers by normalized supply business date (`YYYY-MM-DD`). WB/operator evidence may store `supply_date` as an ISO timestamp such as `2026-07-03T00:00:00+03:00`; the rolling key keeps the local date part (`2026-07-03`) and does not timezone-shift it. Empty or invalid dates are skipped instead of crashing materialization. If accepted WB inbound evidence arrives on a day where stock is still zero, rolling may carry the inbound bucket inside the recalculation and apply it when stock appears later; persisted daily buckets remain capped to current stock so confirmed share cannot exceed 100%.
+Rolling daily state groups physical WB inbound by normalized acceptance business date (`YYYY-MM-DD`). WB/operator evidence may store `accepted_date` as an ISO timestamp such as `2026-07-03T21:11:02+03:00`; the rolling key keeps the local date part and does not timezone-shift it. Empty or invalid fact dates are skipped instead of being replaced by a planned date. If accepted WB inbound evidence arrives on a day where stock is still zero, rolling may carry the inbound bucket inside the recalculation and apply it when stock appears later; persisted daily buckets remain capped to current stock so confirmed share cannot exceed 100%.
 
 # 5. Opening Baseline And Rolling State
 
@@ -146,6 +148,8 @@ new_unit_cost =
 
 Stock reductions keep unit cost stable and scale confirmed/estimated/fallback buckets proportionally. `sheet_vitrina_v1_wb_cost_daily_state` stores daily state by date/SKU.
 
+Every positive-stock row must close its quantity identity: `confirmed_qty + estimated_qty + fallback_qty = stock_qty` within numeric tolerance. Final accepted inbound with `our_wb_unit_cost_rub = NULL` is not skipped after reducing base stock; it enters the explicit estimated/unknown bucket and keeps the previous known weighted cost until cost evidence becomes available. Missing opening cost and stock growth not explained by eligible final accepted inbound are treated the same way instead of inheriting a confirmed bucket. Rebuild remains idempotent.
+
 # 6. Vitrina Metrics
 
 Runtime-extended user-facing metrics:
@@ -153,12 +157,14 @@ Runtime-extended user-facing metrics:
 - `our_wb_cost_confirmed_share_pct`, label `Доля подтверждённой себестоимости, %`; SKU value is bucket-based `confirmed_qty / stock_qty`, blank only when stock is zero/missing, and can be partial (for example fallback opening 100 + confirmed inbound 50 with stock 150 => `33.33%`).
 - TOTAL key `total_our_wb_cost_confirmed_share_pct` is quantity-weighted `SUM(confirmed_qty) / SUM(stock_qty)`, not an average of visible SKU percentages.
 - `proxy_profit_3_rub`, label `proxy прибыль 3`; TOTAL key `total_proxy_profit_3_rub` is sum of SKU rows.
+- `proxy_margin_3_pct`, label `Прокси маржинальность 3, %`, is `proxy_profit_3_rub / orderSum`; TOTAL key `proxy_margin_3_pct_total`, label `Прокси маржинальность 3 всего, %`, is `SUM(proxy_profit_3_rub) / SUM(orderSum)`, never an average of SKU percentages. Both are runtime extensions with `format=percent`, store fractional values, and follow `_divide_or_zero`: missing operand -> blank, zero denominator with present numerator -> `0.0`.
 
 Date boundary:
 - before `2026-07-01`, `proxy_profit_3_rub = proxy_profit_2_rub`;
 - from `2026-07-01`, formula is `orderSum * 0.5096 - orderCount * 0.91 * our_wb_unit_cost_rub - ads_sum`.
+- before `2026-07-01`, margin 3 equals margin 2 because the numerator is identical.
 
-`proxy_profit_2_rub` remains visible and unchanged.
+`proxy_profit_2_rub` and `proxy_margin_2_pct` remain visible and unchanged. Profit 3 and margin 3 stay Python runtime extensions; no legacy `FORMULAS` / `METRICS` seed or GAS row is added. Web-vitrina source/group refresh assigns both margin 3 rows to the same source group as their profit 3 rows, so a partial merge cannot leave a separate stale margin row.
 
 The same runtime metric extension is used by the DATA snapshot builder and the web-vitrina read contract. Operator/public UI must show Russian labels for SKU and TOTAL rows, and `Доля подтверждённой себестоимости, %` is formatted as a percent (for example `0.727918` renders as about `72,79%`).
 

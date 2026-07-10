@@ -16,7 +16,10 @@ if str(ROOT) not in sys.path:
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
+    OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
+    OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
@@ -84,7 +87,7 @@ def main() -> None:
         if payload.page_route != "/sheet-vitrina-v1/vitrina" or payload.read_route != "/v1/sheet-vitrina-v1/web-vitrina":
             raise AssertionError(f"route fixation mismatch, got {payload}")
 
-        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 9:
+        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 12:
             raise AssertionError(f"meta mismatch, got {payload.meta}")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
             raise AssertionError(f"meta date columns mismatch, got {payload.meta}")
@@ -137,7 +140,10 @@ def main() -> None:
         rows_by_id = {row.row_id: row for row in payload.rows}
         total_cost_row = rows_by_id[f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
         total_share_row = rows_by_id[f"TOTAL|{TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}"]
+        total_proxy3_row = rows_by_id[f"TOTAL|{OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY}"]
+        total_margin3_row = rows_by_id[f"TOTAL|{OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY}"]
         sku_proxy3_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY}"]
+        sku_margin3_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY}"]
         sku_cost_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
         sku_share_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}"]
         if total_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or total_cost_row.format != "rub":
@@ -146,6 +152,18 @@ def main() -> None:
             raise AssertionError(f"TOTAL confirmed share must be percent-labeled, got {total_share_row}")
         if sku_proxy3_row.metric_label != "proxy прибыль 3" or sku_proxy3_row.format != "rub":
             raise AssertionError(f"SKU proxy3 metadata mismatch, got {sku_proxy3_row}")
+        if (
+            total_margin3_row.metric_label != "Прокси маржинальность 3 всего, %"
+            or total_margin3_row.format != "percent"
+        ):
+            raise AssertionError(f"TOTAL proxy margin 3 metadata mismatch, got {total_margin3_row}")
+        if sku_margin3_row.metric_label != "Прокси маржинальность 3, %" or sku_margin3_row.format != "percent":
+            raise AssertionError(f"SKU proxy margin 3 metadata mismatch, got {sku_margin3_row}")
+        row_ids = [row.row_id for row in payload.rows]
+        if row_ids.index(total_margin3_row.row_id) != row_ids.index(total_proxy3_row.row_id) + 1:
+            raise AssertionError("TOTAL proxy margin 3 row must immediately follow TOTAL proxy profit 3")
+        if row_ids.index(sku_margin3_row.row_id) != row_ids.index(sku_proxy3_row.row_id) + 1:
+            raise AssertionError("SKU proxy margin 3 row must immediately follow SKU proxy profit 3")
         if sku_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or sku_cost_row.format != "rub":
             raise AssertionError(f"SKU our WB cost metadata mismatch, got {sku_cost_row}")
         if sku_share_row.metric_label != "Доля подтверждённой себестоимости, %" or sku_share_row.format != "percent":
@@ -195,7 +213,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:D5",
+                write_rect="A1:D12",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -218,9 +236,27 @@ def _build_plan(
                         "",
                     ],
                     [
+                        "Итого: proxy прибыль 3",
+                        f"TOTAL|{OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY}",
+                        456.78,
+                        "",
+                    ],
+                    [
+                        "Итого: Прокси маржинальность 3 всего, %",
+                        f"TOTAL|{OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY}",
+                        0.18,
+                        "",
+                    ],
+                    [
                         "SKU A: proxy прибыль 3",
                         f"SKU:{first_nm_id}|{OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY}",
                         123.45,
+                        "",
+                    ],
+                    [
+                        "SKU A: Прокси маржинальность 3, %",
+                        f"SKU:{first_nm_id}|{OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY}",
+                        0.12,
                         "",
                     ],
                     [
@@ -236,7 +272,7 @@ def _build_plan(
                         "",
                     ],
                 ],
-                row_count=9,
+                row_count=12,
                 column_count=4,
             ),
             SheetVitrinaWriteTarget(
