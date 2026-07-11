@@ -11,6 +11,8 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
+import time as time_module
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
@@ -30,6 +32,10 @@ MAX_LOG_WINDOW_DAYS = 7
 MAX_SNAPSHOT_RANGE_DAYS = 62
 MAX_DIAGNOSTIC_ROWS = 80
 COMMAND_TIMEOUT_SECONDS = 8.0
+MCP_AUDIT_FILENAME = "webcore_data_mcp_audit.jsonl"
+DEPLOY_METADATA_FILENAME = ".wb-core-deploy.json"
+MAX_MCP_AUDIT_TAIL_BYTES = 512 * 1024
+MAX_MCP_AUDIT_EVENTS = 2000
 
 OPS_TOOL_NAMES = (
     "get_runtime_health_summary",
@@ -126,14 +132,33 @@ class WebCoreOpsDiagnostics:
         db_path: Path | None = None,
         command_runner: CommandRunner | None = None,
         now_factory: Callable[[], datetime] | None = None,
+        mcp_audit_log_path: Path | None = None,
     ) -> None:
         resolved_runtime_dir = runtime_dir or Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", str(DEFAULT_RUNTIME_DIR)))
         self.runtime_dir = Path(resolved_runtime_dir).expanduser()
         self.db_path = Path(db_path).expanduser() if db_path else self.runtime_dir / DB_FILENAME
         self.command_runner = command_runner or _run_fixed_command
         self.now_factory = now_factory or _utc_now_datetime
+        self.mcp_audit_log_path = Path(mcp_audit_log_path).expanduser() if mcp_audit_log_path else self.runtime_dir / MCP_AUDIT_FILENAME
+        self._call_context = threading.local()
 
-    def call_tool(self, name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def call_tool(
+        self,
+        name: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        deadline_at: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        self._call_context.deadline_at = deadline_at
+        self._call_context.cancel_event = cancel_event
+        try:
+            return self._dispatch_tool(name, arguments)
+        finally:
+            self._call_context.deadline_at = None
+            self._call_context.cancel_event = None
+
+    def _dispatch_tool(self, name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
         args = dict(arguments or {})
         if name == "get_runtime_health_summary":
             return self.get_runtime_health_summary()
@@ -169,6 +194,7 @@ class WebCoreOpsDiagnostics:
                     "disk": self._disk_summary(),
                     "db": self._db_summary(),
                 },
+                "mcp_calls": _mcp_call_summary(self.mcp_audit_log_path),
                 "limits": {
                     "unit_allowlist": "fixed",
                     "arbitrary_shell": False,
@@ -204,7 +230,7 @@ class WebCoreOpsDiagnostics:
         ]
         if window.get("until") is not None:
             args.append(f"--until={_journal_time(window['until'])}")
-        result = self.command_runner(args, COMMAND_TIMEOUT_SECONDS)
+        result = self.command_runner(args, self._remaining_timeout())
         entries: list[dict[str, Any]] = []
         command_unavailable = result.returncode != 0
         if not command_unavailable:
@@ -317,7 +343,8 @@ class WebCoreOpsDiagnostics:
 
     def get_deploy_state(self) -> dict[str, Any]:
         root = Path(__file__).resolve().parents[2]
-        commit = _current_git_commit(root)
+        deploy_metadata = _deploy_metadata(root)
+        commit = str(deploy_metadata.get("commit") or _current_git_commit(root))[:40]
         return _sanitize(
             {
                 "status": "ok",
@@ -325,6 +352,8 @@ class WebCoreOpsDiagnostics:
                 "app": {
                     "commit": commit,
                     "commit_available": bool(commit),
+                    "deployed_at": str(deploy_metadata.get("deployed_at") or ""),
+                    "version_source": "repo_owned_deploy_metadata" if deploy_metadata else ("git_checkout" if commit else "unavailable"),
                     "server_name": "webcore-data-mcp",
                     "ops_diagnostics_contract": "webcore_ops_diagnostics_v1",
                 },
@@ -355,7 +384,7 @@ class WebCoreOpsDiagnostics:
             *[f"--property={item}" for item in _SYSTEMCTL_SHOW_PROPERTIES],
             unit,
         ]
-        result = self.command_runner(args, COMMAND_TIMEOUT_SECONDS)
+        result = self.command_runner(args, self._remaining_timeout())
         if result.returncode != 0:
             return {
                 "unit": unit,
@@ -412,10 +441,32 @@ class WebCoreOpsDiagnostics:
         }
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(_sqlite_ro_uri(self.db_path), uri=True)
+        deadline_at = getattr(self._call_context, "deadline_at", None)
+        cancel_event = getattr(self._call_context, "cancel_event", None)
+        remaining = self._remaining_timeout()
+        conn = sqlite3.connect(_sqlite_ro_uri(self.db_path), uri=True, timeout=min(remaining, 5.0))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
+        conn.execute(f"PRAGMA busy_timeout={max(1, int(min(remaining, 5.0) * 1000))}")
+        if deadline_at is not None or cancel_event is not None:
+            def should_interrupt() -> int:
+                if cancel_event is not None and cancel_event.is_set():
+                    return 1
+                if deadline_at is not None and time_module.monotonic() >= deadline_at:
+                    return 1
+                return 0
+
+            conn.set_progress_handler(should_interrupt, 1000)
         return conn
+
+    def _remaining_timeout(self) -> float:
+        deadline_at = getattr(self._call_context, "deadline_at", None)
+        cancel_event = getattr(self._call_context, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            return 0.05
+        if deadline_at is None:
+            return COMMAND_TIMEOUT_SECONDS
+        return max(0.05, min(COMMAND_TIMEOUT_SECONDS, float(deadline_at - time_module.monotonic())))
 
 
 def _run_fixed_command(args: Sequence[str], timeout_seconds: float) -> CommandResult:
@@ -1131,23 +1182,121 @@ def _coerce_int(value: Any) -> int:
 
 
 def _current_git_commit(root: Path) -> str:
-    head = root / ".git" / "HEAD"
     try:
+        git_entry = root / ".git"
+        git_dir = git_entry
+        if git_entry.is_file():
+            marker = git_entry.read_text(encoding="utf-8").strip()
+            if not marker.startswith("gitdir:"):
+                return ""
+            git_dir = (root / marker.split(":", 1)[1].strip()).resolve()
+        common_dir = git_dir
+        common_dir_marker = git_dir / "commondir"
+        if common_dir_marker.exists():
+            common_dir = (git_dir / common_dir_marker.read_text(encoding="utf-8").strip()).resolve()
+        head = git_dir / "HEAD"
         head_text = head.read_text(encoding="utf-8").strip()
         if head_text.startswith("ref:"):
             ref = head_text.split(" ", 1)[1].strip()
-            ref_path = root / ".git" / ref
-            if ref_path.exists():
-                return ref_path.read_text(encoding="utf-8").strip()[:40]
-            packed = root / ".git" / "packed-refs"
-            if packed.exists():
-                for line in packed.read_text(encoding="utf-8").splitlines():
-                    if line.endswith(f" {ref}"):
-                        return line.split(" ", 1)[0][:40]
+            for candidate_dir in (git_dir, common_dir):
+                ref_path = candidate_dir / ref
+                if ref_path.exists():
+                    return ref_path.read_text(encoding="utf-8").strip()[:40]
+                packed = candidate_dir / "packed-refs"
+                if packed.exists():
+                    for line in packed.read_text(encoding="utf-8").splitlines():
+                        if line.endswith(f" {ref}"):
+                            return line.split(" ", 1)[0][:40]
             return ""
         return head_text[:40]
     except Exception:
         return ""
+
+
+def _deploy_metadata(root: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads((root / DEPLOY_METADATA_FILENAME).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    commit = str(payload.get("commit") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return {}
+    deployed_at = str(payload.get("deployed_at") or "")[:64]
+    return {"commit": commit, "deployed_at": deployed_at}
+
+
+def _mcp_call_summary(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - MAX_MCP_AUDIT_TAIL_BYTES))
+            raw = fh.read(MAX_MCP_AUDIT_TAIL_BYTES)
+    except FileNotFoundError:
+        return {"status": "missing", "audit_enabled": False, "recent_event_count": 0, "in_flight_count": 0}
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "audit_enabled": True,
+            "recent_event_count": 0,
+            "in_flight_count": 0,
+            "error": _redact_text(str(exc)),
+        }
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if size > MAX_MCP_AUDIT_TAIL_BYTES and lines:
+        lines = lines[1:]
+    events: list[dict[str, Any]] = []
+    for line in lines[-MAX_MCP_AUDIT_EVENTS:]:
+        parsed = _safe_json_loads(line)
+        if not isinstance(parsed, Mapping) or parsed.get("schema_version") != "webcore_data_mcp_audit_v2":
+            continue
+        events.append(
+            {
+                "at": str(parsed.get("at") or "")[:64],
+                "request_id": str(parsed.get("request_id") or "")[:64],
+                "tool": str(parsed.get("tool") or "")[:80],
+                "event": str(parsed.get("event") or "")[:40],
+                "status": str(parsed.get("status") or "")[:40],
+                "duration_ms": _coerce_int(parsed.get("duration_ms")),
+                "result_bytes": _coerce_int(parsed.get("result_bytes")),
+                "identity_hash": str(parsed.get("identity_hash") or "")[:64],
+                "error_code": str(parsed.get("error_code") or "")[:80],
+            }
+        )
+    starts: dict[str, dict[str, Any]] = {}
+    terminal_ids: set[str] = set()
+    terminal_by_id: dict[str, dict[str, Any]] = {}
+    for event in events:
+        request_id = event["request_id"]
+        if event["event"] == "start" and request_id:
+            starts[request_id] = event
+        elif event["event"] in {"finish", "timeout", "controlled_error"} and request_id:
+            terminal_ids.add(request_id)
+            current = terminal_by_id.get(request_id)
+            current_status = str((current or {}).get("status") or "")
+            if current_status in {"timeout", "error", "overloaded", "result_too_large"} and event["status"] == "late_after_timeout":
+                continue
+            terminal_by_id[request_id] = event
+    status_counts: dict[str, int] = {}
+    for event in terminal_by_id.values():
+        status = event["status"] or "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+    in_flight = [event for request_id, event in starts.items() if request_id not in terminal_ids]
+    return {
+        "status": "ok",
+        "audit_enabled": True,
+        "recent_event_count": len(events),
+        "status_counts": status_counts,
+        "timeout_count": status_counts.get("timeout", 0),
+        "error_count": sum(count for status, count in status_counts.items() if status in {"error", "overloaded", "result_too_large"}),
+        "in_flight_count": len(in_flight),
+        "oldest_in_flight_started_at": min((event["at"] for event in in_flight if event["at"]), default=""),
+        "recent_events": events[-20:],
+        "tail_bounded": True,
+        "max_events": MAX_MCP_AUDIT_EVENTS,
+    }
 
 
 def _source_mtimes(root: Path) -> list[dict[str, Any]]:

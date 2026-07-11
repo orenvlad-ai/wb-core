@@ -85,6 +85,11 @@
       "name": "wb-core-wb-finance-weekly.timer",
       "enable": true,
       "restart": true
+    },
+    {
+      "name": "wb-core-data-mcp.service",
+      "enable": true,
+      "restart": true
     }
   ],
   "runtime_env": {

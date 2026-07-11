@@ -4,12 +4,13 @@ doc_id: "WB-CORE-MODULE-38-WEBCORE-DATA-MCP-BLOCK"
 doc_type: "module"
 status: "repo_implemented_private_loopback_live_gated"
 purpose: "Зафиксировать отдельный read-only MCP gateway для безопасного доступа ChatGPT Project/custom app к business data и bounded ops diagnostics `wb-core`."
-scope: "Standalone HTTP MCP server over allowlisted read-only business tools plus separate ops diagnostics tools: navigation/data-map resolver, freshness, search, universal persisted ready-snapshot metrics by key/label/date/SKU, metric source explanation, allowlisted runtime business table reads, cached WB supplies registry/detail, supplier shipments registry/full details, server-owned supply artifact metadata/chunk access, CNY document/ledger table projections, factory-order state, persisted stock/SKU snapshots, explicit revenue ambiguity handling, fixed-unit runtime health, sanitized journal excerpts, refresh/load diagnostics, snapshot presence and deploy labels. No arbitrary SQL, shell, SSH, upstream sync/backfill/refresh/load, arbitrary filesystem browsing, secrets, auth/session material, env dumps or unbounded payload dumps."
+scope: "Standalone bounded-concurrency HTTP MCP server with 16 short model-visible read-only tools for freshness, metrics, SKU, supplier/WB supplies, artifacts, factory-order/stock and ops health; legacy tool names remain server-callable compatibility aliases but are hidden from tools/list. Exact output schemas, compact structured results, deadlines, bounded SQLite, payload caps, lifecycle audit and repo-owned deploy identity are part of the contract. No arbitrary SQL, shell, SSH, upstream sync/backfill/refresh/load, arbitrary filesystem browsing, secrets, auth/session material, env dumps or unbounded payload dumps."
 source_basis:
   - "packages/application/webcore_data_mcp.py"
   - "packages/application/webcore_ops_diagnostics.py"
   - "apps/webcore_data_mcp_server.py"
   - "apps/webcore_data_mcp_smoke.py"
+  - "apps/webcore_data_mcp_reliability_smoke.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 related_modules:
@@ -61,11 +62,12 @@ related_endpoints:
 related_runners:
   - "apps/webcore_data_mcp_server.py"
   - "apps/webcore_data_mcp_smoke.py"
+  - "apps/webcore_data_mcp_reliability_smoke.py"
   - "artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service"
 related_docs:
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "EU loopback service is installed and enabled on 127.0.0.1:8766. Public exact OAuth metadata/authorize/token and /mcp routes proxy to that loopback service. ChatGPT connector auth uses owner-only OAuth 2.1 auth-code + PKCE S256; bearer auth remains a server/admin diagnostic path. MCP exposes business-data tools plus bounded ops diagnostics tools under separate OAuth scope `webcore.ops.read`. Ops tools are read-only, fixed-allowlist only, run `systemctl`/`journalctl` through shell=False fixed arg vectors, read SQLite in mode=ro/query_only, redact logs, avoid raw env/secrets/paths and cannot restart/refresh/backfill/load/upload/delete/patch/mutate. Business tools remain metadata/data projections with bounded scrubbed payloads."
+update_note: "The production contract uses bounded threaded HTTP/tool execution, a per-call deadline, SQLite progress cancellation, a 512 KiB result cap and start/finish/timeout/error audit events. tools/list publishes 16 short exact-schema tools; all previous names stay callable for existing chats but navigation/resolver/generic-table/debug tools are hidden. Direct requests no longer require a data-map/resolver preflight. Owner-only OAuth 2.1 + PKCE/scopes and all read-only/redaction boundaries are unchanged."
 ---
 
 # 1. Identifier and Status
@@ -131,61 +133,31 @@ Supported JSON-RPC methods:
 
 The gateway exposes data/diagnostics tools only. It does not expose UI resources/components.
 
-# 4. Tool Allowlist
+# 4. Tool Profiles and Compatibility
 
-Navigation / catalog:
+`tools/list` publishes exactly 16 primary model-visible tools:
 
-- `get_webcore_data_map`
-- `resolve_webcore_data_request`
-- `resolve_webcore_data_intent`
-- `list_webcore_business_tables`
-- `get_webcore_business_table_schema`
-- `get_webcore_business_table_rows`
+- analytics: `freshness`, `metric_catalog`, `metric_values`, `sku_search`, `sku_snapshot`, `stock_report`;
+- supplier/WB data: `supplier_shipments`, `supplier_shipment`, `wb_supplies`, `wb_supply`;
+- documents/state: `supply_artifacts`, `supply_artifact`, `factory_order`;
+- ops (`webcore.ops.read`): `runtime_health`, `refresh_diagnostics`, `deploy_state`.
 
-Supply / artifacts:
+The profile follows current OpenAI Apps SDK guidance: one user job per tool, explicit/defaulted inputs, predictable `outputSchema`, stable follow-up identifiers and concise model-visible `structuredContent` ([Define tools](https://developers.openai.com/apps-sdk/plan/tools), [Build your MCP server](https://developers.openai.com/apps-sdk/build/mcp-server)).
 
-- `get_supplier_shipments_registry`
-- `get_supplier_shipment_full_details`
-- `get_wb_supplies_registry`
-- `get_wb_supply_full_details`
-- `list_supply_artifacts`
-- `get_supply_artifact`
+Direct freshness, metric, SKU, shipment, WB supply, document and runtime-health prompts map to one primary tool without calling a map or resolver first. List tools return stable `shipment_id`, `supply_id` or opaque `artifact_ref` identifiers for their matching detail tools.
 
-P0:
+Every published descriptor contains a title, explicit/defaulted inputs, a tool-specific strict top-level `outputSchema`, OAuth scope metadata and:
 
-- `get_data_freshness_status`
-- `search_business_objects`
-- `explain_metric_source`
-- `get_wb_supplies_summary`
-- `get_wb_supply_details`
-- `rank_supplier_shipments_by_unit_cost`
-- `get_supplier_shipment_details`
+`{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}`
 
-P1:
+Compatibility behavior:
 
-- `get_latest_factory_order_calculation`
-- `list_metrics`
-- `get_metric_values`
-- `get_snapshot_metrics`
-- `get_available_metric_dates`
-- `get_stock_report`
-- `get_sku_snapshot`
-- `get_revenue_by_date`
-- `get_revenue_range`
+- every previously accepted tool name remains allowlisted and callable server-side, including resolver aliases, generic business-table tools, legacy summaries/details, metric/date helpers, revenue helpers and detailed ops tools;
+- compatibility-only names are intentionally absent from `tools/list`, so existing chats can continue a known call while new model selection sees no duplicate resolver/summary/table competitors;
+- `get_webcore_data_map` remains callable, returns no full tool-list copy for `domain=all`, filters its tool/table/artifact sections for a concrete `domain`, defaults examples/limitations off and is never a required preflight;
+- `resolve_webcore_data_request` and `resolve_webcore_data_intent` remain compatibility-only recommendation helpers and do not execute data calls.
 
-Ops diagnostics (`webcore.ops.read`):
-
-- `get_runtime_health_summary`
-- `get_service_logs`
-- `get_refresh_diagnostics`
-- `get_runtime_snapshot_status`
-- `get_deploy_state`
-
-Every tool is emitted with MCP annotations:
-
-`{"readOnlyHint": true}`
-
-No write-like tool names are exposed. There is no arbitrary SQL, shell, SSH, arbitrary filesystem browser, sync, backfill, upload, refresh, replay, load, restart, delete, patch or mutation tool. Artifact access is not a filesystem browser: callers must first obtain an opaque `artifact_ref` from allowlisted runtime DB rows, and reads are bounded/scrubbed. Ops diagnostics use fixed enum allowlists only: unit names are limited to the six WebCore runtime units in code, log priority is an enum, date windows are bounded, SQLite reads are fixed SELECTs over known tables, and subprocess use is limited to fixed `systemctl show` / `journalctl --output=json` arg vectors with `shell=False`.
+No write-like tool is exposed. There is no arbitrary SQL, shell, SSH, arbitrary filesystem browser, sync, backfill, upload, refresh, replay, load, restart, delete, patch or mutation tool. Artifact reads require an opaque `artifact_ref` and stay bounded/scrubbed. Compatibility ops diagnostics retain fixed enum allowlists and fixed `systemctl show` / `journalctl --output=json` argument vectors with `shell=False`.
 
 # 5. Auth Model
 
@@ -224,6 +196,10 @@ OAuth/env config:
 - `WEBCORE_DATA_MCP_OAUTH_ALLOWED_CLIENT_ID_PREFIXES`
 - `WEBCORE_DATA_MCP_OAUTH_CODE_TTL_SECONDS`
 - `WEBCORE_DATA_MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS`
+- `WEBCORE_DATA_MCP_MAX_HTTP_WORKERS` (default `16`, bounded `2..64`)
+- `WEBCORE_DATA_MCP_MAX_TOOL_WORKERS` (default `8`, bounded `2..32`)
+- `WEBCORE_DATA_MCP_TOOL_DEADLINE_SECONDS` (default `12`, bounded `0.05..120`)
+- `WEBCORE_DATA_MCP_MAX_TOOL_RESULT_BYTES` (default `524288`, bounded `1024..2097152`)
 
 Default scopes exposed by the server:
 
@@ -249,6 +225,12 @@ The gateway redacts:
 Boundaries:
 
 - request body max: 256 KiB;
+- JSON-RPC batch max: 20 items;
+- HTTP request threads are capped at 16 by default; excess accepted sockets receive controlled `503 server_overloaded` instead of creating unbounded threads;
+- tool execution is capped at 8 workers by default with no unbounded task queue; capacity exhaustion returns `tool_capacity_exhausted`;
+- every tool call has one 12-second default deadline; timeout returns `tool_timeout`, signals SQLite cancellation and leaves the server available for `ping`, `tools/list` and other calls;
+- SQLite connections use `mode=ro`, `query_only`, bounded busy timeout and a progress handler tied to the call deadline/cancellation event;
+- serialized `structuredContent` max is 512 KiB by default; oversize output is replaced by controlled `tool_result_too_large` metadata;
 - tool output lists are bounded;
 - default limit: 50;
 - max limit: 100;
@@ -258,7 +240,8 @@ Boundaries:
 - artifact chunks are bounded by server-side `max_bytes` caps;
 - revenue range max: 62 days;
 - snapshot/refresh diagnostics date range max: 62 days;
-- audit log stores argument keys and hashes, not raw payloads.
+- normal model-visible results return concise `structuredContent` plus non-model `_meta` request/duration/size fields; they do not duplicate the full JSON in `content`;
+- audit log stores no arguments or business payloads.
 
 # 7. Audit
 
@@ -268,16 +251,16 @@ Optional audit log:
 
 Events include:
 
-- timestamp;
+- timestamp and request/correlation ID;
+- lifecycle event: `start`, `finish`, `timeout` or `controlled_error`;
 - tool name;
 - identity hash;
-- argument keys;
-- arguments hash;
 - status;
 - row count;
-- duration.
+- server-side duration;
+- serialized result size and safe error code.
 
-The audit log must not include secrets, raw arguments, raw DB payloads or file contents.
+The start event is written before execution, so an interrupted or unfinished call remains visible. Events are also emitted as safe JSON to stdout/systemd journal. `runtime_health` aggregates recent terminal statuses, timeout/error counts and unmatched start events without exposing raw identity, arguments, credentials, paths or payloads.
 
 # 8. Data Semantics
 
@@ -287,15 +270,15 @@ Reads ready snapshot max dates, temporal source slot max dates/captured timestam
 
 Ops diagnostics:
 
-- `get_runtime_health_summary` reads fixed unit states for `wb-core-registry-http.service`, sheet-vitrina refresh/closure timers/services and `wb-core-data-mcp.service`, plus runtime disk and DB size/mtime summaries. It does not expose env values or arbitrary paths.
+- `runtime_health` reads fixed unit states for `wb-core-registry-http.service`, sheet-vitrina refresh/closure timers/services and `wb-core-data-mcp.service`, plus runtime disk/DB summaries and bounded MCP lifecycle aggregates. It does not expose env values or arbitrary paths.
 - `get_service_logs` reads only one enum unit through `journalctl --output=json`, bounds `since/until/priority/limit`, redacts entries and returns only timestamp/unit/priority/identifier/pid/message fields.
-- `get_refresh_diagnostics` reads persisted ready snapshot, auto/manual refresh, load state, temporal source snapshot and closure-state summaries for a requested date/range. It never triggers refresh/load/upstream calls.
+- `refresh_diagnostics` reads persisted ready snapshot, auto/manual refresh, load state, temporal source snapshot and closure-state summaries for a requested date/range. It never triggers refresh/load/upstream calls.
 - `get_runtime_snapshot_status` summarizes ready/temporal/source-slot snapshot presence and counts without returning raw payload blobs.
-- `get_deploy_state` returns safe active-EU target labels, public base URL, optional commit if available, and fixed source mtimes by label only. It does not print raw env, tokens, cookies or runtime paths.
+- `deploy_state` returns safe active-EU target labels, public base URL, required commit/deploy timestamp from repo-owned `.wb-core-deploy.json`, and fixed source mtimes by label only. It does not print raw env, tokens, cookies or runtime paths.
 
 Navigation:
 
-`get_webcore_data_map` is a derived guide over current tool definitions, scope constants, allowlisted runtime tables, artifact kinds and canonical module docs. It is not a new source of truth. `resolve_webcore_data_request` and alias `resolve_webcore_data_intent` accept natural-language intent and optional hints, recognize Russian business aliases such as `реестр поставок`, `самая большая поставка`, `упаковочный лист`, `packing list`, `коробки`, `инвойс`, `договор`, `БТТ`, `ВТБ`, `ВБК`, `ДТ`, `КП логистов`, `счёт CNY`, `номенклатура`, `метрика`, `остатки` and `свежесть данных`, and return recommended MCP calls without executing them. For “найди самую большую поставку” the resolver recommends `get_supplier_shipments_registry(sort_by=product_qty_total_desc, limit=1)` and then shipment full-details/artifact reads using the returned `shipment_id`.
+`get_webcore_data_map` is an optional compatibility guide over current tool definitions, scope constants, allowlisted runtime tables, artifact kinds and canonical module docs. It is not a source of truth and filters the returned tool subset by requested domain. Resolver names remain accepted only for old-call compatibility. New ChatGPT selection uses direct tool metadata and server instructions explicitly state that no map/resolver preflight is required.
 
 Business table access:
 
@@ -337,10 +320,9 @@ The MCP returns rows with date, metric key, Russian label, level/scope, SKU/grou
 
 Universal metric tools:
 
-- `list_metrics(query?, section?, scope?, limit?)`: combines `registry_upload_metrics_v2` with latest ready-snapshot coverage hints and Russian labels.
-- `get_metric_values(metric_key_or_label, date?, date_from?, date_to?, sku_or_nm_id?, group_by?, limit?)`: primary tool for any known metric by key or Russian label over a bounded date/date-range.
-- `get_snapshot_metrics(date, sku_or_nm_id?, metric_query?, limit?)`: bounded list of metric values for one ready-snapshot date.
-- `get_available_metric_dates(metric_key_or_label?)`: ready-snapshot date coverage, optionally filtered by metric.
+- `metric_catalog(query?, section?, scope?, limit?)`: combines `registry_upload_metrics_v2` with latest ready-snapshot coverage hints and Russian labels; use only when the metric is not already known.
+- `metric_values(metric_key_or_label, date?, date_from?, date_to?, sku_or_nm_id?, group_by?, limit?)`: one primary tool for any known metric by key or Russian label over a bounded date/date-range.
+- previous snapshot/date/revenue helper names remain callable but are compatibility-only and do not compete in `tools/list`.
 
 Revenue:
 
@@ -352,11 +334,15 @@ Canonical smoke:
 
 `python3 apps/webcore_data_mcp_smoke.py`
 
+Reliability/metadata/auth smoke:
+
+`python3 apps/webcore_data_mcp_reliability_smoke.py`
+
 The smoke proves:
 
 - read-only SQLite connection rejects writes;
-- MCP tool list exposes only approved tools;
-- all tools have `readOnlyHint: true`;
+- MCP tool list exposes exactly 16 primary tools while every legacy name remains server-callable;
+- every published tool has the complete read-only annotations and a distinct strict output schema matching fixture output;
 - unauthenticated HTTP MCP POST leaks no business data;
 - all P0/P1 tools work on a fixture DB;
 - navigation routes cover largest-shipment and packing-list intents;
@@ -370,6 +356,12 @@ The smoke proves:
 - universal metric projection reads the `DATA_VITRINA` layout and returns `total_orderSum`;
 - OAuth-auth MCP can call `get_metric_values(total_orderSum, date)` and `get_deploy_state` when scoped for ops;
 - OAuth tokens without `webcore.ops.read` receive `insufficient_scope` for ops tools;
+- invalid and expired tokens receive `401` plus `WWW-Authenticate` resource metadata and no data; token responses contain no refresh token;
+- five delayed read-only calls complete concurrently; one slow fixture does not block `ping`, `tools/list` or a fast business call;
+- worker capacity is bounded and overload is controlled; a recursive SQLite read is interrupted by its progress deadline;
+- timed-out calls return `tool_timeout`, the server remains healthy, and runtime health reports the timeout/in-flight lifecycle aggregate;
+- oversized structured results return `tool_result_too_large`, while ordinary results omit duplicated JSON `content`;
+- lifecycle audit contains request/correlation id, safe identity hash, start/terminal state, duration and result size without arguments, tokens, paths or payloads;
 - no sync/backfill/refresh/write tools are reachable.
 
 # 10. Live Publication Gate
@@ -389,5 +381,9 @@ Before treating `/mcp` as live-verified ChatGPT-ready:
 1. Configure env-only OAuth signing secret and owner auth material on the host.
 2. Keep all secrets env-only/server-side.
 3. Prove unauthenticated public probe returns 401 and no data.
-4. Prove authenticated MCP `initialize`, `tools/list`, `get_runtime_health_summary` and a bounded sanitized `get_service_logs` call.
-5. Keep DevControl MCP unchanged and separate.
+4. Prove authenticated MCP `initialize`, `tools/list`, `freshness`, `metric_values`, representative supplier/WB calls, `runtime_health` and `deploy_state`.
+5. Prove five common live calls overlap in wall time and journal/audit records server-side latency without arguments or payloads.
+6. Confirm `deploy_state.app.commit` equals the merged commit deployed through the canonical runner.
+7. Keep DevControl MCP unchanged and separate.
+
+After a live `tools/list` metadata change, the only permitted human UI step is: `ChatGPT -> Settings -> Plugins -> WebCore Data MCP -> Refresh`.

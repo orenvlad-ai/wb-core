@@ -109,6 +109,7 @@ CURRENT_LIVE_REQUIRED_TLS_CERTIFICATE_KEY_PATH = "/etc/letsencrypt/live/api.sell
 ACTIVE_HOSTED_RUNTIME_TARGET_DIR = "/opt/wb-core-runtime/app"
 ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR = "/opt/wb-core-runtime/state"
 ACTIVE_HOSTED_RUNTIME_SERVICE_NAME = "wb-core-registry-http.service"
+DEPLOY_METADATA_FILENAME = ".wb-core-deploy.json"
 ARCHIVED_HOSTED_RUNTIME_SSH_DESTINATIONS = {"selleros-root"}
 ARCHIVED_HOSTED_RUNTIME_PUBLIC_HOSTS = {"178.72.152.177"}
 ROLLBACK_ONLY_STATUSES = {ARCHIVED_TARGET_STATUS, "rollback_only", "deprecated"}
@@ -803,6 +804,7 @@ def deploy_current_checkout(
     ]
     mkdir_command = _remote_shell_command(target, f"mkdir -p {shlex.quote(target.target_dir)}")
     chown_target_dir_command = _remote_shell_command(target, f"chown -R root:root {shlex.quote(target.target_dir)}")
+    deploy_metadata_command = _build_deploy_metadata_command(target)
     restart_command = _remote_shell_command(
         target,
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
@@ -832,6 +834,7 @@ def deploy_current_checkout(
             "mkdir": mkdir_command,
             "rsync": rsync_plan,
             "chown_target_dir": chown_target_dir_command,
+            "deploy_metadata": deploy_metadata_command,
             "seller_portal_recovery_os_dependencies": seller_recovery_os_dependencies_command,
             "seller_portal_owner_runtime_os_dependencies": seller_owner_os_dependencies_command,
             "runtime_pip_install": runtime_pip_install_command,
@@ -854,6 +857,7 @@ def deploy_current_checkout(
     _run_command(mkdir_command)
     _run_command(rsync_plan)
     _run_command(chown_target_dir_command)
+    _run_command(deploy_metadata_command)
     _run_command(seller_recovery_os_dependencies_command)
     _run_command(seller_owner_os_dependencies_command)
     _run_command(runtime_pip_install_command)
@@ -874,6 +878,30 @@ def deploy_current_checkout(
     if status_command:
         _run_command(status_command)
     return summary
+
+
+def _build_deploy_metadata_command(target: HostedRuntimeTarget) -> list[str]:
+    commit = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("deploy requires a valid current checkout commit")
+    payload = json.dumps(
+        {
+            "schema_version": "wb_core_deploy_metadata_v1",
+            "commit": commit,
+            "deployed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    target_path = f"{target.target_dir.rstrip('/')}/{DEPLOY_METADATA_FILENAME}"
+    temp_path = f"{target_path}.tmp"
+    shell = (
+        "umask 022 && "
+        f"printf '%s\\n' {shlex.quote(payload)} > {shlex.quote(temp_path)} && "
+        f"mv {shlex.quote(temp_path)} {shlex.quote(target_path)}"
+    )
+    return _remote_shell_command(target, shell)
 
 
 def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]:

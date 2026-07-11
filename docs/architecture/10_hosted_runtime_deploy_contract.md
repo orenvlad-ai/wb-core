@@ -171,7 +171,7 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.timer`
-- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is a WebCore Data MCP artifact for the separate read-only MCP boundary. It is installed/enabled on the active EU host only as a private loopback service on `127.0.0.1:8766`. The repo-owned nginx allowlist may publish only exact OAuth/MCP locations to that loopback upstream; ChatGPT connector auth is owner-only OAuth 2.1 auth-code + PKCE S256, while bearer auth remains a server/admin diagnostic path. The same service may expose bounded read-only ops diagnostics under `webcore.ops.read`; those tools are fixed-unit/log/snapshot/deploy summaries only and must not expose arbitrary shell, SSH, filesystem browsing, SQL, env, secrets or mutations.
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is the separate read-only MCP boundary. It is a managed, enabled and restarted unit on the active EU target, listening only on `127.0.0.1:8766`. Its checked-in defaults cap HTTP workers at `16`, tool workers at `8`, each tool at `12s` and structured result bytes at `524288`. The nginx allowlist may publish only exact OAuth/MCP locations; owner-only OAuth 2.1 + PKCE remains the ChatGPT auth path. MCP lifecycle logs and health summaries must contain only request/correlation id, tool, safe identity hash, status, duration and result size—never args, credentials, paths or business payloads.
 
 `wb-core-sheet-vitrina-refresh.timer` is a due-check ticker, not the business-time source of truth: it runs every 10 minutes and starts `apps/sheet_vitrina_v1_auto_refresh_tick.py`; the runner reads runtime JSON schedules (`11:00`/`20:00 Asia/Yekaterinburg` by default, editable through the web-vitrina auto-schedules API), builds an in-memory WebCore session cookie from hosted env, and then calls the protected refresh route with `auto_refresh=true`. The backend auto-refresh cycle first refreshes the web-vitrina ready snapshot and then runs a nonfatal WB supplies official incremental sync; the result payload/logs expose `wb_supplies_auto_sync_status` and `wb_supplies_auto_sync` diagnostics, while WB supplies failure or Seller Portal transit-cost preflight failure is warning metadata rather than a critical web-vitrina snapshot failure. The timer itself is non-persistent; catch-up is owned by the runner's schedule state so a deploy/restart does not immediately fire a stale systemd event while the app process is restarting.
 
@@ -241,7 +241,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
 - `systemd_unit_directory = /etc/systemd/system`
 - `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
-- `managed_systemd_units = wb-ai-api.service + refresh.service + refresh.timer + closure-retry.service + closure-retry.timer + feedbacks-auto-complaints-tick.service + feedbacks-auto-complaints-tick.timer`
+- `managed_systemd_units = wb-ai-api.service + refresh.service + refresh.timer + closure-retry.service + closure-retry.timer + feedbacks-auto-complaints-tick.service + feedbacks-auto-complaints-tick.timer + wb-finance-weekly.service + wb-finance-weekly.timer + wb-core-data-mcp.service`
 - `nginx_public_routes.server_config_path = /etc/nginx/sites-enabled/wb-ai`
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 - `nginx_public_routes.test_command = nginx -t`
@@ -310,6 +310,10 @@ WebCore Data MCP is a separate read-only data/diagnostics gateway and must not e
 - `WEBCORE_DATA_MCP_OAUTH_ALLOWED_CLIENT_ID_PREFIXES`
 - `WEBCORE_DATA_MCP_OAUTH_CODE_TTL_SECONDS`
 - `WEBCORE_DATA_MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS`
+- `WEBCORE_DATA_MCP_MAX_HTTP_WORKERS`
+- `WEBCORE_DATA_MCP_MAX_TOOL_WORKERS`
+- `WEBCORE_DATA_MCP_TOOL_DEADLINE_SECONDS`
+- `WEBCORE_DATA_MCP_MAX_TOOL_RESULT_BYTES`
 
 Default MCP OAuth scopes:
 - `webcore.analytics.read`
@@ -325,12 +329,16 @@ Active EU private MCP live state:
 
 MCP publication gate:
 - unauthenticated `POST /mcp` must return `401` with no business data;
-- every exposed tool must be allowlisted and marked `readOnlyHint: true`;
+- `tools/list` must expose the compact primary profile (currently 16 names) while known legacy names remain callable compatibility-only;
+- every exposed tool must have exact input/output schemas and full read-only/non-destructive/idempotent/closed-world annotations;
 - every exposed tool must carry an OAuth `securitySchemes` scope in the `webcore.*.read` namespace;
 - ops diagnostics tools must carry only `webcore.ops.read`, accept only enum allowlists/bounded date-log args, and return sanitized summaries for fixed units/logs/refresh-load state/snapshots/deploy labels;
 - the DB read path must use SQLite `mode=ro` and `PRAGMA query_only=ON`;
 - no MCP tool may expose arbitrary SQL, shell/SSH, arbitrary filesystem browsing, upstream sync/backfill/refresh/load, restart, supplier write/upload/rematch/price-check, runtime file download, secrets, storage-state content, raw env or raw payload dumps;
 - OAuth authorization codes are one-time, short-lived and stored outside Git under runtime state; access tokens are short-lived, HMAC-signed, audience-bound to `WEBCORE_DATA_MCP_RESOURCE_URL`, scope-bound and never logged or printed.
+- the canonical deploy writes `.wb-core-deploy.json` only through the repo-owned runner after rsync; `deploy_state` must read that safe file and expose the active 40-character commit plus deploy timestamp even though `.git` is excluded from production;
+- the canonical deploy must install/enable/restart `wb-core-data-mcp.service`, then live verification must cover authenticated initialize/list/direct business/ops calls, concurrent latency and the commit equality check;
+- after model-visible metadata changes, connector refresh in the ChatGPT UI may remain the single human-only post-deploy step.
 
 Current required upstream secret contract stays:
 - `WB_API_TOKEN`

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 import hashlib
 import html
@@ -14,7 +15,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import secrets
+from socketserver import ThreadingMixIn
 import sys
+import threading
 import time
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -54,10 +57,17 @@ DEFAULT_OAUTH_ALLOWED_CLIENT_ID_PREFIXES = ("https://chatgpt.com/oauth/",)
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 MAX_FORM_BODY_BYTES = 64 * 1024
 MAX_OAUTH_FIELD_CHARS = 2048
+MAX_JSON_RPC_BATCH_ITEMS = 20
+DEFAULT_MAX_HTTP_WORKERS = 16
+DEFAULT_MAX_TOOL_WORKERS = 8
+DEFAULT_TOOL_DEADLINE_SECONDS = 12.0
+DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024
 SERVER_NAME = "webcore-data-mcp"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 WEB_AUTH_COOKIE_NAME = "wb_core_web_session"
 _OAUTH_LOGIN_FAILURES: dict[str, list[float]] = {}
+_OAUTH_LOGIN_FAILURES_LOCK = threading.Lock()
+_OAUTH_CODE_STORE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -95,6 +105,10 @@ class WebCoreDataMcpServerConfig:
         oauth_code_ttl_seconds: int,
         oauth_access_token_ttl_seconds: int,
         oauth_issuer: str,
+        max_http_workers: int = DEFAULT_MAX_HTTP_WORKERS,
+        max_tool_workers: int = DEFAULT_MAX_TOOL_WORKERS,
+        tool_deadline_seconds: float = DEFAULT_TOOL_DEADLINE_SECONDS,
+        max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES,
     ) -> None:
         self.host = host
         self.port = port
@@ -120,6 +134,10 @@ class WebCoreDataMcpServerConfig:
         self.oauth_code_ttl_seconds = oauth_code_ttl_seconds
         self.oauth_access_token_ttl_seconds = oauth_access_token_ttl_seconds
         self.oauth_issuer = oauth_issuer
+        self.max_http_workers = max(2, int(max_http_workers))
+        self.max_tool_workers = max(2, int(max_tool_workers))
+        self.tool_deadline_seconds = max(0.05, float(tool_deadline_seconds))
+        self.max_tool_result_bytes = max(1024, int(max_tool_result_bytes))
 
     @property
     def oauth_enabled(self) -> bool:
@@ -193,6 +211,34 @@ def load_config_from_env() -> WebCoreDataMcpServerConfig:
         DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS,
         "WEBCORE_DATA_MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS",
     )
+    max_http_workers = _parse_bounded_int(
+        os.environ.get("WEBCORE_DATA_MCP_MAX_HTTP_WORKERS"),
+        DEFAULT_MAX_HTTP_WORKERS,
+        "WEBCORE_DATA_MCP_MAX_HTTP_WORKERS",
+        minimum=2,
+        maximum=64,
+    )
+    max_tool_workers = _parse_bounded_int(
+        os.environ.get("WEBCORE_DATA_MCP_MAX_TOOL_WORKERS"),
+        DEFAULT_MAX_TOOL_WORKERS,
+        "WEBCORE_DATA_MCP_MAX_TOOL_WORKERS",
+        minimum=2,
+        maximum=32,
+    )
+    tool_deadline_seconds = _parse_bounded_float(
+        os.environ.get("WEBCORE_DATA_MCP_TOOL_DEADLINE_SECONDS"),
+        DEFAULT_TOOL_DEADLINE_SECONDS,
+        "WEBCORE_DATA_MCP_TOOL_DEADLINE_SECONDS",
+        minimum=0.05,
+        maximum=120.0,
+    )
+    max_tool_result_bytes = _parse_bounded_int(
+        os.environ.get("WEBCORE_DATA_MCP_MAX_TOOL_RESULT_BYTES"),
+        DEFAULT_MAX_TOOL_RESULT_BYTES,
+        "WEBCORE_DATA_MCP_MAX_TOOL_RESULT_BYTES",
+        minimum=1024,
+        maximum=2 * 1024 * 1024,
+    )
     if oauth_enabled:
         if not resource_url.startswith("https://"):
             raise ValueError("OAuth mode requires WEBCORE_DATA_MCP_RESOURCE_URL with https://")
@@ -231,21 +277,98 @@ def load_config_from_env() -> WebCoreDataMcpServerConfig:
         oauth_code_ttl_seconds=oauth_code_ttl_seconds,
         oauth_access_token_ttl_seconds=oauth_access_token_ttl_seconds,
         oauth_issuer=oauth_issuer,
+        max_http_workers=max_http_workers,
+        max_tool_workers=max_tool_workers,
+        tool_deadline_seconds=tool_deadline_seconds,
+        max_tool_result_bytes=max_tool_result_bytes,
     )
 
 
-def build_server(config: WebCoreDataMcpServerConfig | None = None) -> HTTPServer:
+class BoundedToolExecutor:
+    def __init__(self, max_workers: int) -> None:
+        self.max_workers = max(2, int(max_workers))
+        self._slots = threading.BoundedSemaphore(self.max_workers)
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="webcore-mcp-tool")
+
+    def submit(self, fn: Any) -> Future[Any] | None:
+        if not self._slots.acquire(blocking=False):
+            return None
+
+        def run() -> Any:
+            try:
+                return fn()
+            finally:
+                self._slots.release()
+
+        try:
+            return self._executor.submit(run)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    block_on_close = True
+    allow_reuse_address = True
+
+    def __init__(self, server_address: tuple[str, int], handler: type[BaseHTTPRequestHandler], *, max_workers: int, tool_executor: BoundedToolExecutor) -> None:
+        self._request_slots = threading.BoundedSemaphore(max(2, int(max_workers)))
+        self.tool_executor = tool_executor
+        super().__init__(server_address, handler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            _reject_overloaded_socket(request)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+    def server_close(self) -> None:
+        self.tool_executor.close()
+        super().server_close()
+
+
+def build_server(
+    config: WebCoreDataMcpServerConfig | None = None,
+    *,
+    gateway: WebCoreDataMcpGateway | None = None,
+) -> HTTPServer:
     resolved_config = config or load_config_from_env()
-    gateway = WebCoreDataMcpGateway(
+    resolved_gateway = gateway or WebCoreDataMcpGateway(
         runtime_dir=resolved_config.runtime_dir,
         db_path=resolved_config.db_path,
         audit_log_path=resolved_config.audit_log_path,
+        emit_audit_to_stdout=True,
     )
-    handler_cls = _build_handler(resolved_config, gateway)
-    return HTTPServer((resolved_config.host, resolved_config.port), handler_cls)
+    tool_executor = BoundedToolExecutor(resolved_config.max_tool_workers)
+    handler_cls = _build_handler(resolved_config, resolved_gateway, tool_executor)
+    return BoundedThreadingHTTPServer(
+        (resolved_config.host, resolved_config.port),
+        handler_cls,
+        max_workers=resolved_config.max_http_workers,
+        tool_executor=tool_executor,
+    )
 
 
-def _build_handler(config: WebCoreDataMcpServerConfig, gateway: WebCoreDataMcpGateway) -> type[BaseHTTPRequestHandler]:
+def _build_handler(
+    config: WebCoreDataMcpServerConfig,
+    gateway: WebCoreDataMcpGateway,
+    tool_executor: BoundedToolExecutor,
+) -> type[BaseHTTPRequestHandler]:
     class WebCoreDataMcpHandler(BaseHTTPRequestHandler):
         server_version = f"{SERVER_NAME}/{SERVER_VERSION}"
 
@@ -300,7 +423,15 @@ def _build_handler(config: WebCoreDataMcpServerConfig, gateway: WebCoreDataMcpGa
                 _write_json_rpc_error(self, None, -32700, str(exc))
                 return
             if isinstance(payload, list):
-                responses = [_handle_json_rpc(item, gateway, identity) for item in payload]
+                if not payload or len(payload) > MAX_JSON_RPC_BATCH_ITEMS:
+                    _write_json_rpc_error(
+                        self,
+                        None,
+                        -32600,
+                        f"JSON-RPC batch must contain 1..{MAX_JSON_RPC_BATCH_ITEMS} items",
+                    )
+                    return
+                responses = [_handle_json_rpc(item, gateway, identity, tool_executor, config) for item in payload]
                 responses = [item for item in responses if item is not None]
                 if not responses:
                     self.send_response(HTTPStatus.ACCEPTED)
@@ -308,7 +439,7 @@ def _build_handler(config: WebCoreDataMcpServerConfig, gateway: WebCoreDataMcpGa
                     return
                 _write_json(self, HTTPStatus.OK, responses)
                 return
-            response = _handle_json_rpc(payload, gateway, identity)
+            response = _handle_json_rpc(payload, gateway, identity, tool_executor, config)
             if response is None:
                 self.send_response(HTTPStatus.ACCEPTED)
                 self.end_headers()
@@ -321,7 +452,13 @@ def _build_handler(config: WebCoreDataMcpServerConfig, gateway: WebCoreDataMcpGa
     return WebCoreDataMcpHandler
 
 
-def _handle_json_rpc(payload: Any, gateway: WebCoreDataMcpGateway, identity: AuthIdentity) -> dict[str, Any] | None:
+def _handle_json_rpc(
+    payload: Any,
+    gateway: WebCoreDataMcpGateway,
+    identity: AuthIdentity,
+    tool_executor: BoundedToolExecutor,
+    config: WebCoreDataMcpServerConfig,
+) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return _json_rpc_error(None, -32600, "JSON-RPC request must be an object")
     request_id = payload.get("id")
@@ -338,12 +475,11 @@ def _handle_json_rpc(payload: Any, gateway: WebCoreDataMcpGateway, identity: Aut
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                     "instructions": (
-                        "WebCore Data MCP exposes read-only, allowlisted business analytics tools only. "
-                        "Call get_webcore_data_map for orientation and resolve_webcore_data_request when unsure which "
-                        "business-data tool to use. Use list_supply_artifacts/get_supply_artifact only for server-owned "
-                        "opaque artifact refs. Ops diagnostics tools require webcore.ops.read and expose only fixed "
-                        "unit/log/snapshot/deploy summaries. No arbitrary SQL, filesystem browsing, shell, SSH, "
-                        "sync/backfill/refresh/load, writes, secrets or unbounded payloads are available."
+                        "WebCore Data MCP exposes compact read-only business tools. Call freshness, metric_values, "
+                        "sku_search, supplier_shipments, wb_supplies, or supply_artifacts directly for matching user "
+                        "requests; no data-map or resolver preflight is required. Detail tools consume stable ids from "
+                        "list results. All data is persisted/cache-only and bounded. Ops tools require webcore.ops.read. "
+                        "No sync, refresh, writes, arbitrary SQL/filesystem/shell, secrets or unbounded payloads."
                     ),
                 },
             )
@@ -365,8 +501,86 @@ def _handle_json_rpc(payload: Any, gateway: WebCoreDataMcpGateway, identity: Aut
                     },
                 )
             arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-            result = gateway.call_tool(name, arguments, identity=identity.label)
-            return _json_rpc_result(request_id, _tool_result(result))
+            correlation_id = secrets.token_hex(12)
+            started = time.monotonic()
+            deadline_at = started + config.tool_deadline_seconds
+            cancel_event = threading.Event()
+            future = tool_executor.submit(
+                lambda: gateway.call_tool(
+                    name,
+                    arguments,
+                    identity=identity.label,
+                    correlation_id=correlation_id,
+                    deadline_at=deadline_at,
+                    cancel_event=cancel_event,
+                )
+            )
+            if future is None:
+                gateway.record_call_event(
+                    request_id=correlation_id,
+                    tool=name,
+                    identity_hash=_hash_text(identity.label),
+                    event="controlled_error",
+                    status="overloaded",
+                    duration_ms=0,
+                    result_bytes=0,
+                    error_code="tool_capacity_exhausted",
+                )
+                return _json_rpc_error(
+                    request_id,
+                    -32005,
+                    "MCP tool capacity is temporarily exhausted",
+                    data={"code": "tool_capacity_exhausted", "request_id": correlation_id},
+                )
+            try:
+                result = future.result(timeout=config.tool_deadline_seconds)
+            except FutureTimeoutError:
+                cancel_event.set()
+                duration_ms = int((time.monotonic() - started) * 1000)
+                gateway.record_call_event(
+                    request_id=correlation_id,
+                    tool=name,
+                    identity_hash=_hash_text(identity.label),
+                    event="timeout",
+                    status="timeout",
+                    duration_ms=duration_ms,
+                    result_bytes=0,
+                    error_code="tool_timeout",
+                )
+                return _json_rpc_error(
+                    request_id,
+                    -32002,
+                    "MCP tool execution deadline exceeded",
+                    data={"code": "tool_timeout", "request_id": correlation_id},
+                )
+            result_bytes = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if result_bytes > config.max_tool_result_bytes:
+                gateway.record_call_event(
+                    request_id=correlation_id,
+                    tool=name,
+                    identity_hash=_hash_text(identity.label),
+                    event="controlled_error",
+                    status="result_too_large",
+                    duration_ms=duration_ms,
+                    result_bytes=result_bytes,
+                    error_code="tool_result_too_large",
+                )
+                return _json_rpc_error(
+                    request_id,
+                    -32004,
+                    "MCP tool result exceeds the configured payload limit",
+                    data={
+                        "code": "tool_result_too_large",
+                        "request_id": correlation_id,
+                        "result_bytes": result_bytes,
+                        "limit_bytes": config.max_tool_result_bytes,
+                    },
+                )
+            return _json_rpc_result(
+                request_id,
+                _tool_result(result, request_id=correlation_id, duration_ms=duration_ms, result_bytes=result_bytes),
+            )
         if method in {"resources/list", "prompts/list"}:
             key = "resources" if method == "resources/list" else "prompts"
             return _json_rpc_result(request_id, {key: []})
@@ -377,11 +591,20 @@ def _handle_json_rpc(payload: Any, gateway: WebCoreDataMcpGateway, identity: Aut
         return _json_rpc_error(request_id, -32001, f"tool execution failed: {_safe_error(str(exc))}")
 
 
-def _tool_result(result: Mapping[str, Any]) -> dict[str, Any]:
-    text = json.dumps(result, ensure_ascii=False, sort_keys=True)
+def _tool_result(
+    result: Mapping[str, Any],
+    *,
+    request_id: str,
+    duration_ms: int,
+    result_bytes: int,
+) -> dict[str, Any]:
     return {
         "structuredContent": result,
-        "content": [{"type": "text", "text": text}],
+        "_meta": {
+            "requestId": request_id,
+            "serverDurationMs": duration_ms,
+            "resultBytes": result_bytes,
+        },
     }
 
 
@@ -628,25 +851,26 @@ def _exchange_authorization_code(
     if not _valid_pkce_verifier(code_verifier):
         return {"error": "invalid_grant", "detail": "invalid code_verifier"}
     code_hash = _hash_text(code)
-    store = _load_code_store(config)
-    record = store.get(code_hash)
-    now = int(time.time())
-    if not isinstance(record, dict):
-        return {"error": "invalid_grant", "detail": "unknown authorization code"}
-    if bool(record.get("used")):
-        return {"error": "invalid_grant", "detail": "authorization code already used"}
-    if int(record.get("expires_at") or 0) < now:
-        return {"error": "invalid_grant", "detail": "authorization code expired"}
-    if str(record.get("redirect_uri") or "") != redirect_uri or str(record.get("client_id") or "") != client_id:
-        return {"error": "invalid_grant", "detail": "authorization code binding mismatch"}
-    if str(record.get("resource") or "") != resource:
-        return {"error": "invalid_target", "detail": "authorization code resource mismatch"}
-    expected_challenge = str(record.get("code_challenge") or "")
-    if not hmac.compare_digest(expected_challenge, _pkce_s256_challenge(code_verifier)):
-        return {"error": "invalid_grant", "detail": "PKCE verification failed"}
-    record["used"] = True
-    store[code_hash] = record
-    _save_code_store(config, store)
+    with _OAUTH_CODE_STORE_LOCK:
+        store = _load_code_store(config)
+        record = store.get(code_hash)
+        now = int(time.time())
+        if not isinstance(record, dict):
+            return {"error": "invalid_grant", "detail": "unknown authorization code"}
+        if bool(record.get("used")):
+            return {"error": "invalid_grant", "detail": "authorization code already used"}
+        if int(record.get("expires_at") or 0) < now:
+            return {"error": "invalid_grant", "detail": "authorization code expired"}
+        if str(record.get("redirect_uri") or "") != redirect_uri or str(record.get("client_id") or "") != client_id:
+            return {"error": "invalid_grant", "detail": "authorization code binding mismatch"}
+        if str(record.get("resource") or "") != resource:
+            return {"error": "invalid_target", "detail": "authorization code resource mismatch"}
+        expected_challenge = str(record.get("code_challenge") or "")
+        if not hmac.compare_digest(expected_challenge, _pkce_s256_challenge(code_verifier)):
+            return {"error": "invalid_grant", "detail": "PKCE verification failed"}
+        record["used"] = True
+        store[code_hash] = record
+        _save_code_store(config, store)
     scopes = tuple(item for item in str(record.get("scope") or "").split() if item)
     access_token = _make_access_token(
         config,
@@ -713,9 +937,10 @@ def _verify_oauth_access_token(token: str, config: WebCoreDataMcpServerConfig) -
 
 
 def _store_authorization_code(config: WebCoreDataMcpServerConfig, code: str, record: Mapping[str, Any]) -> None:
-    store = _load_code_store(config)
-    store[_hash_text(code)] = dict(record)
-    _save_code_store(config, store)
+    with _OAUTH_CODE_STORE_LOCK:
+        store = _load_code_store(config)
+        store[_hash_text(code)] = dict(record)
+        _save_code_store(config, store)
 
 
 def _load_code_store(config: WebCoreDataMcpServerConfig) -> dict[str, Any]:
@@ -905,18 +1130,21 @@ def _client_key(handler: BaseHTTPRequestHandler) -> str:
 
 def _oauth_rate_limited(client_key: str) -> bool:
     now = time.time()
-    failures = [item for item in _OAUTH_LOGIN_FAILURES.get(client_key, []) if now - item < 600]
-    _OAUTH_LOGIN_FAILURES[client_key] = failures
-    return len(failures) >= 5
+    with _OAUTH_LOGIN_FAILURES_LOCK:
+        failures = [item for item in _OAUTH_LOGIN_FAILURES.get(client_key, []) if now - item < 600]
+        _OAUTH_LOGIN_FAILURES[client_key] = failures
+        return len(failures) >= 5
 
 
 def _record_oauth_login_failure(client_key: str) -> None:
-    failures = _OAUTH_LOGIN_FAILURES.setdefault(client_key, [])
-    failures.append(time.time())
+    with _OAUTH_LOGIN_FAILURES_LOCK:
+        failures = _OAUTH_LOGIN_FAILURES.setdefault(client_key, [])
+        failures.append(time.time())
 
 
 def _clear_oauth_login_failures(client_key: str) -> None:
-    _OAUTH_LOGIN_FAILURES.pop(client_key, None)
+    with _OAUTH_LOGIN_FAILURES_LOCK:
+        _OAUTH_LOGIN_FAILURES.pop(client_key, None)
 
 
 def _write_redirect(handler: BaseHTTPRequestHandler, location: str) -> None:
@@ -990,6 +1218,22 @@ def _write_json(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload: An
     handler.wfile.write(raw)
 
 
+def _reject_overloaded_socket(request: Any) -> None:
+    body = b'{"error":"server_overloaded","retryable":true}'
+    response = (
+        b"HTTP/1.1 503 Service Unavailable\r\n"
+        b"Content-Type: application/json; charset=utf-8\r\n"
+        b"Cache-Control: no-store\r\n"
+        b"Connection: close\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+        + body
+    )
+    try:
+        request.sendall(response)
+    except OSError:
+        pass
+
+
 def _parse_port(raw: str) -> int:
     try:
         value = int(str(raw).strip())
@@ -1009,6 +1253,39 @@ def _parse_positive_int(raw: str | None, default: int, env_name: str) -> int:
         raise ValueError(f"{env_name} must be an integer") from exc
     if value <= 0:
         raise ValueError(f"{env_name} must be positive")
+    return value
+
+
+def _parse_bounded_int(
+    raw: str | None,
+    default: int,
+    env_name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = _parse_positive_int(raw, default, env_name)
+    if value < minimum or value > maximum:
+        raise ValueError(f"{env_name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _parse_bounded_float(
+    raw: str | None,
+    default: float,
+    env_name: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(str(raw).strip())
+    except ValueError as exc:
+        raise ValueError(f"{env_name} must be a number") from exc
+    if value < minimum or value > maximum:
+        raise ValueError(f"{env_name} must be between {minimum} and {maximum}")
     return value
 
 
@@ -1080,6 +1357,10 @@ def main(argv: list[str] | None = None) -> int:
                     "has_oauth_owner_password_hash": bool(config.oauth_owner_password_hash),
                     "has_oauth_session_secret": bool(config.oauth_session_secret),
                     "oauth_code_store_path": str(config.oauth_code_store_path) if config.oauth_code_store_path else "",
+                    "max_http_workers": config.max_http_workers,
+                    "max_tool_workers": config.max_tool_workers,
+                    "tool_deadline_seconds": config.tool_deadline_seconds,
+                    "max_tool_result_bytes": config.max_tool_result_bytes,
                 },
                 ensure_ascii=True,
                 sort_keys=True,
