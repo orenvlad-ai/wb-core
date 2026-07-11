@@ -61,7 +61,7 @@ Legacy-репозитории остаются рабочими, но счита
 - `artifacts/sheet_vitrina_v1_registry_upload_trigger/`, `artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/` и `artifacts/sheet_vitrina_v1_mvp_end_to_end/` как archived/migration evidence для бывшего sheet-side contour;
 - `packages/application/cost_price_upload.py` и `packages/contracts/cost_price_upload.py` как отдельный authoritative upload contract для `COST_PRICE`, который затем подключается server-side в `sheet_vitrina_v1` refresh/read contour;
 - `gas/sheet_vitrina_v1/` и `.clasp.json` для legacy bound sheet-side/export wiring; GAS содержит archive guard, не является active production/update/write/verify target и не должен использоваться как Codex completion path;
-- `wb_core_docs_master/` как compact curated-pack для project-oriented retrieval вне primary repo docs;
+- `AGENTS.md` как короткий самодостаточный execution/governance context для Codex и нового ChatGPT Work Project;
 - `docs/modules/` как канонический модульный reference;
 - `migration/` как канонический слой migration contracts и implementation notes.
 
@@ -79,7 +79,6 @@ Legacy-репозитории остаются рабочими, но счита
 10. Первый operator-facing sheet-side trigger для отправки `CONFIG / METRICS / FORMULAS` в уже materialized entrypoint.
 11. Compact v3 bootstrap для `CONFIG / METRICS / FORMULAS` с сохранением service/status block.
 12. Первый bounded end-to-end MVP, где expanded MVP-safe registry seed, upload и load `DATA_VITRINA` уже работают в одном контуре.
-13. Появление `wb_core_docs_master` как derived secondary compact project-pack поверх authoritative canonical repo docs.
 14. Отдельный bounded contour для `COST_PRICE`: `COST_PRICE` sheet-side prepare/upload, sibling `POST /v1/cost-price/upload` и separate authoritative dataset в том же runtime/app boundary.
 15. Server-side read-side integration `COST_PRICE` в `sheet_vitrina_v1`: authoritative resolution по `group + max(effective_from <= slot_date)`, truthful `STATUS.cost_price[*]` и operator-facing derived metrics `total_proxy_profit_rub` / `proxy_margin_pct_total`.
 16. Первый repo-owned bounded `promo_xlsx_collector_block`: canonical hydration/modal/drawer seams, truthful metadata sidecar, workbook inspection и bounded live integration smoke поверх existing seller session reuse path.
@@ -87,7 +86,6 @@ Legacy-репозитории остаются рабочими, но счита
 18. Legacy Google Sheets/GAS contour переведён в `ARCHIVED / DO NOT USE`; current contour = hosted website/operator/web-vitrina runtime.
 19. В active `/sheet-vitrina-v1/vitrina` добавлены `Отзывы` с official WB review tags/chips, подразделы `Жалобы` и `Авто-жалобы`, runtime-журналом/deep status sync, compact supply/report/research operator surfaces and bounded AI-assisted feedback review over OpenAI with server-side prompt/model config, live model discovery, strict feedback period/star filters, Excel export and resizable feedback columns; protected operator-selected complaint submit запускает только async guarded backend job and exposes per-row attempt results, while auto-complaints schedules live in runtime state and are triggered by a repo-owned idempotent tick.
 20. WebCore public/operator surface получил simple app-level auth with login/logout session cookie and env-provided username/password hash/session secret; plaintext owner credentials не являются repo state.
-21. Docs governance переведён в authoritative/derived режим: ordinary task-flow обновляет затронутые canonical docs при truth change, а `wb_core_docs_master` пересобирается отдельным derived-sync flow.
 22. Seller Portal automation contour получил repo-owned single-flight policy: one lock for all browser runners, canonical EU bot storage-state path, route-specific session capability blockers and controlled public busy responses for status/submit/auto-complaints routes.
 23. `Поставки -> От поставщика` добавлен как supplier invoice registry: protected API/UI, XLSX parser, runtime storage and optional supplier-only role isolation.
 24. `Настройки -> Справочники -> Номенклатура` хранит server-owned SKU/nmID/WB reference для future FBW planning: primary `barcode`, all known `barcodes`, `vendor_code`, WB title/subject/updatedAt, source/status/sync diagnostics, manual barcode override priority, separate `is_hidden` visibility semantics outside operational `is_active`, read-only WB Content `POST /content/v2/get/cards/list` cursor sync through canonical `WB_API_TOKEN`, protected sync matching by `nm_id -> barcode -> vendorCode`, managed server-owned `Группы SKU` aliases for vendorCode auto-detection, XLSX import/export reference columns and readiness summary without Google Sheets/GAS/localStorage truth or WB mutations.
@@ -117,6 +115,7 @@ Legacy-репозитории остаются рабочими, но счита
 ## Governance Pointers
 
 Канонические governance/source-of-truth правила живут не в `README.md`, а в:
+- [AGENTS.md](AGENTS.md)
 - [docs/architecture/03_source_of_truth_policy.md](docs/architecture/03_source_of_truth_policy.md)
 - [docs/architecture/07_codex_execution_protocol.md](docs/architecture/07_codex_execution_protocol.md)
 - [docs/architecture/02_repo_workspace_blueprint.md](docs/architecture/02_repo_workspace_blueprint.md)
@@ -127,7 +126,6 @@ Legacy-репозитории остаются рабочими, но счита
 ## Где смотреть детали
 
 - [docs/modules/00_INDEX__MODULES.md](docs/modules/00_INDEX__MODULES.md)
-- [wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md](wb_core_docs_master/00_INDEX__WEBCORE_PROJECT_DOCS.md)
 - [docs/architecture/00_migration_charter.md](docs/architecture/00_migration_charter.md)
 - [docs/architecture/01_target_architecture.md](docs/architecture/01_target_architecture.md)
 - [docs/architecture/10_hosted_runtime_deploy_contract.md](docs/architecture/10_hosted_runtime_deploy_contract.md)

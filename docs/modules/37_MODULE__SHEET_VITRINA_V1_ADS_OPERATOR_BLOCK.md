@@ -188,4 +188,3 @@ These use fake Promotion API sources and do not call live WB write methods. They
 - bulk bid changes.
 - campaign-first top-level UI.
 - Google Sheets/GAS write/load revival.
-- `wb_core_docs_master` sync in ordinary implementation tasks.

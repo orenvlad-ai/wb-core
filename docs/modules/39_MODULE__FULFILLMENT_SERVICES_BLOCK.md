@@ -246,5 +246,4 @@ This module does not implement:
 - global cost truth switch;
 - WB official evidence mutation;
 - Seller Portal transit source boundary changes;
-- Google Sheets/GAS;
-- legacy `wb_core_docs_master` or old project pack updates.
+- Google Sheets/GAS.

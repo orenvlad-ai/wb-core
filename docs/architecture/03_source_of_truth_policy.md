@@ -1,142 +1,62 @@
 # Source Of Truth Policy
 
-## Code Truth
+## Приоритет источников
 
-Git-tracked код в `wb-core` — единственный допустимый source of truth для target implementation.
+Для каждого типа фактов используется один canonical owner:
 
-Runtime-only edits недействительны, пока они не синхронизированы обратно в Git и не прошли review.
+- Git-tracked code и current `origin/main` — code truth для текущей реализации;
+- `README.md`, `docs/architecture/*`, `docs/modules/*` и `migration/*` — authoritative documentation truth;
+- GitHub — truth для branch, commit, PR, checks, review и merge;
+- WebCore Data MCP — read-only источник наблюдаемого production-состояния, диагностики и бизнес-метрик;
+- production server — canonical deploy/runtime boundary;
+- legacy — только migration evidence и do-not-lose constraints.
 
-## Documentation Truth
+Рабочая ветка показывает proposed change, но не заменяет current `origin/main` до review и merge. Runtime-наблюдение не заменяет versioned code или contracts.
 
-Documentation truth в `wb-core` двухслойный, но эти слои имеют разные права:
-- authoritative / canonical docs живут в `README.md`, `docs/architecture/*`, `docs/modules/*` и `migration/*`;
-- derived / secondary retrieval pack живёт в `wb_core_docs_master/` и строится из authoritative docs и текущего code-state.
+## Code И Documentation Truth
 
-Authoritative docs являются source of truth. Derived pack не является source of truth и не должен становиться completion blocker для обычного task-flow.
+Runtime-only edits недействительны, пока эквивалентное изменение не зафиксировано в Git, не проверено и не смёржено.
 
-Правила слоя `wb_core_docs_master/`:
-- он не может вводить новые нормы раньше authoritative docs;
-- он не должен быть dump-копией всего `docs/`;
-- он должен хранить только retrieval-oriented summary, glossary, register, runbook и manifest;
-- legacy knowledge допускается только в тонком register-слое, а не как перенос полного legacy-корпуса.
+Authoritative docs должны описывать текущую реализацию и устойчивые boundaries, а не служить журналом временных snapshots. Если задача меняет code, contract, module status, runtime boundary, deploy path, schema или другую зафиксированную истину, затронутые docs обновляются в той же задаче.
 
-В обычном task-flow:
-- обновляются code/tests и затронутые authoritative docs, если изменился truth;
-- `wb_core_docs_master/**` и manifest не обновляются по умолчанию;
-- отсутствие pack rebuild не блокирует completion, если task явно не является derived-sync задачей.
+Корневой `AGENTS.md` — короткий execution/governance entrypoint. Он не дублирует доменные контракты и направляет к authoritative docs.
 
-Derived pack обновляется отдельным derived-sync flow. Такой flow явно пересобирает затронутые `wb_core_docs_master/**` из текущих authoritative docs / code-state и обновляет `wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md` как build metadata.
+## Production Runtime Boundary
 
-## Local Project Upload Source
+Production server является единственной canonical границей deploy и runtime execution:
 
-Для внешнего ChatGPT Project единственным допустимым локальным upload source считается:
-- `~/Projects/wb-core/wb_core_docs_master`
+- изменения доставляются только через repo-owned deploy/runbook path;
+- server-only code/config patches и ручной drift запрещены;
+- ad-hoc SQL и произвольные server mutations не являются completion path;
+- secrets, session state, production DB dumps и credential-bearing artifacts не попадают в Git, docs, logs или PR;
+- repo хранит config shape, non-secret defaults, contracts и deployment artifacts, а environment-specific secrets остаются вне Git.
 
-Нельзя подменять этот source:
-- временной копией на Desktop/Downloads;
-- zip-архивом без сверки с repo;
-- произвольной локальной папкой, не связанной с current `origin/main`.
+WebCore Data MCP остаётся строго read-only. Его данные пригодны для диагностики, freshness checks и бизнес-метрик, но не дают права изменять production и не становятся code truth.
 
-Готовность pack к upload определяется только по:
-- `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`
+## Schema, Config И Data Truth
 
-Finder timestamps, имя архива, локальные заметки или память исполнителя не считаются признаками readiness.
+- Schema truth живёт в versioned contracts и schema artifacts.
+- Repo-owned config shape и безопасные defaults живут в Git; secret values — вне Git; operator-managed business inputs меняются только через явные interfaces.
+- Accepted production data живёт в durable server-side stores и versioned/runtime-observable snapshots, а не в browser state, temporary raw tabs или памяти человека.
+- User-facing `ЕБД` означает общий server-side accepted truth/runtime layer `wb-core`; это не Google Sheets/GAS, HTML UI, browser `localStorage` или private manual table.
+- Server-only behavior допустимо только когда оно воспроизводимо из versioned code и наблюдаемо через bounded logs, metrics и audit evidence.
 
-В обычном task-flow этот upload source не обновляется автоматически после каждого изменения authoritative docs.
+## Legacy Boundary
 
-Если меняется contract, status/checkpoint, module status, smoke/runbook, glossary/alias, migration boundary или do-not-lose constraint, сначала обновляется соответствующий authoritative doc. Обновление `wb_core_docs_master/**` и manifest выполняется только в отдельном derived-sync flow или в явно обозначенной transitional migration exception.
+Legacy repositories, Apps Script/GAS artifacts и historical sheet/export paths используются только:
 
-Если task является derived-sync flow, внешний ChatGPT Project обновляется уже после merge как один human-only step по загрузке актуального pack. Этот upload reminder живёт в governance/handoff rules, а не во внутреннем upload-state самого pack.
+- как migration evidence;
+- для parity и do-not-lose constraints;
+- для явно заданного archived GAS guard scope.
 
-## Derived-Pack Sync Rule
+Они не являются normal development, runtime, write, deploy или verification path. Полные legacy dumps и устаревшие current-state snapshots не переносятся в canonical docs.
 
-Если task явно является derived-sync flow или transitional pack rebuild, после successful merge Codex обязана:
-- безопасно сохранить несвязанный dirty state по правилам workspace policy, если он есть;
-- привести `~/Projects/wb-core` к current `origin/main`;
-- проверить readiness по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`;
-- оставить пользователю ровно один human-only remainder: загрузить актуальный `~/Projects/wb-core/wb_core_docs_master` во внешний ChatGPT Project.
+## Anti-Drift Rules
 
-Manifest при этом остаётся build-metadata артефактом и не хранит operational state внешней загрузки.
-
-Manifest не должен хранить operational upload-state поля вроде `project_upload_required`, `last_project_upload_at` или `project_upload_note`.
-
-Текущий governance alignment допускает разовую transitional exception: после перевода правил на authoritative/derived модель pack пересобирается один раз, чтобы внешний ChatGPT Project получил чистый актуальный derived pack после перехода.
-
-Факты из reference:
-- `wb-ai-research/RECONCILE_SUMMARY.md` фиксирует drift между runtime и Git для `wb-ai/analyze.py`;
-- `wb-web-bot/RECONCILE_SUMMARY.md` фиксирует тот же класс drift для `bot/fetch_report.py`.
-
-## Schema Truth
-
-Schema truth должен жить в versioned contracts и schema artifacts внутри `wb-core`.
-
-Никакая production schema не должна зависеть от недокументированных table layouts или от SQL, существующего только на сервере.
-
-## Runtime Truth
-
-Runtime truth должен быть наблюдаем через:
-- versioned code;
-- versioned config shape;
-- versioned contract definitions;
-- logs/metrics/audit evidence, производимые controlled runtime.
-
-Память человека не является runtime truth.
-
-## Config Truth
-
-Config truth должен быть разделён по ответственности:
-- repo-owned config shape и defaults в Git;
-- environment-specific secret values вне Git;
-- operator-managed business inputs только через явные интерфейсы.
-
-Факты из reference:
-- legacy читает `CONFIG` и `METRICS` из Google Sheets;
-- legacy server code также зависит от `.env` и service-account files вне Git.
-
-## Data Truth
-
-Data truth должен жить в durable server-side stores и versioned snapshots, а не во временных raw-tabs.
-
-Current `sheet_vitrina_v1` user-facing alias:
-- `ЕБД` / `единая база данных` = общий server-side accepted truth/runtime layer `wb-core`, из которого питаются website/operator web-vitrina, plan-report и будущие отчёты/расчёты;
-- технически это persisted accepted closed-day temporal source slots, ready runtime snapshots and related runtime state managed by repo-owned server code;
-- `ЕБД` is not Google Sheets/GAS, not the HTML/browser UI, not browser `localStorage`, and not a private manual fact table for one report;
-- successful refresh/group-refresh/reconcile paths must write through this server-side runtime contour or produce an explicit blocker; UI-only/session-only state cannot be accepted as data truth.
-
-## Table Truth
-
-Таблица может быть source of truth только для явно выделенных operator-managed inputs.
-
-Таблица не должна быть source of truth для:
-- production computation;
-- скрытых formulas, определяющих server behavior;
-- runtime-only snapshots, нужных downstream-системам.
-
-Факты из reference:
-- legacy Apps Script пересобирает `AI_EXPORT` из `DATA`;
-- `AI_EXPORT` ingest-ится в `wb-ai-research/wb-ai/ingest.py`;
-- текущая таблица до сих пор смешивает operator state и production feed generation.
-
-## Server-Only Truth
-
-Server-only truth допустим только если он:
-- представлен явными контрактами;
-- воспроизводим из versioned code;
-- видим для review через repo artifacts и evidence.
-
-Невидимое server-only поведение запрещено.
-
-## Anti-Drift Policy
-
-Anti-drift rules:
-- никакого manual production patch без того же изменения в Git;
-- никакой runtime snapshot не принимается как truth без reconcile evidence;
-- никакое contract change не проходит без обновления docs/tests/inventory;
-- ordinary task-flow не обновляет `wb_core_docs_master/**` и manifest по умолчанию;
-- authoritative docs обязаны обновляться в той же задаче, если изменился repo truth;
-- никакое изменение project-pack не проходит без derivation из authoritative repo docs / code-state и manifest как build-metadata файла;
-- если задача является derived-sync flow или transitional pack rebuild, после merge `~/Projects/wb-core` должен быть приведён к current `origin/main`, а `~/Projects/wb-core/wb_core_docs_master` должен быть подготовлен как upload-ready source;
-- readiness pack определяется по `~/Projects/wb-core/wb_core_docs_master/99_MANIFEST__DOCSET_VERSION.md`, а не по Finder timestamps или внешним заметкам;
-- manifest внутри pack не должен становиться operational tracker-ом внешней загрузки и не должен требовать post-upload repo-sync loop;
-- никакой cutover по принципу "на сервере вроде работает";
-- каждый migrated module должен давать reviewable evidence версии кода, версии конфига и snapshot/version semantics.
+- никакого manual production patch без эквивалентного reviewed Git change;
+- никакого contract/schema change без синхронизации tests и authoritative docs;
+- никакой runtime snapshot не объявляется code или schema truth;
+- никакого cutover по принципу «на сервере вроде работает»;
+- никакой production mutation без explicit scope, dry-run, backup/reversibility, idempotency, audit и требуемых human gates;
+- никакой потери или смешивания чужого dirty state при branch/sync/merge работе;
+- каждый merged change подтверждается в current `origin/main`, а live/runtime change дополнительно — canonical deploy и live/public verify.
