@@ -929,6 +929,58 @@ class WbFinanceWeeklyBlock:
             "week_count": len(bounds),
         }
 
+    def recalculate_all_weeks(self) -> dict[str, Any]:
+        """Rebuild every stored week for the configured seller from raw rows."""
+        self.ensure_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT week_start,week_end
+                FROM wb_finance_weekly_raw_rows
+                WHERE seller_id=?
+                ORDER BY week_start""",
+                (self.seller_id,),
+            ).fetchall()
+        results = []
+        for row in rows:
+            start = date.fromisoformat(row["week_start"])
+            end = date.fromisoformat(row["week_end"])
+            results.append(
+                {
+                    "week_start": start.isoformat(),
+                    "week_end": end.isoformat(),
+                    "aggregate": self.recalculate_week(start, end),
+                }
+            )
+        return {"status": "completed", "week_count": len(results), "weeks": results}
+
+    def repair_orphan_derived_rows(self) -> dict[str, Any]:
+        """Remove derived rows that have no matching seller/week sync boundary."""
+        self.ensure_schema()
+        tables = (
+            "wb_finance_weekly_aggregates",
+            "wb_finance_weekly_cost_coverage",
+            "wb_finance_weekly_reconciliation",
+        )
+        deleted: dict[str, int] = {}
+        with self._connect() as conn:
+            for table in tables:
+                cursor = conn.execute(
+                    f"""DELETE FROM {table} AS derived
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM wb_finance_weekly_sync AS sync
+                        WHERE sync.seller_id=derived.seller_id
+                          AND sync.week_start=derived.week_start
+                          AND sync.week_end=derived.week_end
+                    )"""
+                )
+                deleted[table] = cursor.rowcount
+            conn.commit()
+        return {
+            "status": "completed",
+            "deleted": deleted,
+            "deleted_total": sum(deleted.values()),
+        }
+
     def due_tick_week(self, now: datetime | None = None) -> tuple[date, date] | None:
         moment = (now or self.now_factory()).astimezone(MOSCOW)
         closed = historical_week_bounds(moment.date())

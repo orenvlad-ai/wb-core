@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
             "backfill",
             "sync-week",
             "recalculate",
+            "recalculate-all",
+            "repair-derived-orphans",
             "tick",
             "status",
         ),
@@ -71,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         result = block.recalculate_week(
             date.fromisoformat(args.date_from), date.fromisoformat(args.date_to)
         )
+    elif args.command == "recalculate-all":
+        result = block.recalculate_all_weeks()
+    elif args.command == "repair-derived-orphans":
+        result = block.repair_orphan_derived_rows()
     else:
         client = WbFinanceApiClient(
             os.environ.get("WB_API_TOKEN", ""),
