@@ -569,9 +569,14 @@ class WbFinanceWeeklyBlock:
                     now,
                 ),
             )
-            if coverage["unmatched_units"] > 0:
+            if coverage["unmatched_units"] != 0:
                 conn.execute(
                     "UPDATE wb_finance_weekly_sync SET status='incomplete_cost' WHERE seller_id=? AND week_start=? AND week_end=? AND status<>'error_loading'",
+                    (self.seller_id, week_start.isoformat(), week_end.isoformat()),
+                )
+            else:
+                conn.execute(
+                    "UPDATE wb_finance_weekly_sync SET status='completed' WHERE seller_id=? AND week_start=? AND week_end=? AND status='incomplete_cost'",
                     (self.seller_id, week_start.isoformat(), week_end.isoformat()),
                 )
             conn.commit()
@@ -798,9 +803,9 @@ class WbFinanceWeeklyBlock:
                 continue
             matched += qty
             cogs += Decimal(qty) * candidates[-1]
-        denominator = matched + unmatched
+        denominator = abs(matched) + abs(unmatched)
         coverage_pct = (
-            Decimal(matched) / Decimal(denominator) * Decimal("100")
+            Decimal(abs(matched)) / Decimal(denominator) * Decimal("100")
             if denominator
             else None
         )
