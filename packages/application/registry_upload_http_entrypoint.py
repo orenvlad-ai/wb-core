@@ -23,6 +23,7 @@ from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
+from packages.application.wb_finance_weekly import block_from_env
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
@@ -679,6 +680,8 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             now_factory=self.now_factory,
         )
+        self.wb_finance_weekly_block = block_from_env(self.runtime.runtime_dir)
+        self.wb_finance_weekly_block.ensure_schema()
         self.web_vitrina_block = SheetVitrinaV1WebVitrinaBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
@@ -788,6 +791,9 @@ class RegistryUploadHttpEntrypoint:
             payload,
             activated_at=self.activated_at_factory(),
         )
+
+    def handle_wb_finance_weekly_request(self) -> dict[str, Any]:
+        return self.wb_finance_weekly_block.build_payload()
 
     def handle_cost_price_payload(self, payload: Mapping[str, Any]) -> CostPriceUploadResult:
         return self.runtime.ingest_cost_price_payload(

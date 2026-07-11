@@ -49,6 +49,7 @@ source_basis:
   - "docs/modules/41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "docs/modules/42_MODULE__WB_SPP_TESTER_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
+  - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -97,6 +98,7 @@ related_docs:
   - "41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "42_MODULE__WB_SPP_TESTER_BLOCK.md"
   - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
+  - "44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
 source_of_truth_level: "navigation_only"
 update_note: "Обновлён под Google Sheets decommission, Fulfillment services contour, management proxy WB cost model, guarded WB prices management, `Цены -> Проверка СПП` and `ФФ -> Остатки ФФ`: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, module 40 owns our WB cost/proxy3 model, module 41 owns guarded WB Prices and Discounts management, module 42 owns bounded WB SPP tester with runtime lock/audit/staged restore, module 43 owns server-side ФФ quantity ledger/current balances/manual documents/auto movements, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
@@ -242,6 +244,7 @@ update_note: "Обновлён под Google Sheets decommission, Fulfillment se
 | `41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md` | `wb_prices_management_block` | `web/operator/official-api/prices` | Guarded `Цены` tab over WB Prices and Discounts API: active nmID price/discount table, inline drafts, server preview with quarantine risk, explicit env-gated upload-task commit, status/detail/quarantine readback and SPP tester subtab boundary; no size-price writes, WB Club writes, B2B writes or live writes in tests |
 | `42_MODULE__WB_SPP_TESTER_BLOCK.md` | `wb_spp_tester_block` | `web/operator/official-api/prices/spp-test` | Bounded `Цены -> Проверка СПП` MVP: one-nmID safe-slow range tester with `WB_SPP_TEST_ENABLED` + `WB_PRICES_WRITE_ENABLED`, runtime lock/audit, stale/429 handling and staged baseline restore |
 | `43_MODULE__FF_STOCK_LEDGER_BLOCK.md` | `ff_stock_ledger_block` | `web/operator/supply/runtime-ledger` | Server-owned `ФФ -> Остатки ФФ`: manual receipt/writeoff preview-confirm documents, computed balances, supplier auto receipts, guarded idempotent WB auto writeoffs, audit trail and calculation source without Google Sheets/GAS or WB mutations |
+| `44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md` | `wb_finance_weekly_report_block` | `web/operator/reports/official-api` | Official WB Finance weekly raw/report/aggregate contour, all report types, canonical COST_PRICE coverage, idempotent backfill and Europe/Moscow schedule |
 
 # 5. Как эта папка используется дальше
 

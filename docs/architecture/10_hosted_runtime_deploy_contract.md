@@ -19,6 +19,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /v1/sheet-vitrina-v1/daily-report`
 - `GET /v1/sheet-vitrina-v1/stock-report`
 - `GET /v1/sheet-vitrina-v1/plan-report`
+- `GET /v1/sheet-vitrina-v1/wb-finance-report`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx`
 - `POST /v1/sheet-vitrina-v1/plan-report/baseline-upload`
 - `GET /v1/sheet-vitrina-v1/plan-report/baseline-status`
@@ -168,6 +169,8 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-refresh.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.service`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is a WebCore Data MCP artifact for the separate read-only MCP boundary. It is installed/enabled on the active EU host only as a private loopback service on `127.0.0.1:8766`. The repo-owned nginx allowlist may publish only exact OAuth/MCP locations to that loopback upstream; ChatGPT connector auth is owner-only OAuth 2.1 auth-code + PKCE S256, while bearer auth remains a server/admin diagnostic path. The same service may expose bounded read-only ops diagnostics under `webcore.ops.read`; those tools are fixed-unit/log/snapshot/deploy summaries only and must not expose arbitrary shell, SSH, filesystem browsing, SQL, env, secrets or mutations.
 
 `wb-core-sheet-vitrina-refresh.timer` is a due-check ticker, not the business-time source of truth: it runs every 10 minutes and starts `apps/sheet_vitrina_v1_auto_refresh_tick.py`; the runner reads runtime JSON schedules (`11:00`/`20:00 Asia/Yekaterinburg` by default, editable through the web-vitrina auto-schedules API), builds an in-memory WebCore session cookie from hosted env, and then calls the protected refresh route with `auto_refresh=true`. The backend auto-refresh cycle first refreshes the web-vitrina ready snapshot and then runs a nonfatal WB supplies official incremental sync; the result payload/logs expose `wb_supplies_auto_sync_status` and `wb_supplies_auto_sync` diagnostics, while WB supplies failure or Seller Portal transit-cost preflight failure is warning metadata rather than a critical web-vitrina snapshot failure. The timer itself is non-persistent; catch-up is owned by the runner's schedule state so a deploy/restart does not immediately fire a stale systemd event while the app process is restarting.

@@ -1,0 +1,10 @@
+[Unit]
+Description=WB Core weekly Wildberries Finance synchronization tick
+After=network.target wb-core-registry-http.service
+Wants=network.target wb-core-registry-http.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/wb_finance_weekly.py tick --env-file /opt/wb-ai/.env --runtime-dir /opt/wb-core-runtime/state
+TimeoutStartSec=900

@@ -75,6 +75,16 @@
       "name": "wb-core-feedbacks-auto-complaints-tick.timer",
       "enable": true,
       "restart": true
+    },
+    {
+      "name": "wb-core-wb-finance-weekly.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-wb-finance-weekly.timer",
+      "enable": true,
+      "restart": true
     }
   ],
   "runtime_env": {

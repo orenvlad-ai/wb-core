@@ -43,6 +43,12 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_wb_finance_report",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/wb-finance-report",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_stock_report",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/stock-report",

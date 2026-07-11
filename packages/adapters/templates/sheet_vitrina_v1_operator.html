@@ -815,6 +815,80 @@
       background: var(--panel-subtle);
     }
 
+    .wb-finance-table-wrap {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--control-bg);
+    }
+
+    .wb-finance-table {
+      border-collapse: separate;
+      border-spacing: 0;
+      min-width: max(100%, 1240px);
+      font-size: 12px;
+    }
+
+    .wb-finance-table th,
+    .wb-finance-table td {
+      min-width: 132px;
+      padding: 9px 10px;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      text-align: right;
+      white-space: nowrap;
+      background: var(--control-bg);
+    }
+
+    .wb-finance-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--panel-subtle);
+      text-align: center;
+      font-weight: 800;
+    }
+
+    .wb-finance-table th:first-child,
+    .wb-finance-table td:first-child {
+      position: sticky;
+      left: 0;
+      z-index: 3;
+      min-width: 285px;
+      max-width: 340px;
+      text-align: left;
+      white-space: normal;
+      background: var(--control-bg);
+      box-shadow: var(--sticky-shadow);
+    }
+
+    .wb-finance-table thead th:first-child {
+      z-index: 4;
+      background: var(--panel-subtle);
+    }
+
+    .wb-finance-table .wb-finance-group-row td {
+      background: var(--panel-subtle);
+      color: var(--muted-strong);
+      font-weight: 800;
+      text-align: left;
+    }
+
+    .wb-finance-table .wb-finance-internal-divider td {
+      border-top: 4px solid var(--accent-hover);
+      background: var(--accent-soft);
+      color: var(--muted-strong);
+      font-weight: 800;
+      text-align: left;
+      white-space: normal;
+    }
+
+    .wb-finance-negative { color: var(--error-text); font-weight: 700; }
+    .wb-finance-week-status { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 600; }
+    .wb-finance-warning { color: var(--error-text); }
+
     .stock-report-sort-button {
       width: 100%;
       border: 0;
@@ -3711,6 +3785,7 @@
 
         <div class="subsection-strip" role="tablist" aria-label="Внутренние разделы отчётов">
           <button class="subsection-button is-active" type="button" data-report-section-button="daily" aria-selected="true">Ежедневные отчёты</button>
+          <button class="subsection-button" type="button" data-report-section-button="wb-finance" aria-selected="false">Финотчёт ВБ</button>
           <button class="subsection-button" type="button" data-report-section-button="stock" aria-selected="false">Отчёт по остаткам</button>
           <button class="subsection-button" type="button" data-report-section-button="plan" aria-selected="false">Выполнение плана</button>
         </div>
@@ -3760,6 +3835,21 @@
                 </div>
               </div>
               <div id="dailyReportNotes" class="report-notes"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="report-panel" data-report-section-panel="wb-finance" hidden>
+          <div class="grid">
+            <section class="block">
+              <h2 class="block-title">Финотчёт ВБ</h2>
+              <p id="wbFinanceReportPeriod" class="report-period">Еженедельные отчёты Wildberries с начала 2026 года.</p>
+              <p class="field-note">Официальный Finance API WB, все сформированные reportId одной недели; суммы хранятся и считаются без float.</p>
+              <p id="wbFinanceReportStatus" class="section-message">Читаем финансовые отчёты...</p>
+              <div id="wbFinanceReportContent" hidden>
+                <div id="wbFinanceReportTableWrap" class="wb-finance-table-wrap"></div>
+              </div>
+              <div id="wbFinanceReportNotes" class="report-notes"></div>
             </section>
           </div>
         </section>
@@ -4973,6 +5063,11 @@
       const dailyNegativeFactors = document.getElementById("dailyNegativeFactors");
       const dailyPositiveFactors = document.getElementById("dailyPositiveFactors");
       const dailyReportNotes = document.getElementById("dailyReportNotes");
+      const wbFinanceReportPeriod = document.getElementById("wbFinanceReportPeriod");
+      const wbFinanceReportStatus = document.getElementById("wbFinanceReportStatus");
+      const wbFinanceReportContent = document.getElementById("wbFinanceReportContent");
+      const wbFinanceReportTableWrap = document.getElementById("wbFinanceReportTableWrap");
+      const wbFinanceReportNotes = document.getElementById("wbFinanceReportNotes");
       const stockReportPeriod = document.getElementById("stockReportPeriod");
       const stockReportLead = document.getElementById("stockReportLead");
       const stockReportStatus = document.getElementById("stockReportStatus");
@@ -5251,7 +5346,8 @@
       const DEFAULT_SUPPLY_MODE = "calculations";
       const DEFAULT_SUPPLY_SECTION = "factory";
       const VALID_TABS = new Set(["vitrina", "factory-order", "reports"]);
-      const VALID_REPORT_SECTIONS = new Set(["daily", "stock", "plan"]);
+      const VALID_REPORT_SECTIONS = new Set(["daily", "wb-finance", "stock", "plan"]);
+      let wbFinanceReportLoaded = false;
       const VALID_SUPPLY_MODES = new Set(["calculations", "wildberries", "fulfillment", "shipment-registry", "cny-account", "supplier"]);
       const DEFAULT_FF_SECTION = "services";
       const VALID_FF_SECTIONS = new Set(["services", "stocks"]);
@@ -6158,6 +6254,9 @@
         });
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ report_section: activeSectionName });
+        }
+        if (activeSectionName === "wb-finance" && !wbFinanceReportLoaded) {
+          loadWbFinanceReport();
         }
         scheduleEmbeddedHeightPost();
         return activeSectionName;
@@ -12175,6 +12274,113 @@
             "Ежедневный отчёт пока недоступен."
           );
         }
+      }
+
+      async function loadWbFinanceReport() {
+        if (!config.wb_finance_report_path) {
+          return;
+        }
+        wbFinanceReportStatus.textContent = "Читаем еженедельные отчёты Wildberries...";
+        wbFinanceReportStatus.className = "section-message";
+        try {
+          const response = await fetch(config.wb_finance_report_path, {method: "GET", headers: {"Accept": "application/json"}});
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          renderWbFinanceReport(payload);
+          wbFinanceReportLoaded = true;
+        } catch (error) {
+          wbFinanceReportContent.hidden = true;
+          wbFinanceReportStatus.textContent = "Финотчёт ВБ пока недоступен: " + (error instanceof Error ? error.message : String(error));
+          wbFinanceReportStatus.className = "section-message error";
+        }
+      }
+
+      function renderWbFinanceReport(payload) {
+        const weeks = Array.isArray(payload && payload.weeks) ? payload.weeks : [];
+        if (!weeks.length) {
+          wbFinanceReportContent.hidden = true;
+          wbFinanceReportStatus.textContent = "Сформированные недели пока не загружены.";
+          wbFinanceReportStatus.className = "section-message";
+          return;
+        }
+        wbFinanceReportPeriod.textContent = "Период: " + formatFinanceWeek(weeks[0]) + " — " + formatFinanceWeek(weeks[weeks.length - 1]) + ".";
+        const definitions = [
+          {group: "Продажи"},
+          {key:"sales_qty", label:"Продажи, шт.", type:"count"}, {key:"returns_qty", label:"Возвраты, шт.", type:"count"},
+          {key:"net_sales_qty", label:"Чистые продажи, шт.", type:"count"},
+          {key:"revenue_before_returns", label:"Выручка до возвратов", type:"money"},
+          {key:"returns_amount", label:"Возвраты в денежном выражении", type:"money"}, {key:"net_revenue", label:"Чистая выручка", type:"money"},
+          {group: "Удержания и расходы Wildberries"},
+          {key:"commission", label:"Агентское вознаграждение / комиссия WB", type:"money"},
+          {key:"acquiring", label:"Эквайринг · раскрытие внутри комиссии", type:"money"},
+          {key:"logistics", label:"Логистика", type:"money"}, {key:"storage", label:"Хранение", type:"money"},
+          {key:"acceptance", label:"Приёмка", type:"money"}, {key:"marketing", label:"Маркетинг и продвижение", type:"money"},
+          {key:"transit_logistics", label:"Транзитная логистика", type:"money"}, {key:"penalties", label:"Штрафы", type:"money"},
+          {key:"subscriptions", label:"Подписки", type:"money"}, {key:"paid_services", label:"Платные сервисы", type:"money"},
+          {key:"other_deductions", label:"Прочие удержания", type:"money"},
+          {key:"positive_adjustments", label:"Корректировки и дополнительные выплаты", type:"money"},
+          {key:"total_wb_expenses", label:"Общие расходы WB", type:"money"}, {key:"wb_expenses_pct", label:"Расходы WB, % от чистой выручки", type:"percent"},
+          {group: "Результат финансового отчёта WB"},
+          {key:"to_seller", label:"К перечислению продавцу", type:"money"},
+          {key:"before_cogs_profit", label:"Финансовый результат до себестоимости", type:"money"},
+          {key:"before_cogs_margin_pct", label:"Рентабельность до себестоимости, %", type:"percent"},
+          {internal: true, label:"Внутренние данные WB Core — не входят в финансовый отчёт Wildberries"},
+          {key:"cogs", label:"Себестоимость продаж", type:"money"}, {key:"profit_after_cogs", label:"Прибыль после себестоимости", type:"money"},
+          {key:"final_margin_pct", label:"Итоговая рентабельность, %", type:"percent"}
+        ];
+        const head = "<thead><tr><th>Метрика</th>" + weeks.map((week) => {
+          const incomplete = Number(week.cost_coverage && week.cost_coverage.unmatched_units || 0) !== 0;
+          const label = financeStatusLabel(week.status, incomplete);
+          return "<th title=\"reportId: " + escapeHtml((week.report_ids || []).join(", ")) + "\">" + escapeHtml(formatFinanceWeek(week)) +
+            "<span class=\"wb-finance-week-status" + (incomplete ? " wb-finance-warning" : "") + "\">" + escapeHtml(label) + "</span></th>";
+        }).join("") + "</tr></thead>";
+        const body = definitions.map((definition) => {
+          if (definition.group) {
+            return "<tr class=\"wb-finance-group-row\"><td>" + escapeHtml(definition.group) + "</td><td colspan=\"" + weeks.length + "\"></td></tr>";
+          }
+          if (definition.internal) {
+            return "<tr class=\"wb-finance-internal-divider\"><td colspan=\"" + (weeks.length + 1) + "\">" + escapeHtml(definition.label) + "</td></tr>";
+          }
+          return "<tr><td>" + escapeHtml(definition.label) + "</td>" + weeks.map((week) => {
+            const value = week.metrics ? week.metrics[definition.key] : null;
+            const numeric = value === null || value === undefined ? null : Number(value);
+            const className = numeric !== null && numeric < 0 ? " class=\"wb-finance-negative\"" : "";
+            return "<td" + className + ">" + escapeHtml(formatFinanceMetric(value, definition.type)) + "</td>";
+          }).join("") + "</tr>";
+        }).join("");
+        wbFinanceReportTableWrap.innerHTML = "<table class=\"wb-finance-table\">" + head + "<tbody>" + body + "</tbody></table>";
+        wbFinanceReportContent.hidden = false;
+        const incompleteWeeks = weeks.filter((week) => Number(week.cost_coverage && week.cost_coverage.unmatched_units || 0) !== 0);
+        wbFinanceReportStatus.textContent = "Загружено недель: " + weeks.length + "; отчётов: " + weeks.reduce((sum, week) => sum + Number(week.report_count || 0), 0) +
+          "; строк: " + new Intl.NumberFormat("ru-RU").format(weeks.reduce((sum, week) => sum + Number(week.raw_row_count || 0), 0)) + ".";
+        wbFinanceReportStatus.className = "section-message success";
+        wbFinanceReportNotes.innerHTML = incompleteWeeks.length
+          ? "<p class=\"wb-finance-warning\">Неполная себестоимость в " + incompleteWeeks.length + " нед.: прибыль для этих недель не показывается как точная.</p>"
+          : "<p>Себестоимость: канонический COST_PRICE WB Core с временной применимостью и SKU-сопоставлением.</p>";
+        window.requestAnimationFrame(() => { wbFinanceReportTableWrap.scrollLeft = wbFinanceReportTableWrap.scrollWidth; });
+        scheduleEmbeddedHeightPost();
+      }
+
+      function formatFinanceWeek(week) {
+        const start = String(week && week.week_start || "").split("-");
+        const end = String(week && week.week_end || "").split("-");
+        return start.length === 3 && end.length === 3 ? start[2] + "." + start[1] + "–" + end[2] + "." + end[1] : "—";
+      }
+
+      function formatFinanceMetric(value, type) {
+        if (value === null || value === undefined || value === "") return "—";
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return "—";
+        if (type === "count") return new Intl.NumberFormat("ru-RU", {maximumFractionDigits:0}).format(numeric);
+        if (type === "percent") return new Intl.NumberFormat("ru-RU", {minimumFractionDigits:2, maximumFractionDigits:2}).format(numeric) + "%";
+        return new Intl.NumberFormat("ru-RU", {style:"currency", currency:"RUB", minimumFractionDigits:2, maximumFractionDigits:2}).format(numeric);
+      }
+
+      function financeStatusLabel(status, incomplete) {
+        if (incomplete) return "Неполная себестоимость";
+        return ({completed:"Завершён", loaded_preliminary:"Загружен предварительно", loading:"Загружается", waiting:"Ожидается отчёт WB", error_loading:"Ошибка загрузки", error_reconciliation:"Ошибка сверки", resync_required:"Нужна пересинхронизация"})[status] || String(status || "—");
       }
 
       async function loadStockReport() {
