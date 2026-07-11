@@ -582,3 +582,9 @@ This module does not implement:
 - ЕБД metric truth changes;
 - global cost truth switch;
 - AI logic.
+
+# 12. Own capital movement consumer
+
+Module 45 consumes normalized WB goods/accepted evidence without changing this module's read-only WB boundary. Unknown nmID may remain upstream/cache evidence but atomically blocks FF writeoff, cost allocation and capital movement until authoritative nomenclature exists.
+
+For an ordinary supply, actual accepted quantity moves from `ФФ → WB` to `На WB`; `sent - accepted` remains in transit. A positive final delta persists as `Недопринято WB` inside that stage. `Допринято` never repeats the FF debit and reconciles the original cost layer by direct upstream identity or strict warehouse/destination+SKU FIFO. Planned quantity/date, upload date, ambiguous identity and fabricated zero are forbidden substitutes.

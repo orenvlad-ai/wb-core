@@ -59,6 +59,9 @@ class WebVitrinaViewModelCell:
     value: Any
     display_text: str
     formatter_id: str | None = None
+    presentation_state: str = ""
+    presentation_tone: str = ""
+    presentation_reason: str = ""
 
 
 @dataclass(frozen=True)

@@ -355,6 +355,14 @@ class OurWbCostBlock:
         return count
 
     def materialize_opening_baseline(self, *, opening_date: str = OUR_WB_COST_OPENING_DATE) -> int:
+        if opening_date not in set(
+            self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
+                date_from=opening_date,
+                date_to=opening_date,
+                descending=False,
+            )
+        ):
+            return 0
         current_ff_lines_by_nm = self._load_current_supplier_ff_cost_lines_grouped_by_nm()
         opening_component_estimates = self._load_wb_component_estimates_by_nm()
         opening_stock = self._load_snapshot_sku_metric(opening_date, "stock_total")

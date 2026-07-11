@@ -436,6 +436,12 @@ def _build_cell(column: WebVitrinaViewModelColumn, row: Mapping[str, Any]) -> We
         value=value,
         row_format=row_format,
     )
+    column_date = column.id.split(":", 1)[1] if column.id.startswith("date:") else ""
+    presentation = (
+        (row.get("presentation_by_date") or {}).get(column_date, {})
+        if column_date
+        else {}
+    )
     return WebVitrinaViewModelCell(
         column_id=column.id,
         cell_kind=cell_kind,
@@ -443,6 +449,9 @@ def _build_cell(column: WebVitrinaViewModelColumn, row: Mapping[str, Any]) -> We
         value=value,
         display_text=_display_text(value),
         formatter_id=formatter_id,
+        presentation_state=str(presentation.get("state") or ""),
+        presentation_tone=str(presentation.get("tone") or ""),
+        presentation_reason=str(presentation.get("reason") or ""),
     )
 
 

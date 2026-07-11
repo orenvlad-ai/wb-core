@@ -247,3 +247,7 @@ This module does not implement:
 - WB official evidence mutation;
 - Seller Portal transit source boundary changes;
 - Google Sheets/GAS.
+
+# 9. Paid-capital consumer boundary
+
+Approved Fulfillment uploads remain service/payment-validation evidence, not capital merely because a file was uploaded or approved. Module 45 may include transit, FF service and storage components only after factual payment evidence with an effective payment date is recognized, and only once for the applicable WB movement layer. Missing payment/completeness evidence produces an estimated/unconfirmed bucket and server-derived yellow reason rather than confirmed zero or a future expense backdated into history.

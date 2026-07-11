@@ -205,3 +205,7 @@ Do not add in this contour:
 - товарный капитал / капитал в остатках;
 - Google Sheets/GAS or browser/localStorage truth;
 - hidden fallback values presented as confirmed.
+
+# 14. Module 45 consumer boundary
+
+The non-goal above means this module does not itself own товарный капитал. The separate module 45 is a read-only consumer of current official WB stock quantity, `our_wb_unit_cost_rub` and the existing bucket-based confirmed share. It does not alter proxy2/proxy3 rows or this module's opening/rolling semantics. Its profitability denominator is the independently materialized capital across all five stages; numerator remains existing `proxy_profit_3_rub`.

@@ -94,11 +94,23 @@ def _assert_price_conformity_application_smoke() -> None:
         expected = ["matched", "mismatched", "sku_not_found", "reference_price_missing", "invoice_price_missing"]
         if statuses != expected:
             raise AssertionError(f"price conformity parse statuses changed: {statuses}")
+        accepted_parsed = json.loads(json.dumps(parsed))
+        accepted_parsed["lines"] = [
+            line
+            for line in accepted_parsed.get("lines") or []
+            if line.get("line_type") != "product"
+            or (
+                line.get("internal_nm_id")
+                and float(line.get("qty") or 0) > 0
+                and float(line.get("unit_price") or 0) > 0
+                and float(line.get("amount") or 0) > 0
+            )
+        ]
         detail = block.create_shipment(
             {
                 "upload_id": parsed["upload_id"],
                 "shipment_date": "2026-05-30",
-                "payload": parsed,
+                "payload": accepted_parsed,
             }
         )
         shipment_id = detail["shipment_id"]
@@ -282,6 +294,21 @@ def main() -> None:
                 "iphone_13_pro",
             ]:
                 raise AssertionError(f"compatible nomenclature item must save normalized keys, got {compat_nom_status} {compat_nom_payload}")
+            third_nom_status, third_nom_payload = _post_json(
+                f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
+                {
+                    "is_active": True,
+                    "our_sku": "SKU-AS-14PM",
+                    "nm_id": 210184534,
+                    "nomenclature_name": "Anti-Spy iPhone 14 Pro Max",
+                    "product_type": "anti_spy",
+                    "match_key": "anti_spy|iphone_14_pro_max",
+                    "purchase_price_yuan": "2",
+                    "comment": "atomic matching smoke",
+                },
+            )
+            if third_nom_status != 200 or third_nom_payload.get("item", {}).get("nm_id") != 210184534:
+                raise AssertionError("third nomenclature item must exist before atomic invoice acceptance")
             nomenclature_import_bytes = _build_nomenclature_import_fixture(
                 first_item_id=str(create_nom_payload["item"]["item_id"]),
                 compat_item_id=str(compat_nom_payload["item"]["item_id"]),
@@ -365,10 +392,10 @@ def main() -> None:
                 or product_lines[1].get("internal_nm_id") != 391662410
             ):
                 raise AssertionError(f"parse route must resolve compatible model overlap, got {product_lines[1]}")
-            if product_lines[2].get("match_status") != "unmatched":
-                raise AssertionError("unknown product match_key must remain visible and unmatched")
+            if product_lines[2].get("match_status") != "matched" or product_lines[2].get("internal_nm_id") != 210184534:
+                raise AssertionError("all product lines must deterministically match before acceptance")
             price_statuses = [line.get("price_conformity_status") for line in product_lines]
-            if price_statuses != ["matched", "mismatched", "sku_not_found"]:
+            if price_statuses != ["matched", "mismatched", "matched"]:
                 raise AssertionError(f"parse route must attach price conformity statuses, got {price_statuses}")
             if (
                 product_lines[0].get("invoice_price_yuan_snapshot") != 1.0
@@ -421,8 +448,8 @@ def main() -> None:
             if create_status != 200 or not detail.get("shipment_id"):
                 raise AssertionError(f"create route must persist shipment, got {create_status} {detail}")
             shipment_id = detail["shipment_id"]
-            if detail.get("shipment_date") != "2026-05-14" or detail.get("match_status") != "has_unmatched":
-                raise AssertionError("created shipment must keep date and unmatched status")
+            if detail.get("shipment_date") != "2026-05-14" or detail.get("match_status") != "all_matched":
+                raise AssertionError("created shipment must keep date and fully matched status")
             if (
                 detail.get("planned_shipment_date") != "2026-05-14"
                 or detail.get("actual_shipment_date") != "2026-05-16"
@@ -562,20 +589,6 @@ def main() -> None:
             if ff_stock_keys.count(f"supplier_shipment_acceptance:{shipment_id}") != 1:
                 raise AssertionError(f"actual FF acceptance must create one idempotent ФФ stock operation, got {ff_stock_keys}")
 
-            second_nom_status, second_nom_payload = _post_json(
-                f"{base_url}{DEFAULT_NOMENCLATURE_PATH}",
-                {
-                    "is_active": True,
-                    "our_sku": "SKU-AS-14PM",
-                    "nm_id": 210184534,
-                    "nomenclature_name": "Anti-Spy iPhone 14 Pro Max",
-                    "product_type": "anti_spy",
-                    "match_key": "anti_spy|iphone_14_pro_max",
-                    "comment": "rematch smoke",
-                },
-            )
-            if second_nom_status != 200 or second_nom_payload.get("item", {}).get("nm_id") != 210184534:
-                raise AssertionError("second nomenclature item must save for rematch")
             rematch_status, rematched = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/rematch",
                 {"overwrite_manual": False},
@@ -586,7 +599,7 @@ def main() -> None:
             if rematched_products[0].get("internal_sku") != "SKU-MANUAL":
                 raise AssertionError("rematch must not overwrite manual_override rows by default")
             if rematched_products[2].get("internal_nm_id") != 210184534:
-                raise AssertionError("rematch must fill previously unmatched rows from nomenclature")
+                raise AssertionError("rematch must preserve deterministic authoritative match")
             if rematched.get("approx_yuan_rate") != 14.5 or rematched.get("approx_landed_cost_per_unit_rub") != 29.24:
                 raise AssertionError("rematch must not erase approximate cost fields")
 
@@ -716,7 +729,7 @@ def main() -> None:
             ]
             if section_ids != expected_section_ids:
                 raise AssertionError(f"shipment registry matrix missing sections: {section_ids}")
-            if _registry_cell_display(shipment_registry, "quote_normalized", "quote_total_rub_per_unit", shipment_id) != "—":
+            if _registry_cell_display(shipment_registry, "quote_normalized", "quote_total_rub_per_unit", shipment_id) != "нет КП":
                 raise AssertionError(f"shipment registry without financial docs must keep quote ₽/шт unavailable: {shipment_registry}")
             if _registry_cell_display(shipment_registry, "fact_expenses", "fact_total_rub_per_unit", shipment_id) != "—":
                 raise AssertionError(f"shipment registry without financial docs must keep fact ₽/шт unavailable: {shipment_registry}")

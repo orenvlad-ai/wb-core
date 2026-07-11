@@ -208,6 +208,9 @@ def _build_rows(
                     cell_kind=str(cell["cell_kind"]),
                     formatter_id=(str(cell["formatter_id"]) if cell.get("formatter_id") is not None else None),
                 ),
+                presentation_state=str(cell.get("presentation_state") or ""),
+                presentation_tone=str(cell.get("presentation_tone") or ""),
+                presentation_reason=str(cell.get("presentation_reason") or ""),
             )
             for cell in row["cells"]
         }

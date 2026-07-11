@@ -351,6 +351,24 @@ def main() -> None:
     with TemporaryDirectory(prefix="wb-supplies-ledger-checkpoint-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         nm_id = 123456
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "wb_incremental_123456",
+                "is_active": True,
+                "our_sku": "",
+                "nm_id": nm_id,
+                "nomenclature_name": "WB incremental fixture",
+                "product_type": "other",
+                "match_key": "other|wb_incremental_fixture",
+                "purchase_price_yuan": 1.0,
+                "aliases": [],
+                "compatible_models_text": "",
+                "compatible_model_keys": [],
+                "comment": "",
+                "created_at": "2026-06-10T14:58:00Z",
+                "updated_at": "2026-06-10T14:58:00Z",
+            }
+        )
         runtime.create_ff_stock_operation(
             operation_id="ffso_opening_smoke",
             operation_type="manual_receipt",

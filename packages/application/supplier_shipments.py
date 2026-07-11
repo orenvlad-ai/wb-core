@@ -8,13 +8,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
 import json
-import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 from uuid import uuid4
 import zlib
 
@@ -88,7 +87,6 @@ from packages.contracts.supplier_shipments import (
     TRADE_DOCUMENT_SOURCE_SETTINGS_UPLOAD,
     TRADE_DOCUMENT_SOURCE_SUPPLIER_SHIPMENT_PARSE,
     TRADE_DOCUMENT_STATUS_ACTIVE,
-    TRADE_DOCUMENT_STATUS_ARCHIVED,
     TRADE_DOCUMENT_TYPE_CONTRACT,
     TRADE_DOCUMENT_TYPE_INVOICE,
     TRADE_DOCUMENT_TYPES,
@@ -289,6 +287,7 @@ class SupplierShipmentsBlock:
         now = self.timestamp_factory()
         nomenclature_items = self._active_nomenclature_items()
         lines = _apply_nomenclature_matches(lines, nomenclature_items)
+        _assert_atomic_supplier_product_matching(lines)
         lines = _apply_price_conformity_checks(
             lines,
             nomenclature_items,
@@ -392,6 +391,7 @@ class SupplierShipmentsBlock:
             shipment_date=shipment_date,
             force_manual_override=False,
         )
+        _assert_atomic_supplier_product_matching(lines)
         order_status = _normalize_order_status(
             payload.get("order_status") if "order_status" in payload else existing_header.get("order_status")
         )
@@ -400,6 +400,11 @@ class SupplierShipmentsBlock:
         elif order_status == ORDER_STATUS_ACCEPTED_FF:
             raise ValueError("accepted_ff status is set only by actual_ff_acceptance_date")
         now = self.timestamp_factory()
+        cost_affecting_changed = (
+            [dict(item) for item in existing.get("lines") or []] != [dict(item) for item in lines]
+            or str(existing_header.get("currency") or "") != str(metadata.get("currency") or "")
+            or _optional_number(existing_header.get("approx_yuan_rate")) != _optional_number(approx_yuan_rate)
+        )
         header = {
             **existing_header,
             "updated_at": now,
@@ -424,10 +429,33 @@ class SupplierShipmentsBlock:
             "warnings": warnings,
             "errors": errors,
         }
+        if cost_affecting_changed:
+            header["expenses_complete"] = False
         self.runtime.save_supplier_shipment(header=header, lines=lines)
+        if cost_affecting_changed:
+            from packages.application.own_product_capital import OwnProductCapitalBlock
+
+            OwnProductCapitalBlock(
+                runtime=self.runtime,
+                timestamp_factory=self.timestamp_factory,
+            ).set_expenses_certification(
+                shipment_id=shipment_id,
+                expenses_complete=False,
+            )
         if actual_ff_acceptance_date:
             self._record_ff_stock_receipt({"header": header, "lines": lines})
             self._materialize_ff_cost_layer(shipment_id)
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).materialize_supplier_boundaries(
+            shipment_id=shipment_id,
+            actual_shipment_date=actual_shipment_date,
+            actual_ff_acceptance_date=actual_ff_acceptance_date,
+            expenses_complete=bool(header.get("expenses_complete")),
+        )
         if "contract_document_id" in payload:
             contract_document_id = str(payload.get("contract_document_id") or "").strip()
             if contract_document_id:
@@ -474,6 +502,15 @@ class SupplierShipmentsBlock:
         )
         if not updated:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).set_expenses_certification(
+            shipment_id=shipment_id,
+            expenses_complete=normalized,
+        )
         return self.get_shipment(shipment_id)
 
     def _materialize_ff_cost_layer(self, shipment_id: str) -> None:
@@ -2248,6 +2285,34 @@ def _recalculate_summary(lines: list[Mapping[str, Any]], *, declared_total: floa
         "declared_invoice_total": declared_total,
         "checksum_error": checksum_error,
     }
+
+
+def _assert_atomic_supplier_product_matching(lines: Iterable[Mapping[str, Any]]) -> None:
+    problems: list[str] = []
+    product_count = 0
+    for index, line in enumerate(lines, start=1):
+        if str(line.get("line_type") or "") != LINE_TYPE_PRODUCT:
+            continue
+        product_count += 1
+        line_id = str(line.get("line_id") or line.get("source_no") or index)
+        status = str(line.get("match_status") or "")
+        if status not in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY}:
+            problems.append(f"строка {line_id}: SKU {status or 'не сопоставлен'}")
+        if _optional_int(line.get("internal_nm_id")) is None:
+            problems.append(f"строка {line_id}: отсутствует nmID")
+        if (_optional_number(line.get("qty")) or 0) <= 0:
+            problems.append(f"строка {line_id}: отсутствует положительное количество")
+        if (_optional_number(line.get("unit_price")) or 0) <= 0:
+            problems.append(f"строка {line_id}: отсутствует положительная цена")
+        if (_optional_number(line.get("amount")) or 0) <= 0:
+            problems.append(f"строка {line_id}: отсутствует положительная сумма")
+    if product_count <= 0:
+        problems.append("товарные строки отсутствуют")
+    if problems:
+        raise ValueError(
+            "supplier document rejected atomically; correct authoritative nomenclature/aliases and reparse: "
+            + "; ".join(problems)
+        )
 
 
 def _shipment_match_status(lines: list[Mapping[str, Any]], *, checksum_error: bool) -> str:

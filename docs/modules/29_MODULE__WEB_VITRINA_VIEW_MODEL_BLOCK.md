@@ -154,3 +154,9 @@ update_note: "Phase 2 web-vitrina materialize-ит отдельный library-ag
 - sticky/resizing/virtualization implementation beyond the current thin page layer
 - export implementation
 - любой browser-side business truth assembly
+
+# 9. Server-derived capital presentation
+
+The view model carries optional per-date `presentation_state`, `presentation_tone` and `presentation_reason` supplied by the server. `Товарный капитал — наши данные` uses these fields for yellow/unconfirmed cells and concise expense/date/matching/invariant diagnostics. The browser does not derive confirmation from localStorage or mutable current status.
+
+The WebCore source group is additive and adjacent to the existing 1C capital group. SKU/TOTAL values, weighted confirmed share and ratio-of-aggregates profitability are computed before the view-model boundary; the mapper only preserves and renders them.

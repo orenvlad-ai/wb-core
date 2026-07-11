@@ -2056,11 +2056,28 @@
             const formData = new FormData();
             formData.append("file", file, file.name);
             try {
-              const payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
+              let payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
                 method: "POST",
                 body: formData,
                 headers: { Accept: "application/json" }
               });
+              if (payload.preview_required && payload.manual_field === "payment_date" && payload.durable_saved === false) {
+                const paymentDate = window.prompt(
+                  "Дата платежа не распознана. Введите фактическую дату платежа в формате YYYY-MM-DD. Финансовые поля изменить нельзя.",
+                  ""
+                );
+                if (!paymentDate) {
+                  throw new Error("Документ не сохранён: дата платежа не подтверждена");
+                }
+                const confirmedFormData = new FormData();
+                confirmedFormData.append("file", file, file.name);
+                confirmedFormData.append("payment_date", String(paymentDate).trim());
+                payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
+                  method: "POST",
+                  body: confirmedFormData,
+                  headers: { Accept: "application/json" }
+                });
+              }
               uploadedCount += 1;
               lastDocumentId = payload.document_id || lastDocumentId;
               if (payload.preview_required) {

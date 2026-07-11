@@ -423,15 +423,16 @@ class FfStockLedgerBlock:
         if status_id not in WB_DEBIT_STATUS_IDS:
             return None
         if _optional_int(normalized.get("virtual_type_id")) == WB_SKIP_VIRTUAL_TYPE_ID:
-            return {"skip_reason": "wb_supply_doprinato_virtual_type", "supply_id": str(normalized.get("supply_id") or "")}
+            return self._record_own_capital_doprinato(record, normalized)
         if str(normalized.get("type_label") or "").strip() == WB_SKIP_TYPE_LABEL:
-            return {"skip_reason": "wb_supply_doprinato_type_label", "supply_id": str(normalized.get("supply_id") or "")}
+            return self._record_own_capital_doprinato(record, normalized)
         cache_key, supply_id, source_key = _wb_supply_debit_identity(record=record, normalized=normalized)
         if not source_key:
             return {"skip_reason": "wb_supply_identity_missing", "supply_id": supply_id}
         existing = self.runtime.load_ff_stock_operation_by_source_key(source_key)
         if existing is not None:
             existing["idempotent"] = True
+            existing["own_product_capital"] = self._record_own_capital_wb_supply(record, normalized)
             return existing
         raw_goods = record.get("raw_goods")
         if not isinstance(raw_goods, list):
@@ -439,6 +440,13 @@ class FfStockLedgerBlock:
         if not isinstance(raw_goods, list) or not raw_goods:
             return {"skip_reason": "wb_supply_goods_missing", "supply_id": supply_id, "source_key": source_key}
         lines, warnings = _wb_supply_goods_lines(raw_goods, self._nomenclature_by_nm())
+        if warnings:
+            return {
+                "skip_reason": "wb_supply_goods_atomic_matching_blocked",
+                "supply_id": supply_id,
+                "source_key": source_key,
+                "problem_rows": warnings[:50],
+            }
         if not lines:
             return {"skip_reason": "wb_supply_goods_without_usable_qty", "supply_id": supply_id, "source_key": source_key}
         total_quantity = sum(abs(float(item.get("quantity_delta") or 0.0)) for item in lines)
@@ -532,7 +540,7 @@ class FfStockLedgerBlock:
         if 0 < total_quantity < 250:
             warnings.append(f"WB-поставка меньше 250 шт: {total_quantity:g}")
         label = str(normalized.get("visible_number") or normalized.get("number_label") or supply_id or cache_key)
-        return self.runtime.create_ff_stock_operation(
+        operation = self.runtime.create_ff_stock_operation(
             operation_id="ffso_" + uuid4().hex[:20],
             operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
             source_type=FF_STOCK_SOURCE_WB_SUPPLY,
@@ -556,6 +564,235 @@ class FfStockLedgerBlock:
             },
             lines=lines,
         )
+        operation["own_product_capital"] = self._record_own_capital_wb_supply(record, normalized)
+        return operation
+
+    def _record_own_capital_wb_supply(
+        self,
+        record: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        *,
+        recalculate: bool = True,
+    ) -> dict[str, Any]:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        capital = OwnProductCapitalBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
+        if not capital.has_events():
+            return {"status": "skipped", "reason": "no_paid_capital_events"}
+        raw_goods = record.get("raw_goods")
+        if not isinstance(raw_goods, list):
+            raw_goods = normalized.get("raw_goods")
+        if not isinstance(raw_goods, list) or not raw_goods:
+            return {"status": "blocked", "reason": "wb_supply_goods_missing"}
+        sent, accepted, problems = _wb_capital_quantities(raw_goods)
+        if problems:
+            return {"status": "blocked", "reason": "wb_supply_goods_atomic_matching_blocked", "problem_rows": problems}
+        supply_id = str(_first_present(normalized, "supply_id", "wb_supply_id", "preorder_id") or "").strip()
+        business_dt, _ = _wb_supply_business_timestamp(record=record, normalized=normalized)
+        if business_dt is None:
+            return {"status": "blocked", "reason": "wb_supply_source_date_missing"}
+        warehouse = str(_first_present(normalized, "warehouse_name", "warehouseName", "warehouse") or "")
+        destination = str(
+            _first_present(
+                normalized,
+                "destination_name",
+                "target_warehouse_name",
+                "targetWarehouseName",
+                "warehouse_name",
+            )
+            or ""
+        )
+        try:
+            status_id = _optional_int(normalized.get("status_id"))
+            if status_id in {4, 5}:
+                if status_id == 5:
+                    missing = sorted(nm_id for nm_id in sent if nm_id not in accepted)
+                    if missing:
+                        raise ValueError(
+                            f"final accepted quantity is missing for nmID {missing}"
+                        )
+                acceptance_dt = _wb_acceptance_business_timestamp(record=record, normalized=normalized)
+                if acceptance_dt is None:
+                    raise ValueError("WB acceptance fact date is missing")
+                result = capital.record_ordinary_wb_supply_acceptance(
+                    supply_id=supply_id,
+                    writeoff_date=business_dt.date().isoformat(),
+                    acceptance_date=acceptance_dt.date().isoformat(),
+                    sent_quantities_by_nm=sent,
+                    accepted_quantities_by_nm=accepted,
+                    warehouse=warehouse,
+                    destination=destination,
+                    known_nm_ids=self._nomenclature_by_nm().keys(),
+                    expenses_complete=False,
+                    final=status_id == 5,
+                    recalculate=recalculate,
+                )
+            else:
+                result = capital.record_ff_writeoff(
+                    supply_id=supply_id,
+                    effective_date=business_dt.date().isoformat(),
+                    sent_quantities_by_nm=sent,
+                    warehouse=warehouse,
+                    destination=destination,
+                    known_nm_ids=self._nomenclature_by_nm().keys(),
+                    expenses_complete=False,
+                )
+            capital.resolve_blockers(source_identity=supply_id)
+            return result
+        except ValueError as exc:
+            capital._record_blocker(  # noqa: SLF001 - same bounded application contour
+                code="wb_capital_movement_blocked",
+                source_identity=supply_id,
+                details={"reason": str(exc)},
+            )
+            return {"status": "blocked", "reason": str(exc)}
+
+    def _record_own_capital_doprinato(
+        self,
+        record: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        *,
+        recalculate: bool = True,
+    ) -> dict[str, Any]:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        supply_id = str(_first_present(normalized, "supply_id", "wb_supply_id", "preorder_id") or "")
+        capital = OwnProductCapitalBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
+        if not capital.has_events():
+            return {"skip_reason": "wb_supply_doprinato_without_paid_capital", "supply_id": supply_id}
+        raw_goods = record.get("raw_goods")
+        if not isinstance(raw_goods, list):
+            raw_goods = normalized.get("raw_goods")
+        sent, accepted, problems = _wb_capital_quantities(raw_goods if isinstance(raw_goods, list) else [])
+        quantities = accepted or sent
+        if problems or not quantities:
+            return {
+                "skip_reason": "wb_supply_doprinato_goods_blocked",
+                "supply_id": supply_id,
+                "problem_rows": problems or ["goods quantities missing"],
+            }
+        business_dt = _wb_acceptance_business_timestamp(record=record, normalized=normalized)
+        if business_dt is None:
+            business_dt, _ = _wb_supply_business_timestamp(record=record, normalized=normalized)
+        if business_dt is None:
+            return {"skip_reason": "wb_supply_doprinato_date_missing", "supply_id": supply_id}
+        warehouse = str(_first_present(normalized, "warehouse_name", "warehouseName", "warehouse") or "")
+        destination = str(
+            _first_present(normalized, "destination_name", "target_warehouse_name", "targetWarehouseName", "warehouse_name")
+            or ""
+        )
+        original_supply_id = str(
+            _first_present(
+                normalized,
+                "original_supply_id",
+                "originalSupplyID",
+                "parent_supply_id",
+                "parentSupplyID",
+                "upstream_supply_id",
+            )
+            or ""
+        )
+        try:
+            result = capital.reconcile_doprinato(
+                reconciliation_supply_id=supply_id,
+                effective_date=business_dt.date().isoformat(),
+                quantities_by_nm=quantities,
+                warehouse=warehouse,
+                destination=destination,
+                original_supply_id=original_supply_id or None,
+                recalculate=recalculate,
+            )
+            capital.resolve_blockers(source_identity=supply_id)
+            return {"skip_reason": "wb_supply_doprinato_reconciled_no_ff_writeoff", "supply_id": supply_id, "result": result}
+        except ValueError as exc:
+            capital._record_blocker(  # noqa: SLF001 - same bounded application contour
+                code="wb_doprinato_reconciliation_blocked",
+                source_identity=supply_id,
+                details={"reason": str(exc)},
+            )
+            return {"skip_reason": "wb_supply_doprinato_reconciliation_blocked", "supply_id": supply_id, "reason": str(exc)}
+
+    def materialize_own_product_capital_history(
+        self,
+        *,
+        date_to: str,
+        recalculate: bool = True,
+    ) -> dict[str, Any]:
+        """Materialize capital movements only where persisted FF/WB evidence exists."""
+        records = self.runtime.list_wb_supplies_cache_records()
+        ordinary: list[tuple[datetime, Mapping[str, Any], Mapping[str, Any]]] = []
+        doprinato: list[tuple[datetime, Mapping[str, Any], Mapping[str, Any]]] = []
+        skipped_without_ledger_evidence = 0
+        for record in records:
+            normalized = dict(record.get("normalized") or record)
+            if _optional_int(normalized.get("status_id")) not in WB_DEBIT_STATUS_IDS:
+                continue
+            business_dt, _ = _wb_supply_business_timestamp(
+                record=record,
+                normalized=normalized,
+            )
+            if business_dt is None or business_dt.date().isoformat() > str(date_to):
+                continue
+            item = (business_dt, record, normalized)
+            if (
+                _optional_int(normalized.get("virtual_type_id")) == WB_SKIP_VIRTUAL_TYPE_ID
+                or str(normalized.get("type_label") or "").strip() == WB_SKIP_TYPE_LABEL
+            ):
+                doprinato.append(item)
+                continue
+            _, _, source_key = _wb_supply_debit_identity(
+                record=record,
+                normalized=normalized,
+            )
+            if not source_key or self.runtime.load_ff_stock_operation_by_source_key(source_key) is None:
+                skipped_without_ledger_evidence += 1
+                continue
+            ordinary.append(item)
+
+        diagnostics: list[dict[str, Any]] = []
+        materialized = 0
+        for _, record, normalized in sorted(ordinary, key=lambda item: item[0]):
+            result = self._record_own_capital_wb_supply(
+                record,
+                normalized,
+                recalculate=False,
+            )
+            materialized += 1
+            if str(result.get("status") or "") == "blocked":
+                diagnostics.append(
+                    {
+                        "supply_id": str(normalized.get("supply_id") or ""),
+                        "reason": str(result.get("reason") or "blocked"),
+                    }
+                )
+        for _, record, normalized in sorted(doprinato, key=lambda item: item[0]):
+            result = self._record_own_capital_doprinato(
+                record,
+                normalized,
+                recalculate=False,
+            )
+            materialized += 1
+            if str(result.get("skip_reason") or "").endswith("_blocked"):
+                diagnostics.append(
+                    {
+                        "supply_id": str(normalized.get("supply_id") or ""),
+                        "reason": str(result.get("reason") or result.get("skip_reason") or "blocked"),
+                    }
+                )
+        if recalculate and materialized:
+            from packages.application.own_product_capital import OwnProductCapitalBlock
+
+            OwnProductCapitalBlock(
+                runtime=self.runtime,
+                timestamp_factory=self.timestamp_factory,
+            ).recalculate()
+        return {
+            "status": "blocked" if diagnostics else "ok",
+            "persisted_supply_count": materialized,
+            "skipped_without_ledger_evidence_count": skipped_without_ledger_evidence,
+            "blocker_count": len(diagnostics),
+            "blockers": diagnostics,
+        }
 
     def plan_targeted_wb_supply_reconciliation(self, supply_id: str) -> dict[str, Any]:
         """Build the read-only v2 plan for the one checkpoint plus pre-activation incident."""
@@ -1341,6 +1578,9 @@ def _wb_supply_goods_lines(raw_goods: list[Mapping[str, Any]], nomenclature_by_n
             warnings.append(f"WB goods row {index}: нет положительного quantity")
             continue
         nomenclature = dict(nomenclature_by_nm.get(nm_id) or {})
+        if not nomenclature:
+            warnings.append(f"WB goods row {index}: nmID {nm_id} отсутствует в authoritative nomenclature")
+            continue
         target = grouped.setdefault(
             nm_id,
             {
@@ -1435,6 +1675,33 @@ def _targeted_nomenclature_guard(item: Mapping[str, Any]) -> dict[str, Any]:
 def _stable_reconciliation_fingerprint(value: Mapping[str, Any]) -> str:
     body = json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _wb_capital_quantities(
+    raw_goods: list[Mapping[str, Any]],
+) -> tuple[dict[int, float], dict[int, float], list[str]]:
+    sent: dict[int, float] = {}
+    accepted: dict[int, float] = {}
+    problems: list[str] = []
+    for index, raw in enumerate(raw_goods, start=1):
+        item = dict(raw or {})
+        nm_id = _optional_int(_first_present(item, "nmID", "nmId", "nm_id"))
+        sent_qty = _optional_float(_first_present(item, "quantity", "qty", "sentQuantity", "sent_quantity"))
+        accepted_raw = _first_present(item, "acceptedQuantity", "accepted_quantity", "acceptedQty")
+        accepted_qty = _optional_float(accepted_raw)
+        if nm_id is None:
+            problems.append(f"WB goods row {index}: nmID missing")
+            continue
+        if sent_qty is None or sent_qty <= 0:
+            problems.append(f"WB goods row {index}: sent quantity missing")
+            continue
+        sent[nm_id] = sent.get(nm_id, 0.0) + sent_qty
+        if accepted_raw not in {None, ""}:
+            if accepted_qty is None or accepted_qty < 0:
+                problems.append(f"WB goods row {index}: accepted quantity invalid")
+                continue
+            accepted[nm_id] = accepted.get(nm_id, 0.0) + accepted_qty
+    return sent, accepted, problems
 
 
 def _negative_balance_preview(
@@ -1542,6 +1809,32 @@ def _wb_supply_business_timestamp(
             if parsed is not None:
                 return parsed, f"{source_name}.{field}"
     return None, ""
+
+
+def _wb_acceptance_business_timestamp(
+    *,
+    record: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+) -> datetime | None:
+    sources: list[Mapping[str, Any]] = [normalized, record]
+    for raw_key in ("raw_detail", "raw_list"):
+        raw = record.get(raw_key)
+        if isinstance(raw, Mapping):
+            sources.append(raw)
+    for source in sources:
+        for field in (
+            "actual_acceptance_date",
+            "actualAcceptanceDate",
+            "accepted_date",
+            "acceptedDate",
+            "fact_date",
+            "factDate",
+        ):
+            if field in source:
+                parsed = _parse_datetime_like(source.get(field))
+                if parsed is not None:
+                    return parsed
+    return None
 
 
 def _parse_datetime_like(value: Any) -> datetime | None:

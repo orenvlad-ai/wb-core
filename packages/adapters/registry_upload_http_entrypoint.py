@@ -233,6 +233,8 @@ DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/supply/wb-s
 DEFAULT_WB_SUPPLIES_OVERLAY_OPTIONS_PATH = "/v1/sheet-vitrina-v1/supply/wb-supplies/overlay-options"
 DEFAULT_OUR_WB_COST_RECALCULATE_PATH = "/v1/sheet-vitrina-v1/wb-cost/recalculate"
 DEFAULT_OUR_WB_COST_STATUS_PATH = "/v1/sheet-vitrina-v1/wb-cost/status"
+DEFAULT_OWN_PRODUCT_CAPITAL_RECALCULATE_PATH = "/v1/sheet-vitrina-v1/product-capital/recalculate"
+DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH = "/v1/sheet-vitrina-v1/product-capital/status"
 DEFAULT_FULFILLMENT_SERVICES_PATH = "/v1/sheet-vitrina-v1/supply/fulfillment-services"
 DEFAULT_FULFILLMENT_SERVICES_TEMPLATE_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/template.xlsx"
 DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH = f"{DEFAULT_FULFILLMENT_SERVICES_PATH}/uploads"
@@ -1303,6 +1305,8 @@ def _build_handler(
                         upload_payload["workbook_bytes"],
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        fields=(upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {}),
+                        actor=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -1389,6 +1393,8 @@ def _build_handler(
                         upload_payload["workbook_bytes"],
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        fields=(upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {}),
+                        actor=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -1792,6 +1798,25 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"our WB cost recalculation failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_OWN_PRODUCT_CAPITAL_RECALCULATE_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = _load_optional_request_payload(self)
+                    result = entrypoint.handle_own_product_capital_recalculate_request(payload)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"own product capital recalculation failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -2829,6 +2854,21 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"our WB cost status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_own_product_capital_status_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"own product capital status failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)

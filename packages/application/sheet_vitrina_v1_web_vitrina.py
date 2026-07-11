@@ -10,6 +10,9 @@ from typing import Any, Callable, Mapping
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
+from packages.application.sheet_vitrina_v1_own_product_capital import (
+    extend_metrics_with_own_product_capital_metrics,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
 )
@@ -203,8 +206,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             int(item.nm_id): item
             for item in current_state.config_v2
         }
-        effective_metrics = extend_metrics_with_our_wb_cost_metrics(
-            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        effective_metrics = extend_metrics_with_own_product_capital_metrics(
+            extend_metrics_with_our_wb_cost_metrics(
+                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+            )
         )
         metrics_by_key = {
             str(item.metric_key): item
@@ -218,6 +223,9 @@ class SheetVitrinaV1WebVitrinaBlock:
             row_updated_at_by_id=_resolve_row_updated_at_by_id(
                 snapshot,
                 fallback_updated_at=refreshed_at,
+            ),
+            server_cell_presentation=(
+                dict(getattr(snapshot, "metadata", {}) or {}).get("server_cell_presentation") or {}
             ),
         )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
@@ -705,6 +713,7 @@ def _normalize_rows(
     config_by_nm_id: Mapping[int, ConfigV2Item],
     metrics_by_key: Mapping[str, MetricV2Item],
     row_updated_at_by_id: Mapping[str, str],
+    server_cell_presentation: Mapping[str, Any] | None = None,
 ) -> list[WebVitrinaContractRow]:
     normalized: list[WebVitrinaContractRow] = []
     for row_order, row in enumerate(rows, start=1):
@@ -735,6 +744,13 @@ def _normalize_rows(
                 nm_id=scope.nm_id,
                 format=metric.format if metric is not None else None,
                 values_by_date=values_by_date,
+                presentation_by_date={
+                    str(column_date): dict(presentation)
+                    for column_date, presentation in (
+                        (server_cell_presentation or {}).get(row_id, {})
+                    ).items()
+                    if isinstance(presentation, Mapping)
+                },
             )
         )
     return normalized

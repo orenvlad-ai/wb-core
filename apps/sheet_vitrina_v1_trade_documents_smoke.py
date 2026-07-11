@@ -63,6 +63,26 @@ def main() -> None:
     with TemporaryDirectory(prefix="trade-documents-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "trade-documents-clear-iphone-14-pro",
+                "is_active": True,
+                "our_sku": "SMOKE-IP14PRO-CLEAR",
+                "nm_id": 210183919,
+                "vendor_code": "SMOKE-IP14PRO-CLEAR",
+                "barcode": "210183919",
+                "nomenclature_name": "Clear iPhone 14 Pro",
+                "product_type": "clear",
+                "match_key": "clear|iphone_14_pro",
+                "purchase_price_yuan": 1,
+                "aliases": [],
+                "compatible_models_text": "iPhone 14 Pro",
+                "compatible_model_keys": ["iphone_14_pro"],
+                "comment": "trade documents smoke",
+                "created_at": "2026-05-30T08:00:00Z",
+                "updated_at": "2026-05-30T08:00:00Z",
+            }
+        )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=_reserve_free_port(),

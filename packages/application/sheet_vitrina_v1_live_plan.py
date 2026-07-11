@@ -29,6 +29,7 @@ from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
 from packages.application.fin_report_daily_block import FinReportDailyBlock
 from packages.application.onec_stocks_block import OnecStocksBlock
+from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.prices_snapshot_block import PricesSnapshotBlock
 from packages.application.registry_upload_db_backed_runtime import (
@@ -71,6 +72,28 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
+)
+from packages.application.sheet_vitrina_v1_own_product_capital import (
+    OWN_AVG_COST_RUB_METRIC_KEY,
+    OWN_AVG_COST_RUB_TOTAL_METRIC_KEY,
+    OWN_CAPITAL_RETURN_PCT_METRIC_KEY,
+    OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    OWN_PRODUCT_CAPITAL_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY,
+    OWN_PRODUCT_CAPITAL_STAGES,
+    OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS,
+    OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
+    OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
+    OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY,
+    OWN_TOTAL_QTY_METRIC_KEY,
+    OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
+    extend_metrics_with_own_product_capital_metrics,
+    is_own_product_capital_sku_metric_key,
+    own_product_capital_metric_value,
+    own_stage_metric_key,
+    own_stage_total_metric_key,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
@@ -147,6 +170,7 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "ads_compact",
     "fin_report_daily",
     ONEC_STOCKS_SOURCE_KEY,
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY,
 }
 CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price", SPP_PROXY_SOURCE_KEY}
 CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp", SPP_PROXY_SOURCE_KEY}
@@ -171,6 +195,7 @@ CLOSURE_PENDING_STATES = {
 BLOCKED_SOURCE_STATUSES = {}
 SOURCE_TEMPORAL_POLICIES = {
     **CANONICAL_SOURCE_TEMPORAL_POLICIES,
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY: "dual_day_capable",
 }
 SOURCE_CLASSIFICATION_GROUPS = {
     "seller_funnel_snapshot": "A_bot_web_source_historical_closed_day_capable",
@@ -181,6 +206,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     SPP_PROXY_SOURCE_KEY: "C_wb_public_card_current_snapshot_with_accepted_current_rollover",
     "stocks": "B_wb_api_date_period_capable",
     ONEC_STOCKS_SOURCE_KEY: "E_onec_product_capital_date_capable",
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY: "F_webcore_product_capital_persisted_events",
     "ads_compact": "B_wb_api_date_period_capable",
     "fin_report_daily": "B_wb_api_date_period_capable",
     "prices_snapshot": "C_wb_api_current_snapshot_only",
@@ -199,6 +225,12 @@ DECISION_SUMMARY = {
     "config_service_values": "CONFIG!H:I service block is preserved across prepare/reprepare",
 }
 SOURCE_DIAGNOSTIC_SPECS = {
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY: {
+        "module": "packages.application.own_product_capital",
+        "block": "OwnProductCapitalBlock",
+        "adapter": "RegistryUploadDbBackedRuntime",
+        "endpoint": "sqlite://own_product_capital_events+daily_state",
+    },
     "seller_funnel_snapshot": {
         "module": "packages.application.seller_funnel_snapshot_block",
         "block": "SellerFunnelSnapshotBlock",
@@ -328,6 +360,7 @@ class SlotLookups:
     promo_lookup: dict[int, dict[str, float]]
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    own_product_capital_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     column_date: str = ""
 
 
@@ -960,8 +993,10 @@ class SheetVitrinaV1LivePlanBlock:
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 
-        effective_metrics = extend_metrics_with_our_wb_cost_metrics(
-            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        effective_metrics = extend_metrics_with_own_product_capital_metrics(
+            extend_metrics_with_our_wb_cost_metrics(
+                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+            )
         )
         metrics_by_key = {item.metric_key: item for item in effective_metrics}
         formulas_by_id = {item.formula_id: item for item in current_state.formulas_v2}
@@ -1155,6 +1190,12 @@ class SheetVitrinaV1LivePlanBlock:
             metadata={
                 **dict(getattr(plan, "metadata", {}) or {}),
                 "refresh_diagnostics": diagnostics,
+                "server_cell_presentation": _own_product_capital_cell_presentation(
+                    enabled_config=enabled_config,
+                    displayed_metrics=displayed_metrics,
+                    temporal_slots=temporal_slots,
+                    live_sources=live_sources,
+                ),
             },
         )
 
@@ -1224,6 +1265,7 @@ class SheetVitrinaV1LivePlanBlock:
                 stocks_lookup={},
                 onec_stocks_lookup={},
                 our_wb_cost_lookup={},
+                own_product_capital_lookup={},
                 ads_compact_lookup={},
                 fin_lookup={},
                 fin_storage_fee_total=None,
@@ -1486,6 +1528,40 @@ class SheetVitrinaV1LivePlanBlock:
                 )
             except Exception:
                 current_lookups.our_wb_cost_lookup = {}
+            try:
+                current_lookups.own_product_capital_lookup = OwnProductCapitalBlock(
+                    runtime=self.runtime
+                ).load_daily_metric_lookup(slot.column_date)
+            except Exception:
+                current_lookups.own_product_capital_lookup = {}
+
+            if not selected_source_keys or OWN_PRODUCT_CAPITAL_SOURCE_KEY in selected_source_keys:
+                covered = sorted(
+                    nm_id for nm_id in requested_nm_ids
+                    if nm_id in current_lookups.own_product_capital_lookup
+                )
+                own_status = LiveSourceStatus(
+                    source_key=OWN_PRODUCT_CAPITAL_SOURCE_KEY,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy=SOURCE_TEMPORAL_POLICIES[OWN_PRODUCT_CAPITAL_SOURCE_KEY],
+                    column_date=slot.column_date,
+                    kind="success" if covered else "incomplete",
+                    freshness=slot.column_date if covered else "",
+                    snapshot_date=slot.column_date,
+                    date=slot.column_date,
+                    date_from="",
+                    date_to="",
+                    requested_count=len(requested_nm_ids),
+                    covered_count=len(covered),
+                    missing_nm_ids=sorted(set(requested_nm_ids) - set(covered)),
+                    note=(
+                        "source=WebCore; persisted paid-event capital materialization"
+                        if covered
+                        else "source=WebCore; no materialized paid-event capital rows"
+                    ),
+                )
+                statuses.append(own_status)
+                _emit_source_status_log(emit, own_status)
 
         if not selected_source_keys or "cost_price" in selected_source_keys:
             for slot in temporal_slots:
@@ -2613,6 +2689,43 @@ class _MetricEvaluator:
                 value = self._aggregate_our_wb_unit_cost(temporal_slot)
             elif metric.metric_key == TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY:
                 value = self._aggregate_our_wb_confirmed_share(temporal_slot)
+            elif metric.metric_key == OWN_TOTAL_QTY_TOTAL_METRIC_KEY:
+                value = self._aggregate_sum(OWN_TOTAL_QTY_METRIC_KEY, self.enabled_config, temporal_slot)
+            elif metric.metric_key == OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY:
+                value = self._aggregate_sum(OWN_TOTAL_CAPITAL_RUB_METRIC_KEY, self.enabled_config, temporal_slot)
+            elif metric.metric_key == OWN_AVG_COST_RUB_TOTAL_METRIC_KEY:
+                value = _divide_or_none(
+                    self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
+                    self.resolve_total(OWN_TOTAL_QTY_TOTAL_METRIC_KEY, temporal_slot),
+                )
+            elif metric.metric_key == OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY:
+                value = self._aggregate_own_product_capital_confirmed_share(temporal_slot)
+            elif metric.metric_key == OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY:
+                value = _divide_or_none(
+                    self.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, temporal_slot),
+                    self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
+                )
+            elif metric.metric_key in {
+                own_stage_total_metric_key(stage, "unit_cost_rub")
+                for stage in OWN_PRODUCT_CAPITAL_STAGES
+            }:
+                stage = next(
+                    item for item in OWN_PRODUCT_CAPITAL_STAGES
+                    if metric.metric_key == own_stage_total_metric_key(item, "unit_cost_rub")
+                )
+                value = _divide_or_none(
+                    self._aggregate_sum(own_stage_metric_key(stage, "capital_rub"), self.enabled_config, temporal_slot),
+                    self._aggregate_sum(own_stage_metric_key(stage, "qty"), self.enabled_config, temporal_slot),
+                )
+            elif metric.metric_key in {
+                own_stage_total_metric_key(stage, "confirmed_share_pct")
+                for stage in OWN_PRODUCT_CAPITAL_STAGES
+            }:
+                stage = next(
+                    item for item in OWN_PRODUCT_CAPITAL_STAGES
+                    if metric.metric_key == own_stage_total_metric_key(item, "confirmed_share_pct")
+                )
+                value = self._aggregate_own_stage_confirmed_share(stage, temporal_slot)
             elif metric.metric_key == ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY:
                 value = _divide_or_zero(
                     self.resolve_total(ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY, temporal_slot),
@@ -2806,6 +2919,47 @@ class _MetricEvaluator:
             return None
         return confirmed_qty / stock_qty
 
+    def _aggregate_own_stage_confirmed_share(self, stage: str, temporal_slot: str) -> float | None:
+        lookup = self._slot_lookups(temporal_slot).own_product_capital_lookup
+        qty = 0.0
+        confirmed = 0.0
+        has_rows = False
+        for item in self.enabled_config:
+            row = lookup.get(item.nm_id)
+            if not row:
+                continue
+            row_qty = _optional_float(row.get(own_stage_metric_key(stage, "qty")))
+            if row_qty is None:
+                continue
+            has_rows = True
+            qty += max(row_qty, 0.0)
+            confirmed += max(
+                _optional_float(row.get(own_stage_metric_key(stage, "confirmed_qty"))) or 0.0,
+                0.0,
+            )
+        return None if not has_rows or qty <= 0 else confirmed / qty
+
+    def _aggregate_own_product_capital_confirmed_share(self, temporal_slot: str) -> float | None:
+        lookup = self._slot_lookups(temporal_slot).own_product_capital_lookup
+        qty = 0.0
+        confirmed = 0.0
+        has_rows = False
+        for item in self.enabled_config:
+            row = lookup.get(item.nm_id)
+            if not row:
+                continue
+            for stage in OWN_PRODUCT_CAPITAL_STAGES:
+                row_qty = _optional_float(row.get(own_stage_metric_key(stage, "qty")))
+                if row_qty is None:
+                    continue
+                has_rows = True
+                qty += max(row_qty, 0.0)
+                confirmed += max(
+                    _optional_float(row.get(own_stage_metric_key(stage, "confirmed_qty"))) or 0.0,
+                    0.0,
+                )
+        return None if not has_rows or qty <= 0 else confirmed / qty
+
     def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
         if metric_key == "cost_price_rub":
             config_item = self.config_by_nm_id.get(nm_id)
@@ -2877,6 +3031,11 @@ class _MetricEvaluator:
                 self.resolve_sku(ONEC_PROXY_PROFIT_2_RUB_METRIC_KEY, nm_id, temporal_slot),
                 self.resolve_sku(ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY, nm_id, temporal_slot),
             )
+        if metric_key == OWN_CAPITAL_RETURN_PCT_METRIC_KEY:
+            return _divide_or_none(
+                self.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, nm_id, temporal_slot),
+                self.resolve_sku(OWN_TOTAL_CAPITAL_RUB_METRIC_KEY, nm_id, temporal_slot),
+            )
         if metric_key == "inventory_value_retail_rub":
             stock_total = self.resolve_sku("stock_total", nm_id, temporal_slot)
             price_seller_discounted = self.resolve_sku("price_seller_discounted", nm_id, temporal_slot)
@@ -2885,6 +3044,11 @@ class _MetricEvaluator:
             return float(stock_total) * float(price_seller_discounted)
 
         slot_lookups = self._slot_lookups(temporal_slot)
+        if is_own_product_capital_sku_metric_key(metric_key):
+            return own_product_capital_metric_value(
+                metric_key,
+                slot_lookups.own_product_capital_lookup.get(nm_id),
+            )
         if is_onec_stock_sku_metric_key(metric_key):
             return resolve_onec_stock_metric_value(
                 metric_key,
@@ -4168,6 +4332,127 @@ def _divide_or_zero(numerator: float | None, denominator: float | None) -> float
     if float(denominator) == 0.0:
         return 0.0
     return float(numerator) / float(denominator)
+
+
+def _divide_or_none(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or float(denominator) == 0.0:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _own_product_capital_cell_presentation(
+    *,
+    enabled_config: Iterable[ConfigV2Item],
+    displayed_metrics: Iterable[MetricV2Item],
+    temporal_slots: Iterable[SheetVitrinaV1TemporalSlot],
+    live_sources: TemporalLiveSources,
+) -> dict[str, dict[str, dict[str, str]]]:
+    metric_keys = {
+        metric.metric_key
+        for metric in displayed_metrics
+        if metric.metric_key in set(OWN_PRODUCT_CAPITAL_METRIC_KEYS)
+    }
+    if not metric_keys:
+        return {}
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    sku_summary_keys = set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS) - {
+        own_stage_metric_key(stage, field)
+        for stage in OWN_PRODUCT_CAPITAL_STAGES
+        for field in ("capital_rub", "qty", "unit_cost_rub", "confirmed_share_pct")
+    }
+    for slot in temporal_slots:
+        lookup = live_sources.slot_lookups.get(slot.slot_key)
+        if lookup is None:
+            continue
+        unconfirmed_rows = {
+            item.nm_id: row
+            for item in enabled_config
+            if (row := lookup.own_product_capital_lookup.get(item.nm_id))
+            and str(row.get("presentation_state") or "") == "unconfirmed"
+        }
+        for item in enabled_config:
+            row = unconfirmed_rows.get(item.nm_id)
+            if row is None:
+                continue
+            reason = str(row.get("presentation_reason") or "полнота расходов не подтверждена")
+            for metric_key in metric_keys:
+                if metric_key not in set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS):
+                    continue
+                metric_reason = reason
+                should_mark = metric_key in sku_summary_keys
+                for stage in OWN_PRODUCT_CAPITAL_STAGES:
+                    if metric_key in {
+                        own_stage_metric_key(stage, field)
+                        for field in ("capital_rub", "qty", "unit_cost_rub", "confirmed_share_pct")
+                    }:
+                        stage_presentation = (row.get("stage_presentation") or {}).get(stage, {})
+                        should_mark = str(stage_presentation.get("state") or "") == "unconfirmed"
+                        metric_reason = str(
+                            stage_presentation.get("reason") or "полнота расходов не подтверждена"
+                        )
+                        break
+                if not should_mark:
+                    continue
+                result.setdefault(f"SKU:{item.nm_id}|{metric_key}", {})[slot.column_date] = {
+                    "state": "unconfirmed",
+                    "tone": "yellow",
+                    "reason": metric_reason,
+                    "source": "WebCore",
+                }
+        if unconfirmed_rows:
+            total_reason = "; ".join(
+                sorted(
+                    {
+                        str(row.get("presentation_reason") or "полнота расходов не подтверждена")
+                        for row in unconfirmed_rows.values()
+                    }
+                )
+            )
+            for metric_key in metric_keys:
+                if metric_key not in set(OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS):
+                    continue
+                metric_reason = total_reason
+                should_mark = metric_key in {
+                    OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
+                    OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
+                    OWN_AVG_COST_RUB_TOTAL_METRIC_KEY,
+                    OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY,
+                    OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+                }
+                for stage in OWN_PRODUCT_CAPITAL_STAGES:
+                    if metric_key in {
+                        own_stage_total_metric_key(stage, field)
+                        for field in ("capital_rub", "qty", "unit_cost_rub", "confirmed_share_pct")
+                    }:
+                        affected = [
+                            row
+                            for row in unconfirmed_rows.values()
+                            if str(
+                                ((row.get("stage_presentation") or {}).get(stage, {})).get("state") or ""
+                            ) == "unconfirmed"
+                        ]
+                        should_mark = bool(affected)
+                        metric_reason = "; ".join(
+                            sorted(
+                                {
+                                    str(
+                                        ((row.get("stage_presentation") or {}).get(stage, {})).get("reason")
+                                        or "полнота расходов не подтверждена"
+                                    )
+                                    for row in affected
+                                }
+                            )
+                        )
+                        break
+                if not should_mark:
+                    continue
+                result.setdefault(f"TOTAL|{metric_key}", {})[slot.column_date] = {
+                    "state": "unconfirmed",
+                    "tone": "yellow",
+                    "reason": metric_reason,
+                    "source": "WebCore",
+                }
+    return result
 
 
 def _evaluate_formula(expression: str, resolver: Callable[[str], float | None]) -> float | None:
