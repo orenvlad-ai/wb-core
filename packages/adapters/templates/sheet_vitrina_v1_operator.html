@@ -12341,7 +12341,7 @@
             return "<tr class=\"wb-finance-group-row\"><td>" + escapeHtml(definition.group) + "</td><td colspan=\"" + weeks.length + "\"></td></tr>";
           }
           if (definition.internal) {
-            return "<tr class=\"wb-finance-internal-divider\"><td colspan=\"" + (weeks.length + 1) + "\">" + escapeHtml(definition.label) + "</td></tr>";
+            return "<tr class=\"wb-finance-internal-divider\"><td>" + escapeHtml(definition.label) + "</td><td colspan=\"" + weeks.length + "\"></td></tr>";
           }
           return "<tr><td>" + escapeHtml(definition.label) + "</td>" + weeks.map((week) => {
             const value = week.metrics ? week.metrics[definition.key] : null;
