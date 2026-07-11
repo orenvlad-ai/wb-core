@@ -132,6 +132,21 @@ def main() -> None:
             raise AssertionError(
                 "missing cost must not be coerced to zero or precise profit"
             )
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute(
+                "insert into registry_upload_config_v2 values('bundle',999999,1,'Recovered SKU','Group',2)"
+            )
+            conn.commit()
+        recovered = block.recalculate_week(date(2026, 6, 29), date(2026, 7, 5))
+        recovered_week = next(
+            week
+            for week in block.build_payload()["weeks"]
+            if week["week_start"] == "2026-06-29"
+        )
+        if recovered["cogs"] is None or recovered_week["status"] != "completed":
+            raise AssertionError(
+                "recovered cost coverage must restore completed status"
+            )
         second_sync = block.ingest_week(date(2026, 6, 22), date(2026, 6, 28), rows)
         if second_sync["status"] != "completed":
             raise AssertionError(
