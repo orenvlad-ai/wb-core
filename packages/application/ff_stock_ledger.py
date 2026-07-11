@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import hashlib
+import json
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ FF_STOCK_SOURCE_MANUAL_EXCEL = "manual_excel"
 FF_STOCK_SOURCE_SUPPLIER_SHIPMENT = "supplier_shipment"
 FF_STOCK_SOURCE_WB_SUPPLY = "wb_supply"
 FF_STOCK_SOURCE_RUNTIME_REPAIR = "runtime_repair"
+FF_STOCK_SOURCE_TARGETED_RECONCILIATION = "wb_supply_targeted_reconciliation"
 
 FF_STOCK_LEDGER_SOURCE_KEY_PREFIX = "ff_stock_ledger"
 FF_STOCK_OPERATION_DEFAULT_PAGE_SIZE = 50
@@ -38,6 +40,20 @@ FF_STOCK_OPERATION_PAGE_SIZES = (50, 100, 200)
 WB_DEBIT_STATUS_IDS = {3, 4, 5, 6}
 WB_SKIP_VIRTUAL_TYPE_ID = 5
 WB_SKIP_TYPE_LABEL = "Допринято"
+TARGETED_WB_RECONCILIATION_REASON = "targeted_checkpoint_reconciliation"
+TARGETED_WB_RECONCILIATION_PLAN_VERSION = "v1"
+TARGETED_WB_RECONCILIATION_SUPPLY_ID = "40561872"
+TARGETED_WB_RECONCILIATION_EXPECTED_SKU_COUNT = 13
+TARGETED_WB_RECONCILIATION_EXPECTED_DEBIT = 31_500.0
+TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_BEFORE = 38_250.0
+TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_AFTER = 6_750.0
+
+
+class TargetedWbSupplyReconciliationError(ValueError):
+    def __init__(self, code: str, message: str, *, details: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
 
 FF_STOCK_XLSX_HEADERS = [
     "barcode",
@@ -537,6 +553,580 @@ class FfStockLedgerBlock:
             lines=lines,
         )
 
+    def plan_targeted_wb_supply_reconciliation(self, supply_id: str) -> dict[str, Any]:
+        """Build a read-only, single-supply plan that may bypass only the baseline checkpoint guard."""
+        requested_supply_id = str(supply_id or "").strip()
+        if requested_supply_id != TARGETED_WB_RECONCILIATION_SUPPLY_ID:
+            raise TargetedWbSupplyReconciliationError(
+                "invalid_supply_id",
+                f"Targeted reconciliation is bounded to WB supply_id {TARGETED_WB_RECONCILIATION_SUPPLY_ID}",
+            )
+        record = self.runtime.load_wb_supply_record(requested_supply_id)
+        if record is None:
+            raise TargetedWbSupplyReconciliationError(
+                "wb_supply_not_found",
+                f"WB supply {requested_supply_id} was not found in the server-owned cache",
+            )
+        normalized = dict(record.get("normalized") or {})
+        cache_key, resolved_supply_id, source_key = _wb_supply_debit_identity(record=record, normalized=normalized)
+        canonical_cache_key = f"supply:{requested_supply_id}"
+        canonical_source_key = f"wb_supply_debit:{canonical_cache_key}"
+        blockers: list[dict[str, Any]] = []
+        if (
+            resolved_supply_id != requested_supply_id
+            or str(record.get("supply_id") or "") != requested_supply_id
+            or str(record.get("wb_supply_id") or normalized.get("wb_supply_id") or "") != requested_supply_id
+        ):
+            blockers.append(
+                {
+                    "code": "wb_supply_identity_mismatch",
+                    "expected_supply_id": requested_supply_id,
+                    "resolved_supply_id": resolved_supply_id,
+                    "cache_supply_id": str(record.get("supply_id") or ""),
+                    "wb_supply_id": str(record.get("wb_supply_id") or normalized.get("wb_supply_id") or ""),
+                }
+            )
+        if cache_key != canonical_cache_key or str(normalized.get("cache_key") or "") != canonical_cache_key:
+            blockers.append(
+                {
+                    "code": "wb_supply_cache_key_not_canonical",
+                    "expected_cache_key": canonical_cache_key,
+                    "actual_cache_key": cache_key,
+                    "normalized_cache_key": str(normalized.get("cache_key") or ""),
+                }
+            )
+        if source_key != canonical_source_key:
+            blockers.append(
+                {
+                    "code": "wb_supply_source_key_not_canonical",
+                    "expected_source_key": canonical_source_key,
+                    "actual_source_key": source_key,
+                }
+            )
+
+        existing = self.runtime.load_ff_stock_operation_by_source_key(canonical_source_key)
+        if existing is not None:
+            existing_fingerprint = str((existing.get("diagnostics") or {}).get("dry_run_fingerprint") or "")
+            return {
+                "contract_name": CONTRACT_NAME,
+                "contract_version": CONTRACT_VERSION,
+                "plan_version": TARGETED_WB_RECONCILIATION_PLAN_VERSION,
+                "status": "already_applied",
+                "apply_allowed": False,
+                "idempotent": True,
+                "fingerprint": existing_fingerprint,
+                "supply": {
+                    "supply_id": requested_supply_id,
+                    "cache_key": canonical_cache_key,
+                    "source_key": canonical_source_key,
+                    "status_id": _optional_int(normalized.get("status_id")),
+                    "status_label": str(normalized.get("status_label") or ""),
+                },
+                "operation": existing,
+                "human_summary": f"WB-поставка № {requested_supply_id} уже списана операцией {existing.get('operation_id')}",
+            }
+
+        status_id = _optional_int(normalized.get("status_id"))
+        if status_id not in WB_DEBIT_STATUS_IDS:
+            blockers.append(
+                {
+                    "code": "wb_supply_status_not_debit_eligible",
+                    "status_id": status_id,
+                    "allowed_status_ids": sorted(WB_DEBIT_STATUS_IDS),
+                }
+            )
+        if _optional_int(normalized.get("virtual_type_id")) == WB_SKIP_VIRTUAL_TYPE_ID:
+            blockers.append({"code": "wb_supply_doprinato_virtual_type", "virtual_type_id": WB_SKIP_VIRTUAL_TYPE_ID})
+        if str(normalized.get("type_label") or "").strip() == WB_SKIP_TYPE_LABEL:
+            blockers.append({"code": "wb_supply_doprinato_type_label", "type_label": WB_SKIP_TYPE_LABEL})
+
+        raw_goods = record.get("raw_goods")
+        operation_lines: list[dict[str, Any]] = []
+        goods_warnings: list[str] = []
+        nomenclature_by_nm = self._nomenclature_by_nm()
+        if not isinstance(raw_goods, list) or not raw_goods:
+            blockers.append({"code": "wb_supply_goods_missing"})
+            raw_goods = []
+        else:
+            operation_lines, goods_warnings, goods_errors = _targeted_wb_supply_goods_lines(
+                raw_goods,
+                nomenclature_by_nm,
+            )
+            blockers.extend(goods_errors)
+            if not operation_lines:
+                blockers.append({"code": "wb_supply_goods_without_usable_qty"})
+
+        checkpoint = self.runtime.load_ff_stock_wb_auto_writeoff_checkpoint()
+        checkpoint_reason = ""
+        checkpoint_match_fields: list[str] = []
+        checkpoint_dt = _parse_datetime_like((checkpoint or {}).get("created_at"))
+        source_dt, source_dt_field = _wb_supply_business_timestamp(record=record, normalized=normalized)
+        if checkpoint is None:
+            blockers.append({"code": "wb_supply_auto_writeoff_checkpoint_missing"})
+        elif checkpoint_dt is None:
+            blockers.append(
+                {
+                    "code": "wb_supply_auto_writeoff_checkpoint_invalid",
+                    "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+                    "created_at": str(checkpoint.get("created_at") or ""),
+                }
+            )
+        elif source_dt is None:
+            blockers.append({"code": "wb_supply_source_date_missing"})
+        else:
+            checkpoint_match_fields = _wb_supply_checkpoint_match_fields(
+                checkpoint=checkpoint,
+                cache_key=cache_key,
+                supply_id=resolved_supply_id,
+                source_key=source_key,
+            )
+            if checkpoint_match_fields or source_dt <= checkpoint_dt:
+                checkpoint_reason = "wb_supply_before_auto_writeoff_checkpoint"
+            else:
+                blockers.append(
+                    {
+                        "code": "targeted_checkpoint_bypass_not_applicable",
+                        "ordinary_path_reason": "eligible_for_ordinary_auto_writeoff",
+                    }
+                )
+
+        activation = self.runtime.load_ff_stock_activation_operation()
+        activation_dt = _parse_datetime_like((activation or {}).get("created_at"))
+        if activation is None:
+            blockers.append({"code": "wb_supply_ledger_not_activated"})
+        elif activation_dt is None:
+            blockers.append(
+                {
+                    "code": "wb_supply_ledger_activation_invalid",
+                    "operation_id": str(activation.get("operation_id") or ""),
+                }
+            )
+        elif source_dt is not None and source_dt < activation_dt:
+            blockers.append(
+                {
+                    "code": "wb_supply_before_ledger_activation",
+                    "source_timestamp": source_dt.isoformat(),
+                    "activation_created_at": activation_dt.isoformat(),
+                }
+            )
+
+        balance_rows = self.runtime.list_ff_stock_balances()
+        balances_by_nm = {int(item.get("nm_id") or 0): float(item.get("balance") or 0.0) for item in balance_rows}
+        sku_rows: list[dict[str, Any]] = []
+        shortages: list[dict[str, Any]] = []
+        for line in sorted(operation_lines, key=lambda item: int(item.get("nm_id") or 0)):
+            nm_id = int(line.get("nm_id") or 0)
+            debit_quantity = abs(float(line.get("quantity_delta") or 0.0))
+            current_balance = float(balances_by_nm.get(nm_id, 0.0))
+            projected_balance = current_balance - debit_quantity
+            sku_row = {
+                "nm_id": nm_id,
+                "nmID": nm_id,
+                "barcode": str(line.get("barcode") or ""),
+                "sku": str(line.get("sku") or ""),
+                "nomenclature_name": str(line.get("nomenclature_name") or ""),
+                "current_balance": current_balance,
+                "debit_quantity": debit_quantity,
+                "projected_balance": projected_balance,
+                "expected_balance": projected_balance,
+            }
+            sku_rows.append(sku_row)
+            if projected_balance < -1e-9:
+                shortages.append(
+                    {
+                        "nm_id": nm_id,
+                        "nmID": nm_id,
+                        "current_balance": current_balance,
+                        "required_debit": debit_quantity,
+                        "projected_balance": projected_balance,
+                        "expected_balance": projected_balance,
+                    }
+                )
+        if shortages:
+            blockers.append({"code": "wb_supply_would_make_negative_balance", "skus": shortages})
+
+        total_before = sum(float(item.get("balance") or 0.0) for item in balance_rows)
+        total_debit = sum(float(item.get("debit_quantity") or 0.0) for item in sku_rows)
+        total_after = total_before - total_debit
+        if len(sku_rows) != TARGETED_WB_RECONCILIATION_EXPECTED_SKU_COUNT:
+            blockers.append(
+                {
+                    "code": "target_supply_sku_count_changed",
+                    "expected": TARGETED_WB_RECONCILIATION_EXPECTED_SKU_COUNT,
+                    "actual": len(sku_rows),
+                }
+            )
+        if abs(total_debit - TARGETED_WB_RECONCILIATION_EXPECTED_DEBIT) > 1e-9:
+            blockers.append(
+                {
+                    "code": "target_supply_debit_quantity_changed",
+                    "expected": TARGETED_WB_RECONCILIATION_EXPECTED_DEBIT,
+                    "actual": total_debit,
+                }
+            )
+        if abs(total_before - TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_BEFORE) > 1e-9:
+            blockers.append(
+                {
+                    "code": "target_ff_stock_total_before_changed",
+                    "expected": TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_BEFORE,
+                    "actual": total_before,
+                }
+            )
+        if abs(total_after - TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_AFTER) > 1e-9:
+            blockers.append(
+                {
+                    "code": "target_ff_stock_total_after_changed",
+                    "expected": TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_AFTER,
+                    "actual": total_after,
+                }
+            )
+        supply_guard = _targeted_supply_guard(record=record, normalized=normalized)
+        expected_balances = {str(item["nm_id"]): item["current_balance"] for item in sku_rows}
+        active_nomenclature_guard = {
+            str(item["nm_id"]): _targeted_nomenclature_guard(nomenclature_by_nm[int(item["nm_id"])])
+            for item in sku_rows
+            if int(item["nm_id"]) in nomenclature_by_nm
+        }
+        checkpoint_guard = {
+            "checkpoint_id": str((checkpoint or {}).get("checkpoint_id") or ""),
+            "created_at": str((checkpoint or {}).get("created_at") or ""),
+            "baseline_cache_keys": list((checkpoint or {}).get("baseline_cache_keys") or []),
+            "baseline_source_keys": list((checkpoint or {}).get("baseline_source_keys") or []),
+            "baseline_supply_ids": list((checkpoint or {}).get("baseline_supply_ids") or []),
+        }
+        activation_guard = {
+            "operation_id": str((activation or {}).get("operation_id") or ""),
+            "created_at": str((activation or {}).get("created_at") or ""),
+        }
+        fingerprint_payload = {
+            "plan_version": TARGETED_WB_RECONCILIATION_PLAN_VERSION,
+            "reason": TARGETED_WB_RECONCILIATION_REASON,
+            "supply_guard": supply_guard,
+            "source_key": canonical_source_key,
+            "checkpoint_guard": checkpoint_guard,
+            "checkpoint_reason": checkpoint_reason,
+            "checkpoint_match_fields": checkpoint_match_fields,
+            "activation_guard": activation_guard,
+            "active_nomenclature_guard": active_nomenclature_guard,
+            "expected_balances": expected_balances,
+            "expected_ledger_totals": {
+                "before": total_before,
+                "delta": -total_debit,
+                "after": total_after,
+            },
+            "operation_lines": operation_lines,
+        }
+        fingerprint = _stable_reconciliation_fingerprint(fingerprint_payload)
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "plan_version": TARGETED_WB_RECONCILIATION_PLAN_VERSION,
+            "status": "dry_run" if not blockers else "blocked",
+            "apply_allowed": not blockers,
+            "fingerprint": fingerprint,
+            "reason": TARGETED_WB_RECONCILIATION_REASON,
+            "supply": {
+                "supply_id": requested_supply_id,
+                "cache_key": canonical_cache_key,
+                "source_key": canonical_source_key,
+                "preorder_id": str(record.get("preorder_id") or normalized.get("preorder_id") or ""),
+                "status_id": status_id,
+                "status_label": str(normalized.get("status_label") or ""),
+                "source_created_at": str(normalized.get("source_created_at") or ""),
+                "supply_date": str(normalized.get("supply_date") or ""),
+                "source_timestamp": source_dt.isoformat() if source_dt is not None else "",
+                "source_timestamp_field": source_dt_field,
+                "sku_count": len(sku_rows),
+            },
+            "checkpoint": {
+                **checkpoint_guard,
+                "ordinary_path_reason": checkpoint_reason,
+                "match_fields": checkpoint_match_fields,
+                "bypass_scope": "only_wb_supply_before_auto_writeoff_checkpoint",
+            },
+            "ledger_activation": {
+                **activation_guard,
+            },
+            "skus": sku_rows,
+            "totals": {
+                "before": total_before,
+                "debit": total_debit,
+                "after": total_after,
+            },
+            "warnings": goods_warnings,
+            "blockers": blockers,
+            "apply_guards": fingerprint_payload,
+            "human_summary": (
+                f"WB-поставка № {requested_supply_id}: {len(sku_rows)} SKU, "
+                f"списание {total_debit:g}, остаток {total_before:g} -> {total_after:g}"
+            ),
+        }
+
+    def apply_targeted_wb_supply_reconciliation(
+        self,
+        supply_id: str,
+        *,
+        apply: bool,
+        confirmation_fingerprint: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        requested_supply_id = str(supply_id or "").strip()
+        if not apply:
+            raise TargetedWbSupplyReconciliationError(
+                "explicit_apply_required",
+                "Targeted reconciliation apply requires an explicit apply flag",
+            )
+        if requested_supply_id != TARGETED_WB_RECONCILIATION_SUPPLY_ID:
+            raise TargetedWbSupplyReconciliationError(
+                "invalid_supply_id",
+                f"Targeted reconciliation is bounded to WB supply_id {TARGETED_WB_RECONCILIATION_SUPPLY_ID}",
+            )
+        canonical_source_key = f"wb_supply_debit:supply:{requested_supply_id}"
+        existing = self.runtime.load_ff_stock_operation_by_source_key(canonical_source_key)
+        if existing is not None:
+            existing_fingerprint = str((existing.get("diagnostics") or {}).get("dry_run_fingerprint") or "")
+            if not confirmation_fingerprint or confirmation_fingerprint != existing_fingerprint:
+                raise TargetedWbSupplyReconciliationError(
+                    "stale_or_invalid_fingerprint",
+                    "Confirmation fingerprint does not match the existing targeted operation",
+                    details={"expected": existing_fingerprint, "provided": str(confirmation_fingerprint or "")},
+                )
+            existing["idempotent"] = True
+            return {
+                "status": "already_applied",
+                "idempotent": True,
+                "operation": existing,
+                "post_run_reconciliation": self._targeted_post_run_reconciliation(existing),
+            }
+        plan = self.plan_targeted_wb_supply_reconciliation(requested_supply_id)
+        actual_fingerprint = str(plan.get("fingerprint") or "")
+        if not confirmation_fingerprint or confirmation_fingerprint != actual_fingerprint:
+            raise TargetedWbSupplyReconciliationError(
+                "stale_or_invalid_fingerprint",
+                "Dry-run fingerprint is stale or does not match the current plan",
+                details={"expected": actual_fingerprint, "provided": str(confirmation_fingerprint or "")},
+            )
+        if not plan.get("apply_allowed"):
+            raise TargetedWbSupplyReconciliationError(
+                "targeted_reconciliation_blocked",
+                "Current targeted reconciliation plan is blocked",
+                details=plan.get("blockers") or [],
+            )
+        guards = dict(plan.get("apply_guards") or {})
+        operation = self.runtime.create_ff_stock_operation_guarded(
+            operation_id="ffso_" + uuid4().hex[:20],
+            operation_type=FF_STOCK_OPERATION_AUTO_WRITEOFF,
+            source_type=FF_STOCK_SOURCE_WB_SUPPLY,
+            source_key=canonical_source_key,
+            source_object_id=requested_supply_id,
+            source_object_label=f"WB-поставка № {requested_supply_id} · targeted checkpoint reconciliation",
+            created_at=self.timestamp_factory(),
+            created_by=str(created_by or "operator").strip() or "operator",
+            warnings=list(plan.get("warnings") or []),
+            diagnostics={
+                "reason": TARGETED_WB_RECONCILIATION_REASON,
+                "supply_id": requested_supply_id,
+                "cache_key": f"supply:{requested_supply_id}",
+                "source_key": canonical_source_key,
+                "dry_run_fingerprint": actual_fingerprint,
+                "ordinary_skip_reason": "wb_supply_before_auto_writeoff_checkpoint",
+                "checkpoint": dict(plan.get("checkpoint") or {}),
+                "totals": dict(plan.get("totals") or {}),
+            },
+            lines=[dict(item) for item in guards.get("operation_lines") or []],
+            expected_balances={int(key): float(value) for key, value in dict(guards.get("expected_balances") or {}).items()},
+            expected_supply_guard=dict(guards.get("supply_guard") or {}),
+            expected_checkpoint=dict(guards.get("checkpoint_guard") or {}),
+            expected_activation=dict(guards.get("activation_guard") or {}),
+            expected_active_nomenclature={
+                int(key): dict(value)
+                for key, value in dict(guards.get("active_nomenclature_guard") or {}).items()
+            },
+            expected_ledger_totals=dict(guards.get("expected_ledger_totals") or {}),
+        )
+        return {
+            "status": "applied" if not operation.get("idempotent") else "already_applied",
+            "idempotent": bool(operation.get("idempotent")),
+            "fingerprint": actual_fingerprint,
+            "operation": operation,
+            "post_run_reconciliation": self._targeted_post_run_reconciliation(operation),
+        }
+
+    def plan_targeted_wb_supply_reversal(self, supply_id: str) -> dict[str, Any]:
+        requested_supply_id = str(supply_id or "").strip()
+        if requested_supply_id != TARGETED_WB_RECONCILIATION_SUPPLY_ID:
+            raise TargetedWbSupplyReconciliationError(
+                "invalid_supply_id",
+                f"Targeted reconciliation is bounded to WB supply_id {TARGETED_WB_RECONCILIATION_SUPPLY_ID}",
+            )
+        canonical_source_key = f"wb_supply_debit:supply:{requested_supply_id}"
+        original = self.runtime.load_ff_stock_operation_by_source_key(canonical_source_key)
+        if original is None:
+            raise TargetedWbSupplyReconciliationError(
+                "targeted_operation_not_found",
+                f"Targeted WB debit for supply {requested_supply_id} was not found",
+            )
+        diagnostics = dict(original.get("diagnostics") or {})
+        if (
+            str(original.get("operation_type") or "") != FF_STOCK_OPERATION_AUTO_WRITEOFF
+            or str(original.get("source_type") or "") != FF_STOCK_SOURCE_WB_SUPPLY
+            or str(original.get("source_object_id") or "") != requested_supply_id
+            or str(diagnostics.get("reason") or "") != TARGETED_WB_RECONCILIATION_REASON
+        ):
+            raise TargetedWbSupplyReconciliationError(
+                "operation_not_targeted_reconciliation",
+                "Only a targeted checkpoint reconciliation operation can be reversed by this path",
+            )
+        reversal_source_key = f"wb_supply_debit_reversal:supply:{requested_supply_id}"
+        existing = self.runtime.load_ff_stock_operation_by_source_key(reversal_source_key)
+        if existing is not None:
+            existing_fingerprint = str((existing.get("diagnostics") or {}).get("dry_run_fingerprint") or "")
+            existing["idempotent"] = True
+            return {
+                "status": "already_reversed",
+                "apply_allowed": False,
+                "idempotent": True,
+                "fingerprint": existing_fingerprint,
+                "operation": existing,
+            }
+        original_with_lines = self.runtime.load_ff_stock_operation(str(original.get("operation_id") or "")) or {}
+        original_lines = [dict(item) for item in original_with_lines.get("lines") or []]
+        if not original_lines:
+            raise TargetedWbSupplyReconciliationError("targeted_operation_lines_missing", "Original targeted debit has no lines")
+        reversal_lines = [
+            {
+                **line,
+                "quantity_delta": abs(float(line.get("quantity_delta") or 0.0)),
+                "raw": {"compensates_operation_id": str(original.get("operation_id") or "")},
+            }
+            for line in original_lines
+        ]
+        balance_rows = self.runtime.list_ff_stock_balances()
+        balances = {int(item.get("nm_id") or 0): float(item.get("balance") or 0.0) for item in balance_rows}
+        expected_balances = {str(int(line["nm_id"])): balances.get(int(line["nm_id"]), 0.0) for line in reversal_lines}
+        total_before = sum(balances.values())
+        fingerprint_payload = {
+            "plan_version": TARGETED_WB_RECONCILIATION_PLAN_VERSION,
+            "reason": "targeted_checkpoint_reconciliation_reversal",
+            "supply_id": requested_supply_id,
+            "original_operation_id": str(original.get("operation_id") or ""),
+            "original_source_key": canonical_source_key,
+            "reversal_source_key": reversal_source_key,
+            "expected_balances": expected_balances,
+            "expected_ledger_totals": {
+                "before": total_before,
+                "delta": sum(float(item.get("quantity_delta") or 0.0) for item in reversal_lines),
+                "after": total_before + sum(float(item.get("quantity_delta") or 0.0) for item in reversal_lines),
+            },
+            "operation_lines": reversal_lines,
+        }
+        fingerprint = _stable_reconciliation_fingerprint(fingerprint_payload)
+        total_receipt = sum(float(item.get("quantity_delta") or 0.0) for item in reversal_lines)
+        return {
+            "status": "reversal_dry_run",
+            "apply_allowed": True,
+            "fingerprint": fingerprint,
+            "supply_id": requested_supply_id,
+            "original_operation_id": str(original.get("operation_id") or ""),
+            "original_source_key": canonical_source_key,
+            "reversal_source_key": reversal_source_key,
+            "totals": {"before": total_before, "receipt": total_receipt, "after": total_before + total_receipt},
+            "apply_guards": fingerprint_payload,
+            "human_summary": (
+                f"Компенсация WB-поставки № {requested_supply_id}: +{total_receipt:g}; "
+                f"исходная операция {original.get('operation_id')} сохраняется"
+            ),
+        }
+
+    def apply_targeted_wb_supply_reversal(
+        self,
+        supply_id: str,
+        *,
+        apply: bool,
+        confirmation_fingerprint: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        if not apply:
+            raise TargetedWbSupplyReconciliationError(
+                "explicit_apply_required",
+                "Targeted reconciliation reversal requires an explicit apply flag",
+            )
+        requested_supply_id = str(supply_id or "").strip()
+        if requested_supply_id != TARGETED_WB_RECONCILIATION_SUPPLY_ID:
+            raise TargetedWbSupplyReconciliationError(
+                "invalid_supply_id",
+                f"Targeted reconciliation is bounded to WB supply_id {TARGETED_WB_RECONCILIATION_SUPPLY_ID}",
+            )
+        reversal_source_key = f"wb_supply_debit_reversal:supply:{requested_supply_id}"
+        existing = self.runtime.load_ff_stock_operation_by_source_key(reversal_source_key)
+        if existing is not None:
+            existing_fingerprint = str((existing.get("diagnostics") or {}).get("dry_run_fingerprint") or "")
+            if not confirmation_fingerprint or confirmation_fingerprint != existing_fingerprint:
+                raise TargetedWbSupplyReconciliationError(
+                    "stale_or_invalid_fingerprint",
+                    "Confirmation fingerprint does not match the existing reversal operation",
+                    details={"expected": existing_fingerprint, "provided": str(confirmation_fingerprint or "")},
+                )
+            existing["idempotent"] = True
+            return {
+                "status": "already_reversed",
+                "idempotent": True,
+                "operation": existing,
+                "post_run_reconciliation": self._targeted_post_run_reconciliation(existing),
+            }
+        plan = self.plan_targeted_wb_supply_reversal(requested_supply_id)
+        actual_fingerprint = str(plan.get("fingerprint") or "")
+        if not confirmation_fingerprint or confirmation_fingerprint != actual_fingerprint:
+            raise TargetedWbSupplyReconciliationError(
+                "stale_or_invalid_fingerprint",
+                "Reversal dry-run fingerprint is stale or does not match the current plan",
+                details={"expected": actual_fingerprint, "provided": str(confirmation_fingerprint or "")},
+            )
+        guards = dict(plan.get("apply_guards") or {})
+        operation = self.runtime.create_ff_stock_operation_guarded(
+            operation_id="ffso_" + uuid4().hex[:20],
+            operation_type=FF_STOCK_OPERATION_CORRECTION_RECEIPT,
+            source_type=FF_STOCK_SOURCE_TARGETED_RECONCILIATION,
+            source_key=reversal_source_key,
+            source_object_id=str(guards.get("original_operation_id") or ""),
+            source_object_label=f"Компенсация targeted WB-поставки № {requested_supply_id}",
+            created_at=self.timestamp_factory(),
+            created_by=str(created_by or "operator").strip() or "operator",
+            warnings=[],
+            diagnostics={
+                "reason": "targeted_checkpoint_reconciliation_reversal",
+                "supply_id": requested_supply_id,
+                "compensates_operation_id": str(guards.get("original_operation_id") or ""),
+                "compensates_source_key": str(guards.get("original_source_key") or ""),
+                "dry_run_fingerprint": actual_fingerprint,
+                "history_preserved": True,
+            },
+            lines=[dict(item) for item in guards.get("operation_lines") or []],
+            expected_balances={int(key): float(value) for key, value in dict(guards.get("expected_balances") or {}).items()},
+            expected_ledger_totals=dict(guards.get("expected_ledger_totals") or {}),
+        )
+        return {
+            "status": "reversed" if not operation.get("idempotent") else "already_reversed",
+            "idempotent": bool(operation.get("idempotent")),
+            "fingerprint": actual_fingerprint,
+            "operation": operation,
+            "original_operation_id": str(guards.get("original_operation_id") or ""),
+            "post_run_reconciliation": self._targeted_post_run_reconciliation(operation),
+        }
+
+    def _targeted_post_run_reconciliation(self, operation: Mapping[str, Any]) -> dict[str, Any]:
+        operation_with_lines = self.runtime.load_ff_stock_operation(str(operation.get("operation_id") or "")) or {}
+        nm_ids = sorted({int(item.get("nm_id") or 0) for item in operation_with_lines.get("lines") or []})
+        all_balances = self.runtime.list_ff_stock_balances()
+        balances = {int(item.get("nm_id") or 0): float(item.get("balance") or 0.0) for item in all_balances}
+        return {
+            "operation_id": str(operation.get("operation_id") or ""),
+            "source_key": str(operation.get("source_key") or ""),
+            "affected_skus": [{"nm_id": nm_id, "current_balance": balances.get(nm_id, 0.0)} for nm_id in nm_ids],
+            "ledger_total_after": sum(balances.values()),
+            "negative_affected_skus": [nm_id for nm_id in nm_ids if balances.get(nm_id, 0.0) < -1e-9],
+        }
+
     def _parse_rows(self, rows: list[list[Any]]) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
         if not rows:
             raise ValueError("XLSX должен содержать строку заголовков")
@@ -730,6 +1320,88 @@ def _wb_supply_goods_lines(raw_goods: list[Mapping[str, Any]], nomenclature_by_n
         )
         target["quantity_delta"] -= float(quantity)
     return list(grouped.values()), warnings
+
+
+def _targeted_wb_supply_goods_lines(
+    raw_goods: list[Any],
+    nomenclature_by_nm: Mapping[int, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+    grouped: dict[int, dict[str, Any]] = {}
+    warnings: list[str] = []
+    errors: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_goods, start=1):
+        if not isinstance(raw, Mapping):
+            errors.append({"code": "wb_supply_goods_row_invalid", "row": index})
+            continue
+        item = dict(raw)
+        nm_id = _optional_int(_first_present(item, "nmID", "nmId", "nm_id"))
+        quantity = _optional_float(_first_present(item, "quantity", "qty"))
+        if nm_id is None:
+            errors.append({"code": "wb_supply_goods_nm_id_missing", "row": index})
+            continue
+        if quantity is None or quantity <= 0:
+            errors.append(
+                {
+                    "code": "wb_supply_goods_quantity_not_positive",
+                    "row": index,
+                    "nm_id": nm_id,
+                    "quantity": quantity,
+                }
+            )
+            continue
+        nomenclature = nomenclature_by_nm.get(nm_id)
+        if nomenclature is None:
+            errors.append({"code": "wb_supply_goods_nm_id_not_in_active_nomenclature", "row": index, "nm_id": nm_id})
+            continue
+        target = grouped.setdefault(
+            nm_id,
+            {
+                **_nomenclature_public_fields(nomenclature),
+                "nm_id": nm_id,
+                "barcode": str(_first_present(item, "barcode", "barCode", "barcodeID") or nomenclature.get("barcode") or ""),
+                "quantity_delta": 0.0,
+                "raw": {"source": "wb_supplies_cache.raw_goods", "source_rows": []},
+            },
+        )
+        target["quantity_delta"] -= float(quantity)
+        target["raw"]["source_rows"].append(index)
+    if len(grouped) < len(raw_goods) and not errors:
+        warnings.append("Некоторые WB goods rows объединены по nmId")
+    return [grouped[nm_id] for nm_id in sorted(grouped)], warnings, errors
+
+
+def _targeted_supply_guard(*, record: Mapping[str, Any], normalized: Mapping[str, Any]) -> dict[str, Any]:
+    raw_goods = record.get("raw_goods") if isinstance(record.get("raw_goods"), list) else None
+    return {
+        "supply_id": str(record.get("supply_id") or ""),
+        "cache_key": str(record.get("cache_key") or normalized.get("cache_key") or ""),
+        "wb_supply_id": str(record.get("wb_supply_id") or normalized.get("wb_supply_id") or ""),
+        "preorder_id": str(record.get("preorder_id") or normalized.get("preorder_id") or ""),
+        "normalized_supply_id": str(normalized.get("supply_id") or ""),
+        "normalized_cache_key": str(normalized.get("cache_key") or ""),
+        "status_id": int(_optional_int(normalized.get("status_id")) or 0),
+        "virtual_type_id": normalized.get("virtual_type_id"),
+        "type_label": str(normalized.get("type_label") or ""),
+        "source_created_at": str(normalized.get("source_created_at") or ""),
+        "supply_date": str(normalized.get("supply_date") or ""),
+        "raw_goods": raw_goods,
+        "raw_goods_hash": str(record.get("raw_goods_hash") or normalized.get("raw_goods_hash") or ""),
+    }
+
+
+def _targeted_nomenclature_guard(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "item_id": str(item.get("item_id") or ""),
+        "nm_id": int(_optional_int(item.get("nm_id")) or 0),
+        "is_active": bool(item.get("is_active")),
+        "is_hidden": bool(item.get("is_hidden")),
+        "updated_at": str(item.get("updated_at") or ""),
+    }
+
+
+def _stable_reconciliation_fingerprint(value: Mapping[str, Any]) -> str:
+    body = json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _negative_balance_preview(

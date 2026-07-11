@@ -32,6 +32,9 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/supply/ff-stocks/confirm"
   - "GET /v1/sheet-vitrina-v1/supply/ff-stocks/operations/{operation_id}/file"
 related_runners:
+  - "apps/ff_stock_targeted_reconciliation.py"
+  - "apps/ff_stock_targeted_reconciliation_smoke.py"
+  - "apps/ff_stock_targeted_reconciliation_runner_smoke.py"
   - "apps/ff_stock_ledger_smoke.py"
   - "apps/ff_stock_ledger_http_smoke.py"
   - "apps/factory_order_supply_smoke.py"
@@ -39,7 +42,7 @@ related_runners:
   - "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"
   - "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "`Остатки ФФ` are computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier movements are idempotent by source key, WB auto writeoffs are guarded by an explicit repair/mechanics checkpoint with baseline-known WB cache/source/supply keys, ledger activation/opening balance and no-negative-balance checks, negative balances are shown with critical calculation warnings, and calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
+update_note: "`Остатки ФФ` are computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier movements are idempotent by source key, and ordinary WB auto writeoffs remain guarded by an explicit repair/mechanics checkpoint with baseline-known WB cache/source/supply keys, ledger activation/opening balance and no-negative-balance checks. A separate repo-owned runner is bounded to WB supply `40561872`: it can bypass only `wb_supply_before_auto_writeoff_checkpoint` after a read-only dry-run, exact fingerprint confirmation, coherent SQLite backup and atomic cache/goods/status/balance recheck; reversal is an audited compensating receipt and never deletes history. Calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
 ---
 
 # 1. Contract
@@ -150,6 +153,33 @@ Activation and balance guards:
 - If the cached WB goods composition would make any SKU balance negative, the whole automatic writeoff is skipped with diagnostics instead of silently creating a negative balance.
 - Repeated sync/backfill/detail enrichment remains idempotent by `wb_supply_debit:<cache_key or supply_id>` and does not duplicate an existing writeoff.
 
+## 6.1. Bounded Targeted Checkpoint Reconciliation
+
+`apps/ff_stock_targeted_reconciliation.py` is the canonical operational path for the one known baseline incident `supply_id=40561872`. The runner rejects every other supply id, accepts no manual goods/SKU/quantity payload, reads `raw_goods` and current active nomenclature only from the server-owned runtime, and is not exposed through the operator UI or HTTP API.
+
+Read-only preflight/dry-run:
+
+```bash
+python3 apps/ff_stock_targeted_reconciliation.py \
+  --runtime-dir "$REGISTRY_UPLOAD_RUNTIME_DIR" \
+  --supply-id 40561872
+```
+
+The plan requires exact identity `supply_id=40561872`, `cache_key=supply:40561872` and `source_key=wb_supply_debit:supply:40561872`; the incident invariants of exactly 13 SKU, total cached debit `31 500`, whole-ledger total before `38 250` and projected total after `6 750`; status `3/4/5/6`; non-`Допринято`; non-empty strictly positive cached goods rows whose `nmId` exists in active, non-hidden nomenclature; an existing ledger activation; and sufficient balance for every SKU. It reports supply/status/checkpoint evidence, every SKU balance/debit/projected balance, totals, blockers and a stable `sha256:` fingerprint. The bypass is applicable only when the ordinary reason is exactly `wb_supply_before_auto_writeoff_checkpoint`; missing/invalid checkpoint, changed global total or an ordinarily eligible post-checkpoint supply fails closed.
+
+Apply requires all three human gates: explicit `--apply`, the exact current dry-run fingerprint in `--confirm-fingerprint`, and an explicit `--backup-dir`. Before any ledger write the runner creates and hashes a coherent SQLite backup and requires its `PRAGMA integrity_check` result to be `ok`. The application then opens one immediate SQLite transaction, rechecks supply identity, cache key, canonical source key, status/type/source timestamps, raw goods, current checkpoint, ledger activation, active/non-hidden nomenclature rows, every affected SKU balance and the whole-ledger before/delta/after totals, and only then appends the linked `auto_writeoff / wb_supply` operation. A change to goods, status, nomenclature, affected balances or non-target global total makes the fingerprint/atomic guard stale. The checkpoint row itself is never updated.
+
+The target writeoff uses:
+- `operation_type=auto_writeoff`;
+- `source_type=wb_supply`;
+- `source_key=wb_supply_debit:supply:40561872`;
+- `source_object_id=40561872` and an explicit WB-supply label;
+- diagnostics reason `targeted_checkpoint_reconciliation`, the dry-run fingerprint, checkpoint evidence and before/debit/after totals.
+
+The canonical source key keeps apply and all later ordinary WB sync/backfill/detail flows idempotent. Per-SKU negative projections block the whole operation and report `nm_id`, current balance, required debit and projected balance.
+
+Reversibility uses the same runner with `--reversal`. It has its own dry-run/fingerprint/backup/apply gate and appends one idempotent `correction_receipt` with source type `wb_supply_targeted_reconciliation` and source key `wb_supply_debit_reversal:supply:40561872`. Diagnostics link the compensation to the original operation. Neither the original header nor its lines are deleted or rewritten.
+
 # 7. Calculation Source
 
 `Поставки -> Расчёты` supports three mutually exclusive `stock_ff_source` values:
@@ -166,11 +196,14 @@ The existing manual Excel and `1С / Фулфилмент` sources remain valid.
 # 8. Smokes
 
 Targeted smoke:
+- `python3 apps/ff_stock_targeted_reconciliation_smoke.py`
+- `python3 apps/ff_stock_targeted_reconciliation_runner_smoke.py`
 - `python3 apps/ff_stock_ledger_smoke.py`
 - `python3 apps/ff_stock_ledger_http_smoke.py`
 
 The smoke covers manual receipt/writeoff preview-confirm-balance, Excel export/import roundtrip, negative-balance warning, supplier auto receipt idempotency, WB checkpoint fail-closed behavior, baseline-known historical WB skip, post-checkpoint WB status writeoff idempotency, statuses `1/2` skip, `Допринято` skip, factory-order ledger source without duplicate selected-WB deduction, selected-WB inbound/projection for ledger source and WB regional ledger source.
 It also covers operation journal pagination metadata/second page retrieval, default status backward compatibility, archive-off visibility versus archive-on retrieval, and verifies that the archive view filter does not change computed balances.
+The targeted reconciliation smokes separately cover the baseline-known status `1/2 -> 3` transition, ordinary-path checkpoint preservation, hard-guarded exact `38 250 - 31 500 = 6 750` totals across 13 SKU, dry-run immutability and stable fingerprint, one linked apply plus ordinary-sync idempotency, statuses `1/2`, `Допринято`, missing goods, inactive nomenclature, changed global total and per-SKU shortage blockers, stale goods/status/balance plans, coherent CLI backup with `integrity_check=ok`, post-run reconciliation and an audited history-preserving reversal.
 
 # 9. Explicit Non-Scope
 
