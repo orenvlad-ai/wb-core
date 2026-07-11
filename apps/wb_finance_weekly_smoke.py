@@ -84,12 +84,36 @@ def main() -> None:
         if control["cost_coverage"]["coverage_pct"] != "100.0000":
             raise AssertionError(f"cost coverage mismatch: {payload}")
 
+        nomenclature_fallback = block.ingest_week(
+            date(2026, 2, 2),
+            date(2026, 2, 8),
+            [
+                {
+                    **rows[0],
+                    "reportId": 102,
+                    "rrdId": 1020,
+                    "nmId": 102,
+                    "vendorCode": "ANTI102",
+                    "sku": "4600000000102",
+                    "quantity": 1,
+                    "retailPriceWithDisc": "150",
+                    "forPay": "100",
+                    "rrDate": "2026-02-03",
+                    "saleDt": "2026-01-02T00:00:00Z",
+                }
+            ],
+        )
+        if nomenclature_fallback["aggregate"]["cogs"] != "115.0000":
+            raise AssertionError(
+                "canonical nomenclature product_type/rrDate cost mapping failed"
+            )
+
         # Same keys update in-place; no duplicate or doubled amounts.
         rows[0]["retailPriceWithDisc"] = "390"
         second = block.ingest_week(date(2026, 6, 22), date(2026, 6, 28), rows)
         with sqlite3.connect(block.db_path) as conn:
             raw_count = conn.execute(
-                "select count(*) from wb_finance_weekly_raw_rows"
+                "select count(*) from wb_finance_weekly_raw_rows where week_start='2026-06-22'"
             ).fetchone()[0]
         if (
             raw_count != len(rows)
@@ -231,12 +255,14 @@ def _seed_canonical_cost(db_path: Path) -> None:
             CREATE TABLE registry_upload_config_v2(bundle_version TEXT,nm_id INTEGER,enabled INTEGER,display_name TEXT,group_name TEXT,display_order INTEGER);
             CREATE TABLE cost_price_current_state(slot INTEGER PRIMARY KEY,dataset_version TEXT,activated_at TEXT);
             CREATE TABLE cost_price_upload_rows(dataset_version TEXT,row_order INTEGER,group_name TEXT,cost_price_rub TEXT,effective_from TEXT);
-            CREATE TABLE sheet_vitrina_v1_nomenclature_items(is_active INTEGER,nm_id INTEGER,vendor_code TEXT,barcode TEXT,barcodes_json TEXT);
+            CREATE TABLE sheet_vitrina_v1_nomenclature_items(is_active INTEGER,nm_id INTEGER,vendor_code TEXT,barcode TEXT,barcodes_json TEXT,product_type TEXT);
             INSERT INTO registry_upload_current_state VALUES(1,'bundle','2026-01-01');
             INSERT INTO registry_upload_config_v2 VALUES('bundle',101,1,'SKU','Group',1);
             INSERT INTO cost_price_current_state VALUES(1,'cost','2026-01-01');
             INSERT INTO cost_price_upload_rows VALUES('cost',1,'Group','100','2026-01-01');
-            INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(1,101,'VC101','4600000000101','["4600000000101"]');
+            INSERT INTO cost_price_upload_rows VALUES('cost',2,'Anti-Spy','115','2026-01-28');
+            INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(1,101,'VC101','4600000000101','["4600000000101"]','other');
+            INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(1,102,'ANTI102','4600000000102','["4600000000102"]','anti_spy');
             """
         )
         conn.commit()
