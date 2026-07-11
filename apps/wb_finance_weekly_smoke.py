@@ -147,6 +147,43 @@ def main() -> None:
             raise AssertionError(
                 "recovered cost coverage must restore completed status"
             )
+        distinct_missing = block.ingest_week(
+            date(2026, 4, 6),
+            date(2026, 4, 12),
+            [
+                dict(
+                    rows[0],
+                    reportId=401,
+                    rrdId=4010,
+                    nmId=401,
+                    vendorCode="missing-sale",
+                    sku="missing-sale",
+                    quantity=1,
+                ),
+                dict(
+                    rows[1],
+                    reportId=402,
+                    rrdId=4020,
+                    nmId=402,
+                    vendorCode="missing-return",
+                    sku="missing-return",
+                    quantity=1,
+                ),
+            ],
+        )
+        distinct_coverage = next(
+            week
+            for week in block.build_payload()["weeks"]
+            if week["week_start"] == "2026-04-06"
+        )["cost_coverage"]
+        if (
+            distinct_missing["aggregate"]["cogs"] is not None
+            or distinct_coverage["unmatched_units"] != 2
+            or len(distinct_coverage["problem_skus"]) != 2
+        ):
+            raise AssertionError(
+                f"different missing SKU movements must not cancel: {distinct_coverage}"
+            )
         second_sync = block.ingest_week(date(2026, 6, 22), date(2026, 6, 28), rows)
         if second_sync["status"] != "completed":
             raise AssertionError(

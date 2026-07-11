@@ -757,8 +757,7 @@ class WbFinanceWeeklyBlock:
                 )
             )
         cogs = ZERO
-        matched = 0
-        unmatched = 0
+        matched_movements: dict[str, int] = {}
         problems: dict[str, int] = {}
         for row in rows:
             doc = str(row.get("docTypeName") or "").casefold()
@@ -796,16 +795,28 @@ class WbFinanceWeeklyBlock:
                 for effective, cost in costs.get(group, [])
                 if effective <= operation_date
             ]
+            movement_key = (
+                internal_nm
+                or raw_keys[1]
+                or raw_keys[2]
+                or str(row.get("srid") or "")
+                or str(row.get("orderUid") or "")
+                or str(row.get("shkId") or "")
+                or "unknown"
+            )
             if not candidates:
-                unmatched += qty
-                problem_key = internal_nm or raw_keys[1] or raw_keys[2] or "unknown"
-                problems[problem_key] = problems.get(problem_key, 0) + qty
+                problems[movement_key] = problems.get(movement_key, 0) + qty
                 continue
-            matched += qty
+            matched_movements[movement_key] = (
+                matched_movements.get(movement_key, 0) + qty
+            )
             cogs += Decimal(qty) * candidates[-1]
-        denominator = abs(matched) + abs(unmatched)
+        problems = {key: units for key, units in problems.items() if units != 0}
+        matched = sum(abs(units) for units in matched_movements.values())
+        unmatched = sum(abs(units) for units in problems.values())
+        denominator = matched + unmatched
         coverage_pct = (
-            Decimal(abs(matched)) / Decimal(denominator) * Decimal("100")
+            Decimal(matched) / Decimal(denominator) * Decimal("100")
             if denominator
             else None
         )
