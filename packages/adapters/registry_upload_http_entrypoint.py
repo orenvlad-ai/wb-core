@@ -61,6 +61,7 @@ DEFAULT_SHEET_PLAN_PATH = "/v1/sheet-vitrina-v1/plan"
 DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
 DEFAULT_SHEET_PLAN_REPORT_PATH = "/v1/sheet-vitrina-v1/plan-report"
+DEFAULT_SHEET_WB_FINANCE_REPORT_PATH = "/v1/sheet-vitrina-v1/wb-finance-report"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-template.xlsx"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-upload"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-status"
@@ -1985,6 +1986,7 @@ def _build_handler(
                         daily_report_path=DEFAULT_SHEET_DAILY_REPORT_PATH,
                         stock_report_path=DEFAULT_SHEET_STOCK_REPORT_PATH,
                         plan_report_path=DEFAULT_SHEET_PLAN_REPORT_PATH,
+                        wb_finance_report_path=DEFAULT_SHEET_WB_FINANCE_REPORT_PATH,
                         refresh_path=sheet_refresh_path,
                         load_path=sheet_load_path,
                         status_path=sheet_status_path,
@@ -2542,6 +2544,19 @@ def _build_handler(
                     HTTPStatus.OK,
                     payload,
                 )
+                return
+
+            if parsed.path == DEFAULT_SHEET_WB_FINANCE_REPORT_PATH:
+                try:
+                    payload = entrypoint.handle_wb_finance_weekly_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB Finance weekly report runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == DEFAULT_SHEET_STOCK_REPORT_PATH:
@@ -6120,6 +6135,7 @@ def _required_section_for_path(path: str) -> str:
         DEFAULT_SHEET_DAILY_REPORT_PATH,
         DEFAULT_SHEET_STOCK_REPORT_PATH,
         DEFAULT_SHEET_PLAN_REPORT_PATH,
+        DEFAULT_SHEET_WB_FINANCE_REPORT_PATH,
         DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
         DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
         DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,
@@ -6496,6 +6512,7 @@ def _render_sheet_vitrina_operator_ui(
     daily_report_path: str,
     stock_report_path: str,
     plan_report_path: str,
+    wb_finance_report_path: str = DEFAULT_SHEET_WB_FINANCE_REPORT_PATH,
     refresh_path: str,
     load_path: str,
     status_path: str,
@@ -6513,6 +6530,7 @@ def _render_sheet_vitrina_operator_ui(
         "daily_report_path": daily_report_path,
         "stock_report_path": stock_report_path,
         "plan_report_path": plan_report_path,
+        "wb_finance_report_path": wb_finance_report_path,
         "plan_report_baseline_template_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH,
         "plan_report_baseline_upload_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH,
         "plan_report_baseline_status_path": DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH,

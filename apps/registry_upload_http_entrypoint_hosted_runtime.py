@@ -207,6 +207,7 @@ ROUTE_ENV_DEFAULTS = {
 RSYNC_EXCLUDES = [
     ".git/",
     ".runtime/",
+    "scratch/",
     ".clasp.json",
     "__pycache__/",
     ".pytest_cache/",
