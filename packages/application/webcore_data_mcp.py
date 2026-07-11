@@ -11,14 +11,13 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 from packages.application.webcore_ops_diagnostics import (
-    ALLOWED_RUNTIME_UNITS,
     OPS_TOOL_NAMES,
-    SERVICE_LOG_PRIORITIES,
     WebCoreOpsDiagnostics,
     WebCoreOpsDiagnosticsError,
 )
@@ -27,13 +26,13 @@ DB_FILENAME = "registry_upload_runtime.sqlite3"
 DEFAULT_MAX_LIMIT = 50
 MAX_LIMIT = 100
 MAX_DATE_RANGE_DAYS = 62
-AUDIT_SCHEMA_VERSION = "webcore_data_mcp_audit_v1"
+AUDIT_SCHEMA_VERSION = "webcore_data_mcp_audit_v2"
 SCOPE_ANALYTICS_READ = "webcore.analytics.read"
 SCOPE_SUPPLY_READ = "webcore.supply.read"
 SCOPE_FINANCE_READ = "webcore.finance.read"
 SCOPE_OPS_READ = "webcore.ops.read"
 
-BUSINESS_TOOL_NAMES = (
+LEGACY_BUSINESS_TOOL_NAMES = (
     "get_webcore_data_map",
     "resolve_webcore_data_request",
     "resolve_webcore_data_intent",
@@ -63,7 +62,30 @@ BUSINESS_TOOL_NAMES = (
     "get_revenue_by_date",
     "get_revenue_range",
 )
-APPROVED_TOOL_NAMES = (*BUSINESS_TOOL_NAMES, *OPS_TOOL_NAMES)
+
+MODEL_TOOL_ALIASES = {
+    "freshness": "get_data_freshness_status",
+    "metric_catalog": "list_metrics",
+    "metric_values": "get_metric_values",
+    "sku_search": "search_business_objects",
+    "sku_snapshot": "get_sku_snapshot",
+    "supplier_shipments": "get_supplier_shipments_registry",
+    "supplier_shipment": "get_supplier_shipment_full_details",
+    "wb_supplies": "get_wb_supplies_registry",
+    "wb_supply": "get_wb_supply_full_details",
+    "supply_artifacts": "list_supply_artifacts",
+    "supply_artifact": "get_supply_artifact",
+    "factory_order": "get_latest_factory_order_calculation",
+    "stock_report": "get_stock_report",
+    "runtime_health": "get_runtime_health_summary",
+    "refresh_diagnostics": "get_refresh_diagnostics",
+    "deploy_state": "get_deploy_state",
+}
+MODEL_VISIBLE_TOOL_NAMES = tuple(MODEL_TOOL_ALIASES)
+BUSINESS_TOOL_NAMES = tuple(
+    dict.fromkeys((*MODEL_VISIBLE_TOOL_NAMES, *LEGACY_BUSINESS_TOOL_NAMES))
+)
+APPROVED_TOOL_NAMES = tuple(dict.fromkeys((*BUSINESS_TOOL_NAMES, *OPS_TOOL_NAMES)))
 
 FORBIDDEN_OUTPUT_KEY_MARKERS = (
     "password",
@@ -113,6 +135,7 @@ REVENUE_CANDIDATE_MARKERS = (
 @dataclass(frozen=True)
 class ToolDefinition:
     name: str
+    title: str
     description: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any] | None = None
@@ -137,6 +160,7 @@ class WebCoreDataMcpGateway:
         max_limit: int = DEFAULT_MAX_LIMIT,
         ops_diagnostics: WebCoreOpsDiagnostics | None = None,
         ops_command_runner: Any | None = None,
+        emit_audit_to_stdout: bool = False,
     ) -> None:
         resolved_runtime_dir: Path | None = runtime_dir
         if db_path is None:
@@ -150,10 +174,14 @@ class WebCoreDataMcpGateway:
         self.db_path = Path(db_path).expanduser()
         self.audit_log_path = Path(audit_log_path).expanduser() if audit_log_path else None
         self.max_limit = max(1, min(int(max_limit or DEFAULT_MAX_LIMIT), MAX_LIMIT))
+        self.emit_audit_to_stdout = bool(emit_audit_to_stdout)
+        self._audit_lock = threading.Lock()
+        self._call_context = threading.local()
         self.ops_diagnostics = ops_diagnostics or WebCoreOpsDiagnostics(
             runtime_dir=self.runtime_dir,
             db_path=self.db_path,
             command_runner=ops_command_runner,
+            mcp_audit_log_path=self.audit_log_path,
         )
 
     def list_tools(self) -> list[dict[str, Any]]:
@@ -163,10 +191,16 @@ class WebCoreDataMcpGateway:
             tools.append(
                 {
                     "name": definition.name,
+                    "title": definition.title,
                     "description": definition.description,
                     "inputSchema": definition.input_schema,
                     "outputSchema": definition.output_schema or _object_schema(),
-                    "annotations": {"readOnlyHint": True},
+                    "annotations": {
+                        "readOnlyHint": True,
+                        "destructiveHint": False,
+                        "idempotentHint": True,
+                        "openWorldHint": False,
+                    },
                     "securitySchemes": security_schemes,
                     "_meta": {"securitySchemes": security_schemes},
                 }
@@ -179,34 +213,108 @@ class WebCoreDataMcpGateway:
         arguments: Mapping[str, Any] | None = None,
         *,
         identity: str = "",
+        correlation_id: str = "",
+        deadline_at: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         args = dict(arguments or {})
         started = time.monotonic()
-        status = "ok"
+        request_id = correlation_id or f"local-{int(time.time() * 1000)}-{threading.get_ident()}"
+        identity_hash = _hash_text(identity) if identity else ""
         row_count = 0
+        self._call_context.deadline_at = deadline_at
+        self._call_context.cancel_event = cancel_event
+        self.record_call_event(
+            request_id=request_id,
+            tool=name,
+            identity_hash=identity_hash,
+            event="start",
+            status="started",
+            duration_ms=0,
+            result_bytes=0,
+        )
         try:
             if name not in APPROVED_TOOL_NAMES:
                 raise WebCoreDataMcpError(f"tool is not allowlisted: {name}", code="tool_not_allowlisted")
             result = self._call_tool(name, args)
-            row_count = _estimate_row_count(result)
-            return _redact(result)
-        except Exception:
-            status = "error"
+            redacted = _redact(result)
+            row_count = _estimate_row_count(redacted)
+            result_bytes = len(json.dumps(redacted, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            late = bool(cancel_event and cancel_event.is_set())
+            self.record_call_event(
+                request_id=request_id,
+                tool=name,
+                identity_hash=identity_hash,
+                event="finish",
+                status="late_after_timeout" if late else "ok",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                result_bytes=result_bytes,
+                row_count=row_count,
+            )
+            return redacted
+        except sqlite3.OperationalError as exc:
+            deadline_reached = deadline_at is not None and time.monotonic() >= deadline_at
+            cancelled = bool(cancel_event and cancel_event.is_set())
+            if deadline_reached or cancelled or "interrupted" in str(exc).lower():
+                error = WebCoreDataMcpError("SQLite query deadline exceeded", code="sqlite_timeout")
+            else:
+                error = exc
+            self.record_call_event(
+                request_id=request_id,
+                tool=name,
+                identity_hash=identity_hash,
+                event="controlled_error",
+                status="timeout" if isinstance(error, WebCoreDataMcpError) else "error",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                result_bytes=0,
+                error_code=error.code if isinstance(error, WebCoreDataMcpError) else error.__class__.__name__,
+            )
+            raise error
+        except Exception as exc:
+            self.record_call_event(
+                request_id=request_id,
+                tool=name,
+                identity_hash=identity_hash,
+                event="controlled_error",
+                status="error",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                result_bytes=0,
+                error_code=exc.code if isinstance(exc, WebCoreDataMcpError) else exc.__class__.__name__,
+            )
             raise
         finally:
-            self._audit(
-                {
-                    "schema_version": AUDIT_SCHEMA_VERSION,
-                    "at": _utc_now(),
-                    "tool": name,
-                    "identity_hash": _hash_text(identity) if identity else "",
-                    "argument_keys": sorted(str(key) for key in args.keys()),
-                    "arguments_hash": _hash_json(args),
-                    "status": status,
-                    "row_count": row_count,
-                    "duration_ms": int((time.monotonic() - started) * 1000),
-                }
-            )
+            self._call_context.deadline_at = None
+            self._call_context.cancel_event = None
+
+    def record_call_event(
+        self,
+        *,
+        request_id: str,
+        tool: str,
+        identity_hash: str,
+        event: str,
+        status: str,
+        duration_ms: int,
+        result_bytes: int,
+        row_count: int = 0,
+        error_code: str = "",
+    ) -> None:
+        self._audit(
+            {
+                "schema_version": AUDIT_SCHEMA_VERSION,
+                "at": _utc_now(),
+                "request_id": request_id,
+                "correlation_id": request_id,
+                "event": event,
+                "tool": tool,
+                "identity_hash": identity_hash,
+                "status": status,
+                "duration_ms": max(0, int(duration_ms)),
+                "result_bytes": max(0, int(result_bytes)),
+                "row_count": max(0, int(row_count)),
+                "error_code": str(error_code or "")[:80],
+            }
+        )
 
     def verify_read_only_connection(self) -> dict[str, Any]:
         with self._connect() as conn:
@@ -225,16 +333,23 @@ class WebCoreDataMcpGateway:
             }
 
     def _call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        requested_name = name
+        name = MODEL_TOOL_ALIASES.get(name, name)
         if name in OPS_TOOL_NAMES:
             try:
-                return self.ops_diagnostics.call_tool(name, args)
+                return self.ops_diagnostics.call_tool(
+                    name,
+                    args,
+                    deadline_at=getattr(self._call_context, "deadline_at", None),
+                    cancel_event=getattr(self._call_context, "cancel_event", None),
+                )
             except WebCoreOpsDiagnosticsError as exc:
                 raise WebCoreDataMcpError(str(exc), code="invalid_ops_diagnostics_request") from exc
         if name == "get_webcore_data_map":
             return self.get_webcore_data_map(
                 domain=_optional_str(args.get("domain"), max_length=40) or "all",
-                include_examples=_optional_bool(args.get("include_examples"), default=True),
-                include_limitations=_optional_bool(args.get("include_limitations"), default=True),
+                include_examples=_optional_bool(args.get("include_examples"), default=False),
+                include_limitations=_optional_bool(args.get("include_limitations"), default=False),
             )
         if name in {"resolve_webcore_data_request", "resolve_webcore_data_intent"}:
             return self.resolve_webcore_data_request(
@@ -292,8 +407,8 @@ class WebCoreDataMcpGateway:
             return self.get_supplier_shipment_full_details(
                 shipment_id=_required_str(args, "shipment_id", max_length=120),
                 include_raw_business_payloads=_optional_bool(args.get("include_raw_business_payloads"), default=False),
-                line_limit=_bounded_limit(args.get("line_limit"), MAX_LIMIT),
-                document_limit=_bounded_limit(args.get("document_limit"), MAX_LIMIT),
+                line_limit=_bounded_limit(args.get("line_limit"), 25 if requested_name == "supplier_shipment" else MAX_LIMIT),
+                document_limit=_bounded_limit(args.get("document_limit"), 25 if requested_name == "supplier_shipment" else MAX_LIMIT),
             )
         if name == "get_wb_supplies_registry":
             return self.get_wb_supplies_registry(
@@ -311,7 +426,10 @@ class WebCoreDataMcpGateway:
         if name == "get_wb_supply_full_details":
             return self.get_wb_supply_full_details(
                 supply_id=_required_str(args, "supply_id", max_length=120),
-                include_raw_business_payloads=_optional_bool(args.get("include_raw_business_payloads"), default=True),
+                include_raw_business_payloads=_optional_bool(
+                    args.get("include_raw_business_payloads"),
+                    default=requested_name != "wb_supply",
+                ),
             )
         if name == "list_supply_artifacts":
             return self.list_supply_artifacts(
@@ -336,7 +454,11 @@ class WebCoreDataMcpGateway:
         if name == "search_business_objects":
             return self.search_business_objects(
                 query=_required_str(args, "query", max_length=120),
-                object_types=_optional_str_list(args.get("object_types")),
+                object_types=(
+                    _optional_str_list(args.get("object_types")) or ["sku", "nomenclature"]
+                    if requested_name == "sku_search"
+                    else _optional_str_list(args.get("object_types"))
+                ),
             )
         if name == "explain_metric_source":
             return self.explain_metric_source(metric_key=_required_str(args, "metric_key", max_length=160))
@@ -1134,10 +1256,10 @@ class WebCoreDataMcpGateway:
                 {
                     "name": definition.name,
                     "required_scope": definition.scope,
-                    "description": definition.description,
-                    "read_only": True,
+                    "title": definition.title,
                 }
                 for definition in _tool_definitions()
+                if normalized_domain != "all" and _model_tool_domain(definition.name) == normalized_domain
             ],
             "scopes": [
                 {"scope": SCOPE_ANALYTICS_READ, "domains": ["navigation", "freshness", "metrics", "sku", "business_tables"]},
@@ -1152,7 +1274,7 @@ class WebCoreDataMcpGateway:
                 if normalized_domain == "all" or spec.get("domain") == normalized_domain
             ],
             "artifact_catalog": artifact_catalog if normalized_domain in {"all", "artifacts", "supplier_shipments", "cny"} else [],
-            "boundary_rules": _boundary_rules(),
+            "boundary_rules": _boundary_rules() if include_limitations else [],
             "known_limitations": _known_limitations() if include_limitations else [],
             "not_source_of_truth_note": (
                 "This map is a derived navigation layer over current MCP tools, allowlisted runtime tables "
@@ -2129,18 +2251,34 @@ class WebCoreDataMcpGateway:
     def _connect(self) -> sqlite3.Connection:
         if not self.db_path.exists():
             raise WebCoreDataMcpError(f"runtime DB does not exist: {self.db_path}", code="runtime_db_missing")
+        deadline_at = getattr(self._call_context, "deadline_at", None)
+        cancel_event = getattr(self._call_context, "cancel_event", None)
+        remaining = max(0.05, float(deadline_at - time.monotonic())) if deadline_at is not None else 5.0
         quoted_path = quote(str(self.db_path.resolve()), safe="/:")
-        conn = sqlite3.connect(f"file:{quoted_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{quoted_path}?mode=ro", uri=True, timeout=min(remaining, 5.0))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
+        conn.execute(f"PRAGMA busy_timeout={max(1, int(min(remaining, 5.0) * 1000))}")
+        if deadline_at is not None or cancel_event is not None:
+            def should_interrupt() -> int:
+                if cancel_event is not None and cancel_event.is_set():
+                    return 1
+                if deadline_at is not None and time.monotonic() >= deadline_at:
+                    return 1
+                return 0
+
+            conn.set_progress_handler(should_interrupt, 1000)
         return conn
 
     def _audit(self, payload: Mapping[str, Any]) -> None:
-        if self.audit_log_path is None:
-            return
-        self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.audit_log_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(_redact(dict(payload)), ensure_ascii=True, sort_keys=True) + "\n")
+        serialized = json.dumps(dict(payload), ensure_ascii=True, sort_keys=True)
+        with self._audit_lock:
+            if self.audit_log_path is not None:
+                self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.audit_log_path.open("a", encoding="utf-8") as fh:
+                    fh.write(serialized + "\n")
+            if self.emit_audit_to_stdout:
+                print(serialized, flush=True)
 
     def _db_file_meta(self) -> dict[str, Any]:
         if not self.db_path.exists():
@@ -2732,246 +2870,252 @@ class WebCoreDataMcpGateway:
 def _tool_definitions() -> list[ToolDefinition]:
     return [
         ToolDefinition(
-            "get_webcore_data_map",
-            "Use this first for orientation. Returns the WebCore Data MCP guide: domains, tools, scopes, business tables, artifact kinds, Russian intent examples and safety boundaries.",
+            "freshness",
+            "WebCore data freshness",
+            "Use this when the user asks whether WebCore business data is fresh or which persisted sources are current. It never triggers refresh or sync.",
+            _schema({}),
+            _strict_output_schema("status", "source", "db", "ready_snapshots", "temporal_slot_sources", "temporal_sources", "wb_supplies", "supplier_shipments", "factory_order", "notes"),
+        ),
+        ToolDefinition(
+            "metric_catalog",
+            "Metric catalog",
+            "Use this only to discover metric keys or Russian labels when the requested metric is not already known. Returns bounded persisted metric metadata, not values.",
+            _schema({
+                "query": _documented(_string_schema(0, 160), "Optional metric key or Russian-label search text."),
+                "section": _documented(_string_schema(0, 120), "Optional exact section filter."),
+                "scope": _documented(_string_schema(0, 60), "Optional metric scope filter."),
+                "limit": _documented(_int_schema(1, MAX_LIMIT), "Maximum rows.", default=DEFAULT_MAX_LIMIT),
+            }),
+            _strict_output_schema("status", "query", "section", "scope", "limit", "rows", "truncated", "latest_ready_snapshot", "source_tables"),
+        ),
+        ToolDefinition(
+            "metric_values",
+            "Metric values",
+            "Use this for a metric value by key or Russian label for one date or a bounded date range, optionally for one SKU. Reads persisted ready snapshots only.",
+            _schema({
+                "metric_key_or_label": _documented(_string_schema(1, 180), "Exact metric key or an unambiguous Russian label."),
+                "date": _documented(_date_schema(), "Single snapshot date; do not combine with date_from/date_to."),
+                "date_from": _documented(_date_schema(), "Inclusive range start, paired with date_to."),
+                "date_to": _documented(_date_schema(), "Inclusive range end, paired with date_from; maximum 62 days."),
+                "sku_or_nm_id": _documented(_string_schema(0, 120), "Optional SKU, vendor code or nmId filter."),
+                "group_by": _documented(_enum_schema(["date", "metric", "sku", "total"]), "Optional result grouping."),
+                "limit": _documented(_int_schema(1, MAX_LIMIT), "Maximum value rows.", default=DEFAULT_MAX_LIMIT),
+            }, required=["metric_key_or_label"]),
+            _strict_output_schema("status", "metric_key_or_label", "resolved_metric_keys", "candidate_metrics", "date_from", "date_to", "sku_or_nm_id", "row_count", "limit", "truncated", "rows", "source_snapshots", "source_table", "caveat"),
+        ),
+        ToolDefinition(
+            "sku_search",
+            "Search SKU",
+            "Use this to find a SKU, nmId, vendor code or nomenclature identity from a bounded text query. For a known SKU's metrics use sku_snapshot instead.",
+            _schema({
+                "query": _documented(_string_schema(1, 120), "SKU name, vendor code or nmId."),
+                "object_types": _documented(_array_schema(_enum_schema(["sku", "nomenclature"])), "Optional SKU identity kinds; defaults to both sku and nomenclature."),
+            }, required=["query"]),
+            _strict_output_schema("status", "query", "object_types", "unknown_object_types", "limit_applied", "results"),
+        ),
+        ToolDefinition(
+            "sku_snapshot",
+            "SKU snapshot",
+            "Use this for one known SKU or nmId with its persisted metrics and freshness flags on an optional date. It does not search broad text.",
+            _schema({
+                "sku_or_nm_id": _documented(_string_schema(1, 120), "Known SKU, vendor code or nmId."),
+                "date": _documented(_date_schema(), "Optional snapshot date; defaults to the latest available snapshot."),
+            }, required=["sku_or_nm_id"]),
+            _strict_output_schema("status", "sku_or_nm_id", "date", "snapshot_id", "refreshed_at", "identity", "metrics", "missing_source_flags"),
+        ),
+        ToolDefinition(
+            "supplier_shipments",
+            "Supplier shipments",
+            "Use this for the supplier shipment registry/list, including physical totals, finance and document completeness. For one known shipment use supplier_shipment.",
             _schema(
                 {
-                    "domain": _enum_schema(["all", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables", "ops_diagnostics"]),
-                    "include_examples": {"type": "boolean"},
-                    "include_limitations": {"type": "boolean"},
+                    "shipment_id": _documented(_string_schema(0, 120), "Optional exact shipment identifier."),
+                    "invoice_no": _documented(_string_schema(0, 160), "Optional supplier invoice number."),
+                    "supplier_name": _documented(_string_schema(0, 160), "Optional supplier-name text filter."),
+                    "order_status": _documented(_string_schema(0, 80), "Optional order status filter."),
+                    "match_status": _documented(_string_schema(0, 80), "Optional nomenclature match status."),
+                    "document_status": _documented(_string_schema(0, 80), "Optional document completeness status."),
+                    "date_from": _documented(_date_schema(), "Inclusive shipment-date range start."),
+                    "date_to": _documented(_date_schema(), "Inclusive shipment-date range end."),
+                    "sort_by": _documented(_enum_schema(["date_desc", "shipment_date_desc", "product_qty_total_desc", "invoice_amount_total_desc", "expense_amount_rub_desc"]), "Stable server-side sort.", default="date_desc"),
+                    "limit": _documented(_int_schema(1, MAX_LIMIT), "Page size.", default=DEFAULT_MAX_LIMIT),
+                    "cursor": _documented(_string_schema(0, 40), "Opaque next_cursor from the prior response."),
+                    "offset": _documented(_int_schema(0, 100000), "Compatibility offset; prefer cursor.", default=0),
                 }
             ),
-        ),
-        ToolDefinition(
-            "resolve_webcore_data_request",
-            "Use this when the user intent is ambiguous. It recommends ordered MCP calls without executing them.",
-            _schema(
-                {
-                    "intent": _string_schema(1, 500),
-                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables", "ops_diagnostics"]),
-                    "object_id": _string_schema(0, 160),
-                    "shipment_id": _string_schema(0, 160),
-                    "supply_id": _string_schema(0, 160),
-                    "invoice_no": _string_schema(0, 160),
-                    "supplier_name": _string_schema(0, 160),
-                    "sku_or_nm_id": _string_schema(0, 120),
-                    "metric_key_or_label": _string_schema(0, 180),
-                    "date": _date_schema(),
-                    "date_from": _date_schema(),
-                    "date_to": _date_schema(),
-                    "artifact_kind": _enum_schema(["auto", "invoice", "contract", "packing_list", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "bank_fee_statement", "cny_conversion_purchase", "supplier_cny_payment", "document_package", "unknown_business_document"]),
-                    "mode": _enum_schema(["metadata_only", "open_or_read", "download_hint"]),
-                    "limit": _int_schema(1, MAX_LIMIT),
-                },
-                required=["intent"],
-            ),
-        ),
-        ToolDefinition(
-            "resolve_webcore_data_intent",
-            "Alias for resolve_webcore_data_request. Use this when the user intent is ambiguous; it recommends ordered MCP calls without executing them.",
-            _schema(
-                {
-                    "intent": _string_schema(1, 500),
-                    "domain": _enum_schema(["auto", "freshness", "metrics", "sku", "supplier_shipments", "wb_supplies", "artifacts", "cny", "factory_order", "business_tables", "ops_diagnostics"]),
-                    "object_id": _string_schema(0, 160),
-                    "shipment_id": _string_schema(0, 160),
-                    "supply_id": _string_schema(0, 160),
-                    "invoice_no": _string_schema(0, 160),
-                    "supplier_name": _string_schema(0, 160),
-                    "sku_or_nm_id": _string_schema(0, 120),
-                    "metric_key_or_label": _string_schema(0, 180),
-                    "date": _date_schema(),
-                    "date_from": _date_schema(),
-                    "date_to": _date_schema(),
-                    "artifact_kind": _enum_schema(["auto", "invoice", "contract", "packing_list", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "bank_fee_statement", "cny_conversion_purchase", "supplier_cny_payment", "document_package", "unknown_business_document"]),
-                    "mode": _enum_schema(["metadata_only", "open_or_read", "download_hint"]),
-                    "limit": _int_schema(1, MAX_LIMIT),
-                },
-                required=["intent"],
-            ),
-        ),
-        ToolDefinition(
-            "list_webcore_business_tables",
-            "Use this to discover allowlisted runtime business tables. This is not arbitrary SQL.",
-            _schema({"domain": _string_schema(0, 60), "include_missing": {"type": "boolean"}}),
-        ),
-        ToolDefinition(
-            "get_webcore_business_table_schema",
-            "Use this to inspect safe columns, filters and redaction rules for one allowlisted business table.",
-            _schema({"table": _string_schema(1, 120)}, required=["table"]),
-        ),
-        ToolDefinition(
-            "get_webcore_business_table_rows",
-            "Use this to read rows from one allowlisted business table with generated SELECT, safe filters and bounded scrubbed output.",
-            _schema(
-                {
-                    "table": _string_schema(1, 120),
-                    "filters": {"type": "object", "additionalProperties": True},
-                    "date_from": _date_schema(),
-                    "date_to": _date_schema(),
-                    "limit": _int_schema(1, MAX_LIMIT),
-                    "cursor": _string_schema(0, 40),
-                    "offset": _int_schema(0, 100000),
-                    "order_by": _string_schema(0, 80),
-                    "include_raw_business_payloads": {"type": "boolean"},
-                },
-                required=["table"],
-            ),
-        ),
-        ToolDefinition(
-            "get_supplier_shipments_registry",
-            "Use this for the read-only supplier shipment registry/list with core physical, financial and document completeness metrics.",
-            _schema(
-                {
-                    "shipment_id": _string_schema(0, 120),
-                    "invoice_no": _string_schema(0, 160),
-                    "supplier_name": _string_schema(0, 160),
-                    "order_status": _string_schema(0, 80),
-                    "match_status": _string_schema(0, 80),
-                    "document_status": _string_schema(0, 80),
-                    "date_from": _date_schema(),
-                    "date_to": _date_schema(),
-                    "sort_by": _enum_schema(["date_desc", "shipment_date_desc", "product_qty_total_desc", "invoice_amount_total_desc", "expense_amount_rub_desc"]),
-                    "limit": _int_schema(1, MAX_LIMIT),
-                    "cursor": _string_schema(0, 40),
-                    "offset": _int_schema(0, 100000),
-                }
-            ),
+            _strict_output_schema("status", "contract_name", "contract_version", "source_tables", "filters", "rows", "pagination", "source_table", "table"),
             scope=SCOPE_SUPPLY_READ,
         ),
         ToolDefinition(
-            "get_supplier_shipment_full_details",
-            "Use this for expanded safe supplier shipment details: header, lines, price conformity, documents, expenses, CNY links and artifact refs.",
+            "supplier_shipment",
+            "Supplier shipment detail",
+            "Use this for one known supplier shipment id. Returns bounded lines, finance, CNY/document metadata and stable artifact_ref identifiers for follow-up reads.",
             _schema(
                 {
-                    "shipment_id": _string_schema(1, 120),
-                    "include_raw_business_payloads": {"type": "boolean"},
-                    "line_limit": _int_schema(1, MAX_LIMIT),
-                    "document_limit": _int_schema(1, MAX_LIMIT),
+                    "shipment_id": _documented(_string_schema(1, 120), "Stable shipment_id returned by supplier_shipments."),
+                    "include_raw_business_payloads": _documented({"type": "boolean"}, "Include scrubbed bounded business payload fields.", default=False),
+                    "line_limit": _documented(_int_schema(1, MAX_LIMIT), "Maximum product lines.", default=25),
+                    "document_limit": _documented(_int_schema(1, MAX_LIMIT), "Maximum document rows.", default=25),
                 },
                 required=["shipment_id"],
             ),
+            _strict_output_schema("status", "shipment_id", "contract_name", "contract_version", "shipment", "lines", "line_summary", "financial_documents", "financial_documents_metadata", "financial_expense_lines", "expense_summary", "trade_documents", "trade_documents_metadata", "cny_documents_metadata", "packing_list_summary", "document_parsed_fields_summary", "artifact_refs", "source_tables", "redaction", "source_table", "table"),
             scope=SCOPE_SUPPLY_READ,
         ),
         ToolDefinition(
-            "get_wb_supplies_registry",
-            "Use this for broader cached-only WB supplies registry/list. Never syncs, backfills or calls WB upstream.",
+            "wb_supplies",
+            "WB supplies",
+            "Use this for the cached read-only WB FBW supply list. It never syncs, backfills or calls WB upstream; for one known supply use wb_supply.",
             _schema(
                 {
-                    "status_filter": _string_schema(0, 80),
-                    "warehouse": _string_schema(0, 160),
-                    "supply_id": _string_schema(0, 120),
-                    "wb_supply_id": _string_schema(0, 120),
-                    "preorder_id": _string_schema(0, 120),
-                    "date_from": _date_schema(),
-                    "date_to": _date_schema(),
-                    "limit": _int_schema(1, MAX_LIMIT),
-                    "cursor": _string_schema(0, 40),
-                    "offset": _int_schema(0, 100000),
+                    "status_filter": _documented(_string_schema(0, 80), "Optional status id or status-name filter."),
+                    "warehouse": _documented(_string_schema(0, 160), "Optional warehouse-name filter."),
+                    "supply_id": _documented(_string_schema(0, 120), "Optional internal supply id."),
+                    "wb_supply_id": _documented(_string_schema(0, 120), "Optional WB supply id."),
+                    "preorder_id": _documented(_string_schema(0, 120), "Optional preorder id."),
+                    "date_from": _documented(_date_schema(), "Inclusive supply-date range start."),
+                    "date_to": _documented(_date_schema(), "Inclusive supply-date range end."),
+                    "limit": _documented(_int_schema(1, MAX_LIMIT), "Page size.", default=DEFAULT_MAX_LIMIT),
+                    "cursor": _documented(_string_schema(0, 40), "Opaque next_cursor from the prior response."),
+                    "offset": _documented(_int_schema(0, 100000), "Compatibility offset; prefer cursor.", default=0),
                 }
             ),
+            _strict_output_schema("status", "contract_name", "contract_version", "source_table", "table", "cache_only", "filters", "rows", "pagination"),
             scope=SCOPE_SUPPLY_READ,
         ),
         ToolDefinition(
-            "get_wb_supply_full_details",
-            "Use this for one cached WB supply with scrubbed normalized/detail/goods/package business payloads. Never fetches upstream.",
-            _schema({"supply_id": _string_schema(1, 120), "include_raw_business_payloads": {"type": "boolean"}}, required=["supply_id"]),
+            "wb_supply",
+            "WB supply detail",
+            "Use this for one known cached WB supply id. Returns normalized/detail/goods/package evidence without any upstream fetch.",
+            _schema({
+                "supply_id": _documented(_string_schema(1, 120), "Internal supply_id, WB supply id or preorder id returned by wb_supplies."),
+                "include_raw_business_payloads": _documented({"type": "boolean"}, "Include scrubbed bounded cached business payload fields.", default=False),
+            }, required=["supply_id"]),
+            _strict_output_schema("status", "supply_id", "contract_name", "contract_version", "source_table", "table", "cache_only", "no_upstream_fetch", "supply", "cached_payloads", "redaction"),
             scope=SCOPE_SUPPLY_READ,
         ),
         ToolDefinition(
-            "list_supply_artifacts",
-            "Use this to list server-owned supply/document/CNY artifacts by opaque artifact_ref. No filesystem paths are exposed.",
+            "supply_artifacts",
+            "Supply documents",
+            "Use this to find server-owned supplier, trade, finance or CNY documents and obtain stable opaque artifact_ref identifiers. No filesystem paths are exposed.",
             _schema(
                 {
-                    "shipment_id": _string_schema(0, 120),
-                    "supplier_order_id": _string_schema(0, 120),
-                    "artifact_kind": _string_schema(0, 80),
-                    "source_domain": _string_schema(0, 80),
-                    "limit": _int_schema(1, MAX_LIMIT),
-                    "cursor": _string_schema(0, 40),
-                    "offset": _int_schema(0, 100000),
+                    "shipment_id": _documented(_string_schema(0, 120), "Optional shipment id."),
+                    "supplier_order_id": _documented(_string_schema(0, 120), "Compatibility alias for shipment id."),
+                    "artifact_kind": _documented(_string_schema(0, 80), "Optional kind such as invoice, packing_list or contract."),
+                    "source_domain": _documented(_string_schema(0, 80), "Optional allowlisted artifact source domain."),
+                    "limit": _documented(_int_schema(1, MAX_LIMIT), "Page size.", default=DEFAULT_MAX_LIMIT),
+                    "cursor": _documented(_string_schema(0, 40), "Opaque next_cursor from the prior response."),
+                    "offset": _documented(_int_schema(0, 100000), "Compatibility offset; prefer cursor.", default=0),
                 }
             ),
+            _strict_output_schema("status", "contract_name", "contract_version", "source", "filters", "artifacts", "pagination", "boundary"),
             scope=SCOPE_SUPPLY_READ,
         ),
         ToolDefinition(
-            "get_supply_artifact",
-            "Use this to read metadata, parsed payload, safe text chunks or bounded base64 chunks for one server-owned artifact_ref.",
+            "supply_artifact",
+            "Supply document content",
+            "Use this after supply_artifacts with one opaque artifact_ref. Reads metadata, parsed data or one bounded text/base64 chunk; never accepts server paths.",
             _schema(
                 {
-                    "artifact_ref": _string_schema(1, 240),
-                    "mode": _enum_schema(["metadata", "parsed", "text", "text_chunk", "base64_chunk"]),
-                    "chunk": _int_schema(0, 100000),
-                    "offset": _int_schema(0, 100000000),
-                    "max_bytes": _int_schema(1, 65536),
+                    "artifact_ref": _documented(_string_schema(1, 240), "Opaque artifact_ref returned by supply_artifacts or supplier_shipment."),
+                    "mode": _documented(_enum_schema(["metadata", "parsed", "text", "text_chunk", "base64_chunk"]), "Bounded read mode.", default="metadata"),
+                    "chunk": _documented(_int_schema(0, 100000), "Zero-based chunk number.", default=0),
+                    "offset": _documented(_int_schema(0, 100000000), "Byte offset for chunk modes.", default=0),
+                    "max_bytes": _documented(_int_schema(1, 65536), "Maximum bytes returned in this call.", default=16384),
                 },
                 required=["artifact_ref"],
             ),
+            _strict_output_schema("status", "artifact_ref", "contract_name", "mode", "artifact", "parsed_business_payload", "packing_list_summary", "chunk", "text", "base64", "reason", "size_bytes", "max_bytes"),
             scope=SCOPE_SUPPLY_READ,
         ),
-        ToolDefinition("get_data_freshness_status", "Use this when the user asks whether WebCore data is fresh. Returns per-source freshness without triggering refresh/sync.", _schema({})),
-        ToolDefinition("search_business_objects", "Use this to find SKU/nmId, nomenclature, shipment ids, WB supply ids, or metric keys by a bounded text query.", _schema({"query": _string_schema(1, 120), "object_types": _array_schema(_enum_schema(["sku", "nomenclature", "shipment", "wb_supply", "metric"]))}, required=["query"])),
-        ToolDefinition("explain_metric_source", "Use this to explain where a metric comes from, its formula/reference and accepted freshness caveats.", _schema({"metric_key": _string_schema(1, 160)}, required=["metric_key"])),
-        ToolDefinition("get_wb_supplies_summary", "Use this for cached-only WB supplies summaries. Never syncs or backfills upstream data.", _schema({"status_filter": _string_schema(0, 40), "date_from": _date_schema(), "date_to": _date_schema(), "limit": _int_schema(1, MAX_LIMIT)})),
-        ToolDefinition("get_wb_supply_details", "Use this for one cached WB supply. Never fetches WB upstream and never exposes raw payload blobs.", _schema({"supply_id": _string_schema(1, 120)}, required=["supply_id"])),
-        ToolDefinition("rank_supplier_shipments_by_unit_cost", "Use this to rank supplier shipments by available quantity/cost evidence with completeness flags.", _schema({"limit": _int_schema(1, MAX_LIMIT), "status_filter": _string_schema(0, 80)}), scope=SCOPE_SUPPLY_READ),
-        ToolDefinition("get_supplier_shipment_details", "Use this for supplier shipment metadata, totals, document statuses and expense summaries. No raw files or paths.", _schema({"shipment_id": _string_schema(1, 120)}, required=["shipment_id"]), scope=SCOPE_SUPPLY_READ),
-        ToolDefinition("get_latest_factory_order_calculation", "Use this for the latest factory-order and WB regional calculation state. Does not recalculate.", _schema({}), scope=SCOPE_SUPPLY_READ),
-        ToolDefinition("list_metrics", "Use this when the user asks what business metrics are available by key or Russian label. Returns registry metrics plus ready-snapshot coverage hints.", _schema({"query": _string_schema(0, 160), "section": _string_schema(0, 120), "scope": _string_schema(0, 60), "limit": _int_schema(1, MAX_LIMIT)})),
-        ToolDefinition("get_metric_values", "Use this when the user asks for any metric value by name/key/date/range/SKU, including Russian requests like total order sum for yesterday. Reads persisted ready snapshots only.", _schema({"metric_key_or_label": _string_schema(1, 180), "date": _date_schema(), "date_from": _date_schema(), "date_to": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "group_by": _enum_schema(["date", "metric", "sku", "total"]), "limit": _int_schema(1, MAX_LIMIT)}, required=["metric_key_or_label"])),
-        ToolDefinition("get_snapshot_metrics", "Use this to inspect a bounded list of all projected metric values in a ready snapshot date, optionally filtered by SKU or metric text. Never returns raw snapshot JSON.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "metric_query": _string_schema(0, 160), "limit": _int_schema(1, MAX_LIMIT)}, required=["date"])),
-        ToolDefinition("get_available_metric_dates", "Use this to discover dates available in persisted ready snapshots, optionally for one metric key or Russian label.", _schema({"metric_key_or_label": _string_schema(0, 180)})),
-        ToolDefinition("get_stock_report", "Use this for persisted ready-side stock metrics for a date/SKU. Does not refresh data.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120)})),
-        ToolDefinition("get_sku_snapshot", "Use this for SKU identity plus persisted ready snapshot metrics and freshness flags.", _schema({"sku_or_nm_id": _string_schema(1, 120), "date": _date_schema()}, required=["sku_or_nm_id"])),
-        ToolDefinition("get_revenue_by_date", "Use this for date/SKU revenue only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date": _date_schema(), "sku_or_nm_id": _string_schema(0, 120), "revenue_metric": _string_schema(0, 160)}, required=["date"]), scope=SCOPE_FINANCE_READ),
-        ToolDefinition("get_revenue_range", "Use this for bounded revenue ranges only after the user chooses a revenue_metric. Without one, returns explicit ambiguity and candidates.", _schema({"date_from": _date_schema(), "date_to": _date_schema(), "group_by": _enum_schema(["date", "sku", "total"]), "revenue_metric": _string_schema(0, 160)}, required=["date_from", "date_to"]), scope=SCOPE_FINANCE_READ),
         ToolDefinition(
-            "get_runtime_health_summary",
-            "Use this for bounded read-only live runtime diagnostics over fixed WebCore systemd units, runtime disk summary and DB file summary. No shell, env or arbitrary paths are exposed.",
+            "factory_order",
+            "Factory order state",
+            "Use this for the latest persisted factory-order and WB regional calculation state. It never recalculates or writes data.",
             _schema({}),
-            scope=SCOPE_OPS_READ,
+            _strict_output_schema("status", "dataset_state", "factory_order_result", "wb_regional_supply_result", "no_recalculation"),
+            scope=SCOPE_SUPPLY_READ,
         ),
         ToolDefinition(
-            "get_service_logs",
-            "Use this for bounded sanitized journal excerpts for one allowlisted WebCore unit. Unit and priority are enums; output is redacted and limited.",
-            _schema(
-                {
-                    "unit": _enum_schema(list(ALLOWED_RUNTIME_UNITS)),
-                    "since": _string_schema(0, 48),
-                    "until": _string_schema(0, 48),
-                    "priority": _enum_schema(list(SERVICE_LOG_PRIORITIES)),
-                    "limit": _int_schema(1, 300),
-                },
-                required=["unit"],
-            ),
-            scope=SCOPE_OPS_READ,
+            "stock_report",
+            "Stock report",
+            "Use this for persisted ready-side stock metrics on an optional date and SKU. It does not refresh data; use sku_snapshot for broader SKU metrics.",
+            _schema({
+                "date": _documented(_date_schema(), "Optional snapshot date; defaults to latest available."),
+                "sku_or_nm_id": _documented(_string_schema(0, 120), "Optional SKU, vendor code or nmId."),
+            }),
+            _strict_output_schema("status", "date", "sku_or_nm_id", "snapshot_id", "refreshed_at", "metrics", "stocks_freshness", "source", "caveat"),
         ),
         ToolDefinition(
-            "get_refresh_diagnostics",
-            "Use this to inspect persisted refresh/load diagnostics for a date or bounded date range. Reads runtime DB/state only and never refreshes or calls upstream.",
-            _schema({"date": _date_schema(), "date_from": _date_schema(), "date_to": _date_schema()}),
-            scope=SCOPE_OPS_READ,
-        ),
-        ToolDefinition(
-            "get_runtime_snapshot_status",
-            "Use this to summarize ready, temporal source and temporal source slot snapshot presence for a bounded date range. Raw payload blobs are not returned.",
-            _schema({"date": _date_schema(), "date_from": _date_schema(), "date_to": _date_schema()}),
-            scope=SCOPE_OPS_READ,
-        ),
-        ToolDefinition(
-            "get_deploy_state",
-            "Use this to inspect safe deploy identity/version labels for the active EU MCP runtime. Does not expose secrets, raw env, SSH commands or runtime paths.",
+            "runtime_health",
+            "Runtime health",
+            "Use this for bounded production health of fixed WebCore units, storage, database and aggregated MCP call status including timeouts and in-flight calls.",
             _schema({}),
+            _strict_output_schema("status", "generated_at", "boundary", "allowed_units", "units", "runtime_storage", "mcp_calls", "limits"),
+            scope=SCOPE_OPS_READ,
+        ),
+        ToolDefinition(
+            "refresh_diagnostics",
+            "Refresh diagnostics",
+            "Use this for persisted refresh/load diagnostics on one date or a bounded date range. It never starts refresh, load or upstream calls.",
+            _schema({
+                "date": _documented(_date_schema(), "Single diagnostic date; do not combine with date_from/date_to."),
+                "date_from": _documented(_date_schema(), "Inclusive range start."),
+                "date_to": _documented(_date_schema(), "Inclusive range end; maximum 62 days."),
+            }),
+            _strict_output_schema("status", "generated_at", "date_range", "latest_refresh", "latest_load", "snapshot_presence", "source_statuses", "closure_states", "likely_failure_area", "latest_successful", "raw_payloads_returned", "upstream_calls", "mutations"),
+            scope=SCOPE_OPS_READ,
+        ),
+        ToolDefinition(
+            "deploy_state",
+            "Deploy state",
+            "Use this to verify the active production target and deployed commit. Returns safe version labels only, without env, credentials, SSH commands or runtime paths.",
+            _schema({}),
+            _strict_output_schema("status", "generated_at", "app", "target_identity", "source_mtimes", "runtime_storage", "credential_values_returned", "raw_env_returned"),
             scope=SCOPE_OPS_READ,
         ),
     ]
 
 
 def tool_required_scope(name: str) -> str:
+    canonical_name = MODEL_TOOL_ALIASES.get(name, name)
     for definition in _tool_definitions():
-        if definition.name == name:
+        if MODEL_TOOL_ALIASES.get(definition.name, definition.name) == canonical_name:
             return definition.scope
+    if canonical_name in OPS_TOOL_NAMES:
+        return SCOPE_OPS_READ
+    if canonical_name in {
+        "get_supplier_shipments_registry", "get_supplier_shipment_full_details",
+        "get_wb_supplies_registry", "get_wb_supply_full_details", "list_supply_artifacts",
+        "get_supply_artifact", "rank_supplier_shipments_by_unit_cost",
+        "get_supplier_shipment_details", "get_latest_factory_order_calculation",
+    }:
+        return SCOPE_SUPPLY_READ
+    if canonical_name in {"get_revenue_by_date", "get_revenue_range"}:
+        return SCOPE_FINANCE_READ
     return SCOPE_ANALYTICS_READ
+
+
+def _model_tool_domain(name: str) -> str:
+    return {
+        "freshness": "freshness",
+        "metric_catalog": "metrics",
+        "metric_values": "metrics",
+        "sku_search": "sku",
+        "sku_snapshot": "sku",
+        "stock_report": "sku",
+        "supplier_shipments": "supplier_shipments",
+        "supplier_shipment": "supplier_shipments",
+        "wb_supplies": "wb_supplies",
+        "wb_supply": "wb_supplies",
+        "supply_artifacts": "artifacts",
+        "supply_artifact": "artifacts",
+        "factory_order": "factory_order",
+        "runtime_health": "ops_diagnostics",
+        "refresh_diagnostics": "ops_diagnostics",
+        "deploy_state": "ops_diagnostics",
+    }.get(name, "all")
 
 
 def _data_map_domains() -> set[str]:
@@ -2983,7 +3127,7 @@ def _domain_catalog() -> list[dict[str, Any]]:
         {
             "domain": "freshness",
             "description": "Ready snapshots, temporal source slots, WB supplies sync, supplier docs and factory calculation freshness.",
-            "primary_tools": ["get_data_freshness_status"],
+            "primary_tools": ["freshness"],
             "required_scope": SCOPE_ANALYTICS_READ,
             "recommended_first_call": "get_data_freshness_status",
         },
@@ -2991,11 +3135,9 @@ def _domain_catalog() -> list[dict[str, Any]]:
             "domain": "ops_diagnostics",
             "description": "Read-only production diagnostics for fixed WebCore runtime units, sanitized logs, refresh/load state, snapshot presence and deploy labels.",
             "primary_tools": [
-                "get_runtime_health_summary",
-                "get_service_logs",
-                "get_refresh_diagnostics",
-                "get_runtime_snapshot_status",
-                "get_deploy_state",
+                "runtime_health",
+                "refresh_diagnostics",
+                "deploy_state",
             ],
             "required_scope": SCOPE_OPS_READ,
             "known_caveat": "No arbitrary shell, SSH, filesystem browsing, SQL, env, secrets or mutations are exposed.",
@@ -3003,27 +3145,27 @@ def _domain_catalog() -> list[dict[str, Any]]:
         {
             "domain": "metrics",
             "description": "Persisted DATA_VITRINA metrics by key/Russian label/date/SKU from ready snapshots.",
-            "primary_tools": ["list_metrics", "get_metric_values", "get_snapshot_metrics", "get_available_metric_dates"],
+            "primary_tools": ["metric_catalog", "metric_values"],
             "required_scope": SCOPE_ANALYTICS_READ,
             "known_caveat": "Revenue remains ambiguous unless revenue_metric is explicitly selected.",
         },
         {
             "domain": "sku",
             "description": "SKU identity, registry config, server-owned nomenclature and persisted stock/SKU snapshots.",
-            "primary_tools": ["search_business_objects", "get_sku_snapshot", "get_stock_report"],
+            "primary_tools": ["sku_search", "sku_snapshot", "stock_report"],
             "required_scope": SCOPE_ANALYTICS_READ,
         },
         {
             "domain": "supplier_shipments",
             "description": "Supplier shipment registry, shipment cards, line rows, price conformity, packing-list summaries, financial docs, trade docs and CNY links.",
-            "primary_tools": ["get_supplier_shipments_registry", "get_supplier_shipment_full_details", "list_supply_artifacts"],
+            "primary_tools": ["supplier_shipments", "supplier_shipment"],
             "legacy_tools": ["rank_supplier_shipments_by_unit_cost", "get_supplier_shipment_details"],
             "required_scope": SCOPE_SUPPLY_READ,
         },
         {
             "domain": "wb_supplies",
             "description": "Cached read-only WB FBW supplies registry/detail and cached normalized business payloads.",
-            "primary_tools": ["get_wb_supplies_registry", "get_wb_supply_full_details"],
+            "primary_tools": ["wb_supplies", "wb_supply"],
             "legacy_tools": ["get_wb_supplies_summary", "get_wb_supply_details"],
             "required_scope": SCOPE_SUPPLY_READ,
             "boundary": "cache-only; no WB sync/backfill/lazy fetch.",
@@ -3031,7 +3173,7 @@ def _domain_catalog() -> list[dict[str, Any]]:
         {
             "domain": "artifacts",
             "description": "Server-owned supplier/trade/financial/CNY artifacts resolved only through opaque artifact_ref.",
-            "primary_tools": ["list_supply_artifacts", "get_supply_artifact"],
+            "primary_tools": ["supply_artifacts", "supply_artifact"],
             "required_scope": SCOPE_SUPPLY_READ,
             "boundary": "no arbitrary filesystem paths; bounded metadata/parsed/text/base64 modes only.",
         },
@@ -3044,7 +3186,7 @@ def _domain_catalog() -> list[dict[str, Any]]:
         {
             "domain": "factory_order",
             "description": "Latest factory-order and WB regional calculation state, without recalculation.",
-            "primary_tools": ["get_latest_factory_order_calculation"],
+            "primary_tools": ["factory_order"],
             "required_scope": SCOPE_SUPPLY_READ,
         },
         {
@@ -3188,6 +3330,66 @@ def _require_table_spec(table: str) -> dict[str, Any]:
 
 def _schema(properties: dict[str, Any], *, required: Iterable[str] = ()) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
+
+
+_NO_DEFAULT = object()
+
+
+def _documented(schema: dict[str, Any], description: str, *, default: Any = _NO_DEFAULT) -> dict[str, Any]:
+    documented = dict(schema)
+    documented["description"] = description
+    if default is not _NO_DEFAULT:
+        documented["default"] = default
+    return documented
+
+
+def _strict_output_schema(*field_names: str) -> dict[str, Any]:
+    array_of_strings = {
+        "allowed_units", "missing_source_flags", "notes", "object_types", "resolved_metric_keys",
+        "source_tables", "unknown_object_types",
+    }
+    array_of_objects = {
+        "artifact_refs", "artifacts", "candidate_metrics", "closure_states", "cny_documents_metadata", "dataset_state",
+        "expense_summary",
+        "financial_documents", "financial_documents_metadata", "financial_expense_lines", "lines", "metrics",
+        "results", "rows", "snapshot_presence", "source_mtimes", "source_snapshots", "source_statuses",
+        "temporal_slot_sources", "temporal_sources", "trade_documents", "trade_documents_metadata", "units",
+    }
+    object_fields = {
+        "app", "artifact", "cached_payloads", "chunk", "date_range", "db", "factory_order",
+        "factory_order_result", "filters", "identity", "latest_load", "latest_ready_snapshot", "latest_refresh",
+        "latest_successful", "likely_failure_area", "limits", "line_summary", "packing_list_summary", "pagination",
+        "ready_snapshots", "runtime_storage", "shipment", "stocks_freshness", "supplier_shipments", "supply", "target_identity",
+        "wb_regional_supply_result", "wb_supplies", "document_parsed_fields_summary", "parsed_business_payload",
+        "mcp_calls",
+    }
+    boolean_fields = {
+        "cache_only", "credential_values_returned", "mutations", "no_recalculation", "no_upstream_fetch",
+        "raw_env_returned", "raw_payloads_returned", "truncated", "upstream_calls",
+    }
+    integer_fields = {"limit", "limit_applied", "max_bytes", "row_count", "size_bytes"}
+    properties: dict[str, Any] = {}
+    for name in field_names:
+        if name in array_of_strings:
+            properties[name] = {"type": "array", "items": {"type": "string"}}
+        elif name in array_of_objects:
+            properties[name] = {"type": "array", "items": {"type": "object", "additionalProperties": True}}
+        elif name in object_fields:
+            properties[name] = {"type": ["object", "null"], "additionalProperties": True}
+        elif name in boolean_fields:
+            properties[name] = {"type": "boolean"}
+        elif name in integer_fields:
+            properties[name] = {"type": "integer", "minimum": 0}
+        elif name == "base64":
+            properties[name] = {"type": "string", "contentEncoding": "base64"}
+        else:
+            properties[name] = {"type": ["string", "null"]}
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["status"],
+        "additionalProperties": False,
+    }
 
 
 def _object_schema() -> dict[str, Any]:

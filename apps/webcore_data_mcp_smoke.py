@@ -31,7 +31,7 @@ from apps.webcore_data_mcp_server import (  # noqa: E402
     build_server,
 )
 from packages.application.webcore_data_mcp import (  # noqa: E402
-    APPROVED_TOOL_NAMES,
+    MODEL_VISIBLE_TOOL_NAMES,
     SCOPE_ANALYTICS_READ,
     SCOPE_FINANCE_READ,
     SCOPE_OPS_READ,
@@ -126,30 +126,41 @@ def _fake_ops_command_runner(args, timeout_seconds):  # type: ignore[no-untyped-
 def _assert_tool_list(gateway: WebCoreDataMcpGateway) -> None:
     tools = gateway.list_tools()
     names = tuple(tool["name"] for tool in tools)
-    if names != APPROVED_TOOL_NAMES:
+    if names != MODEL_VISIBLE_TOOL_NAMES:
         raise AssertionError(f"unexpected tools: {names}")
+    if len(names) > 18 or "resolve_webcore_data_intent" in names or "get_webcore_business_table_rows" in names:
+        raise AssertionError(f"model-visible surface is not compact: {names}")
+    output_schemas = set()
     for tool in tools:
-        if tool.get("annotations", {}).get("readOnlyHint") is not True:
+        annotations = tool.get("annotations", {})
+        if annotations != {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }:
             raise AssertionError(f"tool is not marked read-only: {tool['name']}")
+        output_schema = tool.get("outputSchema") or {}
+        if output_schema.get("additionalProperties") is not False or "status" not in output_schema.get("required", []):
+            raise AssertionError(f"tool output schema is not exact: {tool['name']} {output_schema}")
+        output_schemas.add(json.dumps(output_schema, sort_keys=True))
         if any(marker in tool["name"] for marker in ("sql", "shell", "ssh", "sync", "backfill", "upload")):
             raise AssertionError(f"forbidden tool name exposed: {tool['name']}")
         properties = (tool.get("inputSchema") or {}).get("properties") or {}
-        if tool["name"] == "get_supplier_shipments_registry" and "sort_by" not in properties:
+        if tool["name"] == "supplier_shipments" and "sort_by" not in properties:
             raise AssertionError("supplier registry schema must expose sort_by")
-        if tool["name"] == "get_webcore_business_table_rows" and "sort_by" in properties:
-            raise AssertionError("business table row schema must not expose registry sort_by")
         if tool["name"] in {
-            "get_runtime_health_summary",
-            "get_service_logs",
-            "get_refresh_diagnostics",
-            "get_runtime_snapshot_status",
-            "get_deploy_state",
+            "runtime_health",
+            "refresh_diagnostics",
+            "deploy_state",
         }:
             scopes = ((tool.get("securitySchemes") or [{}])[0].get("scopes") or [])
             if scopes != [SCOPE_OPS_READ]:
                 raise AssertionError(f"ops tool must use only webcore.ops.read: {tool}")
             if tool.get("annotations", {}).get("readOnlyHint") is not True:
                 raise AssertionError(f"ops tool must be read-only: {tool}")
+    if len(output_schemas) != len(tools):
+        raise AssertionError("published tools must not share one permissive output schema")
 
 
 def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
@@ -239,6 +250,12 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
                 artifact_kinds = {item.get("artifact_kind") for item in result.get("artifact_catalog") or []}
                 if "packing_list" not in artifact_kinds:
                     raise AssertionError(f"data map missing packing_list artifact kind: {result}")
+            if args.get("domain") == "supplier_shipments":
+                map_tools = {item.get("name") for item in result.get("tools") or []}
+                if map_tools != {"supplier_shipments", "supplier_shipment"}:
+                    raise AssertionError(f"domain data map did not filter tools: {map_tools}")
+            if result.get("intent_examples") or result.get("known_limitations"):
+                raise AssertionError(f"default data map must stay compact: {result}")
         if name == "resolve_webcore_data_request" and "реестр поставок" in str(args.get("intent")):
             if not any(call.get("tool") == "get_supplier_shipments_registry" for call in result.get("recommended_calls") or []):
                 raise AssertionError(f"resolver did not route registry intent: {result}")
@@ -321,6 +338,9 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
                 raise AssertionError(f"deploy state must not expose env/secrets: {result}")
             if result.get("target_identity", {}).get("public_base_url") != "https://api.selleros.pro":
                 raise AssertionError(f"deploy state target mismatch: {result}")
+            commit = str(result.get("app", {}).get("commit") or "")
+            if len(commit) != 40 or not result.get("app", {}).get("commit_available"):
+                raise AssertionError(f"deploy state must expose a verifiable commit in a git checkout: {result}")
     unknown = gateway.call_tool("explain_metric_source", {"metric_key": "not_real_metric"}, identity="smoke")
     if unknown.get("status") != "metric_not_found":
         raise AssertionError(f"metric_not_found expected: {unknown}")
@@ -425,13 +445,13 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
             headers=headers,
         )
         names = tuple(tool["name"] for tool in tools["result"]["tools"])
-        if names != APPROVED_TOOL_NAMES:
+        if names != MODEL_VISIBLE_TOOL_NAMES:
             raise AssertionError(f"HTTP tool list mismatch: {names}")
         for tool in tools["result"]["tools"]:
             schemes = tool.get("securitySchemes") or []
             if not schemes or not str((schemes[0].get("scopes") or [""])[0]).startswith("webcore."):
                 raise AssertionError(f"tool OAuth scope must use webcore.* namespace: {tool}")
-            if tool.get("name") == "get_deploy_state" and (schemes[0].get("scopes") or []) != [SCOPE_OPS_READ]:
+            if tool.get("name") == "deploy_state" and (schemes[0].get("scopes") or []) != [SCOPE_OPS_READ]:
                 raise AssertionError(f"ops tool must advertise webcore.ops.read in HTTP tools/list: {tool}")
         call = _post_json(
             f"{base_url}{DEFAULT_MCP_PATH}",
@@ -445,6 +465,8 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         )
         if call.get("result", {}).get("structuredContent", {}).get("status") != "ok":
             raise AssertionError(f"tool call failed: {call}")
+        if call.get("result", {}).get("content"):
+            raise AssertionError(f"business result must not duplicate JSON in content: {call}")
         code = _oauth_authorize_code(
             base_url,
             owner_password=owner_password,
@@ -489,6 +511,8 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         access_token = str(token_payload.get("access_token") or "")
         if not access_token or token_payload.get("token_type") != "Bearer":
             raise AssertionError(f"OAuth token endpoint failed: {token_payload}")
+        if token_payload.get("refresh_token"):
+            raise AssertionError("owner-only MCP OAuth must not issue refresh tokens")
         try:
             _post_form(
                 f"{base_url}{DEFAULT_OAUTH_TOKEN_PATH}",
@@ -520,7 +544,7 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
             {"jsonrpc": "2.0", "id": 11, "method": "tools/list"},
             headers=oauth_headers,
         )
-        if len(oauth_tools.get("result", {}).get("tools", [])) != len(APPROVED_TOOL_NAMES):
+        if len(oauth_tools.get("result", {}).get("tools", [])) != len(MODEL_VISIBLE_TOOL_NAMES):
             raise AssertionError(f"OAuth tools/list failed: {oauth_tools}")
         oauth_call = _post_json(
             f"{base_url}{DEFAULT_MCP_PATH}",

@@ -8,6 +8,10 @@ Type=simple
 WorkingDirectory=/opt/wb-core-runtime/app
 EnvironmentFile=/opt/wb-ai/.env
 EnvironmentFile=-/etc/wb-core-data-mcp.env
+Environment=WEBCORE_DATA_MCP_MAX_HTTP_WORKERS=16
+Environment=WEBCORE_DATA_MCP_MAX_TOOL_WORKERS=8
+Environment=WEBCORE_DATA_MCP_TOOL_DEADLINE_SECONDS=12
+Environment=WEBCORE_DATA_MCP_MAX_TOOL_RESULT_BYTES=524288
 ExecStart=/usr/bin/env PYTHONUNBUFFERED=1 WEBCORE_DATA_MCP_HOST=127.0.0.1 WEBCORE_DATA_MCP_PORT=8766 WEBCORE_DATA_MCP_PATH=/mcp WEBCORE_DATA_MCP_HEALTH_PATH=/healthz REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state WEBCORE_DATA_MCP_AUDIT_LOG_PATH=/opt/wb-core-runtime/state/webcore_data_mcp_audit.jsonl /usr/bin/python3 /opt/wb-core-runtime/app/apps/webcore_data_mcp_server.py
 Restart=on-failure
 RestartSec=5s

@@ -44,6 +44,11 @@
       "name": "wb-core-sheet-vitrina-closure-retry.timer",
       "enable": true,
       "restart": true
+    },
+    {
+      "name": "wb-core-data-mcp.service",
+      "enable": true,
+      "restart": true
     }
   ],
   "runtime_env": {
