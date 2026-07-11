@@ -710,11 +710,22 @@ class WbFinanceWeeklyBlock:
             )
         }
         nomenclature = conn.execute(
-            "SELECT nm_id,vendor_code,barcode,barcodes_json FROM sheet_vitrina_v1_nomenclature_items WHERE is_active=1"
+            "SELECT nm_id,vendor_code,barcode,barcodes_json,product_type FROM sheet_vitrina_v1_nomenclature_items WHERE is_active=1"
         ).fetchall()
         alias_to_nm: dict[str, str] = {}
+        nomenclature_group_by_nm: dict[str, str] = {}
+        product_type_groups = {
+            "clear": "Clean",
+            "anti_spy": "Anti-Spy",
+            "matte": "Matte",
+        }
         for item in nomenclature:
             nm = str(item["nm_id"] or "")
+            canonical_group = product_type_groups.get(
+                str(item["product_type"] or "").casefold()
+            )
+            if nm and canonical_group:
+                nomenclature_group_by_nm[nm] = canonical_group
             for value in (
                 nm,
                 str(item["vendor_code"] or ""),
@@ -763,9 +774,11 @@ class WbFinanceWeeklyBlock:
                 ),
                 raw_keys[0],
             )
-            group = group_by_nm.get(internal_nm, "")
+            group = group_by_nm.get(internal_nm) or nomenclature_group_by_nm.get(
+                internal_nm, ""
+            )
             operation_date = week_start
-            for field in ("saleDt", "rrDate", "orderDt"):
+            for field in ("rrDate", "saleDt", "orderDt"):
                 raw_date = str(row.get(field) or "")[:10]
                 try:
                     if raw_date:

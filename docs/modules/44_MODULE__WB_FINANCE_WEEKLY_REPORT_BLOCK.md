@@ -22,7 +22,7 @@ Schema creation is idempotent and runs at hosted application startup. Repeated s
 
 The versioned classifier is `wb_finance_weekly_classifier_v1`. Net revenue uses `retailPriceWithDisc` for sale and return operations. The official commission control is the signed difference between that revenue and `forPay`; acquiring is disclosed as a component already included in that control total and is not double-counted in total WB expenses. `bonusTypeName` drives exclusive deduction buckets for WB Promotion, transit delivery, subscriptions, paid services, and unknown/other deductions.
 
-Cost reuses the current `COST_PRICE` dataset, current registry `nm_id -> group_name`, nomenclature aliases, and `latest effective_from <= operation_date`. Missing mapping or cost remains a problem SKU; COGS, profit, and final margin are null until coverage is complete.
+Cost reuses the current `COST_PRICE` dataset, current registry `nm_id -> group_name`, canonical nomenclature aliases and its exact `clear/anti_spy/matte -> Clean/Anti-Spy/Matte` product-type mapping, and `latest effective_from <= rrDate`. Missing mapping or cost remains a problem SKU; COGS, profit, and final margin are null until coverage is complete.
 
 ## Runtime and schedule
 
