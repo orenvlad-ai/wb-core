@@ -181,5 +181,4 @@ This module does not implement:
 - 1C stock writes;
 - WB create/update/delete mutations;
 - deletion of operations as a correction mechanism;
-- Google Sheets/GAS;
-- legacy `wb_core_docs_master` or old project pack updates.
+- Google Sheets/GAS.
