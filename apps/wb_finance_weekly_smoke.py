@@ -162,6 +162,34 @@ def main() -> None:
             raise AssertionError(
                 f"resumable backfill mismatch: {first_backfill['status']}/{second_backfill['status']}"
             )
+        recalculated = block.recalculate_all_weeks()
+        with sqlite3.connect(block.db_path) as conn:
+            raw_week_count = conn.execute(
+                """select count(*) from (
+                select distinct week_start,week_end
+                from wb_finance_weekly_raw_rows where seller_id='seller-1')"""
+            ).fetchone()[0]
+            conn.executescript(
+                """
+                INSERT INTO wb_finance_weekly_aggregates
+                SELECT 'orphan',week_start,week_end,classifier_version,metrics_json,
+                       report_ids_json,report_types_json,unknown_reasons_json,calculated_at
+                FROM wb_finance_weekly_aggregates WHERE seller_id='seller-1' LIMIT 1;
+                INSERT INTO wb_finance_weekly_cost_coverage
+                SELECT 'orphan',week_start,week_end,matched_units,unmatched_units,
+                       coverage_pct,cogs_rub,problem_skus_json,calculated_at
+                FROM wb_finance_weekly_cost_coverage WHERE seller_id='seller-1' LIMIT 1;
+                INSERT INTO wb_finance_weekly_reconciliation
+                SELECT 'orphan',week_start,week_end,status,difference_rub,detail_json,checked_at
+                FROM wb_finance_weekly_reconciliation WHERE seller_id='seller-1' LIMIT 1;
+                """
+            )
+            conn.commit()
+        if recalculated["week_count"] != raw_week_count:
+            raise AssertionError(f"all-week recalculation mismatch: {recalculated}")
+        repaired = block.repair_orphan_derived_rows()
+        if repaired["deleted_total"] != 3:
+            raise AssertionError(f"orphan derived repair mismatch: {repaired}")
 
         print(
             "wb_finance_weekly: ok -> pagination, 204, 429, merge, idempotency, classifications, COGS, margins, coverage"
