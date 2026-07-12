@@ -94,6 +94,68 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         engine = CanonicalCostEngine(runtime=candidate_runtime)
         operation_date_audit: dict[str, Any] | None = None
         try:
+            source_anomaly_preflight = engine.source_anomaly_preflight(
+                date_to=date_to
+            )
+        except CanonicalCostBlocked as exc:
+            preflight_payload = {
+                "contract_name": "canonical_cost_source_anomaly_preflight_v1",
+                "status": "blocked",
+                "cutover_date": CUTOVER_DATE,
+                "date_to": date_to,
+                "policy": "CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1",
+                "anomalies": [],
+                "unresolved_anomalies": [
+                    {
+                        "blocker_class": exc.code,
+                        "eligible": False,
+                        "reason": "preflight source/cost initialization failed closed",
+                        "details": exc.details,
+                    }
+                ],
+            }
+            source_anomaly_preflight = {
+                **preflight_payload,
+                "fingerprint": _hash(preflight_payload),
+            }
+        if source_anomaly_preflight["status"] != "ok":
+            blocked_report = {
+                "contract_name": "canonical_cost_engine_backfill_v1",
+                "status": "blocked",
+                "scope": {"date_from": date_from, "date_to": date_to},
+                "blocker": {
+                    "code": "cutover_source_anomaly_preflight_blocked",
+                    "details": {
+                        "preflight_fingerprint": source_anomaly_preflight["fingerprint"],
+                        "unresolved_anomalies": source_anomaly_preflight["unresolved_anomalies"],
+                    },
+                },
+                "source_anomaly_preflight": source_anomaly_preflight,
+                "affected_finance_periods": _finance_periods(date_from, date_to),
+                "source_digest": source_digest,
+                "protected_non_target_digest": protected_digest,
+                "legacy_pre_cutover_digest": legacy_digest,
+                "target_before_digest": target_before,
+                "ff_operation_date_audit": None,
+            }
+            fingerprint = _hash(blocked_report)
+            if args.apply:
+                raise ValueError(
+                    "production apply blocked by exhaustive source anomaly preflight; "
+                    f"dry-run report fingerprint={fingerprint}"
+                )
+            return {
+                **blocked_report,
+                "mode": "dry-run",
+                "fingerprint": fingerprint,
+                "would_change": False,
+                "integrity_check": integrity_before,
+                "source_inode": source_inode,
+                "applied": False,
+                "backup": None,
+                "post_run": None,
+            }
+        try:
             operation_date_audit = engine.ff_operation_date_audit(
                 cutover_date=date_from
             )
@@ -110,6 +172,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "legacy_pre_cutover_digest": legacy_digest,
                 "target_before_digest": target_before,
                 "ff_operation_date_audit": operation_date_audit,
+                "source_anomaly_preflight": source_anomaly_preflight,
             }
             fingerprint = _hash(blocked_report)
             if args.apply:
@@ -158,6 +221,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "scope": {"date_from": date_from, "date_to": date_to},
             "baseline": baseline,
             "ff_operation_date_audit": operation_date_audit,
+            "source_anomaly_preflight": source_anomaly_preflight,
             "rebuild": asdict(rebuild),
             "reconciliation": reconciliation,
             "affected_finance_periods": _finance_periods(date_from, date_to),
