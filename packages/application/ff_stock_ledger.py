@@ -605,6 +605,8 @@ class FfStockLedgerBlock:
         )
         try:
             historical_scope: dict[str, Any] | None = None
+            physical_sent = dict(sent)
+            physical_accepted = dict(accepted)
             if historical_paid_only:
                 historical_scope = capital.plan_historical_wb_paid_scope(
                     supply_id=supply_id,
@@ -637,6 +639,12 @@ class FfStockLedgerBlock:
                     acceptance_date=acceptance_dt.date().isoformat(),
                     sent_quantities_by_nm=sent,
                     accepted_quantities_by_nm=accepted,
+                    physical_sent_quantities_by_nm=(
+                        physical_sent if historical_paid_only else None
+                    ),
+                    physical_accepted_quantities_by_nm=(
+                        physical_accepted if historical_paid_only else None
+                    ),
                     warehouse=warehouse,
                     destination=destination,
                     known_nm_ids=self._nomenclature_by_nm().keys(),
