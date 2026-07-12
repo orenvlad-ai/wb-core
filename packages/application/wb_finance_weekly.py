@@ -514,101 +514,110 @@ class WbFinanceWeeklyBlock:
     def recalculate_week(self, week_start: date, week_end: date) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as conn:
-            db_rows = conn.execute(
-                "SELECT raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_start=? AND week_end=? ORDER BY report_id,rrd_id",
-                (self.seller_id, week_start.isoformat(), week_end.isoformat()),
-            ).fetchall()
-            rows = [json.loads(row["raw_json"]) for row in db_rows]
-            aggregate, coverage, unknown = self._aggregate_rows(conn, rows, week_start)
-            reports = conn.execute(
-                "SELECT report_id,report_type FROM wb_finance_weekly_reports WHERE seller_id=? AND week_start=? AND week_end=? ORDER BY report_id",
-                (self.seller_id, week_start.isoformat(), week_end.isoformat()),
-            ).fetchall()
-            now = (
-                self.now_factory()
-                .astimezone(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
-            conn.execute(
-                """INSERT OR REPLACE INTO wb_finance_weekly_aggregates
+            aggregate = self._recalculate_week_in_connection(conn, week_start, week_end)
+            conn.commit()
+            return aggregate
+
+    def _recalculate_week_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        week_start: date,
+        week_end: date,
+    ) -> dict[str, Any]:
+        db_rows = conn.execute(
+            "SELECT raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_start=? AND week_end=? ORDER BY report_id,rrd_id",
+            (self.seller_id, week_start.isoformat(), week_end.isoformat()),
+        ).fetchall()
+        rows = [json.loads(row["raw_json"]) for row in db_rows]
+        aggregate, coverage, unknown = self._aggregate_rows(conn, rows, week_start)
+        reports = conn.execute(
+            "SELECT report_id,report_type FROM wb_finance_weekly_reports WHERE seller_id=? AND week_start=? AND week_end=? ORDER BY report_id",
+            (self.seller_id, week_start.isoformat(), week_end.isoformat()),
+        ).fetchall()
+        now = (
+            self.now_factory()
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        conn.execute(
+            """INSERT OR REPLACE INTO wb_finance_weekly_aggregates
                 (seller_id,week_start,week_end,classifier_version,metrics_json,report_ids_json,report_types_json,unknown_reasons_json,calculated_at)
                 VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    self.seller_id,
-                    week_start.isoformat(),
-                    week_end.isoformat(),
-                    CLASSIFIER_VERSION,
-                    json.dumps(aggregate, ensure_ascii=False),
-                    json.dumps([r["report_id"] for r in reports]),
-                    json.dumps([int(r["report_type"] or 0) for r in reports]),
-                    json.dumps(unknown, ensure_ascii=False),
-                    now,
-                ),
-            )
-            conn.execute(
-                """INSERT OR REPLACE INTO wb_finance_weekly_cost_coverage
+            (
+                self.seller_id,
+                week_start.isoformat(),
+                week_end.isoformat(),
+                CLASSIFIER_VERSION,
+                json.dumps(aggregate, ensure_ascii=False),
+                json.dumps([r["report_id"] for r in reports]),
+                json.dumps([int(r["report_type"] or 0) for r in reports]),
+                json.dumps(unknown, ensure_ascii=False),
+                now,
+            ),
+        )
+        conn.execute(
+            """INSERT OR REPLACE INTO wb_finance_weekly_cost_coverage
                 (seller_id,week_start,week_end,matched_units,unmatched_units,coverage_pct,cogs_rub,
                  problem_skus_json,quality_json,cost_state_hash,calculated_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    self.seller_id,
-                    week_start.isoformat(),
-                    week_end.isoformat(),
-                    coverage["matched_units"],
-                    coverage["unmatched_units"],
-                    coverage["coverage_pct"],
-                    coverage["cogs_rub"],
-                    json.dumps(coverage["problem_skus"], ensure_ascii=False),
-                    json.dumps(coverage["quality"], ensure_ascii=False),
-                    coverage["cost_state_hash"],
-                    now,
-                ),
-            )
-            expected_for_pay = sum(
-                (
-                    _decimal(row.get("forPay"))
-                    if str(row.get("docTypeName") or "").casefold() == "продажа"
-                    else -_decimal(row.get("forPay"))
-                    if str(row.get("docTypeName") or "").casefold() == "возврат"
-                    else ZERO
-                    for row in rows
-                ),
-                ZERO,
-            )
-            actual_for_pay = _decimal(aggregate["to_seller"])
-            diff = actual_for_pay - expected_for_pay
-            reconcile_status = "ok" if abs(diff) <= Decimal("0.01") else "error"
-            conn.execute(
-                """INSERT OR REPLACE INTO wb_finance_weekly_reconciliation
+            (
+                self.seller_id,
+                week_start.isoformat(),
+                week_end.isoformat(),
+                coverage["matched_units"],
+                coverage["unmatched_units"],
+                coverage["coverage_pct"],
+                coverage["cogs_rub"],
+                json.dumps(coverage["problem_skus"], ensure_ascii=False),
+                json.dumps(coverage["quality"], ensure_ascii=False),
+                coverage["cost_state_hash"],
+                now,
+            ),
+        )
+        expected_for_pay = sum(
+            (
+                _decimal(row.get("forPay"))
+                if str(row.get("docTypeName") or "").casefold() == "продажа"
+                else -_decimal(row.get("forPay"))
+                if str(row.get("docTypeName") or "").casefold() == "возврат"
+                else ZERO
+                for row in rows
+            ),
+            ZERO,
+        )
+        actual_for_pay = _decimal(aggregate["to_seller"])
+        diff = actual_for_pay - expected_for_pay
+        reconcile_status = "ok" if abs(diff) <= Decimal("0.01") else "error"
+        conn.execute(
+            """INSERT OR REPLACE INTO wb_finance_weekly_reconciliation
                 (seller_id,week_start,week_end,status,difference_rub,detail_json,checked_at) VALUES (?,?,?,?,?,?,?)""",
-                (
-                    self.seller_id,
-                    week_start.isoformat(),
-                    week_end.isoformat(),
-                    reconcile_status,
-                    _money_text(diff),
-                    json.dumps(
-                        {
-                            "raw_for_pay_sum": _money_text(expected_for_pay),
-                            "aggregate_to_seller": aggregate["to_seller"],
-                        }
-                    ),
-                    now,
+            (
+                self.seller_id,
+                week_start.isoformat(),
+                week_end.isoformat(),
+                reconcile_status,
+                _money_text(diff),
+                json.dumps(
+                    {
+                        "raw_for_pay_sum": _money_text(expected_for_pay),
+                        "aggregate_to_seller": aggregate["to_seller"],
+                    }
                 ),
+                now,
+            ),
+        )
+        if coverage["unmatched_units"] != 0:
+            conn.execute(
+                "UPDATE wb_finance_weekly_sync SET status='incomplete_cost' WHERE seller_id=? AND week_start=? AND week_end=? AND status<>'error_loading'",
+                (self.seller_id, week_start.isoformat(), week_end.isoformat()),
             )
-            if coverage["unmatched_units"] != 0:
-                conn.execute(
-                    "UPDATE wb_finance_weekly_sync SET status='incomplete_cost' WHERE seller_id=? AND week_start=? AND week_end=? AND status<>'error_loading'",
-                    (self.seller_id, week_start.isoformat(), week_end.isoformat()),
-                )
-            else:
-                conn.execute(
-                    "UPDATE wb_finance_weekly_sync SET status='completed' WHERE seller_id=? AND week_start=? AND week_end=? AND status='incomplete_cost'",
-                    (self.seller_id, week_start.isoformat(), week_end.isoformat()),
-                )
-            conn.commit()
-            return aggregate
+        else:
+            conn.execute(
+                "UPDATE wb_finance_weekly_sync SET status='completed' WHERE seller_id=? AND week_start=? AND week_end=? AND status='incomplete_cost'",
+                (self.seller_id, week_start.isoformat(), week_end.isoformat()),
+            )
+        return aggregate
 
     def _aggregate_rows(
         self, conn: sqlite3.Connection, rows: list[dict[str, Any]], week_start: date
@@ -1210,11 +1219,43 @@ class WbFinanceWeeklyBlock:
     def recalculate_stale_cost_weeks(
         self, *, date_from: date = OUR_WB_COST_CUTOVER_WEEK_START
     ) -> dict[str, Any]:
-        """Rebuild post-cutover weeks whose cost dependency fingerprint changed."""
+        """Atomically rebuild post-cutover weeks whose cost fingerprint changed."""
         self.ensure_schema()
+        plan = self.plan_stale_cost_weeks(date_from=date_from)
+        return self.apply_stale_cost_weeks(
+            expected_fingerprint=str(plan["fingerprint"]),
+            date_from=date_from,
+        )
+
+    def plan_stale_cost_weeks(
+        self,
+        *,
+        date_from: date = OUR_WB_COST_CUTOVER_WEEK_START,
+        date_to: date | None = None,
+    ) -> dict[str, Any]:
+        """Build a read-only, fingerprinted plan for stale derived Finance weeks."""
+        if not self.db_path.is_file():
+            raise ValueError(f"Finance runtime SQLite does not exist: {self.db_path}")
+        if date_to is not None and date_to < date_from:
+            raise ValueError("date_to must not be earlier than date_from")
         with self._connect() as conn:
-            candidates = conn.execute(
-                """SELECT DISTINCT raw.week_start,raw.week_end,
+            conn.execute("BEGIN")
+            try:
+                return self._plan_stale_cost_weeks_in_connection(
+                    conn, date_from=date_from, date_to=date_to
+                )
+            finally:
+                conn.rollback()
+
+    def _plan_stale_cost_weeks_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        date_from: date,
+        date_to: date | None,
+    ) -> dict[str, Any]:
+        candidates = conn.execute(
+            """SELECT DISTINCT raw.week_start,raw.week_end,
                        COALESCE(coverage.cost_state_hash,'') AS stored_cost_state_hash
                 FROM wb_finance_weekly_raw_rows AS raw
                 LEFT JOIN wb_finance_weekly_cost_coverage AS coverage
@@ -1222,39 +1263,230 @@ class WbFinanceWeeklyBlock:
                  AND coverage.week_start=raw.week_start
                  AND coverage.week_end=raw.week_end
                 WHERE raw.seller_id=? AND raw.week_end>=?
+                  AND (? IS NULL OR raw.week_start<=?)
                 ORDER BY raw.week_start""",
-                (self.seller_id, date_from.isoformat()),
-            ).fetchall()
-        recalculated: list[dict[str, Any]] = []
+            (
+                self.seller_id,
+                date_from.isoformat(),
+                date_to.isoformat() if date_to is not None else None,
+                date_to.isoformat() if date_to is not None else None,
+            ),
+        ).fetchall()
+        stale: list[dict[str, Any]] = []
         for candidate in candidates:
             start = date.fromisoformat(candidate["week_start"])
             end = date.fromisoformat(candidate["week_end"])
-            with self._connect() as conn:
-                raw_rows = conn.execute(
-                    """SELECT raw_json FROM wb_finance_weekly_raw_rows
+            raw_rows = conn.execute(
+                """SELECT report_id,rrd_id,row_hash,raw_json
+                    FROM wb_finance_weekly_raw_rows
                     WHERE seller_id=? AND week_start=? AND week_end=?
                     ORDER BY report_id,rrd_id""",
-                    (self.seller_id, start.isoformat(), end.isoformat()),
-                ).fetchall()
-                rows = [json.loads(row["raw_json"]) for row in raw_rows]
-                current = self._calculate_cogs(conn, rows, start)
+                (self.seller_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+            rows = [json.loads(row["raw_json"]) for row in raw_rows]
+            aggregate, current, unknown = self._aggregate_rows(conn, rows, start)
             if current["cost_state_hash"] == candidate["stored_cost_state_hash"]:
                 continue
-            metrics = self.recalculate_week(start, end)
-            recalculated.append(
+            raw_digest = hashlib.sha256(
+                json.dumps(
+                    [
+                        [
+                            row["report_id"],
+                            row["rrd_id"],
+                            row["row_hash"],
+                            hashlib.sha256(
+                                str(row["raw_json"]).encode("utf-8")
+                            ).hexdigest(),
+                        ]
+                        for row in raw_rows
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            report_rows = conn.execute(
+                """SELECT report_id,report_type,content_hash,row_count
+                FROM wb_finance_weekly_reports
+                WHERE seller_id=? AND week_start=? AND week_end=?
+                ORDER BY report_id""",
+                (self.seller_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+            report_digest = hashlib.sha256(
+                json.dumps(
+                    [list(row) for row in report_rows],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            stale.append(
                 {
                     "week_start": start.isoformat(),
                     "week_end": end.isoformat(),
-                    "cost_state_hash": current["cost_state_hash"],
-                    "cogs": metrics["cogs"],
+                    "stored_cost_state_hash": candidate["stored_cost_state_hash"],
+                    "expected_cost_state_hash": current["cost_state_hash"],
+                    "raw_digest": f"sha256:{raw_digest}",
+                    "raw_row_count": len(raw_rows),
+                    "report_digest": f"sha256:{report_digest}",
+                    "report_count": len(report_rows),
+                    "expected": {
+                        "cogs": aggregate["cogs"],
+                        "profit_after_cogs": aggregate["profit_after_cogs"],
+                        "final_margin_pct": aggregate["final_margin_pct"],
+                        "matched_units": current["matched_units"],
+                        "unmatched_units": current["unmatched_units"],
+                        "problem_skus": current["problem_skus"],
+                        "quality": current["quality"],
+                        "unknown_reasons": unknown,
+                    },
                 }
             )
-        return {
-            "status": "completed",
+        target_keys = {
+            (self.seller_id, str(item["week_start"]), str(item["week_end"]))
+            for item in stale
+        }
+        plan: dict[str, Any] = {
+            "schema_version": "wb_finance_stale_cost_recalculation_v1",
+            "status": "dry_run",
+            "runtime_mutation": False,
+            "apply_allowed": True,
+            "blockers": [],
+            "seller_id": self.seller_id,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat() if date_to is not None else None,
             "checked_week_count": len(candidates),
+            "stale_week_count": len(stale),
+            "weeks": stale,
+            "target_before_digest": self._finance_state_digest(
+                conn, target_keys=target_keys, target_only=True
+            ),
+            "non_target_digest": self._finance_state_digest(
+                conn, target_keys=target_keys, target_only=False
+            ),
+        }
+        plan["fingerprint"] = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    plan,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        return plan
+
+    def apply_stale_cost_weeks(
+        self,
+        *,
+        expected_fingerprint: str,
+        date_from: date = OUR_WB_COST_CUTOVER_WEEK_START,
+        date_to: date | None = None,
+    ) -> dict[str, Any]:
+        """Apply an exact stale-cost plan in one optimistic SQLite transaction."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                plan = self._plan_stale_cost_weeks_in_connection(
+                    conn, date_from=date_from, date_to=date_to
+                )
+                if str(plan["fingerprint"]) != expected_fingerprint:
+                    raise ValueError(
+                        "stale Finance cost plan fingerprint changed before apply"
+                    )
+                target_keys = {
+                    (
+                        self.seller_id,
+                        str(item["week_start"]),
+                        str(item["week_end"]),
+                    )
+                    for item in plan["weeks"]
+                }
+                recalculated: list[dict[str, Any]] = []
+                for item in plan["weeks"]:
+                    start = date.fromisoformat(str(item["week_start"]))
+                    end = date.fromisoformat(str(item["week_end"]))
+                    metrics = self._recalculate_week_in_connection(conn, start, end)
+                    recalculated.append(
+                        {
+                            "week_start": start.isoformat(),
+                            "week_end": end.isoformat(),
+                            "cost_state_hash": item["expected_cost_state_hash"],
+                            "cogs": metrics["cogs"],
+                        }
+                    )
+                non_target_after = self._finance_state_digest(
+                    conn, target_keys=target_keys, target_only=False
+                )
+                if non_target_after != plan["non_target_digest"]:
+                    raise ValueError(
+                        "non-target Finance state changed during recalculation"
+                    )
+                verification = self._plan_stale_cost_weeks_in_connection(
+                    conn, date_from=date_from, date_to=date_to
+                )
+                if int(verification["stale_week_count"]) != 0:
+                    raise ValueError(
+                        "post-recalculation verification still contains stale weeks"
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "status": "already_current" if not recalculated else "applied",
+            "runtime_mutation": bool(recalculated),
+            "fingerprint": expected_fingerprint,
+            "checked_week_count": plan["checked_week_count"],
             "recalculated_week_count": len(recalculated),
             "weeks": recalculated,
+            "non_target_digest_before": plan["non_target_digest"],
+            "non_target_digest_after": non_target_after,
+            "non_target_preserved": True,
+            "post_verify_stale_week_count": 0,
         }
+
+    def _finance_state_digest(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        target_keys: set[tuple[str, str, str]],
+        target_only: bool,
+    ) -> str:
+        evidence: list[list[Any]] = []
+        for table in (
+            "wb_finance_weekly_aggregates",
+            "wb_finance_weekly_cost_coverage",
+            "wb_finance_weekly_reconciliation",
+            "wb_finance_weekly_sync",
+        ):
+            columns = [
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            ]
+            rows = conn.execute(
+                f"SELECT * FROM {table} ORDER BY seller_id,week_start,week_end"
+            ).fetchall()
+            for row in rows:
+                key = (
+                    str(row["seller_id"]),
+                    str(row["week_start"]),
+                    str(row["week_end"]),
+                )
+                if (key in target_keys) != target_only:
+                    continue
+                evidence.append([table, *[row[column] for column in columns]])
+        return (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
 
     def repair_orphan_derived_rows(self) -> dict[str, Any]:
         """Remove derived rows that have no matching seller/week sync boundary."""

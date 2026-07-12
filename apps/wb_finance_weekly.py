@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date-from", default="")
     parser.add_argument("--date-to", default="")
     parser.add_argument("--today", default="")
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--confirm-fingerprint", default="")
+    parser.add_argument("--backup-dir", default="")
     parser.add_argument("--min-interval-seconds", type=float, default=60.0)
     args = parser.parse_args(argv)
     _load_env(Path(args.env_file))
@@ -77,7 +82,38 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "recalculate-all":
         result = block.recalculate_all_weeks()
     elif args.command == "recalculate-stale-cost":
-        result = block.recalculate_stale_cost_weeks()
+        date_from = date.fromisoformat(args.date_from) if args.date_from else None
+        date_to = date.fromisoformat(args.date_to) if args.date_to else None
+        plan_kwargs = {"date_to": date_to}
+        if date_from is not None:
+            plan_kwargs["date_from"] = date_from
+        plan = block.plan_stale_cost_weeks(**plan_kwargs)
+        if not args.apply:
+            result = plan
+        else:
+            if not args.confirm_fingerprint:
+                parser.error("--apply requires --confirm-fingerprint from dry-run")
+            if not args.backup_dir:
+                parser.error("--apply requires an explicit --backup-dir")
+            if args.confirm_fingerprint != str(plan["fingerprint"]):
+                parser.error("--confirm-fingerprint does not match current dry-run")
+            backup = (
+                _create_sqlite_backup(
+                    block.db_path,
+                    Path(args.backup_dir),
+                    fingerprint=args.confirm_fingerprint,
+                )
+                if int(plan["stale_week_count"]) > 0
+                else None
+            )
+            apply_kwargs = {
+                "expected_fingerprint": args.confirm_fingerprint,
+                "date_to": date_to,
+            }
+            if date_from is not None:
+                apply_kwargs["date_from"] = date_from
+            result = block.apply_stale_cost_weeks(**apply_kwargs)
+            result["backup"] = backup
     elif args.command == "repair-derived-orphans":
         result = block.repair_orphan_derived_rows()
     else:
@@ -106,6 +142,38 @@ def main(argv: list[str] | None = None) -> int:
     return (
         0 if str(result.get("status")) not in {"error", "completed_with_errors"} else 1
     )
+
+
+def _create_sqlite_backup(
+    db_path: Path, backup_dir: Path, *, fingerprint: str
+) -> dict[str, object]:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    suffix = fingerprint.removeprefix("sha256:")[:12]
+    backup_path = backup_dir / f"wb-finance-stale-cost-{stamp}-{suffix}.sqlite3"
+    if backup_path.exists():
+        raise ValueError(f"backup already exists: {backup_path}")
+    source_uri = f"file:{db_path.resolve()}?mode=ro"
+    with sqlite3.connect(source_uri, uri=True, timeout=60) as source:
+        with sqlite3.connect(backup_path) as target:
+            source.backup(target)
+    backup_path.chmod(0o600)
+    with sqlite3.connect(f"file:{backup_path.resolve()}?mode=ro", uri=True) as verify:
+        integrity = str(verify.execute("PRAGMA integrity_check").fetchone()[0])
+    if integrity != "ok":
+        backup_path.unlink(missing_ok=True)
+        raise ValueError(f"backup integrity_check failed: {integrity}")
+    sha256 = hashlib.sha256()
+    with backup_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            sha256.update(chunk)
+    return {
+        "created": True,
+        "path": str(backup_path),
+        "size_bytes": backup_path.stat().st_size,
+        "sha256": f"sha256:{sha256.hexdigest()}",
+        "integrity_check": integrity,
+    }
 
 
 if __name__ == "__main__":
