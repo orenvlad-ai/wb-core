@@ -55,6 +55,24 @@ EVENT_STAGE_TRANSFER = "stage_transfer"
 EVENT_WB_ACCEPTANCE = "wb_acceptance"
 EVENT_WB_RECONCILIATION = "wb_reconciliation"
 
+TARGETED_ORPHAN_DOPRINATO_SUPPLY_ID = "40654176"
+TARGETED_ORPHAN_DOPRINATO_EFFECTIVE_DATE = "2026-07-06"
+TARGETED_ORPHAN_DOPRINATO_NM_ID = 391663632
+TARGETED_ORPHAN_DOPRINATO_QUANTITY = Decimal("1")
+TARGETED_ORPHAN_DOPRINATO_WAREHOUSE = "Склад Шушары"
+TARGETED_ORPHAN_DOPRINATO_FIFO_SUPPLY_ID = "40433285"
+TARGETED_ORPHAN_DOPRINATO_REASON = "historical_orphan_doprinato_zero_capital"
+TARGETED_ORPHAN_DOPRINATO_EVENT_ID = (
+    "wb_reconciliation:40654176:historical_orphan:391663632"
+)
+TARGETED_ORPHAN_DOPRINATO_NORMAL_EVENT_ID = (
+    "wb_reconciliation:40654176:40433285:391660889:1"
+)
+TARGETED_ORPHAN_DOPRINATO_DOCUMENT_QUANTITIES = {
+    391660889: Decimal("1"),
+    391663632: Decimal("1"),
+}
+
 
 @dataclass(frozen=True)
 class OwnProductCapitalRebuildResult:
@@ -1397,19 +1415,34 @@ class OwnProductCapitalBlock:
         }
         if not requested:
             raise ValueError("Допринято requires positive SKU quantities")
+        _validate_targeted_orphan_doprinato_document_guard(
+            reconciliation_supply_id=reconciliation_supply_id,
+            effective_date=effective_date,
+            requested=requested,
+            warehouse=warehouse,
+            original_supply_id=original_supply_id,
+        )
         now = self.timestamp_factory()
         with _connect(self.runtime.db_path) as conn:
             _ensure_own_capital_schema(conn)
             existing = conn.execute(
                 """
-                SELECT 1 FROM sheet_vitrina_v1_own_capital_events
-                WHERE event_id LIKE ? ESCAPE '\\' LIMIT 1
+                SELECT event_id, nm_id, quantity, capital_rub, confirmed_quantity,
+                       payload_json
+                FROM sheet_vitrina_v1_own_capital_events
+                WHERE event_id LIKE ? ESCAPE '\\'
+                ORDER BY event_id
                 """,
                 (_literal_like_prefix(f"wb_reconciliation:{reconciliation_supply_id}:"),),
-            ).fetchone()
-            if existing is not None:
+            ).fetchall()
+            if existing:
+                _validate_targeted_orphan_doprinato_idempotency_guard(
+                    reconciliation_supply_id=reconciliation_supply_id,
+                    existing_events=existing,
+                )
                 return {"status": "ok", "idempotent": True, "reconciliation_supply_id": reconciliation_supply_id}
             closures: list[dict[str, Any]] = []
+            classifications: list[dict[str, Any]] = []
             for nm_id, quantity in requested.items():
                 params: list[Any] = [nm_id]
                 where = ["nm_id = ?", "final_acceptance_date <= ?"]
@@ -1428,6 +1461,19 @@ class OwnProductCapitalBlock:
                     """,
                     tuple(params),
                 ).fetchall()
+                targeted_orphan = _plan_targeted_orphan_doprinato_classification(
+                    reconciliation_supply_id=reconciliation_supply_id,
+                    effective_date=effective_date,
+                    requested=requested,
+                    nm_id=nm_id,
+                    quantity=quantity,
+                    warehouse=warehouse,
+                    original_supply_id=original_supply_id,
+                    candidates=candidates,
+                )
+                if targeted_orphan is not None:
+                    classifications.append(targeted_orphan)
+                    continue
                 remaining = quantity
                 for candidate in candidates:
                     if remaining <= ZERO:
@@ -1514,6 +1560,41 @@ class OwnProductCapitalBlock:
                         closure["nm_id"],
                     ),
                 )
+            for classification in classifications:
+                self._insert_event(
+                    conn,
+                    event_id=classification["event_id"],
+                    event_type=EVENT_WB_RECONCILIATION,
+                    effective_date=effective_date,
+                    shipment_id="",
+                    supply_id=reconciliation_supply_id,
+                    nm_id=classification["nm_id"],
+                    stage_from=STAGE_FF_TO_WB,
+                    stage_to=STAGE_WB,
+                    quantity=ZERO,
+                    capital_rub=ZERO,
+                    confirmed_quantity=ZERO,
+                    cost_layer_id=classification["reason"],
+                    warehouse=warehouse,
+                    destination=destination,
+                    payload={
+                        "classification": classification["reason"],
+                        "original_supply_id": "",
+                        "fifo_candidate_supply_id": classification[
+                            "fifo_candidate_supply_id"
+                        ],
+                        "requested_quantity": _text_decimal(
+                            classification["requested_quantity"]
+                        ),
+                        "tracked_outstanding": "0",
+                        "physical_outstanding": "0",
+                        "paid_capital_outstanding": "0",
+                        "no_ff_writeoff": True,
+                        "zero_capital": True,
+                        "targeted": True,
+                    },
+                    created_at=now,
+                )
             conn.commit()
         if recalculate:
             self.recalculate()
@@ -1532,6 +1613,19 @@ class OwnProductCapitalBlock:
                     ),
                 }
                 for item in closures
+            ],
+            "classifications": [
+                {
+                    "event_id": item["event_id"],
+                    "reason": item["reason"],
+                    "nm_id": item["nm_id"],
+                    "quantity": _text_decimal(item["requested_quantity"]),
+                    "fifo_candidate_supply_id": item[
+                        "fifo_candidate_supply_id"
+                    ],
+                    "capital_rub": "0",
+                }
+                for item in classifications
             ],
         }
 
@@ -2461,6 +2555,130 @@ def _component_reasons(raw: Any) -> list[str]:
         if normalized in {"missing", "pending", "needs_review", "estimated", "unknown"}:
             reasons.append(f"{key}: {normalized}")
     return reasons
+
+
+def _validate_targeted_orphan_doprinato_idempotency_guard(
+    *,
+    reconciliation_supply_id: str,
+    existing_events: Iterable[Any],
+) -> None:
+    if reconciliation_supply_id != TARGETED_ORPHAN_DOPRINATO_SUPPLY_ID:
+        return
+    rows = {str(row["event_id"]): row for row in existing_events}
+    expected_ids = {
+        TARGETED_ORPHAN_DOPRINATO_NORMAL_EVENT_ID,
+        TARGETED_ORPHAN_DOPRINATO_EVENT_ID,
+    }
+    if set(rows) != expected_ids:
+        raise ValueError(
+            "targeted historical orphan Допринято idempotency guard mismatch: event_ids"
+        )
+    normal = rows[TARGETED_ORPHAN_DOPRINATO_NORMAL_EVENT_ID]
+    orphan = rows[TARGETED_ORPHAN_DOPRINATO_EVENT_ID]
+    orphan_payload = _json_loads(orphan["payload_json"])
+    guards = {
+        "normal_nm_id": int(normal["nm_id"]) == 391660889,
+        "normal_quantity": _decimal(normal["quantity"]) == Decimal("1"),
+        "orphan_nm_id": int(orphan["nm_id"])
+        == TARGETED_ORPHAN_DOPRINATO_NM_ID,
+        "orphan_quantity": _decimal(orphan["quantity"]) == ZERO,
+        "orphan_capital": _decimal(orphan["capital_rub"]) == ZERO,
+        "orphan_confirmed_quantity": _decimal(orphan["confirmed_quantity"])
+        == ZERO,
+        "orphan_reason": str(orphan_payload.get("classification") or "")
+        == TARGETED_ORPHAN_DOPRINATO_REASON,
+        "orphan_zero_capital": bool(orphan_payload.get("zero_capital")),
+        "orphan_no_ff_writeoff": bool(orphan_payload.get("no_ff_writeoff")),
+    }
+    failed = sorted(name for name, passed in guards.items() if not passed)
+    if failed:
+        raise ValueError(
+            "targeted historical orphan Допринято idempotency guard mismatch: "
+            + ", ".join(failed)
+        )
+
+
+def _validate_targeted_orphan_doprinato_document_guard(
+    *,
+    reconciliation_supply_id: str,
+    effective_date: str,
+    requested: Mapping[int, Decimal],
+    warehouse: str,
+    original_supply_id: str | None,
+) -> None:
+    if reconciliation_supply_id != TARGETED_ORPHAN_DOPRINATO_SUPPLY_ID:
+        return
+    guards = {
+        "effective_date": effective_date
+        == TARGETED_ORPHAN_DOPRINATO_EFFECTIVE_DATE,
+        "document_quantities": dict(requested)
+        == TARGETED_ORPHAN_DOPRINATO_DOCUMENT_QUANTITIES,
+        "warehouse": str(warehouse or "").strip()
+        == TARGETED_ORPHAN_DOPRINATO_WAREHOUSE,
+        "original_supply_id_absent": not str(original_supply_id or "").strip(),
+    }
+    failed = sorted(name for name, passed in guards.items() if not passed)
+    if failed:
+        raise ValueError(
+            "targeted historical orphan Допринято document guard mismatch: "
+            + ", ".join(failed)
+        )
+
+
+def _plan_targeted_orphan_doprinato_classification(
+    *,
+    reconciliation_supply_id: str,
+    effective_date: str,
+    requested: Mapping[int, Decimal],
+    nm_id: int,
+    quantity: Decimal,
+    warehouse: str,
+    original_supply_id: str | None,
+    candidates: Iterable[Any],
+) -> dict[str, Any] | None:
+    if (
+        reconciliation_supply_id != TARGETED_ORPHAN_DOPRINATO_SUPPLY_ID
+        or nm_id != TARGETED_ORPHAN_DOPRINATO_NM_ID
+    ):
+        return None
+    _validate_targeted_orphan_doprinato_document_guard(
+        reconciliation_supply_id=reconciliation_supply_id,
+        effective_date=effective_date,
+        requested=requested,
+        warehouse=warehouse,
+        original_supply_id=original_supply_id,
+    )
+    candidate_rows = list(candidates)
+    if not candidate_rows:
+        raise ValueError(
+            "targeted historical orphan Допринято guard mismatch: fifo_candidate_missing"
+        )
+    fifo_candidate = candidate_rows[0]
+    guards = {
+        "quantity": quantity == TARGETED_ORPHAN_DOPRINATO_QUANTITY,
+        "fifo_candidate": str(fifo_candidate["original_supply_id"])
+        == TARGETED_ORPHAN_DOPRINATO_FIFO_SUPPLY_ID,
+        "tracked_outstanding": _decimal(fifo_candidate["open_quantity"]) == ZERO,
+        "physical_outstanding": _decimal(
+            fifo_candidate["physical_open_quantity"]
+        )
+        == ZERO,
+        "paid_capital_outstanding": _decimal(fifo_candidate["open_quantity"])
+        == ZERO,
+    }
+    failed = sorted(name for name, passed in guards.items() if not passed)
+    if failed:
+        raise ValueError(
+            "targeted historical orphan Допринято guard mismatch: "
+            + ", ".join(failed)
+        )
+    return {
+        "event_id": TARGETED_ORPHAN_DOPRINATO_EVENT_ID,
+        "reason": TARGETED_ORPHAN_DOPRINATO_REASON,
+        "nm_id": nm_id,
+        "requested_quantity": quantity,
+        "fifo_candidate_supply_id": str(fifo_candidate["original_supply_id"]),
+    }
 
 
 def _reason_ru(reason: str) -> str:

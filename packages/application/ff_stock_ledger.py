@@ -794,6 +794,7 @@ class FfStockLedgerBlock:
         skipped_without_paid_ff_capital = 0
         skipped_doprinato_without_tracked_outstanding = 0
         bounded_paid_quantity_diagnostics: list[dict[str, Any]] = []
+        targeted_orphan_classifications: list[dict[str, Any]] = []
         for record in records:
             normalized = dict(record.get("normalized") or record)
             if _optional_int(normalized.get("status_id")) not in WB_DEBIT_STATUS_IDS:
@@ -875,6 +876,15 @@ class FfStockLedgerBlock:
                 == "wb_supply_doprinato_without_tracked_outstanding"
             ):
                 skipped_doprinato_without_tracked_outstanding += 1
+            reconciliation = result.get("result")
+            if isinstance(reconciliation, Mapping):
+                for classification in reconciliation.get("classifications") or []:
+                    targeted_orphan_classifications.append(
+                        {
+                            "supply_id": str(normalized.get("supply_id") or ""),
+                            **dict(classification),
+                        }
+                    )
             if str(result.get("skip_reason") or "").endswith("_blocked"):
                 diagnostics.append(
                     {
@@ -900,6 +910,10 @@ class FfStockLedgerBlock:
                 skipped_doprinato_without_tracked_outstanding
             ),
             "bounded_paid_quantity_diagnostics": bounded_paid_quantity_diagnostics,
+            "targeted_orphan_classification_count": len(
+                targeted_orphan_classifications
+            ),
+            "targeted_orphan_classifications": targeted_orphan_classifications,
             "blocker_count": len(diagnostics),
             "blockers": diagnostics,
         }

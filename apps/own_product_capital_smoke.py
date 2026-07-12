@@ -21,7 +21,10 @@ from packages.application.own_product_capital import (  # noqa: E402
     STAGE_PRODUCTION,
     STAGE_PRODUCTION_TO_FF,
     STAGE_WB,
+    TARGETED_ORPHAN_DOPRINATO_EVENT_ID,
+    TARGETED_ORPHAN_DOPRINATO_REASON,
     OwnProductCapitalBlock,
+    _plan_targeted_orphan_doprinato_classification,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
@@ -95,6 +98,7 @@ def main() -> None:
     _assert_late_boundary_correction()
     _assert_partial_acceptance_state_machine()
     _assert_historical_doprinato_paid_boundary()
+    _assert_targeted_orphan_doprinato_classification()
     _assert_persisted_expense_events()
     _assert_historical_source_backfill()
     print("own product capital smoke: OK")
@@ -921,6 +925,224 @@ def _assert_historical_doprinato_paid_boundary() -> None:
                 original_supply_id="bounded-wb",
             ),
             "Допринято exceeding physical outstanding",
+        )
+
+
+def _assert_targeted_orphan_doprinato_classification() -> None:
+    with TemporaryDirectory(prefix="own-capital-targeted-orphan-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        block = OwnProductCapitalBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        block.record_supplier_payment(
+            payment_id="targeted-orphan-payment",
+            shipment_id="targeted-orphan-shipment",
+            effective_date="2026-07-01",
+            invoice_total_cny=2,
+            paid_cny=2,
+            paid_rub=200,
+            product_lines=[
+                {
+                    "line_id": "targeted-normal-line",
+                    "nm_id": 391660889,
+                    "qty": 1,
+                    "unit_price": 1,
+                    "match_status": "matched",
+                },
+                {
+                    "line_id": "targeted-orphan-line",
+                    "nm_id": 391663632,
+                    "qty": 1,
+                    "unit_price": 1,
+                    "match_status": "matched",
+                },
+            ],
+            actual_ff_acceptance_date="2026-06-30",
+            expenses_complete=True,
+        )
+        block.record_ordinary_wb_supply_acceptance(
+            supply_id="40433285",
+            writeoff_date="2026-07-02",
+            acceptance_date="2026-07-03",
+            sent_quantities_by_nm={391660889: 1, 391663632: 1},
+            accepted_quantities_by_nm={391660889: 0, 391663632: 1},
+            warehouse="Склад Шушары",
+            destination="Склад Шушары",
+            known_nm_ids=[391660889, 391663632],
+            expenses_complete=True,
+            final=True,
+        )
+        before_lookup = block.load_daily_metric_lookup("2026-07-05")
+        before_total = sum(
+            (
+                Decimal(str(before_lookup[nm_id][OWN_TOTAL_CAPITAL_RUB_METRIC_KEY]))
+                for nm_id in (391660889, 391663632)
+            ),
+            Decimal("0"),
+        )
+        before_orphan_wb_qty = before_lookup[391663632][
+            own_stage_metric_key(STAGE_WB, "qty")
+        ]
+        ff_operations_before = runtime.count_ff_stock_operations()
+        result = block.reconcile_doprinato(
+            reconciliation_supply_id="40654176",
+            effective_date="2026-07-06",
+            quantities_by_nm={391660889: 1, 391663632: 1},
+            warehouse="Склад Шушары",
+            destination="Склад Шушары",
+            original_supply_id=None,
+        )
+        _eq(len(result["closures"]), 1, "targeted document ordinary closure count")
+        _eq(result["closures"][0]["nm_id"], 391660889, "ordinary SKU identity")
+        _dec_eq(result["closures"][0]["quantity"], "1", "ordinary SKU tracked transfer")
+        _eq(len(result["classifications"]), 1, "targeted orphan classification count")
+        classification = result["classifications"][0]
+        _eq(classification["event_id"], TARGETED_ORPHAN_DOPRINATO_EVENT_ID, "orphan audit identity")
+        _eq(classification["reason"], TARGETED_ORPHAN_DOPRINATO_REASON, "orphan audit reason")
+        _eq(classification["nm_id"], 391663632, "orphan SKU identity")
+        _dec_eq(classification["quantity"], "1", "orphan physical quantity")
+        _dec_eq(classification["capital_rub"], "0", "orphan capital")
+        after_lookup = block.load_daily_metric_lookup("2026-07-06")
+        after_total = sum(
+            (
+                Decimal(str(after_lookup[nm_id][OWN_TOTAL_CAPITAL_RUB_METRIC_KEY]))
+                for nm_id in (391660889, 391663632)
+            ),
+            Decimal("0"),
+        )
+        _dec_eq(after_total, before_total, "orphan classification preserves total capital")
+        _dec_eq(
+            after_lookup[391660889][own_stage_metric_key(STAGE_WB, "qty")],
+            "1",
+            "ordinary SKU reaches WB",
+        )
+        _dec_eq(
+            after_lookup[391663632][own_stage_metric_key(STAGE_WB, "qty")],
+            before_orphan_wb_qty,
+            "orphan does not increase paid-capital WB quantity",
+        )
+        _eq(
+            runtime.count_ff_stock_operations(),
+            ff_operations_before,
+            "orphan classification leaves FF quantity ledger unchanged",
+        )
+        with _connect(runtime.db_path) as conn:
+            audit = conn.execute(
+                """
+                SELECT quantity, capital_rub, confirmed_quantity, payload_json
+                FROM sheet_vitrina_v1_own_capital_events
+                WHERE event_id = ?
+                """,
+                (TARGETED_ORPHAN_DOPRINATO_EVENT_ID,),
+            ).fetchone()
+        _dec_eq(audit["quantity"], "0", "orphan audit paid quantity")
+        _dec_eq(audit["capital_rub"], "0", "orphan audit capital persisted")
+        _dec_eq(audit["confirmed_quantity"], "0", "orphan audit confirmed quantity")
+        if TARGETED_ORPHAN_DOPRINATO_REASON not in str(audit["payload_json"]):
+            raise AssertionError(f"orphan audit reason missing: {dict(audit)}")
+        repeated = block.reconcile_doprinato(
+            reconciliation_supply_id="40654176",
+            effective_date="2026-07-06",
+            quantities_by_nm={391660889: 1, 391663632: 1},
+            warehouse="Склад Шушары",
+            destination="Склад Шушары",
+            original_supply_id=None,
+        )
+        if not repeated["idempotent"]:
+            raise AssertionError("targeted orphan classification repeat must be idempotent")
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_own_capital_events
+                SET capital_rub='1'
+                WHERE event_id=?
+                """,
+                (TARGETED_ORPHAN_DOPRINATO_EVENT_ID,),
+            )
+            conn.commit()
+        _must_fail(
+            lambda: block.reconcile_doprinato(
+                reconciliation_supply_id="40654176",
+                effective_date="2026-07-06",
+                quantities_by_nm={391660889: 1, 391663632: 1},
+                warehouse="Склад Шушары",
+                destination="Склад Шушары",
+                original_supply_id=None,
+            ),
+            "targeted orphan corrupted repeat state",
+        )
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_own_capital_events
+                SET capital_rub='0'
+                WHERE event_id=?
+                """,
+                (TARGETED_ORPHAN_DOPRINATO_EVENT_ID,),
+            )
+            conn.commit()
+
+        exact_candidate = [
+            {
+                "original_supply_id": "40433285",
+                "open_quantity": "0",
+                "physical_open_quantity": "0",
+            }
+        ]
+        helper_kwargs = {
+            "reconciliation_supply_id": "40654176",
+            "effective_date": "2026-07-06",
+            "requested": {391660889: Decimal("1"), 391663632: Decimal("1")},
+            "nm_id": 391663632,
+            "quantity": Decimal("1"),
+            "warehouse": "Склад Шушары",
+            "original_supply_id": None,
+            "candidates": exact_candidate,
+        }
+        guard_mutations = [
+            {"quantity": Decimal("2")},
+            {"candidates": [{**exact_candidate[0], "original_supply_id": "40433286"}]},
+            {"candidates": [{**exact_candidate[0], "open_quantity": "1"}]},
+            {"candidates": [{**exact_candidate[0], "physical_open_quantity": "1"}]},
+            {"candidates": []},
+        ]
+        for mutation in guard_mutations:
+            kwargs = {**helper_kwargs, **mutation}
+            _must_fail(
+                lambda kwargs=kwargs: _plan_targeted_orphan_doprinato_classification(
+                    **kwargs
+                ),
+                f"targeted orphan guard mutation {mutation}",
+            )
+        document_guard_mutations = [
+            {"effective_date": "2026-07-07"},
+            {"quantities_by_nm": {391660889: 1, 391663632: 2}},
+            {"quantities_by_nm": {391660889: 1, 391663633: 1}},
+            {"warehouse": "Другой склад"},
+            {"original_supply_id": "40433285"},
+        ]
+        for mutation in document_guard_mutations:
+            call = {
+                "reconciliation_supply_id": "40654176",
+                "effective_date": "2026-07-06",
+                "quantities_by_nm": {391660889: 1, 391663632: 1},
+                "warehouse": "Склад Шушары",
+                "destination": "Склад Шушары",
+                "original_supply_id": None,
+                **mutation,
+            }
+            _must_fail(
+                lambda call=call: block.reconcile_doprinato(**call),
+                f"targeted orphan document guard mutation {mutation}",
+            )
+        _must_fail(
+            lambda: block.reconcile_doprinato(
+                reconciliation_supply_id="40654177",
+                effective_date="2026-07-06",
+                quantities_by_nm={391660889: 1, 391663632: 1},
+                warehouse="Склад Шушары",
+                destination="Склад Шушары",
+                original_supply_id=None,
+            ),
+            "non-target Допринято remains fail closed",
         )
 
 
