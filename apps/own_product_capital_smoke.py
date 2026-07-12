@@ -841,6 +841,28 @@ def _assert_historical_doprinato_paid_boundary() -> None:
             expenses_complete=True,
             final=True,
         )
+        diagnostic_scope = block.matching_wb_outstanding_quantities(
+            effective_date="2026-07-04",
+            quantities_by_nm={101: 6},
+            warehouse="Коледино",
+            destination="ЦФО",
+            original_supply_id="bounded-wb",
+        )
+        _eq(
+            diagnostic_scope["tracked_available_by_nm"]["101"],
+            "3",
+            "bounded diagnostic tracked quantity",
+        )
+        _eq(
+            diagnostic_scope["physical_available_by_nm"]["101"],
+            "6",
+            "bounded diagnostic physical quantity",
+        )
+        _eq(
+            diagnostic_scope["candidates"][0]["original_supply_id"],
+            "bounded-wb",
+            "bounded diagnostic candidate identity",
+        )
         reconciliation = block.reconcile_doprinato(
             reconciliation_supply_id="bounded-doprinato",
             effective_date="2026-07-04",
