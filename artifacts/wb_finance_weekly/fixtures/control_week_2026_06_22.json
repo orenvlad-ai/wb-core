@@ -1,0 +1,22 @@
+{
+  "schema_version": "wb_finance_control_week_regression_v1",
+  "week_start": "2026-06-22",
+  "week_end": "2026-06-28",
+  "raw_row_count": 72184,
+  "report_ids": [
+    "764583098",
+    "764583099"
+  ],
+  "net_sales_qty": 18606,
+  "net_revenue": "9707534.0300",
+  "commission": "3567303.7900",
+  "marketing": "990903.0000",
+  "logistics": "1285.0000",
+  "transit_logistics": "55403.0500",
+  "penalties": "360.0000",
+  "cogs": "1861728.0000",
+  "profit_after_cogs": "3230551.1900",
+  "final_margin_pct": "33.2788",
+  "cost_source": "cost_price",
+  "evidence": "Production acceptance snapshot captured before the 2026-07-01 Our WB Cost cutover; no raw rows or secrets are stored in this fixture."
+}
