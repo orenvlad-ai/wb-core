@@ -22,6 +22,8 @@ After merge, the single merge/deploy coordinator must:
 6. verify post-run reconciliation, UI/source metadata and public historical samples;
 7. run a second dry-run/apply-equivalent check and require zero changes.
 
+After the daily-state apply, historical web-vitrina publication uses the protected `webcore_product_capital` source-group refresh for each persisted date. When a date exists only in an older registry bundle, that group alone may use the prior-bundle ready snapshot as its merge base and save the merged plan under the current bundle. The merge is additive/date-scoped: it updates only `own_product_capital` metric/status rows and preserves unrelated metric groups, 1C and proxy projections. Other source groups retain the current-bundle-only date guard.
+
 The runner builds its candidate from persisted posted CNY operations, supplier fact boundaries, dated expense documents and WB cache rows that already have canonical FF quantity-ledger debit evidence; it does not replay or rewrite those source contours. It makes a coherent SQLite online backup, verifies integrity and private permissions before apply, then opens one `BEGIN IMMEDIATE` transaction on the live database. It rechecks source/target/external fingerprints, writes the complete own-capital event/state contour and only bounded daily rows in place, preserves out-of-range own rows plus the explicit 1C/proxy2/proxy3 digest, verifies the target digest and rolls back the whole scope on any exception. It never replaces the live SQLite file, so WAL/active-reader compatibility and inode identity are preserved. Production dry-run/apply is deliberately not performed while preparing the PR.
 
 ## Backfill evidence policy
