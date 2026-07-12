@@ -44,8 +44,10 @@ Sales add `quantity * unit cost`; returns subtract it. All Finance money arithme
 - History begins with `29.12.2025–04.01.2026` and ends at the latest fully closed week.
 - Finance resync always recalculates its week. Every Our WB Cost rebuild (including an unchanged recovery rebuild after restart) and every nomenclature mutation path compares the stored cost dependency hash and recalculates only changed post-cutover Finance weeks. Finance recalculation does not invoke Our WB Cost rebuild or web-vitrina refresh, so there is no recursive refresh loop.
 
-## Rollout boundary
+## Guarded cost recalculation
 
-This branch is repo-only. It must not change production data before merge/deploy approval. The subsequent live task must deploy the merged schema/code and run the repo-owned `recalculate-stale-cost` Finance command (or equivalent canonical runner path) so `29.06.2026–05.07.2026` and later stored aggregates adopt the cutover. No ad-hoc SQL is part of the rollout.
+`python3 apps/wb_finance_weekly.py recalculate-stale-cost ...` is read-only by default. Its bounded plan lists the exact stale weeks, expected COGS/coverage state, raw-row digests, target/non-target digests and an exact `sha256` fingerprint. Apply requires `--apply`, the same fingerprint in `--confirm-fingerprint`, and an explicit `--backup-dir`; before writing, the runner creates an online SQLite backup through the backup API, verifies `PRAGMA integrity_check=ok`, and hashes the backup.
+
+Apply opens one `BEGIN IMMEDIATE` transaction, recomputes the complete plan, rejects fingerprint drift, recalculates every planned week in-place, checks the non-target Finance digest and proves that no stale target remains before commit. Any exception rolls back all planned weeks. A repeated dry-run has `stale_week_count=0`. Ordinary Our WB Cost/nomenclature invalidation uses the same all-or-nothing application method, without calling refresh recursively. No `os.replace`, ad-hoc SQL or partial/force mode is part of this contour.
 
 Targeted verification is `python3 apps/wb_finance_weekly_smoke.py`. Production acceptance additionally checks control week `22.06.2026–28.06.2026`, both report IDs `764583098` and `764583099`, 72,184 raw rows, UI rendering, timer registration, and repeated-sync idempotency.
