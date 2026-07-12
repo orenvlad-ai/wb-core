@@ -15,10 +15,11 @@
 Owned SKU priority:
 
 1. primary shipment `sku_ff_unit_cost_rub`;
-2. nearest earlier ready snapshot metric `onec_FF_STOCK_unit_cost_rub`, strictly `<= 2026-05-16`, with bundle/date/metric provenance;
-3. no fallback: whole baseline blocked.
+2. for nmID `497415593` and `497416931`, the explicit business decision takes precedence over 1C and uses `business_approved_primary_wac_fallback` derived from the exact current primary layer weighted FF cost, with decision date, both approved nmIDs, primary shipment/layer, method and reason provenance; coverage is full but confirmation is zero;
+3. for every other absent SKU, nearest earlier ready snapshot metric `onec_FF_STOCK_unit_cost_rub`, strictly `<= 2026-05-16`, with bundle/date/metric provenance;
+4. no fallback: whole baseline blocked.
 
-Coverage must be 100%. Future shipment, `near_future_proxy`, WB-stage 1C cost, post-cutoff 1C, zero and hidden last-known costs are forbidden.
+Coverage must be 100%. No general estimated fallback exists. Future shipment, `near_future_proxy`, WB-stage 1C cost, post-cutoff 1C, zero and hidden last-known costs are forbidden.
 
 Opening recognized cost covers every physical unit. For production and
 production-to-FF rows, paid-equivalent quantity and paid capital are still
