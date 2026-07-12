@@ -82,7 +82,7 @@ Public fields дополнены `paid_equivalent_qty` и `cost_coverage_pct`. `
 
 `Недопринято WB` — derived substate `ФФ → WB`, не шестая стадия и не отдельный склад. Exact immutable layers хранят original supply, nmID, warehouse/destination, FF movement snapshot, sent/accepted/open quantities, recognized/paid costs и provenance.
 
-Opening-boundary source anomalies не являются новым складом или пользовательской метрикой. `CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1` может сохранить только bounded pre-cutover raw surplus/residual как audit-only provenance; он не создаёт physical/paid-equivalent quantity, recognized/paid capital или cross-SKU closure. Пять stage totals продолжают следовать authoritative snapshots/ledger, а превышение 3/5/20 units либо missing identity/date/cost блокирует весь candidate.
+Opening-boundary source anomalies не являются новым складом или пользовательской метрикой. Вся pre-cutover history сохраняется только как audit provenance и не создаёт physical/paid-equivalent quantity, recognized/paid capital или historical underaccepted. Пять stage totals следуют authoritative opening snapshots/ledger. Post-cutover composition mismatch допускается только exact manifest policy с supply-level quantity/capital conservation; missing identity/date/cost и fingerprint drift блокируют весь candidate.
 
 Reconciliation: direct original identity, иначе strict FIFO по `warehouse + destination + nmID`; future layer не eligible; surplus/negative блокируются; retry idempotent; second FF debit отсутствует. Cost layers не смешиваются при переносе.
 
@@ -98,3 +98,6 @@ TOTAL quantity суммируется, cost равен `SUM(open paid capital) /
 Даты раньше `2026-07-01` и legacy `own_capital` events/daily rows не переписываются. После approved baseline apply `OwnProductCapitalBlock.load_daily_metric_lookup()` читает canonical rows; старые events/outstanding остаются audit evidence и не являются live physical truth. Targeted historical orphan exceptions legacy runner не переносятся в canonical methodology.
 
 Production candidate/apply выполняет только `apps/canonical_cost_engine_backfill.py`. Dry-run доказывает exact primary shipment, fallback dates, 100% coverage, stage reconciliation, current-vs-candidate delta, affected Finance weeks и preservation digests. Apply запрещён без exact human-approved fingerprint и backup plan.
+## Canonical cutover boundary (2026-07-01)
+
+Capital uses the paid projection of the same canonical layers as recognized COGS. Legacy pre-cutover movements do not create opening capital or historical underaccepted. Exact post-cutover source normalization preserves the same-supply paid-capital pool and never becomes an independent inventory or user-facing anomaly metric.

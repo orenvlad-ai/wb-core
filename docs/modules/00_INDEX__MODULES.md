@@ -256,3 +256,4 @@ update_note: "Обновлён под Google Sheets decommission и active modul
 - считать этот файл navigation entrypoint для пакета `docs/modules/`;
 - не документировать здесь как часть `main` блоки, которые существуют только на незамёрженных ветках или ещё не дошли до merge;
 - не дублировать полный канонический модульный текст в других местах репозитория.
+Canonical cost cutover diagnostics are owned by `apps/canonical_cost_engine_diagnostic.py` and `migration/99_unified_canonical_cost_engine.md`: pre-cutover movements are audit-only, while any bounded post-cutover composition normalization requires an exact versioned manifest and supply-level quantity/capital conservation.

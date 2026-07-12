@@ -16,7 +16,10 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     BASELINE_ONEC,
     CanonicalCostBlocked,
     CanonicalCostEngine,
+    POSTCUTOVER_NORMALIZATION_MANIFEST,
+    POSTCUTOVER_NORMALIZATION_POLICY,
     _ff_opening_boundary_context,
+    _normalized_acceptance_plan,
     _wb_movement_evidence,
     allocate_partial_payment,
     reconcile_outstanding_layers,
@@ -42,7 +45,7 @@ def main() -> int:
     _outstanding_reconciliation()
     _ff_operation_effective_date_resolution()
     _targeted_remediation_stays_outside_opening_collapse()
-    _cutover_immaterial_anomaly_policy()
+    _cutover_boundary_and_normalization_policy()
     _baseline_and_physical_sources()
     print("canonical_cost_engine_smoke: ok")
     return 0
@@ -140,8 +143,8 @@ def _ff_operation_effective_date_resolution() -> None:
             movements = _wb_movement_evidence(conn, as_of_date="2026-07-01")
             _eq(
                 sum((Decimal(str(item["open_quantity"])) for item in movements), Decimal("0")),
-                Decimal("3"),
-                "opening underaccepted is sent minus accepted",
+                Decimal("0"),
+                "legacy underaccepted is audit-only at the cutover boundary",
             )
             source_timestamp = resolve_ff_operation_effective_date(
                 conn,
@@ -226,339 +229,94 @@ def _ff_operation_effective_date_resolution() -> None:
         )
 
 
-def _cutover_immaterial_anomaly_policy() -> None:
-    import json
+def _cutover_boundary_and_normalization_policy() -> None:
+    operation = {
+        "operation_id": "post-normalization-fixture",
+        "supply_id": "supply-fixture",
+        "source_key": "wb_supply_debit:supply:supply-fixture",
+        "business_date": "2026-07-04",
+        "line_set_fingerprint": "sha256:sent",
+        "accepted_line_set_fingerprint": "sha256:accepted",
+        "evidence_fingerprint": "sha256:evidence",
+    }
+    sent = {111: Decimal("100"), 222: Decimal("100")}
+    accepted = {111: Decimal("105"), 222: Decimal("90")}
+    no_manifest = _normalized_acceptance_plan(
+        operation=operation, sent_by_nm=sent, accepted_by_nm=accepted
+    )
+    _eq(no_manifest[111]["effective_accepted"], Decimal("100"), "raw surplus is capped")
+    _eq(no_manifest[222]["effective_accepted"], Decimal("90"), "future/unlisted supply is strict")
+    POSTCUTOVER_NORMALIZATION_MANIFEST[operation["operation_id"]] = dict(operation)
+    try:
+        normalized = _normalized_acceptance_plan(
+            operation=operation, sent_by_nm=sent, accepted_by_nm=accepted
+        )
+        _eq(normalized[111]["direct_accepted"], Decimal("100"), "direct acceptance")
+        _eq(normalized[222]["normalized_accepted"], Decimal("5"), "same-supply shortage allocation")
+        _eq(
+            sum((item["effective_accepted"] for item in normalized.values()), Decimal("0")),
+            Decimal("195"),
+            "aggregate accepted quantity is conserved",
+        )
+        _eq(
+            sum((item["open"] for item in normalized.values()), Decimal("0")),
+            Decimal("5"),
+            "sent equals effective accepted plus underaccepted",
+        )
+        changed = dict(operation)
+        changed["evidence_fingerprint"] = "sha256:drift"
+        drifted = _normalized_acceptance_plan(
+            operation=changed, sent_by_nm=sent, accepted_by_nm=accepted
+        )
+        _eq(
+            drifted[222]["normalized_accepted"],
+            Decimal("0"),
+            "exact manifest fingerprint drift fails closed",
+        )
+    finally:
+        POSTCUTOVER_NORMALIZATION_MANIFEST.pop(operation["operation_id"], None)
 
     with TemporaryDirectory() as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
         with _connect(runtime.db_path) as conn:
             _ensure_schema(conn)
             _insert_primary(conn)
-            nm_ids = [210183142, 210183143, 210183144, 210183145, 210183146]
-            _insert_snapshot(
-                conn,
-                "2026-05-16",
-                {nm_id: {"onec_FF_STOCK_unit_cost_rub": 100 + index}
-                 for index, nm_id in enumerate(nm_ids)},
-            )
-            goods = [
-                {"nmID": nm_ids[0], "quantity": 1000, "acceptedQuantity": 1001},
-                {"nmID": nm_ids[1], "quantity": 1000, "acceptedQuantity": 999},
-                {"nmID": nm_ids[2], "quantity": 1000, "acceptedQuantity": 999},
-                {"nmID": nm_ids[3], "quantity": 1000, "acceptedQuantity": 999},
-                {"nmID": nm_ids[4], "quantity": 1000, "acceptedQuantity": 1000},
-            ]
-            normalized = {
-                "supply_id": "24035703",
-                "wb_supply_id": "24035703",
-                "cache_key": "supply:24035703",
-                "status_id": 5,
-                "fact_date": "2024-10-13",
-                "supply_date": "2024-10-13",
-                "warehouse_name": "W",
-                "destination_name": "D",
-            }
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_wb_supplies(
-                    supply_id,cache_key,wb_supply_id,normalized_row_json,raw_goods_json,
-                    warehouse_id,status_id,quantity_for_size_filter,supply_date,fact_date,synced_at
-                ) VALUES('24035703','supply:24035703','24035703',?,?,'W',5,5000,
-                         '2024-10-13','2024-10-13','2026-06-01T00:00:00Z')
-                """,
-                (json.dumps(normalized), json.dumps(goods)),
-            )
+            operation_row = _insert_legacy_wb_operation_fixture(conn)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_ff_stock_operations(
                     operation_id,operation_type,source_type,source_key,source_object_id,
                     source_object_label,created_at,created_by,sku_count,total_quantity_delta,
                     total_quantity_abs,warnings_json,diagnostics_json
-                ) VALUES('ffso_46a7a083a1b64d82b584','auto_writeoff','wb_supply',
-                         'wb_supply_debit:supply:24035703','24035703','24035703',
-                         '2026-07-09T00:00:00Z','system',5,-5000,5000,'[]','{}')
+                ) VALUES('legacy-audit-opening','opening_balance','manual','legacy-audit-opening',
+                         'legacy-audit-opening','opening','2026-07-01T00:00:00Z','fixture',
+                         5,1250,1250,'[]','{}')
                 """
             )
-            for line_no, nm_id in enumerate(nm_ids, start=1):
+            for line_no, nm_id in enumerate(
+                (259460529, 259465495, 391662410, 428855306, 497414624),
+                start=1,
+            ):
                 conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(
-                        operation_id,line_no,nm_id,quantity_delta,raw_json
-                    ) VALUES('ffso_46a7a083a1b64d82b584',?,?,-1000,'{}')
-                    """,
+                    "INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(operation_id,line_no,nm_id,quantity_delta,raw_json) VALUES('legacy-audit-opening',?,?,250,'{}')",
                     (line_no, nm_id),
                 )
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_ff_stock_operations(
-                    operation_id,operation_type,source_type,source_key,source_object_id,
-                    source_object_label,created_at,created_by,sku_count,total_quantity_delta,
-                    total_quantity_abs,warnings_json,diagnostics_json
-                ) VALUES('policy-opening','opening_balance','manual','policy-opening','policy-opening',
-                         'opening','2026-07-08T00:00:00Z','fixture',5,5000,5000,'[]','{}')
-                """
-            )
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_ff_stock_operations(
-                    operation_id,operation_type,source_type,source_key,source_object_id,
-                    source_object_label,created_at,created_by,sku_count,total_quantity_delta,
-                    total_quantity_abs,warnings_json,diagnostics_json
-                ) VALUES('policy-repair','correction_receipt','runtime_repair','runtime_repair:policy',
-                         'ffso_46a7a083a1b64d82b584','repair','2026-07-09T01:00:00Z','fixture',
-                         5,5000,5000,'[]','{"original_operation_id":"ffso_46a7a083a1b64d82b584"}')
-                """
-            )
-            for line_no, nm_id in enumerate(nm_ids, start=1):
-                conn.execute(
-                    "INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(operation_id,line_no,nm_id,quantity_delta,raw_json) VALUES('policy-opening',?,?,1000,'{}')",
-                    (line_no, nm_id),
-                )
-                conn.execute(
-                    "INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(operation_id,line_no,nm_id,quantity_delta,raw_json) VALUES('policy-repair',?,?,1000,'{}')",
-                    (line_no, nm_id),
-                )
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint(
-                    slot,checkpoint_id,created_at,created_by,reason,
-                    baseline_cache_keys_json,baseline_source_keys_json,
-                    baseline_supply_ids_json,baseline_record_count,diagnostics_json
-                ) VALUES('current','production-cutover-checkpoint','2026-07-01T00:00:00Z',
-                         'fixture','fixture',?,?,?,1,'{}')
-                """,
-                (
-                    json.dumps(["supply:24035703"]),
-                    json.dumps(["wb_supply_debit:supply:24035703"]),
-                    json.dumps(["24035703"]),
-                ),
-            )
             conn.commit()
         engine = CanonicalCostEngine(runtime=runtime)
         report = engine.source_anomaly_preflight(date_to="2026-07-13")
-        _eq(report["status"], "ok", "exact bounded historical anomaly is eligible")
-        _eq(report["budget"]["eligible_anomaly_count"], 1, "one eligible anomaly")
-        _eq(report["budget"]["gross_quantity_discrepancy"], "1", "gross anomaly budget")
-        _eq(report["budget"]["remaining_quantity"], "19", "remaining global budget")
-        operation = report["operations"][0]
-        _eq(operation["sent_quantity"], "5000", "supply sent total")
-        _eq(operation["raw_accepted_quantity"], "4998", "supply raw accepted total")
-        _eq(operation["underaccepted_quantity"], "3", "cross-SKU shortages stay open")
-        _eq(operation["overaccepted_surplus_quantity"], "1", "raw surplus is explicit")
-        _eq(operation["net_quantity_discrepancy"], "2", "supply net discrepancy")
-        _eq(operation["supply_invariant_ok"], True, "supply quantity invariant")
-        anomaly = report["anomalies"][0]
-        _eq(anomaly["nm_id"], 210183142, "exact blocked SKU fixture")
-        _eq(anomaly["raw_quantities"]["raw_accepted"], "1001", "raw acceptance retained")
-        _eq(anomaly["raw_quantities"]["accepted_applied_to_movement"], "1000", "movement is capped at sent")
-        with _connect(runtime.db_path) as conn:
-            movements = _wb_movement_evidence(
-                conn, as_of_date="2026-07-13", anomaly_report=report
-            )
+        _eq(report["legacy_audit_operation_count"], 1, "legacy operation is fully audited")
+        _eq(report["post_cutover_operation_count"], 0, "legacy operation is not replayed")
+        _eq(report["anomalies"], [], "legacy accepted/sent mismatch is out of apply gate")
+        if any(
+            item.get("blocker_class") == "accepted_quantity_exceeds_sent"
+            for item in report["unresolved_anomalies"]
+        ):
+            raise AssertionError("pre-cutover accepted/sent evidence cannot block apply")
         _eq(
-            sum((Decimal(str(item["open_quantity"])) for item in movements), Decimal("0")),
-            Decimal("3"),
-            "surplus does not close another SKU shortage",
+            report["legacy_operations"][0]["operation_id"],
+            operation_row["operation_id"],
+            "legacy audit retains exact source identity",
         )
-        if any(Decimal(str(item["accepted_quantity"])) > Decimal(str(item["sent_quantity"])) for item in movements):
-            raise AssertionError("eligible surplus must not create movement quantity")
-
-        with _connect(runtime.db_path) as conn:
-            dop_normalized = {
-                "supply_id": "pre-cutover-dop",
-                "cache_key": "supply:pre-cutover-dop",
-                "status_id": 5,
-                "fact_date": "2024-10-14",
-                "warehouse_name": "W",
-                "destination_name": "D",
-                "original_supply_id": "24035703",
-                "virtual_type_id": 5,
-                "type_label": "Допринято",
-            }
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_wb_supplies(
-                    supply_id,cache_key,normalized_row_json,raw_goods_json,warehouse_id,
-                    status_id,quantity_for_size_filter,fact_date,synced_at
-                ) VALUES('pre-cutover-dop','supply:pre-cutover-dop',?,?,'W',5,1,
-                         '2024-10-14','2026-06-01T00:00:00Z')
-                """,
-                (
-                    json.dumps(dop_normalized),
-                    json.dumps([{"nmID": nm_ids[0], "quantity": 1, "acceptedQuantity": 1}]),
-                ),
-            )
-            conn.commit()
-        dop_report = engine.source_anomaly_preflight(date_to="2026-07-13")
-        dop_anomaly = next(
-            item for item in dop_report["anomalies"]
-            if item["blocker_class"] == "doprinato_unmatched_surplus"
-        )
-        _eq(dop_anomaly["eligible"], True, "exact pre-cutover unmatched doprinato is audit-only")
-        _eq(
-            dop_anomaly["classification"],
-            "pre_cutover_doprinato_absorbed_by_opening_wb",
-            "doprinato opening classification",
-        )
-        with _connect(runtime.db_path) as conn:
-            conn.execute("DELETE FROM sheet_vitrina_v1_wb_supplies WHERE supply_id='pre-cutover-dop'")
-            conn.commit()
-
-        with _connect(runtime.db_path) as conn:
-            normalized["fact_date"] = "2026-07-02"
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_supplies SET fact_date='2026-07-02',normalized_row_json=? WHERE supply_id='24035703'",
-                (json.dumps(normalized),),
-            )
-            conn.commit()
-        post = engine.source_anomaly_preflight(date_to="2026-07-13")
-        _eq(post["status"], "blocked", "post-cutover surplus always blocks")
-        if post["anomalies"][0]["eligible"]:
-            raise AssertionError("post-cutover anomaly cannot consume the cutover budget")
-
-        with _connect(runtime.db_path) as conn:
-            normalized["fact_date"] = "2024-10-13"
-            goods[0]["acceptedQuantity"] = 1004
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_supplies SET fact_date='2024-10-13',normalized_row_json=?,raw_goods_json=? WHERE supply_id='24035703'",
-                (json.dumps(normalized), json.dumps(goods)),
-            )
-            conn.commit()
-        line_four = engine.source_anomaly_preflight(date_to="2026-07-13")
-        _eq(line_four["status"], "blocked", "four units on one SKU blocks")
-
-        with _connect(runtime.db_path) as conn:
-            goods[0]["nmID"] = 999999999
-            goods[0]["acceptedQuantity"] = 1001
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_supplies SET raw_goods_json=? WHERE supply_id='24035703'",
-                (json.dumps(goods),),
-            )
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_ff_stock_operation_lines SET nm_id=999999999 WHERE operation_id='ffso_46a7a083a1b64d82b584' AND line_no=1"
-            )
-            conn.commit()
-        missing_cost = engine.source_anomaly_preflight(date_to="2026-07-13")
-        _eq(missing_cost["status"], "blocked", "missing baseline cost blocks at one unit")
-        if missing_cost["anomalies"][0]["cost_source"] is not None:
-            raise AssertionError("missing cost must remain explicit")
-        with _connect(runtime.db_path) as conn:
-            goods[0]["nmID"] = nm_ids[0]
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_supplies SET raw_goods_json=? WHERE supply_id='24035703'",
-                (json.dumps(goods),),
-            )
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_ff_stock_operation_lines SET nm_id=? WHERE operation_id='ffso_46a7a083a1b64d82b584' AND line_no=1",
-                (nm_ids[0],),
-            )
-            conn.commit()
-
-        with _connect(runtime.db_path) as conn:
-            goods[0]["acceptedQuantity"] = 1001
-            goods[1]["acceptedQuantity"] = 1003
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_supplies SET raw_goods_json=? WHERE supply_id='24035703'",
-                (json.dumps(goods),),
-            )
-            conn.commit()
-        operation_over = engine.source_anomaly_preflight(date_to="2026-07-13")
-        _eq(operation_over["status"], "ok", "one plus three stays within operation budget")
-        with _connect(runtime.db_path) as conn:
-            goods[2]["acceptedQuantity"] = 1003
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_supplies SET raw_goods_json=? WHERE supply_id='24035703'",
-                (json.dumps(goods),),
-            )
-            conn.commit()
-        operation_six = engine.source_anomaly_preflight(date_to="2026-07-13")
-        _eq(operation_six["status"], "blocked", "six units in one supply blocks")
-        with _connect(runtime.db_path) as conn:
-            goods[1]["acceptedQuantity"] = 999
-            goods[2]["acceptedQuantity"] = 999
-            conn.execute(
-                "UPDATE sheet_vitrina_v1_wb_supplies SET raw_goods_json=? WHERE supply_id='24035703'",
-                (json.dumps(goods),),
-            )
-            cache_keys = ["supply:24035703"]
-            source_keys = ["wb_supply_debit:supply:24035703"]
-            supply_ids = ["24035703"]
-            for index in range(7):
-                supply_id = f"global-{index}"
-                cache_key = f"supply:{supply_id}"
-                source_key = f"wb_supply_debit:{cache_key}"
-                operation_id = f"global-operation-{index}"
-                one_goods = [{"nmID": nm_ids[4], "quantity": 1000, "acceptedQuantity": 1003}]
-                one_normalized = {
-                    "supply_id": supply_id,
-                    "wb_supply_id": supply_id,
-                    "cache_key": cache_key,
-                    "status_id": 5,
-                    "fact_date": "2024-10-13",
-                    "warehouse_name": "W",
-                    "destination_name": "D",
-                }
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_wb_supplies(
-                        supply_id,cache_key,wb_supply_id,normalized_row_json,raw_goods_json,
-                        warehouse_id,status_id,quantity_for_size_filter,supply_date,fact_date,synced_at
-                    ) VALUES(?,?,?,?,?,'W',5,1000,'2024-10-13','2024-10-13','2026-06-01T00:00:00Z')
-                    """,
-                    (supply_id, cache_key, supply_id, json.dumps(one_normalized), json.dumps(one_goods)),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_ff_stock_operations(
-                        operation_id,operation_type,source_type,source_key,source_object_id,
-                        source_object_label,created_at,created_by,sku_count,total_quantity_delta,
-                        total_quantity_abs,warnings_json,diagnostics_json
-                    ) VALUES(?,'auto_writeoff','wb_supply',?,?,?,'2026-07-09T00:00:00Z',
-                             'system',1,-1000,1000,'[]','{}')
-                    """,
-                    (operation_id, source_key, supply_id, supply_id),
-                )
-                conn.execute(
-                    "INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(operation_id,line_no,nm_id,quantity_delta,raw_json) VALUES(?,1,?,-1000,'{}')",
-                    (operation_id, nm_ids[4]),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO sheet_vitrina_v1_ff_stock_operations(
-                        operation_id,operation_type,source_type,source_key,source_object_id,
-                        source_object_label,created_at,created_by,sku_count,total_quantity_delta,
-                        total_quantity_abs,warnings_json,diagnostics_json
-                    ) VALUES(?,'correction_receipt','runtime_repair',?,?,?,'2026-07-09T02:00:00Z',
-                             'fixture',1,1000,1000,'[]',?)
-                    """,
-                    (
-                        f"{operation_id}-repair",
-                        f"runtime_repair:{operation_id}",
-                        operation_id,
-                        "repair",
-                        json.dumps({"original_operation_id": operation_id}),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(operation_id,line_no,nm_id,quantity_delta,raw_json) VALUES(?,1,?,1000,'{}')",
-                    (f"{operation_id}-repair", nm_ids[4]),
-                )
-                cache_keys.append(cache_key)
-                source_keys.append(source_key)
-                supply_ids.append(supply_id)
-            conn.execute(
-                """
-                UPDATE sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint
-                SET baseline_cache_keys_json=?,baseline_source_keys_json=?,
-                    baseline_supply_ids_json=?,baseline_record_count=? WHERE slot='current'
-                """,
-                (json.dumps(cache_keys), json.dumps(source_keys), json.dumps(supply_ids), len(supply_ids)),
-            )
-            conn.commit()
-        global_over = engine.source_anomaly_preflight(date_to="2026-07-13")
-        _eq(global_over["status"], "blocked", "global anomaly budget above twenty blocks")
-        if not all(not item["eligible"] for item in global_over["anomalies"]):
-            raise AssertionError("global budget is a fail-closed all-or-nothing gate")
 
 
 def _targeted_remediation_stays_outside_opening_collapse() -> None:
@@ -731,12 +489,7 @@ def _baseline_and_physical_sources() -> None:
             ).fetchone()
         _eq(ff[0], "6750", "daily FF/ledger reconciliation")
         _eq(wb[0], "93250", "WB physical quantity comes from official stock")
-        _eq(opening_outstanding[0], "3", "pre-cutover accepted stock is not added twice")
-        _eq(
-            opening_outstanding[1],
-            "111.181389",
-            "opening underaccepted uses canonical baseline cost",
-        )
+        _eq(opening_outstanding, None, "pre-cutover outstanding is legacy audit-only")
         _canonical_outstanding_sql(engine, runtime)
         with _connect(runtime.db_path) as conn:
             conn.execute(
@@ -843,8 +596,8 @@ def _canonical_outstanding_sql(
     _eq(_open_qty(runtime), "0", "doprinato 4 closes outstanding")
     _eq(
         engine.physical_quantities_as_of("2026-07-05")[111]["FF_TO_WB"],
-        Decimal("3"),
-        "doprinato closes its original layer and preserves unrelated opening outstanding",
+        Decimal("0"),
+        "doprinato closes its original post-cutover layer without legacy outstanding",
     )
     with _connect(runtime.db_path) as conn:
         _insert_snapshot(conn, "2026-07-03", {111: {"stock_total": 93340}})

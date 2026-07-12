@@ -67,11 +67,9 @@ OFFICIAL_WB_STOCK_METRIC = "stock_total"
 
 CANONICAL_TABLE_PREFIX = "sheet_vitrina_v1_canonical_cost_"
 
-CUTOVER_IMMATERIAL_ANOMALY_POLICY = "CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1"
-CUTOVER_ANOMALY_LINE_LIMIT = Decimal("3")
-CUTOVER_ANOMALY_OPERATION_LIMIT = Decimal("5")
-CUTOVER_ANOMALY_GLOBAL_LIMIT = Decimal("20")
 TARGETED_PRE_ACTIVATION_REMEDIATION_REASON = "targeted_pre_activation_remediation"
+POSTCUTOVER_NORMALIZATION_POLICY = "CUTOVER_POSTCUTOVER_SOURCE_NORMALIZATION_V1"
+POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {}
 
 
 class CanonicalCostBlocked(ValueError):
@@ -215,11 +213,18 @@ class CanonicalCostEngine:
             )
         return {**valid[0], "rejected_candidate_count": len(rejected)}
 
-    def build_baseline_plan(self, *, cutover_date: str = CUTOVER_DATE) -> dict[str, Any]:
+    def build_baseline_plan(
+        self,
+        *,
+        cutover_date: str = CUTOVER_DATE,
+        diagnostic: bool = False,
+    ) -> dict[str, Any]:
         if cutover_date != CUTOVER_DATE:
             raise CanonicalCostBlocked("unsupported_cutover_date", {"cutover_date": cutover_date})
         primary = self.discover_primary_baseline_shipment()
-        physical = self.physical_quantities_as_of(cutover_date)
+        physical = self.physical_quantities_as_of(
+            cutover_date, enforce_source_preflight=not diagnostic
+        )
         owned_nm_ids = sorted(
             nm_id
             for nm_id, stages in physical.items()
@@ -682,9 +687,10 @@ class CanonicalCostEngine:
     ) -> dict[str, Any]:
         """Exhaustively classify source anomalies before the candidate rebuild.
 
-        This is intentionally read-only and non-fail-fast.  Every consumer of
-        the bounded cutover policy uses the same report/fingerprint, so an
-        eligible historical discrepancy cannot become an implicit clamp.
+        This is intentionally read-only and non-fail-fast.  Legacy operations
+        are audit-only; every new-contour exception must match the exact
+        versioned post-cutover manifest and therefore cannot become an
+        implicit or future clamp.
         """
 
         end = _iso_date(date_to or date.today().isoformat())
@@ -700,7 +706,7 @@ class CanonicalCostEngine:
             )
         payload = {
             "contract_name": "canonical_cost_source_anomaly_preflight_v1",
-            "policy": CUTOVER_IMMATERIAL_ANOMALY_POLICY,
+            "policy": POSTCUTOVER_NORMALIZATION_POLICY,
             "cutover_date": CUTOVER_DATE,
             "date_to": end,
             **report,
@@ -767,10 +773,15 @@ class CanonicalCostEngine:
                 }
         return result
 
-    def physical_quantities_as_of(self, as_of_date: str) -> dict[int, dict[str, Decimal]]:
+    def physical_quantities_as_of(
+        self,
+        as_of_date: str,
+        *,
+        enforce_source_preflight: bool = True,
+    ) -> dict[int, dict[str, Decimal]]:
         as_of_date = _iso_date(as_of_date)
         anomaly_report = self.source_anomaly_preflight(date_to=as_of_date)
-        if anomaly_report["status"] != "ok":
+        if enforce_source_preflight and anomaly_report["status"] != "ok":
             raise CanonicalCostBlocked(
                 "cutover_source_anomaly_preflight_blocked",
                 {
@@ -1702,13 +1713,18 @@ class CanonicalCostEngine:
                     "unresolved_anomalies": anomaly_report["unresolved_anomalies"],
                 },
             )
-        anomaly_index = _eligible_anomaly_index(anomaly_report)
         with _connect(self.runtime.db_path) as conn:
             movements = [dict(row) for row in conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_canonical_cost_movement_layers WHERE is_current=1 AND effective_date<=? ORDER BY effective_date,supply_id,nm_id",
                 (date_to,),
             ).fetchall()]
-            evidence = _wb_supply_cache_evidence(conn, date_to=date_to)
+            supply_evidence = _wb_supply_cache_evidence(conn, date_to=date_to)
+            movement_evidence = _wb_movement_evidence(
+                conn,
+                as_of_date=date_to,
+                anomaly_report=anomaly_report,
+            )
+            movement_cost_pools = _movement_cost_pools(movements)
             operation_date_provenance = {}
             for movement in movements:
                 operation = conn.execute(
@@ -1721,28 +1737,33 @@ class CanonicalCostEngine:
                             conn, dict(operation)
                         ).provenance
                     )
-        accepted = {(item["supply_id"], item["nm_id"]): item for item in evidence if not item["is_doprinato"]}
+        accepted = {
+            (item["supply_id"], item["nm_id"]): item
+            for item in movement_evidence
+        }
         open_layers: list[dict[str, Any]] = []
         for movement in movements:
             key = (str(movement["supply_id"]), int(movement["nm_id"]))
             fact = accepted.get(key, {})
             sent = _decimal(movement["sent_quantity"])
             accepted_qty = _decimal(fact.get("accepted_quantity"))
-            if accepted_qty > sent:
-                decision = anomaly_index.get(
-                    ("accepted_quantity_exceeds_sent", str(movement["operation_id"]), key[1])
-                )
-                if decision is None:
-                    raise CanonicalCostBlocked(
-                        "accepted_quantity_exceeds_sent",
-                        {"supply_id": key[0], "nm_id": key[1]},
-                    )
-                accepted_qty = sent
             open_qty = sent - accepted_qty
             if open_qty < ZERO:
                 raise CanonicalCostBlocked("accepted_quantity_exceeds_sent", {"supply_id": key[0], "nm_id": key[1]})
             if not bool(fact.get("is_final_accepted")):
                 continue
+            normalized = (
+                str(fact.get("normalization_policy") or "")
+                == POSTCUTOVER_NORMALIZATION_POLICY
+            )
+            pool = movement_cost_pools.get(key[0], {}) if normalized else {}
+            paid_share = (
+                _decimal(pool.get("paid_share"))
+                if normalized
+                else _safe_ratio(
+                    _decimal(movement["paid_equivalent_quantity"]), sent
+                )
+            )
             open_layers.append({
                 "original_supply_id": key[0], "nm_id": key[1],
                 "warehouse": str(fact.get("warehouse") or ""),
@@ -1751,19 +1772,47 @@ class CanonicalCostEngine:
                 "sent_quantity": _text(sent), "accepted_quantity": _text(accepted_qty),
                 "open_quantity": _text(open_qty),
                 "paid_equivalent_quantity": _text(
-                    open_qty * _safe_ratio(_decimal(movement["paid_equivalent_quantity"]), sent)
+                    open_qty * paid_share
                 ),
                 "paid_equivalent_total_quantity": _text(
-                    open_qty * _safe_ratio(_decimal(movement["paid_equivalent_quantity"]), sent)
+                    open_qty * paid_share
                 ),
-                "cost_coverage_share": str(movement["cost_coverage_share"]),
-                "confirmation_share": str(movement["confirmation_share"]),
-                "recognized_unit_cost_rub": str(movement["recognized_unit_cost_rub"]),
-                "paid_unit_cost_rub": str(movement["paid_unit_cost_rub"]),
+                "cost_coverage_share": _text(
+                    _decimal(pool.get("coverage_share"))
+                    if normalized
+                    else _decimal(movement["cost_coverage_share"])
+                ),
+                "confirmation_share": _text(
+                    _decimal(pool.get("confirmation_share"))
+                    if normalized
+                    else _decimal(movement["confirmation_share"])
+                ),
+                "recognized_unit_cost_rub": _text(
+                    _decimal(pool.get("recognized_unit"))
+                    if normalized
+                    else _decimal(movement["recognized_unit_cost_rub"])
+                ),
+                "paid_unit_cost_rub": _text(
+                    _decimal(pool.get("paid_unit"))
+                    if normalized
+                    else _decimal(movement["paid_unit_cost_rub"])
+                ),
                 "writeoff_date": str(movement["effective_date"]),
                 "accepted_date": str(fact.get("accepted_date") or ""),
                 "provenance": {
                     "acceptance_source": fact.get("source_identity", ""),
+                    "raw_accepted_quantity": _text(
+                        _decimal(fact.get("raw_accepted_quantity"))
+                    ),
+                    "direct_accepted_quantity": _text(
+                        _decimal(fact.get("direct_accepted_quantity"))
+                    ),
+                    "normalized_accepted_quantity": _text(
+                        _decimal(fact.get("normalized_accepted_quantity"))
+                    ),
+                    "normalization_policy": str(
+                        fact.get("normalization_policy") or ""
+                    ),
                     "effective_date_resolution": operation_date_provenance.get(
                         str(movement["operation_id"]), {}
                     ),
@@ -1772,7 +1821,7 @@ class CanonicalCostEngine:
         open_layers = reconcile_outstanding_layers(
             open_layers,
             [
-                item for item in evidence
+                item for item in supply_evidence
                 if item["is_doprinato"] and item["accepted_date"] > CUTOVER_DATE
             ],
         )
@@ -2094,6 +2143,12 @@ class CanonicalCostEngine:
     def _wb_cost_states(self, dates: Iterable[str]) -> dict[str, dict[int, dict[str, Decimal | str]]]:
         ordered = sorted(dates)
         baseline = self._baseline_costs()
+        anomaly_report = self.source_anomaly_preflight(date_to=max(ordered))
+        if anomaly_report["status"] != "ok":
+            raise CanonicalCostBlocked(
+                "cutover_source_anomaly_preflight_blocked",
+                {"fingerprint": anomaly_report["fingerprint"]},
+            )
         previous: dict[int, dict[str, Decimal | str]] = {}
         result: dict[str, dict[int, dict[str, Decimal | str]]] = {}
         with _connect(self.runtime.db_path) as conn:
@@ -2107,9 +2162,15 @@ class CanonicalCostEngine:
             movement_by_id = {
                 str(row["movement_layer_id"]): row for row in movement_rows
             }
+            movement_cost_pools = _movement_cost_pools(movement_rows)
             acceptance = [
-                item for item in _wb_supply_cache_evidence(conn, date_to=max(ordered))
-                if not item["is_doprinato"] and item["is_final_accepted"]
+                item
+                for item in _wb_movement_evidence(
+                    conn,
+                    as_of_date=max(ordered),
+                    anomaly_report=anomaly_report,
+                )
+                if item["is_final_accepted"]
             ]
             doprinato_inbounds: list[dict[str, Any]] = []
             for row in conn.execute(
@@ -2172,19 +2233,44 @@ class CanonicalCostEngine:
                         continue
                     movement_sent = _decimal(movement["sent_quantity"])
                     qty = _decimal(fact["accepted_quantity"])
-                    if qty > movement_sent:
-                        raise CanonicalCostBlocked(
-                            "accepted_quantity_exceeds_sent",
-                            {"supply_id": fact["supply_id"], "nm_id": nm_id},
-                        )
+                    normalized = (
+                        str(fact.get("normalization_policy") or "")
+                        == POSTCUTOVER_NORMALIZATION_POLICY
+                    )
+                    pool = movement_cost_pools.get(str(fact["supply_id"]), {})
                     ratio = _safe_ratio(qty, movement_sent)
+                    direct_qty = _decimal(fact.get("direct_accepted_quantity"))
                     inbounds.append({
                         "quantity": qty,
-                        "recognized_capital": _decimal(movement["recognized_capital_rub"]) * ratio,
-                        "paid_quantity": _decimal(movement["paid_equivalent_quantity"]) * ratio,
-                        "paid_capital": _decimal(movement["paid_capital_rub"]) * ratio,
-                        "covered": qty * _decimal(movement["cost_coverage_share"]),
-                        "confirmed": qty * _decimal(movement["confirmation_share"]),
+                        "recognized_capital": (
+                            qty
+                            * _decimal(pool.get("coverage_share"))
+                            * _decimal(pool.get("recognized_unit"))
+                            if normalized
+                            else _decimal(movement["recognized_capital_rub"]) * ratio
+                        ),
+                        "paid_quantity": (
+                            qty * _decimal(pool.get("paid_share"))
+                            if normalized
+                            else _decimal(movement["paid_equivalent_quantity"]) * ratio
+                        ),
+                        "paid_capital": (
+                            qty
+                            * _decimal(pool.get("paid_share"))
+                            * _decimal(pool.get("paid_unit"))
+                            if normalized
+                            else _decimal(movement["paid_capital_rub"]) * ratio
+                        ),
+                        "covered": qty * (
+                            _decimal(pool.get("coverage_share"))
+                            if normalized
+                            else _decimal(movement["cost_coverage_share"])
+                        ),
+                        "confirmed": (
+                            direct_qty * _decimal(movement["confirmation_share"])
+                            if normalized
+                            else qty * _decimal(movement["confirmation_share"])
+                        ),
                     })
                 for fact in doprinato_inbounds:
                     if (
@@ -2830,7 +2916,10 @@ def _canonical_ff_operation_effective_date(
         return None
     if operation_id in set(context.get("compensation_operation_ids") or set()):
         return None
-    return _ff_operation_effective_date(conn, operation)
+    effective = _ff_operation_effective_date(conn, operation)
+    if effective < CUTOVER_DATE:
+        return None
+    return effective
 
 
 def _ff_operation_effective_date(conn: sqlite3.Connection, operation: Mapping[str, Any]) -> str:
@@ -3127,8 +3216,9 @@ def _source_anomaly_preflight_conn(
     anomalies: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
     operations: list[dict[str, Any]] = []
+    legacy_operations: list[dict[str, Any]] = []
+    legacy_doprinato: list[dict[str, Any]] = []
     movement_rows: list[dict[str, Any]] = []
-    operation_discrepancy: dict[str, Decimal] = defaultdict(Decimal)
 
     duplicate_rows = conn.execute(
         """
@@ -3202,7 +3292,11 @@ def _source_anomaly_preflight_conn(
             or supply.get("status_id")
             or 0
         )
-        if status_id == 5 and not goods:
+        if (
+            resolution.effective_date >= CUTOVER_DATE
+            and status_id == 5
+            and not goods
+        ):
             blockers.append(
                 {
                     "blocker_class": "wb_supply_per_sku_acceptance_evidence_missing",
@@ -3248,6 +3342,13 @@ def _source_anomaly_preflight_conn(
                 (operation_id,),
             ).fetchall()
         ]
+        accepted_line_set_rows = [
+            {
+                "nm_id": nm_id,
+                "accepted_quantity": _text(quantity),
+            }
+            for nm_id, quantity in sorted(accepted_by_nm.items())
+        ]
         cache_key = str(supply.get("cache_key") or "")
         checkpoint = {
             "cache_key": cache_key in cache_keys,
@@ -3267,6 +3368,23 @@ def _source_anomaly_preflight_conn(
             "raw_accepted_quantity": _text(sum(accepted_by_nm.values(), ZERO)),
             "line_count": len(sent_by_nm),
             "line_set_fingerprint": "sha256:" + _stable_hash(line_set_rows),
+            "accepted_line_set_fingerprint": "sha256:"
+            + _stable_hash(accepted_line_set_rows),
+            "sent_lines": line_set_rows,
+            "accepted_lines": accepted_line_set_rows,
+            "warehouse": str(
+                normalized.get("warehouse_name")
+                or normalized.get("warehouseName")
+                or supply.get("warehouse_id")
+                or ""
+            ),
+            "destination": str(
+                normalized.get("destination_name")
+                or normalized.get("target_warehouse_name")
+                or normalized.get("warehouse_name")
+                or supply.get("warehouse_id")
+                or ""
+            ),
             "underaccepted_quantity": _text(sum(
                 (max(sent_by_nm.get(nm_id, ZERO) - accepted_by_nm.get(nm_id, ZERO), ZERO)
                  for nm_id in set(sent_by_nm) | set(accepted_by_nm)),
@@ -3287,7 +3405,107 @@ def _source_anomaly_preflight_conn(
             == _decimal(operation_row["underaccepted_quantity"])
             - _decimal(operation_row["overaccepted_surplus_quantity"])
         )
+        surplus_total = _decimal(operation_row["overaccepted_surplus_quantity"])
+        shortage_total = _decimal(operation_row["underaccepted_quantity"])
+        sent_total = _decimal(operation_row["sent_quantity"])
+        accepted_total = _decimal(operation_row["raw_accepted_quantity"])
+        missing_cost_nm_ids = sorted(
+            nm_id for nm_id in set(sent_by_nm) | set(accepted_by_nm)
+            if baseline_costs.get(nm_id) is None
+            or _decimal(
+                (baseline_costs.get(nm_id) or {}).get(
+                    "recognized_unit_cost_rub"
+                )
+            ) <= ZERO
+        )
+        legacy_cost_rows = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT nm_id,accepted_qty,our_wb_unit_cost_rub,source_status,
+                       supplier_ff_cost_layer_id,supplier_ff_cost_layer_line_id,
+                       inputs_hash
+                FROM sheet_vitrina_v1_wb_supply_cost_layers
+                WHERE wb_supply_id=? AND is_current=1 ORDER BY nm_id
+                """,
+                (str(supply.get("supply_id") or supply_id),),
+            ).fetchall()
+        ]
+        recognized_pool = sum(
+            (
+                sent_by_nm.get(nm_id, ZERO)
+                * _decimal(
+                    (baseline_costs.get(nm_id) or {}).get(
+                        "recognized_unit_cost_rub"
+                    )
+                )
+                for nm_id in sent_by_nm
+            ),
+            ZERO,
+        )
+        paid_pool = sum(
+            (
+                sent_by_nm.get(nm_id, ZERO)
+                * _decimal(
+                    (baseline_costs.get(nm_id) or {}).get(
+                        "paid_unit_cost_rub"
+                    )
+                )
+                for nm_id in sent_by_nm
+            ),
+            ZERO,
+        )
+        operation_row["classification"] = (
+            "legacy_audit_only"
+            if resolution.effective_date < CUTOVER_DATE
+            else "post_cutover_movement"
+        )
+        operation_row["evidence_fingerprint"] = "sha256:" + _stable_hash(
+            {
+                "operation_id": operation_id,
+                "supply_id": operation_row["supply_id"],
+                "source_key": source_key,
+                "business_date": resolution.effective_date,
+                "warehouse": operation_row["warehouse"],
+                "destination": operation_row["destination"],
+                "sent_lines": line_set_rows,
+                "accepted_lines": accepted_line_set_rows,
+            }
+        )
+        normalization_checks = {
+            "business_date_in_allowed_window": (
+                "2026-07-02" <= resolution.effective_date <= "2026-07-12"
+            ),
+            "accepted_skus_subset_of_sent": set(accepted_by_nm) <= set(sent_by_nm),
+            "aggregate_accepted_not_above_sent": accepted_total <= sent_total,
+            "ff_debit_quantity_present": sent_total > ZERO,
+            "legacy_supply_cost_evidence_present": bool(legacy_cost_rows),
+            "missing_cost_nm_ids": missing_cost_nm_ids,
+            "normalized_quantity_within_500": surplus_total <= Decimal("500"),
+        }
+        operation_row["postcutover_normalization"] = {
+            "policy": POSTCUTOVER_NORMALIZATION_POLICY,
+            "surplus_quantity": _text(surplus_total),
+            "shortage_quantity": _text(shortage_total),
+            "effective_accepted_quantity": _text(min(accepted_total, sent_total)),
+            "remaining_underaccepted_quantity": _text(
+                sent_total - min(accepted_total, sent_total)
+            ),
+            "recognized_cost_pool_rub": _text(recognized_pool),
+            "paid_cost_pool_rub": _text(paid_pool),
+            "recognized_weighted_unit_cost_rub": _text(
+                _safe_ratio(recognized_pool, sent_total)
+            ),
+            "paid_weighted_unit_cost_rub": _text(
+                _safe_ratio(paid_pool, sent_total)
+            ),
+            "legacy_supply_cost_rows": legacy_cost_rows,
+            "checks": normalization_checks,
+            "manifest_match": _postcutover_manifest_matches(operation_row),
+        }
         operations.append(operation_row)
+        if resolution.effective_date < CUTOVER_DATE:
+            legacy_operations.append(operation_row)
+            continue
         for nm_id in sorted(set(sent_by_nm) | set(accepted_by_nm)):
             sent = sent_by_nm.get(nm_id, ZERO)
             raw_accepted = accepted_by_nm.get(nm_id, ZERO)
@@ -3324,23 +3542,31 @@ def _source_anomaly_preflight_conn(
             )
             if surplus <= ZERO:
                 continue
-            operation_discrepancy[operation_id] += surplus
             cost = baseline_costs.get(nm_id)
             guard_failures: list[str] = []
-            if surplus > CUTOVER_ANOMALY_LINE_LIMIT:
-                guard_failures.append("line discrepancy exceeds 3 units")
             if not _is_integer_quantity(surplus):
                 guard_failures.append("discrepancy is not an integer quantity")
-            if resolution.effective_date >= CUTOVER_DATE:
-                guard_failures.append("business date is cutover or post-cutover")
-            if not fully_checkpoint_matched:
-                guard_failures.append("source is not fully checkpoint matched")
+            if not normalization_checks["business_date_in_allowed_window"]:
+                guard_failures.append("business date is outside 2026-07-02..2026-07-12")
             if nm_id <= 0 or nm_id not in sent_by_nm:
                 guard_failures.append("exact operation-line SKU identity is missing")
             if cost is None:
                 guard_failures.append("permitted canonical baseline cost is missing")
             elif _decimal(cost.get("recognized_unit_cost_rub")) <= ZERO:
                 guard_failures.append("canonical baseline cost is not positive")
+            for check_name in (
+                "accepted_skus_subset_of_sent",
+                "aggregate_accepted_not_above_sent",
+                "ff_debit_quantity_present",
+                "legacy_supply_cost_evidence_present",
+                "normalized_quantity_within_500",
+            ):
+                if not bool(normalization_checks[check_name]):
+                    guard_failures.append(check_name)
+            if missing_cost_nm_ids:
+                guard_failures.append("one or more supply SKU costs are missing")
+            if not _postcutover_manifest_matches(operation_row):
+                guard_failures.append("operation is absent or changed in exact normalization manifest")
             prelim_ok = not guard_failures
             anomalies.append(
                 {
@@ -3370,13 +3596,13 @@ def _source_anomaly_preflight_conn(
                         if cost is not None else None
                     ),
                     "classification": (
-                        "pre_cutover_checkpoint_overacceptance_absorbed_by_opening_wb"
-                        if prelim_ok else "blocked_accepted_quantity_exceeds_sent"
+                        "postcutover_source_normalized"
+                        if prelim_ok else "postcutover_normalization_candidate"
                     ),
                     "eligible": prelim_ok,
                     "policy_guard_failures": guard_failures,
                     "reason": (
-                        "bounded pre-cutover checkpoint surplus is already absorbed by official WB opening"
+                        "exact manifest normalization preserves aggregate supply quantity and capital"
                         if prelim_ok else "; ".join(guard_failures)
                     ),
                     "gross_discrepancy": surplus,
@@ -3391,6 +3617,20 @@ def _source_anomaly_preflight_conn(
         key=lambda item: (item["accepted_date"], item["supply_id"], item["nm_id"]),
     )
     for fact in doprinato:
+        if str(fact["accepted_date"] or "") < CUTOVER_DATE:
+            legacy_doprinato.append(
+                {
+                    "supply_id": str(fact["supply_id"]),
+                    "nm_id": int(fact["nm_id"]),
+                    "business_date": str(fact["accepted_date"]),
+                    "accepted_quantity": _text(
+                        _decimal(fact["accepted_quantity"])
+                    ),
+                    "source_identity": str(fact["source_identity"]),
+                    "classification": "legacy_audit_only",
+                }
+            )
+            continue
         remaining = _decimal(fact["accepted_quantity"])
         candidates = [
             item for item in outstanding
@@ -3435,13 +3675,9 @@ def _source_anomaly_preflight_conn(
             )
             for item in movement_rows
         )
-        guard_failures = []
-        if remaining > CUTOVER_ANOMALY_LINE_LIMIT:
-            guard_failures.append("line discrepancy exceeds 3 units")
+        guard_failures = ["post-cutover unmatched doprinato is never normalized"]
         if not _is_integer_quantity(remaining):
             guard_failures.append("discrepancy is not an integer quantity")
-        if str(fact["accepted_date"] or "") >= CUTOVER_DATE:
-            guard_failures.append("business date is cutover or post-cutover")
         if not exact_source:
             guard_failures.append("exact doprinato source identity is missing")
         if not checkpoint_match:
@@ -3450,9 +3686,6 @@ def _source_anomaly_preflight_conn(
             guard_failures.append("permitted canonical baseline cost is missing")
         elif _decimal(cost.get("recognized_unit_cost_rub")) <= ZERO:
             guard_failures.append("canonical baseline cost is not positive")
-        prelim_ok = not guard_failures
-        operation_key = f"doprinato:{fact['supply_id']}"
-        operation_discrepancy[operation_key] += remaining
         anomalies.append(
             {
                 "blocker_class": "doprinato_unmatched_surplus",
@@ -3474,19 +3707,12 @@ def _source_anomaly_preflight_conn(
                     }
                     if cost is not None else None
                 ),
-                "classification": (
-                    "pre_cutover_doprinato_absorbed_by_opening_wb"
-                    if prelim_ok else "blocked_doprinato_unmatched_surplus"
-                ),
-                "eligible": prelim_ok,
+                "classification": "blocked_doprinato_unmatched_surplus",
+                "eligible": False,
                 "policy_guard_failures": guard_failures,
-                "reason": (
-                    "bounded pre-cutover unmatched doprinato is already absorbed by official WB opening"
-                    if prelim_ok else "; ".join(guard_failures)
-                ),
+                "reason": "; ".join(guard_failures),
                 "gross_discrepancy": remaining,
                 "net_discrepancy": remaining,
-                "operation_budget_key": operation_key,
             }
         )
 
@@ -3572,21 +3798,17 @@ def _source_anomaly_preflight_conn(
                     and supply_id in supply_ids
                     and source_identity in cache_keys
                 )
-                guard_failures = []
-                if residual > CUTOVER_ANOMALY_LINE_LIMIT:
-                    guard_failures.append("line discrepancy exceeds 3 units")
+                guard_failures = [
+                    "post-cutover FF replay deficit is never normalized"
+                ]
                 if not _is_integer_quantity(residual):
                     guard_failures.append("discrepancy is not an integer quantity")
-                if effective >= CUTOVER_DATE:
-                    guard_failures.append("business date is cutover or post-cutover")
                 if not checkpoint_match:
                     guard_failures.append("source is not fully checkpoint matched")
                 if cost is None:
                     guard_failures.append("permitted canonical baseline cost is missing")
                 elif _decimal(cost.get("recognized_unit_cost_rub")) <= ZERO:
                     guard_failures.append("canonical baseline cost is not positive")
-                prelim_ok = not guard_failures
-                operation_discrepancy[operation_id] += residual
                 anomalies.append(
                     {
                         "blocker_class": "ff_debit_without_available_opening_or_movement_cost_inventory",
@@ -3609,16 +3831,10 @@ def _source_anomaly_preflight_conn(
                             }
                             if cost is not None else None
                         ),
-                        "classification": (
-                            "pre_cutover_ff_replay_residual_absorbed_by_opening"
-                            if prelim_ok else "blocked_ff_replay_inventory_deficit"
-                        ),
-                        "eligible": prelim_ok,
+                        "classification": "blocked_ff_replay_inventory_deficit",
+                        "eligible": False,
                         "policy_guard_failures": guard_failures,
-                        "reason": (
-                            "bounded checkpoint residual is already represented by the opening snapshots"
-                            if prelim_ok else "; ".join(guard_failures)
-                        ),
+                        "reason": "; ".join(guard_failures),
                         "gross_discrepancy": residual,
                         "net_discrepancy": -residual,
                     }
@@ -3721,18 +3937,11 @@ def _source_anomaly_preflight_conn(
     }
     candidate_nm_ids = {int(item["nm_id"]) for item in anomalies}
     for item in anomalies:
-        budget_key = str(item.get("operation_budget_key") or item["operation_id"])
-        if operation_discrepancy[budget_key] > CUTOVER_ANOMALY_OPERATION_LIMIT:
+        if gross > Decimal("500"):
             item["eligible"] = False
             item["reason"] = (
                 str(item["reason"])
-                + "; operation anomaly budget exceeds 5 units"
-            )
-        if gross > CUTOVER_ANOMALY_GLOBAL_LIMIT:
-            item["eligible"] = False
-            item["reason"] = (
-                str(item["reason"])
-                + "; global cutover anomaly budget exceeds 20 units"
+                + "; total post-cutover normalization exceeds 500 units"
             )
         item.pop("gross_discrepancy", None)
         item.pop("net_discrepancy", None)
@@ -3793,6 +4002,11 @@ def _source_anomaly_preflight_conn(
         "status": "blocked" if blockers else "ok",
         "checkpoint_id": checkpoint_id,
         "operation_count": len(operations),
+        "legacy_audit_operation_count": len(legacy_operations),
+        "post_cutover_operation_count": len(operations) - len(legacy_operations),
+        "legacy_doprinato_count": len(legacy_doprinato),
+        "legacy_operations": legacy_operations,
+        "legacy_doprinato": legacy_doprinato,
         "operations": operations,
         "anomalies": sorted(
             anomalies,
@@ -3825,10 +4039,10 @@ def _source_anomaly_preflight_conn(
             )),
             "estimated_recognized_capital_exposure_rub": _text(recognized_exposure),
             "estimated_paid_capital_exposure_rub": _text(paid_exposure),
-            "limit_quantity": _text(CUTOVER_ANOMALY_GLOBAL_LIMIT),
-            "remaining_quantity": _text(CUTOVER_ANOMALY_GLOBAL_LIMIT - gross),
+            "limit_quantity": "500",
+            "remaining_quantity": _text(Decimal("500") - gross),
             "over_budget_quantity": _text(
-                max(gross - CUTOVER_ANOMALY_GLOBAL_LIMIT, ZERO)
+                max(gross - Decimal("500"), ZERO)
             ),
         },
     }
@@ -3846,6 +4060,132 @@ def _eligible_anomaly_index(report: Mapping[str, Any]) -> dict[tuple[str, str, i
     }
 
 
+def _postcutover_manifest_matches(operation: Mapping[str, Any]) -> bool:
+    operation_id = str(operation.get("operation_id") or "")
+    expected = POSTCUTOVER_NORMALIZATION_MANIFEST.get(operation_id)
+    if expected is None:
+        return False
+    actual = {
+        "operation_id": operation_id,
+        "supply_id": str(operation.get("supply_id") or ""),
+        "source_key": str(operation.get("source_key") or ""),
+        "business_date": str(operation.get("business_date") or ""),
+        "line_set_fingerprint": str(operation.get("line_set_fingerprint") or ""),
+        "accepted_line_set_fingerprint": str(
+            operation.get("accepted_line_set_fingerprint") or ""
+        ),
+        "evidence_fingerprint": str(operation.get("evidence_fingerprint") or ""),
+    }
+    return actual == expected
+
+
+def _normalized_acceptance_plan(
+    *,
+    operation: Mapping[str, Any],
+    sent_by_nm: Mapping[int, Decimal],
+    accepted_by_nm: Mapping[int, Decimal],
+) -> dict[int, dict[str, Decimal]]:
+    """Resolve one exact manifest supply without inventing aggregate quantity.
+
+    Raw evidence is immutable.  A manifest supply first applies direct same-SKU
+    acceptance and then assigns only its own composition surplus to its own
+    shortage pool in deterministic nmID order.  No other supply, date or SKU is
+    a candidate.
+    """
+    all_nm_ids = sorted(set(sent_by_nm) | set(accepted_by_nm))
+    result: dict[int, dict[str, Decimal]] = {}
+    surplus_pool = ZERO
+    for nm_id in all_nm_ids:
+        sent = sent_by_nm.get(nm_id, ZERO)
+        raw = accepted_by_nm.get(nm_id, ZERO)
+        direct = min(sent, raw)
+        surplus = max(raw - sent, ZERO)
+        surplus_pool += surplus
+        result[nm_id] = {
+            "sent": sent,
+            "raw_accepted": raw,
+            "direct_accepted": direct,
+            "normalized_accepted": ZERO,
+            "effective_accepted": direct,
+            "open": sent - direct,
+            "raw_surplus": surplus,
+        }
+    if surplus_pool <= ZERO:
+        return result
+    if not _postcutover_manifest_matches(operation):
+        return result
+    for nm_id in all_nm_ids:
+        if surplus_pool <= ZERO:
+            break
+        row = result[nm_id]
+        normalized = min(row["open"], surplus_pool)
+        row["normalized_accepted"] += normalized
+        row["effective_accepted"] += normalized
+        row["open"] -= normalized
+        surplus_pool -= normalized
+    if surplus_pool > ZERO:
+        raise CanonicalCostBlocked(
+            "postcutover_normalization_surplus_exceeds_supply_shortage",
+            {
+                "operation_id": str(operation.get("operation_id") or ""),
+                "supply_id": str(operation.get("supply_id") or ""),
+                "unallocated_surplus": _text(surplus_pool),
+            },
+        )
+    return result
+
+
+def _movement_cost_pools(
+    movements: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, Decimal]]:
+    pools: dict[str, dict[str, Decimal]] = {}
+    for movement in movements:
+        supply_id = str(movement.get("supply_id") or "")
+        bucket = pools.setdefault(
+            supply_id,
+            {
+                "sent": ZERO,
+                "recognized_capital": ZERO,
+                "paid_equivalent": ZERO,
+                "paid_capital": ZERO,
+                "covered": ZERO,
+                "confirmed": ZERO,
+            },
+        )
+        sent = _decimal(movement.get("sent_quantity"))
+        bucket["sent"] += sent
+        bucket["recognized_capital"] += _decimal(
+            movement.get("recognized_capital_rub")
+        )
+        bucket["paid_equivalent"] += _decimal(
+            movement.get("paid_equivalent_quantity")
+        )
+        bucket["paid_capital"] += _decimal(movement.get("paid_capital_rub"))
+        bucket["covered"] += sent * _decimal(
+            movement.get("cost_coverage_share")
+        )
+        bucket["confirmed"] += sent * _decimal(
+            movement.get("confirmation_share")
+        )
+    for bucket in pools.values():
+        bucket["recognized_unit"] = _safe_ratio(
+            bucket["recognized_capital"], bucket["covered"]
+        )
+        bucket["paid_unit"] = _safe_ratio(
+            bucket["paid_capital"], bucket["paid_equivalent"]
+        )
+        bucket["paid_share"] = min(
+            _safe_ratio(bucket["paid_equivalent"], bucket["sent"]), ONE
+        )
+        bucket["coverage_share"] = min(
+            _safe_ratio(bucket["covered"], bucket["sent"]), ONE
+        )
+        bucket["confirmation_share"] = min(
+            _safe_ratio(bucket["confirmed"], bucket["sent"]), ONE
+        )
+    return pools
+
+
 def _wb_movement_evidence(
     conn: sqlite3.Connection,
     *,
@@ -3857,14 +4197,14 @@ def _wb_movement_evidence(
         if str(operation.get("operation_type")) != "auto_writeoff":
             continue
         effective = _ff_operation_effective_date(conn, operation)
-        if not effective or effective > as_of_date:
+        if not effective or effective < CUTOVER_DATE or effective > as_of_date:
             continue
         supply_id = str(operation.get("source_object_id") or "")
         supply = conn.execute(
             "SELECT * FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=? LIMIT 1",
             (supply_id,),
         ).fetchone()
-        accepted_by_nm: dict[int, Decimal] = {}
+        accepted_by_nm: dict[int, Decimal] = defaultdict(Decimal)
         accepted_date = ""
         warehouse = ""
         destination = ""
@@ -3881,15 +4221,40 @@ def _wb_movement_evidence(
                     nm_id = int(item.get("nmID") or item.get("nmId") or item.get("nm_id") or 0)
                     qty = _decimal(item.get("acceptedQuantity") or item.get("accepted_quantity") or 0)
                     if nm_id > 0:
-                        accepted_by_nm[nm_id] = qty
+                        accepted_by_nm[nm_id] += qty
+        sent_by_nm: dict[int, Decimal] = defaultdict(Decimal)
         for line in conn.execute(
             "SELECT nm_id,quantity_delta FROM sheet_vitrina_v1_ff_stock_operation_lines WHERE operation_id=?",
             (operation["operation_id"],),
         ).fetchall():
             nm_id = int(line["nm_id"])
-            sent = abs(min(_decimal(line["quantity_delta"]), ZERO))
-            accepted_quantity = accepted_by_nm.get(nm_id, ZERO)
-            if accepted_quantity > sent:
+            sent_by_nm[nm_id] += abs(min(_decimal(line["quantity_delta"]), ZERO))
+        operation_evidence = next(
+            (
+                dict(item)
+                for item in (anomaly_report or {}).get("operations") or []
+                if str(item.get("operation_id") or "")
+                == str(operation["operation_id"])
+            ),
+            {
+                "operation_id": str(operation["operation_id"]),
+                "supply_id": supply_id,
+                "source_key": str(operation.get("source_key") or ""),
+                "business_date": effective,
+            },
+        )
+        acceptance_plan = _normalized_acceptance_plan(
+            operation=operation_evidence,
+            sent_by_nm=sent_by_nm,
+            accepted_by_nm=accepted_by_nm,
+        )
+        manifest_normalized = _postcutover_manifest_matches(operation_evidence)
+        for nm_id in sorted(sent_by_nm):
+            sent = sent_by_nm[nm_id]
+            planned = acceptance_plan[nm_id]
+            raw_accepted = planned["raw_accepted"]
+            accepted_quantity = planned["effective_accepted"]
+            if raw_accepted > sent:
                 decision = _eligible_anomaly_index(anomaly_report or {}).get(
                     ("accepted_quantity_exceeds_sent", str(operation["operation_id"]), nm_id)
                 )
@@ -3901,26 +4266,36 @@ def _wb_movement_evidence(
                             "supply_id": supply_id,
                             "nm_id": nm_id,
                             "sent": _text(sent),
-                            "raw_accepted": _text(accepted_quantity),
+                            "raw_accepted": _text(raw_accepted),
                         },
                     )
-                accepted_quantity = sent
             movements.append({
+                "operation_id": str(operation["operation_id"]),
                 "supply_id": supply_id,
                 "nm_id": nm_id,
                 "sent_quantity": sent,
+                "raw_accepted_quantity": raw_accepted,
+                "direct_accepted_quantity": planned["direct_accepted"],
+                "normalized_accepted_quantity": planned["normalized_accepted"],
                 "accepted_quantity": accepted_quantity,
-                "open_quantity": sent - accepted_quantity,
+                "open_quantity": planned["open"],
                 "accepted_date": accepted_date,
                 "writeoff_date": effective,
                 "warehouse": warehouse,
                 "destination": destination,
                 "is_final_accepted": is_final_accepted,
+                "normalization_policy": (
+                    POSTCUTOVER_NORMALIZATION_POLICY
+                    if manifest_normalized
+                    else ""
+                ),
             })
     for fact in sorted(
         (item for item in _wb_supply_cache_evidence(conn, date_to=as_of_date) if item["is_doprinato"]),
         key=lambda item: (item["accepted_date"], item["supply_id"], item["nm_id"]),
     ):
+        if str(fact["accepted_date"] or "") < CUTOVER_DATE:
+            continue
         remaining = _decimal(fact["accepted_quantity"])
         candidates = [
             item for item in movements
