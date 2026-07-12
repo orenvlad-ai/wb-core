@@ -9,7 +9,7 @@
 - GitHub — truth для branch, commit, PR, checks, review и merge;
 - WebCore Data MCP — read-only источник наблюдаемого production-состояния, диагностики и бизнес-метрик;
 - production server — canonical deploy/runtime boundary;
-- legacy — только migration evidence и do-not-lose constraints.
+- legacy artifacts, старые чаты, вложения и прежние project instructions — только migration evidence и do-not-lose constraints, но не current truth.
 
 Рабочая ветка показывает proposed change, но не заменяет current `origin/main` до review и merge. Runtime-наблюдение не заменяет versioned code или contracts.
 
@@ -19,7 +19,18 @@ Runtime-only edits недействительны, пока эквивалент
 
 Authoritative docs должны описывать текущую реализацию и устойчивые boundaries, а не служить журналом временных snapshots. Если задача меняет code, contract, module status, runtime boundary, deploy path, schema или другую зафиксированную истину, затронутые docs обновляются в той же задаче.
 
-Корневой `AGENTS.md` — короткий execution/governance entrypoint. Он не дублирует доменные контракты и направляет к authoritative docs.
+Корневой [`AGENTS.md`](../../AGENTS.md) — короткий самодостаточный execution/governance entrypoint для Codex и ChatGPT, читающего репозиторий. Он не дублирует доменные контракты и направляет к authoritative docs. Для текущей работы не требуется отдельный project pack или прежняя ChatGPT Project instruction.
+
+## Кураторский Протокол
+
+Перед техническим выводом, формулированием задачи, реализацией или проверкой результата другого агента необходимо сверить:
+
+- актуальный GitHub state;
+- корневой `AGENTS.md`;
+- только релевантные authoritative docs;
+- фактический Git-tracked code, если вывод касается текущей реализации.
+
+Отчёт агента, старый чат или вложение не заменяют такую проверку. Если repository/GitHub либо другой необходимый authoritative source недоступен, нельзя уверенно заявлять current state: должен быть возвращён точный blocker.
 
 ## Production Runtime Boundary
 
@@ -59,4 +70,5 @@ Legacy repositories, Apps Script/GAS artifacts и historical sheet/export paths 
 - никакого cutover по принципу «на сервере вроде работает»;
 - никакой production mutation без explicit scope, dry-run, backup/reversibility, idempotency, audit и требуемых human gates;
 - никакой потери или смешивания чужого dirty state при branch/sync/merge работе;
+- никакого подтверждения результата только по отчёту агента без проверки применимых branch/commit, semantic diff, checks, review state и authoritative docs;
 - каждый merged change подтверждается в current `origin/main`, а live/runtime change дополнительно — canonical deploy и live/public verify.
