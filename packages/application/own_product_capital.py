@@ -379,7 +379,9 @@ class OwnProductCapitalBlock:
             _positive_int(nm_id, "nm_id") for nm_id in quantities_by_nm
         }
         result = {nm_id: ZERO for nm_id in requested_nm_ids}
+        physical_result = {nm_id: ZERO for nm_id in requested_nm_ids}
         candidate_nm_ids: set[int] = set()
+        candidate_diagnostics: list[dict[str, Any]] = []
         with _connect(self.runtime.db_path) as conn:
             _ensure_own_capital_schema(conn)
             for nm_id in requested_nm_ids:
@@ -393,9 +395,11 @@ class OwnProductCapitalBlock:
                     params.extend([str(warehouse or ""), str(destination or "")])
                 rows = conn.execute(
                     f"""
-                    SELECT open_quantity
+                    SELECT original_supply_id, nm_id, final_acceptance_date,
+                           open_quantity, physical_open_quantity
                     FROM sheet_vitrina_v1_own_capital_wb_outstanding
                     WHERE {' AND '.join(where)}
+                    ORDER BY final_acceptance_date, original_supply_id
                     """,
                     tuple(params),
                 ).fetchall()
@@ -405,9 +409,38 @@ class OwnProductCapitalBlock:
                     (max(_decimal(row["open_quantity"]), ZERO) for row in rows),
                     ZERO,
                 )
+                physical_result[nm_id] = sum(
+                    (
+                        max(_decimal(row["physical_open_quantity"]), ZERO)
+                        for row in rows
+                    ),
+                    ZERO,
+                )
+                candidate_diagnostics.extend(
+                    {
+                        "nm_id": int(row["nm_id"]),
+                        "original_supply_id": str(row["original_supply_id"]),
+                        "final_acceptance_date": str(row["final_acceptance_date"]),
+                        "tracked_open_quantity": _text_decimal(
+                            max(_decimal(row["open_quantity"]), ZERO)
+                        ),
+                        "physical_open_quantity": _text_decimal(
+                            max(_decimal(row["physical_open_quantity"]), ZERO)
+                        ),
+                    }
+                    for row in rows
+                )
         return {
-            "available_by_nm": result,
+            "tracked_available_by_nm": {
+                str(nm_id): _text_decimal(quantity)
+                for nm_id, quantity in result.items()
+            },
+            "physical_available_by_nm": {
+                str(nm_id): _text_decimal(quantity)
+                for nm_id, quantity in physical_result.items()
+            },
             "candidate_nm_ids": sorted(candidate_nm_ids),
+            "candidates": candidate_diagnostics,
         }
 
     def resolve_blockers(self, *, source_identity: str, codes: Iterable[str] | None = None) -> int:

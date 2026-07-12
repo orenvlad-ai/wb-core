@@ -720,6 +720,7 @@ class FfStockLedgerBlock:
             )
             or ""
         )
+        outstanding_scope: dict[str, Any] | None = None
         if historical_paid_only:
             outstanding_scope = capital.matching_wb_outstanding_quantities(
                 effective_date=business_dt.date().isoformat(),
@@ -751,7 +752,26 @@ class FfStockLedgerBlock:
                 source_identity=supply_id,
                 details={"reason": str(exc)},
             )
-            return {"skip_reason": "wb_supply_doprinato_reconciliation_blocked", "supply_id": supply_id, "reason": str(exc)}
+            return {
+                "skip_reason": "wb_supply_doprinato_reconciliation_blocked",
+                "supply_id": supply_id,
+                "reason": str(exc),
+                "historical_scope": (
+                    {
+                        "effective_date": business_dt.date().isoformat(),
+                        "warehouse": warehouse,
+                        "destination": destination,
+                        "original_supply_id": original_supply_id,
+                        "requested_quantities_by_nm": {
+                            str(nm_id): str(quantity)
+                            for nm_id, quantity in quantities.items()
+                        },
+                        "outstanding": outstanding_scope,
+                    }
+                    if outstanding_scope is not None
+                    else None
+                ),
+            }
 
     def materialize_own_product_capital_history(
         self,
@@ -860,6 +880,7 @@ class FfStockLedgerBlock:
                     {
                         "supply_id": str(normalized.get("supply_id") or ""),
                         "reason": str(result.get("reason") or result.get("skip_reason") or "blocked"),
+                        "historical_scope": result.get("historical_scope"),
                     }
                 )
         if recalculate and materialized:
