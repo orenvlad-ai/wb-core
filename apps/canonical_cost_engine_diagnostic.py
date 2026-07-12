@@ -33,6 +33,7 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     STAGES,
     CanonicalCostBlocked,
     CanonicalCostEngine,
+    _wb_supply_cache_evidence,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
@@ -307,6 +308,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         )
                         break
                     except CanonicalCostBlocked as exc:
+                        exc = _enrich_pipeline_blocker(
+                            candidate_runtime.db_path,
+                            exc,
+                            baseline=baseline,
+                            date_to=date_to,
+                        )
                         action = _apply_pipeline_quarantine(
                             candidate_runtime.db_path, exc
                         )
@@ -832,6 +839,56 @@ def _apply_pipeline_quarantine(
     return "newly exposed doprinato excluded from disposable diagnostic reconciliation"
 
 
+def _enrich_pipeline_blocker(
+    db_path: Path,
+    exc: CanonicalCostBlocked,
+    *,
+    baseline: Mapping[str, Any],
+    date_to: str,
+) -> CanonicalCostBlocked:
+    if exc.code != "doprinato_unmatched_surplus":
+        return exc
+    supply_id = str(exc.details.get("supply_id") or "")
+    nm_id = int(exc.details.get("nm_id") or 0)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        fact = next(
+            (
+                item
+                for item in _wb_supply_cache_evidence(conn, date_to=date_to)
+                if str(item.get("supply_id") or "") == supply_id
+                and int(item.get("nm_id") or 0) == nm_id
+            ),
+            None,
+        )
+    cost_candidates = [
+        item
+        for item in baseline.get("lines") or []
+        if int(item.get("nm_id") or 0) == nm_id
+    ]
+    cost = next(
+        (item for item in cost_candidates if item.get("stage") == "FF"),
+        cost_candidates[0] if cost_candidates else None,
+    )
+    quantity = Decimal(str(exc.details.get("surplus") or 0))
+    recognized_unit = Decimal(str((cost or {}).get("recognized_unit_cost_rub") or 0))
+    paid_unit = Decimal(str((cost or {}).get("paid_unit_cost_rub") or 0))
+    details = {
+        **exc.details,
+        "business_date": str((fact or {}).get("accepted_date") or ""),
+        "source_identity": str((fact or {}).get("source_identity") or ""),
+        "original_supply_id": str((fact or {}).get("original_supply_id") or ""),
+        "warehouse": str((fact or {}).get("warehouse") or ""),
+        "destination": str((fact or {}).get("destination") or ""),
+        "is_final_accepted": bool((fact or {}).get("is_final_accepted")),
+        "raw_accepted_quantity": str((fact or {}).get("accepted_quantity") or ""),
+        "cost_source": cost,
+        "recognized_capital_impact_rub": str(quantity * recognized_unit),
+        "paid_capital_impact_rub": str(quantity * paid_unit),
+    }
+    return CanonicalCostBlocked(exc.code, details)
+
+
 def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
     identity = {
         "code": str(anomaly.get("blocker_class") or "unknown"),
@@ -841,6 +898,12 @@ def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
         "business_date": str(anomaly.get("business_date") or ""),
     }
     blocker_id = "cblk_" + _hash(identity)[:20]
+    quantity = Decimal(str(anomaly.get("discrepancy") or 0))
+    cost_source = anomaly.get("cost_source") or {}
+    recognized_unit = Decimal(
+        str(cost_source.get("recognized_unit_cost_rub") or 0)
+    )
+    paid_unit = Decimal(str(cost_source.get("paid_unit_cost_rub") or 0))
     return {
         "blocker_id": blocker_id,
         "code": identity["code"],
@@ -858,8 +921,12 @@ def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
         "expected": "strict canonical source invariant or exact manifest match",
         "actual": str(anomaly.get("reason") or ""),
         "quantity_impact": anomaly.get("discrepancy"),
-        "recognized_capital_impact_rub": None,
-        "paid_capital_impact_rub": None,
+        "recognized_capital_impact_rub": (
+            _text(quantity * recognized_unit) if recognized_unit > 0 else None
+        ),
+        "paid_capital_impact_rub": (
+            _text(quantity * paid_unit) if paid_unit > 0 else None
+        ),
         "affected_pipeline_stages": [
             "wb_movement_layers",
             "acceptance",
@@ -917,8 +984,12 @@ def _exception_blocker(
             exc.details.get("quantity")
             or exc.details.get("surplus")
         ),
-        "recognized_capital_impact_rub": None,
-        "paid_capital_impact_rub": None,
+        "recognized_capital_impact_rub": exc.details.get(
+            "recognized_capital_impact_rub"
+        ),
+        "paid_capital_impact_rub": exc.details.get(
+            "paid_capital_impact_rub"
+        ),
         "affected_pipeline_stages": [stage],
         "dependencies": [],
         "eligible_for_approved_normalization": False,
