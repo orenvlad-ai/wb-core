@@ -572,6 +572,7 @@ class FfStockLedgerBlock:
         record: Mapping[str, Any],
         normalized: Mapping[str, Any],
         *,
+        historical_paid_only: bool = False,
         recalculate: bool = True,
     ) -> dict[str, Any]:
         from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -603,6 +604,22 @@ class FfStockLedgerBlock:
             or ""
         )
         try:
+            historical_scope: dict[str, Any] | None = None
+            if historical_paid_only:
+                historical_scope = capital.plan_historical_wb_paid_scope(
+                    supply_id=supply_id,
+                    effective_date=business_dt.date().isoformat(),
+                    sent_quantities_by_nm=sent,
+                    accepted_quantities_by_nm=accepted,
+                )
+                sent = dict(historical_scope["sent_quantities_by_nm"])
+                accepted = dict(historical_scope["accepted_quantities_by_nm"])
+                if not sent:
+                    return {
+                        "status": "skipped",
+                        "reason": "no_paid_ff_capital_quantity",
+                        "historical_scope": historical_scope,
+                    }
             status_id = _optional_int(normalized.get("status_id"))
             if status_id in {4, 5}:
                 if status_id == 5:
@@ -638,6 +655,8 @@ class FfStockLedgerBlock:
                     expenses_complete=False,
                 )
             capital.resolve_blockers(source_identity=supply_id)
+            if historical_scope is not None:
+                result["historical_scope"] = historical_scope
             return result
         except ValueError as exc:
             capital._record_blocker(  # noqa: SLF001 - same bounded application contour
@@ -652,6 +671,7 @@ class FfStockLedgerBlock:
         record: Mapping[str, Any],
         normalized: Mapping[str, Any],
         *,
+        historical_paid_only: bool = False,
         recalculate: bool = True,
     ) -> dict[str, Any]:
         from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -692,6 +712,19 @@ class FfStockLedgerBlock:
             )
             or ""
         )
+        if historical_paid_only:
+            outstanding_scope = capital.matching_wb_outstanding_quantities(
+                effective_date=business_dt.date().isoformat(),
+                quantities_by_nm=quantities,
+                warehouse=warehouse,
+                destination=destination,
+                original_supply_id=original_supply_id or None,
+            )
+            if not outstanding_scope["candidate_nm_ids"]:
+                return {
+                    "skip_reason": "wb_supply_doprinato_without_tracked_outstanding",
+                    "supply_id": supply_id,
+                }
         try:
             result = capital.reconcile_doprinato(
                 reconciliation_supply_id=supply_id,
@@ -730,6 +763,9 @@ class FfStockLedgerBlock:
         doprinato: list[tuple[datetime, Mapping[str, Any], Mapping[str, Any]]] = []
         skipped_without_ledger_evidence = 0
         skipped_before_paid_ownership = 0
+        skipped_without_paid_ff_capital = 0
+        skipped_doprinato_without_tracked_outstanding = 0
+        bounded_paid_quantity_diagnostics: list[dict[str, Any]] = []
         for record in records:
             normalized = dict(record.get("normalized") or record)
             if _optional_int(normalized.get("status_id")) not in WB_DEBIT_STATUS_IDS:
@@ -768,13 +804,29 @@ class FfStockLedgerBlock:
 
         diagnostics: list[dict[str, Any]] = []
         materialized = 0
-        for _, record, normalized in sorted(ordinary, key=lambda item: item[0]):
+        event_order = lambda item: (  # noqa: E731 - compact stable materialization key
+            item[0],
+            str(item[2].get("supply_id") or item[2].get("cache_key") or ""),
+        )
+        for _, record, normalized in sorted(ordinary, key=event_order):
             result = self._record_own_capital_wb_supply(
                 record,
                 normalized,
+                historical_paid_only=True,
                 recalculate=False,
             )
             materialized += 1
+            historical_scope = result.get("historical_scope")
+            if isinstance(historical_scope, Mapping):
+                for item in historical_scope.get("diagnostics") or []:
+                    bounded_paid_quantity_diagnostics.append(
+                        {
+                            "supply_id": str(normalized.get("supply_id") or ""),
+                            **dict(item),
+                        }
+                    )
+            if str(result.get("reason") or "") == "no_paid_ff_capital_quantity":
+                skipped_without_paid_ff_capital += 1
             if str(result.get("status") or "") == "blocked":
                 diagnostics.append(
                     {
@@ -782,13 +834,19 @@ class FfStockLedgerBlock:
                         "reason": str(result.get("reason") or "blocked"),
                     }
                 )
-        for _, record, normalized in sorted(doprinato, key=lambda item: item[0]):
+        for _, record, normalized in sorted(doprinato, key=event_order):
             result = self._record_own_capital_doprinato(
                 record,
                 normalized,
+                historical_paid_only=True,
                 recalculate=False,
             )
             materialized += 1
+            if (
+                str(result.get("skip_reason") or "")
+                == "wb_supply_doprinato_without_tracked_outstanding"
+            ):
+                skipped_doprinato_without_tracked_outstanding += 1
             if str(result.get("skip_reason") or "").endswith("_blocked"):
                 diagnostics.append(
                     {
@@ -808,6 +866,11 @@ class FfStockLedgerBlock:
             "persisted_supply_count": materialized,
             "skipped_without_ledger_evidence_count": skipped_without_ledger_evidence,
             "skipped_before_paid_ownership_count": skipped_before_paid_ownership,
+            "skipped_without_paid_ff_capital_count": skipped_without_paid_ff_capital,
+            "skipped_doprinato_without_tracked_outstanding_count": (
+                skipped_doprinato_without_tracked_outstanding
+            ),
+            "bounded_paid_quantity_diagnostics": bounded_paid_quantity_diagnostics,
             "blocker_count": len(diagnostics),
             "blockers": diagnostics,
         }
