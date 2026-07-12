@@ -30,6 +30,8 @@ Only persisted factual payment execution, dated factual logistics/customs/tax/VA
 
 WB acceptance evidence is validated atomically before its FF writeoff event: `acceptance_date < writeoff_date` is a blocker and creates no partial event history. Rebuild invariant diagnostics include event identity/type/date/stages/SKU and exact available/requested quantities.
 
+Historical WB rows earlier than the first positive persisted supplier-payment ownership event are outside the WebCore capital contour and are counted as skipped pre-ownership evidence. `Допринято` may close only outstanding rows whose final acceptance date is not later than the reconciliation date; future-layer matching is forbidden.
+
 ## Rollback
 
 Code rollback leaves additive tables dormant and leaves 1C/proxy metrics untouched. If an apply damages the runtime database, restore only the runner-verified coherent backup through the canonical runtime procedure; do not issue ad-hoc SQL or delete audit/event history manually.

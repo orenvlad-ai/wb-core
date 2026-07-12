@@ -214,6 +214,17 @@ def _assert_moving_average_and_wb_reconciliation(block: OwnProductCapitalBlock) 
     _dec_eq(day11[own_stage_metric_key(STAGE_FF_TO_WB, "qty")], "40", "partial acceptance leaves sent-accepted")
     _dec_eq(day11[own_stage_metric_key(STAGE_WB, "qty")], "80", "accepted part moves once")
     total_before = day11[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY]
+    _must_fail(
+        lambda: block.reconcile_doprinato(
+            reconciliation_supply_id="wb-doprin-before-original",
+            effective_date="2026-07-10",
+            quantities_by_nm={101: "1"},
+            warehouse="Коледино",
+            destination="ЦФО",
+            original_supply_id="wb-ordinary-1",
+        ),
+        "Допринято before original final acceptance",
+    )
     direct = block.reconcile_doprinato(
         reconciliation_supply_id="wb-doprin-direct",
         effective_date="2026-07-12",
@@ -1072,6 +1083,29 @@ def _assert_historical_source_backfill() -> None:
                     },
                     "raw_goods": [{"nmID": 101, "quantity": 4}],
                     "raw_package": [],
+                },
+                {
+                    "supply_id": "history-old-doprinato",
+                    "cache_key": "supply:history-old-doprinato",
+                    "wb_supply_id": "history-old-doprinato",
+                    "preorder_id": "history-old-doprinato-preorder",
+                    "number_label": "history-old-doprinato",
+                    "status_id": 5,
+                    "status_label": "Принято",
+                    "virtual_type_id": 5,
+                    "type_label": "Допринято",
+                    "warehouse_name": "Коледино",
+                    "source_created_at": "2025-01-17T10:00:00Z",
+                    "actual_acceptance_date": "2025-01-17T10:00:00Z",
+                    "raw_list": {
+                        "supplyID": "history-old-doprinato",
+                        "statusID": 5,
+                        "createDate": "2025-01-17T10:00:00Z",
+                    },
+                    "raw_goods": [
+                        {"nmID": 101, "quantity": 1, "acceptedQuantity": 1}
+                    ],
+                    "raw_package": [],
                 }
             ],
             warehouses=[],
@@ -1089,6 +1123,11 @@ def _assert_historical_source_backfill() -> None:
         dry = run_backfill(args)
         _eq(dry["cny_materialization"]["persisted_operation_count"], 1, "CNY history source count")
         _eq(dry["wb_materialization"]["persisted_supply_count"], 1, "WB history source count")
+        _eq(
+            dry["wb_materialization"]["skipped_before_paid_ownership_count"],
+            1,
+            "pre-ownership WB history skip count",
+        )
         if dry["candidate_preflight"]["unresolved_blocker_count"]:
             raise AssertionError(f"historical source backfill unexpectedly blocked: {dry}")
         args.apply = True
