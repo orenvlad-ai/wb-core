@@ -94,6 +94,7 @@ def main() -> None:
     _assert_payment_document_hard_gate()
     _assert_late_boundary_correction()
     _assert_partial_acceptance_state_machine()
+    _assert_historical_doprinato_paid_boundary()
     _assert_persisted_expense_events()
     _assert_historical_source_backfill()
     print("own product capital smoke: OK")
@@ -800,6 +801,104 @@ def _assert_partial_acceptance_state_machine() -> None:
                 final=True,
             ),
             "accepted quantity regression",
+        )
+
+
+def _assert_historical_doprinato_paid_boundary() -> None:
+    with TemporaryDirectory(prefix="own-capital-doprinato-paid-boundary-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        block = OwnProductCapitalBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        block.record_supplier_payment(
+            payment_id="bounded-payment",
+            shipment_id="bounded-shipment",
+            effective_date="2026-07-01",
+            invoice_total_cny=5,
+            paid_cny=5,
+            paid_rub=500,
+            product_lines=[
+                {
+                    "line_id": "bounded-line",
+                    "nm_id": 101,
+                    "qty": 5,
+                    "unit_price": 1,
+                    "match_status": "matched",
+                }
+            ],
+            actual_ff_acceptance_date="2026-06-30",
+            expenses_complete=True,
+        )
+        block.record_ordinary_wb_supply_acceptance(
+            supply_id="bounded-wb",
+            writeoff_date="2026-07-02",
+            acceptance_date="2026-07-03",
+            sent_quantities_by_nm={101: 5},
+            accepted_quantities_by_nm={101: 2},
+            physical_sent_quantities_by_nm={101: 10},
+            physical_accepted_quantities_by_nm={101: 4},
+            warehouse="Коледино",
+            destination="ЦФО",
+            known_nm_ids=[101],
+            expenses_complete=True,
+            final=True,
+        )
+        reconciliation = block.reconcile_doprinato(
+            reconciliation_supply_id="bounded-doprinato",
+            effective_date="2026-07-04",
+            quantities_by_nm={101: 6},
+            warehouse="Коледино",
+            destination="ЦФО",
+            original_supply_id="bounded-wb",
+        )
+        _eq(len(reconciliation["closures"]), 1, "bounded Допринято closure count")
+        _dec_eq(
+            reconciliation["closures"][0]["quantity"],
+            "3",
+            "Допринято moves only tracked paid capital",
+        )
+        _dec_eq(
+            reconciliation["closures"][0]["physical_quantity"],
+            "6",
+            "Допринято consumes exact physical outstanding",
+        )
+        _dec_eq(
+            reconciliation["closures"][0]["untracked_physical_quantity"],
+            "3",
+            "unpaid physical remainder creates no capital",
+        )
+        with _connect(runtime.db_path) as conn:
+            outstanding = conn.execute(
+                """
+                SELECT open_quantity, physical_open_quantity
+                FROM sheet_vitrina_v1_own_capital_wb_outstanding
+                WHERE original_supply_id='bounded-wb' AND nm_id=101
+                """
+            ).fetchone()
+        _dec_eq(outstanding["open_quantity"], "0", "tracked outstanding closed")
+        _dec_eq(
+            outstanding["physical_open_quantity"],
+            "0",
+            "physical outstanding closed",
+        )
+        repeated = block.reconcile_doprinato(
+            reconciliation_supply_id="bounded-doprinato",
+            effective_date="2026-07-04",
+            quantities_by_nm={101: 6},
+            warehouse="Коледино",
+            destination="ЦФО",
+            original_supply_id="bounded-wb",
+        )
+        if not repeated["idempotent"]:
+            raise AssertionError("bounded Допринято repeat must be idempotent")
+        _must_fail(
+            lambda: block.reconcile_doprinato(
+                reconciliation_supply_id="bounded-physical-surplus",
+                effective_date="2026-07-05",
+                quantities_by_nm={101: 1},
+                warehouse="Коледино",
+                destination="ЦФО",
+                original_supply_id="bounded-wb",
+            ),
+            "Допринято exceeding physical outstanding",
         )
 
 

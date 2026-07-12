@@ -1065,6 +1065,8 @@ class OwnProductCapitalBlock:
         acceptance_date: str,
         sent_quantities_by_nm: Mapping[int, Any],
         accepted_quantities_by_nm: Mapping[int, Any],
+        physical_sent_quantities_by_nm: Mapping[int, Any] | None = None,
+        physical_accepted_quantities_by_nm: Mapping[int, Any] | None = None,
         warehouse: str,
         destination: str,
         known_nm_ids: Iterable[int] | None = None,
@@ -1096,6 +1098,22 @@ class OwnProductCapitalBlock:
                 quantity, f"accepted[{nm_id}]"
             )
             for nm_id, quantity in accepted_quantities_by_nm.items()
+        }
+        physical_sent = {
+            _positive_int(nm_id, "nm_id"): _positive_decimal(
+                quantity, f"physical_sent[{nm_id}]"
+            )
+            for nm_id, quantity in (
+                physical_sent_quantities_by_nm or normalized_sent
+            ).items()
+        }
+        physical_accepted = {
+            _positive_int(nm_id, "nm_id"): _nonnegative_decimal(
+                quantity, f"physical_accepted[{nm_id}]"
+            )
+            for nm_id, quantity in (
+                physical_accepted_quantities_by_nm or normalized_accepted
+            ).items()
         }
         if final:
             missing = sorted(set(normalized_sent) - set(normalized_accepted))
@@ -1183,6 +1201,13 @@ class OwnProductCapitalBlock:
                         "accepted_before": previous,
                         "accepted_delta": delta,
                         "outstanding": sent - accepted,
+                        "physical_sent": physical_sent.get(nm_id, sent),
+                        "physical_accepted": physical_accepted.get(nm_id, accepted),
+                        "physical_outstanding": max(
+                            ZERO,
+                            physical_sent.get(nm_id, sent)
+                            - physical_accepted.get(nm_id, accepted),
+                        ),
                         "unit_cost": unit_cost or ZERO,
                         "confirmed_share": confirmed_share,
                     }
@@ -1235,7 +1260,8 @@ class OwnProductCapitalBlock:
                 if final:
                     existing_outstanding = conn.execute(
                         """
-                        SELECT total_quantity, open_quantity
+                        SELECT total_quantity, open_quantity,
+                               physical_total_quantity, physical_open_quantity
                         FROM sheet_vitrina_v1_own_capital_wb_outstanding
                         WHERE original_supply_id = ? AND nm_id = ?
                         """,
@@ -1251,18 +1277,35 @@ class OwnProductCapitalBlock:
                         else ZERO
                     )
                     open_quantity = max(ZERO, item["outstanding"] - reconciled)
+                    physical_reconciled = (
+                        max(
+                            ZERO,
+                            _decimal(existing_outstanding["physical_total_quantity"])
+                            - _decimal(existing_outstanding["physical_open_quantity"]),
+                        )
+                        if existing_outstanding is not None
+                        else ZERO
+                    )
+                    physical_open_quantity = max(
+                        ZERO,
+                        item["physical_outstanding"] - physical_reconciled,
+                    )
                     conn.execute(
                         """
                         INSERT INTO sheet_vitrina_v1_own_capital_wb_outstanding (
                             original_supply_id, nm_id, warehouse, destination, original_cost_layer_id,
-                            total_quantity, open_quantity, unit_cost_rub, writeoff_date,
+                            total_quantity, open_quantity,
+                            physical_total_quantity, physical_open_quantity,
+                            unit_cost_rub, writeoff_date,
                             confirmed_share, final_acceptance_date, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(original_supply_id, nm_id) DO UPDATE SET
                             warehouse = excluded.warehouse,
                             destination = excluded.destination,
                             total_quantity = excluded.total_quantity,
                             open_quantity = excluded.open_quantity,
+                            physical_total_quantity = excluded.physical_total_quantity,
+                            physical_open_quantity = excluded.physical_open_quantity,
                             unit_cost_rub = excluded.unit_cost_rub,
                             confirmed_share = excluded.confirmed_share,
                             updated_at = excluded.updated_at
@@ -1275,6 +1318,8 @@ class OwnProductCapitalBlock:
                             f"wb_supply:{supply_id}:{item['nm_id']}",
                             _text_decimal(item["outstanding"]),
                             _text_decimal(open_quantity),
+                            _text_decimal(item["physical_outstanding"]),
+                            _text_decimal(physical_open_quantity),
                             _text_decimal(item["unit_cost"]),
                             _iso_date(writeoff_date, "writeoff_date"),
                             _text_decimal(item["confirmed_share"]),
@@ -1342,24 +1387,24 @@ class OwnProductCapitalBlock:
                 else:
                     where.extend(["warehouse = ?", "destination = ?"])
                     params.extend([str(warehouse or ""), str(destination or "")])
-                candidates = [
-                    row
-                    for row in conn.execute(
-                        f"""
-                        SELECT * FROM sheet_vitrina_v1_own_capital_wb_outstanding
-                        WHERE {' AND '.join(where)}
-                        ORDER BY final_acceptance_date ASC, original_supply_id ASC
-                        """,
-                        tuple(params),
-                    ).fetchall()
-                    if _decimal(row["open_quantity"]) > ZERO
-                ]
+                candidates = conn.execute(
+                    f"""
+                    SELECT * FROM sheet_vitrina_v1_own_capital_wb_outstanding
+                    WHERE {' AND '.join(where)}
+                    ORDER BY final_acceptance_date ASC, original_supply_id ASC
+                    """,
+                    tuple(params),
+                ).fetchall()
                 remaining = quantity
                 for candidate in candidates:
                     if remaining <= ZERO:
                         break
                     open_qty = _decimal(candidate["open_quantity"])
-                    closed = min(open_qty, remaining)
+                    physical_open = _decimal(candidate["physical_open_quantity"])
+                    if physical_open <= ZERO:
+                        continue
+                    physical_closed = min(physical_open, remaining)
+                    closed = min(open_qty, physical_closed)
                     closures.append(
                         {
                             "nm_id": nm_id,
@@ -1369,14 +1414,20 @@ class OwnProductCapitalBlock:
                             "confirmed_share": _decimal(candidate["confirmed_share"]),
                             "cost_layer_id": str(candidate["original_cost_layer_id"]),
                             "open_before": open_qty,
+                            "physical_open_before": physical_open,
+                            "physical_closed": physical_closed,
                         }
                     )
-                    remaining -= closed
+                    remaining -= physical_closed
                 if remaining > ZERO:
                     self._record_blocker(
                         code="doprinato_unmatched_surplus",
                         source_identity=reconciliation_supply_id,
-                        details={"nm_id": nm_id, "surplus": _text_decimal(remaining)},
+                        details={
+                            "nm_id": nm_id,
+                            "requested": _text_decimal(quantity),
+                            "unmatched_physical_surplus": _text_decimal(remaining),
+                        },
                     )
                     raise ValueError("Допринято quantity exceeds matching outstanding quantity")
             for index, closure in enumerate(closures, start=1):
@@ -1403,18 +1454,28 @@ class OwnProductCapitalBlock:
                         "original_supply_id": closure["original_supply_id"],
                         "matching": "direct" if original_supply_id else "warehouse_destination_sku_fifo",
                         "no_ff_writeoff": True,
+                        "physical_quantity": _text_decimal(
+                            closure["physical_closed"]
+                        ),
+                        "untracked_physical_quantity": _text_decimal(
+                            closure["physical_closed"] - closure["closed"]
+                        ),
                     },
                     created_at=now,
                 )
                 next_open = closure["open_before"] - closure["closed"]
+                next_physical_open = (
+                    closure["physical_open_before"] - closure["physical_closed"]
+                )
                 conn.execute(
                     """
                     UPDATE sheet_vitrina_v1_own_capital_wb_outstanding
-                    SET open_quantity = ?, updated_at = ?
+                    SET open_quantity = ?, physical_open_quantity = ?, updated_at = ?
                     WHERE original_supply_id = ? AND nm_id = ?
                     """,
                     (
                         _text_decimal(next_open),
+                        _text_decimal(next_physical_open),
                         now,
                         closure["original_supply_id"],
                         closure["nm_id"],
@@ -1432,6 +1493,10 @@ class OwnProductCapitalBlock:
                     "original_supply_id": item["original_supply_id"],
                     "nm_id": item["nm_id"],
                     "quantity": _text_decimal(item["closed"]),
+                    "physical_quantity": _text_decimal(item["physical_closed"]),
+                    "untracked_physical_quantity": _text_decimal(
+                        item["physical_closed"] - item["closed"]
+                    ),
                 }
                 for item in closures
             ],
@@ -2032,6 +2097,8 @@ def _ensure_own_capital_schema(conn: sqlite3.Connection) -> None:
             original_cost_layer_id TEXT NOT NULL,
             total_quantity TEXT NOT NULL,
             open_quantity TEXT NOT NULL,
+            physical_total_quantity TEXT NOT NULL DEFAULT '0',
+            physical_open_quantity TEXT NOT NULL DEFAULT '0',
             unit_cost_rub TEXT NOT NULL,
             writeoff_date TEXT NOT NULL,
             confirmed_share TEXT NOT NULL DEFAULT '0',
@@ -2085,6 +2152,28 @@ def _ensure_own_capital_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE sheet_vitrina_v1_own_capital_wb_outstanding "
             "ADD COLUMN confirmed_share TEXT NOT NULL DEFAULT '0'"
+        )
+    added_physical_columns = False
+    if "physical_total_quantity" not in outstanding_columns:
+        conn.execute(
+            "ALTER TABLE sheet_vitrina_v1_own_capital_wb_outstanding "
+            "ADD COLUMN physical_total_quantity TEXT NOT NULL DEFAULT '0'"
+        )
+        added_physical_columns = True
+    if "physical_open_quantity" not in outstanding_columns:
+        conn.execute(
+            "ALTER TABLE sheet_vitrina_v1_own_capital_wb_outstanding "
+            "ADD COLUMN physical_open_quantity TEXT NOT NULL DEFAULT '0'"
+        )
+        added_physical_columns = True
+    if added_physical_columns:
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_own_capital_wb_outstanding
+            SET physical_total_quantity = total_quantity,
+                physical_open_quantity = open_quantity
+            WHERE physical_total_quantity = '0' AND total_quantity != '0'
+            """
         )
 
 
