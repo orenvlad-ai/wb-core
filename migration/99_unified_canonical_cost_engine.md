@@ -34,9 +34,9 @@ baseline never upgrades an unpaid opening shipment to fully paid.
 - `sheet_vitrina_v1_canonical_cost_daily_state`.
 
 Legacy module-40/45 tables remain audit-only. Source tables and pre-cutover rows are never target tables.
-An unmatched `Допринято` fact strictly before cutover remains legacy audit
+An unmatched `Допринято` fact on or before the opening cutover snapshot remains legacy audit
 evidence and creates no movement, quantity, cost, or manual buffer; the same
-condition on or after cutover is a fail-closed anomaly.
+condition after cutover is a fail-closed anomaly.
 
 ## Runner safety
 

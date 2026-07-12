@@ -1377,7 +1377,7 @@ class CanonicalCostEngine:
             open_layers,
             [
                 item for item in evidence
-                if item["is_doprinato"] and item["accepted_date"] >= CUTOVER_DATE
+                if item["is_doprinato"] and item["accepted_date"] > CUTOVER_DATE
             ],
         )
         changed = 0
@@ -2430,11 +2430,11 @@ def _wb_movement_evidence(conn: sqlite3.Connection, *, as_of_date: str) -> list[
             remaining -= closed
         if remaining > ZERO:
             # The cutover baseline absorbs legacy history.  An orphan
-            # doprinato before the authoritative boundary cannot be safely
+            # doprinato absorbed by the opening snapshot cannot be safely
             # reconstructed and therefore stays source evidence only: it
             # creates neither a movement nor a zero-cost buffer.  New-contour
             # evidence remains strict and fail-closed.
-            if str(fact["accepted_date"] or "") < CUTOVER_DATE:
+            if str(fact["accepted_date"] or "") <= CUTOVER_DATE:
                 continue
             raise CanonicalCostBlocked(
                 "doprinato_unmatched_surplus",
