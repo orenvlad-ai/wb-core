@@ -299,9 +299,63 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         reconciliation_payload: dict[str, Any] | None = None
         if quarantine_source["status"] == "ok" and baseline is not None:
             try:
-                first_rebuild = engine.rebuild(
-                    date_from=CUTOVER_DATE, date_to=date_to
-                )
+                pipeline_quarantine_attempts: list[dict[str, Any]] = []
+                for attempt in range(1, 26):
+                    try:
+                        first_rebuild = engine.rebuild(
+                            date_from=CUTOVER_DATE, date_to=date_to
+                        )
+                        break
+                    except CanonicalCostBlocked as exc:
+                        action = _apply_pipeline_quarantine(
+                            candidate_runtime.db_path, exc
+                        )
+                        if action is None:
+                            raise
+                        record = _exception_blocker(
+                            exc, stage="canonical_rebuild"
+                        )
+                        if record["blocker_id"] not in {
+                            item["blocker_id"] for item in blockers
+                        }:
+                            blockers.append(record)
+                            primary_ids.append(record["blocker_id"])
+                            quarantine.append(
+                                {
+                                    "blocker_id": record["blocker_id"],
+                                    "source_identity": record["source_identity"],
+                                    "root_cause": record["code"],
+                                    "affected_stages": record[
+                                        "affected_pipeline_stages"
+                                    ],
+                                    "quantity_impact": record["quantity_impact"],
+                                    "recognized_capital_impact_rub": None,
+                                    "paid_capital_impact_rub": None,
+                                    "continued_checks": list(
+                                        PIPELINE_STAGES[1:]
+                                    ),
+                                    "tainted_results": list(
+                                        PIPELINE_STAGES[4:]
+                                    ),
+                                    "proposed_fix": record[
+                                        "recommended_fix"
+                                    ],
+                                    "diagnostic_action": action,
+                                }
+                            )
+                        pipeline_quarantine_attempts.append(
+                            {
+                                "attempt": attempt,
+                                "blocker_id": record["blocker_id"],
+                                "code": record["code"],
+                                "action": action,
+                            }
+                        )
+                else:
+                    raise CanonicalCostBlocked(
+                        "diagnostic_quarantine_attempt_limit_exceeded",
+                        {"attempt_limit": 25},
+                    )
                 first_target = _canonical_digest(
                     candidate_runtime.db_path,
                     date_from=CUTOVER_DATE,
@@ -340,6 +394,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "second": second_rebuild.__dict__,
                     "first_target_digest": first_target,
                     "second_target_digest": second_target,
+                    "pipeline_quarantine_attempts": pipeline_quarantine_attempts,
                 }
                 stage_counts = {
                     "wb_movement_layers": first_rebuild.movement_rows_changed,
@@ -758,6 +813,25 @@ def _apply_diagnostic_quarantine(
     return actions
 
 
+def _apply_pipeline_quarantine(
+    db_path: Path, exc: CanonicalCostBlocked
+) -> str | None:
+    """Quarantine one newly exposed entity and let the next pass continue."""
+
+    supply_id = str(exc.details.get("supply_id") or "")
+    if exc.code != "doprinato_unmatched_surplus" or not supply_id:
+        return None
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=?",
+            (supply_id,),
+        )
+        conn.commit()
+    if int(cursor.rowcount or 0) != 1:
+        return None
+    return "newly exposed doprinato excluded from disposable diagnostic reconciliation"
+
+
 def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
     identity = {
         "code": str(anomaly.get("blocker_class") or "unknown"),
@@ -826,12 +900,23 @@ def _exception_blocker(
         "shipment_id": str(exc.details.get("shipment_id") or ""),
         "document_id": str(exc.details.get("document_id") or ""),
         "nm_id": exc.details.get("nm_id"),
-        "business_date": str(exc.details.get("business_date") or ""),
-        "source_identity": str(exc.details.get("source_identity") or ""),
+        "business_date": str(
+            exc.details.get("business_date")
+            or exc.details.get("accepted_date")
+            or ""
+        ),
+        "source_identity": str(
+            exc.details.get("source_identity")
+            or exc.details.get("supply_id")
+            or ""
+        ),
         "raw_evidence": exc.details,
         "expected": f"{stage} completes",
         "actual": exc.code,
-        "quantity_impact": exc.details.get("quantity"),
+        "quantity_impact": (
+            exc.details.get("quantity")
+            or exc.details.get("surplus")
+        ),
         "recognized_capital_impact_rub": None,
         "paid_capital_impact_rub": None,
         "affected_pipeline_stages": [stage],
