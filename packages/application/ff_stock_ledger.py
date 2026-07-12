@@ -40,13 +40,17 @@ FF_STOCK_OPERATION_PAGE_SIZES = (50, 100, 200)
 WB_DEBIT_STATUS_IDS = {3, 4, 5, 6}
 WB_SKIP_VIRTUAL_TYPE_ID = 5
 WB_SKIP_TYPE_LABEL = "Допринято"
-TARGETED_WB_RECONCILIATION_REASON = "targeted_checkpoint_reconciliation"
-TARGETED_WB_RECONCILIATION_PLAN_VERSION = "v1"
+TARGETED_WB_RECONCILIATION_REASON = "targeted_pre_activation_remediation"
+TARGETED_WB_RECONCILIATION_PLAN_VERSION = "v2"
 TARGETED_WB_RECONCILIATION_SUPPLY_ID = "40561872"
 TARGETED_WB_RECONCILIATION_EXPECTED_SKU_COUNT = 13
 TARGETED_WB_RECONCILIATION_EXPECTED_DEBIT = 31_500.0
 TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_BEFORE = 38_250.0
 TARGETED_WB_RECONCILIATION_EXPECTED_TOTAL_AFTER = 6_750.0
+TARGETED_WB_RECONCILIATION_ORDINARY_BLOCKERS = (
+    "wb_supply_before_auto_writeoff_checkpoint",
+    "wb_supply_before_ledger_activation",
+)
 
 
 class TargetedWbSupplyReconciliationError(ValueError):
@@ -554,7 +558,7 @@ class FfStockLedgerBlock:
         )
 
     def plan_targeted_wb_supply_reconciliation(self, supply_id: str) -> dict[str, Any]:
-        """Build a read-only, single-supply plan that may bypass only the baseline checkpoint guard."""
+        """Build the read-only v2 plan for the one checkpoint plus pre-activation incident."""
         requested_supply_id = str(supply_id or "").strip()
         if requested_supply_id != TARGETED_WB_RECONCILIATION_SUPPLY_ID:
             raise TargetedWbSupplyReconciliationError(
@@ -680,31 +684,38 @@ class FfStockLedgerBlock:
                 supply_id=resolved_supply_id,
                 source_key=source_key,
             )
-            if checkpoint_match_fields or source_dt <= checkpoint_dt:
+            required_checkpoint_match_fields = {"cache_key", "source_key", "supply_id"}
+            if set(checkpoint_match_fields) == required_checkpoint_match_fields:
                 checkpoint_reason = "wb_supply_before_auto_writeoff_checkpoint"
             else:
                 blockers.append(
                     {
-                        "code": "targeted_checkpoint_bypass_not_applicable",
-                        "ordinary_path_reason": "eligible_for_ordinary_auto_writeoff",
+                        "code": "targeted_checkpoint_baseline_match_required",
+                        "required_match_fields": sorted(required_checkpoint_match_fields),
+                        "actual_match_fields": checkpoint_match_fields,
                     }
                 )
 
         activation = self.runtime.load_ff_stock_activation_operation()
+        activation_operation_id = str((activation or {}).get("operation_id") or "")
         activation_dt = _parse_datetime_like((activation or {}).get("created_at"))
+        activation_reason = ""
         if activation is None:
             blockers.append({"code": "wb_supply_ledger_not_activated"})
-        elif activation_dt is None:
+        elif not activation_operation_id or activation_dt is None:
             blockers.append(
                 {
                     "code": "wb_supply_ledger_activation_invalid",
-                    "operation_id": str(activation.get("operation_id") or ""),
+                    "operation_id": activation_operation_id,
+                    "created_at": str(activation.get("created_at") or ""),
                 }
             )
         elif source_dt is not None and source_dt < activation_dt:
+            activation_reason = "wb_supply_before_ledger_activation"
+        elif source_dt is not None:
             blockers.append(
                 {
-                    "code": "wb_supply_before_ledger_activation",
+                    "code": "targeted_pre_activation_remediation_not_applicable",
                     "source_timestamp": source_dt.isoformat(),
                     "activation_created_at": activation_dt.isoformat(),
                 }
@@ -795,9 +806,22 @@ class FfStockLedgerBlock:
             "baseline_supply_ids": list((checkpoint or {}).get("baseline_supply_ids") or []),
         }
         activation_guard = {
-            "operation_id": str((activation or {}).get("operation_id") or ""),
+            "operation_id": activation_operation_id,
             "created_at": str((activation or {}).get("created_at") or ""),
         }
+        bypassed_ordinary_blockers = [
+            reason
+            for reason in TARGETED_WB_RECONCILIATION_ORDINARY_BLOCKERS
+            if reason in {checkpoint_reason, activation_reason}
+        ]
+        if bypassed_ordinary_blockers != list(TARGETED_WB_RECONCILIATION_ORDINARY_BLOCKERS):
+            blockers.append(
+                {
+                    "code": "targeted_required_ordinary_blockers_not_matched",
+                    "expected": list(TARGETED_WB_RECONCILIATION_ORDINARY_BLOCKERS),
+                    "actual": bypassed_ordinary_blockers,
+                }
+            )
         fingerprint_payload = {
             "plan_version": TARGETED_WB_RECONCILIATION_PLAN_VERSION,
             "reason": TARGETED_WB_RECONCILIATION_REASON,
@@ -807,6 +831,8 @@ class FfStockLedgerBlock:
             "checkpoint_reason": checkpoint_reason,
             "checkpoint_match_fields": checkpoint_match_fields,
             "activation_guard": activation_guard,
+            "activation_reason": activation_reason,
+            "bypassed_ordinary_blockers": bypassed_ordinary_blockers,
             "active_nomenclature_guard": active_nomenclature_guard,
             "expected_balances": expected_balances,
             "expected_ledger_totals": {
@@ -842,11 +868,13 @@ class FfStockLedgerBlock:
                 **checkpoint_guard,
                 "ordinary_path_reason": checkpoint_reason,
                 "match_fields": checkpoint_match_fields,
-                "bypass_scope": "only_wb_supply_before_auto_writeoff_checkpoint",
+                "bypass_scope": "only_supply_40561872_checkpoint_and_pre_activation",
             },
             "ledger_activation": {
                 **activation_guard,
+                "ordinary_path_reason": activation_reason,
             },
+            "bypassed_ordinary_blockers": bypassed_ordinary_blockers,
             "skus": sku_rows,
             "totals": {
                 "before": total_before,
@@ -919,17 +947,22 @@ class FfStockLedgerBlock:
             source_type=FF_STOCK_SOURCE_WB_SUPPLY,
             source_key=canonical_source_key,
             source_object_id=requested_supply_id,
-            source_object_label=f"WB-поставка № {requested_supply_id} · targeted checkpoint reconciliation",
+            source_object_label=f"WB-поставка № {requested_supply_id} · targeted pre-activation remediation",
             created_at=self.timestamp_factory(),
             created_by=str(created_by or "operator").strip() or "operator",
             warnings=list(plan.get("warnings") or []),
             diagnostics={
                 "reason": TARGETED_WB_RECONCILIATION_REASON,
+                "plan_version": TARGETED_WB_RECONCILIATION_PLAN_VERSION,
+                "remediation": "targeted_pre_activation_remediation",
                 "supply_id": requested_supply_id,
                 "cache_key": f"supply:{requested_supply_id}",
                 "source_key": canonical_source_key,
                 "dry_run_fingerprint": actual_fingerprint,
-                "ordinary_skip_reason": "wb_supply_before_auto_writeoff_checkpoint",
+                "supply_timestamp": str((plan.get("supply") or {}).get("source_timestamp") or ""),
+                "activation_operation_id": str((plan.get("ledger_activation") or {}).get("operation_id") or ""),
+                "activation_created_at": str((plan.get("ledger_activation") or {}).get("created_at") or ""),
+                "bypassed_ordinary_blockers": list(plan.get("bypassed_ordinary_blockers") or []),
                 "checkpoint": dict(plan.get("checkpoint") or {}),
                 "totals": dict(plan.get("totals") or {}),
             },
@@ -975,7 +1008,7 @@ class FfStockLedgerBlock:
         ):
             raise TargetedWbSupplyReconciliationError(
                 "operation_not_targeted_reconciliation",
-                "Only a targeted checkpoint reconciliation operation can be reversed by this path",
+                "Only a targeted pre-activation remediation operation can be reversed by this path",
             )
         reversal_source_key = f"wb_supply_debit_reversal:supply:{requested_supply_id}"
         existing = self.runtime.load_ff_stock_operation_by_source_key(reversal_source_key)
@@ -1007,7 +1040,7 @@ class FfStockLedgerBlock:
         total_before = sum(balances.values())
         fingerprint_payload = {
             "plan_version": TARGETED_WB_RECONCILIATION_PLAN_VERSION,
-            "reason": "targeted_checkpoint_reconciliation_reversal",
+            "reason": "targeted_pre_activation_remediation_reversal",
             "supply_id": requested_supply_id,
             "original_operation_id": str(original.get("operation_id") or ""),
             "original_source_key": canonical_source_key,
@@ -1094,7 +1127,7 @@ class FfStockLedgerBlock:
             created_by=str(created_by or "operator").strip() or "operator",
             warnings=[],
             diagnostics={
-                "reason": "targeted_checkpoint_reconciliation_reversal",
+                "reason": "targeted_pre_activation_remediation_reversal",
                 "supply_id": requested_supply_id,
                 "compensates_operation_id": str(guards.get("original_operation_id") or ""),
                 "compensates_source_key": str(guards.get("original_source_key") or ""),
