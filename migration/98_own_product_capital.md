@@ -30,7 +30,7 @@ Only persisted factual payment execution, dated factual logistics/customs/tax/VA
 
 WB acceptance evidence is validated atomically before its FF writeoff event: `acceptance_date < writeoff_date` is a blocker and creates no partial event history. Rebuild invariant diagnostics include event identity/type/date/stages/SKU and exact available/requested quantities.
 
-Historical WB rows earlier than the first positive persisted supplier-payment ownership event are outside the WebCore capital contour and are counted as skipped pre-ownership evidence. `Допринято` may close only outstanding rows whose final acceptance date is not later than the reconciliation date; future-layer matching is forbidden.
+Historical WB rows earlier than the first positive persisted supplier-payment ownership event are outside the WebCore capital contour and are counted as skipped pre-ownership evidence. After that boundary a canonical physical FF debit authorizes the movement source but does not fabricate paid ownership: the historical sent/accepted movement is bounded by paid FF capital actually available for the SKU, and any physical remainder is recorded in deterministic diagnostics. A confirmed bank-fee statement with no direct-RUB rows stays in the already-deduplicated CNY-ledger contour; a malformed direct-RUB row remains fail closed. `Допринято` may close only outstanding rows whose final acceptance date is not later than the reconciliation date; future-layer matching is forbidden. A historical `Допринято` row with no eligible tracked outstanding is outside the paid-capital contour, while any surplus against an existing eligible layer remains an atomic blocker.
 
 ## Rollback
 

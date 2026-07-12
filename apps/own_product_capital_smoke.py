@@ -907,6 +907,23 @@ def _assert_persisted_expense_events() -> None:
                 },
             ],
         )
+        _save_expense_document(
+            runtime,
+            document_id="expense-bank-fee-cny-only",
+            document_type="bank_fee_statement",
+            document_date="2026-07-10",
+            parse_status="confirmed",
+            lines=[
+                {
+                    "line_id": "bank-cny-only-line",
+                    "category": "bank_fee",
+                    "amount": 10,
+                    "currency": "CNY",
+                    "amount_rub": 120,
+                    "raw": {"row": {"operation_date": "2026-07-09"}},
+                }
+            ],
+        )
         block = OwnProductCapitalBlock(runtime=runtime, timestamp_factory=lambda: NOW)
         block.record_supplier_payment(
             payment_id="expense-base-payment",
@@ -923,6 +940,11 @@ def _assert_persisted_expense_events() -> None:
         materialized = block.materialize_persisted_expense_events()
         _eq(materialized["blocker_count"], 0, "expense event blockers")
         _eq(materialized["created_event_group_count"], 3, "dated expense event groups")
+        _eq(
+            materialized["skipped_cny_ledger_only_document_count"],
+            1,
+            "CNY-only bank statement stays in CNY capital contour",
+        )
         repeated = block.materialize_persisted_expense_events()
         _eq(repeated["created_event_group_count"], 0, "expense event dedupe")
         _eq(repeated["idempotent_event_group_count"], 3, "expense event idempotency")
@@ -964,6 +986,30 @@ def _assert_persisted_expense_events() -> None:
         )
         if block.has_cost_payment_event("sfd_literal_bbbbbbbb"):
             raise AssertionError("SQLite LIKE wildcards must not alias distinct financial document IDs")
+        _save_expense_document(
+            runtime,
+            document_id="expense-bank-fee-rub-missing",
+            document_type="bank_fee_statement",
+            document_date="2026-07-10",
+            parse_status="confirmed",
+            lines=[
+                {
+                    "line_id": "bank-rub-missing-line",
+                    "category": "bank_fee",
+                    "amount": 50,
+                    "currency": "RUB",
+                    "amount_rub": None,
+                    "raw": {"row": {"operation_date": "2026-07-09"}},
+                }
+            ],
+        )
+        missing_rub = block.materialize_persisted_expense_events()
+        _eq(missing_rub["blocker_count"], 1, "missing direct-RUB amount stays fail closed")
+        _eq(
+            missing_rub["blockers"][0]["document_id"],
+            "expense-bank-fee-rub-missing",
+            "missing direct-RUB blocker identity",
+        )
 
 
 def _assert_historical_source_backfill() -> None:
@@ -1063,6 +1109,17 @@ def _assert_historical_source_backfill() -> None:
             created_by="system",
             lines=[{"nm_id": 101, "quantity_delta": -4}],
         )
+        runtime.create_ff_stock_operation(
+            operation_id="history-overaccepted-wb-debit",
+            operation_type="auto_writeoff",
+            source_type="wb_supply",
+            source_key="wb_supply_debit:supply:history-overaccepted",
+            source_object_id="history-overaccepted",
+            source_object_label="history-overaccepted",
+            created_at="2026-07-05T10:00:00Z",
+            created_by="system",
+            lines=[{"nm_id": 101, "quantity_delta": -10}],
+        )
         runtime.save_wb_supply_rows(
             rows=[
                 {
@@ -1082,6 +1139,51 @@ def _assert_historical_source_backfill() -> None:
                         "supplyDate": "2026-07-04T10:00:00Z",
                     },
                     "raw_goods": [{"nmID": 101, "quantity": 4}],
+                    "raw_package": [],
+                },
+                {
+                    "supply_id": "history-overaccepted",
+                    "cache_key": "supply:history-overaccepted",
+                    "wb_supply_id": "history-overaccepted",
+                    "preorder_id": "history-overaccepted-preorder",
+                    "number_label": "history-overaccepted",
+                    "status_id": 5,
+                    "status_label": "Принято",
+                    "warehouse_name": "Коледино",
+                    "supply_date": "2026-07-05T10:00:00Z",
+                    "source_created_at": "2026-07-05T10:00:00Z",
+                    "actual_acceptance_date": "2026-07-05T12:00:00Z",
+                    "raw_list": {
+                        "supplyID": "history-overaccepted",
+                        "statusID": 5,
+                        "supplyDate": "2026-07-05T10:00:00Z",
+                    },
+                    "raw_goods": [
+                        {"nmID": 101, "quantity": 10, "acceptedQuantity": 12}
+                    ],
+                    "raw_package": [],
+                },
+                {
+                    "supply_id": "history-untracked-doprinato",
+                    "cache_key": "supply:history-untracked-doprinato",
+                    "wb_supply_id": "history-untracked-doprinato",
+                    "preorder_id": "history-untracked-doprinato-preorder",
+                    "number_label": "history-untracked-doprinato",
+                    "status_id": 5,
+                    "status_label": "Принято",
+                    "virtual_type_id": 5,
+                    "type_label": "Допринято",
+                    "warehouse_name": "Электросталь",
+                    "source_created_at": "2026-07-05T13:00:00Z",
+                    "actual_acceptance_date": "2026-07-05T13:00:00Z",
+                    "raw_list": {
+                        "supplyID": "history-untracked-doprinato",
+                        "statusID": 5,
+                        "createDate": "2026-07-05T13:00:00Z",
+                    },
+                    "raw_goods": [
+                        {"nmID": 101, "quantity": 1, "acceptedQuantity": 1}
+                    ],
                     "raw_package": [],
                 },
                 {
@@ -1122,12 +1224,28 @@ def _assert_historical_source_backfill() -> None:
         )
         dry = run_backfill(args)
         _eq(dry["cny_materialization"]["persisted_operation_count"], 1, "CNY history source count")
-        _eq(dry["wb_materialization"]["persisted_supply_count"], 1, "WB history source count")
+        _eq(dry["wb_materialization"]["persisted_supply_count"], 3, "WB history source count")
         _eq(
             dry["wb_materialization"]["skipped_before_paid_ownership_count"],
             1,
             "pre-ownership WB history skip count",
         )
+        _eq(
+            dry["wb_materialization"]["skipped_doprinato_without_tracked_outstanding_count"],
+            1,
+            "post-ownership untracked Допринято skip count",
+        )
+        diagnostic_codes = {
+            str(item.get("code") or "")
+            for item in dry["wb_materialization"]["bounded_paid_quantity_diagnostics"]
+            if str(item.get("supply_id") or "") == "history-overaccepted"
+        }
+        if diagnostic_codes != {
+            "physical_wb_quantity_partially_outside_paid_capital",
+            "physical_accepted_quantity_partially_outside_paid_capital",
+            "physical_accepted_quantity_exceeds_sent_layer",
+        }:
+            raise AssertionError(f"historical paid-capital diagnostics mismatch: {diagnostic_codes}")
         if dry["candidate_preflight"]["unresolved_blocker_count"]:
             raise AssertionError(f"historical source backfill unexpectedly blocked: {dry}")
         args.apply = True
@@ -1145,8 +1263,19 @@ def _assert_historical_source_backfill() -> None:
                 WHERE event_id='stage_transfer:wb_supply:history-wb:101'
                 """
             ).fetchone()
+            overaccepted = conn.execute(
+                """
+                SELECT quantity FROM sheet_vitrina_v1_own_capital_events
+                WHERE event_id='stage_transfer:wb_supply:history-overaccepted:101'
+                """
+            ).fetchone()
         _eq(payment, 1, "persisted CNY payment layer restored")
         _dec_eq(wb["quantity"], "4", "persisted WB movement restored")
+        _dec_eq(
+            overaccepted["quantity"],
+            "6",
+            "historical physical movement is bounded to paid FF capital",
+        )
         second = run_backfill(
             argparse.Namespace(
                 runtime_dir=str(runtime.runtime_dir),

@@ -277,6 +277,139 @@ class OwnProductCapitalBlock:
         value = str(row["effective_date"] or "") if row is not None else ""
         return value or None
 
+    def plan_historical_wb_paid_scope(
+        self,
+        *,
+        supply_id: str,
+        effective_date: str,
+        sent_quantities_by_nm: Mapping[int, Any],
+        accepted_quantities_by_nm: Mapping[int, Any],
+    ) -> dict[str, Any]:
+        """Bound a historical physical WB movement to capital actually owned on FF."""
+        supply_id = _required_text(supply_id, "supply_id")
+        effective_date = _iso_date(effective_date, "effective_date")
+        sent = {
+            _positive_int(nm_id, "nm_id"): _positive_decimal(qty, f"sent[{nm_id}]")
+            for nm_id, qty in sent_quantities_by_nm.items()
+        }
+        accepted = {
+            _positive_int(nm_id, "nm_id"): _nonnegative_decimal(
+                qty, f"accepted[{nm_id}]"
+            )
+            for nm_id, qty in accepted_quantities_by_nm.items()
+        }
+        existing_layers = self._wb_supply_layers(supply_id)
+        state = self._state_as_of(effective_date)
+        tracked_sent: dict[int, Decimal] = {}
+        tracked_accepted: dict[int, Decimal] = {}
+        diagnostics: list[dict[str, Any]] = []
+        for nm_id, physical_sent in sent.items():
+            existing = existing_layers.get(nm_id)
+            if existing is not None:
+                owned_sent = existing["quantity"]
+                if owned_sent > physical_sent:
+                    raise ValueError(
+                        f"persisted WB capital quantity exceeds current sent quantity for nmID {nm_id}"
+                    )
+            else:
+                available = state.get(nm_id, {}).get(STAGE_FF, _empty_bucket())["qty"]
+                owned_sent = min(physical_sent, max(available, ZERO))
+            if owned_sent <= ZERO:
+                diagnostics.append(
+                    {
+                        "nm_id": nm_id,
+                        "code": "physical_wb_quantity_without_paid_ff_capital",
+                        "physical_sent": _text_decimal(physical_sent),
+                        "tracked_sent": "0",
+                    }
+                )
+                continue
+            tracked_sent[nm_id] = owned_sent
+            if owned_sent < physical_sent:
+                diagnostics.append(
+                    {
+                        "nm_id": nm_id,
+                        "code": "physical_wb_quantity_partially_outside_paid_capital",
+                        "physical_sent": _text_decimal(physical_sent),
+                        "tracked_sent": _text_decimal(owned_sent),
+                    }
+                )
+            if nm_id not in accepted:
+                continue
+            physical_accepted = accepted[nm_id]
+            owned_accepted = min(physical_accepted, owned_sent)
+            tracked_accepted[nm_id] = owned_accepted
+            if physical_accepted > owned_sent:
+                diagnostics.append(
+                    {
+                        "nm_id": nm_id,
+                        "code": "physical_accepted_quantity_partially_outside_paid_capital",
+                        "physical_accepted": _text_decimal(physical_accepted),
+                        "tracked_accepted": _text_decimal(owned_accepted),
+                    }
+                )
+            if physical_accepted > physical_sent:
+                diagnostics.append(
+                    {
+                        "nm_id": nm_id,
+                        "code": "physical_accepted_quantity_exceeds_sent_layer",
+                        "physical_sent": _text_decimal(physical_sent),
+                        "physical_accepted": _text_decimal(physical_accepted),
+                        "tracked_accepted": _text_decimal(owned_accepted),
+                    }
+                )
+        return {
+            "sent_quantities_by_nm": tracked_sent,
+            "accepted_quantities_by_nm": tracked_accepted,
+            "diagnostics": diagnostics,
+        }
+
+    def matching_wb_outstanding_quantities(
+        self,
+        *,
+        effective_date: str,
+        quantities_by_nm: Mapping[int, Any],
+        warehouse: str,
+        destination: str,
+        original_supply_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return eligible tracked outstanding quantities without mutating reconciliation state."""
+        effective_date = _iso_date(effective_date, "effective_date")
+        requested_nm_ids = {
+            _positive_int(nm_id, "nm_id") for nm_id in quantities_by_nm
+        }
+        result = {nm_id: ZERO for nm_id in requested_nm_ids}
+        candidate_nm_ids: set[int] = set()
+        with _connect(self.runtime.db_path) as conn:
+            _ensure_own_capital_schema(conn)
+            for nm_id in requested_nm_ids:
+                params: list[Any] = [nm_id, effective_date]
+                where = ["nm_id = ?", "final_acceptance_date <= ?"]
+                if original_supply_id:
+                    where.append("original_supply_id = ?")
+                    params.append(str(original_supply_id))
+                else:
+                    where.extend(["warehouse = ?", "destination = ?"])
+                    params.extend([str(warehouse or ""), str(destination or "")])
+                rows = conn.execute(
+                    f"""
+                    SELECT open_quantity
+                    FROM sheet_vitrina_v1_own_capital_wb_outstanding
+                    WHERE {' AND '.join(where)}
+                    """,
+                    tuple(params),
+                ).fetchall()
+                if rows:
+                    candidate_nm_ids.add(nm_id)
+                result[nm_id] = sum(
+                    (max(_decimal(row["open_quantity"]), ZERO) for row in rows),
+                    ZERO,
+                )
+        return {
+            "available_by_nm": result,
+            "candidate_nm_ids": sorted(candidate_nm_ids),
+        }
+
     def resolve_blockers(self, *, source_identity: str, codes: Iterable[str] | None = None) -> int:
         normalized_identity = _required_text(source_identity, "source_identity")
         normalized_codes = [str(item).strip() for item in (codes or []) if str(item).strip()]
@@ -474,6 +607,7 @@ class OwnProductCapitalBlock:
         ]
         created = 0
         idempotent = 0
+        skipped_cny_ledger_only = 0
         blockers: list[dict[str, Any]] = []
         for document in documents:
             document_type = str(document.get("document_type") or "")
@@ -541,6 +675,12 @@ class OwnProductCapitalBlock:
             ]
             available_plans = _expense_event_plans(document, expense_lines)
             if not available_plans:
+                if (
+                    document_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT
+                    and not _direct_rub_bank_fee_lines(expense_lines)
+                ):
+                    skipped_cny_ledger_only += 1
+                    continue
                 blockers.append(
                     {
                         "code": "expense_effective_amount_missing",
@@ -606,6 +746,7 @@ class OwnProductCapitalBlock:
             "status": "blocked" if blockers else "ok",
             "created_event_group_count": created,
             "idempotent_event_group_count": idempotent,
+            "skipped_cny_ledger_only_document_count": skipped_cny_ledger_only,
             "blocker_count": len(blockers),
             "blockers": blockers,
         }
@@ -2027,6 +2168,17 @@ def _expense_event_plans(
             ),
             "expense_line_ids": [str(line.get("line_id") or "") for line in eligible],
         }
+    ]
+
+
+def _direct_rub_bank_fee_lines(
+    expense_lines: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in expense_lines
+        if str(item.get("status") or "") not in {"excluded", "rejected"}
+        and str(item.get("currency") or "").upper() == "RUB"
     ]
 
 
