@@ -61,12 +61,13 @@ REPORT_NOTES = (
     "Отчёт остаётся server-side read-only path и не триггерит refresh/upstream fetch.",
     "Факт читается из persisted accepted closed-day runtime snapshots `fin_report_daily` + `ads_compact` по current active `config_v2`; manual monthly baseline используется только для plan-report aggregate blocks и не подменяет daily snapshots.",
     "План по выкупу считается посуточно: для fixed target periods используется полный целевой период, обрезанный по дате подписания; rolling/to-date blocks используют закрытое фактическое окно.",
-    "Факт DRR считается как `ads_sum / fin_buyout_rub * 100` и остаётся диагностикой, а не статусом выполнения рекламы.",
-    "План рекламы по WB/VB = `max(плановый выкуп, фактический выкуп) * плановый DRR / 100`; при перевыполнении оборота рекламный план пересчитывается от факта.",
+    "Факт DRR считается как `ads_sum / fin_buyout_rub * 100`; plan_drr_pct — договорный минимум, поэтому значение выше него означает положительный запас.",
+    "План рекламы по WB/VB = `max(плановый выкуп, фактический выкуп) * минимальный договорный DRR / 100`; при перевыполнении оборота рекламный план пересчитывается от факта.",
     "Отдельный прогноз к концу договорного периода использует факт за 2026-02-01..as_of_date и экстраполирует текущий дневной темп до 2026-12-31.",
 )
 CONTRACT_PERIOD_START = date(2026, 2, 1)
 CONTRACT_PERIOD_END = date(2026, 12, 31)
+USN_UPPER_LIMIT_RUB = 490_500_000.0
 
 
 @dataclass(frozen=True)
@@ -1134,15 +1135,23 @@ def _build_contract_period_projection(
         "elapsed_day_count": 0,
         "effective_as_of_date": reference_date.isoformat(),
         "annual_buyout_plan_rub": annual_buyout_plan_rub,
+        "usn_upper_limit_rub": USN_UPPER_LIMIT_RUB,
         "annual_ads_plan_rub": annual_ads_plan_rub,
         "plan_drr_pct": plan_drr_pct,
+        "drr_minimum_pct": plan_drr_pct,
+        "drr_requirement_type": "minimum",
         "fact_buyout_elapsed_rub": None,
         "fact_ads_elapsed_rub": None,
         "projected_buyout_rub": None,
         "projected_buyout_pct_of_annual_plan": None,
+        "projected_buyout_pct_of_usn_upper_limit": None,
+        "projected_buyout_remaining_to_usn_upper_limit_rub": None,
+        "projected_buyout_exceeds_usn_upper_limit": None,
         "projected_ads_sum_rub": None,
         "projected_ads_pct_of_annual_ads_plan": None,
         "projected_drr_pct": None,
+        "projected_drr_margin_to_minimum_pp": None,
+        "projected_drr_minimum_met": None,
         "fact_is_partial": False,
         "source_of_truth": {
             "daily_sources": [FIN_SOURCE_KEY, ADS_SOURCE_KEY],
@@ -1235,6 +1244,34 @@ def _build_contract_period_projection(
         if fact_ads_sum_rub is not None
         else None
     )
+    projected_drr_pct = _compute_drr_pct(
+        ads_sum_rub=projected_ads_sum_rub,
+        buyout_rub=projected_buyout_rub,
+    )
+    projected_buyout_pct_of_usn_upper_limit = _safe_completion_pct(
+        fact=projected_buyout_rub,
+        plan=USN_UPPER_LIMIT_RUB,
+    )
+    projected_buyout_remaining_to_usn_upper_limit_rub = (
+        USN_UPPER_LIMIT_RUB - float(projected_buyout_rub)
+        if projected_buyout_rub is not None
+        else None
+    )
+    projected_buyout_exceeds_usn_upper_limit = (
+        float(projected_buyout_rub) > USN_UPPER_LIMIT_RUB
+        if projected_buyout_rub is not None
+        else None
+    )
+    projected_drr_margin_to_minimum_pp = (
+        float(projected_drr_pct) - plan_drr_pct
+        if projected_drr_pct is not None
+        else None
+    )
+    projected_drr_minimum_met = (
+        float(projected_drr_pct) >= plan_drr_pct
+        if projected_drr_pct is not None
+        else None
+    )
     coverage = fact_block.get("coverage") or {}
     source_status = str(fact_block.get("status") or "unavailable")
     has_any_fact = fact_buyout_rub is not None or fact_ads_sum_rub is not None
@@ -1269,15 +1306,17 @@ def _build_contract_period_projection(
             fact=projected_buyout_rub,
             plan=annual_buyout_plan_rub,
         ),
+        "projected_buyout_pct_of_usn_upper_limit": projected_buyout_pct_of_usn_upper_limit,
+        "projected_buyout_remaining_to_usn_upper_limit_rub": projected_buyout_remaining_to_usn_upper_limit_rub,
+        "projected_buyout_exceeds_usn_upper_limit": projected_buyout_exceeds_usn_upper_limit,
         "projected_ads_sum_rub": projected_ads_sum_rub,
         "projected_ads_pct_of_annual_ads_plan": _safe_completion_pct(
             fact=projected_ads_sum_rub,
             plan=annual_ads_plan_rub,
         ),
-        "projected_drr_pct": _compute_drr_pct(
-            ads_sum_rub=projected_ads_sum_rub,
-            buyout_rub=projected_buyout_rub,
-        ),
+        "projected_drr_pct": projected_drr_pct,
+        "projected_drr_margin_to_minimum_pp": projected_drr_margin_to_minimum_pp,
+        "projected_drr_minimum_met": projected_drr_minimum_met,
         "fact_is_partial": bool(coverage.get("fact_is_partial")) or status == "partial",
         "source_mix": fact_block.get("source_mix") or base_payload["source_mix"],
         "coverage": {
@@ -1440,15 +1479,15 @@ def _build_buyout_metric(
 def _build_drr_metric(*, fact: float | None, plan: float | None) -> dict[str, Any]:
     return {
         "entity_key": "drr_pct",
-        "label": "DRR, %",
+        "label": "DRR, % (минимум по договору)",
         "fact": fact,
         "plan": plan,
         "delta_pp": _safe_delta(fact=fact, plan=plan),
         "delta_pct": _safe_relative_delta(fact=fact, plan=plan),
         **_status_payload(
-            success=bool(fact is not None and plan is not None and fact <= plan + EPS),
-            success_label="в пределах плана",
-            alert_label="выше плана",
+            success=bool(fact is not None and plan is not None and fact >= plan - EPS),
+            success_label="минимум выполнен",
+            alert_label="ниже минимума",
             unknown=bool(fact is None or plan is None),
         ),
     }

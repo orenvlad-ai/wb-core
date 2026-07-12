@@ -132,6 +132,12 @@ def main() -> None:
         "Равномерный годовой план",
         "альтернативная оценка темпа",
         "Прогноз к концу договорного периода при текущем темпе",
+        "Годовой план выкупов",
+        "Верхний порог УСН",
+        "Минимальный DRR по договору",
+        "490,5 млн ₽",
+        "Управленческий ориентир 2026 года. При превышении 490,5 млн ₽ утрачивается право на УСН. Фактический налоговый лимит контролируется по данным налогового учёта.",
+        "Минимальная доля рекламных расходов по договору с Wildberries — 6%. Значение выше 6% означает запас относительно договорного минимума.",
         'id="planReportProjectionTable"',
         "Расчёт по WB/VB: formal H1/H2 по умолчанию",
         DEFAULT_SHEET_DAILY_REPORT_PATH,
@@ -217,7 +223,15 @@ def main() -> None:
         raise AssertionError("plan-report UI must expose ads plan base explanation through a compact tooltip")
     if '<br><span class="field-note">' + ads_note in html:
         raise AssertionError("plan-report metric labels must not render long ads explanations inline")
-    if "payload.contract_period_projection" not in html or "projected_buyout_pct_of_annual_plan" not in html:
+    if (
+        "payload.contract_period_projection" not in html
+        or "projected_buyout_pct_of_annual_plan" not in html
+        or "projected_buyout_pct_of_usn_upper_limit" not in html
+        or "projected_buyout_remaining_to_usn_upper_limit_rub" not in html
+        or "projected_buyout_exceeds_usn_upper_limit" not in html
+        or "projected_drr_margin_to_minimum_pp" not in html
+        or "projected_drr_minimum_met" not in html
+    ):
         raise AssertionError("plan-report UI must render the contract-period projection block")
     projection_index = html.find('<section class="plan-report-card plan-report-projection-card">')
     selected_index = html.find('<h3 id="planReportSelectedTitle">Основной период</h3>')

@@ -112,6 +112,11 @@ def main() -> None:
                 "Равномерный годовой план",
                 "альтернативная оценка темпа",
                 "Прогноз к концу договорного периода при текущем темпе",
+                "Верхний порог УСН",
+                "Минимальный DRR по договору",
+                "490,5 млн ₽",
+                "Управленческий ориентир 2026 года. При превышении 490,5 млн ₽ утрачивается право на УСН. Фактический налоговый лимит контролируется по данным налогового учёта.",
+                "Минимальная доля рекламных расходов по договору с Wildberries — 6%. Значение выше 6% означает запас относительно договорного минимума.",
                 'id="planReportProjectionTable"',
                 "Расчёт по WB/VB: formal H1/H2 по умолчанию",
                 'id="planReportApplyButton"',
@@ -199,7 +204,12 @@ def main() -> None:
             if buyout_metric.get("completion_pct") != 100.0:
                 raise AssertionError(f"plan report buyout metric must expose fact/plan completion_pct, got {report_payload}")
             drr_metric = (selected.get("metrics") or {}).get("drr_pct") or {}
-            if drr_metric.get("fact") != 12.0 or drr_metric.get("delta_pp") != 2.0:
+            if (
+                drr_metric.get("fact") != 12.0
+                or drr_metric.get("delta_pp") != 2.0
+                or drr_metric.get("status") != "ok"
+                or drr_metric.get("status_label") != "минимум выполнен"
+            ):
                 raise AssertionError(f"plan report drr block must stay percentage-based, got {report_payload}")
             ads_metric = (selected.get("metrics") or {}).get("ads_sum_rub") or {}
             if ads_metric.get("plan") != 4500.0 or ads_metric.get("fact") != 5400.0:
@@ -230,6 +240,52 @@ def main() -> None:
             expected_projected_buyout = 76500.0 / 79.0 * 334.0
             if abs(float(projection.get("projected_buyout_rub") or 0.0) - expected_projected_buyout) > 1e-3:
                 raise AssertionError(f"projection buyout formula must be elapsed_fact / elapsed_days * total_days, got {projection}")
+            expected_usn_pct = expected_projected_buyout / 490500000.0 * 100.0
+            expected_usn_remaining = 490500000.0 - expected_projected_buyout
+            if (
+                projection.get("annual_buyout_plan_rub") != 823500.0
+                or projection.get("usn_upper_limit_rub") != 490500000.0
+                or projection.get("drr_minimum_pct") != 10.0
+                or projection.get("drr_requirement_type") != "minimum"
+                or abs(float(projection.get("projected_buyout_pct_of_usn_upper_limit") or 0.0) - expected_usn_pct) > 1e-9
+                or abs(float(projection.get("projected_buyout_remaining_to_usn_upper_limit_rub") or 0.0) - expected_usn_remaining) > 1e-3
+                or projection.get("projected_buyout_exceeds_usn_upper_limit") is not False
+                or abs(float(projection.get("projected_drr_margin_to_minimum_pp") or 0.0) - 2.0) > 1e-9
+                or projection.get("projected_drr_minimum_met") is not True
+            ):
+                raise AssertionError(f"partial HTTP projection must expose strategic guardrails and derivatives, got {projection}")
+            unavailable_query = urllib_parse.urlencode(
+                {
+                    "period": "yesterday",
+                    "h1_buyout_plan_rub": "155379879",
+                    "h2_buyout_plan_rub": "294620121",
+                    "plan_drr_pct": "6",
+                    "as_of_date": "2026-01-31",
+                }
+            )
+            unavailable_status, unavailable_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_PLAN_REPORT_PATH}?{unavailable_query}"
+            )
+            unavailable_projection = unavailable_payload.get("contract_period_projection") or {}
+            if (
+                unavailable_status != 200
+                or unavailable_projection.get("status") != "unavailable"
+                or unavailable_projection.get("annual_buyout_plan_rub") != 450000000.0
+                or unavailable_projection.get("usn_upper_limit_rub") != 490500000.0
+                or unavailable_projection.get("drr_minimum_pct") != 6.0
+                or unavailable_projection.get("drr_requirement_type") != "minimum"
+            ):
+                raise AssertionError(f"unavailable HTTP projection must retain fixed guardrails, got {unavailable_status} {unavailable_payload}")
+            for field_name in (
+                "projected_buyout_pct_of_usn_upper_limit",
+                "projected_buyout_remaining_to_usn_upper_limit_rub",
+                "projected_buyout_exceeds_usn_upper_limit",
+                "projected_drr_pct",
+                "projected_drr_margin_to_minimum_pp",
+                "projected_drr_minimum_met",
+            ):
+                if unavailable_projection.get(field_name) is not None:
+                    raise AssertionError(f"unavailable HTTP projection field {field_name} must be null, got {unavailable_projection}")
             ytd = (report_payload.get("periods") or {}).get("year_to_date") or {}
             if ytd.get("status") != "partial":
                 raise AssertionError(f"YTD must stay local partial before baseline, got {report_payload}")
@@ -440,6 +496,15 @@ def main() -> None:
             ytd_block = (ytd_payload.get("periods") or {}).get("year_to_date") or {}
             if ytd_status != 200 or ytd_block.get("status") != "available":
                 raise AssertionError(f"YTD must become available after Jan/Feb baseline, got {ytd_status} {ytd_payload}")
+            available_projection = ytd_payload.get("contract_period_projection") or {}
+            if (
+                available_projection.get("status") != "available"
+                or available_projection.get("usn_upper_limit_rub") != 490500000.0
+                or available_projection.get("drr_requirement_type") != "minimum"
+                or available_projection.get("projected_buyout_pct_of_usn_upper_limit") is None
+                or available_projection.get("projected_drr_margin_to_minimum_pp") is None
+            ):
+                raise AssertionError(f"available HTTP projection must expose strategic fields, got {available_projection}")
 
             missing_day = "2026-04-10"
             runtime.delete_temporal_source_slot_snapshots(

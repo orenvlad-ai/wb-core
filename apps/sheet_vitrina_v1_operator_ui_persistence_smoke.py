@@ -1407,6 +1407,52 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     )
     if not result_card_titles or result_card_titles[0] != "Прогноз к концу договорного периода при текущем темпе":
         raise AssertionError(f"projection block must render first, got {result_card_titles}")
+    projection_rows = page.evaluate(
+        """() => Array.from(document.querySelectorAll('#planReportProjectionTable tbody tr')).map((row) => {
+            const cells = Array.from(row.querySelectorAll('td'));
+            const label = row.querySelector('.plan-report-metric-label-text');
+            const icon = row.querySelector('.plan-report-metric-tooltip-anchor');
+            const tooltip = row.querySelector('.plan-report-metric-tooltip');
+            return {
+                label: label ? label.textContent.trim() : '',
+                forecast: cells[1] ? cells[1].innerText.trim() : '',
+                target: cells[2] ? cells[2].innerText.trim() : '',
+                comparison: cells[3] ? cells[3].innerText.trim() : '',
+                iconAriaLabel: icon ? icon.getAttribute('aria-label') : '',
+                iconTitle: icon ? icon.getAttribute('title') : '',
+                tooltipText: tooltip ? tooltip.textContent.replace(/\\s+/g, ' ').trim() : '',
+                hasAlertClass: row.classList.contains('is-alert') || Boolean(row.querySelector('.is-alert'))
+            };
+        })"""
+    )
+    projection_rows_by_label = {row["label"]: row for row in projection_rows}
+    annual_row = projection_rows_by_label.get("Годовой план выкупов")
+    usn_row = projection_rows_by_label.get("Верхний порог УСН")
+    drr_row = projection_rows_by_label.get("Минимальный DRR по договору")
+    if not annual_row or annual_row["target"] != "450 млн ₽":
+        raise AssertionError(f"projection must preserve the annual 450m buyout plan, got {projection_rows}")
+    expected_usn_tooltip = "Управленческий ориентир 2026 года. При превышении 490,5 млн ₽ утрачивается право на УСН. Фактический налоговый лимит контролируется по данным налогового учёта."
+    if (
+        not usn_row
+        or usn_row["target"] != "490,5 млн ₽"
+        or "86,19%" not in usn_row["comparison"]
+        or expected_usn_tooltip not in usn_row["tooltipText"]
+        or expected_usn_tooltip not in usn_row["iconAriaLabel"]
+        or expected_usn_tooltip not in usn_row["iconTitle"]
+    ):
+        raise AssertionError(f"projection must render the USN upper-limit row and accessible tooltip, got {projection_rows}")
+    expected_drr_tooltip = "Минимальная доля рекламных расходов по договору с Wildberries — 6%. Значение выше 6% означает запас относительно договорного минимума."
+    if (
+        not drr_row
+        or drr_row["forecast"] != "7%"
+        or drr_row["target"] != "6%"
+        or drr_row["comparison"] != "запас +1 п.п."
+        or drr_row["hasAlertClass"]
+        or expected_drr_tooltip not in drr_row["tooltipText"]
+        or expected_drr_tooltip not in drr_row["iconAriaLabel"]
+        or expected_drr_tooltip not in drr_row["iconTitle"]
+    ):
+        raise AssertionError(f"DRR above 6% must render as positive minimum margin, got {projection_rows}")
     ads_metric_state = page.evaluate(
         """() => {
             const rows = Array.from(document.querySelectorAll('#planReportSelectedTable tbody tr'));
@@ -1673,14 +1719,14 @@ def _plan_report_payload() -> dict[str, object]:
         },
         "drr_pct": {
             "entity_key": "drr_pct",
-            "label": "DRR, %",
+            "label": "DRR, % (минимум по договору)",
             "fact": 10.0,
             "plan": 6.0,
             "completion_pct": None,
             "delta_pp": 4.0,
             "delta_pct": 66.66666666666666,
-            "status": "alert",
-            "status_label": "выше плана",
+            "status": "ok",
+            "status_label": "минимум выполнен",
         },
         "ads_sum_rub": {
             "entity_key": "ads_sum_rub",
@@ -1735,14 +1781,23 @@ def _plan_report_payload() -> dict[str, object]:
             "elapsed_date_to": "2026-04-20",
             "elapsed_day_count": 79,
             "annual_buyout_plan_rub": 450000000.0,
+            "usn_upper_limit_rub": 490500000.0,
             "annual_ads_plan_rub": 27000000.0,
+            "plan_drr_pct": 6.0,
+            "drr_minimum_pct": 6.0,
+            "drr_requirement_type": "minimum",
             "fact_buyout_elapsed_rub": 100000000.0,
-            "fact_ads_elapsed_rub": 6000000.0,
+            "fact_ads_elapsed_rub": 7000000.0,
             "projected_buyout_rub": 422784810.12658226,
             "projected_buyout_pct_of_annual_plan": 93.95218002812939,
-            "projected_ads_sum_rub": 25367088.607594937,
-            "projected_ads_pct_of_annual_ads_plan": 93.95218002812939,
-            "projected_drr_pct": 6.0,
+            "projected_buyout_pct_of_usn_upper_limit": 86.1946605762655,
+            "projected_buyout_remaining_to_usn_upper_limit_rub": 67715189.87341774,
+            "projected_buyout_exceeds_usn_upper_limit": False,
+            "projected_ads_sum_rub": 29594936.70886076,
+            "projected_ads_pct_of_annual_ads_plan": 109.61087669948429,
+            "projected_drr_pct": 7.0,
+            "projected_drr_margin_to_minimum_pp": 1.0,
+            "projected_drr_minimum_met": True,
             "fact_is_partial": False,
             "coverage": {"fact_is_partial": False, "missing_dates": []},
             "source_mix": {},
