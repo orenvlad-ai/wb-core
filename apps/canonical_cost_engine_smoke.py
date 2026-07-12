@@ -16,8 +16,10 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     BASELINE_ONEC,
     CanonicalCostBlocked,
     CanonicalCostEngine,
+    _wb_movement_evidence,
     allocate_partial_payment,
     reconcile_outstanding_layers,
+    resolve_ff_operation_effective_date,
     roll_wac,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
@@ -37,6 +39,7 @@ def main() -> int:
     _partial_payment()
     _wac_and_snapshot_stability()
     _outstanding_reconciliation()
+    _ff_operation_effective_date_resolution()
     _baseline_and_physical_sources()
     print("canonical_cost_engine_smoke: ok")
     return 0
@@ -112,6 +115,114 @@ def _outstanding_reconciliation() -> None:
         raise AssertionError("future outstanding must not be a FIFO candidate")
 
 
+def _ff_operation_effective_date_resolution() -> None:
+    with TemporaryDirectory() as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            _insert_primary(conn)
+            operation = _insert_legacy_wb_operation_fixture(conn)
+            resolution = resolve_ff_operation_effective_date(conn, operation)
+            _eq(resolution.effective_date, "2026-05-07", "legacy WB fact date")
+            _eq(
+                resolution.provenance["source_field"],
+                "normalized.fact_date",
+                "legacy WB date provenance",
+            )
+            _eq(
+                resolution.provenance["supply_id"],
+                "38978468",
+                "exact supply provenance",
+            )
+            movements = _wb_movement_evidence(conn, as_of_date="2026-07-01")
+            _eq(
+                sum((Decimal(str(item["open_quantity"])) for item in movements), Decimal("0")),
+                Decimal("3"),
+                "opening underaccepted is sent minus accepted",
+            )
+            source_timestamp = resolve_ff_operation_effective_date(
+                conn,
+                {
+                    "operation_id": "ordinary-post-cutover",
+                    "source_type": "wb_supply",
+                    "source_key": "wb_supply_debit:supply:post",
+                    "source_object_id": "post",
+                    "created_at": "2026-07-09T00:00:00Z",
+                    "diagnostics_json": '{"source_timestamp":"2026-07-04T12:00:00Z"}',
+                },
+            )
+            _eq(source_timestamp.effective_date, "2026-07-04", "ordinary source timestamp")
+            targeted = resolve_ff_operation_effective_date(
+                conn,
+                {
+                    "operation_id": "targeted-40561872",
+                    "source_type": "wb_supply",
+                    "source_key": "wb_supply_debit:supply:40561872",
+                    "source_object_id": "40561872",
+                    "created_at": "2026-07-12T00:00:00Z",
+                    "diagnostics_json": '{"supply_timestamp":"2026-07-02T12:38:24+00:00"}',
+                },
+            )
+            _eq(targeted.effective_date, "2026-07-02", "targeted remediation timestamp")
+            supplier = resolve_ff_operation_effective_date(
+                conn,
+                {
+                    "operation_id": "supplier-receipt",
+                    "source_type": "supplier_shipment",
+                    "source_object_id": "primary-june",
+                    "created_at": "2026-07-09T00:00:00Z",
+                    "diagnostics_json": "{}",
+                },
+            )
+            _eq(supplier.effective_date, "2026-06-23", "supplier acceptance semantics")
+            manual = resolve_ff_operation_effective_date(
+                conn,
+                {
+                    "operation_id": "manual-correction",
+                    "source_type": "runtime_repair",
+                    "created_at": "2026-07-09T18:28:28Z",
+                    "diagnostics_json": "{}",
+                },
+            )
+            _eq(manual.effective_date, "2026-07-09", "manual/correction created-at semantics")
+            try:
+                resolve_ff_operation_effective_date(
+                    conn,
+                    {
+                        "operation_id": "missing-supply",
+                        "source_type": "wb_supply",
+                        "source_key": "wb_supply_debit:supply:missing",
+                        "source_object_id": "missing",
+                        "created_at": "2026-07-09T00:00:00Z",
+                        "diagnostics_json": "{}",
+                    },
+                )
+            except CanonicalCostBlocked as exc:
+                _eq(
+                    exc.code,
+                    "wb_supply_effective_date_supply_missing",
+                    "missing WB supply fails closed",
+                )
+            else:
+                raise AssertionError("WB operation without its supply must block")
+            conn.commit()
+        engine = CanonicalCostEngine(runtime=runtime)
+        audit = engine.ff_operation_date_audit()
+        exact = next(
+            item for item in audit["operations"]
+            if item["operation_id"] == "ffso_034a89fb11b24ddbace9"
+        )
+        _eq(exact["resolved_business_date"], "2026-05-07", "exact legacy fixture date")
+        _eq(exact["line_count"], 5, "exact legacy fixture line count")
+        _eq(exact["sent_quantity"], "1250", "exact legacy fixture sent quantity")
+        _eq(exact["accepted_quantity"], "1247", "exact legacy fixture accepted quantity")
+        _eq(
+            exact["line_set_fingerprint"],
+            "sha256:671bb89a57a1e2bec2551defb553bf1e17d9958cb0a73f6e82e435ccd7a2c62e",
+            "exact operation-wide line-set fingerprint",
+        )
+
+
 def _baseline_and_physical_sources() -> None:
     with TemporaryDirectory() as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
@@ -129,9 +240,18 @@ def _baseline_and_physical_sources() -> None:
                 conn, shipment_id="fallback-production", cny="150", rub="1500"
             )
             _insert_wb_supply(
-                conn, "opening-orphan-doprinato", 1, "2026-07-01", doprinato=True
+                conn,
+                "opening-orphan-doprinato",
+                1,
+                "2026-07-01",
+                doprinato=True,
+                warehouse="OTHER",
             )
-            _insert_ff_balance(conn, nm_id=111, quantity=6750)
+            # The activation/opening receipt includes the pre-cutover sent
+            # quantity; canonical replay collapses the accepted part into WB
+            # opening and retains only sent-accepted as opening outstanding.
+            _insert_ff_balance(conn, nm_id=111, quantity=7000)
+            _insert_opening_boundary_wb_supply(conn)
             _insert_snapshot(
                 conn,
                 "2026-05-16",
@@ -231,8 +351,21 @@ def _baseline_and_physical_sources() -> None:
             wb = conn.execute(
                 "SELECT physical_quantity FROM sheet_vitrina_v1_canonical_cost_daily_state WHERE as_of_date='2026-07-01' AND nm_id=111 AND stage='WB'"
             ).fetchone()
+            opening_outstanding = conn.execute(
+                """
+                SELECT open_quantity,recognized_unit_cost_rub
+                FROM sheet_vitrina_v1_canonical_cost_wb_outstanding_layers
+                WHERE is_current=1 AND original_supply_id='legacy-opening-supply'
+                """
+            ).fetchone()
         _eq(ff[0], "6750", "daily FF/ledger reconciliation")
         _eq(wb[0], "93250", "WB physical quantity comes from official stock")
+        _eq(opening_outstanding[0], "3", "pre-cutover accepted stock is not added twice")
+        _eq(
+            opening_outstanding[1],
+            "111.181389",
+            "opening underaccepted uses canonical baseline cost",
+        )
         _canonical_outstanding_sql(engine, runtime)
         with _connect(runtime.db_path) as conn:
             conn.execute(
@@ -285,7 +418,7 @@ def _canonical_outstanding_sql(
                 "confirmation_share": "1", "recognized_unit_cost_rub": "120",
                 "paid_unit_cost_rub": "110", "recognized_capital_rub": "12000",
                 "paid_capital_rub": "11000", "ff_wac_quantity_before": "6750",
-                "source_operation_key": "wb:supply:1",
+                "source_operation_key": "wb_supply_debit:cache-wb-supply-1",
             }
         ]
     )
@@ -297,7 +430,7 @@ def _canonical_outstanding_sql(
                 operation_id,operation_type,source_type,source_key,source_object_id,
                 source_object_label,created_at,created_by,sku_count,total_quantity_delta,
                 total_quantity_abs,warnings_json,diagnostics_json
-            ) VALUES('wb-debit-1','auto_writeoff','wb_supply','wb:supply:1',
+            ) VALUES('wb-debit-1','auto_writeoff','wb_supply','wb_supply_debit:cache-wb-supply-1',
                      'wb-supply-1','WB supply 1','2026-07-02T00:00:00Z','fixture',
                      1,-100,100,'[]','{}')
             """
@@ -314,19 +447,33 @@ def _canonical_outstanding_sql(
     engine._materialize_outstanding_layers("2026-07-03")  # noqa: SLF001
     _eq(_open_qty(runtime), "10", "accepted 90 leaves outstanding 10")
     with _connect(runtime.db_path) as conn:
-        _insert_wb_supply(conn, "dop-1", 6, "2026-07-04", doprinato=True)
+        _insert_wb_supply(
+            conn,
+            "dop-1",
+            6,
+            "2026-07-04",
+            doprinato=True,
+            original_supply_id="wb-supply-1",
+        )
         conn.commit()
     engine._materialize_outstanding_layers("2026-07-04")  # noqa: SLF001
     _eq(_open_qty(runtime), "4", "doprinato 6 leaves outstanding 4")
     with _connect(runtime.db_path) as conn:
-        _insert_wb_supply(conn, "dop-2", 4, "2026-07-05", doprinato=True)
+        _insert_wb_supply(
+            conn,
+            "dop-2",
+            4,
+            "2026-07-05",
+            doprinato=True,
+            original_supply_id="wb-supply-1",
+        )
         conn.commit()
     engine._materialize_outstanding_layers("2026-07-05")  # noqa: SLF001
     _eq(_open_qty(runtime), "0", "doprinato 4 closes outstanding")
     _eq(
         engine.physical_quantities_as_of("2026-07-05")[111]["FF_TO_WB"],
-        Decimal("0"),
-        "doprinato closes the physical FF-to-WB substate without another FF debit",
+        Decimal("3"),
+        "doprinato closes its original layer and preserves unrelated opening outstanding",
     )
     with _connect(runtime.db_path) as conn:
         _insert_snapshot(conn, "2026-07-03", {111: {"stock_total": 93340}})
@@ -375,11 +522,20 @@ def _canonical_outstanding_sql(
 
 
 def _insert_wb_supply(
-    conn, supply_id: str, accepted: int, fact_date: str, *, doprinato: bool = False
+    conn,
+    supply_id: str,
+    accepted: int,
+    fact_date: str,
+    *,
+    doprinato: bool = False,
+    warehouse: str = "W",
+    destination: str = "D",
+    original_supply_id: str = "",
 ) -> None:
     normalized = {
         "supply_id": supply_id, "status_id": 5, "fact_date": fact_date,
-        "warehouse_name": "W", "destination_name": "D",
+        "warehouse_name": warehouse, "destination_name": destination,
+        "original_supply_id": original_supply_id,
         "virtual_type_id": 5 if doprinato else 0,
         "type_label": "Допринято" if doprinato else "Обычная",
     }
@@ -394,9 +550,85 @@ def _insert_wb_supply(
         (
             supply_id, f"cache-{supply_id}", json.dumps(normalized, ensure_ascii=False),
             json.dumps([{"nmID": 111, "acceptedQuantity": accepted, "quantity": accepted}], ensure_ascii=False),
-            "W", accepted, fact_date, f"{fact_date}T12:00:00Z",
+            warehouse, accepted, fact_date, f"{fact_date}T12:00:00Z",
         ),
     )
+
+
+def _insert_legacy_wb_operation_fixture(conn) -> dict[str, object]:
+    import json
+
+    operation_id = "ffso_034a89fb11b24ddbace9"
+    source_key = "wb_supply_debit:supply:38978468"
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_wb_supplies(
+            supply_id,cache_key,wb_supply_id,normalized_row_json,raw_goods_json,
+            warehouse_id,status_id,quantity_for_size_filter,supply_date,fact_date,synced_at
+        ) VALUES(?,?,?,?,?,'210001',5,1250,'2026-05-07','2026-05-07',
+                 '2026-06-10T21:01:35Z')
+        """,
+        (
+            "38978468",
+            "supply:38978468",
+            "38978468",
+            json.dumps(
+                {
+                    "supply_id": "38978468",
+                    "wb_supply_id": "38978468",
+                    "cache_key": "supply:38978468",
+                    "status_id": 5,
+                    "fact_date": "2026-05-07T13:09:53+03:00",
+                    "supply_date": "2026-05-07T00:00:00+03:00",
+                    "accepted_quantity": 1247,
+                    "warehouse_name": "W",
+                    "destination_name": "D",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                [
+                    {"nmID": 259460529, "quantity": 250, "acceptedQuantity": 250},
+                    {"nmID": 259465495, "quantity": 250, "acceptedQuantity": 247},
+                    {"nmID": 391662410, "quantity": 250, "acceptedQuantity": 250},
+                    {"nmID": 428855306, "quantity": 250, "acceptedQuantity": 250},
+                    {"nmID": 497414624, "quantity": 250, "acceptedQuantity": 250},
+                ],
+                ensure_ascii=False,
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_ff_stock_operations(
+            operation_id,operation_type,source_type,source_key,source_object_id,
+            source_object_label,created_at,created_by,sku_count,total_quantity_delta,
+            total_quantity_abs,warnings_json,diagnostics_json
+        ) VALUES(?, 'auto_writeoff','wb_supply',?,'38978468','38978468',
+                 '2026-07-09T05:11:09Z','system',5,-1250,1250,'[]','{}')
+        """,
+        (operation_id, source_key),
+    )
+    nm_ids = (259460529, 259465495, 391662410, 428855306, 497414624)
+    for line_no, nm_id in enumerate(nm_ids, start=1):
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(
+                operation_id,line_no,nm_id,quantity_delta,raw_json
+            ) VALUES(?,?,?,-250,'{}')
+            """,
+            (operation_id, line_no, nm_id),
+        )
+    return {
+        "operation_id": operation_id,
+        "operation_type": "auto_writeoff",
+        "source_type": "wb_supply",
+        "source_key": source_key,
+        "source_object_id": "38978468",
+        "created_at": "2026-07-09T05:11:09Z",
+        "diagnostics_json": "{}",
+        "total_quantity_abs": 1250,
+    }
 
 
 def _open_qty(runtime: RegistryUploadDbBackedRuntime) -> str:
@@ -471,6 +703,57 @@ def _insert_fallback_production(conn, *, nm_id: int, shipment_id: str = "fallbac
         ) VALUES(?,?, 'product',1,?,?,?,100,10,1000,'CNY','matched',0,'{}')
         """,
         (f"line-{shipment_id}", shipment_id, f"SKU-{nm_id}", nm_id, f"SKU {nm_id}"),
+    )
+
+
+def _insert_opening_boundary_wb_supply(conn) -> None:
+    import json
+
+    supply_id = "legacy-opening-supply"
+    cache_key = f"supply:{supply_id}"
+    normalized = {
+        "supply_id": supply_id,
+        "wb_supply_id": supply_id,
+        "cache_key": cache_key,
+        "status_id": 5,
+        "fact_date": "2026-05-07",
+        "supply_date": "2026-05-07",
+        "warehouse_name": "W",
+        "destination_name": "D",
+        "accepted_quantity": 247,
+    }
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_wb_supplies(
+            supply_id,cache_key,wb_supply_id,normalized_row_json,raw_goods_json,
+            warehouse_id,status_id,quantity_for_size_filter,supply_date,fact_date,synced_at
+        ) VALUES(?,?,?,?,?,'W',5,250,'2026-05-07','2026-05-07','2026-06-10T00:00:00Z')
+        """,
+        (
+            supply_id,
+            cache_key,
+            supply_id,
+            json.dumps(normalized),
+            json.dumps([{"nmID": 111, "quantity": 250, "acceptedQuantity": 247}]),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_ff_stock_operations(
+            operation_id,operation_type,source_type,source_key,source_object_id,
+            source_object_label,created_at,created_by,sku_count,total_quantity_delta,
+            total_quantity_abs,warnings_json,diagnostics_json
+        ) VALUES('legacy-opening-debit','auto_writeoff','wb_supply',?,?,'legacy opening',
+                 '2026-07-09T05:11:09Z','system',1,-250,250,'[]','{}')
+        """,
+        (f"wb_supply_debit:{cache_key}", supply_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(
+            operation_id,line_no,nm_id,quantity_delta,raw_json
+        ) VALUES('legacy-opening-debit',1,111,-250,'{}')
+        """
     )
 
 

@@ -91,6 +91,14 @@ class CanonicalRebuildResult:
     fingerprint: str
 
 
+@dataclass(frozen=True)
+class FfOperationDateResolution:
+    """Deterministic business date plus immutable source provenance."""
+
+    effective_date: str
+    provenance: dict[str, Any]
+
+
 class CanonicalCostEngine:
     """Build both paid-capital and recognized-cost views from one source graph."""
 
@@ -531,6 +539,137 @@ class CanonicalCostEngine:
                 "SELECT report_json FROM sheet_vitrina_v1_canonical_cost_baseline_versions WHERE is_current=1"
             ).fetchone()
         return _json_loads(row["report_json"]) if row is not None else None
+
+    def ff_operation_date_audit(
+        self, *, cutover_date: str = CUTOVER_DATE
+    ) -> dict[str, Any]:
+        """Audit every legacy WB writeoff missing the ordinary source timestamp."""
+
+        cutover = _iso_date(cutover_date)
+        rows: list[dict[str, Any]] = []
+        with _connect(self.runtime.db_path) as conn:
+            checkpoint = conn.execute(
+                """
+                SELECT baseline_cache_keys_json,baseline_source_keys_json,
+                       baseline_supply_ids_json
+                FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint
+                WHERE slot='current'
+                """
+            ).fetchone()
+            checkpoint_cache_keys = set(
+                _json_loads(checkpoint["baseline_cache_keys_json"])
+                if checkpoint is not None else []
+            )
+            checkpoint_source_keys = set(
+                _json_loads(checkpoint["baseline_source_keys_json"])
+                if checkpoint is not None else []
+            )
+            checkpoint_supply_ids = set(
+                _json_loads(checkpoint["baseline_supply_ids_json"])
+                if checkpoint is not None else []
+            )
+            operations = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_ff_stock_operations
+                WHERE operation_type='auto_writeoff' AND source_type='wb_supply'
+                ORDER BY created_at,operation_id
+                """
+            ).fetchall()
+            for raw_operation in operations:
+                operation = dict(raw_operation)
+                diagnostics = _json_loads(operation.get("diagnostics_json"))
+                if str(diagnostics.get("source_timestamp") or "").strip():
+                    continue
+                resolution = resolve_ff_operation_effective_date(conn, operation)
+                supply = _load_exact_wb_supply_for_operation(conn, operation)
+                normalized = _json_loads(supply.get("normalized_row_json"))
+                accepted = sum(
+                    (
+                        _decimal(
+                            item.get("acceptedQuantity")
+                            or item.get("accepted_quantity")
+                            or 0
+                        )
+                        for item in _goods(supply.get("raw_goods_json"))
+                    ),
+                    ZERO,
+                )
+                if not _goods(supply.get("raw_goods_json")):
+                    accepted = _decimal(normalized.get("accepted_quantity"))
+                line_rows = conn.execute(
+                    """
+                    SELECT line_no,nm_id,quantity_delta
+                    FROM sheet_vitrina_v1_ff_stock_operation_lines
+                    WHERE operation_id=? ORDER BY line_no
+                    """,
+                    (str(operation.get("operation_id") or ""),),
+                ).fetchall()
+                line_set = sorted(
+                    (
+                        {
+                            "line_no": int(line["line_no"] or 0),
+                            "nm_id": int(line["nm_id"] or 0),
+                            "quantity_delta": str(float(line["quantity_delta"] or 0)),
+                        }
+                        for line in line_rows
+                    ),
+                    key=lambda item: (
+                        item["nm_id"], item["line_no"], item["quantity_delta"]
+                    ),
+                )
+                supply_id = str(supply.get("supply_id") or "")
+                cache_key = str(supply.get("cache_key") or "")
+                source_key = str(operation.get("source_key") or "")
+                rows.append(
+                    {
+                        "operation_id": str(operation.get("operation_id") or ""),
+                        "supply_id": supply_id,
+                        "source_key": source_key,
+                        "created_at": str(operation.get("created_at") or ""),
+                        "resolved_business_date": resolution.effective_date,
+                        "date_provenance": resolution.provenance,
+                        "checkpoint_membership": {
+                            "cache_key": cache_key in checkpoint_cache_keys,
+                            "source_key": source_key in checkpoint_source_keys,
+                            "supply_id": supply_id in checkpoint_supply_ids,
+                        },
+                        "sent_quantity": _text(
+                            _decimal(operation.get("total_quantity_abs"))
+                        ),
+                        "accepted_quantity": _text(accepted),
+                        "classification": (
+                            "pre_cutover"
+                            if resolution.effective_date < cutover
+                            else "cutover_or_post"
+                        ),
+                        "line_count": len(line_set),
+                        "line_set_fingerprint": "sha256:"
+                        + hashlib.sha256(
+                            json.dumps(
+                                line_set,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    }
+                )
+        return {
+            "source_type": "wb_supply",
+            "operation_type": "auto_writeoff",
+            "missing_diagnostics_source_timestamp": True,
+            "operation_count": len(rows),
+            "pre_cutover_count": sum(
+                item["classification"] == "pre_cutover" for item in rows
+            ),
+            "cutover_or_post_count": sum(
+                item["classification"] == "cutover_or_post" for item in rows
+            ),
+            "fully_checkpoint_matched_count": sum(
+                all(item["checkpoint_membership"].values()) for item in rows
+            ),
+            "operations": rows,
+        }
 
     def physical_quantities_as_of(self, as_of_date: str) -> dict[int, dict[str, Decimal]]:
         as_of_date = _iso_date(as_of_date)
@@ -1183,7 +1322,8 @@ class CanonicalCostEngine:
                 if _decimal(item["open_quantity"]) > ZERO
             }
             for operation in _ff_operation_rows(conn):
-                effective = _ff_operation_effective_date(conn, operation)
+                date_resolution = resolve_ff_operation_effective_date(conn, operation)
+                effective = date_resolution.effective_date
                 if str(operation["operation_type"]) != "auto_writeoff" or not effective or effective > CUTOVER_DATE:
                     continue
                 supply_id = str(operation["source_object_id"] or "")
@@ -1216,9 +1356,11 @@ class CanonicalCostEngine:
                         "paid_capital_rub": _text(sent * costs["paid"]),
                         "ff_wac_quantity_before": "baseline",
                         "source_operation_key": str(operation["source_key"]),
+                        "effective_date_provenance": date_resolution.provenance,
                     })
             for operation in _ff_operation_rows(conn):
-                effective = _ff_operation_effective_date(conn, operation)
+                date_resolution = resolve_ff_operation_effective_date(conn, operation)
+                effective = date_resolution.effective_date
                 if not effective or effective <= CUTOVER_DATE or effective > date_to:
                     continue
                 lines = conn.execute(
@@ -1366,6 +1508,7 @@ class CanonicalCostEngine:
                             "paid_capital_rub": _text(movement_paid_capital),
                             "ff_wac_quantity_before": _text(rq),
                             "source_operation_key": str(operation["source_key"]),
+                            "effective_date_provenance": date_resolution.provenance,
                         })
                     recognized_wac[nm_id] = (
                         rq - sent,
@@ -1432,6 +1575,18 @@ class CanonicalCostEngine:
                 (date_to,),
             ).fetchall()]
             evidence = _wb_supply_cache_evidence(conn, date_to=date_to)
+            operation_date_provenance = {}
+            for movement in movements:
+                operation = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_ff_stock_operations WHERE operation_id=?",
+                    (str(movement["operation_id"]),),
+                ).fetchone()
+                if operation is not None:
+                    operation_date_provenance[str(movement["operation_id"])] = (
+                        resolve_ff_operation_effective_date(
+                            conn, dict(operation)
+                        ).provenance
+                    )
         accepted = {(item["supply_id"], item["nm_id"]): item for item in evidence if not item["is_doprinato"]}
         open_layers: list[dict[str, Any]] = []
         for movement in movements:
@@ -1468,7 +1623,12 @@ class CanonicalCostEngine:
                 "paid_unit_cost_rub": str(movement["paid_unit_cost_rub"]),
                 "writeoff_date": str(movement["effective_date"]),
                 "accepted_date": str(fact.get("accepted_date") or ""),
-                "provenance": {"acceptance_source": fact.get("source_identity", "")},
+                "provenance": {
+                    "acceptance_source": fact.get("source_identity", ""),
+                    "effective_date_resolution": operation_date_provenance.get(
+                        str(movement["operation_id"]), {}
+                    ),
+                },
             })
         open_layers = reconcile_outstanding_layers(
             open_layers,
@@ -2429,6 +2589,15 @@ def _ff_operation_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def _ff_operation_effective_date(conn: sqlite3.Connection, operation: Mapping[str, Any]) -> str:
+    return resolve_ff_operation_effective_date(conn, operation).effective_date
+
+
+def resolve_ff_operation_effective_date(
+    conn: sqlite3.Connection, operation: Mapping[str, Any]
+) -> FfOperationDateResolution:
+    """Resolve an FF operation business date without trusting WB write timestamps."""
+
+    operation_id = str(operation.get("operation_id") or "")
     source_type = str(operation.get("source_type") or "")
     if source_type == "supplier_shipment":
         row = conn.execute(
@@ -2436,12 +2605,220 @@ def _ff_operation_effective_date(conn: sqlite3.Connection, operation: Mapping[st
             (str(operation.get("source_object_id") or ""),),
         ).fetchone()
         if row and row[0]:
-            return str(row[0])[:10]
+            effective_date = _effective_date_value(
+                row[0],
+                blocker_code="supplier_shipment_effective_date_invalid",
+                details={"operation_id": operation_id},
+            )
+            return FfOperationDateResolution(
+                effective_date=effective_date,
+                provenance={
+                    "resolution_method": "supplier_shipment_actual_ff_acceptance_date",
+                    "source_field": "supplier_shipment.actual_ff_acceptance_date",
+                    "source_identity": str(operation.get("source_object_id") or ""),
+                    "operation_id": operation_id,
+                },
+            )
     diagnostics = _json_loads(operation.get("diagnostics_json"))
-    source_timestamp = str(diagnostics.get("source_timestamp") or "")
-    if source_timestamp:
-        return source_timestamp[:10]
-    return str(operation.get("created_at") or "")[:10]
+    if "source_timestamp" in diagnostics and str(
+        diagnostics.get("source_timestamp") or ""
+    ).strip():
+        effective_date = _effective_date_value(
+            diagnostics.get("source_timestamp"),
+            blocker_code="wb_supply_source_timestamp_invalid",
+            details={"operation_id": operation_id, "source_field": "diagnostics.source_timestamp"},
+        )
+        return FfOperationDateResolution(
+            effective_date=effective_date,
+            provenance={
+                "resolution_method": "persisted_operation_source_timestamp",
+                "source_field": "diagnostics.source_timestamp",
+                "source_identity": str(operation.get("source_key") or ""),
+                "operation_id": operation_id,
+                "supply_id": str(operation.get("source_object_id") or ""),
+            },
+        )
+    # The bounded 40561872 remediation predates this canonical resolver and
+    # persisted the same repo-owned source timestamp as ``supply_timestamp``.
+    # It remains evidence, not a hardcoded identity/date exception.
+    if source_type == "wb_supply" and str(
+        diagnostics.get("supply_timestamp") or ""
+    ).strip():
+        effective_date = _effective_date_value(
+            diagnostics.get("supply_timestamp"),
+            blocker_code="wb_supply_source_timestamp_invalid",
+            details={"operation_id": operation_id, "source_field": "diagnostics.supply_timestamp"},
+        )
+        return FfOperationDateResolution(
+            effective_date=effective_date,
+            provenance={
+                "resolution_method": "persisted_operation_supply_timestamp_compatibility",
+                "source_field": "diagnostics.supply_timestamp",
+                "source_identity": str(operation.get("source_key") or ""),
+                "operation_id": operation_id,
+                "supply_id": str(operation.get("source_object_id") or ""),
+            },
+        )
+    if source_type == "wb_supply":
+        supply = _load_exact_wb_supply_for_operation(conn, operation)
+        effective_date, source_field = _wb_supply_authoritative_business_date(supply)
+        return FfOperationDateResolution(
+            effective_date=effective_date,
+            provenance={
+                "resolution_method": "authoritative_persisted_wb_supply_business_date",
+                "source_field": source_field,
+                "source_identity": str(supply.get("cache_key") or supply.get("supply_id") or ""),
+                "operation_id": operation_id,
+                "supply_id": str(supply.get("supply_id") or ""),
+                "source_key": str(operation.get("source_key") or ""),
+            },
+        )
+    created_at = str(operation.get("created_at") or "")
+    return FfOperationDateResolution(
+        effective_date=created_at[:10],
+        provenance={
+            "resolution_method": "operation_created_at",
+            "source_field": "ff_operation.created_at",
+            "source_identity": operation_id,
+            "operation_id": operation_id,
+        },
+    )
+
+
+def _load_exact_wb_supply_for_operation(
+    conn: sqlite3.Connection, operation: Mapping[str, Any]
+) -> dict[str, Any]:
+    operation_id = str(operation.get("operation_id") or "")
+    source_object_id = str(operation.get("source_object_id") or "").strip()
+    source_key = str(operation.get("source_key") or "").strip()
+    source_identity = source_key.removeprefix("wb_supply_debit:")
+    lookup_values = tuple(
+        sorted({value for value in (source_object_id, source_identity) if value})
+    )
+    if not lookup_values:
+        raise CanonicalCostBlocked(
+            "wb_supply_effective_date_identity_missing",
+            {"operation_id": operation_id, "source_key": source_key},
+        )
+    placeholders = ",".join("?" for _ in lookup_values)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM sheet_vitrina_v1_wb_supplies
+        WHERE supply_id IN ({placeholders})
+           OR cache_key IN ({placeholders})
+           OR wb_supply_id IN ({placeholders})
+           OR preorder_id IN ({placeholders})
+        ORDER BY supply_id
+        """,
+        lookup_values * 4,
+    ).fetchall()
+    unique = {str(row["supply_id"]): dict(row) for row in rows}
+    if not unique:
+        raise CanonicalCostBlocked(
+            "wb_supply_effective_date_supply_missing",
+            {
+                "operation_id": operation_id,
+                "source_object_id": source_object_id,
+                "source_key": source_key,
+            },
+        )
+    if len(unique) != 1:
+        raise CanonicalCostBlocked(
+            "wb_supply_effective_date_supply_ambiguous",
+            {
+                "operation_id": operation_id,
+                "source_object_id": source_object_id,
+                "source_key": source_key,
+                "matched_supply_ids": sorted(unique),
+            },
+        )
+    supply = next(iter(unique.values()))
+    normalized = _json_loads(supply.get("normalized_row_json"))
+    supply_identities = {
+        str(value).strip()
+        for value in (
+            supply.get("supply_id"),
+            supply.get("wb_supply_id"),
+            supply.get("preorder_id"),
+            normalized.get("supply_id"),
+            normalized.get("wb_supply_id"),
+            normalized.get("preorder_id"),
+        )
+        if str(value or "").strip()
+    }
+    cache_identities = {
+        str(value).strip()
+        for value in (
+            supply.get("cache_key"),
+            normalized.get("cache_key"),
+        )
+        if str(value or "").strip()
+    }
+    if source_object_id not in supply_identities or source_identity not in cache_identities:
+        raise CanonicalCostBlocked(
+            "wb_supply_effective_date_identity_mismatch",
+            {
+                "operation_id": operation_id,
+                "source_object_id": source_object_id,
+                "source_key": source_key,
+                "matched_supply_id": str(supply.get("supply_id") or ""),
+                "matched_cache_key": str(supply.get("cache_key") or ""),
+            },
+        )
+    return supply
+
+
+def _wb_supply_authoritative_business_date(
+    supply: Mapping[str, Any]
+) -> tuple[str, str]:
+    normalized = _json_loads(supply.get("normalized_row_json"))
+    candidates = (
+        ("normalized.actual_acceptance_date", normalized.get("actual_acceptance_date")),
+        ("normalized.actualAcceptanceDate", normalized.get("actualAcceptanceDate")),
+        ("normalized.acceptance_date", normalized.get("acceptance_date")),
+        ("normalized.acceptanceDate", normalized.get("acceptanceDate")),
+        ("normalized.fact_date", normalized.get("fact_date")),
+        ("normalized.factDate", normalized.get("factDate")),
+        ("normalized.closed_at", normalized.get("closed_at")),
+        ("normalized.closedAt", normalized.get("closedAt")),
+        ("wb_supply.fact_date", supply.get("fact_date")),
+        ("normalized.supply_date", normalized.get("supply_date")),
+        ("normalized.supplyDate", normalized.get("supplyDate")),
+        ("wb_supply.supply_date", supply.get("supply_date")),
+    )
+    for source_field, value in candidates:
+        if not str(value or "").strip():
+            continue
+        return (
+            _effective_date_value(
+                value,
+                blocker_code="wb_supply_effective_date_business_date_invalid",
+                details={
+                    "supply_id": str(supply.get("supply_id") or ""),
+                    "source_field": source_field,
+                },
+            ),
+            source_field,
+        )
+    raise CanonicalCostBlocked(
+        "wb_supply_effective_date_business_date_missing",
+        {
+            "supply_id": str(supply.get("supply_id") or ""),
+            "cache_key": str(supply.get("cache_key") or ""),
+        },
+    )
+
+
+def _effective_date_value(
+    value: Any, *, blocker_code: str, details: Mapping[str, Any]
+) -> str:
+    text = str(value or "").strip()
+    try:
+        return date.fromisoformat(text[:10]).isoformat()
+    except (TypeError, ValueError):
+        raise CanonicalCostBlocked(
+            blocker_code, {**dict(details), "value": text}
+        ) from None
 
 
 def _wb_movement_evidence(conn: sqlite3.Connection, *, as_of_date: str) -> list[dict[str, Any]]:
