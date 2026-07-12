@@ -45,6 +45,9 @@ condition after cutover is a fail-closed anomaly.
 - defaults to dry-run and requires exact `2026-07-01..current` scope;
 - materializes a coherent SQLite backup candidate and verifies `PRAGMA integrity_check=ok`;
 - reports a stable fingerprint, stage/capital/coverage reconciliation, affected Finance weeks and source/protected/pre-cutover digests;
+- when baseline coverage is incomplete, returns a stable `status=blocked`
+  dry-run report with exact primary shipment, fallback provenance, physical
+  stages and missing/conflicting SKUs; a blocked fingerprint can never apply;
 - requires exact current fingerprint plus explicit backup directory for apply;
 - creates a `0600` online backup;
 - uses `BEGIN IMMEDIATE`, optimistic source/target digest recheck and in-place row replacement;

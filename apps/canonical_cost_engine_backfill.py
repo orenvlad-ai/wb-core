@@ -24,6 +24,7 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     CANONICAL_TABLE_PREFIX,
     CUTOVER_DATE,
     STAGES,
+    CanonicalCostBlocked,
     CanonicalCostEngine,
     ensure_canonical_cost_schema,
 )
@@ -91,7 +92,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         candidate_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         _sqlite_backup(source_db, candidate_runtime.db_path)
         engine = CanonicalCostEngine(runtime=candidate_runtime)
-        baseline = engine.build_baseline_plan(cutover_date=date_from)
+        try:
+            baseline = engine.build_baseline_plan(cutover_date=date_from)
+        except CanonicalCostBlocked as exc:
+            blocked_report = {
+                "contract_name": "canonical_cost_engine_backfill_v1",
+                "status": "blocked",
+                "scope": {"date_from": date_from, "date_to": date_to},
+                "blocker": {"code": exc.code, "details": exc.details},
+                "affected_finance_periods": _finance_periods(date_from, date_to),
+                "source_digest": source_digest,
+                "protected_non_target_digest": protected_digest,
+                "legacy_pre_cutover_digest": legacy_digest,
+                "target_before_digest": target_before,
+            }
+            fingerprint = _hash(blocked_report)
+            if args.apply:
+                raise ValueError(
+                    f"production apply blocked by {exc.code}; "
+                    f"dry-run report fingerprint={fingerprint}"
+                ) from exc
+            return {
+                **blocked_report,
+                "mode": "dry-run",
+                "fingerprint": fingerprint,
+                "would_change": False,
+                "integrity_check": integrity_before,
+                "source_inode": source_inode,
+                "applied": False,
+                "backup": None,
+                "post_run": None,
+            }
         engine.materialize_baseline_plan(baseline)
         rebuild = engine.rebuild(date_from=date_from, date_to=date_to)
         first_target = _canonical_digest(

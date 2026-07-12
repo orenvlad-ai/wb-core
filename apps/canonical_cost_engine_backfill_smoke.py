@@ -162,8 +162,49 @@ def main() -> int:
         )
         if repeated_apply["post_run"] != {"changed": 0, "idempotent": True}:
             raise AssertionError("repeat apply must perform no database write")
+    _blocked_baseline_report()
     print("canonical_cost_engine_backfill_smoke: ok")
     return 0
+
+
+def _blocked_baseline_report() -> None:
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        runtime_dir = root / "runtime"
+        backup_dir = root / "backups"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            _insert_primary(conn)
+            _insert_fallback_production(conn, nm_id=222)
+            _insert_ff_balance(conn, nm_id=111, quantity=6750)
+            _insert_snapshot(
+                conn, "2026-07-01",
+                {111: {"stock_total": 93250}, 222: {"stock_total": 0}},
+            )
+            conn.commit()
+        blocked = run(_args(runtime_dir, backup_dir))
+        if blocked.get("status") != "blocked":
+            raise AssertionError("missing baseline SKU must return a blocked report")
+        details = blocked["blocker"]["details"]
+        if details["missing_nm_ids"] != [222] or details["cost_coverage"] == "1":
+            raise AssertionError("blocked report must expose missing SKU and partial coverage")
+        repeated = run(_args(runtime_dir, backup_dir))
+        if repeated["fingerprint"] != blocked["fingerprint"]:
+            raise AssertionError("blocked report fingerprint must be stable")
+        try:
+            run(
+                _args(
+                    runtime_dir, backup_dir, apply=True,
+                    fingerprint=blocked["fingerprint"],
+                )
+            )
+        except ValueError as exc:
+            if "production apply blocked" not in str(exc):
+                raise
+        else:
+            raise AssertionError("blocked baseline must never enter apply")
 
 
 def _args(
