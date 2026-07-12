@@ -28,6 +28,8 @@ The runner builds its candidate from persisted posted CNY operations, supplier f
 
 Only persisted factual payment execution, dated factual logistics/customs/tax/VAT expense documents, confirmed direct-RUB fee rows, `actual_shipment_date`, `actual_ff_acceptance_date`, idempotent FF movement, cumulative actual WB accepted quantity and `Допринято` reconciliation evidence may create historical transitions. CNY fees remain deduplicated through the CNY ledger. Upload time, quote/`К оплате`, planned quantity/date and inferred mutable status are not substitutes. Missing historical evidence remains blank/warning.
 
+WB acceptance evidence is validated atomically before its FF writeoff event: `acceptance_date < writeoff_date` is a blocker and creates no partial event history. Rebuild invariant diagnostics include event identity/type/date/stages/SKU and exact available/requested quantities.
+
 ## Rollback
 
 Code rollback leaves additive tables dormant and leaves 1C/proxy metrics untouched. If an apply damages the runtime database, restore only the runner-verified coherent backup through the canonical runtime procedure; do not issue ad-hoc SQL or delete audit/event history manually.

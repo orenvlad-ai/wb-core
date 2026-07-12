@@ -623,6 +623,29 @@ def _assert_partial_acceptance_state_machine() -> None:
             actual_ff_acceptance_date="2026-06-30",
             expenses_complete=True,
         )
+        _must_fail(
+            lambda: block.record_ordinary_wb_supply_acceptance(
+                supply_id="acceptance-before-writeoff",
+                writeoff_date="2026-07-03",
+                acceptance_date="2026-07-02",
+                sent_quantities_by_nm={101: 1},
+                accepted_quantities_by_nm={101: 1},
+                warehouse="Коледино",
+                destination="ЦФО",
+                known_nm_ids=[101],
+                expenses_complete=True,
+                final=True,
+            ),
+            "acceptance date before writeoff date",
+        )
+        with _connect(runtime.db_path) as conn:
+            invalid_events = conn.execute(
+                """
+                SELECT COUNT(*) FROM sheet_vitrina_v1_own_capital_events
+                WHERE supply_id='acceptance-before-writeoff'
+                """
+            ).fetchone()[0]
+        _eq(invalid_events, 0, "invalid event ordering must be atomic before writeoff")
         block.record_ff_writeoff(
             supply_id="partial-wb",
             effective_date="2026-07-02",

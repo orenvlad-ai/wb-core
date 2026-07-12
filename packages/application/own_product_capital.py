@@ -918,6 +918,18 @@ class OwnProductCapitalBlock:
         recalculate: bool = True,
     ) -> dict[str, Any]:
         supply_id = _required_text(supply_id, "supply_id")
+        writeoff_date = _iso_date(writeoff_date, "writeoff_date")
+        acceptance_date = _iso_date(acceptance_date, "acceptance_date")
+        if acceptance_date < writeoff_date:
+            self._record_blocker(
+                code="wb_acceptance_before_writeoff",
+                source_identity=supply_id,
+                details={
+                    "writeoff_date": writeoff_date,
+                    "acceptance_date": acceptance_date,
+                },
+            )
+            raise ValueError("WB acceptance date is earlier than FF writeoff date")
         normalized_sent = {
             _positive_int(nm_id, "nm_id"): _positive_decimal(
                 quantity, f"sent[{nm_id}]"
@@ -957,7 +969,6 @@ class OwnProductCapitalBlock:
             known_nm_ids=known_nm_ids,
             expenses_complete=expenses_complete,
         )
-        acceptance_date = _iso_date(acceptance_date, "acceptance_date")
         supply_layers = self._wb_supply_layers(supply_id)
         planned: list[dict[str, Any]] = []
         now = self.timestamp_factory()
@@ -2112,7 +2123,10 @@ def _apply_event(
         source = stages.setdefault(stage_from, _empty_bucket())
         if source["qty"] + Decimal("0.0000001") < quantity:
             raise ValueError(
-                f"persisted capital invariant violated: {stage_from} nmID {nm_id} has "
+                "persisted capital invariant violated: "
+                f"event_id={event.get('event_id') or ''} "
+                f"event_type={event_type} effective_date={event.get('effective_date') or ''} "
+                f"{stage_from}->{stage_to} nmID {nm_id} has "
                 f"{source['qty']} < {quantity}"
             )
         source_confirmed_out = (
