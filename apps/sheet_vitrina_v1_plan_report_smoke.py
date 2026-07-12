@@ -17,6 +17,7 @@ from packages.application.sheet_vitrina_v1_plan_report import (
     BASELINE_TEMPLATE_HEADERS,
     MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
     SheetVitrinaV1PlanReportBlock,
+    USN_UPPER_LIMIT_RUB,
 )
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 
@@ -153,8 +154,20 @@ def main() -> None:
         _assert_close(selected["metrics"]["drr_pct"]["plan"], 10.0, "selected drr plan")
         _assert_close(selected["metrics"]["drr_pct"]["delta_pp"], 2.0, "selected drr delta_pp")
         _assert_close(selected["metrics"]["drr_pct"]["delta_pct"], 20.0, "selected drr delta_pct")
-        if selected["metrics"]["drr_pct"]["status_label"] != "выше плана":
-            raise AssertionError(f"drr status must disclose above-plan overspend, got {selected}")
+        if (
+            selected["metrics"]["drr_pct"]["status"] != "ok"
+            or selected["metrics"]["drr_pct"]["status_label"] != "минимум выполнен"
+        ):
+            raise AssertionError(f"drr above the contractual minimum must be execution-ok, got {selected}")
+        below_minimum_payload = block.build(
+            period="last_30_days",
+            h1_buyout_plan_rub=H1_PLAN_RUB,
+            h2_buyout_plan_rub=H2_PLAN_RUB,
+            plan_drr_pct=13.0,
+        )
+        below_minimum_drr = below_minimum_payload["periods"]["selected_period"]["metrics"]["drr_pct"]
+        if below_minimum_drr["status"] != "alert" or below_minimum_drr["status_label"] != "ниже минимума":
+            raise AssertionError(f"drr below the contractual minimum must remain an alert, got {below_minimum_drr}")
         _assert_close(selected["metrics"]["ads_sum_rub"]["fact"], 5400.0, "selected ads fact")
         _assert_close(selected["metrics"]["ads_sum_rub"]["plan"], 4500.0, "selected ads plan")
         _assert_close(selected["metrics"]["ads_sum_rub"]["delta_abs"], 900.0, "selected ads delta")
@@ -187,6 +200,26 @@ def main() -> None:
             "projection ads percent",
         )
         _assert_close(projection["projected_drr_pct"], 12.0, "projection DRR")
+        _assert_close(projection["annual_buyout_plan_rub"], H1_PLAN_RUB + H2_PLAN_RUB, "projection annual buyout plan")
+        _assert_close(projection["usn_upper_limit_rub"], USN_UPPER_LIMIT_RUB, "projection USN upper limit")
+        _assert_close(
+            projection["projected_buyout_pct_of_usn_upper_limit"],
+            (1500.0 * 334.0) / USN_UPPER_LIMIT_RUB * 100.0,
+            "projection buyout percent of USN upper limit",
+        )
+        _assert_close(
+            projection["projected_buyout_remaining_to_usn_upper_limit_rub"],
+            USN_UPPER_LIMIT_RUB - (1500.0 * 334.0),
+            "projection remaining to USN upper limit",
+        )
+        if projection["projected_buyout_exceeds_usn_upper_limit"] is not False:
+            raise AssertionError(f"low projected buyout must stay below the USN upper limit, got {projection}")
+        if projection["drr_requirement_type"] != "minimum":
+            raise AssertionError(f"projection DRR requirement must be machine-readable as minimum, got {projection}")
+        _assert_close(projection["drr_minimum_pct"], 10.0, "projection DRR minimum")
+        _assert_close(projection["projected_drr_margin_to_minimum_pp"], 2.0, "projection DRR minimum margin")
+        if projection["projected_drr_minimum_met"] is not True:
+            raise AssertionError(f"DRR above the minimum must be met, got {projection}")
 
         mtd = payload["periods"]["month_to_date"]
         if mtd["date_from"] != "2026-04-01" or mtd["day_count"] != 20:
@@ -395,6 +428,14 @@ def main() -> None:
             raise AssertionError(f"overperformance ads plan must use fact turnover base, got {over_ads}")
         if over_ads["status"] != "ok" or over_ads["status_label"] != "выполнен":
             raise AssertionError(f"overperformance ads must be execution-ok, not cost-limit alert, got {over_ads}")
+        over_projection = over_payload["contract_period_projection"]
+        if (
+            over_projection["projected_buyout_exceeds_usn_upper_limit"] is not True
+            or float(over_projection["projected_buyout_remaining_to_usn_upper_limit_rub"]) >= 0.0
+        ):
+            raise AssertionError(f"USN upper-limit exceedance must keep a negative remaining amount, got {over_projection}")
+        if over_projection["projected_drr_minimum_met"] is not True:
+            raise AssertionError(f"DRR above 6% must not be marked as a violation, got {over_projection}")
 
         missing_day = "2026-04-10"
         runtime.delete_temporal_source_slot_snapshots(
@@ -439,6 +480,22 @@ def main() -> None:
         empty_projection = empty_payload["contract_period_projection"]
         if empty_projection.get("status") != "unavailable" or empty_projection.get("projected_buyout_rub") is not None:
             raise AssertionError(f"projection must be unavailable without usable facts, got {empty_projection}")
+        if (
+            empty_projection.get("usn_upper_limit_rub") != USN_UPPER_LIMIT_RUB
+            or empty_projection.get("drr_minimum_pct") != 10.0
+            or empty_projection.get("drr_requirement_type") != "minimum"
+        ):
+            raise AssertionError(f"fixed strategic guardrails must remain available without a forecast, got {empty_projection}")
+        for field_name in (
+            "projected_buyout_pct_of_usn_upper_limit",
+            "projected_buyout_remaining_to_usn_upper_limit_rub",
+            "projected_buyout_exceeds_usn_upper_limit",
+            "projected_drr_pct",
+            "projected_drr_margin_to_minimum_pp",
+            "projected_drr_minimum_met",
+        ):
+            if empty_projection.get(field_name) is not None:
+                raise AssertionError(f"unavailable projection field {field_name} must be null, got {empty_projection}")
 
         partial_runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "daily-from-march")
         partial_result = partial_runtime.ingest_bundle(bundle, activated_at="2026-04-21T01:00:00Z")
@@ -474,6 +531,13 @@ def main() -> None:
             or "2026-02-01" not in (partial_projection.get("coverage") or {}).get("missing_dates", [])
         ):
             raise AssertionError(f"projection must disclose partial elapsed coverage, got {partial_projection}")
+        if (
+            partial_projection.get("usn_upper_limit_rub") != USN_UPPER_LIMIT_RUB
+            or partial_projection.get("drr_requirement_type") != "minimum"
+            or partial_projection.get("projected_buyout_pct_of_usn_upper_limit") is None
+            or partial_projection.get("projected_drr_margin_to_minimum_pp") is None
+        ):
+            raise AssertionError(f"partial projection must keep fixed and computable strategic fields, got {partial_projection}")
 
         partial_runtime.save_plan_report_monthly_baseline(
             rows=[

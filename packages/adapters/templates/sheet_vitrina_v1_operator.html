@@ -3949,7 +3949,7 @@
                     <input id="planReportH2Input" type="number" min="0" step="0.01" inputmode="decimal">
                   </div>
                   <div class="field plan-report-field">
-                    <label for="planReportDrrInput">Плановый DRR, %</label>
+                    <label for="planReportDrrInput">Минимальный DRR по договору, %</label>
                     <input id="planReportDrrInput" type="number" min="0" step="0.01" inputmode="decimal">
                   </div>
                   <div class="field plan-report-checkbox-field">
@@ -3966,7 +3966,7 @@
                 <div class="block-actions">
                   <button id="planReportApplyButton" class="action-button secondary-button" type="button">Рассчитать</button>
                 </div>
-                <p id="planReportValidation" class="plan-report-validation" hidden>Заполните планы H1/H2 и плановый DRR.</p>
+                <p id="planReportValidation" class="plan-report-validation" hidden>Заполните планы H1/H2 и минимальный DRR.</p>
               </div>
               <div class="plan-report-baseline">
                 <div class="plan-report-baseline-head">
@@ -7475,9 +7475,8 @@
         return "План: " + String(metric.ads_plan_base_label) + ".";
       }
 
-      function renderPlanMetricLabel(metric) {
-        const baseLabel = escapeHtml(metric.label || "-");
-        const tooltipText = planMetricTooltipText(metric);
+      function renderPlanLabelWithTooltip(label, tooltipText) {
+        const baseLabel = escapeHtml(label || "-");
         if (!tooltipText) {
           return "<span class=\"plan-report-metric-label-line\"><span class=\"plan-report-metric-label-text\">" + baseLabel + "</span></span>";
         }
@@ -7491,6 +7490,10 @@
           "</span>",
           "</span>"
         ].join("");
+      }
+
+      function renderPlanMetricLabel(metric) {
+        return renderPlanLabelWithTooltip(metric.label, planMetricTooltipText(metric));
       }
 
       function renderPlanMetricTable(periodBlock) {
@@ -7543,8 +7546,8 @@
       }
 
       function renderPlanProjectionTable(projection) {
-        if (!projection || projection.status === "unavailable") {
-          return "<p class=\"report-empty\">" + escapeHtml(valueOrDash(projection && projection.reason)) + "</p>";
+        if (!projection) {
+          return "<p class=\"report-empty\">Прогноз пока недоступен.</p>";
         }
         const notes = [];
         if (projection.status && projection.status !== "available") {
@@ -7556,36 +7559,72 @@
         if (projection.reason) {
           notes.push(String(projection.reason));
         }
-        const annualBuyoutPlanLabel = "годовой план " + formatNumber(projection.annual_buyout_plan_rub);
-        const annualAdsPlanLabel = "годовой рекламный ориентир " + formatNumber(projection.annual_ads_plan_rub);
+        const usnTooltip = "Управленческий ориентир 2026 года. При превышении 490,5 млн ₽ утрачивается право на УСН. Фактический налоговый лимит контролируется по данным налогового учёта.";
+        const drrTooltip = "Минимальная доля рекламных расходов по договору с Wildberries — 6%. Значение выше 6% означает запас относительно договорного минимума.";
+        const formatRub = (value) => isFiniteNumber(value) ? formatNumber(value) + " ₽" : "н/д";
+        const formatRubMillions = (value) => isFiniteNumber(value)
+          ? numberFormatter.format(value / 1000000) + " млн ₽"
+          : "н/д";
+        const formatDrrComparison = () => {
+          const margin = projection.projected_drr_margin_to_minimum_pp;
+          if (!isFiniteNumber(margin) || typeof projection.projected_drr_minimum_met !== "boolean") {
+            return "н/д";
+          }
+          if (projection.projected_drr_minimum_met) {
+            return "запас " + formatSignedPercentPoint(margin);
+          }
+          return "ниже минимума на " + formatPercentValue(Math.abs(margin)).replace("%", " п.п.");
+        };
+        const formatUsnComparison = () => {
+          const pct = formatPercentValue(projection.projected_buyout_pct_of_usn_upper_limit);
+          const remaining = projection.projected_buyout_remaining_to_usn_upper_limit_rub;
+          if (!isFiniteNumber(remaining) || typeof projection.projected_buyout_exceeds_usn_upper_limit !== "boolean") {
+            return pct;
+          }
+          const relation = projection.projected_buyout_exceeds_usn_upper_limit ? "превышение " : "остаток ";
+          return pct + " · " + relation + formatRub(Math.abs(remaining));
+        };
         const rows = [
           {
-            label: "Оборот при текущем темпе к 31.12.2026",
-            amount: projection.projected_buyout_rub,
-            plan: annualBuyoutPlanLabel,
-            pct: projection.projected_buyout_pct_of_annual_plan,
-            drr: null
+            label: "Годовой план выкупов",
+            tooltip: "",
+            forecast: formatRub(projection.projected_buyout_rub),
+            target: formatRubMillions(projection.annual_buyout_plan_rub),
+            comparison: formatPercentValue(projection.projected_buyout_pct_of_annual_plan)
+          },
+          {
+            label: "Верхний порог УСН",
+            tooltip: usnTooltip,
+            forecast: formatRub(projection.projected_buyout_rub),
+            target: formatRubMillions(projection.usn_upper_limit_rub),
+            comparison: formatUsnComparison()
           },
           {
             label: "Реклама при текущем темпе к 31.12.2026",
-            amount: projection.projected_ads_sum_rub,
-            plan: annualAdsPlanLabel,
-            pct: projection.projected_ads_pct_of_annual_ads_plan,
-            drr: projection.projected_drr_pct
+            tooltip: "",
+            forecast: formatRub(projection.projected_ads_sum_rub),
+            target: formatRubMillions(projection.annual_ads_plan_rub),
+            comparison: formatPercentValue(projection.projected_ads_pct_of_annual_ads_plan)
+          },
+          {
+            label: "Минимальный DRR по договору",
+            tooltip: drrTooltip,
+            forecast: formatPercentValue(projection.projected_drr_pct),
+            target: formatPercentValue(projection.drr_minimum_pct),
+            comparison: formatDrrComparison()
           }
         ];
         return [
           notes.length ? "<p class=\"field-note\">" + escapeHtml(notes.join(" ")) + "</p>" : "",
           "<table class=\"plan-report-table\">",
-          "<thead><tr><th>Показатель</th><th>Прогноз</th><th>Ориентир</th><th>Выполнение</th><th>DRR</th></tr></thead>",
+          "<thead><tr><th>Показатель</th><th>Прогноз</th><th>Ориентир</th><th>Сравнение</th></tr></thead>",
           "<tbody>",
           rows.map((row) => [
             "<tr>",
-            "<td class=\"plan-report-metric-label\">" + escapeHtml(row.label) + "</td>",
-            "<td>" + escapeHtml(formatNumber(row.amount)) + "</td>",
-            "<td>" + escapeHtml(row.plan) + "</td>",
-            "<td>" + escapeHtml(formatPercentValue(row.pct)) + "</td>",
-            "<td>" + escapeHtml(row.drr === null ? "-" : formatPercentValue(row.drr)) + "</td>",
+            "<td class=\"plan-report-metric-label\">" + renderPlanLabelWithTooltip(row.label, row.tooltip) + "</td>",
+            "<td>" + escapeHtml(row.forecast) + "</td>",
+            "<td>" + escapeHtml(row.target) + "</td>",
+            "<td>" + escapeHtml(row.comparison) + "</td>",
             "</tr>"
           ].join("")).join(""),
           "</tbody>",
@@ -7672,7 +7711,7 @@
           !["period", "use_contract_start_date", "annual_plan_evenly_distributed", "contract_start_date"].includes(key) && !value
         ));
         if (!request.period || missing) {
-          return { error: "Заполните планы H1/H2 и плановый DRR." };
+          return { error: "Заполните планы H1/H2 и минимальный DRR." };
         }
         const numericKeys = [
           "h1_buyout_plan_rub",
