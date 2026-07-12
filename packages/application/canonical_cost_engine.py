@@ -227,9 +227,44 @@ class CanonicalCostEngine:
             if nm in owned_nm_ids and _decimal(row.get("sku_ff_unit_cost_rub")) <= ZERO
         ]
         if missing or conflicting:
+            covered_nm_ids = set(primary_by_nm) | set(fallbacks)
+            total_quantity = sum(
+                (
+                    sum((stages.get(stage, ZERO) for stage in STAGES), ZERO)
+                    for stages in physical.values()
+                ),
+                ZERO,
+            )
+            covered_quantity = sum(
+                (
+                    sum((physical[nm_id].get(stage, ZERO) for stage in STAGES), ZERO)
+                    for nm_id in owned_nm_ids if nm_id in covered_nm_ids
+                ),
+                ZERO,
+            )
             raise CanonicalCostBlocked(
                 "baseline_cost_coverage_incomplete",
-                {"missing_nm_ids": missing, "conflicting_nm_ids": conflicting},
+                {
+                    "cutover_date": cutover_date,
+                    "primary_shipment": primary,
+                    "primary_sku_count": len(set(primary_by_nm) & set(owned_nm_ids)),
+                    "primary_shipment_sku_count": len(primary_by_nm),
+                    "fallbacks": [fallbacks[nm] for nm in sorted(fallbacks)],
+                    "fallback_sku_count": len(fallbacks),
+                    "missing_nm_ids": missing,
+                    "missing_sku_count": len(missing),
+                    "conflicting_nm_ids": conflicting,
+                    "physical": _json_safe_physical(physical),
+                    "stage_physical_quantities": {
+                        stage: _text(sum(
+                            (stages.get(stage, ZERO) for stages in physical.values()), ZERO
+                        ))
+                        for stage in STAGES
+                    },
+                    "physical_quantity": _text(total_quantity),
+                    "cost_covered_quantity": _text(covered_quantity),
+                    "cost_coverage": _text(_safe_ratio(covered_quantity, total_quantity)),
+                },
             )
         lines: list[dict[str, Any]] = []
         for nm_id in owned_nm_ids:
