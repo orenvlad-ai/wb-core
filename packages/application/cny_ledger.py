@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from pathlib import Path
 import re
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -90,7 +90,6 @@ class CnyLedgerBlock:
     def get_status(self) -> dict[str, Any]:
         documents = [self._with_download_path(item) for item in self.runtime.list_cny_documents()]
         operations = self.runtime.list_cny_ledger_operations()
-        last_operation = operations[-1] if operations else {}
         replay_state = self.runtime.load_cny_ledger_replay_state() or {}
         return {
             "contract_name": CNY_LEDGER_CONTRACT_NAME,
@@ -145,6 +144,8 @@ class CnyLedgerBlock:
         stored_file_path: str | None = None,
         linked_financial_document_id: str | None = None,
         reject_unsupported: bool = True,
+        manual_payment_date: str | None = None,
+        manual_payment_date_actor: str | None = None,
     ) -> dict[str, Any]:
         if not file_bytes:
             raise ValueError("CNY document upload file is empty")
@@ -159,6 +160,41 @@ class CnyLedgerBlock:
             raise ValueError("uploaded PDF was not recognized as a CNY conversion or supplier CNY payment document")
         if not document_type:
             document_type = CNY_DOCUMENT_TYPE_ADJUSTMENT
+        if document_type in {CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT}:
+            required_non_date = {
+                CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE: ("rub_amount", "cny_amount", "currency"),
+                CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT: ("cny_amount", "currency"),
+            }[document_type]
+            missing_non_date = [field for field in required_non_date if not normalized.get(field)]
+            if missing_non_date:
+                raise ValueError(
+                    "payment document rejected before durable save; parser did not recognize: "
+                    + ", ".join(missing_non_date)
+                )
+            parsed_date = str(normalized.get("document_date") or "").strip()
+            manual_date = str(manual_payment_date or "").strip()
+            if not parsed_date and not manual_date:
+                return {
+                    "contract_name": CNY_LEDGER_CONTRACT_NAME,
+                    "status": "payment_date_required",
+                    "preview_required": True,
+                    "durable_saved": False,
+                    "manual_field": "payment_date",
+                    "message": "Дата платежа не распознана. Укажите и подтвердите дату платежа.",
+                    "normalized_parse": normalized,
+                    "warnings": _dedupe_strings(_string_list(parsed.get("warnings"))),
+                }
+            if manual_date:
+                normalized["document_date"] = _optional_iso_date(manual_date)
+                if not normalized["document_date"]:
+                    raise ValueError("manual payment_date must be YYYY-MM-DD")
+                normalized["payment_date_provenance"] = {
+                    "source": "manual_operator_confirmation",
+                    "actor": str(manual_payment_date_actor or "").strip(),
+                    "confirmed_at": self.timestamp_factory(),
+                }
+            else:
+                normalized["payment_date_provenance"] = {"source": "parsed_document"}
         now = self.timestamp_factory()
         file_sha256 = hashlib.sha256(file_bytes).hexdigest()
         document_id = "cnydoc_" + uuid4().hex
@@ -219,6 +255,21 @@ class CnyLedgerBlock:
             "errors": _dedupe_strings(errors),
         }
         saved = self.runtime.save_cny_document(document)
+        if source_order_id:
+            self.runtime.update_supplier_shipment_expenses_complete(
+                shipment_id=str(source_order_id),
+                expenses_complete=False,
+                updated_at=now,
+            )
+            from packages.application.own_product_capital import OwnProductCapitalBlock
+
+            OwnProductCapitalBlock(
+                runtime=self.runtime,
+                timestamp_factory=self.timestamp_factory,
+            ).set_expenses_certification(
+                shipment_id=str(source_order_id),
+                expenses_complete=False,
+            )
         replay = self.replay_ledger(reason="document_upload")
         return {
             **self._with_download_path(saved),
@@ -534,6 +585,7 @@ class CnyLedgerBlock:
         self.runtime.replace_cny_ledger_operations(posted_operations)
         order_updates = self._build_order_updates(order_accumulator, calculated_at=now)
         self.runtime.update_supplier_shipments_cny_calculations(order_updates)
+        own_capital_diagnostics = self._sync_own_product_capital_payments(posted_operations)
         replay_status = CNY_CALC_STATUS_OK if not diagnostics else "blocked"
         replay_state = {
             "status": replay_status,
@@ -545,6 +597,7 @@ class CnyLedgerBlock:
             "balance_rub_value": _decimal_to_storage(balance_rub),
             "average_rate": _decimal_to_storage(_safe_div(balance_rub, balance_cny)),
             "diagnostics": diagnostics,
+            "own_product_capital_diagnostics": own_capital_diagnostics,
         }
         self.runtime.save_cny_ledger_replay_state(replay_state)
         return {
@@ -552,6 +605,140 @@ class CnyLedgerBlock:
             "status": "ok",
             "replay": replay_state,
             "summary": _ledger_summary(documents, posted_operations, replay_state),
+        }
+
+    def _sync_own_product_capital_payments(
+        self,
+        operations: Iterable[Mapping[str, Any]],
+        *,
+        recalculate: bool = True,
+    ) -> list[dict[str, Any]]:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        capital = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
+        documents = {
+            str(item.get("document_id") or ""): dict(item)
+            for item in self.runtime.list_cny_documents()
+        }
+        diagnostics: list[dict[str, Any]] = []
+        for operation in operations:
+            operation_type = str(operation.get("operation_type") or "")
+            if str(operation.get("status") or "") != CNY_LEDGER_OPERATION_STATUS_POSTED:
+                continue
+            if operation_type not in {
+                CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT,
+                CNY_LEDGER_OPERATION_TRANSFER_FEE,
+            }:
+                continue
+            document_id = str(operation.get("source_document_id") or "").strip()
+            shipment_id = str(operation.get("source_order_id") or "").strip()
+            document = documents.get(document_id) or {}
+            detail = self.runtime.load_supplier_shipment(shipment_id) if shipment_id else None
+            try:
+                if detail is None:
+                    raise ValueError("payment→shipment link is missing")
+                header = dict(detail.get("header") or {})
+                product_lines = [
+                    {
+                        "line_id": line.get("line_id"),
+                        "nm_id": line.get("internal_nm_id"),
+                        "qty": line.get("qty"),
+                        "unit_price": line.get("unit_price"),
+                        "amount": line.get("amount"),
+                        "match_status": line.get("match_status"),
+                    }
+                    for line in detail.get("lines") or []
+                    if str(line.get("line_type") or "") == "product"
+                ]
+                provenance = {
+                    "source": "cny_ledger_operation",
+                    "source_document_id": document_id,
+                    "payment_date_provenance": (
+                        (document.get("parsed_payload") or {}).get("payment_date_provenance")
+                        if isinstance(document.get("parsed_payload"), Mapping)
+                        else {}
+                    ),
+                }
+                if operation_type == CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT:
+                    capital.record_supplier_payment(
+                        payment_id=document_id,
+                        shipment_id=shipment_id,
+                        effective_date=str(operation.get("operation_date") or ""),
+                        invoice_total_cny=header.get("invoice_amount_total"),
+                        paid_cny=abs(_parse_decimal(operation.get("cny_delta")) or Decimal("0")),
+                        paid_rub=abs(_parse_decimal(operation.get("rub_value_delta")) or Decimal("0")),
+                        product_lines=product_lines,
+                        actual_shipment_date=str(header.get("actual_shipment_date") or "") or None,
+                        actual_ff_acceptance_date=str(header.get("actual_ff_acceptance_date") or "") or None,
+                        expenses_complete=bool(header.get("expenses_complete")),
+                        provenance=provenance,
+                        recalculate=False,
+                    )
+                    capital.materialize_supplier_boundaries(
+                        shipment_id=shipment_id,
+                        actual_shipment_date=str(header.get("actual_shipment_date") or "") or None,
+                        actual_ff_acceptance_date=str(header.get("actual_ff_acceptance_date") or "") or None,
+                        expenses_complete=bool(header.get("expenses_complete")),
+                        recalculate=False,
+                    )
+                else:
+                    capital.record_order_level_cost_payment(
+                        document_id=f"{document_id}:transfer_fee:{operation.get('operation_id') or ''}",
+                        shipment_id=shipment_id,
+                        effective_date=str(operation.get("operation_date") or ""),
+                        capital_rub=abs(_parse_decimal(operation.get("rub_value_delta")) or Decimal("0")),
+                        product_lines=product_lines,
+                        component="bank_fee",
+                        actual_shipment_date=str(header.get("actual_shipment_date") or "") or None,
+                        actual_ff_acceptance_date=str(header.get("actual_ff_acceptance_date") or "") or None,
+                        expenses_complete=bool(header.get("expenses_complete")),
+                        provenance=provenance,
+                    )
+                capital.resolve_blockers(source_identity=document_id)
+            except ValueError as exc:
+                capital._record_blocker(  # noqa: SLF001 - same bounded application contour
+                    code="payment_capital_allocation_blocked",
+                    source_identity=document_id,
+                    details={"shipment_id": shipment_id, "reason": str(exc)},
+                )
+                diagnostics.append(
+                    {
+                        "document_id": document_id,
+                        "operation_type": operation_type,
+                        "status": "own_product_capital_allocation_blocked",
+                        "source_order_id": shipment_id,
+                        "reason": str(exc),
+                    }
+                )
+        if operations and recalculate:
+            capital.recalculate()
+        return diagnostics
+
+    def materialize_own_product_capital_history(
+        self,
+        *,
+        date_to: str,
+        recalculate: bool = True,
+    ) -> dict[str, Any]:
+        """Materialize capital from persisted posted operations without replaying CNY state."""
+        bounded_operations = [
+            operation
+            for operation in self.runtime.list_cny_ledger_operations()
+            if not str(operation.get("operation_date") or "")
+            or str(operation.get("operation_date") or "") <= str(date_to)
+        ]
+        diagnostics = self._sync_own_product_capital_payments(
+            bounded_operations,
+            recalculate=recalculate,
+        )
+        return {
+            "status": "blocked" if diagnostics else "ok",
+            "persisted_operation_count": len(bounded_operations),
+            "blocker_count": len(diagnostics),
+            "blockers": diagnostics,
         }
 
     def download_document_file(self, document_id: str) -> tuple[bytes, str, str]:
@@ -576,7 +763,29 @@ class CnyLedgerBlock:
             raise ValueError(f"CNY document not found: {document_id}")
         if str(document.get("linked_financial_document_id") or "").strip():
             raise ValueError("CNY document is linked to a supplier financial document; delete the source document instead")
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        capital = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
+        if capital.has_supplier_payment_layer(str(document.get("document_id") or "")):
+            raise ValueError(
+                "CNY payment already created an invested-capital layer; "
+                "deletion requires the audited reversal/backfill contour"
+            )
         deleted = self.runtime.delete_cny_document(str(document.get("document_id") or ""))
+        source_order_id = str(document.get("source_order_id") or "").strip()
+        if source_order_id:
+            self.runtime.update_supplier_shipment_expenses_complete(
+                shipment_id=source_order_id,
+                expenses_complete=False,
+                updated_at=self.timestamp_factory(),
+            )
+            capital.set_expenses_certification(
+                shipment_id=source_order_id,
+                expenses_complete=False,
+            )
         self._delete_document_file_if_owned(deleted)
         replay = self.replay_ledger(reason="document_delete")
         return {

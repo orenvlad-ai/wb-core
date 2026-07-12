@@ -215,3 +215,11 @@ This module does not implement:
 - WB create/update/delete mutations;
 - deletion of operations as a correction mechanism;
 - Google Sheets/GAS.
+
+# 11. Cost snapshot and reconciliation boundary
+
+The FF quantity ledger remains the physical movement authority. Module 45 listens to its idempotent receipt/writeoff evidence, maintains a separate Decimal moving weighted cost per SKU and freezes the current FF unit cost into each WB writeoff layer. Proportional writeoff does not change the average of remaining units; confirmed/estimated quantities and capital move together.
+
+Ordinary WB status/facts can create one guarded FF writeoff. Status `4` transfers only the cumulative `acceptedQuantity` delta into WB capital and leaves `sent - accepted` in `ФФ → WB`; transitions `3 → 4 → 5` reuse the original debit/cost snapshot and reject accepted regression. `Допринято` explicitly creates no second debit and only reconciles persisted `Недопринято WB` outstanding state. Unknown nomenclature, negative stock/capital, surplus reconciliation or ambiguous identity fail closed with a blocker and are safe to retry after authoritative evidence is corrected.
+
+The bounded module-45 backfill may read persisted WB cache rows only after matching an existing canonical FF ledger debit source key. This history materialization never creates or repairs a quantity-ledger operation, never bypasses ordinary checkpoint/activation rules and batches capital reconstruction before one bounded daily recalculation.

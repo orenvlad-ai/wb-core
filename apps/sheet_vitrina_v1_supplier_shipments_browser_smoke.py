@@ -278,6 +278,15 @@ def main() -> None:
                 compat_row.locator("[data-field='compatible_models_text']").fill("iPhone 14, iPhone 13, iPhone 13 Pro")
                 compat_row.get_by_role("button", name="Сохранить").click()
                 expect(settings_page.locator("#nomenclatureMessage")).to_contain_text("Справочник сохранён.", timeout=5000)
+                settings_page.get_by_role("button", name="Добавить строку").click()
+                third_row = settings_page.locator("#nomenclatureRows tr").first
+                third_row.locator("[data-field='nm_id']").fill("391662411")
+                third_row.locator("[data-field='nomenclature_name']").fill("anti-spy iPhone 14 Pro Max")
+                third_row.locator("[data-field='product_type']").select_option("anti_spy")
+                third_row.locator("[data-field='match_key']").fill("anti_spy|iphone_14_pro_max")
+                third_row.locator("[data-field='purchase_price_yuan']").fill("2")
+                third_row.get_by_role("button", name="Сохранить").click()
+                expect(settings_page.locator("#nomenclatureMessage")).to_contain_text("Справочник сохранён.", timeout=5000)
                 page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
                 page.evaluate("window.localStorage.removeItem('wb-core:sheet-vitrina-v1:supplier-order-status-filter:v1')")
                 expect(page.locator("[data-unified-tab-button='factory-order']")).to_be_visible()
@@ -395,7 +404,7 @@ def main() -> None:
                     raise AssertionError(f"price conformity symbols must map to success/error classes, got {first_price_class!r}, {second_price_class!r}")
                 expect(frame.locator("#contractNoInput")).to_have_value("CNT-2026-0513")
                 expect(frame.locator("#contractDateInput")).to_have_value("2026-05-13")
-                expect(frame.locator("#productLines").get_by_text("Сопоставлено", exact=True)).to_be_visible()
+                expect(frame.locator("#productLines").get_by_text("Сопоставлено", exact=True).first).to_be_visible()
                 expect(frame.locator("#productLines").get_by_text("Сопоставлено по совместимости", exact=True)).to_be_visible()
                 expect(frame.locator("select[data-line-field='match_status']")).to_have_count(0)
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
@@ -443,7 +452,7 @@ def main() -> None:
                 expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("2026-05-16")).to_be_visible()
                 expect(frame.locator("#shipmentRows").get_by_text("HanShang Technology")).to_be_visible()
-                expect(frame.locator("#shipmentRows").get_by_text("Проверить")).to_be_visible()
+                expect(frame.locator("#shipmentRows").get_by_text("OK", exact=True)).to_be_visible()
                 frame.get_by_role("button", name="Закрыть").click()
                 expect(frame.locator(".registry-wrap thead")).to_contain_text("Ориент. себестоимость, ₽/шт")
                 expect(frame.locator("#shipmentRows")).to_contain_text("25,45", timeout=5000)
@@ -1105,6 +1114,42 @@ def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> 
             "product_type": "clear",
             "match_key": "clear|iphone_14_pro",
             "purchase_price_yuan": 1.0,
+            "aliases": [],
+            "compatible_models_text": "",
+            "compatible_model_keys": [],
+            "comment": "",
+            "created_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+        }
+    )
+    runtime.save_nomenclature_item(
+        {
+            "item_id": "supplier_browser_anti_spy_compat",
+            "is_active": True,
+            "our_sku": "",
+            "nm_id": 391662410,
+            "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
+            "product_type": "anti_spy",
+            "match_key": "anti_spy|iphone_14_13_13pro",
+            "purchase_price_yuan": 2.0,
+            "aliases": [],
+            "compatible_models_text": "iPhone 14, iPhone 13, iPhone 13 Pro",
+            "compatible_model_keys": ["iphone_14", "iphone_13", "iphone_13_pro"],
+            "comment": "",
+            "created_at": "2026-05-30T08:00:00Z",
+            "updated_at": "2026-05-30T08:00:00Z",
+        }
+    )
+    runtime.save_nomenclature_item(
+        {
+            "item_id": "supplier_browser_anti_spy_14_pro_max",
+            "is_active": True,
+            "our_sku": "",
+            "nm_id": 391662411,
+            "nomenclature_name": "anti-spy iPhone 14 Pro Max",
+            "product_type": "anti_spy",
+            "match_key": "anti_spy|iphone_14_pro_max",
+            "purchase_price_yuan": 2.0,
             "aliases": [],
             "compatible_models_text": "",
             "compatible_model_keys": [],

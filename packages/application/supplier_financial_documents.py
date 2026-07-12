@@ -7,7 +7,6 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
-import json
 from pathlib import Path
 import re
 import shutil
@@ -150,6 +149,12 @@ EXACT_COST_STATUS_UNAVAILABLE = "unavailable"
 EXACT_COST_STATUS_CNY_PAYMENT_PENDING = "cny_payment_cost_unavailable"
 EXACT_COST_STATUS_CNY_LEDGER_MISSING = "cny_ledger_missing"
 EXACT_COST_STATUS_QUANTITY_MISSING = "quantity_missing"
+COST_AFFECTING_DOCUMENT_TYPES = {
+    FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE,
+    FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION,
+    FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION,
+    FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT,
+}
 
 
 @dataclass(frozen=True)
@@ -580,6 +585,9 @@ class SupplierFinancialDocumentsBlock:
         payload["idempotent"] = False
         payload["already_added"] = False
         payload["cny_fee_rows_for_ledger"] = _confirmed_cny_fee_rows(saved)
+        payload["own_product_capital"] = self._materialize_own_capital_expense_events(
+            supplier_order_id
+        )
         return payload
 
     def get_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
@@ -607,6 +615,8 @@ class SupplierFinancialDocumentsBlock:
         file_bytes: bytes,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        manual_payment_date: str | None = None,
+        manual_payment_date_actor: str | None = None,
     ) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
         if not file_bytes:
@@ -618,12 +628,6 @@ class SupplierFinancialDocumentsBlock:
         now = self.timestamp_factory()
         document_id = "fdoc_" + uuid4().hex
         file_sha256 = hashlib.sha256(file_bytes).hexdigest()
-        stored_file_path = self._write_document_file(
-            supplier_order_id=supplier_order_id,
-            document_id=document_id,
-            filename=filename,
-            body=file_bytes,
-        )
         parsed = parse_financial_document_upload(
             file_bytes,
             filename=filename,
@@ -634,6 +638,43 @@ class SupplierFinancialDocumentsBlock:
         warnings = _string_list(parsed.get("warnings"))
         errors = _string_list(parsed.get("errors"))
         expense_lines = [dict(item) for item in parsed.get("expense_lines") or []]
+        if str(normalized.get("document_type") or "") == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
+            missing_non_date = [
+                field
+                for field in ("currency", "transfer_amount", "ordering_customer", "beneficiary_customer")
+                if not normalized.get(field)
+            ]
+            if missing_non_date:
+                raise ValueError(
+                    "payment document rejected before durable save; parser did not recognize: "
+                    + ", ".join(missing_non_date)
+                )
+            parsed_date = str(normalized.get("document_date") or "").strip()
+            manual_date = str(manual_payment_date or "").strip()
+            if not parsed_date and not manual_date:
+                return {
+                    "contract_name": "sheet_vitrina_v1_supplier_financial_documents",
+                    "status": "payment_date_required",
+                    "preview_required": True,
+                    "durable_saved": False,
+                    "manual_field": "payment_date",
+                    "message": "Дата платежа не распознана. Укажите и подтвердите дату платежа.",
+                    "normalized_parse": normalized,
+                    "warnings": _dedupe_strings(warnings),
+                }
+            if manual_date:
+                normalized_date = _optional_iso_date(manual_date)
+                if not normalized_date:
+                    raise ValueError("manual payment_date must be YYYY-MM-DD")
+                normalized["document_date"] = normalized_date
+                normalized["payment_date_provenance"] = {
+                    "source": "manual_operator_confirmation",
+                    "actor": str(manual_payment_date_actor or "").strip(),
+                    "confirmed_at": self.timestamp_factory(),
+                }
+            else:
+                normalized["payment_date_provenance"] = {"source": "parsed_document"}
+            parsed = {**dict(parsed), "normalized_parse": normalized}
         rate_result = self._rate_for_document(normalized)
         if rate_result is not None:
             normalized["cbr_usd_rate"] = _rate_result_to_dict(rate_result)
@@ -644,6 +685,12 @@ class SupplierFinancialDocumentsBlock:
         parse_status = _parse_status_for_payload(parsed, warnings, errors, rate_result)
         if parse_status == FINANCIAL_DOCUMENT_PARSE_STATUS_PARSE_ERROR and not errors:
             errors.append("financial document parser did not recognize a supported MVP document type")
+        stored_file_path = self._write_document_file(
+            supplier_order_id=supplier_order_id,
+            document_id=document_id,
+            filename=filename,
+            body=file_bytes,
+        )
         document = {
             "document_id": document_id,
             "supplier_order_id": supplier_order_id,
@@ -692,22 +739,60 @@ class SupplierFinancialDocumentsBlock:
             document=document,
             expense_lines=stored_lines,
         )
-        return self.get_document(supplier_order_id, str(saved.get("document_id") or document_id))
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            self.runtime.update_supplier_shipment_expenses_complete(
+                shipment_id=supplier_order_id,
+                expenses_complete=False,
+                updated_at=self.timestamp_factory(),
+            )
+            self._reset_own_capital_expense_certification(supplier_order_id)
+        payload = self.get_document(
+            supplier_order_id, str(saved.get("document_id") or document_id)
+        )
+        payload["own_product_capital"] = self._materialize_own_capital_expense_events(
+            supplier_order_id
+        )
+        return payload
 
     def update_document_status(self, supplier_order_id: str, document_id: str, parse_status: str) -> dict[str, Any]:
         self._ensure_supplier_order(supplier_order_id)
         normalized = str(parse_status or "").strip()
         if normalized not in FINANCIAL_DOCUMENT_PARSE_STATUSES:
             raise ValueError("unsupported financial document parse_status")
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        capital = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
+        if (
+            normalized == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
+            and capital.has_cost_payment_event(
+                f"financial_expense:{document_id}"
+            )
+        ):
+            raise ValueError(
+                "financial expense already created capital events; exclusion requires audited reversal"
+            )
         document = self.runtime.update_supplier_financial_document_status(
             supplier_order_id=supplier_order_id,
             document_id=document_id,
             parse_status=normalized,
             updated_at=self.timestamp_factory(),
         )
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            self.runtime.update_supplier_shipment_expenses_complete(
+                shipment_id=supplier_order_id,
+                expenses_complete=False,
+                updated_at=self.timestamp_factory(),
+            )
+            self._reset_own_capital_expense_certification(supplier_order_id)
         payload = self._with_download_path(document)
         shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
         payload["summary"] = build_financial_summary([payload], list(payload.get("expense_lines") or []), shipment=shipment)
+        payload["own_product_capital"] = self._materialize_own_capital_expense_events(
+            supplier_order_id
+        )
         return payload
 
     def delete_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
@@ -718,12 +803,29 @@ class SupplierFinancialDocumentsBlock:
         )
         if document is None:
             raise ValueError(f"financial document not found: {document_id}")
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        capital = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        )
+        if capital.has_cost_payment_event(f"financial_expense:{document_id}"):
+            raise ValueError(
+                "financial expense already created capital events; deletion requires audited reversal"
+            )
         deleted = self.runtime.delete_supplier_financial_document(
             supplier_order_id=supplier_order_id,
             document_id=document_id,
         )
         if deleted is None:
             raise ValueError(f"financial document not found: {document_id}")
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            self.runtime.update_supplier_shipment_expenses_complete(
+                shipment_id=supplier_order_id,
+                expenses_complete=False,
+                updated_at=self.timestamp_factory(),
+            )
+            self._reset_own_capital_expense_certification(supplier_order_id)
         deleted_cny_documents: list[str] = []
         if hasattr(self.runtime, "list_cny_documents") and hasattr(self.runtime, "delete_cny_document"):
             for cny_document in self.runtime.list_cny_documents():
@@ -742,6 +844,27 @@ class SupplierFinancialDocumentsBlock:
             "file_deleted": bool(file_result.get("file_deleted")),
             "warnings": _dedupe_strings(_string_list(file_result.get("warnings"))),
         }
+
+    def _reset_own_capital_expense_certification(self, supplier_order_id: str) -> None:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).set_expenses_certification(
+            shipment_id=supplier_order_id,
+            expenses_complete=False,
+        )
+
+    def _materialize_own_capital_expense_events(
+        self, supplier_order_id: str
+    ) -> dict[str, Any]:
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        return OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).materialize_persisted_expense_events(shipment_id=supplier_order_id)
 
     def download_document_file(self, supplier_order_id: str, document_id: str) -> tuple[bytes, str, str]:
         self._ensure_supplier_order(supplier_order_id)

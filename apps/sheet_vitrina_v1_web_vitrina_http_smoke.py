@@ -340,16 +340,25 @@ def main() -> None:
                 "seller_portal_bot",
                 "wb_api",
                 "wb_public_card_bot",
+                "webcore_product_capital",
             ]:
                 raise AssertionError(f"web-vitrina loading table must expose stable source groups, got {loading_groups}")
             if loading_groups["onec_product_capital"].get("label") != "1С":
                 raise AssertionError(f"1C product-capital group label mismatch, got {loading_groups}")
+            if loading_groups["webcore_product_capital"].get("label") != "WebCore":
+                raise AssertionError(f"WebCore product-capital group label mismatch, got {loading_groups}")
             if not loading_groups["seller_portal_bot"].get("session_controls"):
                 raise AssertionError(f"seller portal group must expose session controls, got {loading_groups}")
             if loading_groups["wb_public_card_bot"].get("session_controls"):
                 raise AssertionError(f"WB public card group must not expose Seller Portal session controls, got {loading_groups}")
             row_group_ids = {row.get("source_group_id") for row in loading_rows}
-            expected_row_groups = {"wb_api", "seller_portal_bot", "onec_product_capital", "other_sources"}
+            expected_row_groups = {
+                "wb_api",
+                "seller_portal_bot",
+                "onec_product_capital",
+                "webcore_product_capital",
+                "other_sources",
+            }
             if not expected_row_groups.issubset(row_group_ids) or not row_group_ids.issubset(
                 expected_row_groups | {"wb_public_card_bot"}
             ):

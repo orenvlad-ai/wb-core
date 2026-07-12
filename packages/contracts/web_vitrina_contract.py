@@ -101,6 +101,7 @@ class WebVitrinaContractRow:
     nm_id: int | None
     format: str | None
     values_by_date: dict[str, Any]
+    presentation_by_date: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

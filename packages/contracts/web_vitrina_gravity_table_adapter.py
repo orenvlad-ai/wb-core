@@ -52,6 +52,9 @@ class WebVitrinaGravityTableCellValue:
     cell_kind: str
     formatter_id: str | None
     renderer_id: str
+    presentation_state: str = ""
+    presentation_tone: str = ""
+    presentation_reason: str = ""
 
 
 @dataclass(frozen=True)

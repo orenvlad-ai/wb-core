@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–43`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–45`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -50,6 +50,7 @@ source_basis:
   - "docs/modules/42_MODULE__WB_SPP_TESTER_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
+  - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -99,8 +100,9 @@ related_docs:
   - "42_MODULE__WB_SPP_TESTER_BLOCK.md"
   - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
   - "44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
+  - "45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под Google Sheets decommission, Fulfillment services contour, management proxy WB cost model, guarded WB prices management, `Цены -> Проверка СПП` and `ФФ -> Остатки ФФ`: modules 17/18/19/24/25 are archive/migration-only, module 26 current contour is website/operator/web-vitrina, module 39 owns server-side Fulfillment uploads/PDF visa/WB overlay, module 40 owns our WB cost/proxy3 model, module 41 owns guarded WB Prices and Discounts management, module 42 owns bounded WB SPP tester with runtime lock/audit/staged restore, module 43 owns server-side ФФ quantity ledger/current balances/manual documents/auto movements, and Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
+update_note: "Обновлён под Google Sheets decommission и active modules through 45: module 45 owns the independent WebCore invested-product-capital event/materialization contour; Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
 
 # 1. Назначение индекса
@@ -117,7 +119,7 @@ update_note: "Обновлён под Google Sheets decommission, Fulfillment se
 
 # 1.1 Текущий Checkpoint Main
 
-На текущем `main` main-confirmed модульные блоки доходят до `01–40`; текущие feature-линии добавляют module `41` for guarded WB Prices and Discounts management, module `42` for bounded `Цены -> Проверка СПП` and module `43` for `ФФ -> Остатки ФФ`. Module `39` implements server-owned Fulfillment service upload/payment-validation contour inside `Поставки`, module `40` implements management proxy WB cost/proxy3 contour.
+Канонический индекс охватывает modules `01–45`. Module `45` добавляет независимый от 1С management-контур вложенного товарного капитала по фактическим paid events, persisted physical movements и WebCore materialization.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -243,8 +245,9 @@ update_note: "Обновлён под Google Sheets decommission, Fulfillment se
 | `40_MODULE__OUR_WB_COST_MODEL_BLOCK.md` | `our_wb_cost_model` | `web/operator/supply/runtime-cost` | Management proxy WB cost contour: SKU-level FF cost layers, final-status-5 accepted-date physical rolling, opening baseline `2026-07-01`, profit/margin 3 and a guarded full-range one-off margin-3 ready-snapshot completion with fingerprint, verified backup, atomic optimistic apply and non-target digest; no strict FIFO/accounting truth, proxy2 replacement or historical full refresh |
 | `41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md` | `wb_prices_management_block` | `web/operator/official-api/prices` | Guarded `Цены` tab over WB Prices and Discounts API: active nmID price/discount table, inline drafts, server preview with quarantine risk, explicit env-gated upload-task commit, status/detail/quarantine readback and SPP tester subtab boundary; no size-price writes, WB Club writes, B2B writes or live writes in tests |
 | `42_MODULE__WB_SPP_TESTER_BLOCK.md` | `wb_spp_tester_block` | `web/operator/official-api/prices/spp-test` | Bounded `Цены -> Проверка СПП` MVP: one-nmID safe-slow range tester with `WB_SPP_TEST_ENABLED` + `WB_PRICES_WRITE_ENABLED`, runtime lock/audit, stale/429 handling and staged baseline restore |
-| `43_MODULE__FF_STOCK_LEDGER_BLOCK.md` | `ff_stock_ledger_block` | `web/operator/supply/runtime-ledger` | Server-owned `ФФ -> Остатки ФФ`: manual receipt/writeoff preview-confirm documents, computed balances, supplier auto receipts, guarded idempotent WB auto writeoffs, audit trail and calculation source without Google Sheets/GAS or WB mutations |
+| `43_MODULE__FF_STOCK_LEDGER_BLOCK.md` | `ff_stock_ledger_block` | `web/operator/supply/runtime-ledger` | Server-owned `ФФ -> Остатки ФФ`: manual receipt/writeoff preview-confirm documents, computed balances, supplier auto receipts, guarded idempotent WB auto writeoffs, cumulative status-4 acceptance evidence, audit trail and calculation source without Google Sheets/GAS or WB mutations |
 | `44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md` | `wb_finance_weekly_report_block` | `web/operator/reports/official-api` | Official WB Finance weekly raw/report/aggregate contour, all report types, per-operation COST_PRICE → Our WB Cost cutover, quality-aware coverage, guarded fingerprinted atomic stale-week recalculation and Europe/Moscow schedule |
+| `45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md` | `own_product_capital_block` | `web/operator/runtime-capital` | Independent WebCore invested-product-capital event/state contour: five stages, paid ownership and dated factual expense layers, FF moving average, cumulative WB underacceptance reconciliation, server-derived confirmation and fingerprinted in-place historical backfill |
 
 # 5. Как эта папка используется дальше
 

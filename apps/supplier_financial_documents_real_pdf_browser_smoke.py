@@ -19,7 +19,6 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_SHEET_SUPPLIER_UI_PATH,
-    DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
 )
@@ -186,16 +185,17 @@ def main() -> None:
                     quote_row.click()
                     expect(page.locator("#financialExpenseRows")).to_contain_text("14 360,00 USD", timeout=5000)
 
-                    for _ in range(6):
-                        if page.locator("#financialDocumentsRows [data-delete-financial-document]").count() <= 0:
-                            break
-                        page.once("dialog", lambda dialog: dialog.accept())
-                        page.locator("#financialDocumentsRows [data-delete-financial-document]").first.click()
-                        expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ удалён.", timeout=10000)
-                    expect(page.locator("#financialDocumentsRows [data-delete-financial-document]")).to_have_count(0, timeout=10000)
-                    expect(page.locator("#financialDocumentsRows")).to_contain_text("Не загружен", timeout=10000)
-                    expect(page.locator("#financialExpenseRows")).to_contain_text("Расходные строки не загружены.", timeout=5000)
-                    expect(page.locator("#financialSummaryGroups")).to_contain_text("—", timeout=5000)
+                    page.once("dialog", lambda dialog: dialog.accept())
+                    quote_row.locator("[data-delete-financial-document]").click()
+                    expect(page.locator("#financialDocumentsMessage")).to_contain_text("Документ удалён.", timeout=10000)
+                    expect(page.locator("#financialDocumentsRows [data-delete-financial-document]")).to_have_count(3, timeout=10000)
+                    page.once("dialog", lambda dialog: dialog.accept())
+                    page.locator("#financialDocumentsRows [data-delete-financial-document]").first.click()
+                    expect(page.locator("#financialDocumentsMessage")).to_contain_text(
+                        "deletion requires audited reversal",
+                        timeout=10000,
+                    )
+                    expect(page.locator("#financialDocumentsRows [data-delete-financial-document]")).to_have_count(3, timeout=10000)
 
                     page.locator("#supplyCompositionTabButton").click()
                     expect(page.locator("#supplyCompositionPanel")).to_be_visible()

@@ -43,6 +43,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     build_registry_upload_http_server,
 )
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
+from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
@@ -52,6 +53,29 @@ def main() -> None:
     supplier_invoice_bytes = _build_invoice_fixture()
     with TemporaryDirectory(prefix="supplier-auth-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        for item_id, nm_id, name, product_type, match_key, price in (
+            ("supplier_auth_clear", 210183919, "Clear iPhone 14 Pro", "clear", "clear|iphone_14_pro", 1.0),
+            ("supplier_auth_anti", 210184534, "Anti-Spy iPhone 14 Pro Max", "anti_spy", "anti_spy|iphone_14_pro_max", 2.0),
+        ):
+            runtime.save_nomenclature_item(
+                {
+                    "item_id": item_id,
+                    "is_active": True,
+                    "our_sku": "",
+                    "nm_id": nm_id,
+                    "nomenclature_name": name,
+                    "product_type": product_type,
+                    "match_key": match_key,
+                    "purchase_price_yuan": price,
+                    "aliases": [],
+                    "compatible_models_text": "",
+                    "compatible_model_keys": [],
+                    "comment": "",
+                    "created_at": "2026-05-30T08:00:00Z",
+                    "updated_at": "2026-05-30T08:00:00Z",
+                }
+            )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=_reserve_free_port(),
@@ -73,7 +97,10 @@ def main() -> None:
                 "WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME": "Supplier",
             }
         ):
-            server = build_registry_upload_http_server(config, entrypoint=RegistryUploadHttpEntrypoint(runtime_dir=runtime_dir))
+            server = build_registry_upload_http_server(
+                config,
+                entrypoint=RegistryUploadHttpEntrypoint(runtime_dir=runtime_dir, runtime=runtime),
+            )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:

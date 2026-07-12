@@ -23,6 +23,7 @@ from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
+from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.wb_finance_weekly import block_from_env
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -87,6 +88,13 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
+)
+from packages.application.sheet_vitrina_v1_own_product_capital import (
+    OWN_PRODUCT_CAPITAL_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
+    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_LABEL_RU,
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY,
+    extend_metrics_with_own_product_capital_metrics,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policy,
@@ -227,6 +235,10 @@ WEB_VITRINA_ACTIVITY_TONE_RANK = {
     "neutral": 3,
 }
 WEB_VITRINA_ACTIVITY_ITEM_COPY = {
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY: {
+        "label_ru": "WebCore",
+        "description_ru": "Наш оплаченный товарный капитал по пяти физическим стадиям.",
+    },
     "seller_funnel_snapshot": {
         "label_ru": "Воронка продавца",
         "description_ru": "Показы карточки, открытия и базовая конверсия за дату.",
@@ -368,6 +380,7 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
         OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
     ),
     ONEC_STOCKS_SOURCE_KEY: ONEC_STOCKS_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY: OWN_PRODUCT_CAPITAL_METRIC_KEYS,
     "ads_compact": (
         "ads_drr_total",
         "ads_drr_attributed_total",
@@ -462,10 +475,15 @@ WEB_VITRINA_SOURCE_GROUPS = {
             ONEC_STOCKS_SOURCE_KEY,
         ),
     },
+    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID: {
+        "label_ru": OWN_PRODUCT_CAPITAL_SOURCE_GROUP_LABEL_RU,
+        "source_keys": (OWN_PRODUCT_CAPITAL_SOURCE_KEY,),
+    },
 }
 WEB_VITRINA_SOURCE_GROUP_ORDER = (
     "wb_api",
     ONEC_STOCKS_SOURCE_GROUP_ID,
+    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
     "seller_portal_bot",
     "wb_public_card_bot",
     "other_sources",
@@ -770,6 +788,10 @@ class RegistryUploadHttpEntrypoint:
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
+        self.own_product_capital_block = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
         self.wb_supplies_block.fulfillment_overlay_provider = (
             self.fulfillment_services_block.approved_overlay_by_supply
         )
@@ -984,9 +1006,11 @@ class RegistryUploadHttpEntrypoint:
             preferred_date=current_business_date_iso(self.now_factory()),
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_our_wb_cost_metrics(
-                extend_metrics_with_onec_stock_metrics(
-                    getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            extend_metrics_with_own_product_capital_metrics(
+                extend_metrics_with_our_wb_cost_metrics(
+                    extend_metrics_with_onec_stock_metrics(
+                        getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                    )
                 )
             )
         )
@@ -1701,9 +1725,11 @@ class RegistryUploadHttpEntrypoint:
             preferred_date=current_business_date,
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_our_wb_cost_metrics(
-                extend_metrics_with_onec_stock_metrics(
-                    getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            extend_metrics_with_own_product_capital_metrics(
+                extend_metrics_with_our_wb_cost_metrics(
+                    extend_metrics_with_onec_stock_metrics(
+                        getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                    )
                 )
             )
         )
@@ -1997,6 +2023,25 @@ class RegistryUploadHttpEntrypoint:
             "result": self.our_wb_cost_block.status(),
         }
 
+    def handle_own_product_capital_recalculate_request(
+        self,
+        payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        requested = dict(payload or {})
+        result = self.own_product_capital_block.recalculate(
+            date_from=str(requested.get("date_from") or "") or None,
+            date_to=str(requested.get("date_to") or "") or None,
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_own_product_capital_recalculate",
+            "status": "ok",
+            "result": asdict(result),
+            "requested": requested,
+        }
+
+    def handle_own_product_capital_status_request(self) -> dict[str, Any]:
+        return self.own_product_capital_block.status()
+
     def handle_supplier_shipments_delete_request(self, shipment_id: str) -> dict[str, Any]:
         return self.supplier_shipments_block.delete_shipment(shipment_id)
 
@@ -2131,7 +2176,10 @@ class RegistryUploadHttpEntrypoint:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        fields: Mapping[str, Any] | None = None,
+        actor: str = "",
     ) -> dict[str, Any]:
+        upload_fields = dict(fields or {})
         suffix = Path(str(uploaded_filename or "")).suffix.lower()
         if suffix == ".pdf":
             preview = self.cny_ledger_block.parse_document_preview(
@@ -2148,6 +2196,8 @@ class RegistryUploadHttpEntrypoint:
                     source_order_id=shipment_id,
                     context_order_id=shipment_id,
                     reject_unsupported=True,
+                    manual_payment_date=str(upload_fields.get("payment_date") or "") or None,
+                    manual_payment_date_actor=actor,
                 )
         financial_preview = self.supplier_financial_documents_block.parse_document_preview(
             file_bytes,
@@ -2166,6 +2216,8 @@ class RegistryUploadHttpEntrypoint:
             file_bytes=file_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
+            manual_payment_date=str(upload_fields.get("payment_date") or "") or None,
+            manual_payment_date_actor=actor,
         )
 
     def handle_supplier_financial_document_confirm_import_request(
@@ -2259,13 +2311,18 @@ class RegistryUploadHttpEntrypoint:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        fields: Mapping[str, Any] | None = None,
+        actor: str = "",
     ) -> dict[str, Any]:
+        upload_fields = dict(fields or {})
         return self.cny_ledger_block.upload_document(
             file_bytes=file_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
             source=CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
             reject_unsupported=True,
+            manual_payment_date=str(upload_fields.get("payment_date") or "") or None,
+            manual_payment_date_actor=actor,
         )
 
     def handle_cny_account_opening_balance_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -3197,7 +3254,16 @@ class RegistryUploadHttpEntrypoint:
             "opening_rows_materialized": int(getattr(result, "opening_rows_materialized", 0) or 0),
             "daily_state_rows_materialized": int(getattr(result, "daily_state_rows_materialized", 0) or 0),
         }
-        changed = any(value > 0 for value in payload.values())
+        own_result = self.own_product_capital_block.recalculate()
+        payload["own_product_capital"] = asdict(own_result)
+        payload["own_product_capital_daily_rows_changed"] = int(
+            getattr(own_result, "daily_rows_changed", 0) or 0
+        )
+        changed = any(
+            value > 0
+            for key, value in payload.items()
+            if key != "own_product_capital" and isinstance(value, (int, float))
+        )
         payload["changed"] = changed
         payload["wb_finance_cost_recalculation"] = (
             self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
@@ -3304,8 +3370,10 @@ class RegistryUploadHttpEntrypoint:
 
                 current_state = self.runtime.load_current_state()
                 metric_keys = _metric_keys_for_source_keys(
-                    extend_metrics_with_our_wb_cost_metrics(
-                        extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                    extend_metrics_with_own_product_capital_metrics(
+                        extend_metrics_with_our_wb_cost_metrics(
+                            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                        )
                     ),
                     source_keys=source_keys,
                 )

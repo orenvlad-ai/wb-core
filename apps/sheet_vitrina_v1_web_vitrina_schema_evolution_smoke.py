@@ -287,6 +287,7 @@ def _assert_page_composition_http_schema_evolution(
         old_period_url = (
             f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}"
             f"?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
+            "&history_mode=explicit"
             f"&date_from={OLD_DATE}&date_to={OLD_DATE}"
         )
         old_period_status, old_period_payload = _get_json_strict(old_period_url)
@@ -312,6 +313,7 @@ def _assert_page_composition_http_schema_evolution(
         mixed_period_status, mixed_period_payload = _get_json_strict(
             f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}"
             f"?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
+            "&history_mode=explicit"
             f"&date_from={OLD_DATE}&date_to={NEW_DATE}"
         )
         if mixed_period_status != 200:

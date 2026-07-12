@@ -10150,9 +10150,30 @@
             headers: { "Accept": "application/json" },
             body: formData
           });
-          const payload = await readJson(response);
+          let payload = await readJson(response);
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (payload.preview_required && payload.manual_field === "payment_date" && payload.durable_saved === false) {
+            const paymentDate = window.prompt(
+              "Дата платежа не распознана. Введите фактическую дату платежа в формате YYYY-MM-DD. Финансовые поля изменить нельзя.",
+              ""
+            );
+            if (!paymentDate) {
+              throw new Error("Документ не сохранён: дата платежа не подтверждена");
+            }
+            const confirmedFormData = new FormData();
+            confirmedFormData.append("file", file, file.name || "cny-document.pdf");
+            confirmedFormData.append("payment_date", String(paymentDate).trim());
+            const confirmedResponse = await fetch(config.cny_account_documents_path, {
+              method: "POST",
+              headers: { "Accept": "application/json" },
+              body: confirmedFormData
+            });
+            payload = await readJson(confirmedResponse);
+            if (!confirmedResponse.ok) {
+              throw new Error(valueOrDash(payload.error) + " (HTTP " + confirmedResponse.status + ")");
+            }
           }
           if (cnyAccountFileInput) {
             cnyAccountFileInput.value = "";

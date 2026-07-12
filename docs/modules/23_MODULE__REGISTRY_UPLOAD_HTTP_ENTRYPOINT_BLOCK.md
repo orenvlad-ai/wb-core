@@ -896,3 +896,9 @@ current_update_note: "`Настройки` встроены в общий WebCor
 - generic scheduler framework beyond current one timer / one route wiring;
 - большой background-jobs subsystem;
 - production Postgres redesign и внешняя инфраструктура.
+
+# 18. Own Product Capital runtime boundary
+
+HTTP entrypoint exposes protected `GET /v1/sheet-vitrina-v1/product-capital/status` and `POST /v1/sheet-vitrina-v1/product-capital/recalculate`. The same hosted refresh boundary rebuilds the independent WebCore daily materialization after upstream refresh and publishes it through the existing ready-snapshot/web-vitrina read contract.
+
+Payment upload remains parse-preview-first: missing non-date financial fields reject before durable save; a missing date returns a mandatory manual-date request with server provenance. Browser code may collect that date, but never owns payment facts, stage state, confirmation or yellow presentation metadata. The endpoint performs no 1C writes and does not expose a production backfill apply route.

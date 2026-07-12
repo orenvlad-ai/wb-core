@@ -44,6 +44,11 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (  # noqa: E402
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     extend_metrics_with_our_wb_cost_metrics,
 )
+from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa: E402
+    OWN_PRODUCT_CAPITAL_METRIC_KEYS,
+    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
+    extend_metrics_with_own_product_capital_metrics,
+)
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
@@ -103,23 +108,25 @@ def main() -> None:
 
 def _assert_group_metric_coverage() -> None:
     bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
-    visible_metrics = extend_metrics_with_our_wb_cost_metrics(
-        extend_metrics_with_onec_stock_metrics(
-            [
-                MetricV2Item(
-                    metric_key=str(item["metric_key"]),
-                    enabled=bool(item["enabled"]),
-                    scope=str(item["scope"]),
-                    label_ru=str(item["label_ru"]),
-                    calc_type=item["calc_type"],
-                    calc_ref=str(item["calc_ref"]),
-                    show_in_data=bool(item["show_in_data"]),
-                    format=str(item["format"]),
-                    display_order=int(item["display_order"]),
-                    section=str(item["section"]),
-                )
-                for item in bundle["metrics_v2"]
-            ]
+    visible_metrics = extend_metrics_with_own_product_capital_metrics(
+        extend_metrics_with_our_wb_cost_metrics(
+            extend_metrics_with_onec_stock_metrics(
+                [
+                    MetricV2Item(
+                        metric_key=str(item["metric_key"]),
+                        enabled=bool(item["enabled"]),
+                        scope=str(item["scope"]),
+                        label_ru=str(item["label_ru"]),
+                        calc_type=item["calc_type"],
+                        calc_ref=str(item["calc_ref"]),
+                        show_in_data=bool(item["show_in_data"]),
+                        format=str(item["format"]),
+                        display_order=int(item["display_order"]),
+                        section=str(item["section"]),
+                    )
+                    for item in bundle["metrics_v2"]
+                ]
+            )
         )
     )
     visible_metric_keys = [
@@ -159,6 +166,10 @@ def _assert_group_metric_coverage() -> None:
         or missing_onec_derived
         or missing_our_wb_derived
         or not any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
+        or any(
+            _groups_for_metric(metric_to_groups, metric_key) != [OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID]
+            for metric_key in OWN_PRODUCT_CAPITAL_METRIC_KEYS
+        )
     ):
         raise AssertionError(
             "web-vitrina loading group metric coverage failed: "
