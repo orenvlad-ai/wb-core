@@ -45,6 +45,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
+    DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH,
     DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
     DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
@@ -536,6 +537,13 @@ def collect_public_surface(
                 f"{base_url}{route_paths['SHEET_VITRINA_STATUS_HTTP_PATH']}",
                 as_of_date,
             ),
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="own_product_capital_status",
+            method="GET",
+            url=f"{base_url}{DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -2269,6 +2277,24 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             ],
             error_keys=["error", "server_context", "manual_context"],
         )
+        return evaluation
+
+    if route == "own_product_capital_status":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=[
+                "contract_name",
+                "source",
+                "event_count",
+                "underaccepted_wb",
+                "blockers",
+            ],
+            error_keys=["error"],
+        )
+        if evaluation["ok"] and payload.get("contract_name") != "sheet_vitrina_v1_own_product_capital":
+            evaluation["ok"] = False
+            evaluation["detail"] = "unexpected own-product-capital status contract"
         return evaluation
 
     if route == "web_vitrina_read":

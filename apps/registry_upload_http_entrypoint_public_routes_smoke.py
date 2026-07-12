@@ -362,6 +362,14 @@ def main() -> None:
             raise AssertionError("print-plan must expose feedbacks in nginx public routes")
         if "/v1/sheet-vitrina-v1/feedbacks/export.xlsx" not in {route["path"] for route in plan_routes}:
             raise AssertionError("print-plan must expose feedbacks export in nginx public routes")
+        for product_capital_path in (
+            "/v1/sheet-vitrina-v1/product-capital/status",
+            "/v1/sheet-vitrina-v1/product-capital/recalculate",
+        ):
+            if product_capital_path not in {route["path"] for route in plan_routes}:
+                raise AssertionError(
+                    f"print-plan must expose protected product-capital route {product_capital_path}"
+                )
         plan_routes_by_path = {route["path"]: route for route in plan_routes}
         if plan_routes_by_path["/mcp"].get("proxy_pass_url") != "http://127.0.0.1:8766":
             raise AssertionError("print-plan must expose MCP route-specific loopback upstream")
