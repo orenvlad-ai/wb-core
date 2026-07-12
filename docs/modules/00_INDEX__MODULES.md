@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–45`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–46`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -51,6 +51,7 @@ source_basis:
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
+  - "docs/modules/46_MODULE__SKU_MANAGEMENT_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -101,8 +102,9 @@ related_docs:
   - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
   - "44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
+  - "46_MODULE__SKU_MANAGEMENT_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён под Google Sheets decommission и active modules through 45: module 45 owns the independent WebCore invested-product-capital event/materialization contour; Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
+update_note: "Обновлён through module 46: `Управление SKU` owns the calculation-only deficit forecast, guarded price/bid action workflow and confirmed action-event history; Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
 ---
 
 # 1. Назначение индекса
@@ -119,7 +121,7 @@ update_note: "Обновлён под Google Sheets decommission и active modul
 
 # 1.1 Текущий Checkpoint Main
 
-Канонический индекс охватывает modules `01–45`. Modules `40` и `45` являются совместимыми read-side surfaces единого canonical cost engine: recognized projection обслуживает WB cost/P&L, paid projection — товарный капитал, а physical quantities имеют общие authoritative sources.
+Канонический индекс охватывает modules `01–46`. Modules `40` и `45` являются совместимыми read-side surfaces единого canonical cost engine: recognized projection обслуживает WB cost/P&L, paid projection — товарный капитал, а physical quantities имеют общие authoritative sources. Module `46` добавляет operator action/read-model contour поверх существующих stock, supply, prices, ads, SPP и metric truths, не создавая параллельные источники.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`

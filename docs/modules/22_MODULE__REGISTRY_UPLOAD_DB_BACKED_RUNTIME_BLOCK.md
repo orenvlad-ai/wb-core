@@ -232,3 +232,7 @@ update_note: "Обновлён под current temporal closure seam, plan-report
 - live operator-facing API endpoint;
 - deploy и orchestration;
 - production Postgres schema и внешняя инфраструктура.
+
+## SKU action event extension
+
+The same SQLite runtime owns `sheet_vitrina_v1_sku_action_events`. It is append-only audit evidence for SKU-management price and exact campaign/placement bid attempts. Only rows with confirmed commit and matching successful readback participate in last-change and daily-delta projections. Business-day grouping uses `Asia/Yekaterinburg`; multiple confirmed deltas are summed, while a day with no event has no lookup value (`null`, not `0`). This table is also the only source for the operator history panel; no parallel experiment journal is created.

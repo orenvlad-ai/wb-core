@@ -128,3 +128,7 @@ update_note: "Обновлён под uploaded compact package: bundle и valida
 - activation runtime;
 - DB-backed uniqueness checks;
 - orchestration и deploy.
+
+## Runtime-superset rule
+
+`metric_runtime_registry` may be a strict superset of the bounded pilot `metrics_v2` display bundle. Validation requires every pilot display metric to have runtime semantics; operational/live extensions such as SKU action metrics need not be copied into historical pilot bridge rows.

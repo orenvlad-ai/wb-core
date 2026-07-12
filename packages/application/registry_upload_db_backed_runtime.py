@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
 import re
 import sqlite3
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+
+from packages.business_time import business_date_from_timestamp
 
 from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
 from packages.application.registry_upload_bundle_v1 import (
@@ -997,6 +999,187 @@ class RegistryUploadDbBackedRuntime:
             user_key=normalized_user_key,
             config_key=normalized_config_key,
         )
+
+    def create_sku_action_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist one immutable SKU impact attempt/readback event in runtime SQLite."""
+
+        event_id = _normalize_required_storage_key(event.get("event_id"), field_name="event_id")
+        nm_id = int(event.get("nm_id") or 0)
+        if nm_id <= 0:
+            raise ValueError("sku action event nm_id must be positive")
+        parameter = str(event.get("parameter") or "").strip()
+        if parameter not in {"seller_price", "advertising_bid"}:
+            raise ValueError("unsupported sku action event parameter")
+        requested_at = str(event.get("requested_at") or "").strip()
+        if requested_at:
+            _validate_timestamp(requested_at, field_name="requested_at")
+        confirmed_at = str(event.get("confirmed_at") or "").strip()
+        if confirmed_at:
+            _validate_timestamp(confirmed_at, field_name="confirmed_at")
+        commit_status = str(event.get("commit_status") or "error").strip()
+        if commit_status not in {"confirmed", "error"}:
+            raise ValueError("unsupported sku action event commit_status")
+        advert_id = event.get("advert_id")
+        placement = str(event.get("placement") or "").strip()
+        if parameter == "advertising_bid":
+            if not isinstance(advert_id, int) or isinstance(advert_id, bool) or advert_id <= 0:
+                raise ValueError("advertising bid event requires positive advert_id")
+            if placement not in {"combined", "search", "recommendations"}:
+                raise ValueError("advertising bid event requires exact supported placement")
+        if commit_status == "confirmed":
+            if not confirmed_at:
+                raise ValueError("confirmed sku action event requires confirmed_at")
+            if event.get("confirmed_value") is None or event.get("delta") is None:
+                raise ValueError("confirmed sku action event requires confirmed_value and delta")
+        payload = {
+            "event_id": event_id,
+            "nm_id": nm_id,
+            "parameter": parameter,
+            "old_value": event.get("old_value"),
+            "requested_value": event.get("requested_value"),
+            "confirmed_value": event.get("confirmed_value"),
+            "delta": event.get("delta"),
+            "requested_at": requested_at,
+            "confirmed_at": confirmed_at,
+            "actor": str(event.get("actor") or ""),
+            "source": str(event.get("source") or "sku_management"),
+            "advert_id": advert_id,
+            "campaign": str(event.get("campaign") or ""),
+            "placement": placement,
+            "preview_id": str(event.get("preview_id") or ""),
+            "correlation_id": str(event.get("correlation_id") or ""),
+            "commit_status": commit_status,
+            "readback": dict(event.get("readback") or {}) if isinstance(event.get("readback"), Mapping) else {},
+            "warnings": list(event.get("warnings") or []) if isinstance(event.get("warnings"), (list, tuple)) else [],
+            "stabilization_override": bool(event.get("stabilization_override")),
+            "error": str(event.get("error") or ""),
+        }
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_sku_action_events(
+                    event_id, nm_id, parameter, old_value, requested_value,
+                    confirmed_value, delta, requested_at, confirmed_at, actor,
+                    source, advert_id, campaign, placement, preview_id,
+                    correlation_id, commit_status, readback_json, warnings_json,
+                    stabilization_override, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["event_id"], payload["nm_id"], payload["parameter"], payload["old_value"],
+                    payload["requested_value"], payload["confirmed_value"], payload["delta"],
+                    payload["requested_at"], payload["confirmed_at"] or None, payload["actor"],
+                    payload["source"], payload["advert_id"], payload["campaign"], payload["placement"],
+                    payload["preview_id"], payload["correlation_id"], payload["commit_status"],
+                    json.dumps(payload["readback"], ensure_ascii=False, sort_keys=True),
+                    json.dumps(payload["warnings"], ensure_ascii=False),
+                    1 if payload["stabilization_override"] else 0,
+                    payload["error"],
+                ),
+            )
+            conn.commit()
+        return payload
+
+    def list_sku_action_events(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        nm_id: int | None = None,
+        parameter: str = "",
+        status: str = "",
+    ) -> dict[str, Any]:
+        limit = min(max(int(limit), 1), 200)
+        offset = max(int(offset), 0)
+        clauses: list[str] = []
+        params: list[Any] = []
+        if nm_id is not None:
+            clauses.append("nm_id = ?")
+            params.append(int(nm_id))
+        if parameter:
+            clauses.append("parameter = ?")
+            params.append(str(parameter))
+        if status:
+            clauses.append("commit_status = ?")
+            params.append(str(status))
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            total = int(conn.execute(f"SELECT COUNT(*) AS count FROM sheet_vitrina_v1_sku_action_events{where_sql}", params).fetchone()["count"])
+            rows = conn.execute(
+                f"""
+                SELECT * FROM sheet_vitrina_v1_sku_action_events
+                {where_sql}
+                ORDER BY COALESCE(confirmed_at, requested_at) DESC, event_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+        return {
+            "contract_name": "sheet_vitrina_v1_sku_action_history",
+            "rows": [_sku_action_event_row_to_dict(row) for row in rows],
+            "pagination": {"limit": limit, "offset": offset, "total": total},
+            "canonical_store": "server_runtime_sqlite",
+        }
+
+    def latest_sku_action_events_by_nm(self, nm_ids: Iterable[int]) -> dict[int, dict[str, dict[str, Any]]]:
+        requested = sorted({int(value) for value in nm_ids if int(value) > 0})
+        if not requested:
+            return {}
+        placeholders = ",".join("?" for _ in requested)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM sheet_vitrina_v1_sku_action_events
+                WHERE nm_id IN ({placeholders})
+                  AND commit_status = 'confirmed'
+                  AND confirmed_at IS NOT NULL
+                ORDER BY confirmed_at DESC, event_id DESC
+                """,
+                requested,
+            ).fetchall()
+        result: dict[int, dict[str, dict[str, Any]]] = {}
+        for row in rows:
+            nm_id = int(row["nm_id"])
+            parameter = str(row["parameter"])
+            if parameter in result.setdefault(nm_id, {}):
+                continue
+            result[nm_id][parameter] = _sku_action_event_row_to_dict(row)
+        return result
+
+    def load_sku_action_daily_metric_lookup(self, as_of_date: str) -> dict[int, dict[str, float]]:
+        """Confirmed daily deltas; missing day stays absent rather than fake zero."""
+
+        _validate_iso_date(as_of_date, field_name="as_of_date")
+        target = date.fromisoformat(as_of_date)
+        candidate_from = (target - timedelta(days=1)).isoformat()
+        candidate_to = (target + timedelta(days=2)).isoformat()
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT nm_id, parameter, delta, confirmed_at
+                FROM sheet_vitrina_v1_sku_action_events
+                WHERE commit_status = 'confirmed'
+                  AND confirmed_at IS NOT NULL
+                  AND substr(confirmed_at, 1, 10) >= ?
+                  AND substr(confirmed_at, 1, 10) < ?
+                """,
+                (candidate_from, candidate_to),
+            ).fetchall()
+        result: dict[int, dict[str, float]] = {}
+        for row in rows:
+            if business_date_from_timestamp(str(row["confirmed_at"])) != as_of_date:
+                continue
+            key = "seller_price_change_rub" if row["parameter"] == "seller_price" else "advertising_bid_change_rub"
+            bucket = result.setdefault(int(row["nm_id"]), {})
+            bucket[key] = bucket.get(key, 0.0) + float(row["delta"])
+        return result
 
     def list_sheet_vitrina_users(self) -> list[dict[str, Any]]:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -7409,6 +7592,32 @@ def _sheet_vitrina_user_config_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _sku_action_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "event_id": row["event_id"],
+        "nm_id": int(row["nm_id"]),
+        "parameter": row["parameter"],
+        "old_value": row["old_value"],
+        "requested_value": row["requested_value"],
+        "confirmed_value": row["confirmed_value"],
+        "delta": row["delta"],
+        "requested_at": row["requested_at"] or "",
+        "confirmed_at": row["confirmed_at"] or "",
+        "actor": row["actor"] or "",
+        "source": row["source"] or "",
+        "advert_id": row["advert_id"],
+        "campaign": row["campaign"] or "",
+        "placement": row["placement"] or "",
+        "preview_id": row["preview_id"] or "",
+        "correlation_id": row["correlation_id"] or "",
+        "commit_status": row["commit_status"] or "",
+        "readback": _loads_json_object(row["readback_json"]),
+        "warnings": _loads_json_list(row["warnings_json"]),
+        "stabilization_override": bool(row["stabilization_override"]),
+        "error": row["error"] or "",
+    }
+
+
 def _sheet_vitrina_user_row_to_dict(row: sqlite3.Row, *, include_password_hash: bool) -> dict[str, Any]:
     role = row["role"] or ""
     payload = {
@@ -7594,6 +7803,36 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             revision INTEGER NOT NULL,
             PRIMARY KEY (user_key, config_key)
         );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_sku_action_events (
+            event_id TEXT PRIMARY KEY,
+            nm_id INTEGER NOT NULL,
+            parameter TEXT NOT NULL,
+            old_value REAL,
+            requested_value REAL,
+            confirmed_value REAL,
+            delta REAL,
+            requested_at TEXT NOT NULL,
+            confirmed_at TEXT,
+            actor TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'sku_management',
+            advert_id INTEGER,
+            campaign TEXT NOT NULL DEFAULT '',
+            placement TEXT NOT NULL DEFAULT '',
+            preview_id TEXT NOT NULL DEFAULT '',
+            correlation_id TEXT NOT NULL DEFAULT '',
+            commit_status TEXT NOT NULL,
+            readback_json TEXT NOT NULL DEFAULT '{}',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            stabilization_override INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_sku_action_events_by_nm_time
+        ON sheet_vitrina_v1_sku_action_events(nm_id, confirmed_at DESC, requested_at DESC);
+
+        CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_sku_action_events_by_status_time
+        ON sheet_vitrina_v1_sku_action_events(commit_status, confirmed_at DESC, requested_at DESC);
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_users (
             user_id TEXT PRIMARY KEY,
@@ -8674,6 +8913,9 @@ _SHEET_VITRINA_USER_SECTION_IDS = (
     "supply",
     "reports",
     "feedbacks",
+    "ads",
+    "prices",
+    "sku_management",
     "research",
     "settings",
 )

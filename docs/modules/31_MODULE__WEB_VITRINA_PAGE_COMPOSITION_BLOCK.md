@@ -455,3 +455,7 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
 - broad parity campaign with every operator/report/supply surface
 - any browser-side business truth assembly
 `Товарный капитал — наши данные` renders canonical server rows only. `Недопринято WB` is shown by the two catalog metrics (quantity and weighted cost) without a separate warehouse/stage, expansion, age/color state or action. Its capital is already included in `ФФ → WB`; page/TOTAL composition must not add it a second time.
+
+## Unified `Управление SKU` tab
+
+The common operator shell includes a compact `Управление SKU` panel with server-owned forecast/preferences, sortable/filterable/reorderable/resizable columns, inline price and exact campaign/placement bid editors, preview/confirmation/readback state, and a collapsed paginated `История изменений`. Confirmed row values and history update without full-page reload; optimistic success before WB readback is forbidden. The existing metric selector exposes observed buyer price and confirmed action-delta rows; the two action rows default to collapsed.

@@ -188,3 +188,7 @@ These use fake Promotion API sources and do not call live WB write methods. They
 - bulk bid changes.
 - campaign-first top-level UI.
 - Google Sheets/GAS write/load revival.
+
+## `Управление SKU` reuse
+
+The `Управление SKU` section reuses this exact WB Promotion adapter, campaign membership/min-bid/current-bid validation and single-target PATCH contract. Its dedicated application block performs bounded delayed control reads and records success only after the exact `advert_id + placement` returns the requested bid. That section is enabled by normal runtime construction and does not inherit the standalone tab's legacy `SHEET_VITRINA_ADS_WRITE_ENABLED` switch; section auth, preview, explicit confirmation, stale/safety validation, single-use action, audit and readback are its sufficient gates. The original `Реклама` tab gate is unchanged.

@@ -685,8 +685,8 @@ def main() -> None:
             patched_diagnostics = patched_supplier_summary.get("diagnostics", {})
             if (
                 patched_diagnostics.get("excluded_accepted_ff_shipment_count") != 2
-                or patched_diagnostics.get("excluded_accepted_ff_line_count") != 4
-                or patched_diagnostics.get("excluded_accepted_ff_quantity") != 89.0
+                or patched_diagnostics.get("excluded_accepted_ff_line_count") != 2
+                or patched_diagnostics.get("excluded_accepted_ff_quantity") != 77.0
             ):
                 raise AssertionError(f"status after actual_ff_acceptance_date PATCH must expose excluded counters, got {patched_diagnostics}")
 
@@ -1136,12 +1136,12 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
             "supplier_name": "HanShang Technology",
             "customer_name": "",
             "currency": "RMB",
-            "product_qty_total": 45,
-            "product_amount_total": 45,
+            "product_qty_total": 33,
+            "product_amount_total": 33,
             "extras_amount_total": 0,
-            "invoice_amount_total": 45,
-            "declared_invoice_total": 45,
-            "match_status": "has_unmatched",
+            "invoice_amount_total": 33,
+            "declared_invoice_total": 33,
+            "match_status": "all_matched",
             "source_filename": "supplier.xlsx",
             "source_file_sha256": "",
             "source_file_path": "",
@@ -1151,8 +1151,37 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
         },
         lines=[
             line("ln_inside_1", sort_order=1, nm_id=210183919, qty=33, match_status="matched", name="Clear iPhone 14 Pro"),
-            line("ln_inside_2", sort_order=2, nm_id=None, qty=5, match_status="unmatched", name="Unknown"),
-            line("ln_inside_3", sort_order=3, nm_id=None, qty=7, match_status="ambiguous", name="Ambiguous"),
+        ],
+    )
+    runtime.save_supplier_shipment(
+        header={
+            "shipment_id": "sup_factory_inbound_unresolved",
+            "created_at": "2026-04-18T09:02:00Z",
+            "updated_at": "2026-04-18T09:02:00Z",
+            "shipment_date": "2026-04-20",
+            "invoice_no": "UNRESOLVED-1",
+            "invoice_date": "2026-04-19",
+            "contract_no": "",
+            "contract_date": "",
+            "supplier_name": "HanShang Technology",
+            "customer_name": "",
+            "currency": "RMB",
+            "product_qty_total": 12,
+            "product_amount_total": 12,
+            "extras_amount_total": 0,
+            "invoice_amount_total": 12,
+            "declared_invoice_total": 12,
+            "match_status": "has_unmatched",
+            "source_filename": "supplier-unresolved.xlsx",
+            "source_file_sha256": "",
+            "source_file_path": "",
+            "parser_version": "smoke",
+            "warnings": [],
+            "errors": [],
+        },
+        lines=[
+            line("ln_unresolved_1", sort_order=1, nm_id=None, qty=5, match_status="unmatched", name="Unknown"),
+            line("ln_unresolved_2", sort_order=2, nm_id=None, qty=7, match_status="ambiguous", name="Ambiguous"),
         ],
     )
     runtime.save_supplier_shipment(

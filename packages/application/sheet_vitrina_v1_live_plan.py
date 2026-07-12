@@ -101,6 +101,12 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (
     own_stage_metric_key,
     own_stage_total_metric_key,
 )
+from packages.application.sheet_vitrina_v1_sku_actions import (
+    ADVERTISING_BID_CHANGE_RUB_METRIC_KEY,
+    BUYER_PRICE_RUB_METRIC_KEY,
+    SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
+    extend_metrics_with_sku_action_metrics,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
     TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY,
@@ -168,6 +174,7 @@ EXECUTION_MODE_PERSISTED_RETRY = "persisted_retry"
 STRICT_CLOSED_DAY_SOURCE_KEYS = {"seller_funnel_snapshot", "web_source_snapshot"}
 SPP_PROXY_SOURCE_KEY = "spp_proxy"
 SPP_PROXY_METRIC_KEY = "spp_proxy"
+SKU_ACTION_SOURCE_KEY = "sku_action_events"
 HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     "sales_funnel_history",
     "sf_period",
@@ -202,6 +209,7 @@ BLOCKED_SOURCE_STATUSES = {}
 SOURCE_TEMPORAL_POLICIES = {
     **CANONICAL_SOURCE_TEMPORAL_POLICIES,
     OWN_PRODUCT_CAPITAL_SOURCE_KEY: "dual_day_capable",
+    SKU_ACTION_SOURCE_KEY: "dual_day_capable",
 }
 SOURCE_CLASSIFICATION_GROUPS = {
     "seller_funnel_snapshot": "A_bot_web_source_historical_closed_day_capable",
@@ -219,6 +227,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "ads_bids": "C_wb_api_current_snapshot_only",
     "cost_price": "D_other_non_wb_or_blocked",
     "promo_by_price": "D_other_non_wb_or_browser_collector",
+    SKU_ACTION_SOURCE_KEY: "F_webcore_confirmed_operator_events",
 }
 PERCENT_SOURCE_KEYS = {"ctr", "ctr_current", "localizationPercent"}
 SEARCH_CTR_AVG_TOTAL_METRIC_KEY = "avg_ctr_current"
@@ -367,6 +376,8 @@ class SlotLookups:
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     own_product_capital_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    sku_action_lookup: dict[int, dict[str, float]] = field(default_factory=dict)
+    sku_action_error: str = ""
     column_date: str = ""
 
 
@@ -999,9 +1010,11 @@ class SheetVitrinaV1LivePlanBlock:
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 
-        effective_metrics = extend_metrics_with_own_product_capital_metrics(
-            extend_metrics_with_our_wb_cost_metrics(
-                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        effective_metrics = extend_metrics_with_sku_action_metrics(
+            extend_metrics_with_own_product_capital_metrics(
+                extend_metrics_with_our_wb_cost_metrics(
+                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                )
             )
         )
         metrics_by_key = {item.metric_key: item for item in effective_metrics}
@@ -1272,6 +1285,8 @@ class SheetVitrinaV1LivePlanBlock:
                 onec_stocks_lookup={},
                 our_wb_cost_lookup={},
                 own_product_capital_lookup={},
+                sku_action_lookup={},
+                sku_action_error="",
                 ads_compact_lookup={},
                 fin_lookup={},
                 fin_storage_fee_total=None,
@@ -1540,6 +1555,13 @@ class SheetVitrinaV1LivePlanBlock:
                 ).load_daily_metric_lookup(slot.column_date)
             except Exception:
                 current_lookups.own_product_capital_lookup = {}
+            try:
+                current_lookups.sku_action_lookup = self.runtime.load_sku_action_daily_metric_lookup(
+                    slot.column_date
+                )
+            except Exception:
+                current_lookups.sku_action_lookup = {}
+                current_lookups.sku_action_error = "sku action event runtime lookup failed"
 
             if not selected_source_keys or OWN_PRODUCT_CAPITAL_SOURCE_KEY in selected_source_keys:
                 covered = sorted(
@@ -1568,6 +1590,33 @@ class SheetVitrinaV1LivePlanBlock:
                 )
                 statuses.append(own_status)
                 _emit_source_status_log(emit, own_status)
+
+            if not selected_source_keys or SKU_ACTION_SOURCE_KEY in selected_source_keys:
+                covered = sorted(
+                    nm_id for nm_id in requested_nm_ids
+                    if nm_id in current_lookups.sku_action_lookup
+                )
+                action_status = LiveSourceStatus(
+                    source_key=SKU_ACTION_SOURCE_KEY,
+                    temporal_slot=slot.slot_key,
+                    temporal_policy=SOURCE_TEMPORAL_POLICIES[SKU_ACTION_SOURCE_KEY],
+                    column_date=slot.column_date,
+                    kind="error" if current_lookups.sku_action_error else "success",
+                    freshness=slot.column_date,
+                    snapshot_date=slot.column_date,
+                    date=slot.column_date,
+                    date_from="",
+                    date_to="",
+                    requested_count=len(requested_nm_ids),
+                    covered_count=len(covered),
+                    missing_nm_ids=[],
+                    note=current_lookups.sku_action_error or (
+                        "source=WebCore; confirmed operator event daily delta; "
+                        "missing rows mean no confirmed change, not zero"
+                    ),
+                )
+                statuses.append(action_status)
+                _emit_source_status_log(emit, action_status)
 
         if not selected_source_keys or "cost_price" in selected_source_keys:
             for slot in temporal_slots:
@@ -3017,6 +3066,18 @@ class _MetricEvaluator:
         return None if not has_rows or qty <= 0 else confirmed / qty
 
     def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
+        if metric_key in {SELLER_PRICE_CHANGE_RUB_METRIC_KEY, ADVERTISING_BID_CHANGE_RUB_METRIC_KEY}:
+            return _optional_float(
+                self._slot_lookups(temporal_slot).sku_action_lookup.get(nm_id, {}).get(metric_key)
+            )
+        if metric_key == BUYER_PRICE_RUB_METRIC_KEY:
+            return _lookup_attr(
+                self._slot_lookups(temporal_slot),
+                "spp_proxy_lookup",
+                nm_id,
+                "public_buyer_price",
+                1.0,
+            )
         if metric_key == "cost_price_rub":
             config_item = self.config_by_nm_id.get(nm_id)
             if config_item is None:
