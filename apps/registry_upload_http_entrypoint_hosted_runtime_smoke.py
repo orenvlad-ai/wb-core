@@ -432,6 +432,8 @@ def main() -> None:
                 raise AssertionError("plan-report baseline template route must be publicly readable")
             if route_map["plan"]["http_status"] != 200:
                 raise AssertionError("plan with seeded snapshot must be publicly readable")
+            if route_map["own_product_capital_status"]["http_status"] != 200:
+                raise AssertionError("own-product-capital status route must be publicly readable")
             if route_map["factory_order_status"]["http_status"] != 200:
                 raise AssertionError("factory-order status route must be publicly readable")
             if route_map["factory_order_template_stock_ff"]["http_status"] != 200:
@@ -466,6 +468,8 @@ def main() -> None:
                 raise AssertionError("canonical loopback probe must not call refresh unless explicitly requested")
             if loopback_routes["status"]["http_status"] != 200:
                 raise AssertionError("status with seeded snapshot must stay 200")
+            if loopback_routes["own_product_capital_status"]["http_status"] != 200:
+                raise AssertionError("own-product-capital status loopback route must stay 200")
             if loopback_routes["web_vitrina_read"]["http_status"] != 200:
                 raise AssertionError("web-vitrina read route with seeded snapshot must stay 200")
             if loopback_routes["operator_reports"]["http_status"] != 200:
