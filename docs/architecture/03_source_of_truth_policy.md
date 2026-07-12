@@ -72,3 +72,8 @@ Legacy repositories, Apps Script/GAS artifacts и historical sheet/export paths 
 - никакой потери или смешивания чужого dirty state при branch/sync/merge работе;
 - никакого подтверждения результата только по отчёту агента без проверки применимых branch/commit, semantic diff, checks, review state и authoritative docs;
 - каждый merged change подтверждается в current `origin/main`, а live/runtime change дополнительно — canonical deploy и live/public verify.
+## Canonical cost and product movement
+
+From `2026-07-01`, cost/capital consumers share one canonical component and replay engine. Physical truth remains in supplier registry, `ff_stock_ledger`, persisted WB sent/accepted evidence and official WB stock; canonical cost tables are versioned derived projections/audit only. Module 40 and module 45 may expose compatible metrics but cannot own independent baselines or physical inventory. `Недопринято WB` is a derived substate of `ФФ → WB`, never a sixth warehouse.
+
+Baseline is a guarded migration fact, not a continuously refreshed fallback. It must cover 100% of opening owned quantity, may use only the discovered certified June supplier shipment or nearest retrospective FF-stage 1C cost `<= 2026-05-16`, and cannot use future evidence, zero, near-future proxy or hidden carry-forward. Post-apply correction requires a separately fingerprinted audited recalibration.

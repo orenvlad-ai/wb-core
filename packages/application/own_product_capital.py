@@ -24,7 +24,10 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_STAGES,
     OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
     OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
     OWN_TOTAL_QTY_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
     own_stage_metric_key,
 )
 from packages.contracts.supplier_financial_documents import (
@@ -1783,6 +1786,10 @@ class OwnProductCapitalBlock:
 
     def load_daily_metric_lookup(self, as_of_date: str) -> dict[int, dict[str, Any]]:
         as_of_date = _iso_date(as_of_date, "as_of_date")
+        if as_of_date >= "2026-07-01":
+            canonical = self._load_canonical_daily_metric_lookup(as_of_date)
+            if canonical:
+                return canonical
         with _connect(self.runtime.db_path) as conn:
             _ensure_own_capital_schema(conn)
             rows = conn.execute(
@@ -1802,6 +1809,7 @@ class OwnProductCapitalBlock:
             confirmed = _decimal(row["confirmed_quantity"])
             target = result.setdefault(nm_id, {"presentation_reasons": [], "stage_presentation": {}})
             target[own_stage_metric_key(stage, "qty")] = float(qty)
+            target[own_stage_metric_key(stage, "paid_equivalent_qty")] = float(qty)
             target[own_stage_metric_key(stage, "capital_rub")] = float(capital)
             target[own_stage_metric_key(stage, "unit_cost_rub")] = (
                 float(capital / qty) if qty > ZERO else None
@@ -1809,7 +1817,13 @@ class OwnProductCapitalBlock:
             target[own_stage_metric_key(stage, "confirmed_share_pct")] = (
                 float(confirmed / qty) if qty > ZERO else None
             )
+            target[own_stage_metric_key(stage, "cost_coverage_pct")] = (
+                1.0 if qty > ZERO and capital > ZERO else (0.0 if qty > ZERO else None)
+            )
             target[own_stage_metric_key(stage, "confirmed_qty")] = float(confirmed)
+            target[own_stage_metric_key(stage, "cost_covered_qty")] = (
+                float(qty) if capital > ZERO else 0.0
+            )
             diagnostics = _json_loads(row.get("diagnostics_json"))
             stage_reasons = [str(item) for item in diagnostics.get("reasons") or []]
             target["presentation_reasons"].extend(stage_reasons)
@@ -1829,9 +1843,12 @@ class OwnProductCapitalBlock:
                 ZERO,
             )
             target[OWN_TOTAL_QTY_METRIC_KEY] = float(qty)
+            target[OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY] = float(qty)
             target[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = float(capital)
             target[OWN_AVG_COST_RUB_METRIC_KEY] = float(capital / qty) if qty > ZERO else None
             target[OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY] = float(confirmed / qty) if qty > ZERO else None
+            target.setdefault(OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY, 0.0)
+            target.setdefault(OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY, None)
             if qty > ZERO and confirmed < qty:
                 target["presentation_state"] = "unconfirmed"
                 if not target["presentation_reasons"]:
@@ -1839,6 +1856,97 @@ class OwnProductCapitalBlock:
             else:
                 target["presentation_state"] = "confirmed"
             target["presentation_reason"] = "; ".join(sorted(set(target["presentation_reasons"])))
+        return result
+
+    def _load_canonical_daily_metric_lookup(self, as_of_date: str) -> dict[int, dict[str, Any]]:
+        """Read module-45 public metrics from the unified projection after cutover."""
+        from packages.application.canonical_cost_engine import (
+            STAGE_FF_TO_WB,
+        )
+
+        with _connect(self.runtime.db_path) as conn:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_canonical_cost_daily_state'"
+            ).fetchone() is None:
+                return {}
+            rows = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_canonical_cost_daily_state
+                WHERE as_of_date=? ORDER BY nm_id,stage
+                """,
+                (as_of_date,),
+            ).fetchall()
+        result: dict[int, dict[str, Any]] = {}
+        for raw in rows:
+            row = dict(raw)
+            nm_id = int(row["nm_id"])
+            stage = str(row["stage"])
+            qty = _decimal(row["physical_quantity"])
+            paid_equivalent = _decimal(row["paid_equivalent_quantity"])
+            capital = _decimal(row["paid_capital_rub"])
+            covered = _decimal(row["cost_covered_quantity"])
+            confirmed = _decimal(row["confirmed_quantity"])
+            target = result.setdefault(
+                nm_id,
+                {"presentation_reasons": [], "stage_presentation": {}},
+            )
+            target[own_stage_metric_key(stage, "qty")] = float(qty)
+            target[own_stage_metric_key(stage, "paid_equivalent_qty")] = float(paid_equivalent)
+            target[own_stage_metric_key(stage, "capital_rub")] = float(capital)
+            target[own_stage_metric_key(stage, "unit_cost_rub")] = (
+                float(capital / paid_equivalent) if paid_equivalent > ZERO else None
+            )
+            target[own_stage_metric_key(stage, "cost_coverage_pct")] = (
+                float(covered / qty) if qty > ZERO else None
+            )
+            target[own_stage_metric_key(stage, "confirmed_share_pct")] = (
+                float(confirmed / qty) if qty > ZERO else None
+            )
+            target[own_stage_metric_key(stage, "confirmed_qty")] = float(confirmed)
+            target[own_stage_metric_key(stage, "cost_covered_qty")] = float(covered)
+            source_quality = str(row.get("source_quality") or "")
+            reasons = [] if source_quality == "primary_documents" else [source_quality or "coverage_gap"]
+            target["presentation_reasons"].extend(reasons)
+            target["stage_presentation"][stage] = {
+                "state": "confirmed" if qty <= ZERO or confirmed >= qty else "unconfirmed",
+                "reason": "; ".join(reasons),
+            }
+            if stage == STAGE_FF_TO_WB:
+                under_qty = _decimal(row["underaccepted_quantity"])
+                under_capital = _decimal(row["underaccepted_paid_capital_rub"])
+                target[OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY] = float(under_qty)
+                target[OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY] = (
+                    float(under_capital / under_qty) if under_qty > ZERO else None
+                )
+        for target in result.values():
+            qty = sum((_decimal(target.get(own_stage_metric_key(stage, "qty"))) for stage in OWN_PRODUCT_CAPITAL_STAGES), ZERO)
+            paid_equivalent = sum((
+                _decimal(target.get(own_stage_metric_key(stage, "paid_equivalent_qty")))
+                for stage in OWN_PRODUCT_CAPITAL_STAGES
+            ), ZERO)
+            capital = sum((
+                _decimal(target.get(own_stage_metric_key(stage, "capital_rub")))
+                for stage in OWN_PRODUCT_CAPITAL_STAGES
+            ), ZERO)
+            confirmed = sum((
+                _decimal(target.get(own_stage_metric_key(stage, "confirmed_qty")))
+                for stage in OWN_PRODUCT_CAPITAL_STAGES
+            ), ZERO)
+            target[OWN_TOTAL_QTY_METRIC_KEY] = float(qty)
+            target[OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY] = float(paid_equivalent)
+            target[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = float(capital)
+            target[OWN_AVG_COST_RUB_METRIC_KEY] = (
+                float(capital / paid_equivalent) if paid_equivalent > ZERO else None
+            )
+            target[OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY] = (
+                float(confirmed / qty) if qty > ZERO else None
+            )
+            target["presentation_state"] = (
+                "confirmed" if qty <= ZERO or confirmed >= qty else "unconfirmed"
+            )
+            target["presentation_reason"] = "; ".join(
+                sorted(set(target["presentation_reasons"]))
+            )
         return result
 
     def status(self) -> dict[str, Any]:

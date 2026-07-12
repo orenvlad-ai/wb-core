@@ -42,8 +42,6 @@ WB_COST_STATUS_NEEDS_REVIEW = "needs_review"
 WB_SUPPLY_STATUS_ACCEPTED = 5
 
 OPENING_SOURCE_CONFIRMED_SUPPLY = "opening_confirmed_supply"
-OPENING_SOURCE_NEAR_FUTURE_PROXY = "near_future_proxy"
-OPENING_SOURCE_METRIC11_FALLBACK = "metric11_2026_07_01_fallback"
 OPENING_SOURCE_NEEDS_REVIEW = "needs_review"
 
 SUPPLIER_FF_ALLOCATION_METHOD = "qty_based_common_pool"
@@ -269,6 +267,45 @@ class OurWbCostBlock:
 
     def rebuild_all(self, *, opening_date: str = OUR_WB_COST_OPENING_DATE) -> OurWbCostRebuildResult:
         supplier_count = self.materialize_existing_accepted_ff_shipments()
+        # After the guarded baseline apply, module 40 is a compatibility facade:
+        # one canonical engine owns baseline, WB rolling state and capital views.
+        from packages.application.canonical_cost_engine import CanonicalCostEngine
+
+        canonical = None
+        with _connect(self.runtime.db_path) as conn:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_canonical_cost_baseline_versions'"
+            ).fetchone()
+            baseline_active = bool(
+                table_exists
+                and conn.execute(
+                    "SELECT 1 FROM sheet_vitrina_v1_canonical_cost_baseline_versions WHERE is_current=1"
+                ).fetchone()
+            )
+        if baseline_active:
+            canonical = CanonicalCostEngine(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
+            result = canonical.rebuild(date_from=opening_date)
+            return OurWbCostRebuildResult(
+                supplier_layers_materialized=supplier_count,
+                wb_supply_layers_materialized=result.movement_rows_changed,
+                opening_rows_materialized=0,
+                daily_state_rows_materialized=result.daily_rows_changed,
+            )
+        with _connect(self.runtime.db_path) as conn:
+            legacy_baseline_exists = conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_wb_opening_baseline WHERE as_of_date=? LIMIT 1",
+                (opening_date,),
+            ).fetchone() is not None
+        if legacy_baseline_exists:
+            # Freeze the already deployed legacy read-side until the separately
+            # approved canonical baseline is applied.  No new forbidden fallback
+            # may be selected in this transition window.
+            return OurWbCostRebuildResult(
+                supplier_layers_materialized=supplier_count,
+                wb_supply_layers_materialized=0,
+                opening_rows_materialized=0,
+                daily_state_rows_materialized=0,
+            )
         wb_supply_count = self.materialize_wb_supply_cost_layers(opening_date=opening_date)
         opening_count = self.materialize_opening_baseline(opening_date=opening_date)
         daily_count = self.materialize_daily_state(opening_date=opening_date)
@@ -364,7 +401,6 @@ class OurWbCostBlock:
         ):
             return 0
         current_ff_lines_by_nm = self._load_current_supplier_ff_cost_lines_grouped_by_nm()
-        opening_component_estimates = self._load_wb_component_estimates_by_nm()
         opening_stock = self._load_snapshot_sku_metric(opening_date, "stock_total")
         metric11 = self._load_snapshot_sku_metric(opening_date, ONEC_STOCKS_WB_UNIT_COST_RUB_METRIC_KEY)
         active_names = self._load_active_sku_names()
@@ -378,7 +414,7 @@ class OurWbCostBlock:
                     current_ff_lines_by_nm.get(nm_id, []),
                     opening_date=opening_date,
                 )
-                component_estimate = opening_component_estimates.get(nm_id, 0.0)
+                component_estimate = 0.0
                 baseline = self._select_opening_baseline(
                     nm_id=nm_id,
                     display_name=display_name,
@@ -578,6 +614,22 @@ class OurWbCostBlock:
         return count
 
     def status(self, *, opening_date: str = OUR_WB_COST_OPENING_DATE) -> dict[str, Any]:
+        from packages.application.canonical_cost_engine import CanonicalCostEngine
+
+        with _connect(self.runtime.db_path) as conn:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_canonical_cost_baseline_versions'"
+            ).fetchone()
+            baseline_active = bool(
+                table_exists
+                and conn.execute(
+                    "SELECT 1 FROM sheet_vitrina_v1_canonical_cost_baseline_versions WHERE is_current=1"
+                ).fetchone()
+            )
+        if baseline_active:
+            return CanonicalCostEngine(
+                runtime=self.runtime, timestamp_factory=self.timestamp_factory
+            ).status()
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
             supplier_layers = conn.execute(
@@ -925,11 +977,6 @@ class OurWbCostBlock:
                 source_status = OPENING_SOURCE_CONFIRMED_SUPPLY
                 confirmed_qty = opening_stock_qty
                 estimated_qty = 0.0
-            elif accepted_ff_date >= opening_date:
-                source_priority = 2
-                source_status = OPENING_SOURCE_NEAR_FUTURE_PROXY
-                confirmed_qty = 0.0
-                estimated_qty = opening_stock_qty
             else:
                 source_priority = 0
                 source_status = ""
@@ -952,29 +999,10 @@ class OurWbCostBlock:
                     "component_status": {
                         "supplier_ff_cost": str(ff_line.get("layer_status") or "confirmed"),
                         "supplier_ff_accepted_ff_date": accepted_ff_date,
-                        "wb_component_estimate": "derived_from_post_opening_supplies" if component_estimate else "absent_or_zero",
+                        "wb_component_estimate": "forbidden_for_opening_baseline",
                         "model": "management_proxy_opening_baseline",
                     },
                 }
-        if metric11_value is not None:
-            return {
-                "nm_id": nm_id,
-                "display_name": display_name,
-                "opening_unit_cost_rub": metric11_value,
-                "source_priority": 3,
-                "source_status": OPENING_SOURCE_METRIC11_FALLBACK,
-                "supplier_ff_cost_layer_id": None,
-                "supplier_ff_cost_layer_line_id": None,
-                "metric11_value": metric11_value,
-                "confirmed_qty": 0.0,
-                "estimated_qty": 0.0,
-                "fallback_qty": opening_stock_qty,
-                "missing_reason": None,
-                "component_status": {
-                    "metric11": "frozen_2026_07_01",
-                    "model": "management_proxy_opening_baseline",
-                },
-            }
         return {
             "nm_id": nm_id,
             "display_name": display_name,
@@ -1304,13 +1332,6 @@ def _select_opening_ff_line_for_baseline(
     ]
     if opening_window:
         return sorted(opening_window, key=lambda line: str(line.get("accepted_ff_date") or ""), reverse=True)[0]
-    near_future = [
-        line
-        for line in usable
-        if str(line.get("accepted_ff_date") or "") >= opening_date
-    ]
-    if near_future:
-        return sorted(near_future, key=lambda line: str(line.get("accepted_ff_date") or ""))[0]
     return None
 
 

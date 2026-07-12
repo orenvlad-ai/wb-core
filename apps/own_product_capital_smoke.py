@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import apps.own_product_capital_backfill as backfill_module  # noqa: E402
 from apps.own_product_capital_backfill import run as run_backfill  # noqa: E402
 from packages.application.cny_ledger import CnyLedgerBlock  # noqa: E402
 from packages.application.own_product_capital import (  # noqa: E402
@@ -100,7 +99,6 @@ def main() -> None:
     _assert_historical_doprinato_paid_boundary()
     _assert_targeted_orphan_doprinato_classification()
     _assert_persisted_expense_events()
-    _assert_historical_source_backfill()
     print("own product capital smoke: OK")
 
 
@@ -448,88 +446,17 @@ def _assert_metric_identities(block: OwnProductCapitalBlock) -> None:
 
 
 def _assert_backfill_runner(runtime: RegistryUploadDbBackedRuntime, block: OwnProductCapitalBlock) -> None:
-    with _connect(runtime.db_path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS own_capital_non_target_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO own_capital_non_target_sentinel VALUES (1, '1c-proxy2-proxy3-unchanged')"
-        )
-        conn.execute(
-            "DELETE FROM sheet_vitrina_v1_own_capital_daily_state WHERE as_of_date BETWEEN '2026-07-01' AND '2026-07-12'"
-        )
-        conn.commit()
     args = argparse.Namespace(
-        runtime_dir=str(runtime.runtime_dir), date_from="2026-07-01", date_to="2026-07-12", apply=False, fingerprint="",
-        backup_dir=str(runtime.runtime_dir / "backups"),
+        runtime_dir=str(runtime.runtime_dir), date_from="2026-07-01", date_to="2026-07-12",
+        apply=True, fingerprint="legacy-disabled", backup_dir=str(runtime.runtime_dir / "backups"),
     )
-    dry = run_backfill(args)
-    if dry["applied"] or not dry["would_change"]:
-        raise AssertionError(f"backfill must default to changing dry-run: {dry}")
-    if not dry["preflight"]["unresolved_blocker_count"]:
-        raise AssertionError(f"backfill preflight must disclose unresolved blockers: {dry}")
-    args.apply = True
-    args.fingerprint = dry["fingerprint"]
-    _must_fail(lambda: run_backfill(args), "backfill apply with unresolved blockers")
-    with _connect(runtime.db_path) as conn:
-        conn.execute(
-            "UPDATE sheet_vitrina_v1_own_capital_blockers SET resolved_at = ? WHERE resolved_at IS NULL",
-            (NOW,),
-        )
-        conn.commit()
-    args.apply = False
-    args.fingerprint = ""
-    dry = run_backfill(args)
-    if dry["preflight"]["unresolved_blocker_count"]:
-        raise AssertionError(f"resolved fixture blockers must leave a clean preflight: {dry}")
-    args.apply = True
-    args.fingerprint = dry["fingerprint"]
-    inode_before = runtime.db_path.stat().st_ino
-    original_copy = backfill_module._copy_candidate_target_rows
-
-    def fail_after_copy(*copy_args, **copy_kwargs):
-        original_copy(*copy_args, **copy_kwargs)
-        raise RuntimeError("synthetic in-place apply failure")
-
-    backfill_module._copy_candidate_target_rows = fail_after_copy
     try:
-        try:
-            run_backfill(args)
-        except RuntimeError as exc:
-            if "synthetic" not in str(exc):
-                raise
-        else:
-            raise AssertionError("synthetic in-place failure unexpectedly committed")
-    finally:
-        backfill_module._copy_candidate_target_rows = original_copy
-    with _connect(runtime.db_path) as conn:
-        leaked = conn.execute(
-            "SELECT COUNT(*) FROM sheet_vitrina_v1_own_capital_daily_state WHERE as_of_date BETWEEN '2026-07-01' AND '2026-07-12'"
-        ).fetchone()[0]
-    if leaked:
-        raise AssertionError("failed in-place apply must roll back every target row")
-    applied = run_backfill(args)
-    if not applied["applied"] or applied["post_run"]["changed"] != 0:
-        raise AssertionError(f"backfill apply/idempotency failed: {applied}")
-    if runtime.db_path.stat().st_ino != inode_before:
-        raise AssertionError("live SQLite inode changed; apply must be in-place")
-    if applied["backup"]["integrity_check"] != "ok":
-        raise AssertionError(f"backfill backup integrity missing: {applied}")
-    backup_path = Path(args.backup_dir) / applied["backup"]["filename"]
-    if backup_path.stat().st_mode & 0o777 != 0o600:
-        raise AssertionError("backfill backup permissions must be 0600")
-    with _connect(runtime.db_path) as conn:
-        sentinel = conn.execute(
-            "SELECT value FROM own_capital_non_target_sentinel WHERE id=1"
-        ).fetchone()[0]
-    if sentinel != "1c-proxy2-proxy3-unchanged":
-        raise AssertionError("non-target sentinel changed during in-place apply")
-    second = run_backfill(argparse.Namespace(
-        runtime_dir=str(runtime.runtime_dir), date_from="2026-07-01", date_to="2026-07-12", apply=False, fingerprint="", backup_dir=""
-    ))
-    if second["would_change"]:
-        raise AssertionError(f"second backfill dry-run must have zero changes: {second}")
+        run_backfill(args)
+    except ValueError as exc:
+        if "audit/dry-run only" not in str(exc):
+            raise
+    else:
+        raise AssertionError("legacy own-capital runner must not remain apply-capable")
     block.recalculate(date_to="2026-07-12")
 
 

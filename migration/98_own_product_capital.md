@@ -1,5 +1,10 @@
 # Own Product Capital migration contract
 
+> Legacy audit contract. The apply-capable successor for the `2026-07-01` cutover is
+> `migration/99_unified_canonical_cost_engine.md` and
+> `apps/canonical_cost_engine_backfill.py`. This file does not authorize a second
+> production baseline or physical inventory truth.
+
 ## Scope
 
 Add the independent WebCore management block `Товарный капитал — наши данные`. The additive SQLite schema persists paid ownership layers, dated movements, FF moving-average cost snapshots, WB underacceptance outstanding state, daily SKU/TOTAL materialization, blockers and operator expense-completeness certification. Existing 1C, proxy2 and proxy3 data is not rewritten.

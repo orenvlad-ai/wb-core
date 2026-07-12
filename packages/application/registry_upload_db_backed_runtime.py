@@ -448,6 +448,41 @@ class RegistryUploadDbBackedRuntime:
             return {}
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            canonical_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_canonical_cost_daily_state'"
+            ).fetchone()
+            if canonical_exists is not None and date_key >= "2026-07-01":
+                canonical_rows = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_canonical_cost_daily_state
+                    WHERE as_of_date=? AND stage='WB'
+                    """,
+                    (date_key,),
+                ).fetchall()
+                if canonical_rows:
+                    return {
+                        int(row["nm_id"]): {
+                            "as_of_date": str(row["as_of_date"]),
+                            "nm_id": int(row["nm_id"]),
+                            "stock_qty": float(row["physical_quantity"]),
+                            "cost_covered_qty": float(row["cost_covered_quantity"]),
+                            "our_wb_unit_cost_rub": (
+                                float(row["recognized_unit_cost_rub"])
+                                if row["recognized_unit_cost_rub"] is not None else None
+                            ),
+                            "confirmed_qty": float(row["confirmed_quantity"]),
+                            "estimated_qty": max(float(row["cost_covered_quantity"]) - float(row["confirmed_quantity"]), 0.0),
+                            "fallback_qty": float(row["cost_covered_quantity"]) if str(row["source_quality"]) == "legacy_1c_fallback" else 0.0,
+                            "confirmed_share_pct": (
+                                float(row["confirmed_quantity"]) / float(row["physical_quantity"])
+                                if float(row["physical_quantity"]) > 0 else None
+                            ),
+                            "source_status": str(row["source_quality"]),
+                            "component_status_json": row["diagnostics_json"],
+                            "calculated_at": row["calculated_at"],
+                        }
+                        for row in canonical_rows
+                    }
             rows = conn.execute(
                 """
                 SELECT *

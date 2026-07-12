@@ -454,3 +454,4 @@ update_note: "Phase 4 live page composition остаётся server-driven; вк
 - legacy Google Sheets/export contour migration
 - broad parity campaign with every operator/report/supply surface
 - any browser-side business truth assembly
+`Товарный капитал — наши данные` renders canonical server rows only. `Недопринято WB` is shown by the two catalog metrics (quantity and weighted cost) without a separate warehouse/stage, expansion, age/color state or action. Its capital is already included in `ФФ → WB`; page/TOTAL composition must not add it a second time.
