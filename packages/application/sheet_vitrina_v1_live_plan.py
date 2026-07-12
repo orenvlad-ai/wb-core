@@ -89,6 +89,12 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY,
     OWN_TOTAL_QTY_METRIC_KEY,
     OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
+    OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
+    OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_QTY_TOTAL_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_TOTAL_METRIC_KEY,
     extend_metrics_with_own_product_capital_metrics,
     is_own_product_capital_sku_metric_key,
     own_product_capital_metric_value,
@@ -229,7 +235,7 @@ SOURCE_DIAGNOSTIC_SPECS = {
         "module": "packages.application.own_product_capital",
         "block": "OwnProductCapitalBlock",
         "adapter": "RegistryUploadDbBackedRuntime",
-        "endpoint": "sqlite://own_product_capital_events+daily_state",
+        "endpoint": "sqlite://canonical_cost_components+daily_state",
     },
     "seller_funnel_snapshot": {
         "module": "packages.application.seller_funnel_snapshot_block",
@@ -2691,12 +2697,18 @@ class _MetricEvaluator:
                 value = self._aggregate_our_wb_confirmed_share(temporal_slot)
             elif metric.metric_key == OWN_TOTAL_QTY_TOTAL_METRIC_KEY:
                 value = self._aggregate_sum(OWN_TOTAL_QTY_METRIC_KEY, self.enabled_config, temporal_slot)
+            elif metric.metric_key == OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY:
+                value = self._aggregate_sum(
+                    OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
             elif metric.metric_key == OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY:
                 value = self._aggregate_sum(OWN_TOTAL_CAPITAL_RUB_METRIC_KEY, self.enabled_config, temporal_slot)
             elif metric.metric_key == OWN_AVG_COST_RUB_TOTAL_METRIC_KEY:
                 value = _divide_or_none(
                     self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
-                    self.resolve_total(OWN_TOTAL_QTY_TOTAL_METRIC_KEY, temporal_slot),
+                    self.resolve_total(OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY, temporal_slot),
                 )
             elif metric.metric_key == OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY:
                 value = self._aggregate_own_product_capital_confirmed_share(temporal_slot)
@@ -2704,6 +2716,19 @@ class _MetricEvaluator:
                 value = _divide_or_none(
                     self.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, temporal_slot),
                     self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
+                )
+            elif metric.metric_key == OWN_UNDERACCEPTED_WB_QTY_TOTAL_METRIC_KEY:
+                value = self._aggregate_sum(
+                    OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
+                )
+            elif metric.metric_key == OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_TOTAL_METRIC_KEY:
+                value = self._aggregate_weighted_avg(
+                    OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
+                    OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+                    self.enabled_config,
+                    temporal_slot,
                 )
             elif metric.metric_key in {
                 own_stage_total_metric_key(stage, "unit_cost_rub")
@@ -2715,7 +2740,7 @@ class _MetricEvaluator:
                 )
                 value = _divide_or_none(
                     self._aggregate_sum(own_stage_metric_key(stage, "capital_rub"), self.enabled_config, temporal_slot),
-                    self._aggregate_sum(own_stage_metric_key(stage, "qty"), self.enabled_config, temporal_slot),
+                    self._aggregate_sum(own_stage_metric_key(stage, "paid_equivalent_qty"), self.enabled_config, temporal_slot),
                 )
             elif metric.metric_key in {
                 own_stage_total_metric_key(stage, "confirmed_share_pct")
@@ -2726,6 +2751,15 @@ class _MetricEvaluator:
                     if metric.metric_key == own_stage_total_metric_key(item, "confirmed_share_pct")
                 )
                 value = self._aggregate_own_stage_confirmed_share(stage, temporal_slot)
+            elif metric.metric_key in {
+                own_stage_total_metric_key(stage, "cost_coverage_pct")
+                for stage in OWN_PRODUCT_CAPITAL_STAGES
+            }:
+                stage = next(
+                    item for item in OWN_PRODUCT_CAPITAL_STAGES
+                    if metric.metric_key == own_stage_total_metric_key(item, "cost_coverage_pct")
+                )
+                value = self._aggregate_own_stage_cost_coverage(stage, temporal_slot)
             elif metric.metric_key == ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY:
                 value = _divide_or_zero(
                     self.resolve_total(ONEC_TOTAL_PROXY_PROFIT_2_RUB_METRIC_KEY, temporal_slot),
@@ -2892,10 +2926,12 @@ class _MetricEvaluator:
                 continue
             unit_cost = _optional_float(row.get("our_wb_unit_cost_rub"))
             stock_qty = _optional_float(row.get("stock_qty"))
-            if unit_cost is None or stock_qty is None or stock_qty <= 0:
+            cost_qty = _optional_float(row.get("cost_covered_qty"))
+            weight_qty = cost_qty if cost_qty is not None else stock_qty
+            if unit_cost is None or weight_qty is None or weight_qty <= 0:
                 continue
-            weighted_sum += unit_cost * stock_qty
-            total_stock += stock_qty
+            weighted_sum += unit_cost * weight_qty
+            total_stock += weight_qty
         if total_stock <= 0:
             return None
         return weighted_sum / total_stock
@@ -2938,6 +2974,26 @@ class _MetricEvaluator:
                 0.0,
             )
         return None if not has_rows or qty <= 0 else confirmed / qty
+
+    def _aggregate_own_stage_cost_coverage(self, stage: str, temporal_slot: str) -> float | None:
+        lookup = self._slot_lookups(temporal_slot).own_product_capital_lookup
+        qty = 0.0
+        covered = 0.0
+        has_rows = False
+        for item in self.enabled_config:
+            row = lookup.get(item.nm_id)
+            if not row:
+                continue
+            row_qty = _optional_float(row.get(own_stage_metric_key(stage, "qty")))
+            if row_qty is None:
+                continue
+            has_rows = True
+            qty += max(row_qty, 0.0)
+            covered += max(
+                _optional_float(row.get(own_stage_metric_key(stage, "cost_covered_qty"))) or 0.0,
+                0.0,
+            )
+        return None if not has_rows or qty <= 0 else covered / qty
 
     def _aggregate_own_product_capital_confirmed_share(self, temporal_slot: str) -> float | None:
         lookup = self._slot_lookups(temporal_slot).own_product_capital_lookup

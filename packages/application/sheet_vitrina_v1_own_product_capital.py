@@ -29,29 +29,42 @@ OWN_PRODUCT_CAPITAL_STAGE_LABELS_RU: Mapping[str, str] = {
 OWN_PRODUCT_CAPITAL_STAGE_FIELDS: tuple[str, ...] = (
     "capital_rub",
     "qty",
+    "paid_equivalent_qty",
     "unit_cost_rub",
+    "cost_coverage_pct",
     "confirmed_share_pct",
 )
 OWN_PRODUCT_CAPITAL_FIELD_LABELS_RU: Mapping[str, str] = {
     "capital_rub": "всего капитал, ₽",
     "qty": "всего количество, шт",
+    "paid_equivalent_qty": "оплаченный эквивалент, шт",
     "unit_cost_rub": "средневзвешенная стоимость, ₽/шт",
+    "cost_coverage_pct": "покрыто себестоимостью, %",
     "confirmed_share_pct": "подтверждено, %",
 }
 OWN_PRODUCT_CAPITAL_FIELD_FORMATS: Mapping[str, str] = {
     "capital_rub": "rub",
     "qty": "number",
+    "paid_equivalent_qty": "number",
     "unit_cost_rub": "rub",
+    "cost_coverage_pct": "percent",
     "confirmed_share_pct": "percent",
 }
 
+OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY = "own_underaccepted_wb_qty"
+OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY = "own_underaccepted_wb_unit_cost_rub"
+OWN_UNDERACCEPTED_WB_QTY_TOTAL_METRIC_KEY = "total_own_underaccepted_wb_qty"
+OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_TOTAL_METRIC_KEY = "total_own_underaccepted_wb_unit_cost_rub"
+
 OWN_TOTAL_QTY_METRIC_KEY = "own_total_product_qty"
+OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY = "own_total_paid_equivalent_qty"
 OWN_TOTAL_CAPITAL_RUB_METRIC_KEY = "own_total_product_capital_rub"
 OWN_AVG_COST_RUB_METRIC_KEY = "own_avg_product_cost_rub"
 OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY = "own_total_confirmed_share_pct"
 OWN_CAPITAL_RETURN_PCT_METRIC_KEY = "own_inventory_capital_return_pct"
 
 OWN_TOTAL_QTY_TOTAL_METRIC_KEY = "total_own_total_product_qty"
+OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY = "total_own_total_paid_equivalent_qty"
 OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY = "total_own_total_product_capital_rub"
 OWN_AVG_COST_RUB_TOTAL_METRIC_KEY = "total_own_avg_product_cost_rub"
 OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY = "total_own_total_confirmed_share_pct"
@@ -80,18 +93,24 @@ OWN_PRODUCT_CAPITAL_TOTAL_STAGE_METRIC_KEYS: tuple[str, ...] = tuple(
 OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS: tuple[str, ...] = (
     *OWN_PRODUCT_CAPITAL_SKU_STAGE_METRIC_KEYS,
     OWN_TOTAL_QTY_METRIC_KEY,
+    OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
     OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
     OWN_AVG_COST_RUB_METRIC_KEY,
     OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OWN_CAPITAL_RETURN_PCT_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
 )
 OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS: tuple[str, ...] = (
     *OWN_PRODUCT_CAPITAL_TOTAL_STAGE_METRIC_KEYS,
     OWN_TOTAL_QTY_TOTAL_METRIC_KEY,
+    OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY,
     OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
     OWN_AVG_COST_RUB_TOTAL_METRIC_KEY,
     OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY,
     OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_QTY_TOTAL_METRIC_KEY,
+    OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_TOTAL_METRIC_KEY,
 )
 OWN_PRODUCT_CAPITAL_METRIC_KEYS: tuple[str, ...] = (
     *OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS,
@@ -137,8 +156,58 @@ def build_own_product_capital_metric_items() -> list[MetricV2Item]:
                 )
                 order += 10
 
+        underaccepted = (
+            (
+                OWN_UNDERACCEPTED_WB_QTY_TOTAL_METRIC_KEY,
+                OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+                "Недопринято WB: количество, шт",
+                "number",
+            ),
+            (
+                OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_TOTAL_METRIC_KEY,
+                OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
+                "Недопринято WB: средняя себестоимость, ₽/шт",
+                "rub",
+            ),
+        ) if scope == "TOTAL" else (
+            (
+                OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+                OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY,
+                "Недопринято WB: количество, шт",
+                "number",
+            ),
+            (
+                OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
+                OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
+                "Недопринято WB: средняя себестоимость, ₽/шт",
+                "rub",
+            ),
+        )
+        for metric_key, calc_ref, label, value_format in underaccepted:
+            items.append(
+                MetricV2Item(
+                    metric_key=metric_key,
+                    enabled=True,
+                    scope=scope,
+                    label_ru=label,
+                    calc_type="metric",
+                    calc_ref=calc_ref,
+                    show_in_data=True,
+                    format=value_format,
+                    display_order=order,
+                    section=OWN_PRODUCT_CAPITAL_SECTION_RU,
+                )
+            )
+            order += 10
+
         totals = (
             (OWN_TOTAL_QTY_TOTAL_METRIC_KEY, OWN_TOTAL_QTY_METRIC_KEY, "всего товаров, шт", "number"),
+            (
+                OWN_TOTAL_PAID_EQUIVALENT_QTY_TOTAL_METRIC_KEY,
+                OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
+                "оплаченный эквивалент всего, шт",
+                "number",
+            ),
             (
                 OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY,
                 OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
@@ -165,6 +234,12 @@ def build_own_product_capital_metric_items() -> list[MetricV2Item]:
             ),
         ) if scope == "TOTAL" else (
             (OWN_TOTAL_QTY_METRIC_KEY, OWN_TOTAL_QTY_METRIC_KEY, "всего товаров, шт", "number"),
+            (
+                OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
+                OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
+                "оплаченный эквивалент всего, шт",
+                "number",
+            ),
             (
                 OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
                 OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
@@ -226,7 +301,12 @@ def own_stage_total_components(metric_key: str) -> tuple[str, str] | None:
     normalized = str(metric_key or "").strip()
     for stage in OWN_PRODUCT_CAPITAL_STAGES:
         if normalized == own_stage_total_metric_key(stage, "unit_cost_rub"):
-            return own_stage_metric_key(stage, "capital_rub"), own_stage_metric_key(stage, "qty")
+            return (
+                own_stage_metric_key(stage, "capital_rub"),
+                own_stage_metric_key(stage, "paid_equivalent_qty"),
+            )
         if normalized == own_stage_total_metric_key(stage, "confirmed_share_pct"):
             return own_stage_metric_key(stage, "confirmed_qty"), own_stage_metric_key(stage, "qty")
+        if normalized == own_stage_total_metric_key(stage, "cost_coverage_pct"):
+            return own_stage_metric_key(stage, "cost_covered_qty"), own_stage_metric_key(stage, "qty")
     return None

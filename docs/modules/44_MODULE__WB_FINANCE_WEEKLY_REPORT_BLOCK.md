@@ -51,3 +51,6 @@ Sales add `quantity * unit cost`; returns subtract it. All Finance money arithme
 Apply opens one `BEGIN IMMEDIATE` transaction, recomputes the complete plan, rejects fingerprint drift, recalculates every planned week in-place, checks the non-target Finance digest and proves that no stale target remains before commit. Any exception rolls back all planned weeks. A repeated dry-run has `stale_week_count=0`. Ordinary Our WB Cost/nomenclature invalidation uses the same all-or-nothing application method, without calling refresh recursively. No `os.replace`, ad-hoc SQL or partial/force mode is part of this contour.
 
 Targeted verification is `python3 apps/wb_finance_weekly_smoke.py`. Production acceptance additionally checks control week `22.06.2026–28.06.2026`, both report IDs `764583098` and `764583099`, 72,184 raw rows, UI rendering, timer registration, and repeated-sync idempotency.
+## Unified cost cutover
+
+For operations dated on/after `2026-07-01`, Finance/P&L reads `our_wb_unit_cost_rub` from canonical recognized WB daily projection. Paid WB projection is reserved for invested-capital metrics and never substitutes COGS. Late recognized evidence invalidates affected Finance weeks from its factual effective date; pre-cutover weeks stay legacy. Existing quality/coverage gates and Decimal aggregate ratios remain mandatory.

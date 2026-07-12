@@ -251,3 +251,6 @@ This module does not implement:
 # 9. Paid-capital consumer boundary
 
 Approved Fulfillment uploads remain service/payment-validation evidence, not capital merely because a file was uploaded or approved. Module 45 may include transit, FF service and storage components only after factual payment evidence with an effective payment date is recognized, and only once for the applicable WB movement layer. Missing payment/completeness evidence produces an estimated/unconfirmed bucket and server-derived yellow reason rather than confirmed zero or a future expense backdated into history.
+## Canonical cost consumer boundary (2026-07-01)
+
+Accepted service/storage documents are financial evidence for `packages/application/canonical_cost_engine.py`. Recognized amount uses the factual document/effective date and supply/SKU allocation provenance; paid projection remains zero until factual payment evidence exists. Quote, `К оплате`, upload time or unaccepted document cannot create paid capital. The module never owns physical FF/WB quantity and cannot replace the exact FF debit snapshot.

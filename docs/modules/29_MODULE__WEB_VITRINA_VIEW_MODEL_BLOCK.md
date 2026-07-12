@@ -159,4 +159,6 @@ update_note: "Phase 2 web-vitrina materialize-ит отдельный library-ag
 
 The view model carries optional per-date `presentation_state`, `presentation_tone` and `presentation_reason` supplied by the server. `Товарный капитал — наши данные` uses these fields for yellow/unconfirmed cells and concise expense/date/matching/invariant diagnostics. The browser does not derive confirmation from localStorage or mutable current status.
 
+The same section exposes additive physical/paid-equivalent/cost-coverage fields and exactly two underaccepted rows: `Недопринято WB: количество, шт` and `Недопринято WB: средняя себестоимость, ₽/шт`. TOTAL underaccepted cost is weighted by open quantity. No age, color state, supply count, capital row, drilldown or browser action is part of this contract.
+
 The WebCore source group is additive and adjacent to the existing 1C capital group. SKU/TOTAL values, weighted confirmed share and ratio-of-aggregates profitability are computed before the view-model boundary; the mapper only preserves and renders them.
