@@ -92,7 +92,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         candidate_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         _sqlite_backup(source_db, candidate_runtime.db_path)
         engine = CanonicalCostEngine(runtime=candidate_runtime)
+        operation_date_audit: dict[str, Any] | None = None
         try:
+            operation_date_audit = engine.ff_operation_date_audit(
+                cutover_date=date_from
+            )
             baseline = engine.build_baseline_plan(cutover_date=date_from)
         except CanonicalCostBlocked as exc:
             blocked_report = {
@@ -105,6 +109,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "protected_non_target_digest": protected_digest,
                 "legacy_pre_cutover_digest": legacy_digest,
                 "target_before_digest": target_before,
+                "ff_operation_date_audit": operation_date_audit,
             }
             fingerprint = _hash(blocked_report)
             if args.apply:
@@ -152,6 +157,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "contract_name": "canonical_cost_engine_backfill_v1",
             "scope": {"date_from": date_from, "date_to": date_to},
             "baseline": baseline,
+            "ff_operation_date_audit": operation_date_audit,
             "rebuild": asdict(rebuild),
             "reconciliation": reconciliation,
             "affected_finance_periods": _finance_periods(date_from, date_to),

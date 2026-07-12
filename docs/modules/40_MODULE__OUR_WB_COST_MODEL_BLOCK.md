@@ -64,4 +64,6 @@ Finance/P&L применяет canonical recognized WB projection с `2026-07-01
 
 `apps/canonical_cost_engine_backfill.py` — единственный apply-capable runner. Он default dry-run, требует scope `2026-07-01..current`, stable fingerprint, explicit backup directory, coherent SQLite backup `0600`, `integrity_check=ok`, `BEGIN IMMEDIATE`, optimistic recheck и in-place apply без `os.replace`/force/partial mode. Apply разрешается только отдельным human gate.
 
+Перед baseline/rebuild runner включает в fingerprint полный audit legacy WB FF writeoffs без ordinary source timestamp. Effective date берётся из canonical resolver и содержит field-level provenance; `operation.created_at` запрещён как fallback для связанной WB supply. Поэтому upload/repair timestamp не может превратить pre-cutover supply в post-cutover cost movement, а отсутствие exact supply/date блокирует candidate до любых target changes.
+
 Не являются целями: бухгалтерский FIFO, изменение 1С/proxy2, Google Sheets/GAS, browser truth, ad-hoc SQL или server-only fixes.

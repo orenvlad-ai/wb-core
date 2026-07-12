@@ -39,6 +39,16 @@ An unmatched `Допринято` fact on or before the opening cutover snapshot
 evidence and creates no movement, quantity, cost, or manual buffer; the same
 condition after cutover is a fail-closed anomaly.
 
+FF operation business dates use one canonical resolver. Supplier-shipment receipts retain
+`actual_ff_acceptance_date`. WB auto-writeoffs use a valid persisted operation source timestamp
+(the bounded targeted-runner `supply_timestamp` key is accepted as equivalent legacy provenance)
+or require an exact persisted WB supply matched by source object plus source key and resolve its
+factual acceptance/fact date, falling back to its supply business date only when no factual date
+exists. `operation.created_at` is not a WB business-date fallback. Missing, ambiguous or conflicting
+supply identity, invalid timestamps and absent authoritative business dates block the candidate.
+The dry-run audit lists every WB auto-writeoff without the ordinary source timestamp together with
+its field-level provenance, checkpoint membership, sent/accepted quantities and cutover class.
+
 ## Runner safety
 
 `apps/canonical_cost_engine_backfill.py` is the only apply-capable path. It:
