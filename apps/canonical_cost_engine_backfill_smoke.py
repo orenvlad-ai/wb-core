@@ -51,6 +51,9 @@ def main() -> int:
             raise AssertionError("default runner mode must be non-mutating dry-run")
         if not dry["would_change"]:
             raise AssertionError("first candidate must report target changes")
+        preflight = dry.get("source_anomaly_preflight") or {}
+        if preflight.get("status") != "ok" or not preflight.get("fingerprint"):
+            raise AssertionError("exhaustive source preflight must precede candidate rebuild")
         with _connect(runtime.db_path) as conn:
             if conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name LIKE 'sheet_vitrina_v1_canonical_cost_%'"

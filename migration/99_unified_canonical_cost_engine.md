@@ -35,9 +35,12 @@ baseline never upgrades an unpaid opening shipment to fully paid.
 - `sheet_vitrina_v1_canonical_cost_daily_state`.
 
 Legacy module-40/45 tables remain audit-only. Source tables and pre-cutover rows are never target tables.
-An unmatched `Допринято` fact on or before the opening cutover snapshot remains legacy audit
-evidence and creates no movement, quantity, cost, or manual buffer; the same
-condition after cutover is a fail-closed anomaly.
+
+`CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1` is a reproducible one-time opening-boundary policy, not a future runtime tolerance. An anomaly is eligible only when it is an integer discrepancy with exact SKU/source/checkpoint/business-date identity, a positive permitted baseline cost, business date strictly before cutover, no more than 3 units per SKU line, 5 per operation and 20 over the whole cutover. The aggregate count/operations/SKUs, gross/net quantity, recognized/paid exposure and remaining budget are part of the candidate fingerprint.
+
+For eligible `accepted > sent`, movement applies `min(sent, accepted)` and exposes raw/applied/surplus in internal audit; surplus is already absorbed by official WB opening and creates no movement, cost or capital and cannot close another SKU. Eligible unmatched pre-cutover `Допринято` and an eligible small pre-cutover FF replay residual likewise remain audit-only. Post-cutover anomalies, missing/ambiguous identity/date/cost, nonpositive cost, cross-SKU redistribution, duplicate operation/closure, negative current balance, digest drift and any limit breach remain fail-closed. No anomaly/surplus user metric is added.
+
+The FF activation receipt is projected at the cutover opening boundary. Exact checkpoint writeoffs and their linked `runtime_repair` compensations remain physical audit history rather than being replayed twice; their net current ledger evidence must reconcile exactly. Non-checkpoint movements, including the bounded targeted `40561872` debit, keep their authoritative effective dates and ordinary physical/WAC effect.
 
 FF operation business dates use one canonical resolver. Supplier-shipment receipts retain
 `actual_ff_acceptance_date`. WB auto-writeoffs use a valid persisted operation source timestamp
@@ -54,6 +57,7 @@ its field-level provenance, checkpoint membership, sent/accepted quantities and 
 `apps/canonical_cost_engine_backfill.py` is the only apply-capable path. It:
 
 - defaults to dry-run and requires exact `2026-07-01..current` scope;
+- runs the exhaustive source audit before baseline materialization/heavy replay and blocks the candidate if any anomaly is unresolved;
 - materializes a coherent SQLite backup candidate and verifies `PRAGMA integrity_check=ok`;
 - reports a stable fingerprint, stage/capital/coverage reconciliation, affected Finance weeks and source/protected/pre-cutover digests;
 - when baseline coverage is incomplete, returns a stable `status=blocked`
@@ -67,5 +71,7 @@ its field-level provenance, checkpoint membership, sent/accepted quantities and 
   failure triggers an in-place SQLite online restore from the verified backup;
 - verifies source/non-target/pre-cutover digests after apply;
 - requires second run with zero changes.
+
+`apps/canonical_cost_engine_preflight.py` is the read-only diagnostic entrypoint. It takes a coherent SQLite copy, reports all supported anomaly classes in one pass, verifies live inode/integrity and source/protected/pre-cutover digests, and performs no production mutation.
 
 Production apply is forbidden until a human explicitly approves the exact dry-run fingerprint and backup plan.

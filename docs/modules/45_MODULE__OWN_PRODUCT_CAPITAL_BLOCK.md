@@ -82,6 +82,8 @@ Public fields дополнены `paid_equivalent_qty` и `cost_coverage_pct`. `
 
 `Недопринято WB` — derived substate `ФФ → WB`, не шестая стадия и не отдельный склад. Exact immutable layers хранят original supply, nmID, warehouse/destination, FF movement snapshot, sent/accepted/open quantities, recognized/paid costs и provenance.
 
+Opening-boundary source anomalies не являются новым складом или пользовательской метрикой. `CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1` может сохранить только bounded pre-cutover raw surplus/residual как audit-only provenance; он не создаёт physical/paid-equivalent quantity, recognized/paid capital или cross-SKU closure. Пять stage totals продолжают следовать authoritative snapshots/ledger, а превышение 3/5/20 units либо missing identity/date/cost блокирует весь candidate.
+
 Reconciliation: direct original identity, иначе strict FIFO по `warehouse + destination + nmID`; future layer не eligible; surplus/negative блокируются; retry idempotent; second FF debit отсутствует. Cost layers не смешиваются при переносе.
 
 UI добавляет только:
