@@ -263,6 +263,20 @@ class OwnProductCapitalBlock:
                 "SELECT 1 FROM sheet_vitrina_v1_own_capital_events LIMIT 1"
             ).fetchone() is not None
 
+    def first_paid_ownership_date(self) -> str | None:
+        with _connect(self.runtime.db_path) as conn:
+            _ensure_own_capital_schema(conn)
+            row = conn.execute(
+                """
+                SELECT MIN(effective_date) AS effective_date
+                FROM sheet_vitrina_v1_own_capital_events
+                WHERE event_type = ? AND quantity != '0'
+                """,
+                (EVENT_SUPPLIER_PAYMENT,),
+            ).fetchone()
+        value = str(row["effective_date"] or "") if row is not None else ""
+        return value or None
+
     def resolve_blockers(self, *, source_identity: str, codes: Iterable[str] | None = None) -> int:
         normalized_identity = _required_text(source_identity, "source_identity")
         normalized_codes = [str(item).strip() for item in (codes or []) if str(item).strip()]
@@ -1179,7 +1193,8 @@ class OwnProductCapitalBlock:
             closures: list[dict[str, Any]] = []
             for nm_id, quantity in requested.items():
                 params: list[Any] = [nm_id]
-                where = ["nm_id = ?"]
+                where = ["nm_id = ?", "final_acceptance_date <= ?"]
+                params.append(effective_date)
                 if original_supply_id:
                     where.append("original_supply_id = ?")
                     params.append(str(original_supply_id))
@@ -1189,12 +1204,12 @@ class OwnProductCapitalBlock:
                 candidates = [
                     row
                     for row in conn.execute(
-                    f"""
-                    SELECT * FROM sheet_vitrina_v1_own_capital_wb_outstanding
-                    WHERE {' AND '.join(where)}
-                    ORDER BY final_acceptance_date ASC, original_supply_id ASC
-                    """,
-                    tuple(params),
+                        f"""
+                        SELECT * FROM sheet_vitrina_v1_own_capital_wb_outstanding
+                        WHERE {' AND '.join(where)}
+                        ORDER BY final_acceptance_date ASC, original_supply_id ASC
+                        """,
+                        tuple(params),
                     ).fetchall()
                     if _decimal(row["open_quantity"]) > ZERO
                 ]

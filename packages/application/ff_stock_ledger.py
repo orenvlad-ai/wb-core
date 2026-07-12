@@ -720,24 +720,41 @@ class FfStockLedgerBlock:
     ) -> dict[str, Any]:
         """Materialize capital movements only where persisted FF/WB evidence exists."""
         records = self.runtime.list_wb_supplies_cache_records()
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        first_paid_date = OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).first_paid_ownership_date()
         ordinary: list[tuple[datetime, Mapping[str, Any], Mapping[str, Any]]] = []
         doprinato: list[tuple[datetime, Mapping[str, Any], Mapping[str, Any]]] = []
         skipped_without_ledger_evidence = 0
+        skipped_before_paid_ownership = 0
         for record in records:
             normalized = dict(record.get("normalized") or record)
             if _optional_int(normalized.get("status_id")) not in WB_DEBIT_STATUS_IDS:
                 continue
-            business_dt, _ = _wb_supply_business_timestamp(
-                record=record,
-                normalized=normalized,
-            )
-            if business_dt is None or business_dt.date().isoformat() > str(date_to):
-                continue
-            item = (business_dt, record, normalized)
-            if (
+            is_doprinato = (
                 _optional_int(normalized.get("virtual_type_id")) == WB_SKIP_VIRTUAL_TYPE_ID
                 or str(normalized.get("type_label") or "").strip() == WB_SKIP_TYPE_LABEL
-            ):
+            )
+            business_dt = (
+                _wb_acceptance_business_timestamp(record=record, normalized=normalized)
+                if is_doprinato
+                else None
+            )
+            if business_dt is None:
+                business_dt, _ = _wb_supply_business_timestamp(
+                    record=record,
+                    normalized=normalized,
+                )
+            if business_dt is None or business_dt.date().isoformat() > str(date_to):
+                continue
+            if first_paid_date and business_dt.date().isoformat() < first_paid_date:
+                skipped_before_paid_ownership += 1
+                continue
+            item = (business_dt, record, normalized)
+            if is_doprinato:
                 doprinato.append(item)
                 continue
             _, _, source_key = _wb_supply_debit_identity(
@@ -790,6 +807,7 @@ class FfStockLedgerBlock:
             "status": "blocked" if diagnostics else "ok",
             "persisted_supply_count": materialized,
             "skipped_without_ledger_evidence_count": skipped_without_ledger_evidence,
+            "skipped_before_paid_ownership_count": skipped_before_paid_ownership,
             "blocker_count": len(diagnostics),
             "blockers": diagnostics,
         }
