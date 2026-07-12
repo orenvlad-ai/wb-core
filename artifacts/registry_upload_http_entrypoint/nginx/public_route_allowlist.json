@@ -37,6 +37,18 @@
       "methods": ["GET"]
     },
     {
+      "name": "own_product_capital_status",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/product-capital/status",
+      "methods": ["GET"]
+    },
+    {
+      "name": "own_product_capital_recalculate",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/product-capital/recalculate",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_daily_report",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/daily-report",
