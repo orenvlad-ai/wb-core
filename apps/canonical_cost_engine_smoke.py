@@ -121,6 +121,9 @@ def _baseline_and_physical_sources() -> None:
             _insert_supplier_payment(
                 conn, shipment_id="fallback-production", cny="150", rub="1500"
             )
+            _insert_wb_supply(
+                conn, "legacy-orphan-doprinato", 1, "2026-06-30", doprinato=True
+            )
             _insert_ff_balance(conn, nm_id=111, quantity=6750)
             _insert_snapshot(conn, "2026-05-16", {222: {"onec_FF_STOCK_unit_cost_rub": 80}})
             _insert_snapshot(conn, "2026-05-17", {222: {"onec_FF_STOCK_unit_cost_rub": 90}})
@@ -141,6 +144,8 @@ def _baseline_and_physical_sources() -> None:
             raise AssertionError("future proxy is forbidden")
         _eq(plan["physical"]["111"]["FF"], "6750", "FF physical quantity comes from ledger")
         _eq(plan["cost_coverage"], "1", "baseline coverage 100%")
+        if "legacy-orphan-doprinato" in str(plan):
+            raise AssertionError("pre-cutover orphan doprinato must remain audit-only")
         production = next(
             line for line in plan["lines"]
             if line["nm_id"] == 222 and line["stage"] == "PRODUCTION"
