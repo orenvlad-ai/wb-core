@@ -69,7 +69,44 @@ CANONICAL_TABLE_PREFIX = "sheet_vitrina_v1_canonical_cost_"
 
 TARGETED_PRE_ACTIVATION_REMEDIATION_REASON = "targeted_pre_activation_remediation"
 POSTCUTOVER_NORMALIZATION_POLICY = "CUTOVER_POSTCUTOVER_SOURCE_NORMALIZATION_V1"
-POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {}
+POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {
+    "ffso_14303efbdb04425baf54": {
+        "operation_id": "ffso_14303efbdb04425baf54",
+        "supply_id": "40436428",
+        "source_key": "wb_supply_debit:supply:40436428",
+        "business_date": "2026-07-03",
+        "line_set_fingerprint": "sha256:8e721d589c7cc311901ba0aeee947978db56b4e458f2017a97ccd4e5edd51a6b",
+        "accepted_line_set_fingerprint": "sha256:953d5243e63c4113aa4ab9f7a60bba0dfe1e5f1a5c60f68fa8056d2422f82d01",
+        "evidence_fingerprint": "sha256:4b10ae816fc8a5022c53c71d5d4b635417d466b8b62841122ae7b2a030d56c7c",
+    },
+    "ffso_786f3d2533374015af12": {
+        "operation_id": "ffso_786f3d2533374015af12",
+        "supply_id": "40422317",
+        "source_key": "wb_supply_debit:supply:40422317",
+        "business_date": "2026-07-02",
+        "line_set_fingerprint": "sha256:8c54f0550ff712b15a1600ee9117716d99f0b93d8b4b96b5f45f5c1026d85251",
+        "accepted_line_set_fingerprint": "sha256:c2c963286fa1b585cee8c9261072facd893343d96ad05d847dd36eb7c0a5f739",
+        "evidence_fingerprint": "sha256:cc785f5d378e1ba4bc2eb6d54900657c1727a471ab6fa014651e4d821f6de3c5",
+    },
+    "ffso_9c618c5b5e0d4957b7cf": {
+        "operation_id": "ffso_9c618c5b5e0d4957b7cf",
+        "supply_id": "40564048",
+        "source_key": "wb_supply_debit:supply:40564048",
+        "business_date": "2026-07-06",
+        "line_set_fingerprint": "sha256:ec5d398d7f2e1b2555e675aeb8725a80558fc3777c15279bc6328ed98603bd9c",
+        "accepted_line_set_fingerprint": "sha256:a49a76cb642f259573c117b65246d93a97cb9f30ab1bb32790c8de417ba7193e",
+        "evidence_fingerprint": "sha256:6385b7004828d1afcc0a13fb38e517d6d5f72ac79afb74e697aaa821dee4f554",
+    },
+    "ffso_ceec1569093b40aa80d7": {
+        "operation_id": "ffso_ceec1569093b40aa80d7",
+        "supply_id": "40559839",
+        "source_key": "wb_supply_debit:supply:40559839",
+        "business_date": "2026-07-06",
+        "line_set_fingerprint": "sha256:320d56dd3c4d13553dbc61e667f321b53af5d732719339e05f684def1fb8a50b",
+        "accepted_line_set_fingerprint": "sha256:7add90d1d03f7f7e4048ebeac583aeb3a3febe16e26971a56e0e502f9a36a416",
+        "evidence_fingerprint": "sha256:37f7d2ebd9a9c7097ac7f3aa568a0ea79ce3df836f43ffb5c2bb2293f426171e",
+    },
+}
 
 
 class CanonicalCostBlocked(ValueError):
@@ -3696,6 +3733,14 @@ def _source_anomaly_preflight_conn(
                 "raw_quantities": {
                     "raw_doprinato": _text(_decimal(fact["accepted_quantity"])),
                     "unmatched_surplus": _text(remaining),
+                },
+                "doprinato_evidence": {
+                    "original_supply_id": str(fact.get("original_supply_id") or ""),
+                    "warehouse": str(fact.get("warehouse") or ""),
+                    "destination": str(fact.get("destination") or ""),
+                    "is_final_accepted": bool(fact.get("is_final_accepted")),
+                    "accepted_date": str(fact.get("accepted_date") or ""),
+                    "source_identity": str(fact.get("source_identity") or ""),
                 },
                 "discrepancy": _text(remaining),
                 "source_identity": str(fact["source_identity"]),
