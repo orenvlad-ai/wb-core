@@ -1,4 +1,4 @@
-"""Targeted smoke-check for guarded WB checkpoint reconciliation and reversal."""
+"""Targeted smoke-check for guarded WB pre-activation reconciliation and reversal."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from packages.application.ff_stock_ledger import (  # noqa: E402
     FF_STOCK_OPERATION_AUTO_WRITEOFF,
     FF_STOCK_OPERATION_CORRECTION_RECEIPT,
     FF_STOCK_OPERATION_MANUAL_RECEIPT,
+    FF_STOCK_OPERATION_MANUAL_WRITEOFF,
     FF_STOCK_SOURCE_MANUAL_EXCEL,
     FF_STOCK_SOURCE_TARGETED_RECONCILIATION,
     FF_STOCK_SOURCE_WB_SUPPLY,
@@ -33,7 +34,7 @@ NM_IDS = [9100000 + index for index in range(1, 14)]
 DEBITS = [2400.0] * 12 + [2700.0]
 REMAINDERS = [500.0] * 12 + [750.0]
 OPENING_BALANCES = [debit + remainder for debit, remainder in zip(DEBITS, REMAINDERS)]
-ACTIVATED_AT = "2026-07-01T00:00:00Z"
+ACTIVATED_AT = "2026-07-08T19:31:48Z"
 CHECKPOINT_AT = "2026-07-05T00:00:00Z"
 APPLIED_AT = "2026-07-12T09:00:00Z"
 
@@ -46,6 +47,9 @@ def main() -> None:
     _insufficient_balance_blocked()
     _unexpected_total_blocked()
     _inactive_nomenclature_blocked()
+    _missing_or_invalid_activation_blocked()
+    _other_supply_id_blocked()
+    _ordinary_pre_activation_supply_blocked()
     _stale_plan_variants_blocked()
     print("ff_stock_targeted_reconciliation_smoke: ok")
 
@@ -66,10 +70,17 @@ def _happy_path_and_reversal() -> None:
         plan = block.plan_targeted_wb_supply_reconciliation(SUPPLY_ID)
         plan_repeat = block.plan_targeted_wb_supply_reconciliation(SUPPLY_ID)
         _assert(plan["status"] == "dry_run" and plan["apply_allowed"], f"target plan must be applicable: {plan}")
+        _assert(plan["plan_version"] == "v2", f"target plan version changed: {plan['plan_version']}")
         _assert(plan["fingerprint"] == plan_repeat["fingerprint"], "unchanged dry-run fingerprint must be stable")
         _assert(plan["supply"]["cache_key"] == CACHE_KEY and plan["supply"]["source_key"] == SOURCE_KEY, "canonical identity changed")
         _assert(plan["supply"]["preorder_id"] == PREORDER_ID and plan["supply"]["sku_count"] == 13, "supply identity/SKU count changed")
         _assert(plan["checkpoint"]["ordinary_path_reason"] == "wb_supply_before_auto_writeoff_checkpoint", "checkpoint reason missing")
+        _assert(plan["ledger_activation"]["ordinary_path_reason"] == "wb_supply_before_ledger_activation", "activation reason missing")
+        _assert(
+            plan["bypassed_ordinary_blockers"]
+            == ["wb_supply_before_auto_writeoff_checkpoint", "wb_supply_before_ledger_activation"],
+            f"ordinary blocker audit changed: {plan['bypassed_ordinary_blockers']}",
+        )
         _assert(plan["totals"] == {"before": 38250.0, "debit": 31500.0, "after": 6750.0}, f"target totals changed: {plan['totals']}")
         _assert(len(plan["skus"]) == 13 and all(item["projected_balance"] >= 0 for item in plan["skus"]), "per-SKU projection invalid")
         _assert(runtime.count_ff_stock_operations() == operation_count_before, "dry-run must not create an operation")
@@ -96,7 +107,16 @@ def _happy_path_and_reversal() -> None:
         _assert(operation and operation["operation_type"] == FF_STOCK_OPERATION_AUTO_WRITEOFF, "operation type must be auto_writeoff")
         _assert(operation["source_type"] == FF_STOCK_SOURCE_WB_SUPPLY and operation["source_key"] == SOURCE_KEY, "operation source link changed")
         _assert(operation["source_object_id"] == SUPPLY_ID and SUPPLY_ID in operation["source_object_label"], "operation supply label changed")
-        _assert(operation["diagnostics"]["reason"] == "targeted_checkpoint_reconciliation", "targeted audit reason missing")
+        _assert(operation["diagnostics"]["reason"] == "targeted_pre_activation_remediation", "targeted audit reason missing")
+        _assert(operation["diagnostics"]["plan_version"] == "v2", "targeted plan version audit missing")
+        _assert(operation["diagnostics"]["supply_timestamp"] == "2026-07-02T12:38:24+00:00", "supply timestamp audit missing")
+        _assert(operation["diagnostics"]["activation_operation_id"] == "ffso_opening", "activation operation audit missing")
+        _assert(operation["diagnostics"]["activation_created_at"] == ACTIVATED_AT, "activation timestamp audit missing")
+        _assert(
+            operation["diagnostics"]["bypassed_ordinary_blockers"]
+            == ["wb_supply_before_auto_writeoff_checkpoint", "wb_supply_before_ledger_activation"],
+            "bypassed ordinary blocker audit missing",
+        )
         _assert(operation["diagnostics"]["cache_key"] == CACHE_KEY, "targeted diagnostics cache key missing")
         _assert(len(operation["lines"]) == 13 and operation["total_quantity_abs"] == 31500.0, "ledger lines/quantity changed")
         _assert(applied["post_run_reconciliation"]["ledger_total_after"] == 6750.0, "post-run total must reconcile")
@@ -124,6 +144,7 @@ def _happy_path_and_reversal() -> None:
         reversal = runtime.load_ff_stock_operation(reversed_result["operation"]["operation_id"])
         _assert(reversal and reversal["operation_type"] == FF_STOCK_OPERATION_CORRECTION_RECEIPT, "reversal must be compensating receipt")
         _assert(reversal["source_type"] == FF_STOCK_SOURCE_TARGETED_RECONCILIATION, "reversal source type changed")
+        _assert(reversal["diagnostics"]["reason"] == "targeted_pre_activation_remediation_reversal", "reversal reason changed")
         _assert(reversal["diagnostics"]["compensates_operation_id"] == operation["operation_id"], "reversal audit link missing")
         _assert(runtime.load_ff_stock_operation(operation["operation_id"]) is not None, "reversal must preserve original history")
         _assert(reversed_result["post_run_reconciliation"]["ledger_total_after"] == 38250.0, "reversal must restore ledger total")
@@ -203,8 +224,41 @@ def _inactive_nomenclature_blocked() -> None:
         _assert(_has_blocker(plan, "wb_supply_goods_nm_id_not_in_active_nomenclature"), "nomenclature blocker missing")
 
 
+def _missing_or_invalid_activation_blocked() -> None:
+    for activation, expected_code in (
+        (None, "wb_supply_ledger_not_activated"),
+        ({"operation_id": "", "created_at": ACTIVATED_AT}, "wb_supply_ledger_activation_invalid"),
+        ({"operation_id": "ffso_invalid", "created_at": "not-a-timestamp"}, "wb_supply_ledger_activation_invalid"),
+    ):
+        with TemporaryDirectory(prefix="ff-stock-targeted-activation-blocked-") as tmp:
+            runtime, block = _setup(Path(tmp), status_id=3)
+            runtime.load_ff_stock_activation_operation = lambda value=activation: value  # type: ignore[method-assign]
+            plan = block.plan_targeted_wb_supply_reconciliation(SUPPLY_ID)
+            _assert(not plan["apply_allowed"], f"activation {activation} must block apply")
+            _assert(_has_blocker(plan, expected_code), f"activation blocker {expected_code} missing")
+
+
+def _other_supply_id_blocked() -> None:
+    with TemporaryDirectory(prefix="ff-stock-targeted-other-supply-") as tmp:
+        _runtime, block = _setup(Path(tmp), status_id=3)
+        error = _expect_error(lambda: block.plan_targeted_wb_supply_reconciliation("40561873"))
+        _assert(error.code == "invalid_supply_id", "another supply id must not enter targeted remediation")
+
+
+def _ordinary_pre_activation_supply_blocked() -> None:
+    with TemporaryDirectory(prefix="ff-stock-ordinary-preactivation-") as tmp:
+        runtime, block = _setup(Path(tmp), status_id=3)
+        _save_ordinary_preactivation_supply(runtime)
+        ordinary = block.record_wb_supply_debit(runtime.load_wb_supply_record("40561873") or {})
+        _assert(
+            ordinary and ordinary.get("skip_reason") == "wb_supply_before_ledger_activation",
+            f"ordinary pre-activation supply must remain blocked: {ordinary}",
+        )
+        _assert(runtime.load_ff_stock_operation_by_source_key("wb_supply_debit:supply:40561873") is None, "ordinary pre-activation debit must not be created")
+
+
 def _stale_plan_variants_blocked() -> None:
-    for variant in ("goods", "status", "balances"):
+    for variant in ("goods", "status", "nomenclature", "balances", "totals", "activation"):
         with TemporaryDirectory(prefix=f"ff-stock-targeted-stale-{variant}-") as tmp:
             runtime, block = _setup(Path(tmp), status_id=3)
             plan = block.plan_targeted_wb_supply_reconciliation(SUPPLY_ID)
@@ -214,7 +268,12 @@ def _stale_plan_variants_blocked() -> None:
                 _save_target_supply(runtime, status_id=3, debit_quantities=changed)
             elif variant == "status":
                 _save_target_supply(runtime, status_id=4)
-            else:
+            elif variant == "nomenclature":
+                item = runtime.load_nomenclature_item(f"nom_{NM_IDS[0]}") or {}
+                item["is_hidden"] = True
+                item["updated_at"] = "2026-07-12T08:00:00Z"
+                runtime.save_nomenclature_item(item)
+            elif variant == "balances":
                 runtime.create_ff_stock_operation(
                     operation_id="ffso_stale_balance",
                     operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
@@ -225,6 +284,41 @@ def _stale_plan_variants_blocked() -> None:
                     created_at="2026-07-11T00:00:00Z",
                     created_by="smoke",
                     lines=[{"nm_id": NM_IDS[0], "quantity_delta": 1.0}],
+                )
+            elif variant == "totals":
+                runtime.create_ff_stock_operation(
+                    operation_id="ffso_stale_total",
+                    operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
+                    source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+                    source_key="manual_excel:stale-total",
+                    source_object_id="stale-total",
+                    source_object_label="stale non-target total",
+                    created_at="2026-07-11T00:00:00Z",
+                    created_by="smoke",
+                    lines=[{"nm_id": 999000001, "quantity_delta": 1.0}],
+                )
+            else:
+                runtime.create_ff_stock_operation(
+                    operation_id="ffso_earlier_activation",
+                    operation_type=FF_STOCK_OPERATION_MANUAL_RECEIPT,
+                    source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+                    source_key="manual_excel:earlier-activation",
+                    source_object_id="earlier-activation",
+                    source_object_label="earlier activation",
+                    created_at="2026-07-07T00:00:00Z",
+                    created_by="smoke",
+                    lines=[{"nm_id": 999000002, "quantity_delta": 1.0}],
+                )
+                runtime.create_ff_stock_operation(
+                    operation_id="ffso_earlier_activation_compensation",
+                    operation_type=FF_STOCK_OPERATION_MANUAL_WRITEOFF,
+                    source_type=FF_STOCK_SOURCE_MANUAL_EXCEL,
+                    source_key="manual_excel:earlier-activation-compensation",
+                    source_object_id="earlier-activation-compensation",
+                    source_object_label="earlier activation compensation",
+                    created_at="2026-07-07T00:00:01Z",
+                    created_by="smoke",
+                    lines=[{"nm_id": 999000002, "quantity_delta": -1.0}],
                 )
             error = _expect_error(
                 lambda: block.apply_targeted_wb_supply_reconciliation(
@@ -355,6 +449,42 @@ def _save_target_supply(
     if raw_goods is not None:
         row["raw_goods"] = raw_goods
     runtime.save_wb_supply_rows(rows=[row], warehouses=[], synced_at="2026-07-10T00:00:00Z")
+
+
+def _save_ordinary_preactivation_supply(runtime: RegistryUploadDbBackedRuntime) -> None:
+    supply_id = "40561873"
+    cache_key = f"supply:{supply_id}"
+    raw_goods = [
+        {"nmID": nm_id, "barcode": f"460{nm_id}", "quantity": quantity}
+        for nm_id, quantity in zip(NM_IDS, DEBITS)
+    ]
+    runtime.save_wb_supply_rows(
+        rows=[
+            {
+                "supply_id": supply_id,
+                "cache_key": cache_key,
+                "wb_supply_id": supply_id,
+                "preorder_id": "52530964",
+                "visible_number": supply_id,
+                "number_label": supply_id,
+                "status_id": 3,
+                "status_label": "Отгрузка разрешена",
+                "type_label": "Короб",
+                "source_created_at": "2026-07-06T12:00:00Z",
+                "supply_date": "2026-07-14T00:00:00+03:00",
+                "quantity_for_size_filter": sum(DEBITS),
+                "raw_list": {"supplyID": int(supply_id), "statusID": 3},
+                "raw_detail": {"supplyID": int(supply_id), "statusID": 3},
+                "raw_goods": raw_goods,
+                "raw_package": [],
+                "raw_goods_hash": hashlib.sha256(
+                    json.dumps(raw_goods, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+            }
+        ],
+        warehouses=[],
+        synced_at="2026-07-10T00:00:00Z",
+    )
 
 
 def _expect_error(callback: object) -> TargetedWbSupplyReconciliationError:
