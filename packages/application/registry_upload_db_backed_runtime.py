@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -101,6 +102,33 @@ class RegistryUploadDbBackedRuntime:
         self.db_path = runtime_dir / DB_FILENAME
         self.bundle_block = bundle_block or RegistryUploadBundleV1Block()
         self.cost_price_block = cost_price_block or CostPriceUploadBlock()
+
+    def backup_database(self, destination: Path) -> dict[str, Any]:
+        """Create a coherent SQLite backup without copying a live WAL file set."""
+        if not self.db_path.is_file():
+            raise ValueError(f"Runtime SQLite database does not exist: {self.db_path}")
+        target = Path(destination)
+        if target.exists():
+            raise ValueError(f"Backup destination already exists: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as source_conn, sqlite3.connect(target) as target_conn:
+            source_conn.backup(target_conn)
+            integrity_rows = target_conn.execute("PRAGMA integrity_check").fetchall()
+            integrity_check = [str(row[0]) for row in integrity_rows]
+            if integrity_check != ["ok"]:
+                raise ValueError(f"SQLite backup integrity_check failed: {integrity_check}")
+        digest = hashlib.sha256()
+        size_bytes = 0
+        with target.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                size_bytes += len(chunk)
+                digest.update(chunk)
+        return {
+            "path": str(target),
+            "size_bytes": size_bytes,
+            "sha256": digest.hexdigest(),
+            "integrity_check": "ok",
+        }
 
     def ingest_bundle_from_path(self, bundle_path: Path, activated_at: str) -> RegistryUploadResult:
         bundle = load_registry_upload_bundle_v1_from_path(bundle_path)
@@ -2102,6 +2130,302 @@ class RegistryUploadDbBackedRuntime:
                 FROM sheet_vitrina_v1_ff_stock_operations
                 WHERE operation_id = ?
                 """,
+                (normalized_operation_id,),
+            ).fetchone()
+            payload = _ff_stock_operation_to_dict(row)
+            payload["idempotent"] = False
+            return payload
+
+    def create_ff_stock_operation_guarded(
+        self,
+        *,
+        operation_id: str,
+        operation_type: str,
+        source_type: str,
+        source_key: str,
+        source_object_id: str,
+        source_object_label: str,
+        created_at: str,
+        created_by: str,
+        warnings: list[str] | None,
+        diagnostics: Mapping[str, Any] | None,
+        lines: list[Mapping[str, Any]],
+        expected_balances: Mapping[int, float],
+        expected_supply_guard: Mapping[str, Any] | None = None,
+        expected_checkpoint: Mapping[str, Any] | None = None,
+        expected_activation: Mapping[str, Any] | None = None,
+        expected_active_nomenclature: Mapping[int, Mapping[str, Any]] | None = None,
+        expected_ledger_totals: Mapping[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically recheck a targeted plan and append one ledger operation."""
+        normalized_operation_id = str(operation_id or "").strip()
+        normalized_source_key = str(source_key or "").strip()
+        if not normalized_operation_id:
+            raise ValueError("operation_id is required")
+        if not normalized_source_key:
+            raise ValueError("source_key is required")
+        _validate_timestamp(created_at, field_name="created_at")
+        normalized_lines = [dict(item) for item in lines]
+        if not normalized_lines:
+            raise ValueError("guarded FF stock operation requires lines")
+        expected_balance_map = {int(key): float(value) for key, value in expected_balances.items()}
+        line_nm_ids = {int(item.get("nm_id") or 0) for item in normalized_lines}
+        if 0 in line_nm_ids or line_nm_ids != set(expected_balance_map):
+            raise ValueError("guarded FF stock operation balance scope does not match lines")
+
+        total_quantity_delta = sum(float(item.get("quantity_delta") or 0.0) for item in normalized_lines)
+        total_quantity_abs = sum(abs(float(item.get("quantity_delta") or 0.0)) for item in normalized_lines)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_ff_stock_operations WHERE source_key = ?",
+                    (normalized_source_key,),
+                ).fetchone()
+                if existing is not None:
+                    payload = _ff_stock_operation_to_dict(existing)
+                    payload["idempotent"] = True
+                    conn.rollback()
+                    return payload
+
+                if expected_supply_guard is not None:
+                    target_supply_id = str(expected_supply_guard.get("supply_id") or "").strip()
+                    supply_row = conn.execute(
+                        """
+                        SELECT supply_id, cache_key, wb_supply_id, preorder_id,
+                               normalized_row_json, raw_goods_json, raw_goods_hash
+                        FROM sheet_vitrina_v1_wb_supplies
+                        WHERE supply_id = ?
+                        """,
+                        (target_supply_id,),
+                    ).fetchone()
+                    actual_guard = _targeted_wb_supply_guard_from_row(supply_row)
+                    if _canonical_json(actual_guard) != _canonical_json(dict(expected_supply_guard)):
+                        raise ValueError(
+                            "targeted_wb_supply_changed: "
+                            + _canonical_json({"expected": dict(expected_supply_guard), "actual": actual_guard})
+                        )
+                    actual_source_key = f"wb_supply_debit:{actual_guard.get('cache_key') or ''}"
+                    if actual_source_key != normalized_source_key:
+                        raise ValueError(
+                            "targeted_wb_supply_source_key_changed: "
+                            + _canonical_json({"expected": normalized_source_key, "actual": actual_source_key})
+                        )
+
+                if expected_checkpoint is not None:
+                    checkpoint_row = conn.execute(
+                        """
+                        SELECT checkpoint_id, created_at,
+                               baseline_cache_keys_json, baseline_source_keys_json, baseline_supply_ids_json
+                        FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint
+                        WHERE slot = 'current'
+                        """
+                    ).fetchone()
+                    actual_checkpoint = {
+                        "checkpoint_id": str(checkpoint_row["checkpoint_id"] or "") if checkpoint_row else "",
+                        "created_at": str(checkpoint_row["created_at"] or "") if checkpoint_row else "",
+                        "baseline_cache_keys": _loads_json_list(checkpoint_row["baseline_cache_keys_json"]) if checkpoint_row else [],
+                        "baseline_source_keys": _loads_json_list(checkpoint_row["baseline_source_keys_json"]) if checkpoint_row else [],
+                        "baseline_supply_ids": _loads_json_list(checkpoint_row["baseline_supply_ids_json"]) if checkpoint_row else [],
+                    }
+                    if _canonical_json(actual_checkpoint) != _canonical_json(dict(expected_checkpoint)):
+                        raise ValueError(
+                            "targeted_wb_supply_checkpoint_changed: "
+                            + _canonical_json({"expected": dict(expected_checkpoint), "actual": actual_checkpoint})
+                        )
+
+                if expected_activation is not None:
+                    activation_row = conn.execute(
+                        """
+                        SELECT operation_id, created_at
+                        FROM sheet_vitrina_v1_ff_stock_operations
+                        WHERE source_type <> 'wb_supply'
+                          AND total_quantity_delta > 0
+                        ORDER BY created_at ASC, operation_id ASC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    actual_activation = {
+                        "operation_id": str(activation_row["operation_id"] or "") if activation_row else "",
+                        "created_at": str(activation_row["created_at"] or "") if activation_row else "",
+                    }
+                    if _canonical_json(actual_activation) != _canonical_json(dict(expected_activation)):
+                        raise ValueError(
+                            "targeted_ff_stock_activation_changed: "
+                            + _canonical_json({"expected": dict(expected_activation), "actual": actual_activation})
+                        )
+
+                if expected_active_nomenclature is not None:
+                    expected_nomenclature = {
+                        int(nm_id): dict(item)
+                        for nm_id, item in expected_active_nomenclature.items()
+                    }
+                    item_ids = [str(item.get("item_id") or "") for item in expected_nomenclature.values()]
+                    if not item_ids or any(not item_id for item_id in item_ids):
+                        raise ValueError("targeted_active_nomenclature_guard_invalid")
+                    nomenclature_placeholders = ",".join("?" for _ in item_ids)
+                    nomenclature_rows = conn.execute(
+                        f"""
+                        SELECT item_id, nm_id, is_active, is_hidden, updated_at
+                        FROM sheet_vitrina_v1_nomenclature_items
+                        WHERE item_id IN ({nomenclature_placeholders})
+                        """,
+                        tuple(item_ids),
+                    ).fetchall()
+                    actual_nomenclature = {
+                        int(row["nm_id"] or 0): {
+                            "item_id": str(row["item_id"] or ""),
+                            "nm_id": int(row["nm_id"] or 0),
+                            "is_active": bool(row["is_active"]),
+                            "is_hidden": bool(row["is_hidden"]),
+                            "updated_at": str(row["updated_at"] or ""),
+                        }
+                        for row in nomenclature_rows
+                    }
+                    if _canonical_json(actual_nomenclature) != _canonical_json(expected_nomenclature):
+                        raise ValueError(
+                            "targeted_active_nomenclature_changed: "
+                            + _canonical_json({"expected": expected_nomenclature, "actual": actual_nomenclature})
+                        )
+                    if any(not item["is_active"] or item["is_hidden"] for item in actual_nomenclature.values()):
+                        raise ValueError("targeted_active_nomenclature_not_eligible")
+
+                placeholders = ",".join("?" for _ in expected_balance_map)
+                balance_rows = conn.execute(
+                    f"""
+                    SELECT nm_id, SUM(quantity_delta) AS balance
+                    FROM sheet_vitrina_v1_ff_stock_operation_lines
+                    WHERE nm_id IN ({placeholders})
+                    GROUP BY nm_id
+                    """,
+                    tuple(sorted(expected_balance_map)),
+                ).fetchall()
+                actual_balances = {int(row["nm_id"]): float(row["balance"] or 0.0) for row in balance_rows}
+                actual_balances = {nm_id: actual_balances.get(nm_id, 0.0) for nm_id in expected_balance_map}
+                changed = [
+                    {
+                        "nm_id": nm_id,
+                        "expected_balance": expected_balance_map[nm_id],
+                        "actual_balance": actual_balances[nm_id],
+                    }
+                    for nm_id in sorted(expected_balance_map)
+                    if abs(expected_balance_map[nm_id] - actual_balances[nm_id]) > 1e-9
+                ]
+                if changed:
+                    raise ValueError("targeted_ff_stock_balances_changed: " + _canonical_json(changed))
+
+                expected_total_map = {str(key): float(value) for key, value in (expected_ledger_totals or {}).items()}
+                if expected_total_map:
+                    required_total_keys = {"before", "delta", "after"}
+                    if set(expected_total_map) != required_total_keys:
+                        raise ValueError("targeted_ff_stock_total_guard_invalid")
+                    total_row = conn.execute(
+                        "SELECT COALESCE(SUM(quantity_delta), 0) AS total FROM sheet_vitrina_v1_ff_stock_operation_lines"
+                    ).fetchone()
+                    actual_total_before = float(total_row["total"] or 0.0) if total_row is not None else 0.0
+                    if abs(actual_total_before - expected_total_map["before"]) > 1e-9:
+                        raise ValueError(
+                            "targeted_ff_stock_total_changed: "
+                            + _canonical_json(
+                                {"expected": expected_total_map["before"], "actual": actual_total_before}
+                            )
+                        )
+                    if abs(total_quantity_delta - expected_total_map["delta"]) > 1e-9:
+                        raise ValueError("targeted_ff_stock_delta_changed")
+                    if abs(actual_total_before + total_quantity_delta - expected_total_map["after"]) > 1e-9:
+                        raise ValueError("targeted_ff_stock_projected_total_changed")
+
+                projected_by_nm = dict(actual_balances)
+                for item in normalized_lines:
+                    nm_id = int(item.get("nm_id") or 0)
+                    projected_by_nm[nm_id] += float(item.get("quantity_delta") or 0.0)
+                negative = [
+                    {
+                        "nm_id": nm_id,
+                        "nmID": nm_id,
+                        "current_balance": actual_balances[nm_id],
+                        "required_debit": abs(
+                            sum(
+                                float(item.get("quantity_delta") or 0.0)
+                                for item in normalized_lines
+                                if int(item.get("nm_id") or 0) == nm_id
+                            )
+                        ),
+                        "projected_balance": projected_by_nm[nm_id],
+                        "expected_balance": projected_by_nm[nm_id],
+                    }
+                    for nm_id in sorted(projected_by_nm)
+                    if projected_by_nm[nm_id] < -1e-9
+                ]
+                if negative:
+                    raise ValueError("targeted_ff_stock_would_make_negative_balance: " + _canonical_json(negative))
+
+                conn.execute(
+                    """
+                    INSERT INTO sheet_vitrina_v1_ff_stock_operations(
+                        operation_id, operation_type, source_type, source_key,
+                        source_object_id, source_object_label, created_at, created_by,
+                        sku_count, total_quantity_delta, total_quantity_abs,
+                        warnings_json, diagnostics_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_operation_id,
+                        str(operation_type or "").strip(),
+                        str(source_type or "").strip(),
+                        normalized_source_key,
+                        str(source_object_id or "").strip(),
+                        str(source_object_label or "").strip(),
+                        created_at,
+                        str(created_by or "").strip(),
+                        len(line_nm_ids),
+                        total_quantity_delta,
+                        total_quantity_abs,
+                        json.dumps(list(warnings or []), ensure_ascii=False),
+                        json.dumps(dict(diagnostics or {}), ensure_ascii=False),
+                    ),
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO sheet_vitrina_v1_ff_stock_operation_lines(
+                        operation_id, line_no, nm_id, barcode, sku,
+                        nomenclature_name, comment, group_name, quantity_delta, raw_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            normalized_operation_id,
+                            index,
+                            int(item.get("nm_id") or 0),
+                            str(item.get("barcode") or "").strip(),
+                            str(item.get("sku") or item.get("our_sku") or "").strip(),
+                            str(item.get("nomenclature_name") or "").strip(),
+                            str(item.get("comment") or "").strip(),
+                            str(item.get("group_name") or "").strip(),
+                            float(item.get("quantity_delta") or 0.0),
+                            json.dumps(dict(item.get("raw") or item), ensure_ascii=False),
+                        )
+                        for index, item in enumerate(normalized_lines, start=1)
+                    ],
+                )
+                if expected_total_map:
+                    post_total_row = conn.execute(
+                        "SELECT COALESCE(SUM(quantity_delta), 0) AS total FROM sheet_vitrina_v1_ff_stock_operation_lines"
+                    ).fetchone()
+                    post_total = float(post_total_row["total"] or 0.0) if post_total_row is not None else 0.0
+                    if abs(post_total - expected_total_map["after"]) > 1e-9:
+                        raise ValueError(
+                            "targeted_ff_stock_post_write_total_mismatch: "
+                            + _canonical_json({"expected": expected_total_map["after"], "actual": post_total})
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_ff_stock_operations WHERE operation_id = ?",
                 (normalized_operation_id,),
             ).fetchone()
             payload = _ff_stock_operation_to_dict(row)
@@ -7010,6 +7334,32 @@ def _wb_supply_record_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "enrichment_status": row["enrichment_status"] or str(normalized.get("enrichment_status") or ""),
         "enrichment_error": row["enrichment_error"] or str(normalized.get("enrichment_error") or ""),
     }
+
+
+def _targeted_wb_supply_guard_from_row(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    normalized = _loads_json_object(row["normalized_row_json"])
+    raw_goods = _loads_json_list(row["raw_goods_json"]) if row["raw_goods_json"] else None
+    return {
+        "supply_id": str(row["supply_id"] or ""),
+        "cache_key": str(row["cache_key"] or normalized.get("cache_key") or ""),
+        "wb_supply_id": str(row["wb_supply_id"] or normalized.get("wb_supply_id") or ""),
+        "preorder_id": str(row["preorder_id"] or normalized.get("preorder_id") or ""),
+        "normalized_supply_id": str(normalized.get("supply_id") or ""),
+        "normalized_cache_key": str(normalized.get("cache_key") or ""),
+        "status_id": _audit_int(normalized.get("status_id")),
+        "virtual_type_id": normalized.get("virtual_type_id"),
+        "type_label": str(normalized.get("type_label") or ""),
+        "source_created_at": str(normalized.get("source_created_at") or ""),
+        "supply_date": str(normalized.get("supply_date") or ""),
+        "raw_goods": raw_goods,
+        "raw_goods_hash": str(row["raw_goods_hash"] or normalized.get("raw_goods_hash") or ""),
+    }
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _sheet_vitrina_user_config_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
