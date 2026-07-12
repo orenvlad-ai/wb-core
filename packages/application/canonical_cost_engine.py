@@ -71,6 +71,7 @@ CUTOVER_IMMATERIAL_ANOMALY_POLICY = "CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1"
 CUTOVER_ANOMALY_LINE_LIMIT = Decimal("3")
 CUTOVER_ANOMALY_OPERATION_LIMIT = Decimal("5")
 CUTOVER_ANOMALY_GLOBAL_LIMIT = Decimal("20")
+TARGETED_PRE_ACTIVATION_REMEDIATION_REASON = "targeted_pre_activation_remediation"
 
 
 class CanonicalCostBlocked(ValueError):
@@ -2744,7 +2745,7 @@ def _ff_opening_boundary_context(conn: sqlite3.Connection) -> dict[str, Any]:
     checkpoint_operation_ids: set[str] = set()
     for row in conn.execute(
         """
-        SELECT operation_id,source_key,source_object_id
+        SELECT operation_id,source_key,source_object_id,diagnostics_json
         FROM sheet_vitrina_v1_ff_stock_operations
         WHERE operation_type='auto_writeoff' AND source_type='wb_supply'
         """
@@ -2752,6 +2753,17 @@ def _ff_opening_boundary_context(conn: sqlite3.Connection) -> dict[str, Any]:
         operation_id = str(row["operation_id"] or "")
         source_key = str(row["source_key"] or "")
         supply_id = str(row["source_object_id"] or "")
+        diagnostics = _json_loads(row["diagnostics_json"])
+        if (
+            str(diagnostics.get("reason") or "")
+            == TARGETED_PRE_ACTIVATION_REMEDIATION_REASON
+            or str(diagnostics.get("remediation") or "")
+            == TARGETED_PRE_ACTIVATION_REMEDIATION_REASON
+        ):
+            # This is the one repo-owned real post-cutover movement.  Its
+            # checkpoint membership authorizes the bounded ledger debit; it
+            # does not turn the debit into opening audit history.
+            continue
         source_identity = source_key.removeprefix("wb_supply_debit:")
         if (
             source_key in source_keys
@@ -3314,16 +3326,22 @@ def _source_anomaly_preflight_conn(
                 continue
             operation_discrepancy[operation_id] += surplus
             cost = baseline_costs.get(nm_id)
-            prelim_ok = (
-                surplus <= CUTOVER_ANOMALY_LINE_LIMIT
-                and _is_integer_quantity(surplus)
-                and resolution.effective_date < CUTOVER_DATE
-                and fully_checkpoint_matched
-                and nm_id > 0
-                and nm_id in sent_by_nm
-                and cost is not None
-                and _decimal(cost.get("recognized_unit_cost_rub")) > ZERO
-            )
+            guard_failures: list[str] = []
+            if surplus > CUTOVER_ANOMALY_LINE_LIMIT:
+                guard_failures.append("line discrepancy exceeds 3 units")
+            if not _is_integer_quantity(surplus):
+                guard_failures.append("discrepancy is not an integer quantity")
+            if resolution.effective_date >= CUTOVER_DATE:
+                guard_failures.append("business date is cutover or post-cutover")
+            if not fully_checkpoint_matched:
+                guard_failures.append("source is not fully checkpoint matched")
+            if nm_id <= 0 or nm_id not in sent_by_nm:
+                guard_failures.append("exact operation-line SKU identity is missing")
+            if cost is None:
+                guard_failures.append("permitted canonical baseline cost is missing")
+            elif _decimal(cost.get("recognized_unit_cost_rub")) <= ZERO:
+                guard_failures.append("canonical baseline cost is not positive")
+            prelim_ok = not guard_failures
             anomalies.append(
                 {
                     "blocker_class": "accepted_quantity_exceeds_sent",
@@ -3356,9 +3374,10 @@ def _source_anomaly_preflight_conn(
                         if prelim_ok else "blocked_accepted_quantity_exceeds_sent"
                     ),
                     "eligible": prelim_ok,
+                    "policy_guard_failures": guard_failures,
                     "reason": (
                         "bounded pre-cutover checkpoint surplus is already absorbed by official WB opening"
-                        if prelim_ok else "one or more mandatory cutover-policy guards failed"
+                        if prelim_ok else "; ".join(guard_failures)
                     ),
                     "gross_discrepancy": surplus,
                     "net_discrepancy": raw_accepted - sent,
@@ -3416,15 +3435,22 @@ def _source_anomaly_preflight_conn(
             )
             for item in movement_rows
         )
-        prelim_ok = (
-            remaining <= CUTOVER_ANOMALY_LINE_LIMIT
-            and _is_integer_quantity(remaining)
-            and str(fact["accepted_date"] or "") < CUTOVER_DATE
-            and exact_source
-            and checkpoint_match
-            and cost is not None
-            and _decimal(cost.get("recognized_unit_cost_rub")) > ZERO
-        )
+        guard_failures = []
+        if remaining > CUTOVER_ANOMALY_LINE_LIMIT:
+            guard_failures.append("line discrepancy exceeds 3 units")
+        if not _is_integer_quantity(remaining):
+            guard_failures.append("discrepancy is not an integer quantity")
+        if str(fact["accepted_date"] or "") >= CUTOVER_DATE:
+            guard_failures.append("business date is cutover or post-cutover")
+        if not exact_source:
+            guard_failures.append("exact doprinato source identity is missing")
+        if not checkpoint_match:
+            guard_failures.append("no exact/direct or strict route checkpoint identity")
+        if cost is None:
+            guard_failures.append("permitted canonical baseline cost is missing")
+        elif _decimal(cost.get("recognized_unit_cost_rub")) <= ZERO:
+            guard_failures.append("canonical baseline cost is not positive")
+        prelim_ok = not guard_failures
         operation_key = f"doprinato:{fact['supply_id']}"
         operation_discrepancy[operation_key] += remaining
         anomalies.append(
@@ -3453,9 +3479,10 @@ def _source_anomaly_preflight_conn(
                     if prelim_ok else "blocked_doprinato_unmatched_surplus"
                 ),
                 "eligible": prelim_ok,
+                "policy_guard_failures": guard_failures,
                 "reason": (
                     "bounded pre-cutover unmatched doprinato is already absorbed by official WB opening"
-                    if prelim_ok else "one or more mandatory cutover-policy guards failed"
+                    if prelim_ok else "; ".join(guard_failures)
                 ),
                 "gross_discrepancy": remaining,
                 "net_discrepancy": remaining,
@@ -3545,14 +3572,20 @@ def _source_anomaly_preflight_conn(
                     and supply_id in supply_ids
                     and source_identity in cache_keys
                 )
-                prelim_ok = (
-                    residual <= CUTOVER_ANOMALY_LINE_LIMIT
-                    and _is_integer_quantity(residual)
-                    and effective < CUTOVER_DATE
-                    and checkpoint_match
-                    and cost is not None
-                    and _decimal(cost.get("recognized_unit_cost_rub")) > ZERO
-                )
+                guard_failures = []
+                if residual > CUTOVER_ANOMALY_LINE_LIMIT:
+                    guard_failures.append("line discrepancy exceeds 3 units")
+                if not _is_integer_quantity(residual):
+                    guard_failures.append("discrepancy is not an integer quantity")
+                if effective >= CUTOVER_DATE:
+                    guard_failures.append("business date is cutover or post-cutover")
+                if not checkpoint_match:
+                    guard_failures.append("source is not fully checkpoint matched")
+                if cost is None:
+                    guard_failures.append("permitted canonical baseline cost is missing")
+                elif _decimal(cost.get("recognized_unit_cost_rub")) <= ZERO:
+                    guard_failures.append("canonical baseline cost is not positive")
+                prelim_ok = not guard_failures
                 operation_discrepancy[operation_id] += residual
                 anomalies.append(
                     {
@@ -3581,9 +3614,10 @@ def _source_anomaly_preflight_conn(
                             if prelim_ok else "blocked_ff_replay_inventory_deficit"
                         ),
                         "eligible": prelim_ok,
+                        "policy_guard_failures": guard_failures,
                         "reason": (
                             "bounded checkpoint residual is already represented by the opening snapshots"
-                            if prelim_ok else "FF replay deficit is outside the cutover-only policy"
+                            if prelim_ok else "; ".join(guard_failures)
                         ),
                         "gross_discrepancy": residual,
                         "net_discrepancy": -residual,
@@ -3678,14 +3712,28 @@ def _source_anomaly_preflight_conn(
         )
 
     gross = sum((_decimal(item["gross_discrepancy"]) for item in anomalies), ZERO)
+    candidate_net = sum(
+        (_decimal(item["net_discrepancy"]) for item in anomalies), ZERO
+    )
+    candidate_operation_ids = {
+        str(item.get("operation_id") or item.get("supply_id") or "")
+        for item in anomalies
+    }
+    candidate_nm_ids = {int(item["nm_id"]) for item in anomalies}
     for item in anomalies:
         budget_key = str(item.get("operation_budget_key") or item["operation_id"])
         if operation_discrepancy[budget_key] > CUTOVER_ANOMALY_OPERATION_LIMIT:
             item["eligible"] = False
-            item["reason"] = "operation anomaly budget exceeds 5 units"
+            item["reason"] = (
+                str(item["reason"])
+                + "; operation anomaly budget exceeds 5 units"
+            )
         if gross > CUTOVER_ANOMALY_GLOBAL_LIMIT:
             item["eligible"] = False
-            item["reason"] = "global cutover anomaly budget exceeds 20 units"
+            item["reason"] = (
+                str(item["reason"])
+                + "; global cutover anomaly budget exceeds 20 units"
+            )
         item.pop("gross_discrepancy", None)
         item.pop("net_discrepancy", None)
         item.pop("operation_budget_key", None)
@@ -3756,6 +3804,11 @@ def _source_anomaly_preflight_conn(
         "unresolved_anomalies": blockers,
         "checks": checks,
         "budget": {
+            "candidate_anomaly_count": len(anomalies),
+            "candidate_affected_operation_count": len(candidate_operation_ids),
+            "candidate_affected_sku_count": len(candidate_nm_ids),
+            "candidate_gross_quantity_discrepancy": _text(gross),
+            "candidate_net_quantity_discrepancy": _text(candidate_net),
             "eligible_anomaly_count": len(eligible),
             "affected_operation_count": len({item["operation_id"] or item["supply_id"] for item in eligible}),
             "affected_sku_count": len({int(item["nm_id"]) for item in eligible}),
@@ -3773,7 +3826,10 @@ def _source_anomaly_preflight_conn(
             "estimated_recognized_capital_exposure_rub": _text(recognized_exposure),
             "estimated_paid_capital_exposure_rub": _text(paid_exposure),
             "limit_quantity": _text(CUTOVER_ANOMALY_GLOBAL_LIMIT),
-            "remaining_quantity": _text(CUTOVER_ANOMALY_GLOBAL_LIMIT - eligible_gross),
+            "remaining_quantity": _text(CUTOVER_ANOMALY_GLOBAL_LIMIT - gross),
+            "over_budget_quantity": _text(
+                max(gross - CUTOVER_ANOMALY_GLOBAL_LIMIT, ZERO)
+            ),
         },
     }
 

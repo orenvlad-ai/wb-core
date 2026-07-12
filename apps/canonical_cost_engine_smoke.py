@@ -16,6 +16,7 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     BASELINE_ONEC,
     CanonicalCostBlocked,
     CanonicalCostEngine,
+    _ff_opening_boundary_context,
     _wb_movement_evidence,
     allocate_partial_payment,
     reconcile_outstanding_layers,
@@ -40,6 +41,7 @@ def main() -> int:
     _wac_and_snapshot_stability()
     _outstanding_reconciliation()
     _ff_operation_effective_date_resolution()
+    _targeted_remediation_stays_outside_opening_collapse()
     _cutover_immaterial_anomaly_policy()
     _baseline_and_physical_sources()
     print("canonical_cost_engine_smoke: ok")
@@ -557,6 +559,48 @@ def _cutover_immaterial_anomaly_policy() -> None:
         _eq(global_over["status"], "blocked", "global anomaly budget above twenty blocks")
         if not all(not item["eligible"] for item in global_over["anomalies"]):
             raise AssertionError("global budget is a fail-closed all-or-nothing gate")
+
+
+def _targeted_remediation_stays_outside_opening_collapse() -> None:
+    import json
+
+    with TemporaryDirectory() as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint(
+                    slot,checkpoint_id,created_at,created_by,reason,
+                    baseline_cache_keys_json,baseline_source_keys_json,
+                    baseline_supply_ids_json,baseline_record_count,diagnostics_json
+                ) VALUES('current','targeted-checkpoint','2026-07-01T00:00:00Z','fixture',
+                         'fixture',?,?,?,1,'{}')
+                """,
+                (
+                    json.dumps(["supply:40561872"]),
+                    json.dumps(["wb_supply_debit:supply:40561872"]),
+                    json.dumps(["40561872"]),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_ff_stock_operations(
+                    operation_id,operation_type,source_type,source_key,source_object_id,
+                    source_object_label,created_at,created_by,sku_count,total_quantity_delta,
+                    total_quantity_abs,warnings_json,diagnostics_json
+                ) VALUES('targeted-40561872','auto_writeoff','wb_supply',
+                         'wb_supply_debit:supply:40561872','40561872','targeted',
+                         '2026-07-12T00:00:00Z','fixture',1,-31500,31500,'[]',?)
+                """,
+                (json.dumps({
+                    "reason": "targeted_pre_activation_remediation",
+                    "supply_timestamp": "2026-07-02T12:38:24+00:00",
+                }),),
+            )
+            context = _ff_opening_boundary_context(conn)
+        if "targeted-40561872" in context["checkpoint_operation_ids"]:
+            raise AssertionError("targeted remediation must remain a real post-cutover debit")
 
 
 def _baseline_and_physical_sources() -> None:
