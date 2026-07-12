@@ -1978,10 +1978,15 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_our_wb_cost_recalculate_request(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         result = self.our_wb_cost_block.rebuild_all()
+        rebuilt = asdict(result)
+        finance_recalculation = (
+            self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+        )
         return {
             "contract_name": "sheet_vitrina_v1_our_wb_cost_recalculate",
             "status": "ok",
-            "result": asdict(result),
+            "result": rebuilt,
+            "wb_finance_cost_recalculation": finance_recalculation,
             "requested": dict(payload or {}),
         }
 
@@ -2475,27 +2480,51 @@ class RegistryUploadHttpEntrypoint:
         uploaded_content_type: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        return self.supplier_shipments_block.import_nomenclature_xlsx(
+        result = self.supplier_shipments_block.import_nomenclature_xlsx(
             workbook_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
             dry_run=dry_run,
         )
+        return (
+            result
+            if dry_run
+            else self._attach_wb_finance_cost_recalculation(result)
+        )
 
     def handle_nomenclature_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.create_nomenclature_item(payload)
+        return self._attach_wb_finance_cost_recalculation(
+            self.supplier_shipments_block.create_nomenclature_item(payload)
+        )
 
     def handle_nomenclature_patch_request(self, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.update_nomenclature_item(item_id, payload)
+        return self._attach_wb_finance_cost_recalculation(
+            self.supplier_shipments_block.update_nomenclature_item(item_id, payload)
+        )
 
     def handle_nomenclature_delete_request(self, item_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.deactivate_nomenclature_item(item_id)
+        return self._attach_wb_finance_cost_recalculation(
+            self.supplier_shipments_block.deactivate_nomenclature_item(item_id)
+        )
 
     def handle_nomenclature_barcode_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.sync_nomenclature_barcodes(payload)
+        return self._attach_wb_finance_cost_recalculation(
+            self.supplier_shipments_block.sync_nomenclature_barcodes(payload)
+        )
 
     def handle_nomenclature_item_barcode_sync_request(self, item_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.sync_nomenclature_item_barcode(item_id)
+        return self._attach_wb_finance_cost_recalculation(
+            self.supplier_shipments_block.sync_nomenclature_item_barcode(item_id)
+        )
+
+    def _attach_wb_finance_cost_recalculation(
+        self, result: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        payload = dict(result)
+        payload["wb_finance_cost_recalculation"] = (
+            self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+        )
+        return payload
 
     def handle_sku_groups_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_sku_groups(include_inactive=True)
@@ -3170,6 +3199,9 @@ class RegistryUploadHttpEntrypoint:
         }
         changed = any(value > 0 for value in payload.values())
         payload["changed"] = changed
+        payload["wb_finance_cost_recalculation"] = (
+            self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+        )
         _finish_operator_phase(
             refresh_diagnostics,
             phase,

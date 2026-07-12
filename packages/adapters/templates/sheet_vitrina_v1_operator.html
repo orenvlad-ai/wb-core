@@ -887,6 +887,8 @@
 
     .wb-finance-negative { color: var(--error-text); font-weight: 700; }
     .wb-finance-week-status { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 600; }
+    .wb-finance-cost-quality { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; font-weight: 600; }
+    .wb-finance-cost-quality.is-estimated { color: var(--warning-text); }
     .wb-finance-warning { color: var(--error-text); }
 
     .stock-report-sort-button {
@@ -3844,7 +3846,7 @@
             <section class="block">
               <h2 class="block-title">Финотчёт ВБ</h2>
               <p id="wbFinanceReportPeriod" class="report-period">Еженедельные отчёты Wildberries с начала 2026 года.</p>
-              <p class="field-note">Официальный Finance API WB, все сформированные reportId одной недели; суммы хранятся и считаются без float.</p>
+              <p class="field-note">Официальный Finance API WB; до 01.07.2026 себестоимость берётся из COST_PRICE, с 01.07.2026 — из «Себестоимость WB наша, ₽/шт» по дате каждой операции.</p>
               <p id="wbFinanceReportStatus" class="section-message">Читаем финансовые отчёты...</p>
               <div id="wbFinanceReportContent" hidden>
                 <div id="wbFinanceReportTableWrap" class="wb-finance-table-wrap"></div>
@@ -12333,8 +12335,11 @@
         const head = "<thead><tr><th>Метрика</th>" + weeks.map((week) => {
           const incomplete = Number(week.cost_coverage && week.cost_coverage.unmatched_units || 0) !== 0;
           const label = financeStatusLabel(week.status, incomplete);
-          return "<th title=\"reportId: " + escapeHtml((week.report_ids || []).join(", ")) + "\">" + escapeHtml(formatFinanceWeek(week)) +
-            "<span class=\"wb-finance-week-status" + (incomplete ? " wb-finance-warning" : "") + "\">" + escapeHtml(label) + "</span></th>";
+          const quality = financeCostQualityLabel(week);
+          const diagnostic = financeCostQualityDiagnostic(week);
+          return "<th title=\"" + escapeHtml("reportId: " + (week.report_ids || []).join(", ") + (diagnostic ? " · " + diagnostic : "")) + "\">" + escapeHtml(formatFinanceWeek(week)) +
+            "<span class=\"wb-finance-week-status" + (incomplete ? " wb-finance-warning" : "") + "\">" + escapeHtml(label) + "</span>" +
+            (quality ? "<span class=\"wb-finance-cost-quality" + (quality.estimated ? " is-estimated" : "") + "\">" + escapeHtml(quality.label) + "</span>" : "") + "</th>";
         }).join("") + "</tr></thead>";
         const body = definitions.map((definition) => {
           if (definition.group) {
@@ -12356,11 +12361,42 @@
         wbFinanceReportStatus.textContent = "Загружено недель: " + weeks.length + "; отчётов: " + weeks.reduce((sum, week) => sum + Number(week.report_count || 0), 0) +
           "; строк: " + new Intl.NumberFormat("ru-RU").format(weeks.reduce((sum, week) => sum + Number(week.raw_row_count || 0), 0)) + ".";
         wbFinanceReportStatus.className = "section-message success";
-        wbFinanceReportNotes.innerHTML = incompleteWeeks.length
-          ? "<p class=\"wb-finance-warning\">Неполная себестоимость в " + incompleteWeeks.length + " нед.: прибыль для этих недель не показывается как точная.</p>"
-          : "<p>Себестоимость: канонический COST_PRICE WB Core с временной применимостью и SKU-сопоставлением.</p>";
+        wbFinanceReportNotes.innerHTML =
+          "<p>Источник себестоимости переключается построчно: COST_PRICE до 01.07.2026; «Себестоимость WB наша, ₽/шт» — с 01.07.2026. Подтверждённость нашей себестоимости показана в статусе недели и tooltip.</p>" +
+          (incompleteWeeks.length ? "<p class=\"wb-finance-warning\">Неполная себестоимость в " + incompleteWeeks.length + " нед.: прибыль для этих недель не показывается как точная.</p>" : "");
         window.requestAnimationFrame(() => { wbFinanceReportTableWrap.scrollLeft = wbFinanceReportTableWrap.scrollWidth; });
         scheduleEmbeddedHeightPost();
+      }
+
+      function financeCostQualityLabel(week) {
+        if (String(week && week.week_end || "") < "2026-07-01") return null;
+        const quality = week && week.cost_coverage && week.cost_coverage.quality || {};
+        const rawShare = quality.confirmed_share_pct;
+        if (rawShare === null || rawShare === undefined || rawShare === "") return {label: "подтв. —", estimated: true};
+        const share = Number(rawShare);
+        if (!Number.isFinite(share)) return {label: "подтв. —", estimated: true};
+        return {label: "подтв. " + formatFinanceMetric(share, "percent"), estimated: share < 99.9999};
+      }
+
+      function financeCostQualityDiagnostic(week) {
+        const coverage = week && week.cost_coverage || {};
+        const quality = coverage.quality || {};
+        const sources = quality.source_units || {};
+        const parts = [];
+        if (Number(sources.cost_price || 0)) parts.push("COST_PRICE: " + formatFinanceMetric(sources.cost_price, "count") + " шт.");
+        if (String(week && week.week_end || "") >= "2026-07-01") {
+          parts.push("Our WB Cost: " + formatFinanceMetric(sources.our_wb_cost_daily_state || 0, "count") + " шт.");
+          if (quality.confirmed_share_pct !== null && quality.confirmed_share_pct !== undefined) parts.push("подтверждено: " + formatFinanceMetric(quality.confirmed_share_pct, "percent"));
+          parts.push("estimated/fallback: " + formatFinanceQualityUnits(quality.estimated_fallback_units || 0) + " шт.");
+        }
+        if (Number(coverage.unmatched_units || 0)) parts.push("без себестоимости: " + formatFinanceMetric(coverage.unmatched_units, "count") + " шт.");
+        if (Number(quality.operation_date_fallback_rows || 0)) parts.push("fallback даты операции: " + formatFinanceMetric(quality.operation_date_fallback_rows, "count") + " строк");
+        return parts.join(" · ");
+      }
+
+      function formatFinanceQualityUnits(value) {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? new Intl.NumberFormat("ru-RU", {maximumFractionDigits:2}).format(numeric) : "—";
       }
 
       function formatFinanceWeek(week) {

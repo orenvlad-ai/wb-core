@@ -16,6 +16,10 @@ import urllib.error
 import urllib.request
 from zoneinfo import ZoneInfo
 
+from packages.application.sheet_vitrina_v1_our_wb_costs import (
+    OUR_WB_COST_OPENING_DATE,
+)
+
 
 FINANCE_URL = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
 CLASSIFIER_VERSION = "wb_finance_weekly_classifier_v1"
@@ -23,6 +27,11 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 ZERO = Decimal("0")
 MONEY_QUANT = Decimal("0.0001")
 FIRST_INCLUDED_DATE = date(2026, 1, 1)
+OUR_WB_COST_CUTOVER_DATE = date.fromisoformat(OUR_WB_COST_OPENING_DATE)
+OUR_WB_COST_CUTOVER_WEEK_START = OUR_WB_COST_CUTOVER_DATE - timedelta(
+    days=OUR_WB_COST_CUTOVER_DATE.weekday()
+)
+COST_METHOD_VERSION = "wb_finance_cost_temporal_v2"
 
 
 def _decimal(value: Any) -> Decimal:
@@ -259,10 +268,26 @@ class WbFinanceWeeklyBlock:
                     seller_id TEXT NOT NULL, week_start TEXT NOT NULL, week_end TEXT NOT NULL,
                     matched_units INTEGER NOT NULL, unmatched_units INTEGER NOT NULL,
                     coverage_pct TEXT, cogs_rub TEXT, problem_skus_json TEXT NOT NULL,
+                    quality_json TEXT NOT NULL DEFAULT '{}',
+                    cost_state_hash TEXT NOT NULL DEFAULT '',
                     calculated_at TEXT NOT NULL, PRIMARY KEY (seller_id, week_start, week_end)
                 );
                 """
             )
+            coverage_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(wb_finance_weekly_cost_coverage)"
+                ).fetchall()
+            }
+            if "quality_json" not in coverage_columns:
+                conn.execute(
+                    "ALTER TABLE wb_finance_weekly_cost_coverage ADD COLUMN quality_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "cost_state_hash" not in coverage_columns:
+                conn.execute(
+                    "ALTER TABLE wb_finance_weekly_cost_coverage ADD COLUMN cost_state_hash TEXT NOT NULL DEFAULT ''"
+                )
             conn.commit()
 
     def sync_week(
@@ -523,8 +548,9 @@ class WbFinanceWeeklyBlock:
             )
             conn.execute(
                 """INSERT OR REPLACE INTO wb_finance_weekly_cost_coverage
-                (seller_id,week_start,week_end,matched_units,unmatched_units,coverage_pct,cogs_rub,problem_skus_json,calculated_at)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (seller_id,week_start,week_end,matched_units,unmatched_units,coverage_pct,cogs_rub,
+                 problem_skus_json,quality_json,cost_state_hash,calculated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     self.seller_id,
                     week_start.isoformat(),
@@ -534,6 +560,8 @@ class WbFinanceWeeklyBlock:
                     coverage["coverage_pct"],
                     coverage["cogs_rub"],
                     json.dumps(coverage["problem_skus"], ensure_ascii=False),
+                    json.dumps(coverage["quality"], ensure_ascii=False),
+                    coverage["cost_state_hash"],
                     now,
                 ),
             )
@@ -756,9 +784,20 @@ class WbFinanceWeeklyBlock:
                     _decimal(row["cost_price_rub"]),
                 )
             )
+        daily_state_available = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_wb_cost_daily_state'"
+            ).fetchone()
+            is not None
+        )
+        daily_state_cache: dict[tuple[str, str], sqlite3.Row | None] = {}
         cogs = ZERO
-        matched_movements: dict[str, int] = {}
+        matched_movements: dict[str, dict[str, Any]] = {}
         problems: dict[str, int] = {}
+        problem_meta: dict[str, dict[str, Any]] = {}
+        dependency_evidence: set[str] = set()
+        operation_date_fallback_rows = 0
+        operation_date_fallback_units = 0
         for row in rows:
             doc = str(row.get("docTypeName") or "").casefold()
             if doc not in {"продажа", "возврат"}:
@@ -782,20 +821,20 @@ class WbFinanceWeeklyBlock:
                 internal_nm, ""
             )
             operation_date = week_start
+            operation_date_source = "week_start_fallback"
             for field in ("rrDate", "saleDt", "orderDt"):
                 raw_date = str(row.get(field) or "")[:10]
                 try:
                     if raw_date:
                         operation_date = date.fromisoformat(raw_date)
+                        operation_date_source = field
                         break
                 except ValueError:
                     pass
-            candidates = [
-                cost
-                for effective, cost in costs.get(group, [])
-                if effective <= operation_date
-            ]
-            movement_key = (
+            if operation_date_source == "week_start_fallback":
+                operation_date_fallback_rows += 1
+                operation_date_fallback_units += abs(qty)
+            identity_key = (
                 internal_nm
                 or raw_keys[1]
                 or raw_keys[2]
@@ -804,15 +843,169 @@ class WbFinanceWeeklyBlock:
                 or str(row.get("shkId") or "")
                 or "unknown"
             )
-            if not candidates:
+            if (
+                operation_date_source == "week_start_fallback"
+                and week_start + timedelta(days=6) >= OUR_WB_COST_CUTOVER_DATE
+            ):
+                source = "operation_date_missing"
+                movement_key = f"{source}|{identity_key}"
+                missing_reason = "operation_date_missing"
+                dependency = {
+                    "source": source,
+                    "operation_date": "",
+                    "operation_date_source": operation_date_source,
+                    "raw_keys": raw_keys,
+                    "internal_nm": internal_nm,
+                    "group": group,
+                    "missing": missing_reason,
+                }
+                dependency_evidence.add(
+                    json.dumps(
+                        dependency,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
                 problems[movement_key] = problems.get(movement_key, 0) + qty
+                problem_meta[movement_key] = {
+                    "sku": identity_key,
+                    "operation_date": "",
+                    "source": source,
+                    "reason": missing_reason,
+                    "operation_date_source": operation_date_source,
+                }
                 continue
-            matched_movements[movement_key] = (
-                matched_movements.get(movement_key, 0) + qty
+            source = (
+                "cost_price"
+                if operation_date < OUR_WB_COST_CUTOVER_DATE
+                else "our_wb_cost_daily_state"
             )
-            cogs += Decimal(qty) * candidates[-1]
+            movement_key = (
+                f"{source}|{identity_key}"
+                if source == "cost_price"
+                else f"{source}|{identity_key}|{operation_date.isoformat()}"
+            )
+            selected_cost: Decimal | None = None
+            selected_state: sqlite3.Row | None = None
+            quality_shares = (ZERO, ZERO, ZERO)
+            missing_reason = ""
+            dependency: dict[str, Any] = {
+                "source": source,
+                "operation_date": operation_date.isoformat(),
+                "operation_date_source": operation_date_source,
+                "raw_keys": raw_keys,
+                "internal_nm": internal_nm,
+                "group": group,
+            }
+            if source == "cost_price":
+                candidates = [
+                    (effective, cost)
+                    for effective, cost in costs.get(group, [])
+                    if effective <= operation_date
+                ]
+                if candidates:
+                    effective, selected_cost = candidates[-1]
+                    dependency.update(
+                        {
+                            "effective_from": effective.isoformat(),
+                            "unit_cost_rub": _money_text(selected_cost),
+                        }
+                    )
+                else:
+                    missing_reason = "cost_price_missing"
+                    dependency["missing"] = missing_reason
+            else:
+                cache_key = (operation_date.isoformat(), internal_nm)
+                if cache_key not in daily_state_cache:
+                    daily_state_cache[cache_key] = (
+                        conn.execute(
+                            """SELECT * FROM sheet_vitrina_v1_wb_cost_daily_state
+                            WHERE as_of_date=? AND nm_id=?""",
+                            cache_key,
+                        ).fetchone()
+                        if daily_state_available and internal_nm
+                        else None
+                    )
+                selected_state = daily_state_cache[cache_key]
+                if selected_state is not None:
+                    raw_unit_cost = selected_state["our_wb_unit_cost_rub"]
+                    selected_cost = (
+                        _decimal(raw_unit_cost) if raw_unit_cost is not None else None
+                    )
+                    confirmed_qty = max(_decimal(selected_state["confirmed_qty"]), ZERO)
+                    estimated_qty = max(_decimal(selected_state["estimated_qty"]), ZERO)
+                    fallback_qty = max(_decimal(selected_state["fallback_qty"]), ZERO)
+                    bucket_total = confirmed_qty + estimated_qty + fallback_qty
+                    if bucket_total > ZERO:
+                        quality_shares = (
+                            confirmed_qty / bucket_total,
+                            estimated_qty / bucket_total,
+                            fallback_qty / bucket_total,
+                        )
+                    else:
+                        state_status = str(selected_state["source_status"] or "")
+                        quality_shares = (
+                            (Decimal("1"), ZERO, ZERO)
+                            if state_status == "confirmed"
+                            else (ZERO, ZERO, Decimal("1"))
+                            if state_status == "fallback"
+                            else (ZERO, Decimal("1"), ZERO)
+                        )
+                    dependency.update(
+                        {
+                            "unit_cost_rub": _money_text(selected_cost),
+                            "confirmed_qty": _money_text(confirmed_qty),
+                            "estimated_qty": _money_text(estimated_qty),
+                            "fallback_qty": _money_text(fallback_qty),
+                            "confirmed_share_pct": str(
+                                selected_state["confirmed_share_pct"]
+                            ),
+                            "source_status": str(selected_state["source_status"] or ""),
+                            "component_status_json": str(
+                                selected_state["component_status_json"] or "{}"
+                            ),
+                            "inputs_hash": str(selected_state["inputs_hash"] or ""),
+                        }
+                    )
+                    if selected_cost is None:
+                        missing_reason = "our_wb_unit_cost_missing"
+                        dependency["missing"] = missing_reason
+                else:
+                    missing_reason = "our_wb_daily_state_missing"
+                    dependency["missing"] = missing_reason
+            dependency_evidence.add(
+                json.dumps(
+                    dependency,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            if selected_cost is None:
+                problems[movement_key] = problems.get(movement_key, 0) + qty
+                problem_meta[movement_key] = {
+                    "sku": identity_key,
+                    "operation_date": operation_date.isoformat(),
+                    "source": source,
+                    "reason": missing_reason,
+                    "operation_date_source": operation_date_source,
+                }
+                continue
+            movement = matched_movements.setdefault(
+                movement_key,
+                {
+                    "net_units": 0,
+                    "source": source,
+                    "quality_shares": quality_shares,
+                },
+            )
+            movement["net_units"] = int(movement["net_units"]) + qty
+            cogs += Decimal(qty) * selected_cost
         problems = {key: units for key, units in problems.items() if units != 0}
-        matched = sum(abs(units) for units in matched_movements.values())
+        matched = sum(
+            abs(int(movement["net_units"])) for movement in matched_movements.values()
+        )
         unmatched = sum(abs(units) for units in problems.values())
         denominator = matched + unmatched
         coverage_pct = (
@@ -820,6 +1013,52 @@ class WbFinanceWeeklyBlock:
             if denominator
             else None
         )
+        source_units = {"cost_price": 0, "our_wb_cost_daily_state": 0}
+        confirmed_units = ZERO
+        estimated_units = ZERO
+        fallback_units = ZERO
+        for movement in matched_movements.values():
+            units = abs(int(movement["net_units"]))
+            source_name = str(movement["source"])
+            source_units[source_name] += units
+            if source_name != "our_wb_cost_daily_state":
+                continue
+            confirmed_share, estimated_share, fallback_share = movement[
+                "quality_shares"
+            ]
+            decimal_units = Decimal(units)
+            confirmed_units += decimal_units * confirmed_share
+            estimated_units += decimal_units * estimated_share
+            fallback_units += decimal_units * fallback_share
+        our_wb_units = source_units["our_wb_cost_daily_state"]
+        confirmed_share_pct = (
+            confirmed_units / Decimal(our_wb_units) * Decimal("100")
+            if our_wb_units
+            else None
+        )
+        quality = {
+            "cost_method_version": COST_METHOD_VERSION,
+            "cutover_date": OUR_WB_COST_OPENING_DATE,
+            "source_units": source_units,
+            "confirmed_units": _money_text(confirmed_units),
+            "estimated_units": _money_text(estimated_units),
+            "fallback_units": _money_text(fallback_units),
+            "estimated_fallback_units": _money_text(estimated_units + fallback_units),
+            "confirmed_share_pct": _money_text(confirmed_share_pct),
+            "operation_date_fallback_rows": operation_date_fallback_rows,
+            "operation_date_fallback_units": operation_date_fallback_units,
+        }
+        cost_state_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "cost_method_version": COST_METHOD_VERSION,
+                    "dependencies": sorted(dependency_evidence),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         return {
             "matched_units": matched,
             "unmatched_units": unmatched,
@@ -827,9 +1066,11 @@ class WbFinanceWeeklyBlock:
             "cogs_rub": _money_text(cogs) if unmatched == 0 else None,
             "partial_cogs_rub": _money_text(cogs),
             "problem_skus": [
-                {"sku": key, "net_units": value}
+                {**problem_meta[key], "net_units": value}
                 for key, value in sorted(problems.items())
             ],
+            "quality": quality,
+            "cost_state_hash": cost_state_hash,
         }
 
     def build_payload(self) -> dict[str, Any]:
@@ -839,7 +1080,7 @@ class WbFinanceWeeklyBlock:
                 """SELECT s.week_start,s.week_end,a.metrics_json,a.report_ids_json,a.report_types_json,
                 a.unknown_reasons_json,a.classifier_version,s.status,s.first_loaded_at,s.last_synced_at,
                 s.report_count,s.raw_row_count,s.last_error,c.matched_units,c.unmatched_units,c.coverage_pct,
-                c.problem_skus_json,r.status reconciliation_status
+                c.problem_skus_json,c.quality_json,c.cost_state_hash,r.status reconciliation_status
                 FROM wb_finance_weekly_sync s
                 LEFT JOIN wb_finance_weekly_aggregates a USING(seller_id,week_start,week_end)
                 LEFT JOIN wb_finance_weekly_cost_coverage c USING(seller_id,week_start,week_end)
@@ -870,6 +1111,8 @@ class WbFinanceWeeklyBlock:
                         "unmatched_units": row["unmatched_units"],
                         "coverage_pct": row["coverage_pct"],
                         "problem_skus": json.loads(row["problem_skus_json"] or "[]"),
+                        "quality": json.loads(row["quality_json"] or "{}"),
+                        "cost_state_hash": row["cost_state_hash"] or "",
                     },
                     "reconciliation_status": row["reconciliation_status"] or "pending",
                 }
@@ -963,6 +1206,55 @@ class WbFinanceWeeklyBlock:
                 }
             )
         return {"status": "completed", "week_count": len(results), "weeks": results}
+
+    def recalculate_stale_cost_weeks(
+        self, *, date_from: date = OUR_WB_COST_CUTOVER_WEEK_START
+    ) -> dict[str, Any]:
+        """Rebuild post-cutover weeks whose cost dependency fingerprint changed."""
+        self.ensure_schema()
+        with self._connect() as conn:
+            candidates = conn.execute(
+                """SELECT DISTINCT raw.week_start,raw.week_end,
+                       COALESCE(coverage.cost_state_hash,'') AS stored_cost_state_hash
+                FROM wb_finance_weekly_raw_rows AS raw
+                LEFT JOIN wb_finance_weekly_cost_coverage AS coverage
+                  ON coverage.seller_id=raw.seller_id
+                 AND coverage.week_start=raw.week_start
+                 AND coverage.week_end=raw.week_end
+                WHERE raw.seller_id=? AND raw.week_end>=?
+                ORDER BY raw.week_start""",
+                (self.seller_id, date_from.isoformat()),
+            ).fetchall()
+        recalculated: list[dict[str, Any]] = []
+        for candidate in candidates:
+            start = date.fromisoformat(candidate["week_start"])
+            end = date.fromisoformat(candidate["week_end"])
+            with self._connect() as conn:
+                raw_rows = conn.execute(
+                    """SELECT raw_json FROM wb_finance_weekly_raw_rows
+                    WHERE seller_id=? AND week_start=? AND week_end=?
+                    ORDER BY report_id,rrd_id""",
+                    (self.seller_id, start.isoformat(), end.isoformat()),
+                ).fetchall()
+                rows = [json.loads(row["raw_json"]) for row in raw_rows]
+                current = self._calculate_cogs(conn, rows, start)
+            if current["cost_state_hash"] == candidate["stored_cost_state_hash"]:
+                continue
+            metrics = self.recalculate_week(start, end)
+            recalculated.append(
+                {
+                    "week_start": start.isoformat(),
+                    "week_end": end.isoformat(),
+                    "cost_state_hash": current["cost_state_hash"],
+                    "cogs": metrics["cogs"],
+                }
+            )
+        return {
+            "status": "completed",
+            "checked_week_count": len(candidates),
+            "recalculated_week_count": len(recalculated),
+            "weeks": recalculated,
+        }
 
     def repair_orphan_derived_rows(self) -> dict[str, Any]:
         """Remove derived rows that have no matching seller/week sync boundary."""

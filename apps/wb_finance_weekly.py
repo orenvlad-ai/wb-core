@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
             "sync-week",
             "recalculate",
             "recalculate-all",
+            "recalculate-stale-cost",
             "repair-derived-orphans",
             "tick",
             "status",
@@ -75,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "recalculate-all":
         result = block.recalculate_all_weeks()
+    elif args.command == "recalculate-stale-cost":
+        result = block.recalculate_stale_cost_weeks()
     elif args.command == "repair-derived-orphans":
         result = block.repair_orphan_derived_rows()
     else:

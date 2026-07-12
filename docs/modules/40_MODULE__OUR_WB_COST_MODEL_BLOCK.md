@@ -183,6 +183,8 @@ The ordinary web-vitrina refresh path persists the freshly built ready snapshot,
 
 Cost-state rebuilding and historical ready-snapshot completion are separate operations. The margin-3 historical completion must not run cost recalculation, upstream fetch, group/full refresh, workbook importer or a replace-existing snapshot rebuild.
 
+The weekly WB Finance P&L is an additional read-side consumer from `2026-07-01`. It resolves `sheet_vitrina_v1_wb_cost_daily_state` by exact operation date and canonical `nm_id`; it does not copy or rebuild this model. Present estimated/fallback unit cost is usable in management COGS with separate confirmation diagnostics. Missing daily cost never falls back to `COST_PRICE`. A changed daily-state `inputs_hash`/value or nomenclature mapping invalidates affected Finance weeks through the existing application orchestrator without calling refresh recursively.
+
 The only approved one-off path for completing already frozen `proxy_margin_3_pct` / `proxy_margin_3_pct_total` rows is `apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py`:
 - it discovers every persisted ready snapshot across all bundle generations and uses only date columns and SKU scopes already stored in each snapshot;
 - dry-run is the default and produces the complete coverage, conflicts, blank operands, zero denominators, pre-boundary margin-2 fallbacks, non-target digest and expected fingerprint;

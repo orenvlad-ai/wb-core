@@ -214,7 +214,8 @@ def main() -> None:
                 FROM wb_finance_weekly_aggregates WHERE seller_id='seller-1' LIMIT 1;
                 INSERT INTO wb_finance_weekly_cost_coverage
                 SELECT 'orphan',week_start,week_end,matched_units,unmatched_units,
-                       coverage_pct,cogs_rub,problem_skus_json,calculated_at
+                       coverage_pct,cogs_rub,problem_skus_json,quality_json,
+                       cost_state_hash,calculated_at
                 FROM wb_finance_weekly_cost_coverage WHERE seller_id='seller-1' LIMIT 1;
                 INSERT INTO wb_finance_weekly_reconciliation
                 SELECT 'orphan',week_start,week_end,status,difference_rub,detail_json,checked_at
