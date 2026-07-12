@@ -1569,6 +1569,15 @@ class RegistryUploadHttpEntrypoint:
         now = self.now_factory()
         selected_as_of_date = _resolve_group_refresh_selected_date(as_of_date, now=now)
         available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)
+        if normalized_group_id == OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID:
+            available_dates = sorted(
+                set(available_dates)
+                | set(
+                    self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
+                        descending=False
+                    )
+                )
+            )
         if selected_as_of_date not in set(available_dates):
             available_text = (
                 f"{available_dates[0]}..{available_dates[-1]}"
@@ -3420,8 +3429,31 @@ class RegistryUploadHttpEntrypoint:
                         target_snapshot_as_of_date=target_snapshot_as_of_date,
                     )
                 )
-                previous_plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=target_snapshot_as_of_date)
-                previous_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=target_snapshot_as_of_date)
+                current_bundle_dates = set(
+                    self.runtime.list_sheet_vitrina_ready_snapshot_dates(
+                        date_from=target_snapshot_as_of_date,
+                        date_to=target_snapshot_as_of_date,
+                    )
+                )
+                if target_snapshot_as_of_date in current_bundle_dates:
+                    previous_plan = self.runtime.load_sheet_vitrina_ready_snapshot(
+                        as_of_date=target_snapshot_as_of_date
+                    )
+                    previous_status = self.runtime.load_sheet_vitrina_refresh_status(
+                        as_of_date=target_snapshot_as_of_date
+                    )
+                elif source_group_id == OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID:
+                    previous_plan = self.runtime.load_sheet_vitrina_ready_snapshot_any_bundle(
+                        as_of_date=target_snapshot_as_of_date
+                    )
+                    previous_status = self.runtime.load_sheet_vitrina_refresh_status_any_bundle(
+                        as_of_date=target_snapshot_as_of_date
+                    )
+                else:
+                    raise ValueError(
+                        "sheet_vitrina_v1 ready snapshot missing in current bundle: "
+                        f"as_of_date={target_snapshot_as_of_date}"
+                    )
                 refreshed_at = self.refreshed_at_factory()
                 merged_plan, merge_summary = _merge_source_group_ready_snapshot(
                     previous_plan=previous_plan,

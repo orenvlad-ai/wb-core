@@ -108,6 +108,8 @@ Mutable source status не является историей. `payment_layers`, 
 
 Production dry-run/apply не является частью merge самого модуля. Его разрешает и выполняет только отдельный merge/deploy-координатор после merge, canonical deploy и проверки backup/runtime boundary. Неподтверждённые исторические даты не выводятся из upload time и остаются blank/warning.
 
+Публикация уже materialized истории в web-vitrina выполняется существующим source-group contour `webcore_product_capital`. Только эта группа вправе выбрать persisted ready snapshot из предыдущего bundle, когда для даты ещё нет current-bundle snapshot: partial plan содержит только `own_product_capital` metrics/status, merge сохраняет все чужие rows/cells/metadata и затем записывает новый current-bundle snapshot. Для WB API, 1С, Seller Portal и прочих групп cross-bundle доступ не расширяется; после первой WebCore-публикации дата становится обычным current-bundle snapshot. Это bounded historical publication, а не full upstream refresh и не переписывание accepted source truth.
+
 # 7. Явные non-goals
 
 - бухгалтерский FIFO и налоговый учёт;

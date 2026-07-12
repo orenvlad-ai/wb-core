@@ -15,6 +15,10 @@ if str(ROOT) not in sys.path:
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa: E402
+    OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
+    OWN_PRODUCT_CAPITAL_SOURCE_KEY,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
@@ -248,6 +252,78 @@ def main() -> None:
         print("web_vitrina_group_refresh_timestamps: ok ->", row_updated_at[price_row_id], row_updated_at[seller_row_id])
         print("web_vitrina_group_refresh_stage_failure: ok ->", failed_snapshot["error"])
 
+    _assert_product_capital_cross_bundle_refresh()
+
+
+def _assert_product_capital_cross_bundle_refresh() -> None:
+    bundle = json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8"))
+    old_bundle = {**bundle, "bundle_version": "registry_upload_bundle_v1__historical"}
+    current_bundle = {**bundle, "bundle_version": "registry_upload_bundle_v1__current"}
+    with TemporaryDirectory(prefix="sheet-vitrina-product-capital-cross-bundle-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        accepted = runtime.ingest_bundle(old_bundle, activated_at="2026-04-19T09:00:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"historical fixture bundle must be accepted, got {accepted}")
+        old_state = runtime.load_current_state()
+        nm_id = next(item.nm_id for item in old_state.config_v2 if item.enabled)
+        runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=old_state,
+            refreshed_at=OLD_REFRESHED_AT,
+            plan=_build_previous_plan(nm_id=nm_id),
+        )
+        accepted = runtime.ingest_bundle(current_bundle, activated_at="2026-04-20T09:00:00Z")
+        if accepted.status != "accepted":
+            raise AssertionError(f"current fixture bundle must be accepted, got {accepted}")
+
+        entrypoint = RegistryUploadHttpEntrypoint(
+            runtime_dir=Path(tmp),
+            runtime=runtime,
+            activated_at_factory=lambda: NEW_REFRESHED_AT,
+            refreshed_at_factory=lambda: NEW_REFRESHED_AT,
+            now_factory=lambda: datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc),
+        )
+        captured: dict[str, object] = {}
+
+        def build_partial_plan(**kwargs: object) -> SheetVitrinaV1Envelope:
+            captured["source_keys"] = list(kwargs.get("source_keys") or [])
+            captured["metric_keys"] = list(kwargs.get("metric_keys") or [])
+            return _build_partial_product_capital_plan(nm_id=nm_id)
+
+        entrypoint.sheet_plan_block.build_plan = build_partial_plan  # type: ignore[method-assign]
+        try:
+            entrypoint.start_sheet_source_group_refresh_job(
+                source_group_id="wb_api",
+                as_of_date="2026-04-20",
+            )
+        except ValueError as exc:
+            if "недоступна для обновления группы" not in str(exc):
+                raise AssertionError(f"non-WebCore cross-bundle guard changed unexpectedly: {exc}") from exc
+        else:
+            raise AssertionError("non-WebCore group must not receive cross-bundle access")
+
+        job = entrypoint.start_sheet_source_group_refresh_job(
+            source_group_id=OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
+            as_of_date="2026-04-20",
+        )
+        snapshot = _wait_job(entrypoint, str(job["job_id"]))
+        if snapshot["status"] != "success":
+            raise AssertionError(f"cross-bundle product-capital refresh must succeed, got {snapshot}")
+        if captured.get("source_keys") != [OWN_PRODUCT_CAPITAL_SOURCE_KEY]:
+            raise AssertionError(f"cross-bundle refresh must remain WebCore-only, got {captured}")
+        merged = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
+        rows = {row[1]: row for row in _sheet(merged, "DATA_VITRINA").rows}
+        product_row_id = f"SKU:{nm_id}|own_capital_FF_qty"
+        if rows[product_row_id][2:] != [321, 654]:
+            raise AssertionError(f"product-capital row was not published, got {rows[product_row_id]}")
+        if rows[f"SKU:{nm_id}|price_seller_discounted"][2:] != [100, 101]:
+            raise AssertionError("cross-bundle publish changed an unrelated metric row")
+        if runtime.load_current_state().bundle_version != current_bundle["bundle_version"]:
+            raise AssertionError("cross-bundle publish changed current registry truth")
+        print(
+            "web_vitrina_product_capital_cross_bundle_refresh: ok ->",
+            snapshot["result"]["merge_summary"],
+        )
+
 
 def _build_previous_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
     return SheetVitrinaV1Envelope(
@@ -333,6 +409,68 @@ def _build_partial_wb_api_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
                 rows=[
                     _status_row("prices_snapshot[yesterday_closed]", "success", "new price yesterday"),
                     _status_row("prices_snapshot[today_current]", "success", "new price today"),
+                ],
+                row_count=2,
+                column_count=len(STATUS_HEADER),
+            ),
+        ],
+    )
+
+
+def _build_partial_product_capital_plan(*, nm_id: int) -> SheetVitrinaV1Envelope:
+    return SheetVitrinaV1Envelope(
+        plan_version="delivery_contract_v1__sheet_scaffold_v1",
+        snapshot_id="partial-product-capital-snapshot",
+        as_of_date="2026-04-20",
+        date_columns=["2026-04-20", "2026-04-21"],
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(
+                slot_key="yesterday_closed", slot_label="Вчера", column_date="2026-04-20"
+            ),
+            SheetVitrinaV1TemporalSlot(
+                slot_key="today_current", slot_label="Сегодня", column_date="2026-04-21"
+            ),
+        ],
+        source_temporal_policies={},
+        sheets=[
+            SheetVitrinaWriteTarget(
+                sheet_name="DATA_VITRINA",
+                write_start_cell="A1",
+                write_rect="A1:D2",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=["label", "key", "2026-04-20", "2026-04-21"],
+                rows=[
+                    [
+                        "SKU: На ФФ: всего количество, шт",
+                        f"SKU:{nm_id}|own_capital_FF_qty",
+                        321,
+                        654,
+                    ]
+                ],
+                row_count=1,
+                column_count=4,
+            ),
+            SheetVitrinaWriteTarget(
+                sheet_name="STATUS",
+                write_start_cell="A1",
+                write_rect="A1:K3",
+                clear_range="A:Z",
+                write_mode="overwrite",
+                partial_update_allowed=False,
+                header=STATUS_HEADER,
+                rows=[
+                    _status_row(
+                        "own_product_capital[yesterday_closed]",
+                        "success",
+                        "source=WebCore; historical",
+                    ),
+                    _status_row(
+                        "own_product_capital[today_current]",
+                        "success",
+                        "source=WebCore; current",
+                    ),
                 ],
                 row_count=2,
                 column_count=len(STATUS_HEADER),
