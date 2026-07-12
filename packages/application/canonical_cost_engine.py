@@ -54,6 +54,13 @@ PROJECTION_PAID = "paid"
 
 BASELINE_PRIMARY = "primary_supplier_shipment"
 BASELINE_ONEC = "legacy_1c_fallback"
+BASELINE_BUSINESS_APPROVED_PRIMARY_WAC = "business_approved_primary_wac_fallback"
+BUSINESS_APPROVED_PRIMARY_WAC_NM_IDS = frozenset({497415593, 497416931})
+BUSINESS_APPROVED_PRIMARY_WAC_DECISION_DATE = "2026-07-13"
+BUSINESS_APPROVED_PRIMARY_WAC_METHOD = "primary shipment weighted FF cost"
+BUSINESS_APPROVED_PRIMARY_WAC_REASON = (
+    "discontinued_immaterial_sku_business_approved_estimate"
+)
 
 ONEC_FF_UNIT_COST_METRIC = "onec_FF_STOCK_unit_cost_rub"
 OFFICIAL_WB_STOCK_METRIC = "stock_total"
@@ -218,16 +225,50 @@ class CanonicalCostEngine:
             ).fetchall()
             primary_by_nm = {int(row["nm_id"]): dict(row) for row in primary_rows}
         fallbacks = self._nearest_onec_ff_fallbacks(
-            nm_ids=[nm for nm in owned_nm_ids if nm not in primary_by_nm]
+            nm_ids=[
+                nm for nm in owned_nm_ids
+                if nm not in primary_by_nm
+                and nm not in BUSINESS_APPROVED_PRIMARY_WAC_NM_IDS
+            ]
         )
+        business_approved_fallbacks = {
+            nm_id: {
+                "nm_id": nm_id,
+                "unit_cost_rub": primary["weighted_ff_unit_cost_rub"],
+                "source_type": BASELINE_BUSINESS_APPROVED_PRIMARY_WAC,
+                "source_identity": primary["shipment_id"],
+                "source_date": BUSINESS_APPROVED_PRIMARY_WAC_DECISION_DATE,
+                "provenance": {
+                    "approved_nm_ids": sorted(BUSINESS_APPROVED_PRIMARY_WAC_NM_IDS),
+                    "nm_id": nm_id,
+                    "primary_shipment_id": primary["shipment_id"],
+                    "ff_cost_layer_id": primary["ff_cost_layer_id"],
+                    "primary_weighted_ff_unit_cost_rub": primary["weighted_ff_unit_cost_rub"],
+                    "business_decision_date": BUSINESS_APPROVED_PRIMARY_WAC_DECISION_DATE,
+                    "method": BUSINESS_APPROVED_PRIMARY_WAC_METHOD,
+                    "reason": BUSINESS_APPROVED_PRIMARY_WAC_REASON,
+                },
+            }
+            for nm_id in owned_nm_ids
+            if nm_id in BUSINESS_APPROVED_PRIMARY_WAC_NM_IDS
+            and nm_id not in primary_by_nm
+            and nm_id not in fallbacks
+        }
         supplier_paid = self._supplier_payment_projection_as_of(cutover_date)
-        missing = [nm for nm in owned_nm_ids if nm not in primary_by_nm and nm not in fallbacks]
+        missing = [
+            nm for nm in owned_nm_ids
+            if nm not in primary_by_nm
+            and nm not in fallbacks
+            and nm not in business_approved_fallbacks
+        ]
         conflicting = [
             nm for nm, row in primary_by_nm.items()
             if nm in owned_nm_ids and _decimal(row.get("sku_ff_unit_cost_rub")) <= ZERO
         ]
         if missing or conflicting:
-            covered_nm_ids = set(primary_by_nm) | set(fallbacks)
+            covered_nm_ids = (
+                set(primary_by_nm) | set(fallbacks) | set(business_approved_fallbacks)
+            )
             total_quantity = sum(
                 (
                     sum((stages.get(stage, ZERO) for stage in STAGES), ZERO)
@@ -251,6 +292,11 @@ class CanonicalCostEngine:
                     "primary_shipment_sku_count": len(primary_by_nm),
                     "fallbacks": [fallbacks[nm] for nm in sorted(fallbacks)],
                     "fallback_sku_count": len(fallbacks),
+                    "business_approved_fallbacks": [
+                        business_approved_fallbacks[nm]
+                        for nm in sorted(business_approved_fallbacks)
+                    ],
+                    "business_approved_sku_count": len(business_approved_fallbacks),
                     "missing_nm_ids": missing,
                     "missing_sku_count": len(missing),
                     "conflicting_nm_ids": conflicting,
@@ -281,13 +327,21 @@ class CanonicalCostEngine:
                     "ff_cost_layer_line_id": str(source["layer_line_id"]),
                 }
                 confirmation = ONE
-            else:
+            elif nm_id in fallbacks:
                 source = fallbacks[nm_id]
                 unit_cost = _decimal(source["unit_cost_rub"])
                 source_type = BASELINE_ONEC
                 source_identity = str(source["bundle_version"])
                 source_date = str(source["as_of_date"])
                 provenance = dict(source)
+                confirmation = ZERO
+            else:
+                source = business_approved_fallbacks[nm_id]
+                unit_cost = _decimal(source["unit_cost_rub"])
+                source_type = BASELINE_BUSINESS_APPROVED_PRIMARY_WAC
+                source_identity = str(source["source_identity"])
+                source_date = str(source["source_date"])
+                provenance = dict(source["provenance"])
                 confirmation = ZERO
             if source_date > ONEC_FALLBACK_LAST_DATE and source_type == BASELINE_ONEC:
                 raise CanonicalCostBlocked(
@@ -369,6 +423,10 @@ class CanonicalCostEngine:
             "primary_sku_ids": sorted(primary_by_nm),
             "primary_used_sku_ids": sorted(set(primary_by_nm) & set(owned_nm_ids)),
             "fallbacks": [fallbacks[nm] for nm in sorted(fallbacks)],
+            "business_approved_fallbacks": [
+                business_approved_fallbacks[nm]
+                for nm in sorted(business_approved_fallbacks)
+            ],
             "missing_nm_ids": missing,
             "conflicting_nm_ids": conflicting,
             "physical": _json_safe_physical(physical),
@@ -381,6 +439,7 @@ class CanonicalCostEngine:
             "primary_sku_count": len(set(primary_by_nm) & set(owned_nm_ids)),
             "primary_shipment_sku_count": len(primary_by_nm),
             "fallback_sku_count": len(fallbacks),
+            "business_approved_sku_count": len(business_approved_fallbacks),
             "missing_sku_count": len(missing),
             "physical_quantity": _text(quantity),
             "recognized_capital_rub": _text(
@@ -398,6 +457,7 @@ class CanonicalCostEngine:
         if not fingerprint or fingerprint != _stable_hash(
             {key: value for key, value in plan.items() if key not in {
                 "fingerprint", "primary_sku_count", "primary_shipment_sku_count", "fallback_sku_count",
+                "business_approved_sku_count",
                 "missing_sku_count", "physical_quantity", "recognized_capital_rub",
                 "paid_capital_rub", "cost_coverage",
             }}
@@ -425,9 +485,10 @@ class CanonicalCostEngine:
                 INSERT INTO sheet_vitrina_v1_canonical_cost_baseline_versions(
                     baseline_id, version, cutover_date, primary_shipment_id,
                     primary_accepted_ff_date, primary_quantity, primary_sku_count,
-                    weighted_ff_unit_cost_rub, fallback_sku_count, fingerprint,
+                    weighted_ff_unit_cost_rub, fallback_sku_count,
+                    business_approved_sku_count, fingerprint,
                     report_json, is_current, created_at, superseded_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?,NULL)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,NULL)
                 """,
                 (
                     baseline_id, version, plan["cutover_date"],
@@ -435,7 +496,8 @@ class CanonicalCostEngine:
                     plan["primary_shipment"]["accepted_ff_date"],
                     plan["primary_shipment"]["quantity"], plan["primary_sku_count"],
                     plan["primary_shipment"]["weighted_ff_unit_cost_rub"],
-                    plan["fallback_sku_count"], fingerprint, _json_dumps(plan), now,
+                    plan["fallback_sku_count"], plan["business_approved_sku_count"],
+                    fingerprint, _json_dumps(plan), now,
                 ),
             )
             for item in plan["lines"]:
@@ -2127,6 +2189,7 @@ def ensure_canonical_cost_schema(conn: sqlite3.Connection) -> None:
             primary_shipment_id TEXT NOT NULL, primary_accepted_ff_date TEXT NOT NULL,
             primary_quantity TEXT NOT NULL, primary_sku_count INTEGER NOT NULL,
             weighted_ff_unit_cost_rub TEXT NOT NULL, fallback_sku_count INTEGER NOT NULL,
+            business_approved_sku_count INTEGER NOT NULL,
             fingerprint TEXT NOT NULL UNIQUE, report_json TEXT NOT NULL, is_current INTEGER NOT NULL,
             created_at TEXT NOT NULL, superseded_at TEXT
         );

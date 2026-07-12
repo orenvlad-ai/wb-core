@@ -65,7 +65,7 @@ Canonical daily rows являются replay/cache, а не отдельным �
 
 Physical quantity не исчезает при неполной оплате или cost gap. Для production отдельно выводятся physical quantity, paid-equivalent quantity и paid capital. Partial supplier payment распределяется по всем matched product lines: при 15% оплаты 100 000 физ. единиц дают 15 000 paid-equivalent, а paid unit cost использует denominator 15 000.
 
-Public fields дополнены `paid_equivalent_qty` и `cost_coverage_pct`. `confirmed_share_pct` остаётся отдельным quality ratio. 1С fallback считается covered, но не primary-confirmed.
+Public fields дополнены `paid_equivalent_qty` и `cost_coverage_pct`. `confirmed_share_pct` остаётся отдельным quality ratio. 1С fallback и bounded `business_approved_primary_wac_fallback` для nmID `497415593/497416931` считаются covered, но не primary-confirmed; production paid projection по-прежнему использует только factual payments.
 
 # 3. TOTAL semantics
 

@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.canonical_cost_engine import (  # noqa: E402
+    BASELINE_BUSINESS_APPROVED_PRIMARY_WAC,
     BASELINE_ONEC,
     CanonicalCostBlocked,
     CanonicalCostEngine,
@@ -118,6 +119,12 @@ def _baseline_and_physical_sources() -> None:
             _ensure_schema(conn)
             _insert_primary(conn)
             _insert_fallback_production(conn, nm_id=222)
+            _insert_fallback_production(
+                conn, nm_id=497415593, shipment_id="business-approved-497415593"
+            )
+            _insert_fallback_production(
+                conn, nm_id=497416931, shipment_id="business-approved-497416931"
+            )
             _insert_supplier_payment(
                 conn, shipment_id="fallback-production", cny="150", rub="1500"
             )
@@ -125,7 +132,15 @@ def _baseline_and_physical_sources() -> None:
                 conn, "opening-orphan-doprinato", 1, "2026-07-01", doprinato=True
             )
             _insert_ff_balance(conn, nm_id=111, quantity=6750)
-            _insert_snapshot(conn, "2026-05-16", {222: {"onec_FF_STOCK_unit_cost_rub": 80}})
+            _insert_snapshot(
+                conn,
+                "2026-05-16",
+                {
+                    222: {"onec_FF_STOCK_unit_cost_rub": 80},
+                    497415593: {"onec_FF_STOCK_unit_cost_rub": 50},
+                    497416931: {"onec_FF_STOCK_unit_cost_rub": 60},
+                },
+            )
             _insert_snapshot(conn, "2026-05-17", {222: {"onec_FF_STOCK_unit_cost_rub": 90}})
             _insert_snapshot(conn, "2026-07-01", {111: {"stock_total": 93250}, 222: {"stock_total": 0}})
             conn.commit()
@@ -136,12 +151,43 @@ def _baseline_and_physical_sources() -> None:
         plan = engine.build_baseline_plan()
         _eq(plan["primary_sku_count"], 1, "primary SKU count")
         _eq(plan["fallback_sku_count"], 1, "fallback SKU count")
+        _eq(plan["business_approved_sku_count"], 2, "bounded business-approved count")
         fallback = plan["fallbacks"][0]
         _eq(fallback["as_of_date"], "2026-05-16", "nearest allowed 1C date")
         _eq(fallback["source_type"], BASELINE_ONEC, "1C quality provenance")
         _eq(fallback["unit_cost_rub"], "80", "post-cutoff 1C is forbidden")
         if "near_future_proxy" in str(plan):
             raise AssertionError("future proxy is forbidden")
+        approved = plan["business_approved_fallbacks"]
+        _eq(
+            {item["nm_id"] for item in approved},
+            {497415593, 497416931},
+            "only exact business-approved nmIDs receive the estimate",
+        )
+        for item in approved:
+            _eq(item["source_type"], BASELINE_BUSINESS_APPROVED_PRIMARY_WAC, "source type")
+            _eq(item["unit_cost_rub"], "111.181389", "exact current primary WAC")
+            provenance = item["provenance"]
+            _eq(provenance["primary_shipment_id"], "primary-june", "primary shipment provenance")
+            _eq(provenance["ff_cost_layer_id"], "ff-primary", "current FF layer provenance")
+            _eq(provenance["approved_nm_ids"], [497415593, 497416931], "bounded approval provenance")
+            _eq(
+                provenance["reason"],
+                "discontinued_immaterial_sku_business_approved_estimate",
+                "business reason provenance",
+            )
+        approved_lines = [
+            line for line in plan["lines"]
+            if line["nm_id"] in {497415593, 497416931}
+        ]
+        if not approved_lines:
+            raise AssertionError("business-approved opening lines missing")
+        for line in approved_lines:
+            _eq(line["recognized_unit_cost_rub"], "111.181389", "estimated recognized cost")
+            _eq(line["confirmed_quantity"], "0", "estimate is not document-confirmed")
+            _eq(line["cost_covered_quantity"], line["physical_quantity"], "estimate covers physical qty")
+            _eq(line["paid_equivalent_quantity"], "0", "estimate does not invent payment")
+            _eq(line["paid_capital_rub"], "0", "paid capital remains factual only")
         _eq(plan["physical"]["111"]["FF"], "6750", "FF physical quantity comes from ledger")
         _eq(plan["cost_coverage"], "1", "baseline coverage 100%")
         if "opening-orphan-doprinato" in str(plan):
@@ -156,6 +202,22 @@ def _baseline_and_physical_sources() -> None:
             "15% payment is allocated over the full production line set",
         )
         _eq(production["paid_capital_rub"], "1500", "factual paid capital")
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_ff_cost_layers SET weighted_avg_ff_unit_cost_rub=111.185 WHERE layer_id='ff-primary'"
+            )
+            conn.commit()
+        within_tolerance = engine.build_baseline_plan()
+        _eq(
+            {item["unit_cost_rub"] for item in within_tolerance["business_approved_fallbacks"]},
+            {"111.185"},
+            "estimate is computed from the current primary layer, not hardcoded",
+        )
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_ff_cost_layers SET weighted_avg_ff_unit_cost_rub=111.181389 WHERE layer_id='ff-primary'"
+            )
+            conn.commit()
         engine.materialize_baseline_plan(plan)
         result = engine.rebuild(date_from="2026-07-01", date_to="2026-07-01")
         if result.daily_rows_changed <= 0:
@@ -172,6 +234,33 @@ def _baseline_and_physical_sources() -> None:
         _eq(ff[0], "6750", "daily FF/ledger reconciliation")
         _eq(wb[0], "93250", "WB physical quantity comes from official stock")
         _canonical_outstanding_sql(engine, runtime)
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_ff_cost_layers SET weighted_avg_ff_unit_cost_rub=112 WHERE layer_id='ff-primary'"
+            )
+            conn.commit()
+        try:
+            engine.build_baseline_plan()
+        except CanonicalCostBlocked as exc:
+            _eq(exc.code, "primary_baseline_shipment_not_unique", "out-of-tolerance primary blocks")
+        else:
+            raise AssertionError("changed primary WAC must block baseline")
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_ff_cost_layers SET weighted_avg_ff_unit_cost_rub=111.181389,is_current=0 WHERE layer_id='ff-primary'"
+            )
+            conn.commit()
+        try:
+            engine.build_baseline_plan()
+        except CanonicalCostBlocked as exc:
+            _eq(exc.code, "primary_baseline_shipment_not_unique", "missing current primary blocks")
+        else:
+            raise AssertionError("missing current primary layer must block baseline")
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_ff_cost_layers SET is_current=1 WHERE layer_id='ff-primary'"
+            )
+            conn.commit()
         with _connect(runtime.db_path) as conn:
             _insert_fallback_production(conn, nm_id=333, shipment_id="missing-cost")
             conn.commit()

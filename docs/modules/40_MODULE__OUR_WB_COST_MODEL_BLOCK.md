@@ -54,7 +54,7 @@ WB daily quantity берётся только из official persisted WB stock. 
 
 Единственный baseline принадлежит canonical engine. Primary source автоматически обнаруживается среди fully matched/certified `accepted_ff` shipment в окне `2026-06-21..2026-06-24`, с количеством не менее 100 000, confirmed FF layer, reconciliation `ok` и weighted landed cost `111.181389 ± 0.01 ₽/шт`.
 
-Для отсутствующей SKU используется ближайший назад `onec_FF_STOCK_unit_cost_rub`, строго `<= 2026-05-16`, с exact bundle/date/metric provenance и quality `legacy_1c_fallback`. `near_future_proxy`, 1С после cutoff, WB-stage 1C cost, future shipment, zero и hidden last-known fallback запрещены. Любая missing owned SKU блокирует весь baseline; coverage должна быть 100%.
+Для отсутствующей SKU используется ближайший назад `onec_FF_STOCK_unit_cost_rub`, строго `<= 2026-05-16`, с exact bundle/date/metric provenance и quality `legacy_1c_fallback`. Единственное bounded исключение `{497415593, 497416931}` использует `business_approved_primary_wac_fallback`: recognized FF cost вычисляется из weighted cost exact current primary FF layer, а confirmation остаётся 0%. `near_future_proxy`, 1С после cutoff, WB-stage 1C cost, future shipment, zero, hidden last-known и общий estimated fallback запрещены. Любая другая missing owned SKU блокирует весь baseline; coverage должна быть 100%.
 
 # 5. Finance compatibility
 
