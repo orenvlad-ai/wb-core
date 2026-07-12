@@ -9,6 +9,7 @@ from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 from typing import Any, Mapping
@@ -154,6 +155,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             first_source["fingerprint"],
         )
 
+        quarantine_actions = _apply_diagnostic_quarantine(
+            candidate_runtime.db_path,
+            first_source.get("unresolved_anomalies") or [],
+        )
+        for action in quarantine_actions:
+            for item in quarantine:
+                if item["blocker_id"] == action["blocker_id"]:
+                    item["diagnostic_action"] = action["action"]
+                    item["continued_checks"] = list(PIPELINE_STAGES[1:])
+                    break
+        quarantine_source = engine.source_anomaly_preflight(date_to=date_to)
+
         baseline: dict[str, Any] | None = None
         try:
             baseline = engine.build_baseline_plan(
@@ -284,7 +297,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         rebuild_payload: dict[str, Any] | None = None
         reconciliation_payload: dict[str, Any] | None = None
-        if not primary_ids and baseline is not None:
+        if quarantine_source["status"] == "ok" and baseline is not None:
             try:
                 first_rebuild = engine.rebuild(
                     date_from=CUTOVER_DATE, date_to=date_to
@@ -345,7 +358,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 }
                 for stage, checked in stage_counts.items():
                     coverage[stage] = _coverage(
-                        "PASS",
+                        "TAINTED" if primary_ids else "PASS",
                         checked,
                         0,
                         ["component_materialization"],
@@ -492,6 +505,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "status": "blocked" if primary_ids else "ok",
             "scope": {"date_from": CUTOVER_DATE, "date_to": date_to},
             "source_preflight": first_source,
+            "diagnostic_quarantine_preflight": quarantine_source,
             "baseline": baseline,
             "rebuild": rebuild_payload,
             "reconciliation": reconciliation_payload,
@@ -698,6 +712,50 @@ def _normalization_analysis(
         and all(item["all_conditions_met"] for item in rows),
         "fingerprint": _hash({"operations": rows, "global_checks": global_checks}),
     }
+
+
+def _apply_diagnostic_quarantine(
+    db_path: Path,
+    anomalies: list[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """Remove only blocked entities from the disposable diagnostic copy."""
+
+    actions: list[dict[str, str]] = []
+    with sqlite3.connect(db_path) as conn:
+        for anomaly in anomalies:
+            blocker = _primary_blocker(anomaly)
+            operation_id = str(anomaly.get("operation_id") or "")
+            supply_id = str(anomaly.get("supply_id") or "")
+            code = str(anomaly.get("blocker_class") or "")
+            if operation_id and "," not in operation_id:
+                conn.execute(
+                    "DELETE FROM sheet_vitrina_v1_ff_stock_operation_lines WHERE operation_id=?",
+                    (operation_id,),
+                )
+                conn.execute(
+                    "DELETE FROM sheet_vitrina_v1_ff_stock_operations WHERE operation_id=?",
+                    (operation_id,),
+                )
+                actions.append(
+                    {
+                        "blocker_id": blocker["blocker_id"],
+                        "action": "operation header/lines excluded from disposable diagnostic replay",
+                    }
+                )
+                continue
+            if code == "doprinato_unmatched_surplus" and supply_id:
+                conn.execute(
+                    "DELETE FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=?",
+                    (supply_id,),
+                )
+                actions.append(
+                    {
+                        "blocker_id": blocker["blocker_id"],
+                        "action": "doprinato supply excluded from disposable diagnostic reconciliation",
+                    }
+                )
+        conn.commit()
+    return actions
 
 
 def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
