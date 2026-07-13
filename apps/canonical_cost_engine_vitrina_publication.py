@@ -133,7 +133,7 @@ def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict
                     continue
                 key = str(values[1])
                 scope, _, metric = key.partition("|")
-                if not metric.startswith(("onec_", "total_onec_", "avg_onec_", "our_wb_unit_cost_rub", "total_our_wb_unit_cost_rub")):
+                if not metric.startswith(("onec_", "total_onec_", "avg_onec_", "own_capital_", "total_own_capital_", "avg_own_capital_", "our_wb_unit_cost_rub", "total_our_wb_unit_cost_rub")):
                     continue
                 nm_id = None
                 if scope.startswith("SKU:"):
@@ -146,6 +146,12 @@ def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict
                     metric_name = metric_name[len("total_"):]
                 if metric_name.startswith("avg_onec_"):
                     metric_name = metric_name[len("avg_"):]
+                if metric_name.startswith("total_own_capital_"):
+                    metric_name = metric_name[len("total_"):]
+                if metric_name.startswith("avg_own_capital_"):
+                    metric_name = metric_name[len("avg_"):]
+                if metric_name.startswith("own_capital_"):
+                    metric_name = "onec_" + metric_name[len("own_capital_"):]
                 if metric_name == "total_our_wb_unit_cost_rub":
                     metric_name = "our_wb_unit_cost_rub"
                 value = _value_for_metric(metric_name, nm_id, lookup)
