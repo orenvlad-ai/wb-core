@@ -70,3 +70,5 @@ Finance/P&L применяет canonical recognized WB projection с `2026-07-01
 ## Canonical cutover boundary (2026-07-01)
 
 This module is a read-side projection of the unified recognized-cost engine. Pre-cutover WB movements are legacy audit-only; official WB opening owns physical quantity. Exact manifest normalization uses the weighted recognized/paid pool of the same FF debit and gives normalized quantity confirmation `0`; it does not create a second WB cost truth.
+
+Exact unmatched `Допринято` rows approved in `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1` are audit-only evidence already contained in official WB stock. They are excluded before direct/FIFO and add no movement, capital or confirmation; this read side continues to value the authoritative stock through the existing canonical SKU WAC.

@@ -29,6 +29,7 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 def main() -> int:
     _clean_pipeline_is_reached()
     _multiple_independent_blockers_are_collected()
+    _same_supply_doprinato_lines_are_collected_independently()
     print("canonical_cost_engine_diagnostic_smoke: ok")
     return 0
 
@@ -115,6 +116,67 @@ def _multiple_independent_blockers_are_collected() -> None:
             raise AssertionError("blocked coverage contains unexplained NOT_REACHED")
         if report["preservation"]["production_mutation"] is not False:
             raise AssertionError("diagnostic collector may not mutate production")
+
+
+def _same_supply_doprinato_lines_are_collected_independently() -> None:
+    with TemporaryDirectory() as tmp:
+        runtime = _runtime(Path(tmp), include_fallback=True)
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_wb_supplies(
+                    supply_id,cache_key,normalized_row_json,raw_goods_json,
+                    warehouse_id,status_id,quantity_for_size_filter,fact_date,
+                    synced_at
+                ) VALUES('same-supply','supply:same-supply',?,?,'W',5,3,
+                         '2026-07-01','2026-07-01T00:00:00Z')
+                """,
+                (
+                    json.dumps(
+                        {
+                            "supply_id": "same-supply",
+                            "status_id": 5,
+                            "fact_date": "2026-07-01",
+                            "warehouse_name": "W",
+                            "destination_name": "D",
+                            "virtual_type_id": 5,
+                            "type_label": "Допринято",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        [
+                            {"nmID": 111, "acceptedQuantity": 1},
+                            {"nmID": 222, "acceptedQuantity": 2},
+                        ]
+                    ),
+                ),
+            )
+            conn.commit()
+        report = run(_args(runtime))
+        blockers = [
+            item
+            for item in report["blocker_registry"]
+            if item["kind"] == "primary"
+            and item["code"] == "doprinato_unmatched_surplus"
+            and item["supply_id"] == "same-supply"
+        ]
+        if {(item["nm_id"], item["quantity_impact"]) for item in blockers} != {
+            (111, "1"),
+            (222, "2"),
+        }:
+            raise AssertionError(
+                "line-level quarantine hid a sibling doprinato blocker"
+            )
+        if report["rebuild"] is None or not report["fixpoint"]["reached"]:
+            raise AssertionError(
+                "collector did not continue after line-level quarantine"
+            )
+        if any(
+            item["status"] == "NOT_REACHED"
+            for item in report["coverage_matrix"]
+        ):
+            raise AssertionError("line-level coverage contains NOT_REACHED")
 
 
 def _runtime(root: Path, *, include_fallback: bool) -> RegistryUploadDbBackedRuntime:

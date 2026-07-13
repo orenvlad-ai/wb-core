@@ -160,6 +160,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             candidate_runtime.db_path,
             first_source.get("unresolved_anomalies") or [],
         )
+        engine._diagnostic_quarantined_doprinato_keys.update(  # noqa: SLF001
+            (
+                str(item.get("supply_id") or ""),
+                int(item.get("nm_id") or 0),
+            )
+            for item in first_source.get("unresolved_anomalies") or []
+            if item.get("blocker_class") == "doprinato_unmatched_surplus"
+            and str(item.get("supply_id") or "")
+            and int(item.get("nm_id") or 0) > 0
+        )
         for action in quarantine_actions:
             for item in quarantine:
                 if item["blocker_id"] == action["blocker_id"]:
@@ -314,9 +324,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             baseline=baseline,
                             date_to=date_to,
                         )
-                        action = _apply_pipeline_quarantine(
-                            candidate_runtime.db_path, exc
-                        )
+                        action = _apply_pipeline_quarantine(engine, exc)
                         if action is None:
                             raise
                         record = _exception_blocker(
@@ -476,14 +484,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     coverage[stage] = _coverage(
                         "TAINTED", 0, 1, [record["blocker_id"]], record["blocker_id"]
                     )
-        dop_count = int(
+        dop_checked_count = int(
             first_source.get("checks", {}).get("doprinato_unmatched_surplus")
             or 0
         )
+        dop_blocker_count = sum(
+            item.get("blocker_class") == "doprinato_unmatched_surplus"
+            for item in first_source.get("unresolved_anomalies") or []
+        )
         coverage["doprinato_direct_fifo"] = _coverage(
-            "BLOCKED" if dop_count else "PASS",
-            int(first_source.get("legacy_doprinato_count") or 0) + dop_count,
-            dop_count,
+            "BLOCKED" if dop_blocker_count else "PASS",
+            int(first_source.get("legacy_doprinato_count") or 0)
+            + dop_checked_count,
+            dop_blocker_count,
             ["source_wide_validation"],
             _hash(first_source.get("legacy_doprinato") or []),
         )
@@ -572,6 +585,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "rebuild": rebuild_payload,
             "reconciliation": reconciliation_payload,
             "postcutover_normalization": normalization,
+            "unmatched_doprinato_absorption": first_source.get(
+                "unmatched_doprinato_absorption"
+            ),
             "blocker_registry": sorted(
                 blockers, key=lambda item: (item["kind"], item["blocker_id"])
             ),
@@ -806,14 +822,13 @@ def _apply_diagnostic_quarantine(
                 )
                 continue
             if code == "doprinato_unmatched_surplus" and supply_id:
-                conn.execute(
-                    "DELETE FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=?",
-                    (supply_id,),
-                )
                 actions.append(
                     {
                         "blocker_id": blocker["blocker_id"],
-                        "action": "doprinato supply excluded from disposable diagnostic reconciliation",
+                        "action": (
+                            "exact doprinato supply/SKU line excluded in-memory "
+                            "from disposable diagnostic reconciliation"
+                        ),
                     }
                 )
         conn.commit()
@@ -821,22 +836,26 @@ def _apply_diagnostic_quarantine(
 
 
 def _apply_pipeline_quarantine(
-    db_path: Path, exc: CanonicalCostBlocked
+    engine: CanonicalCostEngine, exc: CanonicalCostBlocked
 ) -> str | None:
     """Quarantine one newly exposed entity and let the next pass continue."""
 
     supply_id = str(exc.details.get("supply_id") or "")
-    if exc.code != "doprinato_unmatched_surplus" or not supply_id:
+    nm_id = int(exc.details.get("nm_id") or 0)
+    if (
+        exc.code != "doprinato_unmatched_surplus"
+        or not supply_id
+        or nm_id <= 0
+    ):
         return None
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.execute(
-            "DELETE FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=?",
-            (supply_id,),
-        )
-        conn.commit()
-    if int(cursor.rowcount or 0) != 1:
+    key = (supply_id, nm_id)
+    if key in engine._diagnostic_quarantined_doprinato_keys:  # noqa: SLF001
         return None
-    return "newly exposed doprinato excluded from disposable diagnostic reconciliation"
+    engine._diagnostic_quarantined_doprinato_keys.add(key)  # noqa: SLF001
+    return (
+        "newly exposed exact doprinato supply/SKU line excluded in-memory "
+        "from disposable diagnostic reconciliation"
+    )
 
 
 def _enrich_pipeline_blocker(
@@ -904,6 +923,16 @@ def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
         str(cost_source.get("recognized_unit_cost_rub") or 0)
     )
     paid_unit = Decimal(str(cost_source.get("paid_unit_cost_rub") or 0))
+    recommended_fix = (
+        "after a new human decision, add only this exact fingerprinted "
+        "supply/SKU evidence to CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1"
+        if identity["code"] == "doprinato_unmatched_surplus"
+        else (
+            "add the exact immutable operation evidence to "
+            "CUTOVER_POSTCUTOVER_SOURCE_NORMALIZATION_V1 only when all "
+            "exposure gates pass"
+        )
+    )
     return {
         "blocker_id": blocker_id,
         "code": identity["code"],
@@ -944,10 +973,7 @@ def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
         ],
         "dependencies": ["source_wide_validation"],
         "eligible_for_approved_normalization": bool(anomaly.get("eligible")),
-        "recommended_fix": (
-            "add the exact immutable operation evidence to "
-            "CUTOVER_POSTCUTOVER_SOURCE_NORMALIZATION_V1 only when all exposure gates pass"
-        ),
+        "recommended_fix": recommended_fix,
         "requires_new_business_decision": not bool(anomaly.get("eligible")),
     }
 

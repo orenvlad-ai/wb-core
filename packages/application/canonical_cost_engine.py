@@ -69,6 +69,22 @@ CANONICAL_TABLE_PREFIX = "sheet_vitrina_v1_canonical_cost_"
 
 TARGETED_PRE_ACTIVATION_REMEDIATION_REASON = "targeted_pre_activation_remediation"
 POSTCUTOVER_NORMALIZATION_POLICY = "CUTOVER_POSTCUTOVER_SOURCE_NORMALIZATION_V1"
+UNMATCHED_DOPRINATO_ABSORPTION_POLICY = (
+    "CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION = (
+    "unmatched_doprinato_absorbed_by_official_wb_stock"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_SOURCE_QUALITY = (
+    "exact_unmatched_doprinato_absorbed"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_REASON = (
+    "human_approved_exact_unmatched_doprinato_already_absorbed_by_official_wb_stock"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE = "2026-07-13"
+UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT = (
+    "d03d574bec2ac1d0133736c5d9b5d3441f11fba0d4fb7d182645e711df10dfb5"
+)
 POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {
     "ffso_14303efbdb04425baf54": {
         "operation_id": "ffso_14303efbdb04425baf54",
@@ -105,6 +121,153 @@ POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {
         "line_set_fingerprint": "sha256:320d56dd3c4d13553dbc61e667f321b53af5d732719339e05f684def1fb8a50b",
         "accepted_line_set_fingerprint": "sha256:7add90d1d03f7f7e4048ebeac583aeb3a3febe16e26971a56e0e502f9a36a416",
         "evidence_fingerprint": "sha256:37f7d2ebd9a9c7097ac7f3aa568a0ea79ce3df836f43ffb5c2bb2293f426171e",
+    },
+}
+
+# Exact source-evidence absorptions approved for the one-time canonical
+# cutover.  These rows never become movement/capital events and are checked
+# before direct/FIFO reconciliation.  Persisted route strings are deliberately
+# pinned in their full source form rather than shortened UI labels.
+UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST: dict[str, dict[str, Any]] = {
+    "40517726": {
+        "supply_id": "40517726",
+        "business_date": "2026-07-01",
+        "nm_id": 259466031,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40517726",
+        "raw_row_line_fingerprint": "sha256:b1863fe7bcd5d98d1320f8d56c4ff30ab9d3097e1324199ac66c1e7b99edd29c",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_FF,
+        "recognized_reference_unit_cost_rub": "100.146048",
+        "paid_reference_unit_cost_rub": "100.146048",
+    },
+    "40610543": {
+        "supply_id": "40610543",
+        "business_date": "2026-07-05",
+        "nm_id": 210183919,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40610543",
+        "raw_row_line_fingerprint": "sha256:6028fd543f341d8dc5f231e1ef06b95ed266af788aea6cbd893a3455898ab60a",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_FF,
+        "recognized_reference_unit_cost_rub": "93.547548",
+        "paid_reference_unit_cost_rub": "93.547548",
+    },
+    "40654176": {
+        "supply_id": "40654176",
+        "business_date": "2026-07-07",
+        "nm_id": 391663632,
+        "warehouse": "Склад Шушары",
+        "destination": "Склад Шушары",
+        "quantity": "1",
+        "source_identity": "supply:40654176",
+        "raw_row_line_fingerprint": "sha256:e77faf4615529a4b999f46796338acdcf9bee9197421428f9afd598faf79a941",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_FF,
+        "recognized_reference_unit_cost_rub": "119.941548",
+        "paid_reference_unit_cost_rub": "119.941548",
+    },
+    "40712116": {
+        "supply_id": "40712116",
+        "business_date": "2026-07-09",
+        "nm_id": 497417474,
+        "warehouse": "Краснодар (Тихорецкая)",
+        "destination": "Краснодар (Тихорецкая)",
+        "quantity": "1",
+        "source_identity": "supply:40712116",
+        "raw_row_line_fingerprint": "sha256:2f7f8043d20035b655c7a5e9ee7c40d267876119b4ee7ab61722c99769f04f7f",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "114.442798",
+        "paid_reference_unit_cost_rub": "114.442798",
+    },
+    "40739431": {
+        "supply_id": "40739431",
+        "business_date": "2026-07-10",
+        "nm_id": 391659990,
+        "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14",
+        "quantity": "1",
+        "source_identity": "supply:40739431",
+        "raw_row_line_fingerprint": "sha256:c2715065c5d72657083e01f10217b0cf24f2cd0ea12865f6f3913e5b8929b4fd",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "119.941548",
+        "paid_reference_unit_cost_rub": "80.358877",
+    },
+    "40739432": {
+        "supply_id": "40739432",
+        "business_date": "2026-07-10",
+        "nm_id": 210183142,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40739432",
+        "raw_row_line_fingerprint": "sha256:88430e4065c9818b8ae5ad9223d1d4c0ff8c70d085a1e1a06e3189bbcfa079e0",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "93.547548",
+        "paid_reference_unit_cost_rub": "54.304632",
+    },
+    "40765457": {
+        "supply_id": "40765457",
+        "business_date": "2026-07-11",
+        "nm_id": 210183142,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40765457",
+        "raw_row_line_fingerprint": "sha256:b9d25d11d4154b47c1a08c8f1f1559cb9db85d183d351999ae01d21441188026",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "93.547548",
+        "paid_reference_unit_cost_rub": "54.304632",
+    },
+    "40765458": {
+        "supply_id": "40765458",
+        "business_date": "2026-07-11",
+        "nm_id": 391662410,
+        "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14",
+        "quantity": "2",
+        "source_identity": "supply:40765458",
+        "raw_row_line_fingerprint": "sha256:020b1b7f159cc34325c9086ad552b5dbc3715851760c4a829d3fe039291f59a3",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "116.642298",
+        "paid_reference_unit_cost_rub": "76.863799",
+    },
+    "40778404": {
+        "supply_id": "40778404",
+        "business_date": "2026-07-12",
+        "nm_id": 391659990,
+        "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14",
+        "quantity": "1",
+        "source_identity": "supply:40778404",
+        "raw_row_line_fingerprint": "sha256:13060d8db62c9470bf1e8fe88f035cb84759b381c34312bb26c83050ac59d36d",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "119.941548",
+        "paid_reference_unit_cost_rub": "80.358877",
+    },
+    "40778405": {
+        "supply_id": "40778405",
+        "business_date": "2026-07-12",
+        "nm_id": 259466031,
+        "warehouse": "Склад Шушары",
+        "destination": "Склад Шушары",
+        "quantity": "1",
+        "source_identity": "supply:40778405",
+        "raw_row_line_fingerprint": "sha256:727b16abec9c3eab45c658a3b45bdc55e12d9b17dde79acc8f3414a3e313d808",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_FF,
+        "recognized_reference_unit_cost_rub": "100.146048",
+        "paid_reference_unit_cost_rub": "100.146048",
     },
 }
 
@@ -151,6 +314,13 @@ class CanonicalCostEngine:
     ) -> None:
         self.runtime = runtime
         self.timestamp_factory = timestamp_factory or _now
+        # Diagnostic collectors may quarantine one exact source line in
+        # memory so another blocker in the same persisted supply is still
+        # visited.  The strict runtime never populates this set and therefore
+        # remains fail-closed for every non-manifest row.
+        self._diagnostic_quarantined_doprinato_keys: set[
+            tuple[str, int]
+        ] = set()
         self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
@@ -735,15 +905,26 @@ class CanonicalCostEngine:
             _ensure_schema(conn)
             nm_ids = _wb_operation_and_acceptance_nm_ids(conn, date_to=end)
         costs = self._baseline_candidate_costs(nm_ids)
+        cost_references = self._baseline_candidate_stage_cost_references(costs)
         with _connect(self.runtime.db_path) as conn:
             report = _source_anomaly_preflight_conn(
                 conn,
                 date_to=end,
                 baseline_costs=costs,
+                baseline_cost_references=cost_references,
+                diagnostic_quarantined_doprinato_keys=(
+                    self._diagnostic_quarantined_doprinato_keys
+                ),
             )
         payload = {
             "contract_name": "canonical_cost_source_anomaly_preflight_v1",
             "policy": POSTCUTOVER_NORMALIZATION_POLICY,
+            "policies": {
+                "accepted_composition": POSTCUTOVER_NORMALIZATION_POLICY,
+                "unmatched_doprinato_absorption": (
+                    UNMATCHED_DOPRINATO_ABSORPTION_POLICY
+                ),
+            },
             "cutover_date": CUTOVER_DATE,
             "date_to": end,
             **report,
@@ -808,6 +989,51 @@ class CanonicalCostEngine:
                     "source_identity": str(primary["ff_cost_layer_id"]),
                     "source_date": BUSINESS_APPROVED_PRIMARY_WAC_DECISION_DATE,
                 }
+        return result
+
+    def _baseline_candidate_stage_cost_references(
+        self, baseline_costs: Mapping[int, Mapping[str, Any]]
+    ) -> dict[tuple[int, str], dict[str, Any]]:
+        """Build stage paid/recognized references before baseline targets exist."""
+
+        supplier_paid = self._supplier_payment_projection_as_of(CUTOVER_DATE)
+        result: dict[tuple[int, str], dict[str, Any]] = {}
+        for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values():
+            nm_id = int(expected["nm_id"])
+            stage = str(expected["cost_reference_stage"])
+            source = baseline_costs.get(nm_id)
+            if source is None:
+                continue
+            recognized = _decimal(source.get("recognized_unit_cost_rub"))
+            paid = _decimal(source.get("paid_unit_cost_rub"))
+            payment: Mapping[str, Any] = {}
+            if stage in {STAGE_PRODUCTION, STAGE_PRODUCTION_TO_FF}:
+                payment = supplier_paid.get((nm_id, stage), {})
+                paid_equivalent = _decimal(
+                    payment.get("paid_equivalent_quantity")
+                )
+                paid = (
+                    _safe_ratio(
+                        _decimal(payment.get("paid_capital_rub")),
+                        paid_equivalent,
+                    )
+                    if paid_equivalent > ZERO else ZERO
+                )
+            reference = {
+                "stage": stage,
+                "recognized_unit_cost_rub": _text(recognized),
+                "paid_unit_cost_rub": _text(paid),
+                "source_type": str(source.get("source_type") or ""),
+                "source_identity": str(source.get("source_identity") or ""),
+                "source_date": str(source.get("source_date") or ""),
+                "payment_reference": {
+                    key: _text(value) if isinstance(value, Decimal) else value
+                    for key, value in payment.items()
+                },
+            }
+            reference["line_fingerprint"] = "sha256:" + _stable_hash(reference)
+            reference["baseline_fingerprint"] = "pre_materialization_source_graph"
+            result[(nm_id, stage)] = reference
         return result
 
     def physical_quantities_as_of(
@@ -1778,6 +2004,19 @@ class CanonicalCostEngine:
             (item["supply_id"], item["nm_id"]): item
             for item in movement_evidence
         }
+        absorbed_doprinato = {
+            (str(item["supply_id"]), int(item["nm_id"]))
+            for item in anomaly_report.get("anomalies") or []
+            if bool(item.get("eligible"))
+            and item.get("classification")
+            == UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION
+        }
+        diagnostic_quarantined_doprinato = {
+            (str(item["supply_id"]), int(item["nm_id"]))
+            for item in anomaly_report.get(
+                "diagnostic_quarantined_doprinato"
+            ) or []
+        }
         open_layers: list[dict[str, Any]] = []
         for movement in movements:
             key = (str(movement["supply_id"]), int(movement["nm_id"]))
@@ -1860,6 +2099,10 @@ class CanonicalCostEngine:
             [
                 item for item in supply_evidence
                 if item["is_doprinato"] and item["accepted_date"] > CUTOVER_DATE
+                and (str(item["supply_id"]), int(item["nm_id"]))
+                not in absorbed_doprinato
+                and (str(item["supply_id"]), int(item["nm_id"]))
+                not in diagnostic_quarantined_doprinato
             ],
         )
         changed = 0
@@ -3246,10 +3489,18 @@ def _source_anomaly_preflight_conn(
     *,
     date_to: str,
     baseline_costs: Mapping[int, Mapping[str, Any]],
+    baseline_cost_references: Mapping[
+        tuple[int, str], Mapping[str, Any]
+    ] | None = None,
+    diagnostic_quarantined_doprinato_keys: set[tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Collect every bounded-policy candidate without failing on the first row."""
 
     cache_keys, source_keys, supply_ids, checkpoint_id = _checkpoint_identity_sets(conn)
+    boundary = _ff_opening_boundary_context(conn)
+    quarantined_doprinato_keys = (
+        diagnostic_quarantined_doprinato_keys or set()
+    )
     anomalies: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
     operations: list[dict[str, Any]] = []
@@ -3543,14 +3794,21 @@ def _source_anomaly_preflight_conn(
         if resolution.effective_date < CUTOVER_DATE:
             legacy_operations.append(operation_row)
             continue
+        canonical_replay_date = _canonical_ff_operation_effective_date(
+            conn, operation, boundary=boundary
+        )
         for nm_id in sorted(set(sent_by_nm) | set(accepted_by_nm)):
             sent = sent_by_nm.get(nm_id, ZERO)
             raw_accepted = accepted_by_nm.get(nm_id, ZERO)
             applied = min(sent, raw_accepted)
             surplus = max(raw_accepted - sent, ZERO)
             open_quantity = max(sent - raw_accepted, ZERO)
-            movement_rows.append(
-                {
+            # Only a finalized operation that the strict physical replay
+            # materializes may provide an outstanding candidate.  Checkpoint
+            # audit history must not make an otherwise orphan doprinato look
+            # matched during source preflight.
+            if canonical_replay_date is not None and status_id == 5:
+                movement_rows.append({
                     "operation_id": operation_id,
                     "supply_id": str(supply.get("supply_id") or supply_id),
                     "business_date": resolution.effective_date,
@@ -3575,8 +3833,7 @@ def _source_anomaly_preflight_conn(
                     ),
                     "accepted_date": _wb_accepted_date(normalized, supply),
                     "checkpoint_matched": fully_checkpoint_matched,
-                }
-            )
+                })
             if surplus <= ZERO:
                 continue
             cost = baseline_costs.get(nm_id)
@@ -3653,7 +3910,34 @@ def _source_anomaly_preflight_conn(
         (item for item in _wb_supply_cache_evidence(conn, date_to=date_to) if item["is_doprinato"]),
         key=lambda item: (item["accepted_date"], item["supply_id"], item["nm_id"]),
     )
+    manifest_source_keys = {
+        (str(item["supply_id"]), int(item["nm_id"]))
+        for item in doprinato
+        if str(item["supply_id"]) in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST
+        and int(item["nm_id"])
+        == int(
+            UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST[str(item["supply_id"])][
+                "nm_id"
+            ]
+        )
+    }
+    persisted_manifest_supply_count = sum(
+        int(
+            conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=?)",
+                (supply_id,),
+            ).fetchone()[0]
+        )
+        for supply_id in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST
+    )
+    matched_absorption_supply_ids: set[str] = set()
     for fact in doprinato:
+        fact_key = (str(fact["supply_id"]), int(fact["nm_id"]))
+        if fact_key in quarantined_doprinato_keys:
+            # Disposable diagnostic-only exclusion.  Raw persisted evidence
+            # stays untouched and the strict apply path cannot populate this
+            # set.
+            continue
         if str(fact["accepted_date"] or "") < CUTOVER_DATE:
             legacy_doprinato.append(
                 {
@@ -3667,6 +3951,103 @@ def _source_anomaly_preflight_conn(
                     "classification": "legacy_audit_only",
                 }
             )
+            continue
+        manifest_decision = _unmatched_doprinato_manifest_decision(
+            conn,
+            fact,
+            baseline_cost_references=baseline_cost_references,
+        )
+        if manifest_decision is not None:
+            expected = dict(manifest_decision["expected"])
+            reference = dict(manifest_decision.get("cost_reference") or {})
+            quantity = _decimal(fact["accepted_quantity"])
+            guard_failures = [
+                f"manifest field drift: {key}"
+                for key in sorted(manifest_decision["mismatches"])
+            ]
+            matched = bool(manifest_decision["matched"])
+            if matched:
+                matched_absorption_supply_ids.add(str(fact["supply_id"]))
+            anomalies.append(
+                {
+                    "blocker_class": "doprinato_unmatched_surplus",
+                    "operation_id": "",
+                    "supply_id": str(fact["supply_id"]),
+                    "business_date": str(fact["accepted_date"]),
+                    "nm_id": int(fact["nm_id"]),
+                    "raw_quantities": {
+                        "raw_doprinato": _text(quantity),
+                        "absorbed_source_evidence": _text(quantity),
+                        "movement_quantity_delta": "0",
+                        "recognized_capital_delta_rub": "0",
+                        "paid_capital_delta_rub": "0",
+                        "confirmation_quantity_delta": "0",
+                        "underaccepted_quantity_delta": "0",
+                    },
+                    "doprinato_evidence": {
+                        **_doprinato_fact_fingerprint_payload(fact),
+                        "raw_row_line_fingerprint": str(
+                            fact["raw_row_line_fingerprint"]
+                        ),
+                        "raw_source_row_fingerprint": str(
+                            fact["raw_source_row_fingerprint"]
+                        ),
+                        "raw_source_line_fingerprint": str(
+                            fact["raw_source_line_fingerprint"]
+                        ),
+                        "semantic_evidence_fingerprint": str(
+                            fact["semantic_evidence_fingerprint"]
+                        ),
+                        "source_status": str(fact["source_status"]),
+                    },
+                    "discrepancy": _text(quantity),
+                    "source_identity": str(fact["source_identity"]),
+                    "checkpoint_identity": checkpoint_id,
+                    "cost_source": {
+                        "recognized_unit_cost_rub": expected[
+                            "recognized_reference_unit_cost_rub"
+                        ],
+                        "paid_unit_cost_rub": expected[
+                            "paid_reference_unit_cost_rub"
+                        ],
+                        "cost_reference_stage": expected[
+                            "cost_reference_stage"
+                        ],
+                        "baseline_source_type": reference.get("source_type"),
+                        "baseline_source_identity": reference.get(
+                            "source_identity"
+                        ),
+                        "baseline_source_date": reference.get("source_date"),
+                        "baseline_line_fingerprint": reference.get(
+                            "line_fingerprint"
+                        ),
+                        "baseline_fingerprint": reference.get(
+                            "baseline_fingerprint"
+                        ),
+                    },
+                    "classification": (
+                        UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION
+                        if matched
+                        else "unmatched_doprinato_absorption_manifest_drift"
+                    ),
+                    "source_quality": (
+                        UNMATCHED_DOPRINATO_ABSORPTION_SOURCE_QUALITY
+                        if matched else "manifest_drift"
+                    ),
+                    "eligible": matched,
+                    "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+                    "policy_guard_failures": guard_failures,
+                    "manifest_decision": manifest_decision,
+                    "reason": (
+                        UNMATCHED_DOPRINATO_ABSORPTION_REASON
+                        if matched else "; ".join(guard_failures)
+                    ),
+                    "gross_discrepancy": quantity,
+                    "net_discrepancy": ZERO,
+                }
+            )
+            # Exact manifest evidence is audit-only and must never close a
+            # direct/FIFO layer.  Drift is also isolated and fail-closed.
             continue
         remaining = _decimal(fact["accepted_quantity"])
         candidates = [
@@ -3735,12 +4116,20 @@ def _source_anomaly_preflight_conn(
                     "unmatched_surplus": _text(remaining),
                 },
                 "doprinato_evidence": {
-                    "original_supply_id": str(fact.get("original_supply_id") or ""),
-                    "warehouse": str(fact.get("warehouse") or ""),
-                    "destination": str(fact.get("destination") or ""),
-                    "is_final_accepted": bool(fact.get("is_final_accepted")),
-                    "accepted_date": str(fact.get("accepted_date") or ""),
-                    "source_identity": str(fact.get("source_identity") or ""),
+                    **_doprinato_fact_fingerprint_payload(fact),
+                    "raw_row_line_fingerprint": str(
+                        fact.get("raw_row_line_fingerprint") or ""
+                    ),
+                    "raw_source_row_fingerprint": str(
+                        fact.get("raw_source_row_fingerprint") or ""
+                    ),
+                    "raw_source_line_fingerprint": str(
+                        fact.get("raw_source_line_fingerprint") or ""
+                    ),
+                    "semantic_evidence_fingerprint": str(
+                        fact.get("semantic_evidence_fingerprint") or ""
+                    ),
+                    "source_status": str(fact.get("source_status") or ""),
                 },
                 "discrepancy": _text(remaining),
                 "source_identity": str(fact["source_identity"]),
@@ -3761,10 +4150,39 @@ def _source_anomaly_preflight_conn(
             }
         )
 
+    if persisted_manifest_supply_count:
+        for supply_id in sorted(
+            set(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST)
+            - matched_absorption_supply_ids
+        ):
+            expected = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST[supply_id]
+            if str(expected["business_date"]) > date_to:
+                continue
+            if (supply_id, int(expected["nm_id"])) in manifest_source_keys:
+                # Present-but-drifted evidence already emitted its exact
+                # mismatch record above.
+                continue
+            blockers.append(
+                {
+                    "blocker_class": "unmatched_doprinato_manifest_source_missing",
+                    "operation_id": "",
+                    "supply_id": supply_id,
+                    "business_date": str(expected["business_date"]),
+                    "nm_id": int(expected["nm_id"]),
+                    "raw_quantities": {},
+                    "discrepancy": str(expected["quantity"]),
+                    "source_identity": str(expected["source_identity"]),
+                    "checkpoint_identity": checkpoint_id,
+                    "cost_source": None,
+                    "classification": "unmatched_doprinato_absorption_manifest_drift",
+                    "eligible": False,
+                    "reason": "approved exact manifest source row is missing",
+                }
+            )
+
     # Replay the physical opening boundary chronologically.  Checkpoint rows
     # and their exact compensations are audit-only; the activation receipt is
     # the FF opening snapshot at cutover.
-    boundary = _ff_opening_boundary_context(conn)
     replay_balance: dict[int, Decimal] = defaultdict(Decimal)
     authoritative_balance: dict[int, Decimal] = defaultdict(Decimal)
     for row in conn.execute(
@@ -4043,6 +4461,42 @@ def _source_anomaly_preflight_conn(
         "source_protected_pre_cutover_digest_anomaly": "checked_by_backfill_runner",
         "potential_non_idempotency": len(duplicate_rows),
     }
+    manifest_report = _unmatched_doprinato_manifest_report()
+    matched_absorptions = [
+        item
+        for item in eligible
+        if item.get("classification")
+        == UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION
+    ]
+    absorption_report = {
+        **manifest_report,
+        "classification": UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION,
+        "source_quality": UNMATCHED_DOPRINATO_ABSORPTION_SOURCE_QUALITY,
+        "matched_supply_count": len(
+            {str(item["supply_id"]) for item in matched_absorptions}
+        ),
+        "matched_sku_count": len(
+            {int(item["nm_id"]) for item in matched_absorptions}
+        ),
+        "matched_unit_count": _text(
+            sum(
+                (_decimal(item["discrepancy"]) for item in matched_absorptions),
+                ZERO,
+            )
+        ),
+        "all_rows_match": (
+            len(matched_absorptions)
+            == sum(
+                str(row["business_date"]) <= date_to
+                for row in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values()
+            )
+        ),
+        "movement_quantity_delta": "0",
+        "recognized_capital_delta_rub": "0",
+        "paid_capital_delta_rub": "0",
+        "confirmation_quantity_delta": "0",
+        "underaccepted_quantity_delta": "0",
+    }
     return {
         "status": "blocked" if blockers else "ok",
         "checkpoint_id": checkpoint_id,
@@ -4052,7 +4506,12 @@ def _source_anomaly_preflight_conn(
         "legacy_doprinato_count": len(legacy_doprinato),
         "legacy_operations": legacy_operations,
         "legacy_doprinato": legacy_doprinato,
+        "diagnostic_quarantined_doprinato": [
+            {"supply_id": supply_id, "nm_id": nm_id}
+            for supply_id, nm_id in sorted(quarantined_doprinato_keys)
+        ],
         "operations": operations,
+        "unmatched_doprinato_absorption": absorption_report,
         "anomalies": sorted(
             anomalies,
             key=lambda item: (
@@ -4122,6 +4581,212 @@ def _postcutover_manifest_matches(operation: Mapping[str, Any]) -> bool:
         "evidence_fingerprint": str(operation.get("evidence_fingerprint") or ""),
     }
     return actual == expected
+
+
+def _doprinato_fact_fingerprint_payload(
+    fact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Stable semantic projection of one persisted doprinato source line."""
+
+    return {
+        "supply_id": str(fact.get("supply_id") or ""),
+        "accepted_date": str(fact.get("accepted_date") or ""),
+        "nm_id": int(fact.get("nm_id") or 0),
+        "warehouse": str(fact.get("warehouse") or ""),
+        "destination": str(fact.get("destination") or ""),
+        "accepted_quantity": _text(_decimal(fact.get("accepted_quantity"))),
+        "original_supply_id": str(fact.get("original_supply_id") or ""),
+        "is_doprinato": bool(fact.get("is_doprinato")),
+        "is_final_accepted": bool(fact.get("is_final_accepted")),
+        "source_identity": str(fact.get("source_identity") or ""),
+    }
+
+
+def _wb_supply_raw_row_fingerprint_payload(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Immutable persisted source fields, excluding refresh-only timestamps."""
+
+    return {
+        key: row.get(key)
+        for key in (
+            "supply_id",
+            "cache_key",
+            "normalized_row_json",
+            "raw_goods_json",
+            "warehouse_id",
+            "status_id",
+            "quantity_for_size_filter",
+            "fact_date",
+            "supply_date",
+            "updated_date",
+        )
+    }
+
+
+def _wb_supply_raw_row_line_fingerprints(
+    row: Mapping[str, Any], line: Mapping[str, Any]
+) -> dict[str, str]:
+    row_fingerprint = "sha256:" + _stable_hash(
+        _wb_supply_raw_row_fingerprint_payload(row)
+    )
+    line_fingerprint = "sha256:" + _stable_hash(dict(line))
+    return {
+        "raw_source_row_fingerprint": row_fingerprint,
+        "raw_source_line_fingerprint": line_fingerprint,
+        "raw_row_line_fingerprint": "sha256:"
+        + _stable_hash(
+            {
+                "row_fingerprint": row_fingerprint,
+                "line_fingerprint": line_fingerprint,
+            }
+        ),
+    }
+
+
+def _unmatched_doprinato_manifest_report() -> dict[str, Any]:
+    rows = [
+        dict(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST[key])
+        for key in sorted(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST)
+    ]
+    payload = {
+        "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+        "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT,
+        "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON,
+        "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE,
+        "rows": rows,
+    }
+    recognized = sum(
+        (
+            _decimal(row["quantity"])
+            * _decimal(row["recognized_reference_unit_cost_rub"])
+            for row in rows
+        ),
+        ZERO,
+    )
+    paid = sum(
+        (
+            _decimal(row["quantity"])
+            * _decimal(row["paid_reference_unit_cost_rub"])
+            for row in rows
+        ),
+        ZERO,
+    )
+    return {
+        **payload,
+        "manifest_fingerprint": "sha256:" + _stable_hash(payload),
+        "supply_count": len(rows),
+        "sku_count": len({int(row["nm_id"]) for row in rows}),
+        "unit_count": _text(
+            sum((_decimal(row["quantity"]) for row in rows), ZERO)
+        ),
+        "recognized_reference_exposure_rub": _text(recognized),
+        "paid_reference_exposure_rub": _text(paid),
+    }
+
+
+def _unmatched_doprinato_cost_reference(
+    conn: sqlite3.Connection,
+    *,
+    expected: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Read the exact current baseline stage pinned by one manifest row."""
+
+    row = conn.execute(
+        """
+        SELECT line.stage,line.recognized_unit_cost_rub,line.paid_unit_cost_rub,
+               line.source_type,line.source_identity,line.source_date,
+               line.line_fingerprint,version.fingerprint baseline_fingerprint
+        FROM sheet_vitrina_v1_canonical_cost_baseline_lines AS line
+        JOIN sheet_vitrina_v1_canonical_cost_baseline_versions AS version
+          ON version.baseline_id=line.baseline_id AND version.is_current=1
+        WHERE line.nm_id=? AND line.stage=?
+        ORDER BY version.version DESC LIMIT 1
+        """,
+        (int(expected["nm_id"]), str(expected["cost_reference_stage"])),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "stage": str(row["stage"]),
+        "recognized_unit_cost_rub": _text(
+            _decimal(row["recognized_unit_cost_rub"])
+        ),
+        "paid_unit_cost_rub": _text(_decimal(row["paid_unit_cost_rub"])),
+        "source_type": str(row["source_type"]),
+        "source_identity": str(row["source_identity"]),
+        "source_date": str(row["source_date"]),
+        "line_fingerprint": str(row["line_fingerprint"]),
+        "baseline_fingerprint": str(row["baseline_fingerprint"]),
+    }
+
+
+def _unmatched_doprinato_manifest_decision(
+    conn: sqlite3.Connection,
+    fact: Mapping[str, Any],
+    *,
+    baseline_cost_references: Mapping[
+        tuple[int, str], Mapping[str, Any]
+    ] | None = None,
+) -> dict[str, Any] | None:
+    """Return an exact allowlist decision, including fail-closed drift proof."""
+
+    supply_id = str(fact.get("supply_id") or "")
+    expected = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.get(supply_id)
+    if expected is None or int(fact.get("nm_id") or 0) != int(expected["nm_id"]):
+        return None
+    reference = dict(
+        (baseline_cost_references or {}).get(
+            (int(expected["nm_id"]), str(expected["cost_reference_stage"]))
+        )
+        or {}
+    ) or _unmatched_doprinato_cost_reference(conn, expected=expected)
+    actual = {
+        "supply_id": supply_id,
+        "business_date": str(fact.get("accepted_date") or ""),
+        "nm_id": int(fact.get("nm_id") or 0),
+        "warehouse": str(fact.get("warehouse") or ""),
+        "destination": str(fact.get("destination") or ""),
+        "quantity": _text(_decimal(fact.get("accepted_quantity"))),
+        "source_identity": str(fact.get("source_identity") or ""),
+        "raw_row_line_fingerprint": str(
+            fact.get("raw_row_line_fingerprint") or ""
+        ),
+        "status": (
+            "final-accepted" if bool(fact.get("is_final_accepted")) else ""
+        ),
+        "cost_reference_stage": (
+            str(reference.get("stage") or "") if reference else ""
+        ),
+        "recognized_reference_unit_cost_rub": (
+            str(reference.get("recognized_unit_cost_rub") or "")
+            if reference else ""
+        ),
+        "paid_reference_unit_cost_rub": (
+            str(reference.get("paid_unit_cost_rub") or "")
+            if reference else ""
+        ),
+    }
+    mismatches = {
+        key: {"expected": expected.get(key), "actual": actual.get(key)}
+        for key in expected
+        if actual.get(key) != expected.get(key)
+    }
+    return {
+        "matched": not mismatches,
+        "expected": dict(expected),
+        "actual": actual,
+        "mismatches": mismatches,
+        "cost_reference": reference,
+        "classification": UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION,
+        "source_quality": UNMATCHED_DOPRINATO_ABSORPTION_SOURCE_QUALITY,
+        "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON,
+        "human_approval": {
+            "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE,
+            "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT,
+            "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+        },
+    }
 
 
 def _normalized_acceptance_plan(
@@ -4238,11 +4903,21 @@ def _wb_movement_evidence(
     anomaly_report: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     movements: list[dict[str, Any]] = []
+    eligible_anomalies = _eligible_anomaly_index(anomaly_report or {})
+    diagnostic_quarantined_doprinato = {
+        (str(item["supply_id"]), int(item["nm_id"]))
+        for item in (anomaly_report or {}).get(
+            "diagnostic_quarantined_doprinato"
+        ) or []
+    }
+    boundary = _ff_opening_boundary_context(conn)
     for operation in _ff_operation_rows(conn):
         if str(operation.get("operation_type")) != "auto_writeoff":
             continue
-        effective = _ff_operation_effective_date(conn, operation)
-        if not effective or effective < CUTOVER_DATE or effective > as_of_date:
+        effective = _canonical_ff_operation_effective_date(
+            conn, operation, boundary=boundary
+        )
+        if not effective or effective > as_of_date:
             continue
         supply_id = str(operation.get("source_object_id") or "")
         supply = conn.execute(
@@ -4341,6 +5016,25 @@ def _wb_movement_evidence(
     ):
         if str(fact["accepted_date"] or "") < CUTOVER_DATE:
             continue
+        if (
+            str(fact["supply_id"]), int(fact["nm_id"])
+        ) in diagnostic_quarantined_doprinato:
+            continue
+        absorption = eligible_anomalies.get(
+            (
+                "doprinato_unmatched_surplus",
+                str(fact["supply_id"]),
+                int(fact["nm_id"]),
+            )
+        )
+        if (
+            absorption is not None
+            and absorption.get("classification")
+            == UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION
+        ):
+            # Already present in official WB stock.  It is immutable source
+            # evidence only and cannot close any unrelated outstanding layer.
+            continue
         remaining = _decimal(fact["accepted_quantity"])
         candidates = [
             item for item in movements
@@ -4370,7 +5064,7 @@ def _wb_movement_evidence(
             # reconstructed and therefore stays source evidence only: it
             # creates neither a movement nor a zero-cost buffer.  New-contour
             # evidence remains strict and fail-closed.
-            decision = _eligible_anomaly_index(anomaly_report or {}).get(
+            decision = eligible_anomalies.get(
                 ("doprinato_unmatched_surplus", str(fact["supply_id"]), int(fact["nm_id"]))
             )
             if decision is not None:
@@ -4393,6 +5087,7 @@ def _wb_supply_cache_evidence(conn: sqlite3.Connection, *, date_to: str) -> list
     ).fetchall()
     result: list[dict[str, Any]] = []
     for row in rows:
+        raw_row = dict(row)
         normalized = _json_loads(row["normalized_row_json"])
         accepted_date = _wb_accepted_date(normalized, row)
         if not accepted_date or accepted_date > date_to:
@@ -4407,14 +5102,24 @@ def _wb_supply_cache_evidence(conn: sqlite3.Connection, *, date_to: str) -> list
             accepted = _decimal(item.get("acceptedQuantity") or item.get("accepted_quantity") or (item.get("quantity") if is_doprinato else 0))
             if nm_id <= 0 or accepted < ZERO:
                 continue
-            result.append({
+            fact = {
                 "supply_id": str(row["supply_id"]), "nm_id": nm_id,
                 "accepted_quantity": accepted, "accepted_date": accepted_date,
                 "warehouse": warehouse, "destination": destination,
                 "original_supply_id": original, "is_doprinato": is_doprinato,
                 "is_final_accepted": status_id == 5,
                 "source_identity": str(row["cache_key"]),
-            })
+            }
+            fact.update(
+                _wb_supply_raw_row_line_fingerprints(raw_row, dict(item))
+            )
+            fact["semantic_evidence_fingerprint"] = (
+                "sha256:" + _stable_hash(_doprinato_fact_fingerprint_payload(fact))
+            )
+            fact["source_status"] = (
+                "final-accepted" if status_id == 5 else f"status-{status_id}"
+            )
+            result.append(fact)
     return result
 
 
