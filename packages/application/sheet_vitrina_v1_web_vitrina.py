@@ -13,6 +13,9 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_wi
 from packages.application.sheet_vitrina_v1_own_product_capital import (
     extend_metrics_with_own_product_capital_metrics,
 )
+from packages.application.sheet_vitrina_v1_sku_actions import (
+    extend_metrics_with_sku_action_metrics,
+)
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
 )
@@ -206,9 +209,11 @@ class SheetVitrinaV1WebVitrinaBlock:
             int(item.nm_id): item
             for item in current_state.config_v2
         }
-        effective_metrics = extend_metrics_with_own_product_capital_metrics(
-            extend_metrics_with_our_wb_cost_metrics(
-                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+        effective_metrics = extend_metrics_with_sku_action_metrics(
+            extend_metrics_with_own_product_capital_metrics(
+                extend_metrics_with_our_wb_cost_metrics(
+                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                )
             )
         )
         metrics_by_key = {
