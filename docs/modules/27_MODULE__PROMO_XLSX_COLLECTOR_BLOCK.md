@@ -43,7 +43,7 @@ update_note: "Обновлён под archive-first promo semantics: collector r
 
 # 2. Legacy-source и legacy semantics
 
-- Legacy browser/session contour по-прежнему lives outside `wb-core` как seller portal session reuse path из `wb-web-bot`.
+- Legacy browser/session contour по-прежнему lives outside `wb-core` как seller portal session reuse path из `wb-web-bot`; local fallback вычисляется home-relative (`~/Projects/wb-web-bot/storage_state.json`) и не фиксирует путь конкретного пользователя, production fallback остаётся `/opt/wb-web-bot/storage_state.json`.
 - В `wb-core` переносится не весь browser runtime, а только bounded collector semantics:
   - canonical hydration entry через direct open `dp-promo-calendar`
   - cookie accept seam `Принимаю`

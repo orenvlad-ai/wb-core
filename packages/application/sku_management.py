@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 import json
 import math
 from pathlib import Path
@@ -76,6 +76,8 @@ class ForecastInbound:
     source_id: str = ""
     district_key: str = ""
     synthetic: bool = False
+    consumes_initial_ff: bool = False
+    initial_ff_reservation_qty: float | None = None
 
 
 def validate_forecast_settings(payload: Mapping[str, Any] | None) -> ForecastSettings:
@@ -109,7 +111,13 @@ def calculate_depletion_forecast(
     districts: Mapping[str, Mapping[str, Any]] | None = None,
     evidence_warnings: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Sequential calculation-only stock timeline with real then synthetic inbound."""
+    """Sequential calculation-only WB availability timeline.
+
+    Current FF stock is not treated as instantly saleable on WB. Its unreserved
+    part becomes available only after the configured FF -> WB lead time. A WB
+    supply that has not yet produced an FF-ledger debit consumes that same
+    initial FF pool instead of creating inventory a second time.
+    """
 
     start = date.fromisoformat(as_of_date)
     warnings = [str(item) for item in evidence_warnings if str(item).strip()]
@@ -117,9 +125,11 @@ def calculate_depletion_forecast(
         warnings.append("Текущий остаток WB недоступен")
     if stock_ff is None:
         warnings.append("Текущий остаток ФФ недоступен")
-    if daily_demand is None or daily_demand <= 0:
-        warnings.append("Интенсивность продаж недоступна или равна нулю")
-    if stock_wb is None or daily_demand is None or daily_demand <= 0:
+    if daily_demand is None:
+        warnings.append("Интенсивность продаж недоступна")
+    elif daily_demand < 0:
+        warnings.append("Интенсивность продаж не может быть отрицательной")
+    if stock_wb is None or stock_ff is None or daily_demand is None or daily_demand < 0:
         return {
             "risk": "unknown",
             "risk_rank": -1,
@@ -127,64 +137,136 @@ def calculate_depletion_forecast(
             "minimum_stock": None,
             "deficit_units": None,
             "coverage_pct": None,
-            "first_problem_district": None,
+            "first_problem_district": "unknown",
             "reason": "; ".join(warnings) or "Недостаточно evidence для расчёта",
             "quality": "unknown",
             "quality_warnings": warnings,
             "daily_demand": daily_demand,
             "timeline": [],
             "synthetic_orders": [],
+            "regional_status": "unknown",
         }
 
-    ff = max(float(stock_ff or 0.0), 0.0)
-    balance = max(float(stock_wb), 0.0) + ff
+    initial_ff = float(stock_ff)
+    balance = float(stock_wb)
     demand = float(daily_demand)
+    if balance < 0:
+        warnings.append("Расчётный остаток WB отрицательный")
+    if initial_ff < 0:
+        warnings.append("Расчётный остаток ФФ отрицательный")
     safety_units = demand * settings.safety_stock_days
-    horizon_end = start + timedelta(days=settings.forecast_horizon_days)
+    horizon_end = start + timedelta(days=settings.forecast_horizon_days - 1)
     scheduled: dict[date, list[ForecastInbound]] = {}
     real_plan_dates: list[date] = []
-    seen_real_keys: set[tuple[str, str, str]] = set()
+    seen_real_keys: set[tuple[str, str, str, str]] = set()
+    reserved_initial_ff_qty = 0.0
     for inbound in real_inbounds:
         if inbound.quantity <= 0:
             continue
+        if not _is_iso_date(inbound.arrival_date):
+            warnings.append(
+                f"Inbound evidence без usable даты исключён: {inbound.source}:{inbound.source_id or 'unknown'}"
+            )
+            continue
         arrival = date.fromisoformat(inbound.arrival_date)
         if arrival < start:
+            warnings.append(
+                f"Просроченный inbound plan исключён: {inbound.source}:{inbound.source_id or 'unknown'} ({inbound.arrival_date})"
+            )
             continue
-        identity = (inbound.source, inbound.source_id, inbound.arrival_date)
+        identity = (inbound.source, inbound.source_id, inbound.arrival_date, inbound.district_key)
         if identity in seen_real_keys:
             warnings.append(f"Дубликат inbound evidence исключён: {inbound.source}:{inbound.source_id}")
             continue
         seen_real_keys.add(identity)
         scheduled.setdefault(arrival, []).append(inbound)
         real_plan_dates.append(arrival)
+        if inbound.consumes_initial_ff:
+            reserved_initial_ff_qty += max(
+                float(
+                    inbound.initial_ff_reservation_qty
+                    if inbound.initial_ff_reservation_qty is not None
+                    else inbound.quantity
+                ),
+                0.0,
+            )
 
-    real_plan_end = max(real_plan_dates, default=start)
-    synthetic_order_start = max(start, real_plan_end)
+    available_initial_ff = max(initial_ff, 0.0)
+    generic_initial_ff_qty = max(available_initial_ff - reserved_initial_ff_qty, 0.0)
+    reserved_initial_ff_remaining = min(available_initial_ff, reserved_initial_ff_qty)
+    if reserved_initial_ff_qty > available_initial_ff:
+        warnings.append(
+            "WB supply reservations exceed the current FF balance; transfers are capped by authoritative FF stock"
+        )
+    if generic_initial_ff_qty > 0:
+        initial_ff_arrival = start + timedelta(days=settings.ff_to_wb_lead_days)
+        if initial_ff_arrival <= horizon_end:
+            scheduled.setdefault(initial_ff_arrival, []).append(
+                ForecastInbound(
+                    arrival_date=initial_ff_arrival.isoformat(),
+                    quantity=generic_initial_ff_qty,
+                    source="current_ff_stock",
+                    source_id="authoritative_ff_balance",
+                )
+            )
+
+    real_plan_end = max(real_plan_dates, default=start - timedelta(days=1))
+    synthetic_order_start = max(start, real_plan_end + timedelta(days=1))
     total_lead = settings.production_lead_days + settings.factory_to_ff_lead_days + settings.ff_to_wb_lead_days
-    target_level = demand * (total_lead + settings.future_order_period_days + settings.safety_stock_days)
+    target_level = demand * (settings.future_order_period_days + settings.safety_stock_days)
     first_deficit_date: str | None = None
     minimum_stock = balance
     timeline: list[dict[str, Any]] = []
     synthetic_orders: list[dict[str, Any]] = []
+    effective_district_inbounds: list[ForecastInbound] = []
 
     current = start
     while current <= horizon_end:
         arrivals = scheduled.get(current, [])
-        inbound_qty = sum(float(item.quantity) for item in arrivals)
+        inbound_qty = 0.0
+        inbound_sources: list[str] = []
+        for item in arrivals:
+            quantity = float(item.quantity)
+            if item.consumes_initial_ff:
+                applied = min(quantity, reserved_initial_ff_remaining)
+                reserved_initial_ff_remaining -= applied
+                if applied + 1e-9 < quantity:
+                    warnings.append(
+                        f"WB supply {item.source_id or 'unknown'} applied partially because FF evidence is insufficient"
+                    )
+                quantity = applied
+            if quantity <= 0:
+                continue
+            inbound_qty += quantity
+            inbound_sources.append(item.source)
+            if item.district_key and not item.synthetic:
+                effective_district_inbounds.append(
+                    ForecastInbound(
+                        arrival_date=item.arrival_date,
+                        quantity=quantity,
+                        source=item.source,
+                        source_id=item.source_id,
+                        district_key=item.district_key,
+                    )
+                )
         balance += inbound_qty
-        balance -= demand
-        minimum_stock = min(minimum_stock, balance)
-        if first_deficit_date is None and balance < safety_units:
-            first_deficit_date = current.isoformat()
 
         if current >= synthetic_order_start and (current - synthetic_order_start).days % settings.future_order_period_days == 0:
             arrival_date = current + timedelta(days=total_lead)
             if arrival_date <= horizon_end:
-                known_before_arrival = sum(
-                    float(item.quantity)
+                future_items = [
+                    item
                     for scheduled_date, items in scheduled.items()
                     if current < scheduled_date <= arrival_date
                     for item in items
+                ]
+                known_before_arrival = sum(
+                    float(item.quantity)
+                    for item in future_items
+                    if not item.consumes_initial_ff
+                ) + min(
+                    sum(float(item.quantity) for item in future_items if item.consumes_initial_ff),
+                    reserved_initial_ff_remaining,
                 )
                 projected_on_arrival = balance - demand * total_lead + known_before_arrival
                 shortage = max(target_level - projected_on_arrival, 0.0)
@@ -198,9 +280,9 @@ def calculate_depletion_forecast(
                         synthetic=True,
                     )
                     if arrival_date == current:
-                        arrivals.append(item)
                         inbound_qty += float(quantity)
                         balance += float(quantity)
+                        inbound_sources.append(item.source)
                     else:
                         scheduled.setdefault(arrival_date, []).append(item)
                     synthetic_orders.append(
@@ -212,11 +294,16 @@ def calculate_depletion_forecast(
                         }
                     )
 
+        balance -= demand
+        minimum_stock = min(minimum_stock, balance)
+        if first_deficit_date is None and balance < safety_units:
+            first_deficit_date = current.isoformat()
+
         timeline.append(
             {
                 "date": current.isoformat(),
                 "inbound_qty": round(inbound_qty, 2),
-                "inbound_sources": [item.source for item in arrivals],
+                "inbound_sources": inbound_sources,
                 "demand_qty": round(demand, 4),
                 "ending_stock": round(balance, 2),
             }
@@ -235,12 +322,12 @@ def calculate_depletion_forecast(
     else:
         risk, rank = "medium", 1
 
-    district_problem = _first_problem_district(
+    district_problem, regional_status = _first_problem_district(
         as_of_date=start,
         horizon_end=horizon_end,
         safety_days=settings.safety_stock_days,
         districts=districts or {},
-        inbounds=real_inbounds,
+        inbounds=effective_district_inbounds,
     )
     quality = "complete" if not warnings else "partial"
     reason_parts = []
@@ -250,6 +337,8 @@ def calculate_depletion_forecast(
         reason_parts.append("дефицит внутри горизонта не прогнозируется")
     if synthetic_orders:
         reason_parts.append(f"учтено calculation-only заказов: {len(synthetic_orders)}")
+    if regional_status == "unknown":
+        reason_parts.append("региональный риск unknown: authoritative evidence отсутствует")
     if warnings:
         reason_parts.append("evidence неполный")
     return {
@@ -260,6 +349,7 @@ def calculate_depletion_forecast(
         "deficit_units": round(deficit_units, 2),
         "coverage_pct": None if coverage_pct is None else round(coverage_pct, 2),
         "first_problem_district": district_problem,
+        "regional_status": regional_status,
         "reason": "; ".join(reason_parts),
         "quality": quality,
         "quality_warnings": warnings,
@@ -287,7 +377,11 @@ def choose_target_price_configuration(
     for discount in range(100):
         divisor = Decimal(100 - discount)
         raw_price = target * Decimal(100) / divisor
-        for price in {int(raw_price.to_integral_value(rounding=ROUND_HALF_UP)), int(math.floor(float(raw_price))), int(math.ceil(float(raw_price)))}:
+        for price in {
+            int(raw_price.to_integral_value(rounding=ROUND_HALF_UP)),
+            int(raw_price.to_integral_value(rounding=ROUND_FLOOR)),
+            int(raw_price.to_integral_value(rounding=ROUND_CEILING)),
+        }:
             if price <= 0:
                 continue
             seller = (Decimal(price) * divisor / Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -372,6 +466,7 @@ class SkuManagementBlock:
         active = self._active_skus()
         nm_ids = [int(item["nm_id"]) for item in active]
         commercial = self._commercial_projection(nm_ids)
+        current_buyer_prices = self._current_buyer_price_projection(nm_ids)
         source_warnings: list[str] = []
         try:
             prices_payload = self.prices_block.build_goods_table()
@@ -385,13 +480,12 @@ class SkuManagementBlock:
             ads_payload = {"rows": []}
             source_warnings.append(f"advertising evidence error: {exc}")
         ads_by_nm = {int(row["nm_id"]): row for row in ads_payload.get("rows", []) if int(row.get("nm_id") or 0) in set(nm_ids)}
-        ad_options: dict[int, list[dict[str, Any]]] = {}
-        for nm_id in nm_ids:
-            try:
-                ad_options[nm_id] = list(self.ads_block.build_sku_detail(nm_id).get("rows", []))
-            except Exception as exc:
-                ad_options[nm_id] = []
-                source_warnings.append(f"advertising placement evidence error for nmID {nm_id}: {exc}")
+        try:
+            placement_index = self.ads_block.build_placement_index()
+            ad_options = {nm_id: list(placement_index.get(nm_id, [])) for nm_id in nm_ids}
+        except Exception as exc:
+            ad_options = {nm_id: [] for nm_id in nm_ids}
+            source_warnings.append(f"advertising placement evidence error: {exc}")
         evidence = self._collect_forecast_evidence(active=active, settings=settings)
         for item_evidence in evidence.values():
             item_evidence["warnings"].extend(source_warnings)
@@ -413,11 +507,28 @@ class SkuManagementBlock:
             price = price_by_nm.get(nm_id, {})
             ads = ads_by_nm.get(nm_id, {})
             options = ad_options.get(nm_id, [])
-            current_bid = options[0].get("current_bid_rub") if len(options) == 1 else None
+            bid_values = [
+                value
+                for item in options
+                if (value := _optional_float(item.get("current_bid_rub"))) is not None
+            ]
+            current_bid = bid_values[0] if len(options) == 1 and bid_values else None
             latest = last_events.get(nm_id, {})
             metrics = commercial.get(nm_id, {})
             latest_price_readback = (latest.get(PRICE_PARAMETER) or {}).get("readback") or {}
-            event_buyer = (latest_price_readback.get("buyer_price") or {}).get("value") if isinstance(latest_price_readback, Mapping) else None
+            event_buyer = (
+                latest_price_readback.get("buyer_price") or {}
+                if isinstance(latest_price_readback, Mapping)
+                else {}
+            )
+            buyer = _select_observed_buyer_price(
+                event_buyer=event_buyer,
+                metrics=metrics,
+                current_buyer=current_buyer_prices.get(nm_id),
+            )
+            promo_count = metrics.get("promo_count_by_price")
+            if promo_count is None:
+                promo_count = price.get("promoEligibleCount")
             rows.append(
                 {
                     **sku,
@@ -425,14 +536,20 @@ class SkuManagementBlock:
                     "seller_price": price.get("discountedPrice"),
                     "initial_price": price.get("price"),
                     "seller_discount": price.get("discount"),
-                    "buyer_price": event_buyer if event_buyer is not None else metrics.get("buyer_price_rub"),
+                    "buyer_price": buyer["value"],
+                    "buyer_price_source": buyer["source"],
+                    "buyer_price_freshness": buyer["freshness"],
+                    "buyer_price_quality": buyer["quality"],
                     "spp_proxy": price.get("sppProxy"),
                     "promo_label": price.get("promoLabel") or "н/д",
-                    "promo_count": price.get("promoCurrentCount"),
+                    "promo_count": promo_count,
+                    "promo_participation": metrics.get("promo_participation"),
+                    "promo_freshness": metrics.get("promo_participation__date") or metrics.get("promo_count_by_price__date") or "",
                     "campaign_count": ads.get("campaign_count", 0),
                     "placement_count": ads.get("placement_count", 0),
                     "ad_options": options,
                     "current_bid": current_bid,
+                    "bid_sort_value": min(bid_values) if bid_values else None,
                     "ads_drr": metrics.get("ads_drr"),
                     "ads_drr_attributed": metrics.get("ads_drr_attributed"),
                     "funnel": {key: metrics.get(key) for key in ("view_count", "openCount", "cartCount", "addToCartConversion", "cartToOrderConversion")},
@@ -492,18 +609,33 @@ class SkuManagementBlock:
             current_view = {}
         quarantine_rows: list[Mapping[str, Any]] = []
         try:
-            quarantine_rows = [
-                item for item in self.prices_block.get_quarantine_goods({"limit": 1000}).get("rows", [])
-                if int(item.get("nmID") or 0) == nm_id
-            ]
-        except Exception:
-            warnings.append("quarantine_evidence_unavailable")
+            quarantine_rows = self._load_price_quarantine_rows(nm_id)
+        except SkuManagementError:
+            raise
+        except Exception as exc:
+            raise SkuManagementError(
+                "quarantine evidence is unavailable; price preview is blocked",
+                http_status=503,
+                payload={"safety_status": "quarantine_evidence_unavailable"},
+            ) from exc
         if quarantine_rows:
-            warnings.append("current_quarantine")
-        if current_view.get("promoLabel") in {None, "", "н/д"}:
+            raise SkuManagementError(
+                "current WB quarantine blocks the price change",
+                http_status=409,
+                payload={"safety_status": "current_quarantine", "quarantine": quarantine_rows},
+            )
+        promo_snapshot = self._price_promo_snapshot(nm_id=nm_id, current_view=current_view)
+        override_required_warnings = list(warnings)
+        if promo_snapshot["quality"] != "observed":
             warnings.append("promo_evidence_unavailable_or_stale")
+            override_required_warnings.append("promo_evidence_unavailable_or_stale")
+        elif (_optional_float(promo_snapshot.get("participation")) or 0.0) > 0:
+            warnings.append("active_promo_participation")
+            override_required_warnings.append("active_promo_participation")
         stabilization = self._stabilization_warnings(nm_id=nm_id, parameter=PRICE_PARAMETER, actor=actor)
-        warnings.extend(item["code"] for item in stabilization)
+        stabilization_codes = [item["code"] for item in stabilization]
+        warnings.extend(stabilization_codes)
+        override_required_warnings.extend(stabilization_codes)
         buyer = self._fetch_buyer_price(nm_id)
         if buyer.get("quality") != "observed":
             warnings.append("public_buyer_price_missing_or_stale")
@@ -514,6 +646,7 @@ class SkuManagementBlock:
             "nm_id": nm_id,
             "actor": actor,
             "created_at": self.timestamp_factory(),
+            "expires_at_epoch": int(delegated["preview"].get("expires_at_epoch") or 0),
             "delegated_confirmation": delegated["confirmation_payload"],
             "current": row["current"],
             "new": row["new"],
@@ -521,25 +654,31 @@ class SkuManagementBlock:
             "current_buyer_price": buyer.get("value"),
             "estimated_buyer_price": None,
             "buyer_price_evidence": buyer,
-            "promo": {
-                "label": current_view.get("promoLabel") or "н/д",
-                "eligible_count": current_view.get("promoEligibleCount"),
-                "current_count": current_view.get("promoCurrentCount"),
-                "reason": current_view.get("promoReason") or "",
-            },
+            "promo": promo_snapshot,
             "quarantine": quarantine_rows,
-            "warnings": warnings,
+            "warnings": _dedupe_strings(warnings),
+            "override_required_warnings": _dedupe_strings(override_required_warnings),
             "stabilization_warnings": stabilization,
         }
         self._save_preview(preview)
-        return {"status": "preview_ready", "preview": preview, "writes_enabled": True}
+        response_preview = dict(preview)
+        response_preview.pop("delegated_confirmation", None)
+        return {"status": "preview_ready", "preview": response_preview, "writes_enabled": True}
 
     def commit_price(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
         preview = self._load_preview(payload.get("preview_id"), expected_parameter=PRICE_PARAMETER)
         self._validate_confirmation(preview, payload=payload, actor=actor)
-        override = bool(preview.get("stabilization_warnings")) and _boolean(payload.get("override_stabilization", False))
+        stabilization_override = bool(preview.get("stabilization_warnings")) and (
+            _boolean(payload.get("override_stabilization", False))
+            or _boolean(payload.get("override_warnings", False))
+        )
+        warning_override = bool(preview.get("override_required_warnings")) and (
+            _boolean(payload.get("override_warnings", False)) or stabilization_override
+        )
         self._claim_preview(preview)
         try:
+            self._assert_price_not_quarantined(int(preview["nm_id"]))
+            self._assert_price_promo_fresh(preview)
             current_goods = normalize_goods_payload(
                 self.prices_block.source.fetch_goods_by_nm_ids([int(preview["nm_id"])])
             )
@@ -579,16 +718,19 @@ class SkuManagementBlock:
                     payload={"readback": dict(status_payload)},
                 )
             confirmed, observed = self._readback_price(
-                int(preview["nm_id"]), float(preview["target_seller_price"])
+                int(preview["nm_id"]),
+                target=float(preview["target_seller_price"]),
+                expected_price=int(preview["new"]["price"]),
+                expected_discount=int(preview["new"]["discount"]),
             )
             if confirmed is None:
                 raise SkuManagementError(
-                    "WB price readback does not match target seller price",
+                    "WB price readback does not match the requested price/discount/seller-price tuple",
                     http_status=409,
-                    payload={"readback": {"seller_price": observed, "target": preview["target_seller_price"]}},
+                    payload={"readback_status": "mismatch", "readback": observed, "target": preview["new"]},
                 )
             confirmed_at = self.timestamp_factory()
-            buyer = self._fetch_buyer_price(int(preview["nm_id"]))
+            buyer = self._readback_buyer_price(int(preview["nm_id"]))
             event = self._persist_event(
                 preview=preview,
                 actor=actor,
@@ -596,18 +738,41 @@ class SkuManagementBlock:
                 confirmed_value=confirmed,
                 old_value=float(preview["current"]["discountedPrice"]),
                 status="confirmed",
-                override=override,
-                readback={"upload": dict(status_payload), "seller_price": confirmed, "buyer_price": buyer},
+                stabilization_override=stabilization_override,
+                warning_override=warning_override,
+                readback_status="matching",
+                readback={"upload": dict(status_payload), "price": observed, "buyer_price": buyer},
                 confirmed_at=confirmed_at,
             )
-            return {"status": "success", "confirmed_value": confirmed, "buyer_price": buyer, "event": event}
+            return {
+                "status": "success",
+                "confirmed_value": confirmed,
+                "confirmed_price": observed.get("price"),
+                "confirmed_discount": observed.get("discount"),
+                "confirmed_seller_price": observed.get("seller_price"),
+                "readback_status": "matching",
+                "buyer_price": buyer,
+                "event": event,
+            }
         except Exception as exc:
-            self._persist_failure(preview=preview, actor=actor, exc=exc, override=override)
+            self._persist_failure(
+                preview=preview,
+                actor=actor,
+                exc=exc,
+                stabilization_override=stabilization_override,
+                warning_override=warning_override,
+            )
             raise
 
     def preview_bid(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
         delegated = self.ads_block.preview_bid_change(payload)
         facts = dict(delegated["preview"])
+        if facts.get("min_bid_rub") is None:
+            raise SkuManagementError(
+                "minimum bid evidence is unavailable; bid preview is blocked",
+                http_status=503,
+                payload={"safety_status": "min_bid_unavailable"},
+            )
         nm_id = int(facts["nm_id"])
         stabilization = self._stabilization_warnings(nm_id=nm_id, parameter=BID_PARAMETER, actor=actor)
         warnings = list(facts.get("warnings") or []) + [item["code"] for item in stabilization]
@@ -618,6 +783,7 @@ class SkuManagementBlock:
             "nm_id": nm_id,
             "actor": actor,
             "created_at": self.timestamp_factory(),
+            "expires_at_epoch": int(facts.get("expires_at_epoch") or 0),
             "delegated_preview_id": facts["preview_id"],
             "advert_id": int(facts["advert_id"]),
             "campaign_name": str(facts.get("campaign_name") or ""),
@@ -626,23 +792,32 @@ class SkuManagementBlock:
             "requested_value": facts["new_bid_rub"],
             "min_bid_rub": facts.get("min_bid_rub"),
             "warnings": warnings,
+            "override_required_warnings": [item["code"] for item in stabilization],
             "stabilization_warnings": stabilization,
             "current_bid_freshness": facts.get("created_at"),
         }
         self._save_preview(preview)
-        return {"status": "preview_ready", "preview": preview, "writes_enabled": True}
+        response_preview = dict(preview)
+        response_preview.pop("delegated_preview_id", None)
+        return {"status": "preview_ready", "preview": response_preview, "writes_enabled": True}
 
     def commit_bid(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
         preview = self._load_preview(payload.get("preview_id"), expected_parameter=BID_PARAMETER)
         self._validate_confirmation(preview, payload=payload, actor=actor)
-        override = bool(preview.get("stabilization_warnings")) and _boolean(payload.get("override_stabilization", False))
+        stabilization_override = bool(preview.get("stabilization_warnings")) and (
+            _boolean(payload.get("override_stabilization", False))
+            or _boolean(payload.get("override_warnings", False))
+        )
+        warning_override = bool(preview.get("override_required_warnings")) and (
+            _boolean(payload.get("override_warnings", False)) or stabilization_override
+        )
         self._claim_preview(preview)
         try:
             delegated = self.ads_block.commit_bid_change({"preview_id": preview["delegated_preview_id"]}, actor=actor)
             confirmed: float | None = None
             readback: Mapping[str, Any] = {}
             for attempt in range(self.readback_attempts):
-                detail = self.ads_block.build_sku_detail(int(preview["nm_id"]))
+                detail = self.ads_block.build_sku_detail(int(preview["nm_id"]), bypass_cache=True)
                 readback = detail
                 for row in detail.get("rows", []):
                     if int(row.get("advert_id") or 0) == int(preview["advert_id"]) and str(row.get("placement") or "") == preview["placement"]:
@@ -667,13 +842,21 @@ class SkuManagementBlock:
                 confirmed_value=confirmed,
                 old_value=float(preview["old_value"]),
                 status="confirmed",
-                override=override,
+                stabilization_override=stabilization_override,
+                warning_override=warning_override,
+                readback_status="matching",
                 readback={"commit": delegated, "detail": dict(readback)},
                 confirmed_at=confirmed_at,
             )
-            return {"status": "success", "confirmed_value": confirmed, "event": event}
+            return {"status": "success", "confirmed_value": confirmed, "readback_status": "matching", "event": event}
         except Exception as exc:
-            self._persist_failure(preview=preview, actor=actor, exc=exc, override=override)
+            self._persist_failure(
+                preview=preview,
+                actor=actor,
+                exc=exc,
+                stabilization_override=stabilization_override,
+                warning_override=warning_override,
+            )
             raise
 
     def history(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -718,13 +901,17 @@ class SkuManagementBlock:
                     target = result.get(int(item.nm_id))
                     if target is None:
                         continue
-                    target["stock_wb"] = float(item.stock_total)
+                    target["stock_wb"] = _optional_float(getattr(item, "stock_total", None))
+                    if target["stock_wb"] is None:
+                        target["warnings"].append("current WB stock evidence is unavailable")
                     for key, attribute in (
                         ("central", "stock_ru_central"), ("northwest", "stock_ru_northwest"),
                         ("volga", "stock_ru_volga"), ("ural", "stock_ru_ural"),
                         ("south_caucasus", "stock_ru_south_caucasus"), ("far_siberia", "stock_ru_far_siberia"),
                     ):
-                        target["districts"].setdefault(key, {})["stock"] = float(getattr(item, attribute, 0.0) or 0.0)
+                        value = _optional_float(getattr(item, attribute, None))
+                        if value is not None:
+                            target["districts"].setdefault(key, {})["stock"] = value
             except Exception as exc:
                 for row in result.values():
                     row["warnings"].append(f"stocks evidence error: {exc}")
@@ -756,21 +943,29 @@ class SkuManagementBlock:
                     clamp_to_coverage=True,
                 )
                 for nm_id in nm_ids:
+                    sku_samples = list(samples.get(nm_id, []))
+                    if not sku_samples:
+                        result[nm_id]["daily_demand"] = None
+                        result[nm_id]["warnings"].append(
+                            "authoritative sales history has no dated samples for this SKU"
+                        )
+                        continue
                     estimate = estimate_availability_adjusted_demand(
-                        samples.get(nm_id, []),
+                        sku_samples,
                         report_date=date.fromisoformat(today),
                         sales_avg_period_days=settings.sales_avg_period_days,
                         sales_lookup_days=lookup_days,
                     )
-                    result[nm_id]["daily_demand"] = estimate.daily_demand_total or None
+                    result[nm_id]["daily_demand"] = estimate.daily_demand_total
                     if estimate.demand_warning:
                         result[nm_id]["warnings"].append(estimate.demand_warning)
             except Exception as exc:
                 for row in result.values():
                     row["warnings"].append(f"sales history evidence error: {exc}")
         self._append_supplier_inbounds(result, settings=settings)
+        self._append_factory_order_inbounds(result, settings=settings)
         self._append_wb_supply_inbounds(result, settings=settings)
-        self._append_regional_demand(result)
+        self._append_regional_demand(result, settings=settings, as_of_date=today)
         return result
 
     def _append_supplier_inbounds(self, result: dict[int, dict[str, Any]], *, settings: ForecastSettings) -> None:
@@ -780,8 +975,6 @@ class SkuManagementBlock:
             for row in result.values(): row["warnings"].append(f"supplier shipment evidence error: {exc}")
             return
         for shipment in shipments:
-            if str(shipment.get("actual_ff_acceptance_date") or ""):
-                continue
             shipment_id = str(shipment.get("shipment_id") or "")
             try:
                 detail = self.runtime.load_supplier_shipment(shipment_id)
@@ -792,6 +985,17 @@ class SkuManagementBlock:
             if not detail:
                 continue
             header = detail.get("header") or {}
+            if str(header.get("actual_ff_acceptance_date") or shipment.get("actual_ff_acceptance_date") or ""):
+                continue
+            order_status = str(header.get("order_status") or shipment.get("order_status") or "production")
+            if order_status not in {"production", "in_transit"}:
+                for line in detail.get("lines", []):
+                    nm_id = _optional_int(line.get("internal_nm_id"))
+                    if nm_id in result:
+                        result[nm_id]["warnings"].append(
+                            f"supplier shipment {shipment_id} status {order_status or 'unknown'} is not usable forecast evidence"
+                        )
+                continue
             base_date = str(header.get("actual_shipment_date") or header.get("shipment_date") or "")
             if not _is_iso_date(base_date):
                 for line in detail.get("lines", []):
@@ -801,12 +1005,67 @@ class SkuManagementBlock:
                             f"supplier shipment {shipment_id} has no usable shipment date"
                         )
                 continue
-            arrival = date.fromisoformat(base_date) + timedelta(days=settings.factory_to_ff_lead_days)
+            arrival = date.fromisoformat(base_date) + timedelta(
+                days=settings.factory_to_ff_lead_days + settings.ff_to_wb_lead_days
+            )
+            quantity_by_nm: dict[int, float] = {}
             for line in detail.get("lines", []):
+                if str(line.get("line_type") or "product") != "product":
+                    continue
                 nm_id = _optional_int(line.get("internal_nm_id"))
                 qty = _optional_float(line.get("qty"))
                 if nm_id in result and qty and qty > 0:
-                    result[nm_id]["real_inbounds"].append(ForecastInbound(arrival.isoformat(), qty, "supplier_shipment", shipment_id))
+                    quantity_by_nm[nm_id] = quantity_by_nm.get(nm_id, 0.0) + qty
+            for nm_id, quantity in quantity_by_nm.items():
+                result[nm_id]["real_inbounds"].append(
+                    ForecastInbound(
+                        arrival.isoformat(),
+                        quantity,
+                        "supplier_shipment",
+                        f"{shipment_id}:{nm_id}",
+                    )
+                )
+
+    def _append_factory_order_inbounds(self, result: dict[int, dict[str, Any]], *, settings: ForecastSettings) -> None:
+        """Reuse only manual factory-order rows; supplier-registry rows are already consumed above."""
+
+        try:
+            payload = self.runtime.load_factory_order_result_state() or {}
+        except Exception as exc:
+            for row in result.values():
+                row["warnings"].append(f"factory-order evidence error: {exc}")
+            return
+        if not isinstance(payload, Mapping) or not payload:
+            for row in result.values():
+                row["warnings"].append("factory-order calculation evidence is unavailable")
+            return
+        raw_settings = payload.get("settings") if isinstance(payload.get("settings"), Mapping) else {}
+        source = str(payload.get("factory_inbound_source") or raw_settings.get("factory_inbound_source") or "")
+        if source != "manual_excel":
+            return
+        calculation_id = str(payload.get("calculation_id") or "factory-order")
+        for index, item in enumerate(payload.get("effective_inbound_factory_to_ff") or []):
+            if not isinstance(item, Mapping):
+                continue
+            nm_id = _optional_int(item.get("nm_id"))
+            quantity = _optional_float(item.get("quantity"))
+            arrival_raw = str(item.get("effective_arrival_date") or item.get("planned_arrival_date") or "")
+            if nm_id not in result or quantity is None or quantity <= 0:
+                continue
+            if not _is_iso_date(arrival_raw):
+                result[nm_id]["warnings"].append(
+                    f"factory-order inbound {calculation_id}:{index} has no usable arrival date"
+                )
+                continue
+            arrival = date.fromisoformat(arrival_raw) + timedelta(days=settings.ff_to_wb_lead_days)
+            result[nm_id]["real_inbounds"].append(
+                ForecastInbound(
+                    arrival.isoformat(),
+                    quantity,
+                    "factory_order_manual",
+                    f"{calculation_id}:{index}:{nm_id}",
+                )
+            )
 
     def _append_wb_supply_inbounds(self, result: dict[int, dict[str, Any]], *, settings: ForecastSettings) -> None:
         try:
@@ -833,39 +1092,77 @@ class SkuManagementBlock:
                 or normalized.get("date")
                 or ""
             )[:10]
+            quantities_by_nm: dict[int, dict[str, Any]] = {}
             for good in record.get("raw_goods") or []:
                 nm_id = _optional_int(good.get("nmID") or good.get("nmId") or good.get("nm_id"))
-                qty = _optional_float(good.get("quantity") or good.get("qty") or good.get("addedQuantity"))
-                if nm_id in result and qty and qty > 0:
-                    if not writeoff:
-                        result[nm_id]["warnings"].append(
-                            f"WB supply {record.get('supply_id') or cache_key} remains inside current FF balance; inbound not added twice"
-                        )
-                        continue
-                    if not _is_iso_date(arrival_raw):
-                        result[nm_id]["warnings"].append(
-                            f"WB supply {record.get('supply_id') or cache_key} has no usable arrival date"
-                        )
-                        continue
-                    district_key = str(
-                        normalized.get("district_key")
-                        or normalized.get("warehouse_district_key")
-                        or ""
+                quantities = _wb_supply_quantities(good)
+                if nm_id not in result or not quantities["planned"] or quantities["planned"] <= 0:
+                    continue
+                bucket = quantities_by_nm.setdefault(
+                    nm_id,
+                    {"planned": 0.0, "progressed": 0.0, "remaining": 0.0, "progressed_exceeds_planned": False},
+                )
+                bucket["planned"] += float(quantities["planned"] or 0.0)
+                bucket["progressed"] += float(quantities["progressed"] or 0.0)
+                bucket["remaining"] += float(quantities["remaining"] or 0.0)
+                bucket["progressed_exceeds_planned"] = bool(
+                    bucket["progressed_exceeds_planned"] or quantities["progressed_exceeds_planned"]
+                )
+            for nm_id, quantities in quantities_by_nm.items():
+                qty = float(quantities["remaining"])
+                planned_qty = float(quantities["planned"])
+                consumes_initial_ff = not bool(writeoff)
+                if consumes_initial_ff:
+                    result[nm_id]["warnings"].append(
+                        f"WB supply {record.get('supply_id') or cache_key} will transfer existing FF stock instead of adding inventory twice"
                     )
-                    result[nm_id]["real_inbounds"].append(
-                        ForecastInbound(
-                            arrival_raw,
-                            qty,
-                            "wb_supply",
-                            str(record.get("supply_id") or cache_key),
-                            district_key=district_key,
-                        )
+                if float(quantities["progressed"]) > 0:
+                    result[nm_id]["warnings"].append(
+                        f"WB supply {record.get('supply_id') or cache_key} remaining quantity excludes factual progressed/accepted units already covered by current WB stock"
                     )
+                if quantities["progressed_exceeds_planned"]:
+                    result[nm_id]["warnings"].append(
+                        f"WB supply {record.get('supply_id') or cache_key} progressed quantity exceeds planned composition; future inbound is capped at zero"
+                    )
+                if not _is_iso_date(arrival_raw):
+                    result[nm_id]["warnings"].append(
+                        f"WB supply {record.get('supply_id') or cache_key} has no usable arrival date"
+                    )
+                district_key = str(
+                    normalized.get("district_key")
+                    or normalized.get("warehouse_district_key")
+                    or ""
+                )
+                result[nm_id]["real_inbounds"].append(
+                    ForecastInbound(
+                        arrival_raw,
+                        qty,
+                        "wb_supply",
+                        str(record.get("supply_id") or cache_key),
+                        district_key=district_key,
+                        consumes_initial_ff=consumes_initial_ff,
+                        initial_ff_reservation_qty=planned_qty if consumes_initial_ff else None,
+                    )
+                )
 
-    def _append_regional_demand(self, result: dict[int, dict[str, Any]]) -> None:
+    def _append_regional_demand(
+        self,
+        result: dict[int, dict[str, Any]],
+        *,
+        settings: ForecastSettings,
+        as_of_date: str,
+    ) -> None:
         try:
             state = self.runtime.load_wb_regional_supply_result_state() or {}
             payload = state.get("payload") if isinstance(state.get("payload"), Mapping) else state
+            report_date = str(payload.get("report_date") or "") if isinstance(payload, Mapping) else ""
+            if not _is_iso_date(report_date):
+                raise ValueError("regional calculation report_date is missing")
+            age_days = (date.fromisoformat(as_of_date) - date.fromisoformat(report_date)).days
+            if age_days < 0 or age_days > settings.sales_avg_period_days:
+                raise ValueError(
+                    f"regional calculation is stale for forecast: report_date={report_date}, age_days={age_days}"
+                )
             for district in payload.get("districts", []) if isinstance(payload, Mapping) else []:
                 key = str(district.get("district_key") or "")
                 for item in district.get("rows", []):
@@ -880,7 +1177,7 @@ class SkuManagementBlock:
             if not any(_optional_float(item.get("daily_demand")) is not None for item in row["districts"].values()):
                 row["warnings"].append("regional demand evidence is unavailable")
 
-    def _commercial_projection(self, nm_ids: Sequence[int]) -> dict[int, dict[str, float | None]]:
+    def _commercial_projection(self, nm_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
         result = {int(nm_id): {} for nm_id in nm_ids}
         try:
             snapshot = self.runtime.load_sheet_vitrina_ready_snapshot()
@@ -889,6 +1186,7 @@ class SkuManagementBlock:
         data = next((sheet for sheet in snapshot.sheets if sheet.sheet_name == "DATA_VITRINA"), None)
         if data is None:
             return result
+        date_columns = [str(item) for item in getattr(snapshot, "date_columns", [])]
         for row in data.rows:
             if not isinstance(row, list) or len(row) < 3:
                 continue
@@ -899,8 +1197,40 @@ class SkuManagementBlock:
             nm_id = _optional_int(nm_raw)
             if nm_id not in result:
                 continue
-            value = next((_optional_float(item) for item in reversed(row[2:]) if _optional_float(item) is not None), None)
-            result[nm_id][metric] = value
+            values = list(row[2:])
+            found_index = next(
+                (index for index in range(len(values) - 1, -1, -1) if _optional_float(values[index]) is not None),
+                None,
+            )
+            if found_index is not None:
+                result[nm_id][metric] = _optional_float(values[found_index])
+                result[nm_id][f"{metric}__date"] = (
+                    date_columns[found_index] if found_index < len(date_columns) else ""
+                )
+        return result
+
+    def _current_buyer_price_projection(self, nm_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+        today = current_business_date_iso(self.now_factory())
+        try:
+            payload, captured_at = self.runtime.load_temporal_source_snapshot(
+                source_key="spp_proxy",
+                snapshot_date=today,
+            )
+        except Exception:
+            return {}
+        requested = {int(item) for item in nm_ids}
+        result: dict[int, dict[str, Any]] = {}
+        for item in getattr(payload, "items", []) if payload is not None else []:
+            nm_id = _optional_int(getattr(item, "nm_id", None))
+            value = _optional_float(getattr(item, "public_buyer_price", None))
+            if nm_id in requested and value is not None:
+                result[nm_id] = {
+                    "value": value,
+                    "source": "spp_proxy_temporal_snapshot",
+                    "freshness": today,
+                    "observed_at": str(captured_at or ""),
+                    "quality": "observed",
+                }
         return result
 
     def _stabilization_warnings(self, *, nm_id: int, parameter: str, actor: str) -> list[dict[str, Any]]:
@@ -928,17 +1258,150 @@ class SkuManagementBlock:
                     warnings.append({"code": "cross_parameter_stabilization", "message": f"По этому SKU продолжается период стабилизации после изменения {source_label}. Изменение {target_label} усложнит оценку результата.", "elapsed_days": elapsed, "remaining_days": other_days - elapsed})
         return warnings
 
-    def _readback_price(self, nm_id: int, target: float) -> tuple[float | None, float | None]:
-        last_value: float | None = None
+    def _readback_price(
+        self,
+        nm_id: int,
+        *,
+        target: float,
+        expected_price: int,
+        expected_discount: int,
+    ) -> tuple[float | None, dict[str, Any]]:
+        observed: dict[str, Any] = {
+            "price": None,
+            "discount": None,
+            "seller_price": None,
+            "status": "missing",
+        }
         for attempt in range(self.readback_attempts):
             goods = normalize_goods_payload(self.prices_block.source.fetch_goods_by_nm_ids([nm_id]))
-            value = float(goods[0].discounted_price) if goods else None
-            last_value = value
-            if value is not None and abs(value - target) < 0.011:
-                return value, value
+            if goods:
+                good = goods[0]
+                observed = {
+                    "price": float(good.price),
+                    "discount": int(good.discount),
+                    "seller_price": float(good.discounted_price),
+                    "status": "observed",
+                }
+                if (
+                    int(good.price) == int(expected_price)
+                    and int(good.discount) == int(expected_discount)
+                    and abs(float(good.discounted_price) - target) < 0.011
+                ):
+                    observed["status"] = "matching"
+                    return float(good.discounted_price), observed
             if attempt + 1 < self.readback_attempts:
                 self.sleep(self.readback_delay_seconds)
-        return None, last_value
+        observed["status"] = "mismatch" if observed.get("seller_price") is not None else "missing"
+        return None, observed
+
+    def _assert_price_not_quarantined(self, nm_id: int) -> None:
+        try:
+            rows = self._load_price_quarantine_rows(nm_id)
+        except SkuManagementError:
+            raise
+        except Exception as exc:
+            raise SkuManagementError(
+                "quarantine evidence is unavailable before commit",
+                http_status=503,
+                payload={"safety_status": "quarantine_evidence_unavailable"},
+            ) from exc
+        if rows:
+            raise SkuManagementError(
+                "current WB quarantine blocks the price commit",
+                http_status=409,
+                payload={"safety_status": "current_quarantine", "quarantine": rows},
+            )
+
+    def _load_price_quarantine_rows(self, nm_id: int) -> list[Mapping[str, Any]]:
+        limit = 1000
+        for page in range(10):
+            rows = list(
+                self.prices_block.get_quarantine_goods({"limit": limit, "offset": page * limit}).get("rows", [])
+            )
+            matched = [item for item in rows if int(item.get("nmID") or 0) == nm_id]
+            if matched:
+                return matched
+            if len(rows) < limit:
+                return []
+        raise SkuManagementError(
+            "quarantine evidence exceeds bounded pagination; price action is blocked",
+            http_status=503,
+            payload={"safety_status": "quarantine_evidence_truncated"},
+        )
+
+    def _assert_price_promo_fresh(self, preview: Mapping[str, Any]) -> None:
+        nm_id = int(preview["nm_id"])
+        try:
+            current = next(
+                (
+                    item
+                    for item in self.prices_block.build_goods_table({"filterNmID": nm_id}).get("rows", [])
+                    if int(item.get("nmID") or 0) == nm_id
+                ),
+                {},
+            )
+        except Exception:
+            current = {}
+        current_snapshot = self._price_promo_snapshot(nm_id=nm_id, current_view=current)
+        if current_snapshot != dict(preview.get("promo") or {}):
+            raise SkuManagementError(
+                "promo evidence changed after preview; create a new preview",
+                http_status=409,
+                payload={"safety_status": "promo_evidence_changed", "promo": current_snapshot},
+            )
+
+    def _price_promo_snapshot(self, *, nm_id: int, current_view: Mapping[str, Any]) -> dict[str, Any]:
+        metrics = self._commercial_projection([nm_id]).get(nm_id, {})
+        participation = _optional_float(metrics.get("promo_participation"))
+        participation_date = str(metrics.get("promo_participation__date") or "")
+        count = _optional_float(metrics.get("promo_count_by_price"))
+        count_date = str(metrics.get("promo_count_by_price__date") or "")
+        captured_at = ""
+        today = current_business_date_iso(self.now_factory())
+        try:
+            current_payload, current_captured_at = self.runtime.load_temporal_source_snapshot(
+                source_key="promo_by_price",
+                snapshot_date=today,
+            )
+            current_item = next(
+                (
+                    item
+                    for item in (getattr(current_payload, "items", []) if current_payload is not None else [])
+                    if _optional_int(getattr(item, "nm_id", None)) == nm_id
+                ),
+                None,
+            )
+            current_participation = _optional_float(getattr(current_item, "promo_participation", None))
+            current_count = _optional_float(getattr(current_item, "promo_count_by_price", None))
+            if current_participation is not None and current_count is not None:
+                participation = current_participation
+                count = current_count
+                participation_date = today
+                count_date = today
+                captured_at = str(current_captured_at or "")
+        except Exception:
+            pass
+        freshness = min(
+            (item for item in (participation_date, count_date) if _is_iso_date(item)),
+            default="",
+        )
+        quality = (
+            "observed"
+            if participation is not None and count is not None and freshness == today
+            else "stale" if participation is not None or count is not None
+            else "missing"
+        )
+        return {
+            "label": str(current_view.get("promoLabel") or "н/д"),
+            "eligible_count": _optional_float(current_view.get("promoEligibleCount")),
+            "current_count": _optional_float(current_view.get("promoCurrentCount")),
+            "participation": participation,
+            "participation_count": count,
+            "freshness": freshness,
+            "observed_at": captured_at,
+            "quality": quality,
+            "reason": str(current_view.get("promoReason") or ""),
+        }
 
     def _fetch_buyer_price(self, nm_id: int) -> dict[str, Any]:
         observed_at = self.timestamp_factory()
@@ -948,11 +1411,44 @@ class SkuManagementBlock:
             items = ((payload.get("data") or {}).get("items") or []) if isinstance(payload, Mapping) else []
             item = next((row for row in items if int(row.get("nmId") or 0) == nm_id), None)
             value = _optional_float((item or {}).get("public_buyer_price"))
-            return {"value": value, "observed_at": observed_at, "source": "public_wb_card", "freshness": today, "quality": "observed" if value is not None else "missing", "evidence": item or payload.get("diagnostics") or {}}
+            diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), Mapping) else {}
+            source_date = str(payload.get("snapshot_date") or today)
+            quality = (
+                "observed"
+                if value is not None and source_date == today and diagnostics.get("fresh") is not False
+                else "stale" if value is not None
+                else "missing"
+            )
+            return {"value": value, "observed_at": observed_at, "source": "public_wb_card", "freshness": source_date, "quality": quality, "evidence": item or diagnostics}
         except Exception as exc:
             return {"value": None, "observed_at": observed_at, "source": "public_wb_card", "freshness": today, "quality": "error", "error": str(exc)}
 
-    def _persist_event(self, *, preview: Mapping[str, Any], actor: str, requested_value: float, confirmed_value: float, old_value: float, status: str, override: bool, readback: Mapping[str, Any], confirmed_at: str) -> dict[str, Any]:
+    def _readback_buyer_price(self, nm_id: int) -> dict[str, Any]:
+        latest: dict[str, Any] = {}
+        for attempt in range(self.readback_attempts):
+            latest = self._fetch_buyer_price(nm_id)
+            if latest.get("quality") == "observed" and latest.get("value") is not None:
+                return latest
+            if attempt + 1 < self.readback_attempts:
+                self.sleep(self.readback_delay_seconds)
+        return latest
+
+    def _persist_event(
+        self,
+        *,
+        preview: Mapping[str, Any],
+        actor: str,
+        requested_value: float,
+        confirmed_value: float,
+        old_value: float,
+        status: str,
+        stabilization_override: bool,
+        warning_override: bool,
+        readback_status: str,
+        readback: Mapping[str, Any],
+        confirmed_at: str,
+    ) -> dict[str, Any]:
+        delta = _money_decimal(confirmed_value, "confirmed_value") - _money_decimal(old_value, "old_value")
         event = {
             "event_id": uuid4().hex,
             "nm_id": int(preview["nm_id"]),
@@ -960,7 +1456,7 @@ class SkuManagementBlock:
             "old_value": old_value,
             "requested_value": requested_value,
             "confirmed_value": confirmed_value,
-            "delta": confirmed_value - old_value,
+            "delta": float(delta.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
             "requested_at": str(preview.get("created_at") or ""),
             "confirmed_at": confirmed_at,
             "actor": actor,
@@ -971,14 +1467,28 @@ class SkuManagementBlock:
             "preview_id": str(preview.get("preview_id") or ""),
             "correlation_id": str(preview.get("operation_id") or ""),
             "commit_status": status,
+            "readback_status": readback_status,
             "readback": dict(readback),
             "warnings": list(preview.get("warnings") or []),
-            "stabilization_override": bool(override),
+            "stabilization_override": bool(stabilization_override),
+            "warning_override": bool(warning_override),
             "error": "",
         }
         return self.runtime.create_sku_action_event(event)
 
-    def _persist_failure(self, *, preview: Mapping[str, Any], actor: str, exc: Exception, override: bool) -> None:
+    def _persist_failure(
+        self,
+        *,
+        preview: Mapping[str, Any],
+        actor: str,
+        exc: Exception,
+        stabilization_override: bool,
+        warning_override: bool,
+    ) -> None:
+        payload = getattr(exc, "payload", {})
+        readback_status = str(payload.get("readback_status") or "") if isinstance(payload, Mapping) else ""
+        if not readback_status:
+            readback_status = "mismatch" if "mismatch" in str(exc).lower() or "does not match" in str(exc).lower() else "error"
         self.runtime.create_sku_action_event({
             "event_id": uuid4().hex, "nm_id": int(preview["nm_id"]), "parameter": str(preview["parameter"]),
             "old_value": _optional_float(preview["old_value"] if "old_value" in preview else (preview.get("current") or {}).get("discountedPrice")),
@@ -987,8 +1497,10 @@ class SkuManagementBlock:
             "actor": actor, "source": "sku_management", "advert_id": _optional_int(preview.get("advert_id")),
             "campaign": str(preview.get("campaign_name") or ""), "placement": str(preview.get("placement") or ""),
             "preview_id": str(preview.get("preview_id") or ""), "correlation_id": str(preview.get("operation_id") or ""),
-            "commit_status": "error", "readback": getattr(exc, "payload", {}), "warnings": list(preview.get("warnings") or []),
-            "stabilization_override": bool(override), "error": str(exc),
+            "commit_status": "error", "readback_status": readback_status,
+            "readback": payload if isinstance(payload, Mapping) else {}, "warnings": list(preview.get("warnings") or []),
+            "stabilization_override": bool(stabilization_override), "warning_override": bool(warning_override),
+            "error": str(exc),
         })
 
     def _validate_confirmation(self, preview: Mapping[str, Any], *, payload: Mapping[str, Any], actor: str) -> None:
@@ -996,8 +1508,19 @@ class SkuManagementBlock:
             raise SkuManagementError("preview belongs to another operator", http_status=403)
         if not _boolean(payload.get("confirm", False)):
             raise SkuManagementError("confirm=true is required", http_status=400)
-        if preview.get("stabilization_warnings") and not _boolean(payload.get("override_stabilization", False)):
-            raise SkuManagementError("stabilization warning requires explicit override", http_status=409, payload={"warnings": preview["stabilization_warnings"]})
+        override_required = list(preview.get("override_required_warnings") or [])
+        stabilization_override = _boolean(payload.get("override_stabilization", False))
+        warning_override = _boolean(payload.get("override_warnings", False))
+        if override_required and not warning_override:
+            only_stabilization = set(override_required).issubset(
+                {str(item.get("code") or "") for item in preview.get("stabilization_warnings") or []}
+            )
+            if not (only_stabilization and stabilization_override):
+                raise SkuManagementError(
+                    "preview warnings require explicit override",
+                    http_status=409,
+                    payload={"warnings": override_required},
+                )
 
     def _save_preview(self, payload: Mapping[str, Any]) -> None:
         self._preview_dir.mkdir(parents=True, exist_ok=True)
@@ -1023,15 +1546,28 @@ class SkuManagementBlock:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("parameter") != expected_parameter:
             raise SkuManagementError("preview parameter mismatch", http_status=409)
+        if int(payload.get("expires_at_epoch") or 0) < int(time.time()):
+            raise SkuManagementError("preview is stale; create a new preview", http_status=409)
         return payload
 
 
-def _first_problem_district(*, as_of_date: date, horizon_end: date, safety_days: int, districts: Mapping[str, Mapping[str, Any]], inbounds: Sequence[ForecastInbound]) -> str | None:
+def _first_problem_district(
+    *,
+    as_of_date: date,
+    horizon_end: date,
+    safety_days: int,
+    districts: Mapping[str, Mapping[str, Any]],
+    inbounds: Sequence[ForecastInbound],
+) -> tuple[str | None, str]:
     candidates: list[tuple[date, str]] = []
+    evidence_count = 0
     for key, row in districts.items():
         stock = _optional_float(row.get("stock"))
         demand = _optional_float(row.get("daily_demand"))
-        if stock is None or demand is None or demand <= 0:
+        if stock is None or demand is None or demand < 0:
+            continue
+        evidence_count += 1
+        if demand == 0:
             continue
         threshold = demand * safety_days
         day = as_of_date
@@ -1047,7 +1583,59 @@ def _first_problem_district(*, as_of_date: date, horizon_end: date, safety_days:
                 candidates.append((day, str(key)))
                 break
             day += timedelta(days=1)
-    return min(candidates)[1] if candidates else None
+    if evidence_count == 0:
+        return "unknown", "unknown"
+    return (min(candidates)[1] if candidates else None), "available"
+
+
+def _select_observed_buyer_price(
+    *,
+    event_buyer: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+    current_buyer: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    event_value = _optional_float(event_buyer.get("value"))
+    if event_value is not None and str(event_buyer.get("quality") or "") == "observed":
+        candidates.append(
+            {
+                "value": event_value,
+                "source": str(event_buyer.get("source") or "public_wb_card"),
+                "freshness": str(event_buyer.get("freshness") or event_buyer.get("observed_at") or ""),
+                "quality": "observed",
+                "_sort_freshness": str(event_buyer.get("observed_at") or event_buyer.get("freshness") or ""),
+            }
+        )
+    metric_value = _optional_float(metrics.get("buyer_price_rub"))
+    if metric_value is not None:
+        candidates.append(
+            {
+                "value": metric_value,
+                "source": "web_vitrina_spp_proxy_projection",
+                "freshness": str(metrics.get("buyer_price_rub__date") or ""),
+                "quality": "observed",
+                "_sort_freshness": str(metrics.get("buyer_price_rub__date") or ""),
+            }
+        )
+    current_value = _optional_float((current_buyer or {}).get("value"))
+    if current_value is not None and str((current_buyer or {}).get("quality") or "") == "observed":
+        candidates.append(
+            {
+                "value": current_value,
+                "source": str((current_buyer or {}).get("source") or "spp_proxy_temporal_snapshot"),
+                "freshness": str((current_buyer or {}).get("freshness") or ""),
+                "quality": "observed",
+                "_sort_freshness": str(
+                    (current_buyer or {}).get("observed_at")
+                    or (current_buyer or {}).get("freshness")
+                    or ""
+                ),
+            }
+        )
+    if not candidates:
+        return {"value": None, "source": "public_wb_card", "freshness": "", "quality": "missing"}
+    selected = max(candidates, key=lambda item: str(item.get("_sort_freshness") or ""))
+    return {key: value for key, value in selected.items() if not key.startswith("_")}
 
 
 def _sanitize_table_preferences(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1091,6 +1679,15 @@ def _string_list(value: Any) -> list[str]:
     return result[:100]
 
 
+def _dedupe_strings(values: Sequence[Any]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
 def _integer(value: Any, field: str, minimum: int, maximum: int) -> int:
     try:
         parsed = int(str(value).strip())
@@ -1119,6 +1716,42 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _wb_supply_quantities(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return stage-aware supply quantities without re-adding units already in current WB stock."""
+
+    planned = next(
+        (
+            quantity
+            for key in ("quantity", "qty", "supplierBoxAmount", "supplier_box_amount")
+            if (quantity := _optional_float(value.get(key))) is not None and quantity > 0
+        ),
+        None,
+    )
+    progressed_candidates = [
+        quantity
+        for key in (
+            "readyForSaleQuantity", "ready_for_sale_quantity",
+            "acceptedQuantity", "accepted_quantity",
+            "addedQuantity", "added_quantity",
+        )
+        if (quantity := _optional_float(value.get(key))) is not None and quantity > 0
+    ]
+    progressed = max(progressed_candidates, default=0.0)
+    if planned is None:
+        return {
+            "planned": None,
+            "progressed": progressed,
+            "remaining": None,
+            "progressed_exceeds_planned": False,
+        }
+    return {
+        "planned": planned,
+        "progressed": progressed,
+        "remaining": max(planned - progressed, 0.0),
+        "progressed_exceeds_planned": progressed > planned,
+    }
 
 
 def _boolean(value: Any) -> bool:

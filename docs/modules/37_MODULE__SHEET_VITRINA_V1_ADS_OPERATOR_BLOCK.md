@@ -32,7 +32,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/09_official_api_secret_boundary.md"
 source_of_truth_level: "module_canonical"
-update_note: "Initial SKU-first ads operator MVP with read routes, guarded bid preview/commit, persistent audit and no bulk/auto-bidding."
+update_note: "SKU-first ads operator with guarded bid preview/commit, commit-time minimum revalidation, cache-bypassing delayed read support for `Управление SKU`, persistent audit and no bulk/auto-bidding."
 ---
 
 # 1. Идентификатор и статус
@@ -115,6 +115,8 @@ Commit route:
 - accepts only one preview id / one bid operation;
 - rejects stale preview;
 - re-fetches current bid and blocks if it differs from preview old bid;
+- re-fetches the current WB minimum and reapplies absolute/relative safety thresholds immediately before PATCH;
+- blocks before PATCH when minimum evidence is unavailable or the requested bid is now below it;
 - sends one `bids[0].nm_bids[0]` PATCH request to WB;
 - writes a JSONL audit event;
 - returns `pending_refresh` with delayed refresh guidance because WB bid sync has lag.
@@ -191,4 +193,4 @@ These use fake Promotion API sources and do not call live WB write methods. They
 
 ## `Управление SKU` reuse
 
-The `Управление SKU` section reuses this exact WB Promotion adapter, campaign membership/min-bid/current-bid validation and single-target PATCH contract. Its dedicated application block performs bounded delayed control reads and records success only after the exact `advert_id + placement` returns the requested bid. That section is enabled by normal runtime construction and does not inherit the standalone tab's legacy `SHEET_VITRINA_ADS_WRITE_ENABLED` switch; section auth, preview, explicit confirmation, stale/safety validation, single-use action, audit and readback are its sufficient gates. The original `Реклама` tab gate is unchanged.
+The `Управление SKU` section reuses this exact WB Promotion adapter, campaign membership/min-bid/current-bid validation and single-target PATCH contract. Its table uses one reverse placement index so it does not issue minimum/recommendation requests for every SKU. Preview fetches the exact minimum; commit fetches it again. The dedicated block performs bounded delayed cache-bypassing control reads and records success only after the exact `advert_id + placement` returns the requested bid. That section is enabled by normal runtime construction and does not inherit the standalone tab's legacy `SHEET_VITRINA_ADS_WRITE_ENABLED` switch; section auth, preview, explicit confirmation, stale/safety validation, single-use action, audit and readback are its sufficient gates. The original `Реклама` tab gate is unchanged.

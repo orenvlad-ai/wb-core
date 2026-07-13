@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+from decimal import Decimal, ROUND_HALF_UP
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
@@ -1031,6 +1032,11 @@ class RegistryUploadDbBackedRuntime:
                 raise ValueError("confirmed sku action event requires confirmed_at")
             if event.get("confirmed_value") is None or event.get("delta") is None:
                 raise ValueError("confirmed sku action event requires confirmed_value and delta")
+        readback_status = str(
+            event.get("readback_status") or ("matching" if commit_status == "confirmed" else "error")
+        ).strip()
+        if readback_status not in {"matching", "mismatch", "error", "not_started"}:
+            raise ValueError("unsupported sku action event readback_status")
         payload = {
             "event_id": event_id,
             "nm_id": nm_id,
@@ -1049,9 +1055,11 @@ class RegistryUploadDbBackedRuntime:
             "preview_id": str(event.get("preview_id") or ""),
             "correlation_id": str(event.get("correlation_id") or ""),
             "commit_status": commit_status,
+            "readback_status": readback_status,
             "readback": dict(event.get("readback") or {}) if isinstance(event.get("readback"), Mapping) else {},
             "warnings": list(event.get("warnings") or []) if isinstance(event.get("warnings"), (list, tuple)) else [],
             "stabilization_override": bool(event.get("stabilization_override")),
+            "warning_override": bool(event.get("warning_override")),
             "error": str(event.get("error") or ""),
         }
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -1063,9 +1071,9 @@ class RegistryUploadDbBackedRuntime:
                     event_id, nm_id, parameter, old_value, requested_value,
                     confirmed_value, delta, requested_at, confirmed_at, actor,
                     source, advert_id, campaign, placement, preview_id,
-                    correlation_id, commit_status, readback_json, warnings_json,
-                    stabilization_override, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    correlation_id, commit_status, readback_status, readback_json, warnings_json,
+                    stabilization_override, warning_override, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["event_id"], payload["nm_id"], payload["parameter"], payload["old_value"],
@@ -1073,9 +1081,11 @@ class RegistryUploadDbBackedRuntime:
                     payload["requested_at"], payload["confirmed_at"] or None, payload["actor"],
                     payload["source"], payload["advert_id"], payload["campaign"], payload["placement"],
                     payload["preview_id"], payload["correlation_id"], payload["commit_status"],
+                    payload["readback_status"],
                     json.dumps(payload["readback"], ensure_ascii=False, sort_keys=True),
                     json.dumps(payload["warnings"], ensure_ascii=False),
                     1 if payload["stabilization_override"] else 0,
+                    1 if payload["warning_override"] else 0,
                     payload["error"],
                 ),
             )
@@ -1138,6 +1148,7 @@ class RegistryUploadDbBackedRuntime:
                 SELECT * FROM sheet_vitrina_v1_sku_action_events
                 WHERE nm_id IN ({placeholders})
                   AND commit_status = 'confirmed'
+                  AND readback_status = 'matching'
                   AND confirmed_at IS NOT NULL
                 ORDER BY confirmed_at DESC, event_id DESC
                 """,
@@ -1166,6 +1177,7 @@ class RegistryUploadDbBackedRuntime:
                 SELECT nm_id, parameter, delta, confirmed_at
                 FROM sheet_vitrina_v1_sku_action_events
                 WHERE commit_status = 'confirmed'
+                  AND readback_status = 'matching'
                   AND confirmed_at IS NOT NULL
                   AND substr(confirmed_at, 1, 10) >= ?
                   AND substr(confirmed_at, 1, 10) < ?
@@ -1178,7 +1190,8 @@ class RegistryUploadDbBackedRuntime:
                 continue
             key = "seller_price_change_rub" if row["parameter"] == "seller_price" else "advertising_bid_change_rub"
             bucket = result.setdefault(int(row["nm_id"]), {})
-            bucket[key] = bucket.get(key, 0.0) + float(row["delta"])
+            total = Decimal(str(bucket.get(key, 0.0))) + Decimal(str(row["delta"]))
+            bucket[key] = float(total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         return result
 
     def list_sheet_vitrina_users(self) -> list[dict[str, Any]]:
@@ -7611,9 +7624,11 @@ def _sku_action_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "preview_id": row["preview_id"] or "",
         "correlation_id": row["correlation_id"] or "",
         "commit_status": row["commit_status"] or "",
+        "readback_status": row["readback_status"] or "",
         "readback": _loads_json_object(row["readback_json"]),
         "warnings": _loads_json_list(row["warnings_json"]),
         "stabilization_override": bool(row["stabilization_override"]),
+        "warning_override": bool(row["warning_override"]),
         "error": row["error"] or "",
     }
 
@@ -7822,9 +7837,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             preview_id TEXT NOT NULL DEFAULT '',
             correlation_id TEXT NOT NULL DEFAULT '',
             commit_status TEXT NOT NULL,
+            readback_status TEXT NOT NULL DEFAULT 'not_started',
             readback_json TEXT NOT NULL DEFAULT '{}',
             warnings_json TEXT NOT NULL DEFAULT '[]',
             stabilization_override INTEGER NOT NULL DEFAULT 0,
+            warning_override INTEGER NOT NULL DEFAULT 0,
             error TEXT NOT NULL DEFAULT ''
         );
 
@@ -8846,6 +8863,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipment_lines",
         column_name="price_conformity_context_json",
         column_sql="TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_sku_action_events",
+        column_name="readback_status",
+        column_sql="TEXT NOT NULL DEFAULT 'not_started'",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_sku_action_events",
+        column_name="warning_override",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
     )
     _ensure_column(
         conn,

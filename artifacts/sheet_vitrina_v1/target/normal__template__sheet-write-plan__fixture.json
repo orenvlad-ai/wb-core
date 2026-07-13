@@ -2,6 +2,19 @@
   "plan_version": "wide_matrix_delivery_v1__sheet_scaffold_v1",
   "snapshot_id": "2026-04-05__wide_matrix_delivery_v1__normal",
   "as_of_date": "2026-04-05",
+  "date_columns": [
+    "2026-04-03",
+    "2026-04-04",
+    "2026-04-05"
+  ],
+  "temporal_slots": [
+    {
+      "slot_key": "as_of_date",
+      "slot_label": "as_of_date",
+      "column_date": "2026-04-03"
+    }
+  ],
+  "source_temporal_policies": {},
   "sheets": [
     {
       "sheet_name": "DATA_VITRINA",
@@ -316,5 +329,6 @@
       "row_count": 11,
       "column_count": 11
     }
-  ]
+  ],
+  "metadata": {}
 }

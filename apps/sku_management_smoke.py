@@ -25,8 +25,10 @@ from packages.application.sku_management import (
     SkuManagementError,
     calculate_depletion_forecast,
     choose_target_price_configuration,
+    _select_observed_buyer_price,
 )
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
+from packages.business_time import current_business_date_iso
 
 
 BUNDLE = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -40,6 +42,9 @@ class FakePrices:
         self.discount = 10
         self.pending: list[dict[str, object]] = []
         self.ignore_upload = False
+        self.alternate_matching_tuple = False
+        self.quarantined = False
+        self.quarantine_error = False
         self.upload_calls = 0
 
     def _good(self):
@@ -60,6 +65,9 @@ class FakePrices:
         if not self.ignore_upload:
             self.price = int(row["price"])
             self.discount = int(row["discount"])
+        if self.alternate_matching_tuple:
+            self.price = int(round(float(row["price"]) * (100 - int(row["discount"])) / 100))
+            self.discount = 0
         return {"data": {"id": 101, "alreadyExists": False}}
 
     def fetch_upload_status(self, upload_id):
@@ -69,12 +77,16 @@ class FakePrices:
         return {"data": {"historyGoods": []}}
 
     def fetch_quarantine_goods(self, *, limit, offset):
-        return {"data": {"quarantineGoods": []}}
+        if self.quarantine_error:
+            raise RuntimeError("fake quarantine source unavailable")
+        rows = [{"nmID": NM_ID, "newPrice": self.price, "oldPrice": self.price}] if self.quarantined else []
+        return {"data": {"quarantineGoods": rows}}
 
 
 class FakeAds:
     def __init__(self) -> None:
         self.bid = 1500
+        self.min_bid = 1000
 
     def fetch_campaign_count(self):
         return {"adverts": [{"status": 9, "advert_list": [{"advertId": 77}]}]}
@@ -83,7 +95,9 @@ class FakeAds:
         return {"adverts": [{"id": 77, "status": 9, "bid_type": "manual", "settings": {"name": "SKU campaign", "payment_type": "cpm", "placements": {"search": True}}, "nm_settings": [{"nm_id": NM_ID, "bids_kopecks": {"search": self.bid}}]}]}
 
     def fetch_min_bids(self, *, advert_id, nm_ids, payment_type, placement_types):
-        return {"bids": [{"nm_id": NM_ID, "bids": [{"type": "search", "value": 1000}]}]}
+        if self.min_bid is None:
+            return {"bids": []}
+        return {"bids": [{"nm_id": NM_ID, "bids": [{"type": "search", "value": self.min_bid}]}]}
 
     def fetch_recommendations(self, *, advert_id, nm_id):
         return {"base": {"competitiveBid": {"bidKopecks": 1600}}}
@@ -121,6 +135,11 @@ class FakeSalesHistory:
         return {NM_ID: [((date(2026, 7, 12) - __import__("datetime").timedelta(days=index)).isoformat(), 10.0) for index in range(30)]}
 
 
+class EmptySalesHistory:
+    def load_order_count_samples_by_date(self, **kwargs):
+        return {NM_ID: []}
+
+
 def main() -> None:
     _forecast_checks()
     _price_configuration_checks()
@@ -134,6 +153,10 @@ def main() -> None:
         ads = SheetVitrinaV1AdsBlock(runtime=runtime, runtime_dir=runtime_dir, source=ads_source, now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", cache_ttl_seconds=0, safety_config=AdsSafetyConfig(True, 100000, __import__("decimal").Decimal("100"), 100000, 300))
         block = SkuManagementBlock(runtime=runtime, runtime_dir=runtime_dir, prices_block=prices, ads_block=ads, stocks_block=FakeStocksBlock(), sales_history=FakeSalesHistory(), buyer_price_source=FakeBuyer(), now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", sleep=lambda _: None, readback_attempts=2, readback_delay_seconds=0)
         _settings_and_table(block)
+        missing_sales = SkuManagementBlock(runtime=runtime, runtime_dir=runtime_dir, prices_block=prices, ads_block=ads, stocks_block=FakeStocksBlock(), sales_history=EmptySalesHistory(), buyer_price_source=FakeBuyer(), now_factory=lambda: NOW, timestamp_factory=lambda: "2026-07-13T08:00:00Z", sleep=lambda _: None, readback_attempts=2, readback_delay_seconds=0)
+        missing_sales_row = next(item for item in missing_sales.build_table(user_key="operator")["rows"] if item["nm_id"] == NM_ID)
+        if missing_sales_row["risk"] != "unknown" or missing_sales_row["daily_demand"] is not None:
+            raise AssertionError("absent sales samples must remain unknown rather than optimistic zero demand")
         _price_write(block, runtime, prices_source)
         _bid_write_and_stabilization(block, runtime)
         _daily_projection(runtime)
@@ -147,14 +170,19 @@ def main() -> None:
 
 
 def _forecast_checks() -> None:
+    if current_business_date_iso(datetime(2026, 7, 13, 19, 30, tzinfo=timezone.utc)) != "2026-07-14":
+        raise AssertionError("forecast business-day boundary must use Asia/Yekaterinburg")
     settings = ForecastSettings(forecast_horizon_days=80, future_order_period_days=14, production_lead_days=7, factory_to_ff_lead_days=5, ff_to_wb_lead_days=3, safety_stock_days=5, order_batch_qty=10)
     result = calculate_depletion_forecast(
         as_of_date="2026-07-13", stock_wb=50, stock_ff=20, daily_demand=10, settings=settings,
         real_inbounds=[ForecastInbound("2026-07-16", 30, "supplier_shipment", "s1"), ForecastInbound("2026-07-20", 40, "wb_supply", "w1")],
         districts={"central": {"stock": 12, "daily_demand": 3}, "volga": {"stock": 80, "daily_demand": 2}},
     )
-    if result["deficit_date"] != "2026-07-15":
+    if result["deficit_date"] != "2026-07-13":
         raise AssertionError(f"sequential safety depletion mismatch: {result['deficit_date']}")
+    ff_day = next(item for item in result["timeline"] if item["date"] == "2026-07-16")
+    if "current_ff_stock" not in ff_day["inbound_sources"]:
+        raise AssertionError("current FF stock must respect FF -> WB lead time")
     if not result["synthetic_orders"] or any(not item["calculation_only"] for item in result["synthetic_orders"]):
         raise AssertionError("forecast must transition to calculation-only synthetic orders")
     if result["first_problem_district"] != "central":
@@ -163,12 +191,116 @@ def _forecast_checks() -> None:
     day = next(item for item in deduped["timeline"] if item["date"] == "2026-07-14")
     if day["inbound_qty"] != 10:
         raise AssertionError("duplicate inbound evidence must not double count")
+    same_day = calculate_depletion_forecast(
+        as_of_date="2026-07-13",
+        stock_wb=100,
+        stock_ff=0,
+        daily_demand=1,
+        settings=settings,
+        real_inbounds=[
+            ForecastInbound("2026-07-14", 10, "wb_supply", "one"),
+            ForecastInbound("2026-07-14", 15, "wb_supply", "two"),
+        ],
+    )
+    same_day_row = next(item for item in same_day["timeline"] if item["date"] == "2026-07-14")
+    if same_day_row["inbound_qty"] != 25:
+        raise AssertionError("independent same-day inbounds must be accumulated")
+    zero_sales = calculate_depletion_forecast(
+        as_of_date="2026-07-13", stock_wb=10, stock_ff=0, daily_demand=0, settings=settings
+    )
+    if zero_sales["risk"] != "low" or zero_sales["deficit_date"] is not None:
+        raise AssertionError("authoritative zero sales must not become unknown demand")
+    missing_ff = calculate_depletion_forecast(
+        as_of_date="2026-07-13", stock_wb=10, stock_ff=None, daily_demand=1, settings=settings
+    )
+    if missing_ff["risk"] != "unknown" or missing_ff["first_problem_district"] != "unknown":
+        raise AssertionError("missing FF evidence must fail closed")
+    regional_unknown = calculate_depletion_forecast(
+        as_of_date="2026-07-13", stock_wb=10, stock_ff=0, daily_demand=1, settings=settings
+    )
+    if regional_unknown["first_problem_district"] != "unknown" or regional_unknown["regional_status"] != "unknown":
+        raise AssertionError("missing regional evidence must remain explicit unknown")
+    regional_zero = calculate_depletion_forecast(
+        as_of_date="2026-07-13",
+        stock_wb=10,
+        stock_ff=0,
+        daily_demand=0,
+        settings=settings,
+        districts={"central": {"stock": 10, "daily_demand": 0}},
+    )
+    if regional_zero["regional_status"] != "available" or regional_zero["first_problem_district"] is not None:
+        raise AssertionError("authoritative zero regional demand is known evidence, not unknown")
+    missing_regional_stock = calculate_depletion_forecast(
+        as_of_date="2026-07-13",
+        stock_wb=10,
+        stock_ff=0,
+        daily_demand=1,
+        settings=settings,
+        districts={"central": {"daily_demand": 1}},
+    )
+    if missing_regional_stock["regional_status"] != "unknown":
+        raise AssertionError("missing district stock must not be converted to optimistic zero")
+    missing_date = calculate_depletion_forecast(
+        as_of_date="2026-07-13",
+        stock_wb=10,
+        stock_ff=5,
+        daily_demand=1,
+        settings=settings,
+        real_inbounds=[ForecastInbound("", 5, "wb_supply", "missing-date", consumes_initial_ff=True)],
+    )
+    if not any("usable даты" in item for item in missing_date["quality_warnings"]):
+        raise AssertionError("undated inbound must remain explicit partial evidence")
+    missing_date_ff_day = next(item for item in missing_date["timeline"] if item["date"] == "2026-07-16")
+    if missing_date_ff_day["inbound_qty"] != 5 or "current_ff_stock" not in missing_date_ff_day["inbound_sources"]:
+        raise AssertionError("an excluded undated transfer must not reserve authoritative current FF stock")
+    if len(missing_date["timeline"]) != settings.forecast_horizon_days:
+        raise AssertionError("forecast horizon must have exact configured calendar-day length")
+    partial = calculate_depletion_forecast(
+        as_of_date="2026-07-13",
+        stock_wb=0,
+        stock_ff=10,
+        daily_demand=1,
+        settings=settings,
+        real_inbounds=[ForecastInbound("2026-07-14", 15, "wb_supply", "partial", consumes_initial_ff=True)],
+    )
+    partial_day = next(item for item in partial["timeline"] if item["date"] == "2026-07-14")
+    if partial_day["inbound_qty"] != 10 or not any("partially" in item for item in partial["quality_warnings"]):
+        raise AssertionError("FF-backed WB supply must be capped to partial authoritative quantity")
+    overdue = calculate_depletion_forecast(
+        as_of_date="2026-07-13",
+        stock_wb=-2,
+        stock_ff=0,
+        daily_demand=1,
+        settings=settings,
+        real_inbounds=[ForecastInbound("2026-07-12", 20, "supplier_shipment", "overdue")],
+    )
+    if overdue["minimum_stock"] >= 0 or not any("Просроченный" in item for item in overdue["quality_warnings"]):
+        raise AssertionError("negative stock and overdue plans must not be hidden by optimistic clamps")
 
 
 def _price_configuration_checks() -> None:
     pair = choose_target_price_configuration(target_seller_price=850, current_price=1000, current_discount=10)
     if pair["price"] * (100 - pair["discount"]) / 100 != 850:
         raise AssertionError(f"target price pair mismatch: {pair}")
+    freshest = _select_observed_buyer_price(
+        event_buyer={"value": 700, "quality": "observed", "freshness": "2026-07-12", "source": "public_wb_card"},
+        metrics={"buyer_price_rub": 777, "buyer_price_rub__date": "2026-07-13"},
+    )
+    if freshest["value"] != 777 or freshest["source"] != "web_vitrina_spp_proxy_projection":
+        raise AssertionError("table buyer price must choose the freshest factual public-card observation")
+    refreshed_same_day = _select_observed_buyer_price(
+        event_buyer={"value": 777, "quality": "observed", "freshness": "2026-07-13", "observed_at": "2026-07-13T09:00:00Z"},
+        metrics={"buyer_price_rub": 776, "buyer_price_rub__date": "2026-07-13"},
+        current_buyer={"value": 778, "quality": "observed", "freshness": "2026-07-13", "observed_at": "2026-07-13T10:00:00Z", "source": "spp_proxy_temporal_snapshot"},
+    )
+    if refreshed_same_day["value"] != 778:
+        raise AssertionError("a later same-day public-card refresh must supersede an older mutation readback")
+    missing = _select_observed_buyer_price(
+        event_buyer={"value": 701, "quality": "estimated", "freshness": "2026-07-14"},
+        metrics={},
+    )
+    if missing["value"] is not None or missing["quality"] != "missing":
+        raise AssertionError("calculated buyer price must never substitute missing public confirmation")
 
 
 def _wb_supply_double_count_check() -> None:
@@ -176,7 +308,10 @@ def _wb_supply_double_count_check() -> None:
         "supply_id": "supply-1",
         "cache_key": "supply:supply-1",
         "normalized": {"status_id": 3, "supply_date": "2026-07-20"},
-        "raw_goods": [{"nmID": NM_ID, "quantity": 25}],
+        "raw_goods": [
+            {"nmID": NM_ID, "quantity": 10, "acceptedQuantity": 4},
+            {"nmID": NM_ID, "quantity": 15, "acceptedQuantity": 6},
+        ],
     }
     runtime = SimpleNamespace(
         list_wb_supplies_cache_records=lambda: [record],
@@ -191,13 +326,16 @@ def _wb_supply_double_count_check() -> None:
     )
     result = {NM_ID: {"real_inbounds": [], "warnings": []}}
     block._append_wb_supply_inbounds(result, settings=ForecastSettings())
-    if result[NM_ID]["real_inbounds"] or not any("not added twice" in item for item in result[NM_ID]["warnings"]):
-        raise AssertionError("WB supply still present in FF balance must not be added a second time")
+    transfer = result[NM_ID]["real_inbounds"][0]
+    if len(result[NM_ID]["real_inbounds"]) != 1 or not transfer.consumes_initial_ff:
+        raise AssertionError("WB supply still present in FF balance must be represented as a transfer")
+    if transfer.quantity != 15 or transfer.initial_ff_reservation_qty != 25:
+        raise AssertionError("duplicate SKU lines must aggregate before partial acceptance and FF reservation")
     runtime.load_ff_stock_operation_by_source_key = lambda source_key: {"operation_id": "writeoff-1"}
     result = {NM_ID: {"real_inbounds": [], "warnings": []}}
     block._append_wb_supply_inbounds(result, settings=ForecastSettings())
-    if len(result[NM_ID]["real_inbounds"]) != 1 or result[NM_ID]["real_inbounds"][0].quantity != 25:
-        raise AssertionError("WB supply deducted from FF ledger must return as one dated inbound")
+    if len(result[NM_ID]["real_inbounds"]) != 1 or result[NM_ID]["real_inbounds"][0].quantity != 15:
+        raise AssertionError("WB supply deducted from FF ledger must return only its not-yet-progressed quantity")
 
 
 def _settings_and_table(block) -> None:
@@ -216,11 +354,49 @@ def _settings_and_table(block) -> None:
 
 
 def _price_write(block, runtime, prices_source) -> None:
+    prices_source.quarantined = True
+    try:
+        block.preview_price({"nm_id": NM_ID, "target_seller_price": 850}, actor="operator")
+    except SkuManagementError as exc:
+        if exc.http_status != 409 or exc.payload.get("safety_status") != "current_quarantine":
+            raise
+    else:
+        raise AssertionError("current quarantine must block price preview")
+    prices_source.quarantined = False
+    prices_source.quarantine_error = True
+    try:
+        block.preview_price({"nm_id": NM_ID, "target_seller_price": 850}, actor="operator")
+    except SkuManagementError as exc:
+        if exc.http_status != 503 or exc.payload.get("safety_status") != "quarantine_evidence_unavailable":
+            raise
+    else:
+        raise AssertionError("unavailable quarantine evidence must fail closed")
+    prices_source.quarantine_error = False
+
+    original_commercial = block._commercial_projection
+    original_table = block.prices_block.build_goods_table
+    block.prices_block.build_goods_table = lambda params=None: {
+        "rows": [{"nmID": NM_ID, "promoLabel": "0 / 5", "promoEligibleCount": 0, "promoCurrentCount": 5, "promoReason": "source=promo_by_price date=2026-07-13"}]
+    }
+    block._commercial_projection = lambda nm_ids: {NM_ID: {"promo_participation": 0.0, "promo_participation__date": "2026-07-13", "promo_count_by_price": 0.0, "promo_count_by_price__date": "2026-07-13"}}
+    no_participation = block.preview_price({"nm_id": NM_ID, "target_seller_price": 860}, actor="operator")["preview"]
+    if "active_promo_participation" in no_participation["warnings"]:
+        raise AssertionError("global current promo count must not be mistaken for this SKU's participation")
+    block._commercial_projection = lambda nm_ids: {NM_ID: {"promo_participation": 1.0, "promo_participation__date": "2026-07-13", "promo_count_by_price": 1.0, "promo_count_by_price__date": "2026-07-13"}}
+    active_participation = block.preview_price({"nm_id": NM_ID, "target_seller_price": 860}, actor="operator")["preview"]
+    if "active_promo_participation" not in active_participation["override_required_warnings"]:
+        raise AssertionError("canonical per-SKU promo participation must require explicit price override")
+    block._commercial_projection = original_commercial
+    block.prices_block.build_goods_table = original_table
+
     preview = block.preview_price({"nm_id": NM_ID, "target_seller_price": 850}, actor="operator")
     facts = preview["preview"]
     if facts["new"]["discountedPrice"] != 850 or facts["current_buyer_price"] != 777:
         raise AssertionError(facts)
-    committed = block.commit_price({"preview_id": facts["preview_id"], "confirm": True}, actor="operator")
+    committed = block.commit_price(
+        {"preview_id": facts["preview_id"], "confirm": True, "override_warnings": True},
+        actor="operator",
+    )
     if committed["status"] != "success" or committed["confirmed_value"] != 850:
         raise AssertionError(committed)
     latest = runtime.latest_sku_action_events_by_nm([NM_ID])[NM_ID][PRICE_PARAMETER]
@@ -249,26 +425,70 @@ def _price_write(block, runtime, prices_source) -> None:
         raise AssertionError("stale current WB price must block before upload")
     prices_source.discount += 1
 
-    mismatch = block.preview_price({"nm_id": NM_ID, "target_seller_price": 830}, actor="operator")["preview"]
-    prices_source.ignore_upload = True
+    promo_stale = block.preview_price({"nm_id": NM_ID, "target_seller_price": 840}, actor="operator")["preview"]
+    original_table = block.prices_block.build_goods_table
+    block.prices_block.build_goods_table = lambda params=None: {
+        "rows": [{"nmID": NM_ID, "promoLabel": "1 / 1", "promoEligibleCount": 1, "promoCurrentCount": 1}]
+    }
+    calls_before = prices_source.upload_calls
     try:
         block.commit_price(
-            {"preview_id": mismatch["preview_id"], "confirm": True, "override_stabilization": True},
+            {"preview_id": promo_stale["preview_id"], "confirm": True, "override_warnings": True},
             actor="operator",
         )
     except SkuManagementError as exc:
-        if exc.http_status != 409 or (exc.payload.get("readback") or {}).get("seller_price") != 850:
+        if exc.http_status != 409 or exc.payload.get("safety_status") != "promo_evidence_changed" or prices_source.upload_calls != calls_before:
             raise
     else:
-        raise AssertionError("price readback mismatch must not produce optimistic success")
+        raise AssertionError("changed promo evidence must block before WB upload")
     finally:
-        prices_source.ignore_upload = False
+        block.prices_block.build_goods_table = original_table
+
+    mismatch = block.preview_price({"nm_id": NM_ID, "target_seller_price": 830}, actor="operator")["preview"]
+    prices_source.alternate_matching_tuple = True
+    try:
+        block.commit_price(
+            {"preview_id": mismatch["preview_id"], "confirm": True, "override_stabilization": True, "override_warnings": True},
+            actor="operator",
+        )
+    except SkuManagementError as exc:
+        observed = exc.payload.get("readback") or {}
+        if exc.http_status != 409 or observed.get("seller_price") != 830 or observed.get("price") == mismatch["new"]["price"]:
+            raise
+    else:
+        raise AssertionError("seller-price-only readback must not hide a price/discount tuple mismatch")
+    finally:
+        prices_source.alternate_matching_tuple = False
     latest_error = runtime.list_sku_action_events(status="error", limit=1)["rows"][0]
     if latest_error["confirmed_value"] is not None or latest_error["commit_status"] != "error":
         raise AssertionError("readback mismatch must persist a controlled failure event")
 
 
 def _bid_write_and_stabilization(block, runtime) -> None:
+    block.ads_block.source.min_bid = None
+    try:
+        block.preview_bid({"nm_id": NM_ID, "advert_id": 77, "placement": "search", "requested_bid_rub": 18}, actor="operator")
+    except SkuManagementError as exc:
+        if exc.http_status != 503 or exc.payload.get("safety_status") != "min_bid_unavailable":
+            raise
+    else:
+        raise AssertionError("bid preview must fail closed when the WB minimum is unavailable")
+    block.ads_block.source.min_bid = 1000
+
+    changed_minimum = block.preview_bid({"nm_id": NM_ID, "advert_id": 77, "placement": "search", "requested_bid_rub": 18}, actor="operator")["preview"]
+    block.ads_block.source.min_bid = 1900
+    try:
+        block.commit_bid(
+            {"preview_id": changed_minimum["preview_id"], "confirm": True, "override_stabilization": True},
+            actor="operator",
+        )
+    except Exception as exc:
+        if getattr(exc, "http_status", None) != 409:
+            raise
+    else:
+        raise AssertionError("a higher current WB minimum must block bid commit before PATCH")
+    block.ads_block.source.min_bid = 1000
+
     cross = block.preview_bid({"nm_id": NM_ID, "advert_id": 77, "placement": "search", "requested_bid_rub": 18}, actor="operator")["preview"]
     if "cross_parameter_stabilization" not in cross["warnings"]:
         raise AssertionError(cross)
@@ -285,15 +505,34 @@ def _bid_write_and_stabilization(block, runtime) -> None:
     same = block.preview_bid({"nm_id": NM_ID, "advert_id": 77, "placement": "search", "requested_bid_rub": 19}, actor="operator")["preview"]
     if "same_parameter_stabilization" not in same["warnings"]:
         raise AssertionError(same)
+    current = block.get_settings(user_key="operator")
+    disabled = {**current["forecast"], "price_stabilization_days": 0, "bid_stabilization_days": 0}
+    saved = block.save_settings(user_key="operator", payload={"base_revision": current["revision"], "forecast": disabled, "table": current["table"]})
+    if block._stabilization_warnings(nm_id=NM_ID, parameter=PRICE_PARAMETER, actor="operator"):
+        raise AssertionError("zero-day stabilization must disable same and cross warnings")
+    restored = {**saved["forecast"], "price_stabilization_days": 3, "bid_stabilization_days": 3}
+    block.save_settings(user_key="operator", payload={"base_revision": saved["revision"], "forecast": restored, "table": saved["table"]})
 
 
 def _daily_projection(runtime) -> None:
     runtime.create_sku_action_event({"event_id": "extra_price", "nm_id": NM_ID, "parameter": PRICE_PARAMETER, "old_value": 850, "requested_value": 840, "confirmed_value": 840, "delta": -10, "requested_at": "2026-07-13T09:00:00Z", "confirmed_at": "2026-07-13T09:01:00Z", "actor": "operator", "source": "sku_management", "commit_status": "confirmed"})
+    runtime.create_sku_action_event({"event_id": "nonmatching_defense", "nm_id": NM_ID, "parameter": PRICE_PARAMETER, "old_value": 840, "requested_value": 940, "confirmed_value": 940, "delta": 100, "requested_at": "2026-07-13T09:02:00Z", "confirmed_at": "2026-07-13T09:03:00Z", "actor": "operator", "source": "sku_management", "commit_status": "confirmed", "readback_status": "mismatch"})
     lookup = runtime.load_sku_action_daily_metric_lookup("2026-07-13")[NM_ID]
     if lookup["seller_price_change_rub"] != -60 or lookup["advertising_bid_change_rub"] != 3:
         raise AssertionError(f"daily aggregation mismatch: {lookup}")
+    latest = runtime.latest_sku_action_events_by_nm([NM_ID])[NM_ID][PRICE_PARAMETER]
+    if latest["event_id"] == "nonmatching_defense":
+        raise AssertionError("non-matching readback must not update stabilization/last-confirmed truth")
     if runtime.load_sku_action_daily_metric_lookup("2026-07-12"):
         raise AssertionError("no-change day must stay empty")
+    for event_id, old_value, confirmed_value in (("canary_change", 840, 839), ("canary_restore", 839, 840)):
+        runtime.create_sku_action_event({"event_id": event_id, "nm_id": NM_ID, "parameter": PRICE_PARAMETER, "old_value": old_value, "requested_value": confirmed_value, "confirmed_value": confirmed_value, "delta": confirmed_value - old_value, "requested_at": "2026-07-14T09:00:00Z", "confirmed_at": "2026-07-14T09:01:00Z", "actor": "operator", "source": "sku_management", "commit_status": "confirmed", "readback_status": "matching"})
+    restored_lookup = runtime.load_sku_action_daily_metric_lookup("2026-07-14")[NM_ID]
+    if restored_lookup["seller_price_change_rub"] != 0:
+        raise AssertionError("same-day mutation plus exact restore must aggregate to a truthful zero daily delta")
+    events = runtime.list_sku_action_events(nm_id=NM_ID, parameter=PRICE_PARAMETER, limit=100)["rows"]
+    if not {"canary_change", "canary_restore"}.issubset({item["event_id"] for item in events}):
+        raise AssertionError("zero daily delta must retain both underlying action events")
 
 
 def _seed_runtime(runtime_dir: Path) -> RegistryUploadDbBackedRuntime:

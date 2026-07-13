@@ -63,6 +63,12 @@ def main() -> None:
             raise AssertionError(f"runtime metric registry missing/invalid: {key}")
     if runtime_items[BUYER_PRICE_RUB_METRIC_KEY]["source_module"] != "spp_proxy_block":
         raise AssertionError("buyer price provenance must remain the existing public-card contour")
+    template = (ROOT / "packages" / "adapters" / "templates" / "sheet_vitrina_v1_web_vitrina.html").read_text(encoding="utf-8")
+    default_collapsed_contract = 'new Set(["seller_price_change_rub", "advertising_bid_change_rub"])'
+    if default_collapsed_contract not in template:
+        raise AssertionError("the two action metrics must default to collapsed in the metric selector")
+    if 'new Set(["seller_price_change_rub", "advertising_bid_change_rub", "buyer_price_rub"])' in template:
+        raise AssertionError("observed buyer price must not be hidden by the action-metric default")
     print("sku_management_metrics_smoke: OK")
 
 

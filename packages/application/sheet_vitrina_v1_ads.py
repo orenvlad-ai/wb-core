@@ -149,7 +149,13 @@ class SheetVitrinaV1AdsBlock:
             },
         }
 
-    def build_sku_detail(self, nm_id: int, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def build_sku_detail(
+        self,
+        nm_id: int,
+        params: Mapping[str, Any] | None = None,
+        *,
+        bypass_cache: bool = False,
+    ) -> dict[str, Any]:
         date_from, date_to = self._resolve_period(params or {})
         nm_id = _as_positive_int(nm_id, "nm_id")
         sku = self._sku_by_nm_id().get(nm_id) or {
@@ -159,7 +165,7 @@ class SheetVitrinaV1AdsBlock:
             "barcode": "",
             "source": "wb_campaign_only",
         }
-        campaigns_payload = self._load_campaigns()
+        campaigns_payload = self._load_campaigns(bypass_cache=bypass_cache)
         reverse_index = _build_reverse_index(campaigns_payload["campaigns"])
         placement_rows = reverse_index.get(nm_id, [])
         advert_ids = sorted({int(row["advert_id"]) for row in placement_rows})
@@ -181,6 +187,23 @@ class SheetVitrinaV1AdsBlock:
                 "stats_error": self._last_stats_error,
                 "recommended_cpc_status": "not_available",
             },
+        }
+
+    def build_placement_index(self, *, bypass_cache: bool = False) -> dict[int, list[dict[str, Any]]]:
+        """Return current campaign/placement identity without per-row min/recommendation calls."""
+
+        campaigns_payload = self._load_campaigns(bypass_cache=bypass_cache)
+        reverse_index = _build_reverse_index(campaigns_payload["campaigns"])
+        return {
+            int(nm_id): [
+                {
+                    **dict(row),
+                    "current_bid_rub": _kopecks_to_rub(_optional_int(row.get("current_bid_kopecks"))),
+                    "campaign_fetched_at": campaigns_payload["fetched_at"],
+                }
+                for row in rows
+            ]
+            for nm_id, rows in reverse_index.items()
         }
 
     def preview_bid_change(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -292,6 +315,28 @@ class SheetVitrinaV1AdsBlock:
                 http_status=409,
                 payload={"current_bid_kopecks": current_bid},
             )
+        min_bid_kopecks, min_status = self._fetch_min_bid_kopecks(
+            advert_id=int(preview["advert_id"]),
+            nm_id=int(preview["nm_id"]),
+            payment_type=str(preview.get("payment_type") or ""),
+            placement=str(preview["placement"]),
+        )
+        if min_bid_kopecks is None:
+            raise SheetVitrinaV1AdsError(
+                "current WB minimum bid is unavailable; run preview again",
+                http_status=409,
+                payload={"min_bid_status": min_status},
+            )
+        if int(preview["new_bid_kopecks"]) < min_bid_kopecks:
+            raise SheetVitrinaV1AdsError(
+                "requested bid is now below the current WB minimum; run preview again",
+                http_status=409,
+                payload={"min_bid_kopecks": min_bid_kopecks},
+            )
+        self._validate_safety_thresholds(
+            old_bid_kopecks=current_bid,
+            new_bid_kopecks=int(preview["new_bid_kopecks"]),
+        )
         request_payload = _build_patch_payload(
             advert_id=int(preview["advert_id"]),
             nm_id=int(preview["nm_id"]),
