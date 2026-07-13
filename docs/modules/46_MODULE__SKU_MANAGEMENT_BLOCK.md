@@ -99,6 +99,7 @@ The authoritative window starts at confirmed WB readback time. Same-parameter ch
 - `buyer_price_rub` / `Цена для покупателя, ₽`: factually observed public-card price from `spp_proxy`, preserving that source's measured-at/freshness/quality evidence. Missing observation stays `null`.
 
 The two action metrics are available in the existing selector but default to collapsed. Runtime registry may contain operational metrics beyond the pilot display bundle; validation requires all display metrics to have runtime semantics but permits the documented runtime superset.
+The web-vitrina read contract extends its metric metadata through the same SKU-action registry extension used by live materialization, so Russian labels, sections and formats remain authoritative after snapshot normalization instead of falling back to raw metric keys.
 
 # 9. Out of scope
 

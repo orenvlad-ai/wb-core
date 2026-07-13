@@ -24,6 +24,11 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
 )
+from packages.application.sheet_vitrina_v1_sku_actions import (
+    ADVERTISING_BID_CHANGE_RUB_METRIC_KEY,
+    BUYER_PRICE_RUB_METRIC_KEY,
+    SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.contracts.sheet_vitrina_v1 import (
     SheetVitrinaV1Envelope,
@@ -87,7 +92,7 @@ def main() -> None:
         if payload.page_route != "/sheet-vitrina-v1/vitrina" or payload.read_route != "/v1/sheet-vitrina-v1/web-vitrina":
             raise AssertionError(f"route fixation mismatch, got {payload}")
 
-        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 12:
+        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 15:
             raise AssertionError(f"meta mismatch, got {payload.meta}")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
             raise AssertionError(f"meta date columns mismatch, got {payload.meta}")
@@ -168,6 +173,28 @@ def main() -> None:
             raise AssertionError(f"SKU our WB cost metadata mismatch, got {sku_cost_row}")
         if sku_share_row.metric_label != "Доля подтверждённой себестоимости, %" or sku_share_row.format != "percent":
             raise AssertionError(f"SKU confirmed share must be percent-labeled, got {sku_share_row}")
+        seller_change_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{SELLER_PRICE_CHANGE_RUB_METRIC_KEY}"]
+        bid_change_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{ADVERTISING_BID_CHANGE_RUB_METRIC_KEY}"]
+        buyer_price_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{BUYER_PRICE_RUB_METRIC_KEY}"]
+        if (
+            seller_change_row.metric_label != "Изменение нашей цены, ₽"
+            or seller_change_row.section != "Цены"
+            or seller_change_row.format != "rub"
+        ):
+            raise AssertionError(f"seller price action metadata mismatch, got {seller_change_row}")
+        if (
+            bid_change_row.metric_label != "Изменение рекламной ставки, ₽"
+            or bid_change_row.section != "Реклама"
+            or bid_change_row.format != "rub"
+        ):
+            raise AssertionError(f"advertising bid action metadata mismatch, got {bid_change_row}")
+        if (
+            buyer_price_row.metric_label != "Цена для покупателя, ₽"
+            or buyer_price_row.section != "Цены"
+            or buyer_price_row.format != "rub"
+            or buyer_price_row.values_by_date != {"2026-04-19": 777.25, "2026-04-20": 778.0}
+        ):
+            raise AssertionError(f"buyer price metadata mismatch, got {buyer_price_row}")
 
         if payload.capabilities.exportable or not payload.capabilities.grid_library_agnostic:
             raise AssertionError(f"capabilities mismatch, got {payload.capabilities}")
@@ -213,7 +240,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:D12",
+                write_rect="A1:D15",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -271,8 +298,26 @@ def _build_plan(
                         1,
                         "",
                     ],
+                    [
+                        "SKU A: Изменение нашей цены, ₽",
+                        f"SKU:{first_nm_id}|{SELLER_PRICE_CHANGE_RUB_METRIC_KEY}",
+                        "",
+                        0,
+                    ],
+                    [
+                        "SKU A: Изменение рекламной ставки, ₽",
+                        f"SKU:{first_nm_id}|{ADVERTISING_BID_CHANGE_RUB_METRIC_KEY}",
+                        "",
+                        0,
+                    ],
+                    [
+                        "SKU A: Цена для покупателя, ₽",
+                        f"SKU:{first_nm_id}|{BUYER_PRICE_RUB_METRIC_KEY}",
+                        777.25,
+                        778.0,
+                    ],
                 ],
-                row_count=12,
+                row_count=15,
                 column_count=4,
             ),
             SheetVitrinaWriteTarget(
