@@ -7,6 +7,7 @@ import argparse
 from contextlib import closing
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -216,6 +217,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if legacy_digest != _legacy_digest(candidate_runtime.db_path):
             raise ValueError("candidate changed dates before cutover")
         reconciliation = _candidate_reconciliation(candidate_runtime.db_path, date_to)
+        layer_cost_continuity = _layer_cost_continuity(candidate_runtime.db_path)
+        if layer_cost_continuity["status"] != "ok":
+            raise ValueError(
+                "candidate layer-level cost continuity mismatch: "
+                + json.dumps(
+                    layer_cost_continuity["mismatches"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
         report = {
             "contract_name": "canonical_cost_engine_backfill_v1",
             "scope": {"date_from": date_from, "date_to": date_to},
@@ -224,6 +235,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "source_anomaly_preflight": source_anomaly_preflight,
             "rebuild": asdict(rebuild),
             "reconciliation": reconciliation,
+            "layer_cost_continuity": layer_cost_continuity,
             "affected_finance_periods": _finance_periods(date_from, date_to),
             "source_digest": source_digest,
             "protected_non_target_digest": protected_digest,
@@ -309,6 +321,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError("post-apply protected digest mismatch")
             if legacy_digest != _legacy_digest(source_db):
                 raise ValueError("post-apply pre-cutover digest mismatch")
+            post_continuity = _layer_cost_continuity(source_db)
+            if post_continuity["status"] != "ok":
+                raise ValueError("post-apply layer-level cost continuity mismatch")
         except Exception:
             _restore_backup_in_place(backup_path, source_db)
             if source_db.stat().st_ino != source_inode:
@@ -320,7 +335,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise
         payload["applied"] = True
         payload["backup"] = backup
-        payload["post_run"] = {"changed": 0, "idempotent": True, "fingerprint": post.fingerprint}
+        payload["post_run"] = {
+            "changed": 0,
+            "idempotent": True,
+            "fingerprint": post.fingerprint,
+            "layer_cost_continuity": post_continuity,
+        }
         return payload
 
 
@@ -439,6 +459,170 @@ def _candidate_reconciliation(db_path: Path, as_of_date: str) -> dict[str, Any]:
             ),
         },
     }
+
+
+def _layer_cost_continuity(db_path: Path) -> dict[str, Any]:
+    """Prove that one immutable FF debit layer keeps its unit costs downstream.
+
+    Aggregate stage WACs are intentionally outside this check: they contain
+    different SKU/lot compositions.  The invariant here is the exact movement
+    layer capital identity and the exact unit-cost link of every persisted
+    underaccepted child layer.
+    """
+
+    mismatches: list[dict[str, Any]] = []
+    layers: list[dict[str, Any]] = []
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        movements = conn.execute(
+            """
+            SELECT movement_layer_id,movement_identity,operation_id,supply_id,
+                   nm_id,effective_date,sent_quantity,paid_equivalent_quantity,
+                   cost_coverage_share,recognized_unit_cost_rub,
+                   paid_unit_cost_rub,recognized_capital_rub,paid_capital_rub,
+                   fingerprint
+            FROM sheet_vitrina_v1_canonical_cost_movement_layers
+            WHERE is_current=1
+            ORDER BY effective_date,supply_id,nm_id
+            """
+        ).fetchall()
+        movement_by_id = {
+            str(row["movement_layer_id"]): row for row in movements
+        }
+        outstanding = conn.execute(
+            """
+            SELECT outstanding_layer_id,original_supply_id,nm_id,
+                   original_movement_layer_id,sent_quantity,accepted_quantity,
+                   open_quantity,recognized_unit_cost_rub,paid_unit_cost_rub,
+                   fingerprint
+            FROM sheet_vitrina_v1_canonical_cost_wb_outstanding_layers
+            WHERE is_current=1
+            ORDER BY original_supply_id,nm_id
+            """
+        ).fetchall()
+
+        for row in movements:
+            layer_id = str(row["movement_layer_id"])
+            sent = Decimal(str(row["sent_quantity"] or 0))
+            paid_quantity = Decimal(str(row["paid_equivalent_quantity"] or 0))
+            coverage = Decimal(str(row["cost_coverage_share"] or 0))
+            recognized_unit = Decimal(
+                str(row["recognized_unit_cost_rub"] or 0)
+            )
+            paid_unit = Decimal(str(row["paid_unit_cost_rub"] or 0))
+            recognized_capital = Decimal(
+                str(row["recognized_capital_rub"] or 0)
+            )
+            paid_capital = Decimal(str(row["paid_capital_rub"] or 0))
+            expected_recognized = sent * coverage * recognized_unit
+            expected_paid = paid_quantity * paid_unit
+            failures: list[str] = []
+            if sent <= 0:
+                failures.append("sent_quantity_not_positive")
+            if not (Decimal("0") <= coverage <= Decimal("1")):
+                failures.append("cost_coverage_share_out_of_range")
+            if coverage > 0 and recognized_unit <= 0:
+                failures.append("recognized_unit_cost_not_positive")
+            if paid_quantity < 0 or paid_quantity > sent:
+                failures.append("paid_equivalent_quantity_out_of_range")
+            if paid_unit < 0:
+                failures.append("paid_unit_cost_negative")
+            if not _layer_money_close(
+                recognized_capital, expected_recognized, sent
+            ):
+                failures.append("recognized_capital_identity_mismatch")
+            if not _layer_money_close(paid_capital, expected_paid, sent):
+                failures.append("paid_capital_identity_mismatch")
+            if failures:
+                mismatches.append(
+                    {
+                        "movement_layer_id": layer_id,
+                        "supply_id": str(row["supply_id"]),
+                        "nm_id": int(row["nm_id"]),
+                        "failures": failures,
+                    }
+                )
+            layers.append(
+                {
+                    "movement_layer_id": layer_id,
+                    "operation_id": str(row["operation_id"]),
+                    "supply_id": str(row["supply_id"]),
+                    "nm_id": int(row["nm_id"]),
+                    "effective_date": str(row["effective_date"]),
+                    "sent_quantity": str(row["sent_quantity"]),
+                    "recognized_unit_cost_rub": str(
+                        row["recognized_unit_cost_rub"]
+                    ),
+                    "paid_unit_cost_rub": str(row["paid_unit_cost_rub"]),
+                    "recognized_capital_rub": str(
+                        row["recognized_capital_rub"]
+                    ),
+                    "paid_capital_rub": str(row["paid_capital_rub"]),
+                    "movement_fingerprint": str(row["fingerprint"]),
+                    "downstream_unit_cost_contract": (
+                        "proportional_copy_of_exact_ff_debit_snapshot"
+                    ),
+                }
+            )
+
+        for row in outstanding:
+            movement = movement_by_id.get(str(row["original_movement_layer_id"]))
+            failures = []
+            if movement is None:
+                failures.append("original_movement_layer_missing")
+            else:
+                if str(row["original_supply_id"]) != str(movement["supply_id"]):
+                    failures.append("original_supply_identity_mismatch")
+                if int(row["nm_id"]) != int(movement["nm_id"]):
+                    failures.append("nm_id_mismatch")
+                if Decimal(str(row["recognized_unit_cost_rub"] or 0)) != Decimal(
+                    str(movement["recognized_unit_cost_rub"] or 0)
+                ):
+                    failures.append("recognized_unit_cost_changed_downstream")
+                if Decimal(str(row["paid_unit_cost_rub"] or 0)) != Decimal(
+                    str(movement["paid_unit_cost_rub"] or 0)
+                ):
+                    failures.append("paid_unit_cost_changed_downstream")
+            sent = Decimal(str(row["sent_quantity"] or 0))
+            accepted = Decimal(str(row["accepted_quantity"] or 0))
+            open_quantity = Decimal(str(row["open_quantity"] or 0))
+            if accepted < 0 or open_quantity < 0 or accepted + open_quantity != sent:
+                failures.append("outstanding_quantity_conservation_mismatch")
+            if failures:
+                mismatches.append(
+                    {
+                        "outstanding_layer_id": str(row["outstanding_layer_id"]),
+                        "original_movement_layer_id": str(
+                            row["original_movement_layer_id"]
+                        ),
+                        "supply_id": str(row["original_supply_id"]),
+                        "nm_id": int(row["nm_id"]),
+                        "failures": failures,
+                    }
+                )
+
+    report = {
+        "contract_name": "canonical_cost_layer_continuity_v1",
+        "status": "blocked" if mismatches else "ok",
+        "movement_layer_count": len(movements),
+        "outstanding_layer_count": len(outstanding),
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+        "layers": layers,
+        "aggregate_wac_monotonicity_required": False,
+        "reason": (
+            "stage aggregates contain different SKU/lot composition; exact "
+            "movement layers retain their FF-debit unit-cost snapshot"
+        ),
+    }
+    return {**report, "fingerprint": _hash(report)}
+
+
+def _layer_money_close(
+    actual: Decimal, expected: Decimal, quantity: Decimal
+) -> bool:
+    tolerance = max(Decimal("0.000001"), abs(quantity) * Decimal("0.000001"))
+    return abs(actual - expected) <= tolerance
 
 
 def _finance_periods(start: str, end: str) -> list[str]:

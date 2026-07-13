@@ -101,3 +101,7 @@ Production candidate/apply выполняет только `apps/canonical_cost_
 ## Canonical cutover boundary (2026-07-01)
 
 Capital uses the paid projection of the same canonical layers as recognized COGS. Legacy pre-cutover movements do not create opening capital or historical underaccepted. Exact post-cutover source normalization preserves the same-supply paid-capital pool and never becomes an independent inventory or user-facing anomaly metric.
+
+The separate `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1` is consumed only from the canonical engine. Its 10 exact supplies / 11 units are evidence already represented by official WB stock and are removed before direct/FIFO with zero movement/capital/confirmation/underaccepted delta. The paid-capital projection therefore keeps valuing official WB stock through its existing SKU WAC and does not add manifest exposure a second time. Drifted or future evidence remains a blocker.
+
+`CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V2` is a separate 9-row / 12-unit approval keyed by exact supply and SKU and leaves V1 unchanged. It has the same zero-delta audit-only semantics, so its reference exposure is never added to capital. The strict layer-continuity report requires paid and recognized unit cost to remain attached to the original FF debit identity; differing aggregate stage WACs reflect different SKU/lot composition and do not imply a layer-level cost decrease.

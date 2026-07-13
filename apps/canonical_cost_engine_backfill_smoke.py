@@ -51,6 +51,9 @@ def main() -> int:
             raise AssertionError("default runner mode must be non-mutating dry-run")
         if not dry["would_change"]:
             raise AssertionError("first candidate must report target changes")
+        continuity = dry.get("layer_cost_continuity") or {}
+        if continuity.get("status") != "ok" or continuity.get("mismatch_count"):
+            raise AssertionError("dry-run must prove layer-level cost continuity")
         preflight = dry.get("source_anomaly_preflight") or {}
         if preflight.get("status") != "ok" or not preflight.get("fingerprint"):
             raise AssertionError("exhaustive source preflight must precede candidate rebuild")
@@ -142,6 +145,8 @@ def main() -> int:
         reader.close()
         if not applied["applied"] or applied["post_run"]["changed"] != 0:
             raise AssertionError("guarded apply and second zero-change run required")
+        if applied["post_run"]["layer_cost_continuity"]["status"] != "ok":
+            raise AssertionError("post-apply layer-level continuity failed")
         if runtime.db_path.stat().st_ino != inode:
             raise AssertionError("in-place apply must preserve SQLite inode")
         backup_path = backup_dir / applied["backup"]["filename"]

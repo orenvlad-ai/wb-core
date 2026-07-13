@@ -160,7 +160,16 @@ def main() -> None:
                     raise AssertionError(f"diagnostic users API must expose service users separately: {service_code} {service_payload}")
                 if _service_usernames(service_payload):
                     raise AssertionError(f"diagnostic users API must still keep users[] user-facing only: {service_payload}")
-                if _section_ids(users_payload) != ["vitrina", "supply", "reports", "feedbacks", "research", "settings"]:
+                if _section_ids(users_payload) != [
+                    "vitrina",
+                    "supply",
+                    "reports",
+                    "feedbacks",
+                    "ads",
+                    "prices",
+                    "research",
+                    "settings",
+                ]:
                     raise AssertionError(f"users API must expose available sections: {users_payload}")
                 if not _env_user_has_readonly_reason(users_payload, admin_username) or not _env_user_has_readonly_reason(users_payload, "hunshang"):
                     raise AssertionError(f"env users must expose readonly reason: {users_payload}")
