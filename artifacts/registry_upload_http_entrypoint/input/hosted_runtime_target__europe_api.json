@@ -77,6 +77,16 @@
       "restart": true
     },
     {
+      "name": "wb-core-spp-tester-schedule-tick.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-spp-tester-schedule-tick.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-wb-finance-weekly.service",
       "enable": false,
       "restart": false

@@ -43,6 +43,10 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `POST /v1/sheet-vitrina-v1/prices/spp-test/start`
 - `GET /v1/sheet-vitrina-v1/prices/spp-test/status`
 - `POST /v1/sheet-vitrina-v1/prices/spp-test/restore`
+- `GET /v1/sheet-vitrina-v1/prices/spp-test/history?limit=...&cursor=...`
+- `GET /v1/sheet-vitrina-v1/prices/spp-test/history/{job_id}`
+- `GET /v1/sheet-vitrina-v1/prices/spp-test/schedule`
+- `POST /v1/sheet-vitrina-v1/prices/spp-test/schedule`
 - `GET /v1/sheet-vitrina-v1/plan`
 - `GET /v1/sheet-vitrina-v1/status`
 - `GET /v1/sheet-vitrina-v1/product-capital/status`
@@ -173,9 +177,13 @@ Canonical repo-owned systemd artifacts for this contour:
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-sheet-vitrina-closure-retry.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.service`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-wb-finance-weekly.timer`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-spp-tester-schedule-tick.service`
+- `artifacts/registry_upload_http_entrypoint/systemd/wb-core-spp-tester-schedule-tick.timer`
 - `artifacts/registry_upload_http_entrypoint/systemd/wb-core-data-mcp.service` is the separate read-only MCP boundary. It is a managed, enabled and restarted unit on the active EU target, listening only on `127.0.0.1:8766`. Its checked-in defaults cap HTTP workers at `16`, tool workers at `8`, each tool at `12s` and structured result bytes at `524288`. The nginx allowlist may publish only exact OAuth/MCP locations; owner-only OAuth 2.1 + PKCE remains the ChatGPT auth path. MCP lifecycle logs and health summaries must contain only request/correlation id, tool, safe identity hash, status, duration and result size—never args, credentials, paths or business payloads.
 
 `wb-core-sheet-vitrina-refresh.timer` is a due-check ticker, not the business-time source of truth: it runs every 10 minutes and starts `apps/sheet_vitrina_v1_auto_refresh_tick.py`; the runner reads runtime JSON schedules (`11:00`/`20:00 Asia/Yekaterinburg` by default, editable through the web-vitrina auto-schedules API), builds an in-memory WebCore session cookie from hosted env, and then calls the protected refresh route with `auto_refresh=true`. The backend auto-refresh cycle first refreshes the web-vitrina ready snapshot and then runs a nonfatal WB supplies official incremental sync; the result payload/logs expose `wb_supplies_auto_sync_status` and `wb_supplies_auto_sync` diagnostics, while WB supplies failure or Seller Portal transit-cost preflight failure is warning metadata rather than a critical web-vitrina snapshot failure. The timer itself is non-persistent; catch-up is owned by the runner's schedule state so a deploy/restart does not immediately fire a stale systemd event while the app process is restarting.
+
+`wb-core-spp-tester-schedule-tick.timer` is likewise a non-persistent one-minute due ticker for `apps/wb_spp_tester_schedule_tick.py`. The single daily SPP schedule, consent, next due time, last business-date claim and automatic result stay under `sheet_vitrina_v1_prices/spp_tests/schedule.json`; the timer does not own business time. The runner atomically claims one schedule/business date, uses the same cross-process SPP execution lock and existing `WbSppTesterBlock`, captures a fresh baseline immediately before a due run, enforces mandatory restore and records scheduled starts/skips in the existing job/audit files. Catch-up is limited to 15 minutes; later missed runs are visible skips and advance to the next day without a price write. The oneshot has `TimeoutStartSec=3h`, long enough for the bounded safe-slow probe and final restore instead of inheriting systemd's short default start timeout.
 
 Canonical repo-owned public route allowlist:
 - `artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
@@ -243,7 +251,7 @@ Known active EU target values теперь зафиксированы repo-owned
 - `runtime_env.REGISTRY_UPLOAD_RUNTIME_DIR = /opt/wb-core-runtime/state`
 - `systemd_unit_directory = /etc/systemd/system`
 - `systemd_units_source_dir = artifacts/registry_upload_http_entrypoint/systemd`
-- `managed_systemd_units = wb-ai-api.service + refresh.service + refresh.timer + closure-retry.service + closure-retry.timer + feedbacks-auto-complaints-tick.service + feedbacks-auto-complaints-tick.timer + wb-finance-weekly.service + wb-finance-weekly.timer + wb-core-data-mcp.service`
+- `managed_systemd_units = wb-ai-api.service + refresh.service + refresh.timer + closure-retry.service + closure-retry.timer + feedbacks-auto-complaints-tick.service + feedbacks-auto-complaints-tick.timer + spp-tester-schedule-tick.service + spp-tester-schedule-tick.timer + wb-finance-weekly.service + wb-finance-weekly.timer + wb-core-data-mcp.service`
 - `nginx_public_routes.server_config_path = /etc/nginx/sites-enabled/wb-ai`
 - `nginx_public_routes.manifest_path = artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json`
 - `nginx_public_routes.test_command = nginx -t`
@@ -286,6 +294,7 @@ Hosted service должна предоставлять current repo entrypoint e
 - `WB_CORE_SUPPLIER_AUTH_DISPLAY_NAME` (optional)
 - `WB_PRICES_WRITE_ENABLED` (optional safety gate; default false)
 - `WB_SPP_TEST_ENABLED` (optional SPP tester safety gate; default false)
+- `WB_SPP_TEST_SCHEDULE_LATE_WINDOW_MINUTES` (optional bounded catch-up override; default `15`)
 
 Production WebCore auth is app-level session auth, not nginx basic auth. The password hash uses the entrypoint PBKDF2-HMAC format `pbkdf2_sha256$iterations$salt_b64$digest_b64`; plaintext credentials must stay outside Git/docs/logs and are handed to the owner separately. `WB_CORE_WEB_AUTH_REQUIRED=1` may be set to fail closed when auth env is incomplete. The env web principal is the bootstrap/fallback `admin`; runtime users are stored server-side in SQLite `sheet_vitrina_v1_users` and may have legacy technical roles `admin`, `operator`, `supply_operator` or `supplier`, but shell/API authorization is section-based through `allowed_sections` plus internal `manage_users`. Supplier env credentials are optional and remain backward-compatible supplier-only; when absent, supplier login is unavailable, but users with the `supply` section can access `Поставки -> От поставщика` through the shell.
 
@@ -485,6 +494,9 @@ Public probe validates:
   - top summary must be compact (`Обновлено`, `Статус`, `Период`); the old bulky `Свежесть данных`/`Строки` cards are not separate page blocks. Auto freshness must be visible in `Автообновления` through last run, last success, next run and last status/error.
 - `GET/POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules` returns/persists runtime-managed web-vitrina refresh schedules. Default rows are `11:00` and `20:00 Asia/Yekaterinburg`, but business cadence is editable in runtime JSON; response exposes timezone, mutability, `next_auto_run_at`, `last_auto_run_at`, `last_auto_success_at`, `last_auto_error_summary` and per-schedule next/last/status fields.
 - `POST /v1/sheet-vitrina-v1/web-vitrina/auto-schedules/run-now` launches the existing async full-refresh job with auto-schedule trigger metadata. The route must return a job payload quickly and must not call archived Google Sheets/GAS load.
+- `GET /v1/sheet-vitrina-v1/prices/spp-test/history`, bounded by `limit<=50` and an opaque cursor, reads existing and new `sheet_vitrina_v1_prices/spp_tests/jobs/*.json` newest-first; `GET /v1/sheet-vitrina-v1/prices/spp-test/history/{job_id}` accepts only a safe job id and returns sanitized lifecycle detail without headers, credentials or internal paths. Legacy jobs keep `trigger_source=null`; new jobs record `manual` or `schedule`.
+- `GET/POST /v1/sheet-vitrina-v1/prices/spp-test/schedule` reads and saves the single server-owned daily schedule. An enabled save requires explicit consent for future temporary price changes, computes a strictly future `next_run_at` in `Asia/Yekaterinburg` and never starts a job inline. The due ticker atomically claims one business date, refuses an active or not-proven-restored predecessor through the shared execution lock, captures a fresh baseline and always runs with restore enabled. A missed due time is eligible for at most 15 minutes; later ticks persist a visible `skipped` history result and advance to the next business date without a price write.
+- `GET /v1/sheet-vitrina-v1/prices/spp-test/status` reconciles an orphan only after the cross-process execution lock proves that no runner is alive. It then requires a fresh exact WB tuple (`price`, `discount`, `discountedPrice`), no quarantine and fresh public buyer/SPP evidence before terminalizing the job as `interrupted_restored`; TTL expiry alone is never restore proof. A mismatch, missing evidence or unsafe readback becomes `manual_restore_required` and blocks both manual and scheduled starts until guarded restore succeeds.
 - `GET /v1/sheet-vitrina-v1/web-vitrina` returns either:
   - `200` + JSON `web_vitrina_contract` v1 when a ready snapshot is present, with root fields `contract_name`, `contract_version`, `page_route`, `read_route`, `meta`, `status_summary`, `schema`, `rows`, `capabilities`
   - truthful `422 {"error": ...}` when the ready snapshot is absent

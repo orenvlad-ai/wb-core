@@ -1279,6 +1279,23 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_prices_spp_test_restore_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
         return self.spp_tester_block.restore(payload, actor=actor)
 
+    def handle_sheet_prices_spp_test_history_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.spp_tester_block.history(params or {})
+
+    def handle_sheet_prices_spp_test_history_detail_request(self, job_id: str) -> dict[str, Any]:
+        return self.spp_tester_block.history_detail(job_id)
+
+    def handle_sheet_prices_spp_test_schedule_request(self) -> dict[str, Any]:
+        return self.spp_tester_block.get_schedule()
+
+    def handle_sheet_prices_spp_test_schedule_save_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        return self.spp_tester_block.save_schedule(payload, actor=actor)
+
     def handle_sku_management_table_request(self, *, user_key: str) -> dict[str, Any]:
         return self.sku_management_block.build_table(user_key=user_key)
 

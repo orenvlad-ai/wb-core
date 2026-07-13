@@ -62,6 +62,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/feedbacks/complaints/sync-status/job",
         "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected",
         "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-job",
+        "/v1/sheet-vitrina-v1/prices/",
         "/v1/sheet-vitrina-v1/supply/factory-order/",
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
         "/v1/sheet-vitrina-v1/supply/wb-supplies",
@@ -437,6 +438,17 @@ def main() -> None:
         raise AssertionError("EU print-plan must expose primary_live target_role")
     if eu_print_plan["deploy_plan"]["target_lifecycle"] != "current_live":
         raise AssertionError("EU print-plan must expose current_live lifecycle")
+    eu_managed_units = {
+        item["name"]
+        for item in eu_print_plan["deploy_plan"]["managed_systemd_units"]
+        if isinstance(item, dict)
+    }
+    required_spp_units = {
+        "wb-core-spp-tester-schedule-tick.service",
+        "wb-core-spp-tester-schedule-tick.timer",
+    }
+    if not required_spp_units.issubset(eu_managed_units):
+        raise AssertionError(f"EU target missing repo-owned SPP scheduler units: {required_spp_units - eu_managed_units}")
     eu_plan_routes = eu_print_plan["deploy_plan"]["nginx_public_routes"]
     if eu_plan_routes["server_names"] != ["89.191.226.88", "api.selleros.pro"]:
         raise AssertionError("EU print-plan must expose current domain and IP server_names")

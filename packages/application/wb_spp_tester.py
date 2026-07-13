@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import socket
 import threading
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -32,10 +37,14 @@ from packages.contracts.wb_spp_tester import (
     SPP_TEST_CONTRACT_PREFIX,
     SPP_TEST_DEFAULT_MAX_MEASUREMENTS,
     SPP_TEST_DEFAULT_PRECISION_RUB,
-    SPP_TEST_FINAL_STATUSES,
+    SPP_TEST_HISTORY_DEFAULT_LIMIT,
+    SPP_TEST_HISTORY_MAX_LIMIT,
     SPP_TEST_MAX_MEASUREMENTS_MAX,
     SPP_TEST_MAX_MEASUREMENTS_MIN,
     SPP_TEST_MODE_SAFE_SLOW,
+    SPP_TEST_SCHEDULE_LATE_WINDOW_MINUTES,
+    SPP_TEST_SCHEDULE_TIMEZONE,
+    SPP_TEST_SCHEDULE_TIMEZONE_LABEL,
     SppTestPlan,
     SppTestPointPlan,
 )
@@ -43,6 +52,22 @@ from packages.contracts.wb_spp_tester import (
 
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 MONEY = Decimal("0.01")
+JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,160}$")
+SCHEDULE_ID = "daily"
+SCHEDULE_CADENCE = "daily"
+SCHEDULE_CONTRACT_NAME = f"{SPP_TEST_CONTRACT_PREFIX}_schedule"
+HISTORY_CONTRACT_NAME = f"{SPP_TEST_CONTRACT_PREFIX}_history"
+HISTORY_DETAIL_CONTRACT_NAME = f"{SPP_TEST_CONTRACT_PREFIX}_history_detail"
+SCHEDULER_TICK_CONTRACT_NAME = f"{SPP_TEST_CONTRACT_PREFIX}_scheduler_tick"
+SAFETY_STOP_POINT_STATUSES = {
+    "rate_limited_stop",
+    "quarantine_detected",
+    "readback_mismatch",
+    "upload_not_success",
+    "upload_missing_id",
+    "public_429",
+    "public_unstable",
+}
 
 
 class WbSppTesterError(ValueError):
@@ -126,6 +151,7 @@ class WbSppTesterCadenceConfig:
     readback_max_polls: int = 12
     rate_limit_min_cooldown_seconds: int = 900
     active_lock_ttl_seconds: int = 1800
+    schedule_late_window_minutes: int = SPP_TEST_SCHEDULE_LATE_WINDOW_MINUTES
 
 
 class WbSppTesterBlock:
@@ -157,8 +183,13 @@ class WbSppTesterBlock:
         self._jobs_dir = self._state_dir / "jobs"
         self._current_job_path = self._state_dir / "current_job.json"
         self._audit_path = self._state_dir / "audit.jsonl"
+        self._schedule_path = self._state_dir / "schedule.json"
+        self._execution_lock_path = self._state_dir / "execution.lock"
+        self._schedule_lock_path = self._state_dir / "schedule.lock"
         self._threads: dict[str, threading.Thread] = {}
+        self._execution_locks: dict[str, Any] = {}
         self._thread_lock = threading.RLock()
+        self._state_lock = threading.RLock()
 
     def build_baseline(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         nm_id = _as_positive_int(_single_param((params or {}).get("nmID") or (params or {}).get("nm_id")), "nmID")
@@ -216,7 +247,178 @@ class WbSppTesterBlock:
             "active_job": self._current_job_summary(),
         }
 
-    def start(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+    def history(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        limit = _bounded_int(
+            _single_param(params.get("limit")),
+            minimum=1,
+            maximum=SPP_TEST_HISTORY_MAX_LIMIT,
+            default=SPP_TEST_HISTORY_DEFAULT_LIMIT,
+        )
+        cursor = _decode_history_cursor(str(_single_param(params.get("cursor")) or ""))
+        keyed_rows = [
+            (_history_sort_key(job), self._history_summary(job))
+            for job in self._load_history_jobs()
+        ]
+        keyed_rows.sort(key=lambda item: item[0], reverse=True)
+        if cursor is not None:
+            keyed_rows = [item for item in keyed_rows if item[0] < cursor]
+        page_rows = keyed_rows[:limit]
+        page = [item[1] for item in page_rows]
+        has_more = len(keyed_rows) > limit
+        next_cursor = ""
+        if has_more and page_rows:
+            next_cursor = _encode_history_cursor(*page_rows[-1][0])
+        return {
+            "contract_name": HISTORY_CONTRACT_NAME,
+            "generated_at": self.timestamp_factory(),
+            "items": page,
+            "limit": limit,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }
+
+    def history_detail(self, job_id: str) -> dict[str, Any]:
+        normalized = str(job_id or "").strip()
+        if not JOB_ID_RE.fullmatch(normalized):
+            raise WbSppTesterError("invalid SPP test job_id", http_status=400)
+        job = self._load_job(normalized)
+        if not job:
+            raise WbSppTesterError("SPP test job was not found", http_status=404)
+        return {
+            "contract_name": HISTORY_DETAIL_CONTRACT_NAME,
+            "generated_at": self.timestamp_factory(),
+            "job": self._job_public_payload(job, details=True),
+        }
+
+    def get_schedule(self) -> dict[str, Any]:
+        with self._schedule_file_lock():
+            schedule = self._load_schedule_unlocked()
+        return self._schedule_response(schedule)
+
+    def save_schedule(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+        raw = payload.get("schedule") if isinstance(payload.get("schedule"), Mapping) else payload
+        now = self._now()
+        with self._schedule_file_lock():
+            existing = self._load_schedule_unlocked()
+            schedule = self._normalize_schedule_for_save(raw, existing=existing, now=now, actor=actor)
+            self._write_schedule_unlocked(schedule)
+        self._append_audit(
+            f"schedule:{SCHEDULE_ID}",
+            "schedule_saved",
+            {
+                "actor": actor,
+                "enabled": schedule["enabled"],
+                "nmID": schedule.get("nmID"),
+                "local_time_hhmm": schedule["local_time_hhmm"],
+                "timezone": schedule["timezone"],
+                "next_run_at": schedule.get("next_run_at"),
+                "future_live_price_changes_confirmed": schedule.get("future_live_price_changes_confirmed"),
+            },
+        )
+        return self._schedule_response(schedule)
+
+    def run_due_schedule_tick(self) -> dict[str, Any]:
+        now = self._now()
+        with self._schedule_file_lock():
+            schedule = self._load_schedule_unlocked()
+            if not schedule.get("enabled"):
+                return self._scheduler_tick_response("disabled", schedule=schedule)
+            due_at = _parse_iso_datetime(schedule.get("next_run_at"))
+            if due_at is None:
+                schedule["next_run_at"] = _next_daily_run_at(
+                    now,
+                    local_time_hhmm=str(schedule["local_time_hhmm"]),
+                    timezone_name=str(schedule["timezone"]),
+                ).isoformat()
+                self._write_schedule_unlocked(schedule)
+                return self._scheduler_tick_response("not_due", schedule=schedule)
+            if now < due_at:
+                return self._scheduler_tick_response("not_due", schedule=schedule, due_at=due_at)
+            business_date = due_at.astimezone(ZoneInfo(str(schedule["timezone"]))).date().isoformat()
+            if str(schedule.get("last_claimed_business_date") or "") == business_date:
+                schedule["next_run_at"] = _next_daily_run_at(
+                    due_at + timedelta(seconds=1),
+                    local_time_hhmm=str(schedule["local_time_hhmm"]),
+                    timezone_name=str(schedule["timezone"]),
+                ).isoformat()
+                schedule["last_scheduler_decision_at"] = now.isoformat()
+                schedule["last_automatic_status"] = "already_claimed"
+                self._write_schedule_unlocked(schedule)
+                return self._scheduler_tick_response("already_claimed", schedule=schedule, due_at=due_at)
+            late_seconds = max(0, int((now - due_at).total_seconds()))
+            schedule["last_claimed_business_date"] = business_date
+            schedule["last_due_at"] = due_at.isoformat()
+            schedule["last_scheduler_decision_at"] = now.isoformat()
+            schedule["last_automatic_status"] = "claimed"
+            schedule["next_run_at"] = _next_daily_run_at(
+                due_at + timedelta(seconds=1),
+                local_time_hhmm=str(schedule["local_time_hhmm"]),
+                timezone_name=str(schedule["timezone"]),
+            ).isoformat()
+            self._write_schedule_unlocked(schedule)
+
+        self._append_audit(
+            f"schedule:{SCHEDULE_ID}",
+            "schedule_due_decision",
+            {
+                "decision": "claimed",
+                "due_at": due_at.isoformat(),
+                "business_date": business_date,
+                "late_seconds": late_seconds,
+                "late_window_seconds": int(self.cadence.schedule_late_window_minutes) * 60,
+            },
+        )
+        if late_seconds > int(self.cadence.schedule_late_window_minutes) * 60:
+            job = self._record_scheduled_skip(
+                schedule,
+                reason="missed_late_window",
+                due_at=due_at,
+                diagnostics={"late_seconds": late_seconds},
+            )
+            schedule = self._update_schedule_after_automatic_job(schedule, job)
+            return self._scheduler_tick_response("skipped_late", schedule=schedule, due_at=due_at, job=job)
+
+        start_payload = {
+            "nmID": schedule.get("nmID"),
+            "range_min_discounted": schedule.get("range_min_discounted"),
+            "range_max_discounted": schedule.get("range_max_discounted"),
+            "precision_rub": schedule.get("precision_rub"),
+            "max_measurements": schedule.get("max_measurements"),
+            "mode": SPP_TEST_MODE_SAFE_SLOW,
+            "confirm_live_price_change": True,
+            "restore_baseline": True,
+        }
+        try:
+            started = self.start(
+                start_payload,
+                actor="systemd:spp_schedule",
+                trigger_source="schedule",
+                schedule_id=SCHEDULE_ID,
+                run_async=False,
+            )
+            job = started.get("job") or {}
+            schedule = self._update_schedule_after_automatic_job(schedule, job)
+            return self._scheduler_tick_response("finished", schedule=schedule, due_at=due_at, job=job)
+        except WbSppTesterError as exc:
+            job = self._record_scheduled_skip(
+                schedule,
+                reason=_scheduled_skip_reason(exc),
+                due_at=due_at,
+                diagnostics={"error": str(exc), **dict(exc.payload)},
+            )
+            schedule = self._update_schedule_after_automatic_job(schedule, job)
+            return self._scheduler_tick_response("skipped", schedule=schedule, due_at=due_at, job=job)
+
+    def start(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        actor: str = "",
+        trigger_source: str = "manual",
+        schedule_id: str = "",
+        run_async: bool | None = None,
+    ) -> dict[str, Any]:
         if not self.safety.spp_test_enabled:
             raise WbSppTesterError(
                 "WB SPP test writes are disabled; set WB_SPP_TEST_ENABLED=true",
@@ -231,67 +433,115 @@ class WbSppTesterBlock:
             raise WbSppTesterError("confirm_live_price_change=true is required", http_status=400)
         if not _coerce_bool(payload.get("restore_baseline")):
             raise WbSppTesterError("restore_baseline=true is required in MVP", http_status=422)
-        blocking = self._blocking_current_job()
-        if blocking is not None:
+        normalized_trigger = str(trigger_source or "manual").strip().lower()
+        if normalized_trigger not in {"manual", "schedule"}:
+            raise WbSppTesterError("trigger_source must be manual or schedule", http_status=400)
+        execution_lock = self._acquire_execution_lock(
+            owner=f"{normalized_trigger}:{actor or 'unknown'}",
+            blocking=False,
+        )
+        if execution_lock is None:
             raise WbSppTesterError(
-                "another SPP test job is active or requires restore",
+                "another SPP test runner holds the execution lock",
                 http_status=409,
-                payload={"active_job": blocking},
+                payload={"reason": "execution_lock_busy", "active_job": self._current_job_summary(reconcile=False)},
             )
-        nm_id, range_min, range_max, precision, max_measurements = self._parse_plan_input(payload)
-        baseline = self._capture_baseline(nm_id=nm_id, strict=True)
-        plan_payload = self.build_plan(payload)["plan"]
-        job_id = uuid4().hex
-        job = {
-            "job_id": job_id,
-            "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_job",
-            "created_at": self.timestamp_factory(),
-            "updated_at": self.timestamp_factory(),
-            "actor": actor,
-            "status": "planning",
-            "result_status": "",
-            "nmID": nm_id,
-            "input": {
-                "range_min_discounted": _decimal_to_float(range_min),
-                "range_max_discounted": _decimal_to_float(range_max),
-                "precision_rub": _decimal_to_float(precision),
-                "max_measurements": max_measurements,
-                "mode": SPP_TEST_MODE_SAFE_SLOW,
-                "restore_baseline": True,
-            },
-            "baseline": baseline,
-            "plan": plan_payload,
-            "measurements": [],
-            "thresholds": [],
-            "timeline": [],
-            "restore": {"required": True, "restored": False, "proof": None, "steps": []},
-            "audit_path": str(self._audit_path),
-            "manual_restore_required": False,
-            "error": "",
-        }
-        self._append_timeline(job, "planning", "job_created")
-        self._save_job(job)
-        self._write_current_job(job)
-        self._append_audit(job_id, "job_start", {"actor": actor, "input": job["input"], "baseline": baseline})
-        if self.cadence.run_async:
-            self._start_background_job(job_id)
-        else:
-            self._run_job(job_id)
+        job_id = ""
+        lock_transferred = False
+        try:
+            blocking = self._blocking_current_job(reconcile=True, caller_holds_execution_lock=True)
+            if blocking is not None:
+                raise WbSppTesterError(
+                    "another SPP test job is active or requires restore",
+                    http_status=409,
+                    payload={"reason": "active_or_unrestored_job", "active_job": blocking},
+                )
+            nm_id, range_min, range_max, precision, max_measurements = self._parse_plan_input(payload)
+            baseline = self._capture_baseline(nm_id=nm_id, strict=True)
+            plan_payload = self.build_plan(payload)["plan"]
+            job_id = uuid4().hex
+            now_text = self.timestamp_factory()
+            job = {
+                "job_id": job_id,
+                "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_job",
+                "created_at": now_text,
+                "updated_at": now_text,
+                "finished_at": "",
+                "actor": actor,
+                "trigger_source": normalized_trigger,
+                "schedule_id": str(schedule_id or "") if normalized_trigger == "schedule" else "",
+                "status": "planning",
+                "result_status": "",
+                "nmID": nm_id,
+                "input": {
+                    "range_min_discounted": _decimal_to_float(range_min),
+                    "range_max_discounted": _decimal_to_float(range_max),
+                    "precision_rub": _decimal_to_float(precision),
+                    "max_measurements": max_measurements,
+                    "mode": SPP_TEST_MODE_SAFE_SLOW,
+                    "restore_baseline": True,
+                },
+                "baseline": baseline,
+                "plan": plan_payload,
+                "measurements": [],
+                "thresholds": [],
+                "timeline": [],
+                "restore": {"required": True, "restored": False, "proof": None, "steps": []},
+                "lifecycle_diagnostics": {
+                    "classification": "live",
+                    "runner_pid": os.getpid(),
+                    "runner_host": socket.gethostname(),
+                    "runner_token": uuid4().hex,
+                    "heartbeat_at": now_text,
+                    "phase": "planning",
+                },
+                "manual_restore_required": False,
+                "warnings": [],
+                "error": "",
+            }
+            self._append_timeline(job, "planning", "job_created")
+            self._save_job(job)
+            self._write_current_job(job)
+            self._append_audit(
+                job_id,
+                "job_start",
+                {
+                    "actor": actor,
+                    "trigger_source": normalized_trigger,
+                    "schedule_id": job.get("schedule_id"),
+                    "input": job["input"],
+                    "baseline": baseline,
+                },
+            )
+            should_run_async = self.cadence.run_async if run_async is None else bool(run_async)
+            if should_run_async:
+                self._start_background_job(job_id, execution_lock)
+                lock_transferred = True
+            else:
+                self._run_job(job_id)
+        finally:
+            if not lock_transferred:
+                self._release_execution_lock(execution_lock, job_id=job_id)
         current = self._load_job(job_id)
         return {
             "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_start",
-            "job": self._job_public_payload(current),
+            "job": self._job_public_payload(current, details=True),
         }
 
     def status(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         requested_job_id = str(_single_param(params.get("job_id") or params.get("jobID")) or "").strip()
-        job = self._load_job(requested_job_id) if requested_job_id else self._load_current_job_payload()
+        if requested_job_id:
+            job = self._load_job(requested_job_id)
+            active_job = self._current_job_summary()
+        else:
+            active_job = self._current_job_summary()
+            job = self._load_current_job_payload()
         return {
             "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_status",
             "generated_at": self.timestamp_factory(),
-            "active_job": self._current_job_summary(),
-            "job": self._job_public_payload(job) if job else None,
+            "active_job": active_job,
+            "job": self._job_public_payload(job, details=True) if job else None,
         }
 
     def restore(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
@@ -313,13 +563,41 @@ class WbSppTesterBlock:
             raise WbSppTesterError("SPP test job was not found", http_status=404)
         if not job.get("baseline"):
             raise WbSppTesterError("job has no captured baseline", http_status=409)
-        self._append_audit(str(job["job_id"]), "emergency_restore_requested", {"actor": actor})
-        restored = self._restore_baseline(job, reason="emergency_restore")
-        job = self._load_job(str(job["job_id"]))
+        execution_lock = self._acquire_execution_lock(owner=f"manual_restore:{actor or 'unknown'}", blocking=False)
+        if execution_lock is None:
+            raise WbSppTesterError(
+                "SPP execution lock is held by a live runner",
+                http_status=409,
+                payload={"reason": "execution_lock_busy"},
+            )
+        try:
+            self._append_audit(str(job["job_id"]), "emergency_restore_requested", {"actor": actor})
+            restored = self._restore_baseline(job, reason="emergency_restore")
+            job = self._load_job(str(job["job_id"])) or job
+            if restored:
+                job["status"] = "interrupted_restored"
+                job["result_status"] = str(job.get("result_status") or "inconclusive")
+                job["manual_restore_required"] = False
+                job["finished_at"] = self.timestamp_factory()
+                self._append_timeline(job, "interrupted_restored", "emergency_restore_confirmed")
+            else:
+                job["status"] = "manual_restore_required"
+                job["result_status"] = "manual_restore_required"
+                job["manual_restore_required"] = True
+            job["updated_at"] = self.timestamp_factory()
+            self._save_job(job)
+            self._write_current_job(job)
+            self._append_audit(
+                str(job["job_id"]),
+                "emergency_restore_finished",
+                {"restored": restored, "status": job["status"]},
+            )
+        finally:
+            self._release_execution_lock(execution_lock, job_id=str(job.get("job_id") or ""))
         return {
             "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_restore",
             "status": "restored" if restored else "manual_restore_required",
-            "job": self._job_public_payload(job),
+            "job": self._job_public_payload(job, details=True),
         }
 
     def _run_job(self, job_id: str) -> None:
@@ -335,14 +613,29 @@ class WbSppTesterBlock:
             job = self._load_job(job_id) or job
             if not restored:
                 self._set_job_status(job, "manual_restore_required", "restore_failed")
+                job = self._load_job(job_id) or job
+                job["finished_at"] = self.timestamp_factory()
+                job["result_status"] = "manual_restore_required"
+                job["manual_restore_required"] = True
+                self._save_job(job)
+                self._write_current_job(job)
+                self._append_audit(job_id, "job_finish", {"status": job["status"], "restored": False})
                 return
             result_status = str(job.get("result_status") or "inconclusive")
             final_status = "complete" if result_status not in {"manual_restore_required"} else result_status
             job["status"] = final_status
             job["updated_at"] = self.timestamp_factory()
+            job["finished_at"] = self.timestamp_factory()
+            job["manual_restore_required"] = False
+            self._set_lifecycle(job, classification="terminal", phase=final_status)
             self._append_timeline(job, final_status, result_status)
             self._save_job(job)
             self._write_current_job(job)
+            self._append_audit(
+                job_id,
+                "job_finish",
+                {"status": final_status, "result_status": result_status, "restored": True},
+            )
         except Exception as exc:
             job = self._load_job(job_id) or job
             job["error"] = str(exc)
@@ -363,8 +656,15 @@ class WbSppTesterBlock:
                 job["result_status"] = "manual_restore_required"
                 job["manual_restore_required"] = True
             job["updated_at"] = self.timestamp_factory()
+            job["finished_at"] = self.timestamp_factory()
+            self._set_lifecycle(job, classification="terminal", phase=str(job["status"]))
             self._save_job(job)
             self._write_current_job(job)
+            self._append_audit(
+                job_id,
+                "job_finish",
+                {"status": job["status"], "result_status": job["result_status"], "restored": restored},
+            )
 
     def _execute_measurements(self, job: dict[str, Any]) -> None:
         input_payload = job["input"]
@@ -387,12 +687,12 @@ class WbSppTesterBlock:
             point = self._measure_point(job, target)
             job["measurements"].append(point)
             self._save_job(job)
-            if point.get("status") == "rate_limited_stop":
+            if point.get("status") in SAFETY_STOP_POINT_STATUSES:
                 stop_after_restore = True
                 break
             if len(job["measurements"]) < max_measurements and route:
                 self._set_job_status(job, "cooldown", "between_measurements")
-                self.sleep(self.cadence.measurement_upload_cooldown_seconds)
+                self._sleep_with_heartbeat(job, self.cadence.measurement_upload_cooldown_seconds, phase="between_measurements")
                 self._set_job_status(job, "measuring", "measurement_resumed")
 
         while not stop_after_restore and len(job["measurements"]) < max_measurements:
@@ -410,7 +710,7 @@ class WbSppTesterBlock:
             if signature in measured_targets:
                 break
             self._set_job_status(job, "cooldown", "before_refinement")
-            self.sleep(self.cadence.measurement_upload_cooldown_seconds)
+            self._sleep_with_heartbeat(job, self.cadence.measurement_upload_cooldown_seconds, phase="before_refinement")
             self._set_job_status(job, "measuring", "refinement_measurement")
             measured_targets.add(signature)
             job["measurements"].append(self._measure_point(job, target))
@@ -542,7 +842,7 @@ class WbSppTesterBlock:
             last = {"uploadID": upload_id, "status_code": status_code, "status": status, "wb_response": payload}
             if status in {"success", "partial_error", "all_error", "canceled"}:
                 return last
-            self.sleep(self.cadence.upload_status_poll_seconds)
+            self._sleep_with_heartbeat(job, self.cadence.upload_status_poll_seconds, phase="upload_status_poll")
         last["status"] = last.get("status") or "timeout"
         return last
 
@@ -555,13 +855,13 @@ class WbSppTesterBlock:
             actual = _number_or_none(good.get("discountedPrice"))
             if actual is not None and _money_close(_parse_money(actual, "discountedPrice"), expected_discounted, Decimal("1.00")):
                 return good
-            self.sleep(self.cadence.readback_poll_seconds)
+            self._sleep_with_heartbeat(job, self.cadence.readback_poll_seconds, phase="readback_poll")
         return last
 
     def _poll_public_stable(self, job: Mapping[str, Any]) -> dict[str, Any]:
         nm_id = int(job["nmID"])
         reads: list[dict[str, Any]] = []
-        self.sleep(self.cadence.first_public_poll_delay_seconds)
+        self._sleep_with_heartbeat(job, self.cadence.first_public_poll_delay_seconds, phase="public_poll_initial")
         for attempt in range(3):
             payload = dict(self.public_source.fetch_public_buyer_price(nm_id))
             reads.append(payload)
@@ -584,9 +884,9 @@ class WbSppTesterBlock:
                     "proof": "3_identical_public_reads" if len(reads) >= 3 else "2_identical_public_reads_extended_gap",
                 }
             if attempt == 0:
-                self.sleep(self.cadence.extended_public_poll_gap_seconds)
+                self._sleep_with_heartbeat(job, self.cadence.extended_public_poll_gap_seconds, phase="public_poll_extended")
             else:
-                self.sleep(self.cadence.public_poll_gap_seconds)
+                self._sleep_with_heartbeat(job, self.cadence.public_poll_gap_seconds, phase="public_poll_gap")
         return {"status": "public_unstable", "stable": False, "reads": reads, "public_buyer_price": None}
 
     def _handle_429_backoff(
@@ -608,7 +908,7 @@ class WbSppTesterBlock:
         )
         current = self._load_job(str(job["job_id"])) or dict(job)
         self._set_job_status(current, "cooldown", f"429_backoff_{phase}")
-        self.sleep(cooldown)
+        self._sleep_with_heartbeat(job, cooldown, phase=f"429_backoff_{phase}")
         try:
             self._fetch_current_good(int(job["nmID"]), job_id=str(job["job_id"]), audit_event="wb_prices_429_probe")
             return True
@@ -631,12 +931,44 @@ class WbSppTesterBlock:
         baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else None
         if not baseline:
             return False
-        if (job.get("restore") or {}).get("restored") and (job.get("restore") or {}).get("proof"):
-            return True
         nm_id = int(job["nmID"])
         self._set_job_status(job, "restoring", reason)
-        steps = self._build_restore_steps(job)
         restore_state = job.setdefault("restore", {"required": True, "restored": False, "proof": None, "steps": []})
+        try:
+            preflight_proof = self._capture_restore_proof(job, event_prefix="restore_preflight")
+        except Exception as exc:
+            restore_state["restored"] = False
+            restore_state["proof"] = {"error": _safe_text(exc, 1000), "proof_status": "readback_failed"}
+            job["manual_restore_required"] = True
+            job["result_status"] = "manual_restore_required"
+            self._append_audit(str(job["job_id"]), "restore_preflight_error", {"error": str(exc)})
+            self._save_job(job)
+            return False
+        restore_state["proof"] = preflight_proof
+        if _restore_proof_ok(preflight_proof):
+            restore_state["restored"] = True
+            job["manual_restore_required"] = False
+            self._append_audit(str(job["job_id"]), "restore_already_confirmed", preflight_proof)
+            self._save_job(job)
+            return True
+        tuple_is_restored = bool(
+            preflight_proof.get("price_matches")
+            and preflight_proof.get("discount_matches")
+            and preflight_proof.get("discountedPrice_matches")
+        )
+        if tuple_is_restored or not preflight_proof.get("quarantine_absent"):
+            restore_state["restored"] = False
+            job["manual_restore_required"] = True
+            job["result_status"] = "manual_restore_required"
+            self._append_audit(
+                str(job["job_id"]),
+                "restore_preflight_blocked",
+                {"tuple_is_restored": tuple_is_restored, "proof": preflight_proof},
+            )
+            self._save_job(job)
+            return False
+
+        steps = self._build_restore_steps(job)
         for step in steps:
             price = int(step["price"])
             discount = int(step["discount"])
@@ -672,38 +1004,8 @@ class WbSppTesterBlock:
                 self._save_job(job)
                 return False
 
-        proof_good = self._fetch_current_good(nm_id, job_id=str(job["job_id"]), audit_event="wb_restore_final_readback")
-        proof_quarantine = self._check_quarantine(job)
-        proof_public = dict(self.public_source.fetch_public_buyer_price(nm_id))
-        self._append_audit(str(job["job_id"]), "public_restore_final_read", proof_public)
-        proof = {
-            "price_matches": _optional_int(proof_good.get("price")) == _optional_int(baseline.get("price")),
-            "discount_matches": _optional_int(proof_good.get("discount")) == _optional_int(baseline.get("discount")),
-            "discountedPrice_matches": _money_close(
-                _parse_money(proof_good.get("discountedPrice"), "discountedPrice"),
-                _parse_money(baseline.get("discountedPrice"), "baseline_discountedPrice"),
-                Decimal("1.00"),
-            ),
-            "quarantine_absent": not proof_quarantine.get("is_quarantined"),
-            "public_buyer_price": proof_public.get("public_buyer_price"),
-            "public_status": proof_public.get("status"),
-            "wb_readback": proof_good,
-            "quarantine": proof_quarantine,
-        }
-        public_price = _number_or_none(proof_public.get("public_buyer_price"))
-        if public_price is not None:
-            proof["spp_proxy"] = _decimal_to_float(
-                _spp_proxy(
-                    _parse_money(baseline.get("discountedPrice"), "baseline_discountedPrice"),
-                    _parse_money(public_price, "public_buyer_price"),
-                )
-            )
-        ok = bool(
-            proof["price_matches"]
-            and proof["discount_matches"]
-            and proof["discountedPrice_matches"]
-            and proof["quarantine_absent"]
-        )
+        proof = self._capture_restore_proof(job, event_prefix="restore_final")
+        ok = _restore_proof_ok(proof)
         restore_state["proof"] = proof
         restore_state["restored"] = ok
         job["manual_restore_required"] = not ok
@@ -712,6 +1014,45 @@ class WbSppTesterBlock:
         self._append_audit(str(job["job_id"]), "restore_final_proof", proof)
         self._save_job(job)
         return ok
+
+    def _capture_restore_proof(self, job: Mapping[str, Any], *, event_prefix: str) -> dict[str, Any]:
+        baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
+        nm_id = int(job["nmID"])
+        proof_good = self._fetch_current_good(
+            nm_id,
+            job_id=str(job["job_id"]),
+            audit_event=f"wb_{event_prefix}_readback",
+        )
+        proof_quarantine = self._check_quarantine(job)
+        proof_public = dict(self.public_source.fetch_public_buyer_price(nm_id))
+        self._append_audit(str(job["job_id"]), f"public_{event_prefix}_read", proof_public)
+        public_price = _number_or_none(proof_public.get("public_buyer_price"))
+        public_status = str(proof_public.get("status") or "")
+        proof: dict[str, Any] = {
+            "captured_at": self.timestamp_factory(),
+            "price_matches": _optional_int(proof_good.get("price")) == _optional_int(baseline.get("price")),
+            "discount_matches": _optional_int(proof_good.get("discount")) == _optional_int(baseline.get("discount")),
+            "discountedPrice_matches": _money_exact(
+                proof_good.get("discountedPrice"),
+                baseline.get("discountedPrice"),
+            ),
+            "quarantine_absent": not proof_quarantine.get("is_quarantined"),
+            "public_evidence_captured": public_price is not None and public_status not in {"429", "timeout", "stale"},
+            "public_buyer_price": public_price,
+            "public_status": public_status,
+            "spp_proxy": None,
+            "wb_readback": proof_good,
+            "quarantine": proof_quarantine,
+        }
+        if public_price is not None:
+            proof["spp_proxy"] = _decimal_to_float(
+                _spp_proxy(
+                    _parse_money(baseline.get("discountedPrice"), "baseline_discountedPrice"),
+                    _parse_money(public_price, "public_buyer_price"),
+                )
+            )
+        proof["proof_status"] = "confirmed" if _restore_proof_ok(proof) else "not_confirmed"
+        return proof
 
     def _build_restore_steps(self, job: Mapping[str, Any]) -> list[dict[str, Any]]:
         baseline = job["baseline"]
@@ -852,6 +1193,13 @@ class WbSppTesterBlock:
             blockers.append("price_quarantine_present")
         if baseline["price"] is None or baseline["discount"] is None or baseline["discountedPrice"] is None:
             blockers.append("wb_price_baseline_incomplete")
+        if not enrichment:
+            blockers.append("active_nomenclature_missing")
+        public_status = str(public.get("status") or "").strip().lower()
+        if baseline["publicBuyerPrice"] is None or baseline["sppProxy"] is None:
+            blockers.append("public_spp_baseline_incomplete")
+        elif public_status in {"429", "timeout", "stale", "missing"}:
+            blockers.append(f"public_spp_baseline_{public_status}")
         baseline["can_start"] = not blockers
         baseline["blockers"] = blockers
         if strict and blockers:
@@ -906,23 +1254,113 @@ class WbSppTesterBlock:
                 result[nm_id] = item
         return result
 
-    def _blocking_current_job(self) -> dict[str, Any] | None:
-        job = self._load_current_job_payload()
+    def _blocking_current_job(
+        self,
+        *,
+        reconcile: bool = True,
+        caller_holds_execution_lock: bool = False,
+    ) -> dict[str, Any] | None:
+        job = self._reconcile_current_job(caller_holds_execution_lock=caller_holds_execution_lock) if reconcile else self._load_current_job_payload()
         if not job:
             return None
         status = str(job.get("status") or "")
         restore = job.get("restore") if isinstance(job.get("restore"), Mapping) else {}
-        if status in SPP_TEST_ACTIVE_STATUSES:
-            return self._job_summary(job)
-        if status in {"manual_restore_required"}:
+        if status in SPP_TEST_ACTIVE_STATUSES or status == "manual_restore_required":
             return self._job_summary(job)
         if status == "failed" and not restore.get("restored"):
             return self._job_summary(job)
         return None
 
-    def _current_job_summary(self) -> dict[str, Any] | None:
-        job = self._load_current_job_payload()
+    def _current_job_summary(
+        self,
+        *,
+        reconcile: bool = True,
+        caller_holds_execution_lock: bool = False,
+    ) -> dict[str, Any] | None:
+        job = (
+            self._reconcile_current_job(caller_holds_execution_lock=caller_holds_execution_lock)
+            if reconcile
+            else self._load_current_job_payload()
+        )
         return self._job_summary(job) if job else None
+
+    def _reconcile_current_job(self, *, caller_holds_execution_lock: bool = False) -> dict[str, Any] | None:
+        job = self._load_current_job_payload()
+        if not job:
+            return None
+        status = str(job.get("status") or "")
+        restore = job.get("restore") if isinstance(job.get("restore"), Mapping) else {}
+        needs_restore_confirmation = status in SPP_TEST_ACTIVE_STATUSES or status == "manual_restore_required" or (
+            status == "failed" and not restore.get("restored")
+        )
+        if not needs_restore_confirmation:
+            return job
+        if not caller_holds_execution_lock and self._execution_lock_is_held():
+            lifecycle = job.get("lifecycle_diagnostics") if isinstance(job.get("lifecycle_diagnostics"), Mapping) else {}
+            if lifecycle.get("classification") != "live":
+                mutable = dict(job)
+                self._set_lifecycle(mutable, classification="live", phase=status)
+                self._save_job(mutable)
+                return mutable
+            return job
+        try:
+            proof = self._capture_restore_proof(job, event_prefix="orphan_reconcile")
+        except Exception as exc:
+            mutable = dict(job)
+            mutable["status"] = "manual_restore_required"
+            mutable["result_status"] = "manual_restore_required"
+            mutable["manual_restore_required"] = True
+            mutable["updated_at"] = self.timestamp_factory()
+            diagnostics = {
+                "classification": "stale_orphan_unrestored",
+                "phase": status,
+                "reconciled_at": self.timestamp_factory(),
+                "restore_readback_error": _safe_text(exc, 1000),
+            }
+            self._set_lifecycle(mutable, **diagnostics)
+            self._append_timeline(mutable, "manual_restore_required", "orphan_restore_readback_failed")
+            self._save_job(mutable)
+            self._write_current_job(mutable)
+            self._append_audit(str(mutable["job_id"]), "orphan_reconcile_failed", diagnostics)
+            return mutable
+
+        mutable = dict(job)
+        restore_state = dict(restore)
+        restore_state["proof"] = proof
+        restored = _restore_proof_ok(proof)
+        restore_state["restored"] = restored
+        mutable["restore"] = restore_state
+        mutable["updated_at"] = self.timestamp_factory()
+        if restored:
+            mutable["status"] = "interrupted_restored"
+            mutable["result_status"] = str(mutable.get("result_status") or "inconclusive")
+            mutable["manual_restore_required"] = False
+            mutable["finished_at"] = self.timestamp_factory()
+            self._set_lifecycle(
+                mutable,
+                classification="stale_orphan_restored_confirmed",
+                phase="interrupted_restored",
+                reconciled_at=self.timestamp_factory(),
+            )
+            self._append_timeline(mutable, "interrupted_restored", "fresh_live_baseline_readback_confirmed")
+            audit_event = "orphan_reconcile_restored"
+        else:
+            mutable["status"] = "manual_restore_required"
+            mutable["result_status"] = "manual_restore_required"
+            mutable["manual_restore_required"] = True
+            self._set_lifecycle(
+                mutable,
+                classification="stale_orphan_unrestored",
+                phase="manual_restore_required",
+                reconciled_at=self.timestamp_factory(),
+                restore_proof=proof,
+            )
+            self._append_timeline(mutable, "manual_restore_required", "fresh_live_baseline_readback_not_confirmed")
+            audit_event = "orphan_reconcile_unrestored"
+        self._save_job(mutable)
+        self._write_current_job(mutable)
+        self._append_audit(str(mutable["job_id"]), audit_event, proof)
+        return mutable
 
     def _job_summary(self, job: Mapping[str, Any]) -> dict[str, Any]:
         return {
@@ -930,21 +1368,29 @@ class WbSppTesterBlock:
             "status": str(job.get("status") or ""),
             "result_status": str(job.get("result_status") or ""),
             "nmID": _optional_int(job.get("nmID")),
+            "trigger_source": str(job.get("trigger_source") or "") or None,
+            "created_at": str(job.get("created_at") or ""),
             "updated_at": str(job.get("updated_at") or ""),
             "manual_restore_required": bool(job.get("manual_restore_required")),
             "restore_restored": bool((job.get("restore") or {}).get("restored")) if isinstance(job.get("restore"), Mapping) else False,
+            "lifecycle_classification": str((job.get("lifecycle_diagnostics") or {}).get("classification") or "")
+            if isinstance(job.get("lifecycle_diagnostics"), Mapping)
+            else "",
         }
 
-    def _job_public_payload(self, job: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _job_public_payload(self, job: Mapping[str, Any] | None, *, details: bool = False) -> dict[str, Any] | None:
         if not job:
             return None
-        return {
+        payload = {
             key: job.get(key)
             for key in (
                 "job_id",
                 "created_at",
                 "updated_at",
+                "finished_at",
                 "actor",
+                "trigger_source",
+                "schedule_id",
                 "status",
                 "result_status",
                 "nmID",
@@ -955,26 +1401,358 @@ class WbSppTesterBlock:
                 "thresholds",
                 "timeline",
                 "restore",
+                "lifecycle_diagnostics",
                 "manual_restore_required",
+                "warnings",
                 "error",
             )
         }
+        return _sanitize_public_payload(payload, details=details)
 
-    def _start_background_job(self, job_id: str) -> None:
+    def _load_history_jobs(self) -> list[dict[str, Any]]:
+        if not self._jobs_dir.exists():
+            return []
+        jobs: list[dict[str, Any]] = []
+        for path in self._jobs_dir.iterdir():
+            if not path.is_file() or path.suffix != ".json" or not JOB_ID_RE.fullmatch(path.stem):
+                continue
+            job = self._load_job(path.stem)
+            if job:
+                jobs.append(job)
+            if len(jobs) >= 10000:
+                break
+        return jobs
+
+    def _history_summary(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
+        created_at = str(job.get("created_at") or "")
+        finished_at = str(job.get("finished_at") or job.get("updated_at") or "")
+        return {
+            "job_id": str(job.get("job_id") or ""),
+            "created_at": created_at,
+            "finished_at": finished_at,
+            "duration_seconds": _duration_seconds(created_at, finished_at),
+            "trigger_source": str(job.get("trigger_source") or "") or None,
+            "status": str(job.get("status") or ""),
+            "result_status": str(job.get("result_status") or ""),
+            "nmID": _optional_int(job.get("nmID")),
+            "title": _safe_text(baseline.get("title"), 300),
+            "ourSku": _safe_text(baseline.get("ourSku"), 160),
+            "vendorCode": _safe_text(baseline.get("vendorCode"), 300),
+            "manual_restore_required": bool(job.get("manual_restore_required")),
+            "restore_restored": bool((job.get("restore") or {}).get("restored")) if isinstance(job.get("restore"), Mapping) else False,
+        }
+
+    def _default_schedule(self) -> dict[str, Any]:
+        return {
+            "id": SCHEDULE_ID,
+            "enabled": False,
+            "cadence": SCHEDULE_CADENCE,
+            "nmID": None,
+            "range_min_discounted": None,
+            "range_max_discounted": None,
+            "precision_rub": SPP_TEST_DEFAULT_PRECISION_RUB,
+            "max_measurements": SPP_TEST_DEFAULT_MAX_MEASUREMENTS,
+            "local_time_hhmm": "12:00",
+            "timezone": SPP_TEST_SCHEDULE_TIMEZONE,
+            "timezone_label": SPP_TEST_SCHEDULE_TIMEZONE_LABEL,
+            "future_live_price_changes_confirmed": False,
+            "created_at": "",
+            "updated_at": "",
+            "enabled_since_at": "",
+            "next_run_at": "",
+            "last_claimed_business_date": "",
+            "last_due_at": "",
+            "last_scheduler_decision_at": "",
+            "last_automatic_run_at": "",
+            "last_automatic_status": "",
+            "last_automatic_job_id": "",
+            "last_automatic_result_status": "",
+        }
+
+    def _load_schedule_unlocked(self) -> dict[str, Any]:
+        if not self._schedule_path.exists():
+            return self._default_schedule()
+        try:
+            payload = json.loads(self._schedule_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WbSppTesterError("SPP schedule state is not readable", http_status=500) from exc
+        if not isinstance(payload, Mapping):
+            raise WbSppTesterError("SPP schedule state has invalid shape", http_status=500)
+        return {**self._default_schedule(), **dict(payload), "id": SCHEDULE_ID, "cadence": SCHEDULE_CADENCE}
+
+    def _normalize_schedule_for_save(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        existing: Mapping[str, Any],
+        now: datetime,
+        actor: str,
+    ) -> dict[str, Any]:
+        enabled = _coerce_bool(raw.get("enabled"))
+        timezone_name = str(raw.get("timezone") or existing.get("timezone") or SPP_TEST_SCHEDULE_TIMEZONE)
+        if timezone_name != SPP_TEST_SCHEDULE_TIMEZONE:
+            raise WbSppTesterError(f"timezone must be {SPP_TEST_SCHEDULE_TIMEZONE}", http_status=422)
+        local_time = _normalize_hhmm(raw.get("local_time_hhmm") or raw.get("time") or existing.get("local_time_hhmm") or "12:00")
+        consent = _coerce_bool(raw.get("future_live_price_changes_confirmed"))
+        if enabled and not consent:
+            raise WbSppTesterError(
+                "future_live_price_changes_confirmed=true is required for an enabled schedule",
+                http_status=422,
+            )
+        plan_source = {
+            "nmID": raw.get("nmID") or raw.get("nm_id") or existing.get("nmID"),
+            "range_min_discounted": raw.get("range_min_discounted") or existing.get("range_min_discounted"),
+            "range_max_discounted": raw.get("range_max_discounted") or existing.get("range_max_discounted"),
+            "precision_rub": raw.get("precision_rub") or existing.get("precision_rub") or SPP_TEST_DEFAULT_PRECISION_RUB,
+            "max_measurements": raw.get("max_measurements") or existing.get("max_measurements") or SPP_TEST_DEFAULT_MAX_MEASUREMENTS,
+            "mode": SPP_TEST_MODE_SAFE_SLOW,
+        }
+        parsed: tuple[int, Decimal, Decimal, Decimal, int] | None = None
+        if enabled or plan_source["nmID"] not in {None, ""}:
+            parsed = self._parse_plan_input(plan_source)
+        was_enabled = bool(existing.get("enabled"))
+        now_text = now.isoformat()
+        schedule = {**self._default_schedule(), **dict(existing)}
+        schedule.update(
+            {
+                "id": SCHEDULE_ID,
+                "enabled": enabled,
+                "cadence": SCHEDULE_CADENCE,
+                "local_time_hhmm": local_time,
+                "timezone": timezone_name,
+                "timezone_label": SPP_TEST_SCHEDULE_TIMEZONE_LABEL,
+                "future_live_price_changes_confirmed": consent if enabled else False,
+                "created_at": str(existing.get("created_at") or now_text),
+                "updated_at": now_text,
+                "updated_by": _safe_text(actor, 160),
+                "enabled_since_at": str(existing.get("enabled_since_at") or now_text) if enabled and was_enabled else (now_text if enabled else ""),
+                "next_run_at": _next_daily_run_at(
+                    now,
+                    local_time_hhmm=local_time,
+                    timezone_name=timezone_name,
+                ).isoformat()
+                if enabled
+                else "",
+            }
+        )
+        if parsed is not None:
+            nm_id, range_min, range_max, precision, max_measurements = parsed
+            schedule.update(
+                {
+                    "nmID": nm_id,
+                    "range_min_discounted": _decimal_to_float(range_min),
+                    "range_max_discounted": _decimal_to_float(range_max),
+                    "precision_rub": _decimal_to_float(precision),
+                    "max_measurements": max_measurements,
+                }
+            )
+        return schedule
+
+    def _write_schedule_unlocked(self, schedule: Mapping[str, Any]) -> None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(self._schedule_path, schedule)
+
+    def _schedule_response(self, schedule: Mapping[str, Any]) -> dict[str, Any]:
+        public = _sanitize_public_payload(dict(schedule), details=False)
+        last_job_id = str(schedule.get("last_automatic_job_id") or "")
+        last_job = self._load_job(last_job_id) if last_job_id else None
+        return {
+            "contract_name": SCHEDULE_CONTRACT_NAME,
+            "generated_at": self.timestamp_factory(),
+            "schedule": public,
+            "last_automatic_job": self._job_summary(last_job) if last_job else None,
+        }
+
+    def _update_schedule_after_automatic_job(self, schedule: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, Any]:
+        with self._schedule_file_lock():
+            current = self._load_schedule_unlocked()
+            current.update(
+                {
+                    "last_automatic_run_at": str(job.get("finished_at") or job.get("updated_at") or self.timestamp_factory()),
+                    "last_automatic_status": str(job.get("status") or ""),
+                    "last_automatic_job_id": str(job.get("job_id") or ""),
+                    "last_automatic_result_status": str(job.get("result_status") or ""),
+                    "updated_at": self.timestamp_factory(),
+                }
+            )
+            self._write_schedule_unlocked(current)
+            return current
+
+    def _record_scheduled_skip(
+        self,
+        schedule: Mapping[str, Any],
+        *,
+        reason: str,
+        due_at: datetime,
+        diagnostics: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        job_id = uuid4().hex
+        now_text = self.timestamp_factory()
+        baseline = diagnostics.get("baseline") if isinstance(diagnostics.get("baseline"), Mapping) else {}
+        job = {
+            "job_id": job_id,
+            "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_job",
+            "created_at": now_text,
+            "updated_at": now_text,
+            "finished_at": now_text,
+            "actor": "systemd:spp_schedule",
+            "trigger_source": "schedule",
+            "schedule_id": SCHEDULE_ID,
+            "status": "skipped",
+            "result_status": reason,
+            "nmID": _optional_int(schedule.get("nmID")),
+            "input": {
+                "range_min_discounted": schedule.get("range_min_discounted"),
+                "range_max_discounted": schedule.get("range_max_discounted"),
+                "precision_rub": schedule.get("precision_rub"),
+                "max_measurements": schedule.get("max_measurements"),
+                "mode": SPP_TEST_MODE_SAFE_SLOW,
+                "restore_baseline": True,
+            },
+            "baseline": dict(baseline),
+            "plan": {},
+            "measurements": [],
+            "thresholds": [],
+            "timeline": [{"timestamp": now_text, "status": "skipped", "note": reason}],
+            "restore": {"required": True, "restored": False, "not_started": True, "proof": None, "steps": []},
+            "lifecycle_diagnostics": {
+                "classification": "scheduled_skip",
+                "phase": "skipped",
+                "due_at": due_at.isoformat(),
+                "reason": reason,
+                "diagnostics": _sanitize_public_payload(dict(diagnostics), details=False),
+            },
+            "manual_restore_required": False,
+            "warnings": [reason],
+            "error": _safe_text(diagnostics.get("error"), 1000),
+        }
+        self._save_job(job)
+        self._append_audit(job_id, "schedule_skip", {"reason": reason, "due_at": due_at.isoformat(), "diagnostics": diagnostics})
+        return self._job_public_payload(job, details=True) or {}
+
+    def _scheduler_tick_response(
+        self,
+        status: str,
+        *,
+        schedule: Mapping[str, Any],
+        due_at: datetime | None = None,
+        job: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "contract_name": SCHEDULER_TICK_CONTRACT_NAME,
+            "checked_at": self.timestamp_factory(),
+            "status": status,
+            "due_at": due_at.isoformat() if due_at else "",
+            "schedule": _sanitize_public_payload(dict(schedule), details=False),
+            "job": self._job_public_payload(job, details=True) if job else None,
+        }
+
+    @contextmanager
+    def _schedule_file_lock(self):
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        handle = self._schedule_lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def _acquire_execution_lock(self, *, owner: str, blocking: bool) -> Any | None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        handle = self._execution_lock_path.open("a+", encoding="utf-8")
+        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(handle.fileno(), flags)
+        except BlockingIOError:
+            handle.close()
+            return None
+        metadata = {
+            "owner": _safe_text(owner, 200),
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "acquired_at": self.timestamp_factory(),
+        }
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+        handle.flush()
+        os.fsync(handle.fileno())
+        return handle
+
+    def _release_execution_lock(self, handle: Any, *, job_id: str) -> None:
+        if handle is None:
+            return
+        with self._thread_lock:
+            self._execution_locks.pop(job_id, None)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def _execution_lock_is_held(self) -> bool:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        handle = self._execution_lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+        return False
+
+    def _start_background_job(self, job_id: str, execution_lock: Any) -> None:
         with self._thread_lock:
             existing = self._threads.get(job_id)
             if existing and existing.is_alive():
                 return
-            thread = threading.Thread(target=self._run_job, args=(job_id,), daemon=True)
+            self._execution_locks[job_id] = execution_lock
+            thread = threading.Thread(target=self._run_job_background, args=(job_id,), daemon=True)
             self._threads[job_id] = thread
             thread.start()
+
+    def _run_job_background(self, job_id: str) -> None:
+        try:
+            self._run_job(job_id)
+        finally:
+            with self._thread_lock:
+                handle = self._execution_locks.get(job_id)
+                self._threads.pop(job_id, None)
+            self._release_execution_lock(handle, job_id=job_id)
 
     def _set_job_status(self, job: dict[str, Any], status: str, note: str) -> None:
         job["status"] = status
         job["updated_at"] = self.timestamp_factory()
+        self._set_lifecycle(job, classification="live", phase=status)
         self._append_timeline(job, status, note)
         self._save_job(job)
         self._write_current_job(job)
+
+    def _set_lifecycle(self, job: dict[str, Any], **patch: Any) -> None:
+        lifecycle = dict(job.get("lifecycle_diagnostics") or {}) if isinstance(job.get("lifecycle_diagnostics"), Mapping) else {}
+        lifecycle.update(_json_safe(patch))
+        lifecycle["heartbeat_at"] = self.timestamp_factory()
+        lifecycle.setdefault("runner_pid", os.getpid())
+        lifecycle.setdefault("runner_host", socket.gethostname())
+        job["lifecycle_diagnostics"] = lifecycle
+
+    def _sleep_with_heartbeat(self, job: Mapping[str, Any], seconds: float, *, phase: str) -> None:
+        remaining = max(0.0, float(seconds or 0))
+        if remaining <= 0:
+            return
+        job_id = str(job.get("job_id") or "")
+        while remaining > 0:
+            chunk = min(30.0, remaining)
+            self.sleep(chunk)
+            remaining -= chunk
+            current = self._load_job(job_id) if job_id else None
+            if current and str(current.get("status") or "") in SPP_TEST_ACTIVE_STATUSES:
+                current["updated_at"] = self.timestamp_factory()
+                self._set_lifecycle(current, classification="live", phase=phase)
+                self._save_job(current)
+                self._write_current_job(current)
 
     def _append_timeline(self, job: dict[str, Any], status: str, note: str) -> None:
         job.setdefault("timeline", []).append(
@@ -994,7 +1772,10 @@ class WbSppTesterBlock:
             "payload": _json_safe(payload),
         }
         with self._audit_path.open("a", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _job_path(self, job_id: str) -> Path:
         return self._jobs_dir / f"{job_id}.json"
@@ -1002,21 +1783,22 @@ class WbSppTesterBlock:
     def _save_job(self, job: Mapping[str, Any]) -> None:
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
         job_id = str(job.get("job_id") or "").strip()
-        if not job_id:
+        if not JOB_ID_RE.fullmatch(job_id):
             raise WbSppTesterError("job_id is missing", http_status=500)
-        self._job_path(job_id).write_text(
-            json.dumps(_json_safe(job), ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        with self._state_lock:
+            _atomic_write_json(self._job_path(job_id), job)
 
     def _load_job(self, job_id: str) -> dict[str, Any] | None:
         normalized = str(job_id or "").strip()
-        if not normalized or "/" in normalized or "." in normalized:
+        if not JOB_ID_RE.fullmatch(normalized):
             return None
         path = self._job_path(normalized)
         if not path.exists():
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WbSppTesterError("SPP test job state is not readable", http_status=500) from exc
         return payload if isinstance(payload, dict) else None
 
     def _write_current_job(self, job: Mapping[str, Any]) -> None:
@@ -1025,12 +1807,17 @@ class WbSppTesterBlock:
             "job_id": str(job.get("job_id") or ""),
             "status": str(job.get("status") or ""),
             "heartbeat_at": self.timestamp_factory(),
-            "expires_at_epoch": int(time.time()) + int(self.cadence.active_lock_ttl_seconds),
+            "expires_at_epoch": int(self._now().timestamp()) + int(self.cadence.active_lock_ttl_seconds),
+            "runner_pid": (job.get("lifecycle_diagnostics") or {}).get("runner_pid")
+            if isinstance(job.get("lifecycle_diagnostics"), Mapping)
+            else None,
+            "runner_host": (job.get("lifecycle_diagnostics") or {}).get("runner_host")
+            if isinstance(job.get("lifecycle_diagnostics"), Mapping)
+            else None,
+            "trigger_source": str(job.get("trigger_source") or "") or None,
         }
-        self._current_job_path.write_text(
-            json.dumps(current, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        with self._state_lock:
+            _atomic_write_json(self._current_job_path, current)
 
     def _load_current_job_payload(self) -> dict[str, Any] | None:
         if not self._current_job_path.exists():
@@ -1042,6 +1829,169 @@ class WbSppTesterBlock:
         if not isinstance(current, Mapping):
             return None
         return self._load_job(str(current.get("job_id") or ""))
+
+    def _now(self) -> datetime:
+        value = self.now_factory()
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _sanitize_public_payload(value: Any, *, details: bool, depth: int = 0) -> Any:
+    if depth > 8:
+        return None
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        blocked_markers = ("token", "cookie", "secret", "password", "authorization")
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "")[:160]
+            lowered = key.lower()
+            if (
+                not key
+                or lowered == "headers"
+                or lowered == "path"
+                or lowered.endswith("_path")
+                or any(marker in lowered for marker in blocked_markers)
+            ):
+                continue
+            result[key] = _sanitize_public_payload(raw_value, details=details, depth=depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        limit = 500 if details else 100
+        return [_sanitize_public_payload(item, details=details, depth=depth + 1) for item in value[:limit]]
+    if isinstance(value, str):
+        return value.replace("\x00", "")[:4000 if details else 1000]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _safe_text(value, 1000)
+
+
+def _encode_history_cursor(created_at: str, job_id: str) -> str:
+    raw = json.dumps([created_at, job_id], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_history_cursor(value: str) -> tuple[str, str] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) > 1024:
+        raise WbSppTesterError("invalid history cursor", http_status=400)
+    try:
+        padding = "=" * (-len(text) % 4)
+        payload = json.loads(base64.urlsafe_b64decode((text + padding).encode("ascii")).decode("utf-8"))
+    except Exception as exc:
+        raise WbSppTesterError("invalid history cursor", http_status=400) from exc
+    if not isinstance(payload, list) or len(payload) != 2 or not JOB_ID_RE.fullmatch(str(payload[1] or "")):
+        raise WbSppTesterError("invalid history cursor", http_status=400)
+    return str(payload[0] or "")[:100], str(payload[1])
+
+
+def _duration_seconds(start_value: Any, end_value: Any) -> int | None:
+    start = _parse_iso_datetime(start_value)
+    end = _parse_iso_datetime(end_value)
+    if start is None or end is None or end < start:
+        return None
+    return int((end - start).total_seconds())
+
+
+def _history_sort_key(job: Mapping[str, Any]) -> tuple[str, str]:
+    parsed = _parse_iso_datetime(job.get("created_at") or job.get("updated_at"))
+    timestamp = parsed.astimezone(timezone.utc).isoformat() if parsed is not None else ""
+    return timestamp, str(job.get("job_id") or "")
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _normalize_hhmm(value: Any) -> str:
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise WbSppTesterError("local_time_hhmm must use HH:mm", http_status=422)
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError as exc:
+        raise WbSppTesterError("local_time_hhmm must use HH:mm", http_status=422) from exc
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise WbSppTesterError("local_time_hhmm must be a valid 24-hour time", http_status=422)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _next_daily_run_at(now: datetime, *, local_time_hhmm: str, timezone_name: str) -> datetime:
+    timezone_value = ZoneInfo(timezone_name)
+    local_now = now.astimezone(timezone_value)
+    hour, minute = (int(part) for part in local_time_hhmm.split(":", 1))
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= local_now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _scheduled_skip_reason(exc: WbSppTesterError) -> str:
+    reason = str(exc.payload.get("reason") or "").strip()
+    if reason:
+        return reason
+    if exc.http_status == 403:
+        return "write_guard_disabled"
+    if exc.http_status == 409:
+        return "active_or_unrestored_job"
+    if exc.http_status == 422:
+        return "safety_blocker"
+    return "scheduler_start_failed"
+
+
+def _restore_proof_ok(proof: Mapping[str, Any]) -> bool:
+    return bool(
+        proof.get("price_matches")
+        and proof.get("discount_matches")
+        and proof.get("discountedPrice_matches")
+        and proof.get("quarantine_absent")
+        and proof.get("public_evidence_captured")
+        and _number_or_none(proof.get("spp_proxy")) is not None
+    )
+
+
+def _money_exact(left: Any, right: Any) -> bool:
+    try:
+        return _parse_money(left, "left_money") == _parse_money(right, "right_money")
+    except WbSppTesterError:
+        return False
+
+
+def _bounded_int(value: Any, *, minimum: int, maximum: int, default: int) -> int:
+    parsed = _optional_int(value)
+    if parsed is None:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _safe_text(value: Any, limit: int) -> str:
+    return str(value or "").replace("\n", " ").replace("\r", " ").strip()[:limit]
 
 
 def _load_safety_config() -> WbSppTesterSafetyConfig:
@@ -1065,6 +2015,10 @@ def _load_cadence_config() -> WbSppTesterCadenceConfig:
         readback_max_polls=_env_int("WB_SPP_TEST_READBACK_MAX_POLLS", 12),
         rate_limit_min_cooldown_seconds=_env_int("WB_SPP_TEST_429_COOLDOWN_SECONDS", 900),
         active_lock_ttl_seconds=_env_int("WB_SPP_TEST_LOCK_TTL_SECONDS", 1800),
+        schedule_late_window_minutes=_env_int(
+            "WB_SPP_TEST_SCHEDULE_LATE_WINDOW_MINUTES",
+            SPP_TEST_SCHEDULE_LATE_WINDOW_MINUTES,
+        ),
     )
 
 

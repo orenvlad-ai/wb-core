@@ -111,6 +111,9 @@ DEFAULT_SHEET_PRICES_SPP_TEST_PLAN_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/
 DEFAULT_SHEET_PRICES_SPP_TEST_START_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/start"
 DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/status"
 DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/restore"
+DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/history"
+DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PREFIX = "/v1/sheet-vitrina-v1/prices/spp-test/history/"
+DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/schedule"
 DEFAULT_SKU_MANAGEMENT_PATH = "/v1/sheet-vitrina-v1/sku-management"
 DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/settings"
 DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price/preview"
@@ -906,6 +909,31 @@ def _build_handler(
                     )
                     return
 
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH:
+                try:
+                    payload = _load_request_payload(self)
+                    result = entrypoint.handle_sheet_prices_spp_test_schedule_save_request(
+                        payload,
+                        actor=_current_web_user_config_key(self),
+                    )
+                except WbSppTesterError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices SPP schedule save failed: {exc}"},
+                    )
+                    return
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
@@ -2184,6 +2212,61 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"sheet vitrina prices SPP test status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_prices_spp_test_history_request(_flatten_query_params(parsed.query))
+                except WbSppTesterError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices SPP test history failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path.startswith(DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PREFIX):
+                try:
+                    job_id = parsed.path[len(DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PREFIX) :]
+                    payload = entrypoint.handle_sheet_prices_spp_test_history_detail_request(job_id)
+                except WbSppTesterError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices SPP test history detail failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH:
+                try:
+                    payload = entrypoint.handle_sheet_prices_spp_test_schedule_request()
+                except WbSppTesterError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"sheet vitrina prices SPP schedule failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -6848,6 +6931,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "prices_spp_test_start_path": DEFAULT_SHEET_PRICES_SPP_TEST_START_PATH,
         "prices_spp_test_status_path": DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH,
         "prices_spp_test_restore_path": DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH,
+        "prices_spp_test_history_path": DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH,
+        "prices_spp_test_schedule_path": DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH,
         "sku_management_path": DEFAULT_SKU_MANAGEMENT_PATH,
         "sku_management_settings_path": DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH,
         "sku_management_price_preview_path": DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH,

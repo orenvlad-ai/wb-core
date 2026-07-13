@@ -12,6 +12,11 @@ SPP_TEST_MAX_MEASUREMENTS_MIN = 3
 SPP_TEST_MAX_MEASUREMENTS_MAX = 30
 SPP_TEST_DEFAULT_PRECISION_RUB = 2
 SPP_TEST_DEFAULT_MAX_MEASUREMENTS = 8
+SPP_TEST_SCHEDULE_TIMEZONE = "Asia/Yekaterinburg"
+SPP_TEST_SCHEDULE_TIMEZONE_LABEL = "Оренбург"
+SPP_TEST_SCHEDULE_LATE_WINDOW_MINUTES = 15
+SPP_TEST_HISTORY_DEFAULT_LIMIT = 20
+SPP_TEST_HISTORY_MAX_LIMIT = 50
 
 SPP_TEST_ACTIVE_STATUSES = {
     "planning",
@@ -22,6 +27,8 @@ SPP_TEST_ACTIVE_STATUSES = {
 }
 SPP_TEST_FINAL_STATUSES = {
     "complete",
+    "interrupted_restored",
+    "skipped",
     "threshold_detected",
     "threshold_not_detected",
     "inconclusive",
@@ -35,6 +42,8 @@ SppTestJobStatus = Literal[
     "cooldown",
     "restoring",
     "complete",
+    "interrupted_restored",
+    "skipped",
     "manual_restore_required",
     "failed",
 ]
