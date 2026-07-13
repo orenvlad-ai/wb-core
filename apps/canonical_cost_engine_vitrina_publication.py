@@ -176,7 +176,11 @@ def _backup(source: Path, destination: Path) -> dict[str, Any]:
     destination.chmod(0o600)
     with closing(sqlite3.connect(f"file:{destination.resolve()}?mode=ro", uri=True)) as conn:
         integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
-    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    digest_hash = hashlib.sha256()
+    with destination.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest_hash.update(chunk)
+    digest = digest_hash.hexdigest()
     return {"path": str(destination), "mode": oct(destination.stat().st_mode & 0o777), "integrity": integrity, "sha256": digest, "size": destination.stat().st_size}
 
 
