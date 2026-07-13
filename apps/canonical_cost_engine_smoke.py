@@ -22,12 +22,15 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     POSTCUTOVER_NORMALIZATION_POLICY,
     UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION,
     UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST,
+    UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2,
     UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+    UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2,
     _ff_opening_boundary_context,
     _normalized_acceptance_plan,
     _source_anomaly_preflight_conn,
     _unmatched_doprinato_manifest_decision,
     _unmatched_doprinato_manifest_report,
+    _unmatched_doprinato_manifest_report_v2,
     _wb_movement_evidence,
     _wb_supply_cache_evidence,
     allocate_partial_payment,
@@ -332,6 +335,7 @@ def _cutover_boundary_and_normalization_policy() -> None:
 
 def _exact_unmatched_doprinato_absorption_manifest() -> None:
     report = _unmatched_doprinato_manifest_report()
+    report_v2 = _unmatched_doprinato_manifest_report_v2()
     _eq(report["policy"], UNMATCHED_DOPRINATO_ABSORPTION_POLICY, "policy")
     _eq(report["supply_count"], 10, "exact manifest supply count")
     _eq(report["sku_count"], 7, "exact manifest SKU count")
@@ -348,6 +352,35 @@ def _exact_unmatched_doprinato_absorption_manifest() -> None:
     )
     if not str(report["manifest_fingerprint"]).startswith("sha256:"):
         raise AssertionError("manifest must expose a stable SHA-256 fingerprint")
+    _eq(
+        report["manifest_fingerprint"],
+        "sha256:d9dc86710a5a2a6cf607d898807e4d9f2ba40fd9bb77ff9fc98e5e6c9b3d0945",
+        "V1 fingerprint remains unchanged",
+    )
+    _eq(report_v2["policy"], UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2, "V2 policy")
+    _eq(report_v2["row_count"], 9, "V2 exact row count")
+    _eq(report_v2["supply_count"], 5, "V2 affected supply count")
+    _eq(report_v2["unit_count"], "12", "V2 exact unit count")
+    _eq(
+        report_v2["manifest_fingerprint"],
+        "sha256:1076507575d785395dde47be185fa1144c49c1e4af7b404ea252e87652656161",
+        "V2 manifest fingerprint",
+    )
+    _eq(
+        report_v2["recognized_reference_exposure_rub"],
+        "1385.410826",
+        "V2 recognized audit exposure",
+    )
+    _eq(
+        report_v2["paid_reference_exposure_rub"],
+        "1385.410826",
+        "V2 paid audit exposure",
+    )
+
+    all_manifest_rows = [
+        *UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values(),
+        *UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.values(),
+    ]
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -367,7 +400,7 @@ def _exact_unmatched_doprinato_absorption_manifest() -> None:
                      '2026-07-13T00:00:00Z')
             """
         )
-        for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values():
+        for expected in all_manifest_rows:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO sheet_vitrina_v1_canonical_cost_baseline_lines(
@@ -473,11 +506,51 @@ def _exact_unmatched_doprinato_absorption_manifest() -> None:
                     f"{expected['business_date']}T00:00:00Z",
                 ),
             )
+        # V2 shares persisted supply rows with V1 but pins additional exact
+        # SKU lines.  Keep one authoritative raw supply row per supply.
+        for supply_id in sorted(
+            {str(row["supply_id"]) for row in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.values()}
+        ):
+            source = conn.execute(
+                "SELECT raw_goods_json,quantity_for_size_filter FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=?",
+                (supply_id,),
+            ).fetchone()
+            goods = json.loads(str(source["raw_goods_json"]))
+            extra = [
+                {
+                    "nmID": int(row["nm_id"]),
+                    "acceptedQuantity": int(row["quantity"]),
+                }
+                for row in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.values()
+                if str(row["supply_id"]) == supply_id
+            ]
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_wb_supplies SET raw_goods_json=?,quantity_for_size_filter=? WHERE supply_id=?",
+                (
+                    json.dumps([*goods, *extra]),
+                    int(source["quantity_for_size_filter"] or 0)
+                    + sum(int(row["acceptedQuantity"]) for row in extra),
+                    supply_id,
+                ),
+            )
         conn.commit()
         original_fingerprints = {
             supply_id: str(row["raw_row_line_fingerprint"])
             for supply_id, row in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.items()
         }
+        original_v2_fingerprints = {
+            key: {
+                field: str(row[field])
+                for field in (
+                    "raw_source_row_fingerprint",
+                    "raw_source_line_fingerprint",
+                    "raw_row_line_fingerprint",
+                    "semantic_evidence_fingerprint",
+                )
+            }
+            for key, row in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.items()
+        }
+        last_v2_fact = None
         for fact_row in _wb_supply_cache_evidence(conn, date_to="2026-07-13"):
             expected = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.get(
                 str(fact_row["supply_id"])
@@ -488,25 +561,95 @@ def _exact_unmatched_doprinato_absorption_manifest() -> None:
                 expected["raw_row_line_fingerprint"] = str(
                     fact_row["raw_row_line_fingerprint"]
                 )
+            expected_v2 = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.get(
+                (str(fact_row["supply_id"]), int(fact_row["nm_id"]))
+            )
+            if expected_v2 is not None:
+                last_v2_fact = dict(fact_row)
+                for field in (
+                    "raw_source_row_fingerprint",
+                    "raw_source_line_fingerprint",
+                    "raw_row_line_fingerprint",
+                    "semantic_evidence_fingerprint",
+                ):
+                    expected_v2[field] = str(fact_row[field])
+                decision_v2 = _unmatched_doprinato_manifest_decision(
+                    conn, fact_row
+                )
+                if decision_v2 is None or not decision_v2["matched"]:
+                    raise AssertionError(
+                        "exact V2 absorption row did not match: "
+                        f"{fact_row['supply_id']}/{fact_row['nm_id']}"
+                    )
+        if last_v2_fact is None:
+            raise AssertionError("V2 fixture did not produce source evidence")
+        original_identity_drift = dict(
+            last_v2_fact, original_supply_id="fabricated-original"
+        )
+        drift_decision_v2 = _unmatched_doprinato_manifest_decision(
+            conn, original_identity_drift
+        )
+        if drift_decision_v2 is None or drift_decision_v2["matched"]:
+            raise AssertionError("fabricated V2 original_supply_id must fail closed")
+        last_v2_expected = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2[
+            (str(last_v2_fact["supply_id"]), int(last_v2_fact["nm_id"]))
+        ]
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_canonical_cost_baseline_lines
+            SET recognized_unit_cost_rub='999'
+            WHERE baseline_id='baseline' AND nm_id=? AND stage=?
+            """,
+            (
+                int(last_v2_expected["nm_id"]),
+                str(last_v2_expected["cost_reference_stage"]),
+            ),
+        )
+        cost_drift_decision = _unmatched_doprinato_manifest_decision(
+            conn, last_v2_fact
+        )
+        if cost_drift_decision is None or cost_drift_decision["matched"]:
+            raise AssertionError("changed current canonical V2 cost must fail closed")
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_canonical_cost_baseline_lines
+            SET recognized_unit_cost_rub=?
+            WHERE baseline_id='baseline' AND nm_id=? AND stage=?
+            """,
+            (
+                str(last_v2_expected["recognized_reference_unit_cost_rub"]),
+                int(last_v2_expected["nm_id"]),
+                str(last_v2_expected["cost_reference_stage"]),
+            ),
+        )
         preflight = _source_anomaly_preflight_conn(
             conn, date_to="2026-07-13", baseline_costs={}
         )
         _eq(preflight["status"], "ok", "exact manifest clears strict preflight")
-        _eq(len(preflight["anomalies"]), 10, "all exact rows are audited")
+        _eq(len(preflight["anomalies"]), 19, "all exact rows are audited")
         _eq(
             preflight["unmatched_doprinato_absorption"]["matched_unit_count"],
-            "11",
+            "23",
             "all exact units matched",
         )
         if preflight["unmatched_doprinato_absorption"]["all_rows_match"] is not True:
             raise AssertionError("full exact manifest did not match")
+        _eq(
+            preflight["unmatched_doprinato_absorption"]["approved_row_count"],
+            19,
+            "combined manifest row count",
+        )
         if any(
             item["raw_quantities"]["movement_quantity_delta"] != "0"
             or item["raw_quantities"]["recognized_capital_delta_rub"] != "0"
+            or item["raw_quantities"]["paid_capital_delta_rub"] != "0"
             or item["raw_quantities"]["confirmation_quantity_delta"] != "0"
+            or item["raw_quantities"]["underaccepted_quantity_delta"] != "0"
             for item in preflight["anomalies"]
         ):
-            raise AssertionError("absorption manifest created quantity/capital/confirmation")
+            raise AssertionError(
+                "absorption manifest created quantity/capital/confirmation/underaccepted"
+            )
         movements = _wb_movement_evidence(
             conn, as_of_date="2026-07-13", anomaly_report=preflight
         )
@@ -530,6 +673,25 @@ def _exact_unmatched_doprinato_absorption_manifest() -> None:
                 raise AssertionError("removed exact row did not return to blocker")
         finally:
             UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST[removed_supply_id] = removed
+
+        removed_v2_key = ("40765458", 497414624)
+        removed_v2 = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.pop(
+            removed_v2_key
+        )
+        try:
+            removed_v2_report = _source_anomaly_preflight_conn(
+                conn, date_to="2026-07-13", baseline_costs={}
+            )
+            if removed_v2_report["status"] != "blocked" or not any(
+                item.get("supply_id") == removed_v2_key[0]
+                and int(item.get("nm_id") or 0) == removed_v2_key[1]
+                for item in removed_v2_report["unresolved_anomalies"]
+            ):
+                raise AssertionError("removed V2 row did not return to blocker")
+        finally:
+            UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2[
+                removed_v2_key
+            ] = removed_v2
 
         conn.execute(
             """
@@ -572,6 +734,10 @@ def _exact_unmatched_doprinato_absorption_manifest() -> None:
             UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST[supply_id][
                 "raw_row_line_fingerprint"
             ] = fingerprint
+        for key, fingerprints in original_v2_fingerprints.items():
+            UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2[key].update(
+                fingerprints
+            )
     finally:
         conn.close()
 

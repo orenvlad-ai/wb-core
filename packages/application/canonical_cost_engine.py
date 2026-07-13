@@ -85,6 +85,16 @@ UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE = "2026-07-13"
 UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT = (
     "d03d574bec2ac1d0133736c5d9b5d3441f11fba0d4fb7d182645e711df10dfb5"
 )
+UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2 = (
+    "CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V2"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_REASON_V2 = (
+    "human_approved_exact_remaining_unmatched_doprinato_already_absorbed_by_official_wb_stock"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V2 = "2026-07-13"
+UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V2 = (
+    "99eca22fa972f0207b60cd4fb699b608d637ca4fcee41ca7fd273aa93863c2ec"
+)
 POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {
     "ffso_14303efbdb04425baf54": {
         "operation_id": "ffso_14303efbdb04425baf54",
@@ -266,6 +276,176 @@ UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST: dict[str, dict[str, Any]] = {
         "raw_row_line_fingerprint": "sha256:727b16abec9c3eab45c658a3b45bdc55e12d9b17dde79acc8f3414a3e313d808",
         "status": "final-accepted",
         "cost_reference_stage": STAGE_FF,
+        "recognized_reference_unit_cost_rub": "100.146048",
+        "paid_reference_unit_cost_rub": "100.146048",
+    },
+}
+
+# V1 above is immutable.  V2 is a distinct approval and is keyed by the exact
+# supply/SKU identity because multiple approved source lines can share one
+# persisted doprinato supply.  It has no wildcard or quantity tolerance.
+UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2: dict[
+    tuple[str, int], dict[str, Any]
+] = {
+    ("40610543", 391662410): {
+        "supply_id": "40610543",
+        "business_date": "2026-07-05",
+        "nm_id": 391662410,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "2",
+        "source_identity": "supply:40610543",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:9607cc6234a5b7866cbda1b0021bc9e7e4f315d8d41f738e10c4b883ec9d6c8b",
+        "raw_source_line_fingerprint": "sha256:32b72a4189df276bf791072d15ad8135af35a941bf66b259d2319bbae705f302",
+        "raw_row_line_fingerprint": "sha256:2b87137767b15d00203f39be531df3fce8ceee7ab5bb6942040edea05f41fada",
+        "semantic_evidence_fingerprint": "sha256:c19db9557ae51c93ae164f51ee8d5d299e498fcaf3ab605707d658de1af914f5",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "116.642298",
+        "paid_reference_unit_cost_rub": "116.642298",
+    },
+    ("40610543", 428855560): {
+        "supply_id": "40610543",
+        "business_date": "2026-07-05",
+        "nm_id": 428855560,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40610543",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:9607cc6234a5b7866cbda1b0021bc9e7e4f315d8d41f738e10c4b883ec9d6c8b",
+        "raw_source_line_fingerprint": "sha256:15668716ec327a12123aceedf541d7557d6f05a824e48d259e36574f6a26dd5b",
+        "raw_row_line_fingerprint": "sha256:fb356bdd64ccff27b85975b99b75db5e29cd9e7c37aa3c22a1c1768717779fa1",
+        "semantic_evidence_fingerprint": "sha256:0ed7fc34f2ec995432f4f00b4c49a544c046726c840242ab8195e33b567bf905",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "111.143548",
+        "paid_reference_unit_cost_rub": "111.143548",
+    },
+    ("40654176", 391660889): {
+        "supply_id": "40654176",
+        "business_date": "2026-07-07",
+        "nm_id": 391660889,
+        "warehouse": "Склад Шушары",
+        "destination": "Склад Шушары",
+        "quantity": "1",
+        "source_identity": "supply:40654176",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:42b9584a0fdf0fa2632eeeecb0f8c8c507d9459b5f5f881fb33df59464e1146e",
+        "raw_source_line_fingerprint": "sha256:31476c4814c960fb0325c0e90528dc949dd444438a4920589bb1e188dfc89e36",
+        "raw_row_line_fingerprint": "sha256:b746f54b3b9308320e9fe0f9a0b3d963d99e824a24d497e577c7f3a0b74a877e",
+        "semantic_evidence_fingerprint": "sha256:41d8d5b23c561122507bd3253b5809761660456fb890d434f223e69a1ad6bbed",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "123.240798",
+        "paid_reference_unit_cost_rub": "123.240798",
+    },
+    ("40739431", 391662965): {
+        "supply_id": "40739431",
+        "business_date": "2026-07-10",
+        "nm_id": 391662965,
+        "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14",
+        "quantity": "1",
+        "source_identity": "supply:40739431",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:1a316aa794752e4e7aabb47acdaa68436e8fd9efd4685126efd4046c19990734",
+        "raw_source_line_fingerprint": "sha256:855f92f1b24ad464b82f9c045e761efcebc1f0e4a363b5d2c03c1c611b560208",
+        "raw_row_line_fingerprint": "sha256:013ae02c344ab95be24536684e7c9f4a35bcea689eed6ffcaf8ad5309944f73b",
+        "semantic_evidence_fingerprint": "sha256:6d53be9b1c069839d4c5934d004231fec7e4773102e223ebc394b4d8e4303325",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "119.941548",
+        "paid_reference_unit_cost_rub": "119.941548",
+    },
+    ("40765457", 391661710): {
+        "supply_id": "40765457",
+        "business_date": "2026-07-11",
+        "nm_id": 391661710,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40765457",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:5a3c2002d5fac188e34da8cd6e72511e5d1e8971ea35f4e5c8adcaf1c3ae1e5e",
+        "raw_source_line_fingerprint": "sha256:d5bc78fb3fb0b83ccd881add4181450fd3f8aac724085b030d8a372628a7d0cc",
+        "raw_row_line_fingerprint": "sha256:70fe1e98a3d7b52dcf8f5b1607c1f9615bfa534c570c2b211cf8cf223b4138e2",
+        "semantic_evidence_fingerprint": "sha256:54dcddd1ee9ddbb2a22fee2cf782380eaa5d38c4123a52f5cb0546c037075d93",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_FF,
+        "recognized_reference_unit_cost_rub": "123.240798",
+        "paid_reference_unit_cost_rub": "123.240798",
+    },
+    ("40765457", 391662410): {
+        "supply_id": "40765457",
+        "business_date": "2026-07-11",
+        "nm_id": 391662410,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40765457",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:5a3c2002d5fac188e34da8cd6e72511e5d1e8971ea35f4e5c8adcaf1c3ae1e5e",
+        "raw_source_line_fingerprint": "sha256:b87138b129aa87b7e8825499cdbf868fbf5e33b0cbf115191948cede3e020a03",
+        "raw_row_line_fingerprint": "sha256:c14e8c3b20911e9a0eddbdfb06d1eb68a82742d0bba50c73e9f8710aac90f739",
+        "semantic_evidence_fingerprint": "sha256:f277d64e85a14b3ee706ae9b3c7ea1341000c43e65196a268b4f5bb888c47cb9",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "116.642298",
+        "paid_reference_unit_cost_rub": "116.642298",
+    },
+    ("40765457", 428854140): {
+        "supply_id": "40765457",
+        "business_date": "2026-07-11",
+        "nm_id": 428854140,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "3",
+        "source_identity": "supply:40765457",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:5a3c2002d5fac188e34da8cd6e72511e5d1e8971ea35f4e5c8adcaf1c3ae1e5e",
+        "raw_source_line_fingerprint": "sha256:7d63b9e4f541081ccad25477a959d7c5613682f5f2f731d528274daac347755d",
+        "raw_row_line_fingerprint": "sha256:05929e4ed0b956599c0f4b43cef6294a44ff1de7933ef6d89ef317560fc6c58d",
+        "semantic_evidence_fingerprint": "sha256:e8e18fbb60a55fe188f3626c4a6f7afa5d3f3647cbf65af7b60cbc9598ca72fa",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "114.442798",
+        "paid_reference_unit_cost_rub": "114.442798",
+    },
+    ("40765457", 428854299): {
+        "supply_id": "40765457",
+        "business_date": "2026-07-11",
+        "nm_id": 428854299,
+        "warehouse": "Электросталь",
+        "destination": "Электросталь",
+        "quantity": "1",
+        "source_identity": "supply:40765457",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:5a3c2002d5fac188e34da8cd6e72511e5d1e8971ea35f4e5c8adcaf1c3ae1e5e",
+        "raw_source_line_fingerprint": "sha256:a78b211cbea97323fb55455e50a75f8e3b4ba167175c1a05309a75b70563f3f5",
+        "raw_row_line_fingerprint": "sha256:e6ed64bc90a7402796b92c299e0b6bdbd525f30b52977fa578018402098689c2",
+        "semantic_evidence_fingerprint": "sha256:ee245add766c119f42f796d27790ac2d422733afb7874fb91d3954bad9df8b59",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "114.442798",
+        "paid_reference_unit_cost_rub": "114.442798",
+    },
+    ("40765458", 497414624): {
+        "supply_id": "40765458",
+        "business_date": "2026-07-11",
+        "nm_id": 497414624,
+        "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14",
+        "quantity": "1",
+        "source_identity": "supply:40765458",
+        "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:68d7558524b2181e946d105c4cdb88edaf108167b42008c92eab0454e9b9e7e4",
+        "raw_source_line_fingerprint": "sha256:bd4f37de2c9e9d8cf1991f280473521e17d74dc1f39c8177b3eafcf0130e5aef",
+        "raw_row_line_fingerprint": "sha256:5e361c407f7c3d6520bcb6cfa8d8a440211a7663571ff7bbaabcede83a732f3a",
+        "semantic_evidence_fingerprint": "sha256:f96a323ba42bbabdf779811ef7fd73017fd775c7b2eef15eb59391f438819847",
+        "status": "final-accepted",
+        "cost_reference_stage": STAGE_WB,
         "recognized_reference_unit_cost_rub": "100.146048",
         "paid_reference_unit_cost_rub": "100.146048",
     },
@@ -921,9 +1101,10 @@ class CanonicalCostEngine:
             "policy": POSTCUTOVER_NORMALIZATION_POLICY,
             "policies": {
                 "accepted_composition": POSTCUTOVER_NORMALIZATION_POLICY,
-                "unmatched_doprinato_absorption": (
-                    UNMATCHED_DOPRINATO_ABSORPTION_POLICY
-                ),
+                "unmatched_doprinato_absorption": [
+                    UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+                    UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2,
+                ],
             },
             "cutover_date": CUTOVER_DATE,
             "date_to": end,
@@ -998,7 +1179,8 @@ class CanonicalCostEngine:
 
         supplier_paid = self._supplier_payment_projection_as_of(CUTOVER_DATE)
         result: dict[tuple[int, str], dict[str, Any]] = {}
-        for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values():
+        for manifest_entry in _unmatched_doprinato_manifest_entries():
+            expected = manifest_entry["expected"]
             nm_id = int(expected["nm_id"])
             stage = str(expected["cost_reference_stage"])
             source = baseline_costs.get(nm_id)
@@ -3910,16 +4092,16 @@ def _source_anomaly_preflight_conn(
         (item for item in _wb_supply_cache_evidence(conn, date_to=date_to) if item["is_doprinato"]),
         key=lambda item: (item["accepted_date"], item["supply_id"], item["nm_id"]),
     )
+    manifest_entries = _unmatched_doprinato_manifest_entries()
     manifest_source_keys = {
         (str(item["supply_id"]), int(item["nm_id"]))
         for item in doprinato
-        if str(item["supply_id"]) in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST
-        and int(item["nm_id"])
-        == int(
-            UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST[str(item["supply_id"])][
-                "nm_id"
-            ]
-        )
+        if _unmatched_doprinato_manifest_entry(
+            str(item["supply_id"]), int(item["nm_id"])
+        ) is not None
+    }
+    manifest_supply_ids = {
+        str(item["expected"]["supply_id"]) for item in manifest_entries
     }
     persisted_manifest_supply_count = sum(
         int(
@@ -3928,9 +4110,9 @@ def _source_anomaly_preflight_conn(
                 (supply_id,),
             ).fetchone()[0]
         )
-        for supply_id in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST
+        for supply_id in manifest_supply_ids
     )
-    matched_absorption_supply_ids: set[str] = set()
+    matched_absorption_identities: set[tuple[str, str, int]] = set()
     for fact in doprinato:
         fact_key = (str(fact["supply_id"]), int(fact["nm_id"]))
         if fact_key in quarantined_doprinato_keys:
@@ -3967,7 +4149,13 @@ def _source_anomaly_preflight_conn(
             ]
             matched = bool(manifest_decision["matched"])
             if matched:
-                matched_absorption_supply_ids.add(str(fact["supply_id"]))
+                matched_absorption_identities.add(
+                    (
+                        str(manifest_decision["policy"]),
+                        str(fact["supply_id"]),
+                        int(fact["nm_id"]),
+                    )
+                )
             anomalies.append(
                 {
                     "blocker_class": "doprinato_unmatched_surplus",
@@ -4035,11 +4223,11 @@ def _source_anomaly_preflight_conn(
                         if matched else "manifest_drift"
                     ),
                     "eligible": matched,
-                    "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+                    "policy": str(manifest_decision["policy"]),
                     "policy_guard_failures": guard_failures,
                     "manifest_decision": manifest_decision,
                     "reason": (
-                        UNMATCHED_DOPRINATO_ABSORPTION_REASON
+                        str(manifest_decision["reason"])
                         if matched else "; ".join(guard_failures)
                     ),
                     "gross_discrepancy": quantity,
@@ -4151,14 +4339,16 @@ def _source_anomaly_preflight_conn(
         )
 
     if persisted_manifest_supply_count:
-        for supply_id in sorted(
-            set(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST)
-            - matched_absorption_supply_ids
-        ):
-            expected = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST[supply_id]
+        for manifest_entry in manifest_entries:
+            expected = manifest_entry["expected"]
+            policy = str(manifest_entry["policy"])
+            supply_id = str(expected["supply_id"])
+            nm_id = int(expected["nm_id"])
+            if (policy, supply_id, nm_id) in matched_absorption_identities:
+                continue
             if str(expected["business_date"]) > date_to:
                 continue
-            if (supply_id, int(expected["nm_id"])) in manifest_source_keys:
+            if (supply_id, nm_id) in manifest_source_keys:
                 # Present-but-drifted evidence already emitted its exact
                 # mismatch record above.
                 continue
@@ -4168,7 +4358,7 @@ def _source_anomaly_preflight_conn(
                     "operation_id": "",
                     "supply_id": supply_id,
                     "business_date": str(expected["business_date"]),
-                    "nm_id": int(expected["nm_id"]),
+                    "nm_id": nm_id,
                     "raw_quantities": {},
                     "discrepancy": str(expected["quantity"]),
                     "source_identity": str(expected["source_identity"]),
@@ -4176,6 +4366,7 @@ def _source_anomaly_preflight_conn(
                     "cost_source": None,
                     "classification": "unmatched_doprinato_absorption_manifest_drift",
                     "eligible": False,
+                    "policy": policy,
                     "reason": "approved exact manifest source row is missing",
                 }
             )
@@ -4461,7 +4652,11 @@ def _source_anomaly_preflight_conn(
         "source_protected_pre_cutover_digest_anomaly": "checked_by_backfill_runner",
         "potential_non_idempotency": len(duplicate_rows),
     }
-    manifest_report = _unmatched_doprinato_manifest_report()
+    manifest_reports = [
+        _unmatched_doprinato_manifest_report(),
+        _unmatched_doprinato_manifest_report_v2(),
+    ]
+    manifest_report = manifest_reports[0]
     matched_absorptions = [
         item
         for item in eligible
@@ -4470,6 +4665,32 @@ def _source_anomaly_preflight_conn(
     ]
     absorption_report = {
         **manifest_report,
+        "versions": manifest_reports,
+        "version_fingerprints": {
+            str(report["policy"]): str(report["manifest_fingerprint"])
+            for report in manifest_reports
+        },
+        "approved_row_count": sum(
+            int(report["row_count"]) for report in manifest_reports
+        ),
+        "approved_supply_count": len(
+            {
+                str(entry["expected"]["supply_id"])
+                for entry in manifest_entries
+            }
+        ),
+        "approved_sku_count": len(
+            {int(entry["expected"]["nm_id"]) for entry in manifest_entries}
+        ),
+        "approved_unit_count": _text(
+            sum(
+                (
+                    _decimal(entry["expected"]["quantity"])
+                    for entry in manifest_entries
+                ),
+                ZERO,
+            )
+        ),
         "classification": UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION,
         "source_quality": UNMATCHED_DOPRINATO_ABSORPTION_SOURCE_QUALITY,
         "matched_supply_count": len(
@@ -4487,8 +4708,8 @@ def _source_anomaly_preflight_conn(
         "all_rows_match": (
             len(matched_absorptions)
             == sum(
-                str(row["business_date"]) <= date_to
-                for row in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values()
+                str(entry["expected"]["business_date"]) <= date_to
+                for entry in manifest_entries
             )
         ),
         "movement_quantity_delta": "0",
@@ -4675,6 +4896,7 @@ def _unmatched_doprinato_manifest_report() -> dict[str, Any]:
     return {
         **payload,
         "manifest_fingerprint": "sha256:" + _stable_hash(payload),
+        "row_count": len(rows),
         "supply_count": len(rows),
         "sku_count": len({int(row["nm_id"]) for row in rows}),
         "unit_count": _text(
@@ -4682,6 +4904,111 @@ def _unmatched_doprinato_manifest_report() -> dict[str, Any]:
         ),
         "recognized_reference_exposure_rub": _text(recognized),
         "paid_reference_exposure_rub": _text(paid),
+    }
+
+
+def _unmatched_doprinato_manifest_report_v2() -> dict[str, Any]:
+    """Report the second approval without changing V1's payload/fingerprint."""
+
+    rows = [
+        dict(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2[key])
+        for key in sorted(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2)
+    ]
+    payload = {
+        "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2,
+        "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V2,
+        "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON_V2,
+        "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V2,
+        "rows": rows,
+    }
+    recognized = sum(
+        (
+            _decimal(row["quantity"])
+            * _decimal(row["recognized_reference_unit_cost_rub"])
+            for row in rows
+        ),
+        ZERO,
+    )
+    paid = sum(
+        (
+            _decimal(row["quantity"])
+            * _decimal(row["paid_reference_unit_cost_rub"])
+            for row in rows
+        ),
+        ZERO,
+    )
+    return {
+        **payload,
+        "manifest_fingerprint": "sha256:" + _stable_hash(payload),
+        "row_count": len(rows),
+        "supply_count": len({str(row["supply_id"]) for row in rows}),
+        "sku_count": len({int(row["nm_id"]) for row in rows}),
+        "unit_count": _text(
+            sum((_decimal(row["quantity"]) for row in rows), ZERO)
+        ),
+        "recognized_reference_exposure_rub": _text(recognized),
+        "paid_reference_exposure_rub": _text(paid),
+    }
+
+
+def _unmatched_doprinato_manifest_entries() -> list[dict[str, Any]]:
+    """Return both exact approvals with policy-specific provenance."""
+
+    entries = [
+        {
+            "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+            "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON,
+            "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE,
+            "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT,
+            "expected": expected,
+        }
+        for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values()
+    ]
+    entries.extend(
+        {
+            "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2,
+            "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON_V2,
+            "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V2,
+            "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V2,
+            "expected": expected,
+        }
+        for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.values()
+    )
+    return sorted(
+        entries,
+        key=lambda item: (
+            str(item["policy"]),
+            str(item["expected"]["supply_id"]),
+            int(item["expected"]["nm_id"]),
+        ),
+    )
+
+
+def _unmatched_doprinato_manifest_entry(
+    supply_id: str, nm_id: int
+) -> dict[str, Any] | None:
+    """Resolve only one fully specified supply/SKU manifest identity."""
+
+    v1 = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.get(str(supply_id))
+    if v1 is not None and int(v1["nm_id"]) == int(nm_id):
+        return {
+            "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+            "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON,
+            "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE,
+            "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT,
+            "expected": v1,
+        }
+    v2 = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.get(
+        (str(supply_id), int(nm_id))
+    )
+    if v2 is None:
+        return None
+    return {
+        "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2,
+        "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON_V2,
+        "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V2,
+        "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V2,
+        "expected": v2,
     }
 
 
@@ -4732,9 +5059,12 @@ def _unmatched_doprinato_manifest_decision(
     """Return an exact allowlist decision, including fail-closed drift proof."""
 
     supply_id = str(fact.get("supply_id") or "")
-    expected = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.get(supply_id)
-    if expected is None or int(fact.get("nm_id") or 0) != int(expected["nm_id"]):
+    manifest_entry = _unmatched_doprinato_manifest_entry(
+        supply_id, int(fact.get("nm_id") or 0)
+    )
+    if manifest_entry is None:
         return None
+    expected = manifest_entry["expected"]
     reference = dict(
         (baseline_cost_references or {}).get(
             (int(expected["nm_id"]), str(expected["cost_reference_stage"]))
@@ -4749,8 +5079,18 @@ def _unmatched_doprinato_manifest_decision(
         "destination": str(fact.get("destination") or ""),
         "quantity": _text(_decimal(fact.get("accepted_quantity"))),
         "source_identity": str(fact.get("source_identity") or ""),
+        "original_supply_id": str(fact.get("original_supply_id") or ""),
+        "raw_source_row_fingerprint": str(
+            fact.get("raw_source_row_fingerprint") or ""
+        ),
+        "raw_source_line_fingerprint": str(
+            fact.get("raw_source_line_fingerprint") or ""
+        ),
         "raw_row_line_fingerprint": str(
             fact.get("raw_row_line_fingerprint") or ""
+        ),
+        "semantic_evidence_fingerprint": str(
+            fact.get("semantic_evidence_fingerprint") or ""
         ),
         "status": (
             "final-accepted" if bool(fact.get("is_final_accepted")) else ""
@@ -4780,11 +5120,14 @@ def _unmatched_doprinato_manifest_decision(
         "cost_reference": reference,
         "classification": UNMATCHED_DOPRINATO_ABSORPTION_CLASSIFICATION,
         "source_quality": UNMATCHED_DOPRINATO_ABSORPTION_SOURCE_QUALITY,
-        "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON,
+        "policy": str(manifest_entry["policy"]),
+        "reason": str(manifest_entry["reason"]),
         "human_approval": {
-            "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE,
-            "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT,
-            "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
+            "approval_date": str(manifest_entry["approval_date"]),
+            "diagnostic_fingerprint": str(
+                manifest_entry["diagnostic_fingerprint"]
+            ),
+            "policy": str(manifest_entry["policy"]),
         },
     }
 

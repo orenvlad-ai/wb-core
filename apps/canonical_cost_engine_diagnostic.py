@@ -24,6 +24,7 @@ from apps.canonical_cost_engine_backfill import (  # noqa: E402
     _canonical_digest,
     _candidate_reconciliation,
     _integrity_check,
+    _layer_cost_continuity,
     _legacy_digest,
     _sqlite_backup,
     _tables_digest,
@@ -50,6 +51,7 @@ PIPELINE_STAGES = (
     "acceptance",
     "doprinato_direct_fifo",
     "outstanding_underaccepted",
+    "layer_cost_continuity",
     "recognized_wac",
     "paid_wac",
     "daily_state",
@@ -287,6 +289,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "wb_movement_layers",
             "acceptance",
             "outstanding_underaccepted",
+            "layer_cost_continuity",
             "recognized_wac",
             "paid_wac",
             "daily_state",
@@ -308,6 +311,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         rebuild_payload: dict[str, Any] | None = None
         reconciliation_payload: dict[str, Any] | None = None
+        layer_cost_continuity_payload: dict[str, Any] | None = None
         if quarantine_source["status"] == "ok" and baseline is not None:
             try:
                 pipeline_quarantine_attempts: list[dict[str, Any]] = []
@@ -403,6 +407,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 reconciliation_payload = _candidate_reconciliation(
                     candidate_runtime.db_path, date_to
+                )
+                layer_cost_continuity_payload = _layer_cost_continuity(
+                    candidate_runtime.db_path
+                )
+                if layer_cost_continuity_payload["status"] != "ok":
+                    raise CanonicalCostBlocked(
+                        "layer_cost_continuity_mismatch",
+                        {
+                            "fingerprint": layer_cost_continuity_payload[
+                                "fingerprint"
+                            ],
+                            "mismatches": layer_cost_continuity_payload[
+                                "mismatches"
+                            ],
+                        },
+                    )
+                coverage["layer_cost_continuity"] = _coverage(
+                    "TAINTED" if primary_ids else "PASS",
+                    int(layer_cost_continuity_payload["movement_layer_count"])
+                    + int(
+                        layer_cost_continuity_payload[
+                            "outstanding_layer_count"
+                        ]
+                    ),
+                    0,
+                    ["wb_movement_layers", "outstanding_underaccepted"],
+                    str(layer_cost_continuity_payload["fingerprint"]),
                 )
                 rebuild_payload = {
                     "first": first_rebuild.__dict__,
@@ -584,6 +615,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "baseline": baseline,
             "rebuild": rebuild_payload,
             "reconciliation": reconciliation_payload,
+            "layer_cost_continuity": layer_cost_continuity_payload,
             "postcutover_normalization": normalization,
             "unmatched_doprinato_absorption": first_source.get(
                 "unmatched_doprinato_absorption"

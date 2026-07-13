@@ -42,6 +42,9 @@ def _clean_pipeline_is_reached() -> None:
             raise AssertionError("clean diagnostic must reach a zero-blocker fixpoint")
         if report["rebuild"] is None or report["reconciliation"] is None:
             raise AssertionError("collector must execute the actual candidate pipeline")
+        continuity = report.get("layer_cost_continuity") or {}
+        if continuity.get("status") != "ok" or continuity.get("mismatch_count"):
+            raise AssertionError("collector did not prove layer-level cost continuity")
         if any(item["status"] == "NOT_REACHED" for item in report["coverage_matrix"]):
             raise AssertionError("coverage matrix contains unexplained NOT_REACHED")
         if not all(item["status"] == "PASS" for item in report["coverage_matrix"]):
