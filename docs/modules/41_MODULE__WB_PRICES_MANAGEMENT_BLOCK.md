@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-41-WB-PRICES-MANAGEMENT-BLOCK"
 doc_type: "module"
 status: "active"
 purpose: "Зафиксировать канонический reference по operator-разделу `Цены` для чтения, guarded изменения цен/скидок и bounded `Проверка СПП` через WB Prices and Discounts API."
-scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: подтабы `Текущие цены` и `Проверка СПП`; compact current goods price/discount table, browser-local column visibility, read-only `SPP-прокси`/promo summary enrichment from existing server-owned read-side sources, inline price/discount edits, backend preview with diff/quarantine risk, env-guarded explicit upload task commit, upload status/goods error readback and quarantine read-only diagnostics; bounded server-owned SPP tester for one nmID with user-specified discounted-price range, safe-slow plan/start/status/restore routes, runtime lock/journal, fake-upstream smokes and staged baseline restore. The module reuses canonical `WB_API_TOKEN`, keeps browser state transient and does not create a new business truth layer."
+scope: "MVP раздела `Цены` в unified `/sheet-vitrina-v1/vitrina`: подтабы `Текущие цены` и `Проверка СПП`; compact current goods price/discount table, browser-local column visibility, read-only `SPP-прокси`/promo summary enrichment from existing server-owned read-side sources, inline price/discount edits, backend preview with diff/quarantine risk, env-guarded explicit upload task commit, upload status/goods error readback and quarantine read-only diagnostics; bounded server-owned SPP tester for one nmID with safe-slow plan/start/status/restore, stale lifecycle reconciliation, existing-job history, one persistent daily `Автопроверка` schedule and a shared manual/scheduled runtime lock. The module reuses canonical `WB_API_TOKEN`, keeps browser state transient and does not create a new business truth layer."
 source_basis:
   - "packages/contracts/wb_prices_management.py"
   - "packages/contracts/wb_spp_tester.py"
@@ -37,6 +37,10 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/start"
   - "GET /v1/sheet-vitrina-v1/prices/spp-test/status"
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/restore"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/history"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/history/{job_id}"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/schedule"
+  - "POST /v1/sheet-vitrina-v1/prices/spp-test/schedule"
 related_runners:
   - "apps/wb_prices_management_smoke.py"
   - "apps/wb_prices_management_browser_smoke.py"
@@ -50,7 +54,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Prices table uses a simplified toolbar, browser-local column visibility, read-only `СПП` and `Акции` columns from existing `spp_proxy`/`promo_by_price` read-side data, and keeps the guarded manual preview+upload-task workflow controlled by `WB_PRICES_WRITE_ENABLED`. `Цены -> Проверка СПП` is now an in-scope production MVP: one nmID, user-specified discounted-price range, `WB_SPP_TEST_ENABLED` + `WB_PRICES_WRITE_ENABLED` guards, server-owned runtime job/audit, safe-slow measurements and staged baseline restore."
+update_note: "Prices table semantics are unchanged. `Цены -> Проверка СПП` now reconciles interrupted jobs using fresh live restore proof, exposes bounded expandable history from canonical job files, and supports one consented daily `Автопроверка` schedule through the same WB Prices adapter, shared cross-process lock and mandatory restore path."
 ---
 
 # 1. Идентификатор и статус
@@ -81,7 +85,7 @@ Top-level UI shows one row per active `nmID` where possible:
 
 Browser state is only transient editing/modal state plus presentation-only column visibility in localStorage. Current price truth is read from WB via backend routes; SPP/promo values are read from current server-owned runtime/read-side sources; preview and upload status are server-owned readback surfaces.
 
-For `Проверка СПП`, browser state is only form draft and presentation. Baseline, plan, job status, measurements, thresholds, audit and restore proof are server-owned runtime state under `sheet_vitrina_v1_prices/spp_tests/`.
+For `Проверка СПП`, browser state is only form draft and presentation. Baseline, plan, current/last job, measurements, thresholds, expandable history, schedule, audit and restore proof are server-owned runtime state under `sheet_vitrina_v1_prices/spp_tests/`. Existing `jobs/*.json` remain the history source; no second DB/journal is introduced.
 
 # 3. WB Prices API Boundary
 
@@ -161,6 +165,10 @@ SPP tester route:
 - polls public anonymous buyer price slowly and excludes low-confidence/stale/429 points from threshold detection;
 - writes upload/readback/public/quarantine events to JSONL audit;
 - allows only one active/unrestored SPP test job at a time through runtime `current_job.json` lock/heartbeat.
+- shares one OS-level execution lock across manual jobs, scheduled jobs and emergency restore;
+- reconciles an orphan only through fresh exact WB tuple + quarantine + public buyer/SPP evidence; TTL expiry alone never unlocks it;
+- persists `trigger_source=manual|schedule` for new jobs while legacy source stays unknown;
+- uses the same baseline/write/readback/restore path for daily scheduled jobs and never starts one merely because the schedule was saved.
 
 Restore:
 - is always required at the end of an MVP run;
@@ -207,11 +215,13 @@ The `Цены` tab is a sibling section in the unified operator shell. It render
 - row-level WB error overlay after status/detail readback.
 
 `Проверка СПП` renders a minimal operator surface:
+- `Автопроверка` above manual inputs with one daily schedule, explicit future-live-change consent, `Asia/Yekaterinburg — Оренбург`, next run and last automatic status;
 - SKU/nmID selector sourced from current price rows / active registry;
 - baseline card with seller price, discount, discounted price, public buyer price, current `SPP-прокси`, quarantine and `editableSizePrice`;
 - inputs for discounted price min/max, threshold precision, max measurements, safe-slow mode, live-change confirmation and restore confirmation;
 - plan preview with route, estimated duration, request budget, restore route and live warning;
 - current job status, compact timeline, measurements table and threshold table.
+- `История проверок` below the current/last job with bounded cursor loading and lazy safe detail expansion.
 
 # 9. Verification
 
@@ -234,8 +244,7 @@ Public/live verification may open the page, read goods, run preview and inspect 
 # 10. Out Of Scope
 
 - Excel import/export of prices.
-- Scheduled SPP probes.
-- Automatic price experiments.
+- Multiple SPP schedules or non-daily cadence.
 - WB Club discount writes.
 - B2B wholesale discount writes.
 - Size-level price editing through `/api/v2/upload/task/size`.

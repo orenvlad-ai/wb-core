@@ -263,6 +263,26 @@ def main() -> None:
             ).read_text(encoding="utf-8")
             if "--runtime-dir /opt/wb-core-runtime/state" not in refresh_unit:
                 raise AssertionError("refresh tick systemd unit must pin production runtime state dir")
+            spp_service = (
+                ROOT
+                / "artifacts"
+                / "registry_upload_http_entrypoint"
+                / "systemd"
+                / "wb-core-spp-tester-schedule-tick.service"
+            ).read_text(encoding="utf-8")
+            spp_timer = (
+                ROOT
+                / "artifacts"
+                / "registry_upload_http_entrypoint"
+                / "systemd"
+                / "wb-core-spp-tester-schedule-tick.timer"
+            ).read_text(encoding="utf-8")
+            if "apps/wb_spp_tester_schedule_tick.py" not in spp_service or "--runtime-dir /opt/wb-core-runtime/state" not in spp_service:
+                raise AssertionError("SPP schedule service must use the repo-owned due runner and production state dir")
+            if "TimeoutStartSec=3h" not in spp_service:
+                raise AssertionError("SPP schedule service must outlive a complete safe-slow probe and guarded restore")
+            if "OnUnitActiveSec=1min" not in spp_timer or "Persistent=true" in spp_timer:
+                raise AssertionError("SPP schedule timer must be a non-persistent one-minute due ticker")
             if "apply-nginx-routes" not in " ".join(deploy_dry_run["commands"]["nginx_public_routes_update"]):
                 raise AssertionError("deploy --dry-run must expose nginx public route update command")
 

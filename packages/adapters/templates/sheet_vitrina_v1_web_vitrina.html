@@ -4189,6 +4189,58 @@
       text-overflow: ellipsis;
     }
 
+    .spp-test-schedule {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .spp-test-schedule-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .spp-test-history-list {
+      display: grid;
+    }
+
+    .spp-test-history-row {
+      border-bottom: 1px solid var(--border);
+      padding: 0 12px;
+    }
+
+    .spp-test-history-row:last-child {
+      border-bottom: 0;
+    }
+
+    .spp-test-history-row summary {
+      cursor: pointer;
+      display: grid;
+      grid-template-columns: minmax(170px, 1fr) minmax(180px, 1.5fr) minmax(110px, .7fr) minmax(120px, .8fr) minmax(90px, .6fr);
+      gap: 10px;
+      align-items: center;
+      padding: 10px 0;
+      font-size: 12px;
+      list-style-position: inside;
+    }
+
+    .spp-test-history-detail {
+      padding: 0 0 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .spp-test-history-json {
+      margin: 0;
+      max-height: 360px;
+      overflow: auto;
+      border-radius: 6px;
+      background: var(--panel-subtle);
+      padding: 10px;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .ads-workspace {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(360px, 42vw);
@@ -4550,7 +4602,9 @@
 
       .spp-test-summary-grid,
       .spp-test-field-grid,
-      .spp-test-input-row {
+      .spp-test-input-row,
+      .spp-test-schedule-grid,
+      .spp-test-history-row summary {
         grid-template-columns: minmax(0, 1fr);
       }
 
@@ -5362,6 +5416,46 @@
         </section>
         <section class="prices-subpanel" data-prices-subpanel="spp-test" hidden>
           <p class="spp-test-warning">Тест временно меняет live цену на WB. План, запуск, restore и результат сохраняются на сервере.</p>
+          <section class="spp-test-card spp-test-schedule">
+            <div class="spp-test-main-head" style="padding:0 0 10px">
+              <h3>Автопроверка</h3>
+              <span class="prices-badge" data-spp-schedule-state>выключена</span>
+            </div>
+            <label class="spp-test-checkbox"><input type="checkbox" data-spp-schedule-enabled>Включена</label>
+            <div class="spp-test-schedule-grid">
+              <label class="spp-test-field">Товар / SKU / nmID
+                <select class="input" data-spp-schedule-nm><option value="">Выберите SKU</option></select>
+              </label>
+              <label class="spp-test-field">Мин. цена со скидкой
+                <input class="input" type="number" min="1" step="1" data-spp-schedule-input="range_min_discounted">
+              </label>
+              <label class="spp-test-field">Макс. цена со скидкой
+                <input class="input" type="number" min="1" step="1" data-spp-schedule-input="range_max_discounted">
+              </label>
+              <label class="spp-test-field">Точность
+                <input class="input" type="number" min="1" step="1" value="2" data-spp-schedule-input="precision_rub">
+              </label>
+              <label class="spp-test-field">Макс. измерений
+                <input class="input" type="number" min="3" max="30" step="1" value="8" data-spp-schedule-input="max_measurements">
+              </label>
+              <span class="spp-test-field">Периодичность<strong>Ежедневно</strong></span>
+              <label class="spp-test-field">Время запуска
+                <input class="input" type="time" value="12:00" data-spp-schedule-time>
+              </label>
+              <span class="spp-test-field">Часовой пояс<strong>Asia/Yekaterinburg — Оренбург</strong></span>
+            </div>
+            <label class="spp-test-checkbox"><input type="checkbox" data-spp-schedule-consent>Согласен на будущие временные live-изменения цены по этому расписанию</label>
+            <div class="spp-test-field-grid" data-spp-schedule-meta>
+              <span class="spp-test-field">Следующий запуск<strong>—</strong></span>
+              <span class="spp-test-field">Последний автоматический запуск<strong>—</strong></span>
+              <span class="spp-test-field">Последний статус<strong>—</strong></span>
+            </div>
+            <div class="spp-test-actions">
+              <button class="button primary" type="button" data-spp-schedule-save>Сохранить расписание</button>
+              <span class="research-result-note" data-spp-schedule-note></span>
+            </div>
+            <p class="research-error" data-spp-schedule-error></p>
+          </section>
           <div class="spp-test-summary-grid">
             <section class="spp-test-card">
               <h3>SKU / nmID</h3>
@@ -5465,6 +5559,16 @@
                 </tbody>
               </table>
             </div>
+          </div>
+          <div class="spp-test-main">
+            <div class="spp-test-main-head">
+              <h3>История проверок</h3>
+              <button class="button secondary" type="button" data-spp-history-more hidden>Показать ещё</button>
+            </div>
+            <div class="spp-test-history-list" data-spp-history-list>
+              <p class="research-result-note" style="padding:12px">История загружается…</p>
+            </div>
+            <p class="research-error" style="padding:0 12px" data-spp-history-error></p>
           </div>
         </section>
       </section>
@@ -5913,6 +6017,18 @@
     const sppTestThresholdsNode = document.querySelector("[data-spp-test-thresholds]");
     const sppTestStateNode = document.querySelector("[data-spp-test-state]");
     const sppTestStatusTitleNode = document.querySelector("[data-spp-test-status-title]");
+    const sppScheduleEnabledNode = document.querySelector("[data-spp-schedule-enabled]");
+    const sppScheduleNmSelect = document.querySelector("[data-spp-schedule-nm]");
+    const sppScheduleTimeNode = document.querySelector("[data-spp-schedule-time]");
+    const sppScheduleConsentNode = document.querySelector("[data-spp-schedule-consent]");
+    const sppScheduleSaveButton = document.querySelector("[data-spp-schedule-save]");
+    const sppScheduleStateNode = document.querySelector("[data-spp-schedule-state]");
+    const sppScheduleMetaNode = document.querySelector("[data-spp-schedule-meta]");
+    const sppScheduleNoteNode = document.querySelector("[data-spp-schedule-note]");
+    const sppScheduleErrorNode = document.querySelector("[data-spp-schedule-error]");
+    const sppHistoryListNode = document.querySelector("[data-spp-history-list]");
+    const sppHistoryMoreButton = document.querySelector("[data-spp-history-more]");
+    const sppHistoryErrorNode = document.querySelector("[data-spp-history-error]");
     const vitrinaAutoAddButton = document.querySelector("[data-vitrina-auto-add]");
     const vitrinaAutoSaveButton = document.querySelector("[data-vitrina-auto-save]");
     const vitrinaAutoMetaNode = document.querySelector("[data-vitrina-auto-schedule-meta]");
@@ -6411,6 +6527,17 @@
           job: null,
           activeJob: null,
           pollSequence: 0,
+          scheduleLoading: false,
+          scheduleSaving: false,
+          scheduleLoaded: false,
+          schedule: null,
+          scheduleNote: "",
+          historyLoading: false,
+          historyLoaded: false,
+          historyItems: [],
+          historyNextCursor: "",
+          historyHasMore: false,
+          historyDetails: {},
           error: ""
         }
       },
@@ -16422,6 +16549,23 @@
       }
       if (event.target.closest("[data-spp-test-restore]")) {
         restoreSppTestBaseline();
+        return;
+      }
+      if (event.target.closest("[data-spp-schedule-save]")) {
+        saveSppSchedule();
+        return;
+      }
+      if (event.target.closest("[data-spp-history-more]")) {
+        loadSppHistory({reset: false});
+        return;
+      }
+      const historyRow = event.target.closest("[data-spp-history-job]");
+      if (historyRow) {
+        window.setTimeout(function() {
+          if (historyRow.open) {
+            loadSppHistoryDetail(historyRow.getAttribute("data-spp-history-job") || "");
+          }
+        }, 0);
       }
     }
 
@@ -16449,6 +16593,12 @@
       renderSppTestSelector();
       renderSppTest();
       loadSppTestStatus({silent: true});
+      if (!state.prices.sppTest.scheduleLoaded) {
+        loadSppSchedule();
+      }
+      if (!state.prices.sppTest.historyLoaded) {
+        loadSppHistory({reset: true});
+      }
     }
 
     function renderSppTestSelector() {
@@ -16463,6 +16613,14 @@
         return '<option value="' + escapeHtml(nmId) + '"' + (nmId === selected ? " selected" : "") + ">" + escapeHtml(title + " · " + nmId + sku) + "</option>";
       }));
       sppTestNmSelect.innerHTML = options.join("");
+      if (sppScheduleNmSelect) {
+        const schedule = state.prices.sppTest.schedule || {};
+        const scheduleSelected = String(schedule.nmID || sppScheduleNmSelect.value || "");
+        sppScheduleNmSelect.innerHTML = options.map(function(option) {
+          return option.replace(/ selected/g, "");
+        }).join("");
+        sppScheduleNmSelect.value = scheduleSelected;
+      }
     }
 
     function selectedSppTestRow() {
@@ -16518,6 +16676,7 @@
         renderSppTest();
       }
       try {
+        const previousJob = state.prices.sppTest.job || {};
         const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_status_path, {credentials: "same-origin"});
         const payload = await readJsonResponse(response, "non-json response from SPP status route");
         if (!response.ok) {
@@ -16525,6 +16684,17 @@
         }
         state.prices.sppTest.activeJob = payload.active_job || null;
         state.prices.sppTest.job = payload.job || state.prices.sppTest.job;
+        const currentJob = state.prices.sppTest.job || {};
+        const terminalStatuses = ["complete", "interrupted_restored", "manual_restore_required", "failed", "skipped"];
+        if (
+          state.prices.sppTest.historyLoaded
+          && currentJob.job_id
+          && (currentJob.job_id !== previousJob.job_id || currentJob.status !== previousJob.status)
+          && terminalStatuses.indexOf(String(currentJob.status || "")) !== -1
+        ) {
+          loadSppHistory({reset: true});
+          loadSppSchedule();
+        }
         pollSppTestIfActive();
       } catch (error) {
         if (!options || !options.silent) {
@@ -16533,6 +16703,232 @@
       } finally {
         state.prices.sppTest.statusLoading = false;
         renderSppTest();
+      }
+    }
+
+    async function loadSppSchedule() {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_schedule_path || state.prices.sppTest.scheduleLoading) {
+        return;
+      }
+      state.prices.sppTest.scheduleLoading = true;
+      state.prices.sppTest.error = "";
+      renderSppSchedule();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_schedule_path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from SPP schedule route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP schedule route returned " + response.status);
+        }
+        state.prices.sppTest.schedule = payload.schedule || null;
+        state.prices.sppTest.scheduleLoaded = true;
+        applySppScheduleToForm();
+      } catch (error) {
+        state.prices.sppTest.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.scheduleLoading = false;
+        renderSppSchedule();
+      }
+    }
+
+    function applySppScheduleToForm() {
+      const schedule = state.prices.sppTest.schedule || {};
+      if (sppScheduleEnabledNode) sppScheduleEnabledNode.checked = !!schedule.enabled;
+      if (sppScheduleNmSelect) sppScheduleNmSelect.value = String(schedule.nmID || "");
+      if (sppScheduleTimeNode) sppScheduleTimeNode.value = String(schedule.local_time_hhmm || "12:00");
+      if (sppScheduleConsentNode) sppScheduleConsentNode.checked = !!schedule.future_live_price_changes_confirmed;
+      document.querySelectorAll("[data-spp-schedule-input]").forEach(function(input) {
+        const key = input.getAttribute("data-spp-schedule-input") || "";
+        const value = schedule[key];
+        input.value = value === null || value === undefined ? "" : String(value);
+      });
+      renderSppTestSelector();
+    }
+
+    function collectSppSchedulePayload() {
+      const payload = {
+        enabled: !!(sppScheduleEnabledNode && sppScheduleEnabledNode.checked),
+        nmID: Number(sppScheduleNmSelect && sppScheduleNmSelect.value ? sppScheduleNmSelect.value : 0),
+        cadence: "daily",
+        local_time_hhmm: String(sppScheduleTimeNode && sppScheduleTimeNode.value ? sppScheduleTimeNode.value : "12:00"),
+        timezone: "Asia/Yekaterinburg",
+        future_live_price_changes_confirmed: !!(sppScheduleConsentNode && sppScheduleConsentNode.checked)
+      };
+      document.querySelectorAll("[data-spp-schedule-input]").forEach(function(input) {
+        payload[input.getAttribute("data-spp-schedule-input")] = String(input.value || "").trim();
+      });
+      return payload;
+    }
+
+    async function saveSppSchedule() {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_schedule_path || state.prices.sppTest.scheduleSaving) {
+        return;
+      }
+      state.prices.sppTest.scheduleSaving = true;
+      state.prices.sppTest.scheduleNote = "";
+      state.prices.sppTest.error = "";
+      renderSppSchedule();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_schedule_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({schedule: collectSppSchedulePayload()})
+        });
+        const payload = await readJsonResponse(response, "non-json response from SPP schedule save route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP schedule save returned " + response.status);
+        }
+        state.prices.sppTest.schedule = payload.schedule || null;
+        state.prices.sppTest.scheduleLoaded = true;
+        state.prices.sppTest.scheduleNote = "Расписание сохранено. Проверка ждёт назначенного времени.";
+        applySppScheduleToForm();
+      } catch (error) {
+        state.prices.sppTest.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.scheduleSaving = false;
+        renderSppSchedule();
+      }
+    }
+
+    function renderSppSchedule() {
+      const schedule = state.prices.sppTest.schedule || {};
+      if (sppScheduleStateNode) {
+        sppScheduleStateNode.textContent = schedule.enabled ? "включена" : "выключена";
+        sppScheduleStateNode.className = "prices-badge " + (schedule.enabled ? "success" : "");
+      }
+      if (sppScheduleSaveButton) {
+        sppScheduleSaveButton.disabled = state.prices.sppTest.scheduleSaving;
+        sppScheduleSaveButton.textContent = state.prices.sppTest.scheduleSaving ? "Сохранение…" : "Сохранить расписание";
+      }
+      if (sppScheduleMetaNode) {
+        const next = formatTimestampDisplay(schedule.next_run_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—";
+        const last = formatTimestampDisplay(schedule.last_automatic_run_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—";
+        sppScheduleMetaNode.innerHTML = [
+          sppTestFact("Следующий запуск", next),
+          sppTestFact("Последний автоматический запуск", last),
+          sppTestFact("Последний статус", schedule.last_automatic_status || "—")
+        ].join("");
+      }
+      if (sppScheduleNoteNode) sppScheduleNoteNode.textContent = state.prices.sppTest.scheduleNote || "";
+      if (sppScheduleErrorNode) sppScheduleErrorNode.textContent = state.prices.sppTest.error || "";
+    }
+
+    async function loadSppHistory(options) {
+      if (!WEB_VITRINA_CONFIG.prices_spp_test_history_path || state.prices.sppTest.historyLoading) {
+        return;
+      }
+      const reset = !!(options && options.reset);
+      if (reset) {
+        state.prices.sppTest.historyItems = [];
+        state.prices.sppTest.historyNextCursor = "";
+        state.prices.sppTest.historyHasMore = false;
+        state.prices.sppTest.historyDetails = {};
+      }
+      state.prices.sppTest.historyLoading = true;
+      renderSppHistory();
+      try {
+        const url = new URL(WEB_VITRINA_CONFIG.prices_spp_test_history_path, window.location.origin);
+        url.searchParams.set("limit", "20");
+        if (!reset && state.prices.sppTest.historyNextCursor) {
+          url.searchParams.set("cursor", state.prices.sppTest.historyNextCursor);
+        }
+        const response = await fetch(url.toString(), {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from SPP history route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP history route returned " + response.status);
+        }
+        const incoming = Array.isArray(payload.items) ? payload.items : [];
+        const known = new Set(state.prices.sppTest.historyItems.map(function(item) { return String(item.job_id || ""); }));
+        incoming.forEach(function(item) {
+          if (!known.has(String(item.job_id || ""))) state.prices.sppTest.historyItems.push(item);
+        });
+        state.prices.sppTest.historyNextCursor = String(payload.next_cursor || "");
+        state.prices.sppTest.historyHasMore = !!payload.has_more;
+        state.prices.sppTest.historyLoaded = true;
+        if (sppHistoryErrorNode) sppHistoryErrorNode.textContent = "";
+      } catch (error) {
+        if (sppHistoryErrorNode) sppHistoryErrorNode.textContent = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.historyLoading = false;
+        renderSppHistory();
+      }
+    }
+
+    async function loadSppHistoryDetail(jobId) {
+      const normalized = String(jobId || "");
+      if (!normalized || state.prices.sppTest.historyDetails[normalized]) {
+        return;
+      }
+      state.prices.sppTest.historyDetails[normalized] = {loading: true};
+      renderSppHistory();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_history_path + "/" + encodeURIComponent(normalized), {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from SPP history detail route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "SPP history detail returned " + response.status);
+        }
+        state.prices.sppTest.historyDetails[normalized] = {job: payload.job || {}};
+      } catch (error) {
+        state.prices.sppTest.historyDetails[normalized] = {error: String(error && error.message ? error.message : error)};
+      } finally {
+        renderSppHistory();
+      }
+    }
+
+    function renderSppHistory() {
+      if (!sppHistoryListNode) return;
+      const rows = state.prices.sppTest.historyItems || [];
+      if (!rows.length) {
+        sppHistoryListNode.innerHTML = '<p class="research-result-note" style="padding:12px">' + (state.prices.sppTest.historyLoading ? "История загружается…" : "Проверок пока нет.") + "</p>";
+      } else {
+        sppHistoryListNode.innerHTML = rows.map(function(row) {
+          const jobId = String(row.job_id || "");
+          const detail = state.prices.sppTest.historyDetails[jobId] || null;
+          const source = row.trigger_source === "manual" ? "ручной" : (row.trigger_source === "schedule" ? "автоматический" : "источник неизвестен");
+          const product = row.title || row.ourSku || row.vendorCode || ("nmID " + valueOrDash(row.nmID));
+          const when = formatTimestampDisplay(row.created_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—";
+          const duration = formatDurationSeconds(row.duration_seconds || 0);
+          let detailHtml = '<p class="research-result-note">Раскройте строку для загрузки деталей.</p>';
+          if (detail && detail.loading) detailHtml = '<p class="research-result-note">Загрузка деталей…</p>';
+          if (detail && detail.error) detailHtml = '<p class="research-error">' + escapeHtml(detail.error) + "</p>";
+          if (detail && detail.job) {
+            const job = detail.job;
+            const baseline = job.baseline || {};
+            const input = job.input || {};
+            const restore = job.restore || {};
+            const proof = restore.proof || {};
+            detailHtml = [
+              '<div class="spp-test-field-grid">',
+              sppTestFact("Диапазон", pricesMoney(input.range_min_discounted, "RUB") + " … " + pricesMoney(input.range_max_discounted, "RUB")),
+              sppTestFact("Точность / измерения", valueOrDash(input.precision_rub) + " / " + valueOrDash(input.max_measurements)),
+              sppTestFact("Baseline", pricesMoney(baseline.price, "RUB") + " · " + pricesDiscount(baseline.discount) + " · " + pricesMoney(baseline.discountedPrice, "RUB")),
+              sppTestFact("Измерений / порогов", String((job.measurements || []).length) + " / " + String((job.thresholds || []).length)),
+              sppTestFact("Restore proof", restore.restored ? "подтверждён" : "не подтверждён"),
+              sppTestFact("Exact tuple", [proof.price_matches, proof.discount_matches, proof.discountedPrice_matches].every(Boolean) ? "совпадает" : "не подтверждён"),
+              sppTestFact("Quarantine", proof.quarantine_absent === true ? "нет" : "не подтверждено"),
+              sppTestFact("Lifecycle", (job.lifecycle_diagnostics || {}).classification || "—"),
+              "</div>",
+              '<pre class="spp-test-history-json">' + escapeHtml(JSON.stringify(job, null, 2)) + "</pre>"
+            ].join("");
+          }
+          return [
+            '<details class="spp-test-history-row" data-spp-history-job="' + escapeHtml(jobId) + '"' + (detail ? " open" : "") + ">",
+            "<summary>",
+            "<span>" + escapeHtml(when) + "</span>",
+            "<span>" + escapeHtml(product + " · " + valueOrDash(row.nmID)) + "</span>",
+            "<span>" + escapeHtml(source) + "</span>",
+            '<span class="prices-badge ' + sppStatusTone(row.status) + '">' + escapeHtml(sppStatusLabel(row.status)) + "</span>",
+            "<span>" + escapeHtml(duration) + "</span>",
+            "</summary>",
+            '<div class="spp-test-history-detail">' + detailHtml + "</div>",
+            "</details>"
+          ].join("");
+        }).join("");
+      }
+      if (sppHistoryMoreButton) {
+        sppHistoryMoreButton.hidden = !state.prices.sppTest.historyHasMore;
+        sppHistoryMoreButton.disabled = state.prices.sppTest.historyLoading;
+        sppHistoryMoreButton.textContent = state.prices.sppTest.historyLoading ? "Загрузка…" : "Показать ещё";
       }
     }
 
@@ -16786,6 +17182,8 @@
       renderSppRestoreButton();
       renderSppPlanPreview();
       renderSppJobTables();
+      renderSppSchedule();
+      renderSppHistory();
     }
 
     function renderSppRestoreButton() {
@@ -16927,6 +17325,8 @@
       if (normalized === "cooldown") return "пауза";
       if (normalized === "restoring") return "restore";
       if (normalized === "complete") return "готово";
+      if (normalized === "interrupted_restored") return "прерван, baseline восстановлен";
+      if (normalized === "skipped") return "пропущено";
       if (normalized === "manual_restore_required") return "нужен restore";
       if (normalized === "failed") return "ошибка";
       if (normalized === "no_job") return "нет active job";
@@ -16945,8 +17345,8 @@
     function sppStatusTone(value) {
       const normalized = String(value || "");
       if (normalized === "manual_restore_required" || normalized === "failed") return "error";
-      if (normalized === "cooldown" || normalized === "restoring") return "warning";
-      if (normalized === "complete") return "success";
+      if (normalized === "cooldown" || normalized === "restoring" || normalized === "skipped") return "warning";
+      if (normalized === "complete" || normalized === "interrupted_restored") return "success";
       return "";
     }
 
@@ -17303,7 +17703,6 @@
         const nmId = String(target.value || "");
         state.prices.sppTest.selectedNmId = nmId;
         state.prices.sppTest.plan = null;
-        state.prices.sppTest.job = null;
         state.prices.sppTest.error = "";
         renderSppTest();
         if (nmId) {

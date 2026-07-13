@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import socket
@@ -22,8 +22,10 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_PRICES_SPP_TEST_BASELINE_PATH,
+    DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH,
     DEFAULT_SHEET_PRICES_SPP_TEST_PLAN_PATH,
     DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH,
+    DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH,
     DEFAULT_SHEET_PRICES_SPP_TEST_START_PATH,
     DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH,
     DEFAULT_SHEET_STATUS_PATH,
@@ -44,10 +46,28 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 NOW = datetime(2026, 7, 7, 7, 0, tzinfo=timezone.utc)
 
 
+class MutableClock:
+    def __init__(self, value: datetime) -> None:
+        self.value = value
+
+    def now(self) -> datetime:
+        return self.value
+
+    def timestamp(self) -> str:
+        return self.value.isoformat()
+
+
 class FakeSppPricesSource:
-    def __init__(self, *, rate_limit_upload_attempts: int = 0, quarantine: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        rate_limit_upload_attempts: int = 0,
+        quarantine: bool = False,
+        quarantine_after_upload: bool = False,
+    ) -> None:
         self.rate_limit_upload_attempts = rate_limit_upload_attempts
         self.quarantine = quarantine
+        self.quarantine_after_upload = quarantine_after_upload
         self.upload_attempts = 0
         self.upload_payloads: list[list[dict[str, Any]]] = []
         self.next_upload_id = 7000
@@ -133,19 +153,48 @@ class FakeSppPricesSource:
 
     def fetch_quarantine_goods(self, *, limit: int, offset: int) -> Mapping[str, Any]:
         rows = []
-        if self.quarantine:
+        if self.quarantine or (self.quarantine_after_upload and self.upload_attempts > 0):
             rows.append({"nmID": PRIMARY_NM, "newPrice": 100, "oldPrice": 1000, "newDiscount": 10, "oldDiscount": 10})
         return {"data": {"quarantineGoods": rows[offset : offset + limit]}, "error": False, "errorText": ""}
 
 
 class FakePublicSource:
-    def __init__(self, prices: FakeSppPricesSource, *, stale: bool = False) -> None:
+    def __init__(
+        self,
+        prices: FakeSppPricesSource,
+        *,
+        stale: bool = False,
+        timeout_reads: set[int] | None = None,
+        rate_limit_reads: set[int] | None = None,
+    ) -> None:
         self.prices = prices
         self.stale = stale
+        self.timeout_reads = set(timeout_reads or set())
+        self.rate_limit_reads = set(rate_limit_reads or set())
         self.reads = 0
 
     def fetch_public_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
         self.reads += 1
+        if self.reads in self.rate_limit_reads:
+            return {
+                "status": "429",
+                "public_buyer_price": None,
+                "endpoint": "fake_public_card",
+                "http_status": 429,
+                "headers": {},
+                "body_summary": "rate limit",
+                "diagnostics": {"read": self.reads},
+            }
+        if self.reads in self.timeout_reads:
+            return {
+                "status": "timeout",
+                "public_buyer_price": None,
+                "endpoint": "fake_public_card",
+                "http_status": None,
+                "headers": {},
+                "body_summary": "timeout",
+                "diagnostics": {"read": self.reads},
+            }
         discounted = self.prices.discounted_price
         if self.stale:
             public_price = 630.0
@@ -292,23 +341,267 @@ def _run_backend_unit_smokes() -> None:
         emergency_block._save_job(manual_job)
         emergency_block._write_current_job(manual_job)
         restored = emergency_block.restore({"job_id": "manual_restore_job", "confirm_restore": True}, actor="smoke")
-        if restored["status"] != "restored" or not restored["job"]["restore"]["restored"]:
+        if (
+            restored["status"] != "restored"
+            or restored["job"]["status"] != "interrupted_restored"
+            or not restored["job"]["restore"]["restored"]
+        ):
             raise AssertionError(f"emergency restore failed: {restored}")
 
-        lock_source = FakeSppPricesSource()
-        lock_block = _build_block(runtime, runtime_dir / "lock", lock_source, FakePublicSource(lock_source))
+        timeout_source = FakeSppPricesSource()
+        timeout_public = FakePublicSource(timeout_source, timeout_reads={2, 3, 4})
+        timeout_block = _build_block(runtime, runtime_dir / "timeout", timeout_source, timeout_public)
+        timeout_job = timeout_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")["job"]
+        if timeout_job["measurements"][0]["status"] != "public_unstable" or not timeout_job["restore"]["restored"]:
+            raise AssertionError(f"public timeout must stop probing and restore: {timeout_job}")
+
+        public_preflight_source = FakeSppPricesSource()
+        public_preflight_block = _build_block(
+            runtime,
+            runtime_dir / "public_preflight_429",
+            public_preflight_source,
+            FakePublicSource(public_preflight_source, rate_limit_reads={1}),
+        )
+        try:
+            public_preflight_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")
+        except WbSppTesterError as exc:
+            if exc.http_status != 422 or "public_spp_baseline_incomplete" not in set(exc.payload.get("blockers") or []):
+                raise
+        else:
+            raise AssertionError("unsafe public baseline must block before a live write")
+        if public_preflight_source.upload_payloads:
+            raise AssertionError("unsafe public baseline performed an unexpected price write")
+
+        public_429_source = FakeSppPricesSource()
+        public_429 = FakePublicSource(public_429_source, rate_limit_reads={2})
+        public_429_block = _build_block(runtime, runtime_dir / "public_429", public_429_source, public_429)
+        public_429_job = public_429_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")["job"]
+        if public_429_job["measurements"][0]["status"] != "public_429" or not public_429_job["restore"]["restored"]:
+            raise AssertionError(f"public 429 must stop probing and restore: {public_429_job}")
+
+        quarantine_source = FakeSppPricesSource(quarantine_after_upload=True)
+        quarantine_block = _build_block(runtime, runtime_dir / "quarantine", quarantine_source, FakePublicSource(quarantine_source))
+        quarantine_job = quarantine_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")["job"]
+        if quarantine_job["status"] != "manual_restore_required" or quarantine_job["measurements"][0]["status"] != "quarantine_detected":
+            raise AssertionError(f"quarantine must stop probing and require guarded remediation: {quarantine_job}")
+
+        orphan_source = FakeSppPricesSource()
+        orphan_block = _build_block(runtime, runtime_dir / "orphan", orphan_source, FakePublicSource(orphan_source))
         active_job = dict(manual_job)
         active_job["job_id"] = "active_job"
         active_job["status"] = "measuring"
-        lock_block._save_job(active_job)
-        lock_block._write_current_job(active_job)
+        active_job["restore"] = {"required": True, "restored": False, "proof": None, "steps": []}
+        orphan_block._save_job(active_job)
+        orphan_block._write_current_job(active_job)
+        reconciled = orphan_block.status({})["job"]
+        if reconciled["status"] != "interrupted_restored" or not reconciled["restore"]["restored"]:
+            raise AssertionError(f"orphan with fresh baseline proof must become terminal: {reconciled}")
+
+        unrestored_source = FakeSppPricesSource()
+        unrestored_block = _build_block(runtime, runtime_dir / "unrestored", unrestored_source, FakePublicSource(unrestored_source))
+        unrestored_source.upload_task([{"nmID": PRIMARY_NM, "price": 1500, "discount": 10}])
+        unrestored_job = dict(active_job)
+        unrestored_job["job_id"] = "unrestored_job"
+        unrestored_block._save_job(unrestored_job)
+        unrestored_block._write_current_job(unrestored_job)
         try:
-            lock_block.start(_start_payload(700, 900), actor="smoke")
+            unrestored_block.start(_start_payload(700, 900), actor="smoke")
         except WbSppTesterError as exc:
-            if exc.http_status != 409:
+            if exc.http_status != 409 or exc.payload.get("reason") != "active_or_unrestored_job":
                 raise
         else:
-            raise AssertionError("active SPP job must reject concurrent start")
+            raise AssertionError("unrestored orphan must reject a new SPP job")
+        if unrestored_block.status({})["job"]["status"] != "manual_restore_required":
+            raise AssertionError("unrestored orphan must become manual_restore_required")
+
+        lock_source = FakeSppPricesSource()
+        lock_block = _build_block(runtime, runtime_dir / "lock", lock_source, FakePublicSource(lock_source))
+        held_lock = lock_block._acquire_execution_lock(owner="smoke_contention", blocking=False)
+        try:
+            try:
+                lock_block.start(_start_payload(700, 900), actor="smoke")
+            except WbSppTesterError as exc:
+                if exc.http_status != 409 or exc.payload.get("reason") != "execution_lock_busy":
+                    raise
+            else:
+                raise AssertionError("live execution lock must reject a concurrent manual start")
+        finally:
+            lock_block._release_execution_lock(held_lock, job_id="")
+
+        legacy_job = dict(manual_job)
+        legacy_job["job_id"] = "legacy_without_trigger"
+        legacy_job.pop("trigger_source", None)
+        legacy_job["lifecycle_diagnostics"] = {
+            **dict(legacy_job.get("lifecycle_diagnostics") or {}),
+            "internal_path": "/opt/wb-core-runtime/state/private.json",
+            "authorization_header": "Bearer must-not-leak",
+        }
+        block._save_job(legacy_job)
+        history_page = block.history({"limit": 1})
+        if len(history_page["items"]) != 1 or not history_page["has_more"] or not history_page["next_cursor"]:
+            raise AssertionError(f"bounded history pagination mismatch: {history_page}")
+        history_next = block.history({"limit": 5, "cursor": history_page["next_cursor"]})
+        if not history_next["items"]:
+            raise AssertionError(f"history cursor did not return the next page: {history_next}")
+        legacy_summary = next(
+            (item for item in [*history_page["items"], *history_next["items"]] if item["job_id"] == "legacy_without_trigger"),
+            None,
+        )
+        if legacy_summary is None or legacy_summary["trigger_source"] is not None:
+            raise AssertionError(f"legacy trigger source must stay unknown: {history_next}")
+        detail = block.history_detail("legacy_without_trigger")["job"]
+        detail_lifecycle = detail.get("lifecycle_diagnostics") or {}
+        if (
+            "internal_path" in detail_lifecycle
+            or "authorization_header" in detail_lifecycle
+            or "trigger_source" in detail and detail["trigger_source"]
+        ):
+            raise AssertionError(f"history detail leaked unsafe or fabricated fields: {detail}")
+        try:
+            block.history_detail("../audit")
+        except WbSppTesterError as exc:
+            if exc.http_status != 400:
+                raise
+        else:
+            raise AssertionError("history detail must reject path traversal")
+
+    _run_schedule_smokes()
+
+
+def _run_schedule_smokes() -> None:
+    with TemporaryDirectory(prefix="wb-spp-schedule-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = _seed_runtime(runtime_dir)
+        clock = MutableClock(datetime(2026, 7, 7, 7, 0, tzinfo=timezone.utc))
+        source = FakeSppPricesSource()
+        block = _build_block(runtime, runtime_dir, source, FakePublicSource(source), clock=clock)
+        schedule_payload = {
+            "enabled": True,
+            "nmID": PRIMARY_NM,
+            "range_min_discounted": 700,
+            "range_max_discounted": 900,
+            "precision_rub": 2,
+            "max_measurements": 3,
+            "local_time_hhmm": "12:05",
+            "timezone": "Asia/Yekaterinburg",
+            "future_live_price_changes_confirmed": True,
+        }
+        saved = block.save_schedule({"schedule": schedule_payload}, actor="smoke")["schedule"]
+        if source.upload_payloads:
+            raise AssertionError("saving an enabled schedule must not start a job immediately")
+        if saved["next_run_at"] != "2026-07-07T12:05:00+05:00":
+            raise AssertionError(f"next_run_at mismatch: {saved}")
+        if block.run_due_schedule_tick()["status"] != "not_due":
+            raise AssertionError("schedule must wait for its assigned time")
+
+        clock.value = datetime(2026, 7, 7, 7, 5, tzinfo=timezone.utc)
+        first_tick = block.run_due_schedule_tick()
+        first_job = first_tick.get("job") or {}
+        if (
+            first_tick["status"] != "finished"
+            or first_job.get("trigger_source") != "schedule"
+            or first_job.get("status") != "complete"
+            or not (first_job.get("restore") or {}).get("restored")
+            or not (first_job.get("input") or {}).get("restore_baseline")
+        ):
+            raise AssertionError(f"scheduled job did not use mandatory shared restore path: {first_tick}")
+        upload_count = len(source.upload_payloads)
+        if block.run_due_schedule_tick()["status"] != "not_due" or len(source.upload_payloads) != upload_count:
+            raise AssertionError("schedule must be at-most-once for the claimed business date")
+        restarted = _build_block(runtime, runtime_dir, source, FakePublicSource(source), clock=clock)
+        if restarted.run_due_schedule_tick()["status"] != "not_due" or len(source.upload_payloads) != upload_count:
+            raise AssertionError("schedule claim must remain idempotent after restart")
+        disabled = restarted.save_schedule(
+            {"schedule": {**schedule_payload, "enabled": False, "future_live_price_changes_confirmed": False}},
+            actor="smoke",
+        )["schedule"]
+        if disabled["enabled"] or disabled["next_run_at"]:
+            raise AssertionError(f"disabled schedule state mismatch: {disabled}")
+
+    with TemporaryDirectory(prefix="wb-spp-late-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = _seed_runtime(runtime_dir)
+        clock = MutableClock(datetime(2026, 7, 7, 7, 0, tzinfo=timezone.utc))
+        source = FakeSppPricesSource()
+        block = _build_block(runtime, runtime_dir, source, FakePublicSource(source), clock=clock, schedule_late_window_minutes=15)
+        block.save_schedule(
+            {
+                "enabled": True,
+                "nmID": PRIMARY_NM,
+                "range_min_discounted": 700,
+                "range_max_discounted": 900,
+                "precision_rub": 2,
+                "max_measurements": 3,
+                "local_time_hhmm": "12:01",
+                "timezone": "Asia/Yekaterinburg",
+                "future_live_price_changes_confirmed": True,
+            },
+            actor="smoke",
+        )
+        clock.value = datetime(2026, 7, 7, 7, 17, tzinfo=timezone.utc)
+        late = block.run_due_schedule_tick()
+        if late["status"] != "skipped_late" or (late.get("job") or {}).get("result_status") != "missed_late_window":
+            raise AssertionError(f"late-run policy mismatch: {late}")
+        if source.upload_payloads:
+            raise AssertionError("late schedule skip must not mutate WB prices")
+
+    with TemporaryDirectory(prefix="wb-spp-contention-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = _seed_runtime(runtime_dir)
+        clock = MutableClock(datetime(2026, 7, 7, 7, 0, tzinfo=timezone.utc))
+        source = FakeSppPricesSource()
+        block = _build_block(runtime, runtime_dir, source, FakePublicSource(source), clock=clock)
+        block.save_schedule(
+            {
+                "enabled": True,
+                "nmID": PRIMARY_NM,
+                "range_min_discounted": 700,
+                "range_max_discounted": 900,
+                "precision_rub": 2,
+                "max_measurements": 3,
+                "local_time_hhmm": "12:01",
+                "timezone": "Asia/Yekaterinburg",
+                "future_live_price_changes_confirmed": True,
+            },
+            actor="smoke",
+        )
+        held = block._acquire_execution_lock(owner="manual_job", blocking=False)
+        clock.value = datetime(2026, 7, 7, 7, 1, tzinfo=timezone.utc)
+        try:
+            contention = block.run_due_schedule_tick()
+        finally:
+            block._release_execution_lock(held, job_id="")
+        if contention["status"] != "skipped" or (contention.get("job") or {}).get("result_status") != "execution_lock_busy":
+            raise AssertionError(f"manual/scheduled lock contention mismatch: {contention}")
+        if source.upload_payloads:
+            raise AssertionError("scheduled contention skip must not mutate WB prices")
+
+    with TemporaryDirectory(prefix="wb-spp-safety-skip-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = _seed_runtime(runtime_dir)
+        clock = MutableClock(datetime(2026, 7, 7, 7, 0, tzinfo=timezone.utc))
+        source = FakeSppPricesSource(quarantine=True)
+        block = _build_block(runtime, runtime_dir, source, FakePublicSource(source), clock=clock)
+        block.save_schedule(
+            {
+                "enabled": True,
+                "nmID": PRIMARY_NM,
+                "range_min_discounted": 700,
+                "range_max_discounted": 900,
+                "precision_rub": 2,
+                "max_measurements": 3,
+                "local_time_hhmm": "12:01",
+                "timezone": "Asia/Yekaterinburg",
+                "future_live_price_changes_confirmed": True,
+            },
+            actor="smoke",
+        )
+        clock.value = datetime(2026, 7, 7, 7, 1, tzinfo=timezone.utc)
+        skipped = block.run_due_schedule_tick()
+        if skipped["status"] != "skipped" or (skipped.get("job") or {}).get("result_status") != "safety_blocker":
+            raise AssertionError(f"scheduled safety skip mismatch: {skipped}")
+        if source.upload_payloads:
+            raise AssertionError("scheduled safety skip must not mutate WB prices")
 
 
 def _run_http_smoke() -> None:
@@ -365,6 +658,40 @@ def _run_http_smoke() -> None:
             status, status_payload = _get_json(f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH}")
             if status != 200 or status_payload["contract_name"] != "sheet_vitrina_v1_prices_spp_test_status":
                 raise AssertionError(f"status route failed: {status} {status_payload}")
+            uploads_before_schedule_save = len(source.upload_payloads)
+            status, schedule = _post_json(
+                f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH}",
+                {
+                    "schedule": {
+                        "enabled": True,
+                        "nmID": PRIMARY_NM,
+                        "range_min_discounted": 700,
+                        "range_max_discounted": 900,
+                        "precision_rub": 2,
+                        "max_measurements": 3,
+                        "local_time_hhmm": "12:05",
+                        "timezone": "Asia/Yekaterinburg",
+                        "future_live_price_changes_confirmed": True,
+                    }
+                },
+            )
+            if status != 200 or schedule["contract_name"] != "sheet_vitrina_v1_prices_spp_test_schedule":
+                raise AssertionError(f"schedule save route failed: {status} {schedule}")
+            if len(source.upload_payloads) != uploads_before_schedule_save:
+                raise AssertionError("schedule HTTP save must not start a price job immediately")
+            status, schedule_read = _get_json(f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH}")
+            if status != 200 or not schedule_read["schedule"]["enabled"]:
+                raise AssertionError(f"schedule read route failed: {status} {schedule_read}")
+            status, history = _get_json(f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH}?limit=1")
+            if status != 200 or not history["items"] or history["items"][0]["trigger_source"] != "manual":
+                raise AssertionError(f"history route failed: {status} {history}")
+            history_job_id = history["items"][0]["job_id"]
+            status, history_detail = _get_json(f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH}/{history_job_id}")
+            if status != 200 or history_detail["job"]["job_id"] != history_job_id:
+                raise AssertionError(f"history detail route failed: {status} {history_detail}")
+            status, invalid_detail = _get_json(f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH}/..%2Faudit")
+            if status != 400 or "invalid" not in str(invalid_detail.get("error") or ""):
+                raise AssertionError(f"history path traversal must be rejected: {status} {invalid_detail}")
             status, restore = _post_json(
                 f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH}",
                 {"job_id": started["job"]["job_id"], "confirm_restore": True},
@@ -384,7 +711,10 @@ def _build_block(
     public_source: FakePublicSource,
     *,
     zero_cadence: bool = True,
+    clock: MutableClock | None = None,
+    schedule_late_window_minutes: int = 15,
 ) -> WbSppTesterBlock:
+    clock = clock or MutableClock(NOW)
     cadence_config = (
         WbSppTesterCadenceConfig(
             run_async=False,
@@ -398,6 +728,7 @@ def _build_block(
             readback_max_polls=2,
             rate_limit_min_cooldown_seconds=0,
             active_lock_ttl_seconds=60,
+            schedule_late_window_minutes=schedule_late_window_minutes,
         )
         if zero_cadence
         else WbSppTesterCadenceConfig(run_async=False)
@@ -407,8 +738,8 @@ def _build_block(
         runtime_dir=runtime_dir,
         prices_source=prices_source,
         public_source=public_source,
-        now_factory=lambda: NOW,
-        timestamp_factory=lambda: "2026-07-07T07:00:00Z",
+        now_factory=clock.now,
+        timestamp_factory=clock.timestamp,
         sleep=lambda _seconds: None,
         safety_config=WbSppTesterSafetyConfig(spp_test_enabled=True, prices_write_enabled=True),
         cadence_config=cadence_config,
@@ -435,8 +766,11 @@ def _reserve_free_port() -> int:
 
 
 def _get_json(url: str) -> tuple[int, Mapping[str, Any]]:
-    with request.urlopen(url, timeout=10) as response:
-        return int(response.status), json.loads(response.read().decode("utf-8"))
+    try:
+        with request.urlopen(url, timeout=10) as response:
+            return int(response.status), json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        return int(exc.status), json.loads(exc.read().decode("utf-8"))
 
 
 def _post_json(url: str, payload: Mapping[str, Any]) -> tuple[int, Mapping[str, Any]]:

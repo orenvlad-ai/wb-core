@@ -43,16 +43,40 @@ def main() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            with _LocalSppUiServer(spp_test_enabled=True, prices_write_enabled=True) as base_url:
+            with _LocalSppUiServer(spp_test_enabled=True, prices_write_enabled=True) as server:
+                base_url = server.base_url
                 page = browser.new_page(viewport={"width": 1440, "height": 940})
                 _prepare_spp_page(page, base_url)
                 if page.locator("[data-spp-test-start]").is_disabled():
                     raise AssertionError("SPP start must become enabled after successful plan and confirmations")
                 if page.locator("[data-spp-test-start-reason]").inner_text().strip():
                     raise AssertionError("enabled SPP start must not show disabled reason")
+                upload_count = len(server.spp_prices_source.upload_payloads)
+                page.locator("[data-spp-schedule-nm]").select_option(str(PRIMARY_NM))
+                page.locator('[data-spp-schedule-input="range_min_discounted"]').fill("700")
+                page.locator('[data-spp-schedule-input="range_max_discounted"]').fill("900")
+                page.locator('[data-spp-schedule-input="precision_rub"]').fill("2")
+                page.locator('[data-spp-schedule-input="max_measurements"]').fill("3")
+                page.locator("[data-spp-schedule-time]").fill("12:05")
+                page.locator("[data-spp-schedule-enabled]").check()
+                page.locator("[data-spp-schedule-consent]").check()
+                page.locator("[data-spp-schedule-save]").click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-spp-schedule-note]')?.innerText.includes('ждёт назначенного времени')",
+                    timeout=7000,
+                )
+                if len(server.spp_prices_source.upload_payloads) != upload_count:
+                    raise AssertionError("saving the UI schedule must not immediately start an SPP job")
+                page.wait_for_selector("[data-spp-history-job]", timeout=7000)
+                page.locator("[data-spp-history-job]").first.locator("summary").click()
+                page.wait_for_selector("[data-spp-history-job] .spp-test-history-json", state="visible", timeout=7000)
+                detail_text = page.locator("[data-spp-history-job] .spp-test-history-json").first.inner_text()
+                if '"baseline"' not in detail_text or '"measurements"' not in detail_text or '"restore"' not in detail_text:
+                    raise AssertionError(f"expanded history detail is incomplete: {detail_text}")
                 page.close()
 
-            with _LocalSppUiServer(spp_test_enabled=False, prices_write_enabled=True) as base_url:
+            with _LocalSppUiServer(spp_test_enabled=False, prices_write_enabled=True) as server:
+                base_url = server.base_url
                 page = browser.new_page(viewport={"width": 1440, "height": 940})
                 _prepare_spp_page(page, base_url)
                 if not page.locator("[data-spp-test-start]").is_disabled():
@@ -90,9 +114,11 @@ def _prepare_spp_page(page, base_url: str) -> None:
     )
     page.locator("[data-spp-test-confirm-live]").check()
     panel_text = page.locator('[data-prices-subpanel="spp-test"]').inner_text()
-    for expected in ("Baseline", "План и измерения", "Измерений пока нет", "WB writes", "SPP guard"):
+    for expected in ("Автопроверка", "Ежедневно", "Оренбург", "История проверок", "Baseline", "WB writes", "SPP guard"):
         if expected not in panel_text:
             raise AssertionError(f"SPP tester panel missing text {expected!r}: {panel_text}")
+    if "План и измерения" not in panel_text and "Результат:" not in panel_text:
+        raise AssertionError(f"SPP tester panel missing current/last job heading: {panel_text}")
     if "Текущие цены" not in page.locator("[data-prices-panel]").inner_text():
         raise AssertionError("prices subtabs must include current prices")
 
@@ -103,15 +129,16 @@ class _LocalSppUiServer:
         self.server = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
+        self.spp_prices_source = FakeSppPricesSource()
         self.spp_test_enabled = spp_test_enabled
         self.prices_write_enabled = prices_write_enabled
 
-    def __enter__(self) -> str:
+    def __enter__(self) -> "_LocalSppUiServer":
         self.tmp = TemporaryDirectory(prefix="wb-spp-browser-")
         runtime_dir = Path(self.tmp.name) / "runtime"
         runtime = _seed_runtime(runtime_dir)
         prices_source = FakePricesSource()
-        spp_prices_source = FakeSppPricesSource()
+        spp_prices_source = self.spp_prices_source
         spp_block = WbSppTesterBlock(
             runtime=runtime,
             runtime_dir=runtime_dir,
@@ -126,6 +153,20 @@ class _LocalSppUiServer:
             ),
             cadence_config=WbSppTesterCadenceConfig(run_async=False),
         )
+        if self.spp_test_enabled and self.prices_write_enabled:
+            spp_block.start(
+                {
+                    "nmID": PRIMARY_NM,
+                    "range_min_discounted": 700,
+                    "range_max_discounted": 900,
+                    "precision_rub": 2,
+                    "max_measurements": 3,
+                    "mode": "safe_slow",
+                    "confirm_live_price_change": True,
+                    "restore_baseline": True,
+                },
+                actor="browser_smoke",
+            )
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,
@@ -148,7 +189,7 @@ class _LocalSppUiServer:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{config.port}"
-        return self.base_url
+        return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.server is not None:
