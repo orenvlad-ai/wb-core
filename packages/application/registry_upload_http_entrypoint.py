@@ -33,8 +33,9 @@ from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1Fee
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import SheetVitrinaV1FeedbacksAutoComplaintsBlock
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitrinaV1FeedbacksComplaintsBlock
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
-from packages.application.wb_prices_management import WbPricesManagementBlock
+from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
+from packages.application.sku_management import SkuManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
     LegacyGoogleSheetsContourArchivedError,
@@ -95,6 +96,12 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_PRODUCT_CAPITAL_SOURCE_GROUP_LABEL_RU,
     OWN_PRODUCT_CAPITAL_SOURCE_KEY,
     extend_metrics_with_own_product_capital_metrics,
+)
+from packages.application.sheet_vitrina_v1_sku_actions import (
+    ADVERTISING_BID_CHANGE_RUB_METRIC_KEY,
+    BUYER_PRICE_RUB_METRIC_KEY,
+    SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
+    extend_metrics_with_sku_action_metrics,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policy,
@@ -295,6 +302,10 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
         "label_ru": "Промо и акции",
         "description_ru": "Промо-показатели из browser-collected promo source.",
     },
+    "sku_action_events": {
+        "label_ru": "Изменения SKU",
+        "description_ru": "Подтверждённые операторские изменения цены и ставки.",
+    },
 }
 WEB_VITRINA_SOURCE_METRIC_KEYS = {
     "seller_funnel_snapshot": (
@@ -349,6 +360,11 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
     "spp_proxy": (
         "avg_spp_proxy",
         "spp_proxy",
+        BUYER_PRICE_RUB_METRIC_KEY,
+    ),
+    "sku_action_events": (
+        SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
+        ADVERTISING_BID_CHANGE_RUB_METRIC_KEY,
     ),
     "ads_bids": (
         "avg_ads_bid_search",
@@ -467,6 +483,7 @@ WEB_VITRINA_SOURCE_GROUPS = {
         "label_ru": "Прочие источники",
         "source_keys": (
             "cost_price",
+            "sku_action_events",
         ),
     },
     ONEC_STOCKS_SOURCE_GROUP_ID: {
@@ -674,6 +691,7 @@ class RegistryUploadHttpEntrypoint:
         ads_block: SheetVitrinaV1AdsBlock | None = None,
         prices_block: WbPricesManagementBlock | None = None,
         spp_tester_block: WbSppTesterBlock | None = None,
+        sku_management_block: SkuManagementBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -806,6 +824,36 @@ class RegistryUploadHttpEntrypoint:
         )
         self.wb_regional_supply_block.wb_supply_district_mapping_provider = (
             self.wb_supplies_block.current_warehouse_district_mapping
+        )
+        sku_prices_block = WbPricesManagementBlock(
+            runtime=self.runtime,
+            runtime_dir=self.runtime.runtime_dir,
+            source=self.prices_block.source,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+            safety_config=WbPricesSafetyConfig(
+                write_enabled=True,
+                preview_ttl_seconds=self.prices_block.safety.preview_ttl_seconds,
+            ),
+        )
+        sku_ads_block = SheetVitrinaV1AdsBlock(
+            runtime=self.runtime,
+            runtime_dir=self.runtime.runtime_dir,
+            source=self.ads_block.source,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+            cache_ttl_seconds=self.ads_block.cache_ttl_seconds,
+            safety_config=replace(self.ads_block.safety, write_enabled=True),
+        )
+        self.sku_management_block = sku_management_block or SkuManagementBlock(
+            runtime=self.runtime,
+            runtime_dir=self.runtime.runtime_dir,
+            prices_block=sku_prices_block,
+            ads_block=sku_ads_block,
+            stocks_block=self.factory_order_supply_block.stocks_block,
+            sales_history=self.factory_order_supply_block.sales_history,
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
         )
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
@@ -1006,10 +1054,12 @@ class RegistryUploadHttpEntrypoint:
             preferred_date=current_business_date_iso(self.now_factory()),
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_own_product_capital_metrics(
-                extend_metrics_with_our_wb_cost_metrics(
-                    extend_metrics_with_onec_stock_metrics(
-                        getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            extend_metrics_with_sku_action_metrics(
+                extend_metrics_with_own_product_capital_metrics(
+                    extend_metrics_with_our_wb_cost_metrics(
+                        extend_metrics_with_onec_stock_metrics(
+                            getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                        )
                     )
                 )
             )
@@ -1228,6 +1278,30 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_sheet_prices_spp_test_restore_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
         return self.spp_tester_block.restore(payload, actor=actor)
+
+    def handle_sku_management_table_request(self, *, user_key: str) -> dict[str, Any]:
+        return self.sku_management_block.build_table(user_key=user_key)
+
+    def handle_sku_management_settings_request(self, *, user_key: str) -> dict[str, Any]:
+        return self.sku_management_block.get_settings(user_key=user_key)
+
+    def handle_sku_management_settings_save_request(self, payload: Mapping[str, Any], *, user_key: str) -> dict[str, Any]:
+        return self.sku_management_block.save_settings(user_key=user_key, payload=payload)
+
+    def handle_sku_management_price_preview_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        return self.sku_management_block.preview_price(payload, actor=actor)
+
+    def handle_sku_management_price_commit_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        return self.sku_management_block.commit_price(payload, actor=actor)
+
+    def handle_sku_management_bid_preview_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        return self.sku_management_block.preview_bid(payload, actor=actor)
+
+    def handle_sku_management_bid_commit_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        return self.sku_management_block.commit_bid(payload, actor=actor)
+
+    def handle_sku_management_history_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.sku_management_block.history(params or {})
 
     def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
@@ -1734,10 +1808,12 @@ class RegistryUploadHttpEntrypoint:
             preferred_date=current_business_date,
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_own_product_capital_metrics(
-                extend_metrics_with_our_wb_cost_metrics(
-                    extend_metrics_with_onec_stock_metrics(
-                        getattr(self.runtime.load_current_state(), "metrics_v2", [])
+            extend_metrics_with_sku_action_metrics(
+                extend_metrics_with_own_product_capital_metrics(
+                    extend_metrics_with_our_wb_cost_metrics(
+                        extend_metrics_with_onec_stock_metrics(
+                            getattr(self.runtime.load_current_state(), "metrics_v2", [])
+                        )
                     )
                 )
             )
@@ -3379,9 +3455,11 @@ class RegistryUploadHttpEntrypoint:
 
                 current_state = self.runtime.load_current_state()
                 metric_keys = _metric_keys_for_source_keys(
-                    extend_metrics_with_own_product_capital_metrics(
-                        extend_metrics_with_our_wb_cost_metrics(
-                            extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                    extend_metrics_with_sku_action_metrics(
+                        extend_metrics_with_own_product_capital_metrics(
+                            extend_metrics_with_our_wb_cost_metrics(
+                                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
+                            )
                         )
                     ),
                     source_keys=source_keys,

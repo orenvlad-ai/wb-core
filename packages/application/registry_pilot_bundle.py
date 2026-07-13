@@ -51,12 +51,11 @@ def validate_registry_pilot_bundle(
     metric_keys_v2 = {item.metric_key for item in bundle.metrics_v2}
     runtime_keys = set(runtime_by_key)
 
-    if metric_keys_v2 != runtime_keys:
+    if not metric_keys_v2.issubset(runtime_keys):
         missing_in_runtime = sorted(metric_keys_v2 - runtime_keys)
-        missing_in_display = sorted(runtime_keys - metric_keys_v2)
         raise ValueError(
-            "metrics_v2 and metric_runtime_registry diverge: "
-            f"missing_in_runtime={missing_in_runtime}, missing_in_display={missing_in_display}"
+            "metrics_v2 contains metrics without runtime semantics: "
+            f"missing_in_runtime={missing_in_runtime}"
         )
 
     for metric in bundle.metrics_v2:

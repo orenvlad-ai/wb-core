@@ -903,3 +903,7 @@ current_update_note: "`Настройки` встроены в общий WebCor
 HTTP entrypoint exposes protected `GET /v1/sheet-vitrina-v1/product-capital/status` and `POST /v1/sheet-vitrina-v1/product-capital/recalculate`. The same hosted refresh boundary rebuilds the independent WebCore daily materialization after upstream refresh and publishes it through the existing ready-snapshot/web-vitrina read contract.
 
 Payment upload remains parse-preview-first: missing non-date financial fields reject before durable save; a missing date returns a mandatory manual-date request with server provenance. Browser code may collect that date, but never owns payment facts, stage state, confirmation or yellow presentation metadata. The endpoint performs no 1C writes and does not expose a production backfill apply route.
+
+# 19. SKU management HTTP/auth boundary
+
+The unified shell exposes `Управление SKU` only to principals whose server-owned `allowed_sections` includes `sku_management` (bootstrap admin retains full access). Protected routes are `GET /v1/sheet-vitrina-v1/sku-management`, `GET|POST .../settings`, `POST .../price/preview|commit`, `POST .../bid/preview|commit` and `GET .../history`. The nginx manifest publishes the exact base GET plus the narrow `/v1/sheet-vitrina-v1/sku-management/` GET/POST prefix; application session/section authorization remains authoritative. No route proxies a browser directly to WB.

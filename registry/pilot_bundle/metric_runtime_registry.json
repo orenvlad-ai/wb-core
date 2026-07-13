@@ -281,6 +281,48 @@
       "source_family": "derived",
       "source_module": "metric_runtime_registry",
       "is_runtime_enabled": true
+    },
+    {
+      "metric_key": "seller_price_change_rub",
+      "metric_kind": "direct",
+      "value_unit": "rub",
+      "value_scale": "decimal_2",
+      "missing_policy": "null",
+      "period_agg": "sum_window",
+      "formula_id": null,
+      "ratio_num_key": null,
+      "ratio_den_key": null,
+      "source_family": "webcore_event",
+      "source_module": "sku_management",
+      "is_runtime_enabled": true
+    },
+    {
+      "metric_key": "advertising_bid_change_rub",
+      "metric_kind": "direct",
+      "value_unit": "rub",
+      "value_scale": "decimal_2",
+      "missing_policy": "null",
+      "period_agg": "sum_window",
+      "formula_id": null,
+      "ratio_num_key": null,
+      "ratio_den_key": null,
+      "source_family": "webcore_event",
+      "source_module": "sku_management",
+      "is_runtime_enabled": true
+    },
+    {
+      "metric_key": "buyer_price_rub",
+      "metric_kind": "direct",
+      "value_unit": "rub",
+      "value_scale": "decimal_2",
+      "missing_policy": "null",
+      "period_agg": "last_snapshot",
+      "formula_id": null,
+      "ratio_num_key": null,
+      "ratio_den_key": null,
+      "source_family": "public_web",
+      "source_module": "spp_proxy_block",
+      "is_runtime_enabled": true
     }
   ]
 }

@@ -3970,6 +3970,31 @@
       gap: 14px;
     }
 
+    .sku-management-panel { min-width: 0; display: grid; gap: 12px; }
+    .sku-management-toolbar, .sku-management-filters, .sku-management-settings-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); align-items: end; }
+    .sku-management-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+    .sku-management-settings, .sku-management-history { margin: 0; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+    .sku-management-settings summary, .sku-management-history summary { cursor: pointer; font-weight: 650; }
+    .sku-management-table-shell { overflow: auto; max-height: 68vh; border: 1px solid var(--line); border-radius: 10px; }
+    .sku-management-table { border-collapse: separate; border-spacing: 0; min-width: 1800px; width: max-content; }
+    .sku-management-table th, .sku-management-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+    .sku-management-table th { position: sticky; top: 0; z-index: 2; background: var(--surface-elevated); text-align: left; cursor: pointer; }
+    .sku-management-table td.wrap { white-space: normal; max-width: 280px; }
+    .sku-risk { display: inline-flex; border-radius: 999px; padding: 3px 8px; font-size: 12px; }
+    .sku-risk.high { background: rgba(210, 52, 52, .14); color: #c23232; }
+    .sku-risk.medium { background: rgba(222, 151, 30, .16); color: #ad6d08; }
+    .sku-risk.low { background: rgba(43, 148, 88, .14); color: #257c4a; }
+    .sku-risk.unknown { background: var(--surface-muted); color: var(--text-muted); }
+    .sku-inline-edit { display: flex; gap: 6px; align-items: center; }
+    .sku-inline-edit .input { width: 92px; }
+    .sku-inline-edit select.input { width: 180px; }
+    .sku-column-controls { display: grid; gap: 6px; max-height: 320px; overflow: auto; min-width: 330px; }
+    .sku-column-row { display: grid; grid-template-columns: 1fr 64px 30px 30px; gap: 5px; align-items: center; }
+    .sku-management-status { min-height: 20px; color: var(--text-muted); }
+    .sku-management-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: rgba(0,0,0,.45); padding: 20px; }
+    .sku-management-modal-backdrop[hidden] { display: none; }
+    .sku-management-modal { width: min(760px, 100%); max-height: 86vh; overflow: auto; border-radius: 12px; padding: 16px; background: var(--surface); box-shadow: 0 18px 60px rgba(0,0,0,.28); }
+
     .ads-toolbar {
       display: flex;
       justify-content: space-between;
@@ -4759,6 +4784,7 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="ads" role="tab" aria-selected="false">Реклама</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="prices" role="tab" aria-selected="false">Цены</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="sku-management" role="tab" aria-selected="false">Управление SKU</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
       </nav>
       <div class="shell-actions">
@@ -5444,6 +5470,61 @@
       </section>
     </section>
 
+    <section class="unified-tab-panel" data-unified-tab-panel="sku-management" hidden>
+      <section class="panel sku-management-panel" data-sku-management-panel>
+        <div class="sku-management-toolbar">
+          <div>
+            <h2>Управление SKU</h2>
+            <p class="panel-meta">Прогноз дефицита, canonical коммерческие метрики и single-target изменения с WB readback.</p>
+          </div>
+          <button class="button secondary" type="button" data-sku-management-refresh>Обновить</button>
+        </div>
+        <details class="sku-management-settings" data-sku-management-settings>
+          <summary>Настройки прогноза</summary>
+          <div class="sku-management-settings-grid" style="margin-top:10px">
+            <label class="research-field"><span>Интенсивность продаж</span><select class="input" data-sku-setting="sales_avg_period_days"><option>7</option><option>14</option><option>30</option><option>60</option></select></label>
+            <label class="research-field"><span>Горизонт, дней</span><input class="input" type="number" min="7" max="365" data-sku-setting="forecast_horizon_days"></label>
+            <label class="research-field"><span>Период заказов, дней</span><input class="input" type="number" min="1" max="180" data-sku-setting="future_order_period_days"></label>
+            <label class="research-field"><span>Производство, дней</span><input class="input" type="number" min="0" data-sku-setting="production_lead_days"></label>
+            <label class="research-field"><span>Фабрика → ФФ, дней</span><input class="input" type="number" min="0" data-sku-setting="factory_to_ff_lead_days"></label>
+            <label class="research-field"><span>ФФ → WB, дней</span><input class="input" type="number" min="0" data-sku-setting="ff_to_wb_lead_days"></label>
+            <label class="research-field"><span>Страховой запас, дней</span><input class="input" type="number" min="0" data-sku-setting="safety_stock_days"></label>
+            <label class="research-field"><span>Партия заказа, шт.</span><input class="input" type="number" min="1" max="100000" data-sku-setting="order_batch_qty"></label>
+            <label class="research-field"><span>Стабилизация цены, дней</span><input class="input" type="number" min="0" data-sku-setting="price_stabilization_days"></label>
+            <label class="research-field"><span>Стабилизация ставки, дней</span><input class="input" type="number" min="0" data-sku-setting="bid_stabilization_days"></label>
+            <label class="research-field"><span>Перекрёстные предупреждения</span><input type="checkbox" data-sku-setting="cross_warnings_enabled"></label>
+          </div>
+          <div class="research-actions" style="margin-top:10px"><button class="button primary" type="button" data-sku-settings-save>Сохранить настройки</button></div>
+        </details>
+        <div class="sku-management-filters">
+          <label class="research-field"><span>SKU / nmID</span><input class="input" type="search" data-sku-filter="search"></label>
+          <label class="research-field"><span>Риск</span><select class="input" data-sku-filter="risk"><option value="">Все</option><option value="high">Высокий</option><option value="medium">Средний</option><option value="low">Низкий</option><option value="unknown">Нет данных</option></select></label>
+          <label class="research-field"><span>Акции</span><select class="input" data-sku-filter="promo"><option value="">Все</option><option value="yes">Есть</option><option value="no">Нет</option><option value="unknown">н/д</option></select></label>
+          <label class="research-field"><span>Обеспеченность от, %</span><input class="input" type="number" data-sku-filter="coverage_min"></label>
+          <label class="research-field"><span>Обеспеченность до, %</span><input class="input" type="number" data-sku-filter="coverage_max"></label>
+          <label class="research-field"><span>Дефицит от, шт.</span><input class="input" type="number" data-sku-filter="deficit_min"></label>
+          <label class="research-field"><span>Дефицит до, шт.</span><input class="input" type="number" data-sku-filter="deficit_max"></label>
+          <details class="column-manager" data-sku-column-manager><summary class="button secondary">Колонки</summary><div class="column-manager-panel"><div class="sku-column-controls" data-sku-column-controls></div></div></details>
+        </div>
+        <p class="sku-management-status" data-sku-management-status>Раздел не загружен.</p>
+        <p class="research-error" data-sku-management-error></p>
+        <div class="sku-management-table-shell">
+          <table class="sku-management-table" data-sku-management-table><thead data-sku-management-head></thead><tbody data-sku-management-body><tr><td>Откройте раздел для загрузки.</td></tr></tbody></table>
+        </div>
+        <details class="sku-management-history" data-sku-management-history>
+          <summary>История изменений</summary>
+          <div class="sku-management-filters" style="margin-top:10px">
+            <label class="research-field"><span>nmID</span><input class="input" type="number" data-sku-history-filter="nm_id"></label>
+            <label class="research-field"><span>Параметр</span><select class="input" data-sku-history-filter="parameter"><option value="">Все</option><option value="seller_price">Цена</option><option value="advertising_bid">Ставка</option></select></label>
+            <label class="research-field"><span>Статус</span><select class="input" data-sku-history-filter="status"><option value="">Все</option><option value="confirmed">Подтверждено</option><option value="error">Ошибка</option></select></label>
+            <button class="button secondary" type="button" data-sku-history-refresh>Обновить историю</button>
+          </div>
+          <div class="sku-management-table-shell" style="max-height:360px;margin-top:10px"><table class="sku-management-table" style="min-width:1200px"><thead><tr><th>Время</th><th>SKU</th><th>Параметр</th><th>Старое → новое</th><th>Δ</th><th>Campaign / placement</th><th>Пользователь</th><th>Warnings / override</th><th>Статус / readback</th></tr></thead><tbody data-sku-history-body><tr><td colspan="9">История не загружена.</td></tr></tbody></table></div>
+          <div class="research-actions" style="margin-top:8px"><button class="button secondary" type="button" data-sku-history-prev>Назад</button><span data-sku-history-page>1</span><button class="button secondary" type="button" data-sku-history-next>Далее</button></div>
+        </details>
+      </section>
+    </section>
+
     <section class="unified-tab-panel" data-unified-tab-panel="research" hidden>
       <section class="panel research-panel" data-research-panel>
         <div class="research-section-tabs" role="tablist" aria-label="Разделы исследования">
@@ -5623,6 +5704,14 @@
     </section>
   </div>
 
+  <div class="sku-management-modal-backdrop" data-sku-management-modal hidden>
+    <section class="sku-management-modal" role="dialog" aria-modal="true">
+      <div class="ads-modal-head"><h3 class="ads-modal-title">Подтверждение изменения SKU</h3><button class="button ghost" type="button" data-sku-modal-cancel>Закрыть</button></div>
+      <div data-sku-modal-body></div>
+      <div class="ads-modal-actions"><button class="button secondary" type="button" data-sku-modal-cancel>Отменить</button><button class="button danger" type="button" data-sku-modal-confirm disabled>Изменить</button></div>
+    </section>
+  </div>
+
   <script>
     const WEB_VITRINA_CONFIG = __SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__;
     const unifiedTabButtons = Array.from(document.querySelectorAll("[data-unified-tab-button]"));
@@ -5790,6 +5879,23 @@
     const pricesModalNode = document.querySelector("[data-prices-modal]");
     const pricesModalBodyNode = document.querySelector("[data-prices-modal-body]");
     const pricesCommitButton = document.querySelector("[data-prices-commit]");
+    const skuManagementPanelNode = document.querySelector("[data-sku-management-panel]");
+    const skuManagementRefreshButton = document.querySelector("[data-sku-management-refresh]");
+    const skuManagementSettingsSaveButton = document.querySelector("[data-sku-settings-save]");
+    const skuManagementStatusNode = document.querySelector("[data-sku-management-status]");
+    const skuManagementErrorNode = document.querySelector("[data-sku-management-error]");
+    const skuManagementHeadNode = document.querySelector("[data-sku-management-head]");
+    const skuManagementBodyNode = document.querySelector("[data-sku-management-body]");
+    const skuManagementColumnControlsNode = document.querySelector("[data-sku-column-controls]");
+    const skuManagementHistoryNode = document.querySelector("[data-sku-management-history]");
+    const skuManagementHistoryBodyNode = document.querySelector("[data-sku-history-body]");
+    const skuManagementHistoryRefreshButton = document.querySelector("[data-sku-history-refresh]");
+    const skuManagementHistoryPrevButton = document.querySelector("[data-sku-history-prev]");
+    const skuManagementHistoryNextButton = document.querySelector("[data-sku-history-next]");
+    const skuManagementHistoryPageNode = document.querySelector("[data-sku-history-page]");
+    const skuManagementModalNode = document.querySelector("[data-sku-management-modal]");
+    const skuManagementModalBodyNode = document.querySelector("[data-sku-modal-body]");
+    const skuManagementModalConfirmButton = document.querySelector("[data-sku-modal-confirm]");
     const pricesSubtabButtons = Array.from(document.querySelectorAll("[data-prices-subtab]"));
     const pricesSubpanels = Array.from(document.querySelectorAll("[data-prices-subpanel]"));
     const sppTestNmSelect = document.querySelector("[data-spp-test-nm]");
@@ -5835,6 +5941,7 @@
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const ADS_UNIFIED_TAB = "ads";
     const PRICES_UNIFIED_TAB = "prices";
+    const SKU_MANAGEMENT_UNIFIED_TAB = "sku-management";
     const FEEDBACKS_AI_MAX_QUEUE_ROWS = 25;
     const FEEDBACKS_MAX_RANGE_DAYS = 62;
     const FEEDBACKS_WB_CATEGORY_LABELS = {
@@ -5960,10 +6067,24 @@
       {id: "wb_error", label: "Ошибка WB", width: 180},
       {id: "edit", label: "Редактирование", width: 180}
     ];
+    const SKU_MANAGEMENT_COLUMNS = [
+      {id:"product", label:"SKU / nmID / название", width:240}, {id:"risk", label:"Риск", width:90},
+      {id:"deficit_date", label:"Дата дефицита", width:120}, {id:"coverage_pct", label:"Обеспеченность, %", width:125},
+      {id:"deficit_units", label:"Дефицит, шт.", width:110}, {id:"first_problem_district", label:"Проблемный округ", width:130},
+      {id:"seller_price", label:"Наша цена", width:190}, {id:"buyer_price", label:"Цена покупателя", width:120},
+      {id:"spp_proxy", label:"СПП / прокси", width:110}, {id:"promo", label:"Акции", width:100},
+      {id:"campaigns", label:"Кампании", width:100}, {id:"current_bid", label:"Рекламная ставка", width:300},
+      {id:"ads_drr", label:"Общий ДРР", width:100}, {id:"ads_drr_attributed", label:"ДРР рекламных заказов", width:150},
+      {id:"funnel", label:"Воронка", width:220}, {id:"orders", label:"Продажи / заказы", width:130},
+      {id:"profit_rub", label:"Прибыль", width:110}, {id:"margin_pct", label:"Маржинальность", width:120},
+      {id:"last_price_change_at", label:"Последняя цена", width:150}, {id:"last_bid_change_at", label:"Последняя ставка", width:150},
+      {id:"diagnostics", label:"Диагностика / качество", width:280}
+    ];
+    const SKU_MANAGEMENT_DEFAULT_COLUMNS = SKU_MANAGEMENT_COLUMNS.map(function(item){ return item.id; });
     const RESEARCH_UNIFIED_TAB = "research";
     const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
     const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
     const ALLOWED_UNIFIED_TABS = new Set(
       CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
@@ -6293,6 +6414,27 @@
           error: ""
         }
       },
+      skuManagement: {
+        loading: false,
+        loaded: false,
+        saving: false,
+        savePending: false,
+        rows: [],
+        settings: null,
+        revision: 0,
+        table: {visible_columns: [], column_order: [], column_widths: {}, filters: {}, sort: []},
+        drafts: {},
+        editingPriceNmId: null,
+        editingBidNmId: null,
+        error: "",
+        preview: null,
+        previewKind: "",
+        commitRunning: false,
+        historyRows: [],
+        historyOffset: 0,
+        historyTotal: 0,
+        historyLimit: 50
+      },
       vitrinaAuto: {
         loading: false,
         saving: false,
@@ -6380,6 +6522,19 @@
     if (pricesCommitButton) {
       pricesCommitButton.addEventListener("click", commitPriceChanges);
     }
+    if (skuManagementRefreshButton) skuManagementRefreshButton.addEventListener("click", function(){ loadSkuManagement({force:true}); });
+    if (skuManagementSettingsSaveButton) skuManagementSettingsSaveButton.addEventListener("click", saveSkuManagementSettings);
+    if (skuManagementPanelNode) {
+      skuManagementPanelNode.addEventListener("input", handleSkuManagementInput);
+      skuManagementPanelNode.addEventListener("change", handleSkuManagementInput);
+      skuManagementPanelNode.addEventListener("click", handleSkuManagementClick);
+    }
+    if (skuManagementHistoryNode) skuManagementHistoryNode.addEventListener("toggle", function(){ if (skuManagementHistoryNode.open) loadSkuManagementHistory({force:true}); });
+    if (skuManagementHistoryRefreshButton) skuManagementHistoryRefreshButton.addEventListener("click", function(){ state.skuManagement.historyOffset=0; loadSkuManagementHistory({force:true}); });
+    if (skuManagementHistoryPrevButton) skuManagementHistoryPrevButton.addEventListener("click", function(){ state.skuManagement.historyOffset=Math.max(0,state.skuManagement.historyOffset-state.skuManagement.historyLimit); loadSkuManagementHistory({force:true}); });
+    if (skuManagementHistoryNextButton) skuManagementHistoryNextButton.addEventListener("click", function(){ if(state.skuManagement.historyOffset+state.skuManagement.historyLimit<state.skuManagement.historyTotal){state.skuManagement.historyOffset+=state.skuManagement.historyLimit;loadSkuManagementHistory({force:true});} });
+    if (skuManagementModalNode) skuManagementModalNode.addEventListener("click", handleSkuManagementModalClick);
+    if (skuManagementModalConfirmButton) skuManagementModalConfirmButton.addEventListener("click", commitSkuManagementPreview);
 
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
@@ -7199,6 +7354,9 @@
       if (activeTab === PRICES_UNIFIED_TAB) {
         ensurePricesLoaded();
       }
+      if (activeTab === SKU_MANAGEMENT_UNIFIED_TAB) {
+        ensureSkuManagementLoaded();
+      }
       if (activeTab === SETTINGS_UNIFIED_TAB) {
         ensureSettingsEmbed();
       }
@@ -7985,6 +8143,12 @@
       return METRIC_DISPLAY_STATUSES.has(normalized) ? normalized : "shown";
     }
 
+    function defaultMetricDisplayStatus(metricKey) {
+      return new Set(["seller_price_change_rub", "advertising_bid_change_rub"]).has(String(metricKey || ""))
+        ? "collapsed"
+        : "shown";
+    }
+
     function metricDisplayStatusForScope(scopeId, metricKey) {
       const normalizedScopeId = String(scopeId || "");
       const normalizedMetricKey = String(metricKey || "");
@@ -8056,7 +8220,7 @@
           scopeByKey[metricKey] = scopeId;
           const savedDisplay = savedScope.display && Object.prototype.hasOwnProperty.call(savedScope.display, metricKey)
             ? savedScope.display[metricKey]
-            : "shown";
+            : defaultMetricDisplayStatus(metricKey);
           setMetricDisplayStatusForScope(scopeId, metricKey, savedDisplay);
         });
         if (!forceDefault && previousSelectionModeByScope[scopeId]) {
@@ -17888,6 +18052,230 @@
         return "вне справочника";
       }
       return normalized || "—";
+    }
+
+    function ensureSkuManagementLoaded() {
+      if (!state.skuManagement.loaded && !state.skuManagement.loading) loadSkuManagement();
+    }
+
+    async function loadSkuManagement(options) {
+      if (state.skuManagement.loading || (state.skuManagement.loaded && !(options && options.force))) return;
+      state.skuManagement.loading = true;
+      state.skuManagement.error = "";
+      renderSkuManagement();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.sku_management_path, {headers:{"Accept":"application/json"}});
+        const payload = await readJsonResponse(response, "non-json response from SKU management route");
+        if (!response.ok) throw new Error((payload && payload.error) || ("SKU management route returned " + response.status));
+        state.skuManagement.rows = Array.isArray(payload.rows) ? payload.rows : [];
+        state.skuManagement.settings = (payload.settings || {}).forecast || {};
+        state.skuManagement.revision = Number((payload.settings || {}).revision || 0);
+        state.skuManagement.table = Object.assign({visible_columns:[],column_order:[],column_widths:{},filters:{},sort:[]}, (payload.settings || {}).table || {});
+        state.skuManagement.loaded = true;
+        syncSkuManagementSettingsInputs();
+      } catch (error) {
+        state.skuManagement.error = String(error && error.message ? error.message : error);
+      } finally {
+        state.skuManagement.loading = false;
+        renderSkuManagement();
+      }
+    }
+
+    function syncSkuManagementSettingsInputs() {
+      const settings = state.skuManagement.settings || {};
+      document.querySelectorAll("[data-sku-setting]").forEach(function(node){
+        const key = String(node.getAttribute("data-sku-setting") || "");
+        if (!Object.prototype.hasOwnProperty.call(settings,key)) return;
+        if (node.type === "checkbox") node.checked = !!settings[key]; else node.value = settings[key];
+      });
+      const filters = state.skuManagement.table.filters || {};
+      document.querySelectorAll("[data-sku-filter]").forEach(function(node){ const key=node.getAttribute("data-sku-filter"); node.value = filters[key] === undefined ? "" : filters[key]; });
+    }
+
+    function skuForecastSettingsFromInputs() {
+      const result = {};
+      document.querySelectorAll("[data-sku-setting]").forEach(function(node){
+        const key=String(node.getAttribute("data-sku-setting")||"");
+        result[key] = node.type === "checkbox" ? !!node.checked : Number(node.value);
+      });
+      return result;
+    }
+
+    async function saveSkuManagementSettings(options) {
+      if (state.skuManagement.saving) { state.skuManagement.savePending = true; return; }
+      state.skuManagement.saving = true;
+      if (skuManagementStatusNode) skuManagementStatusNode.textContent = "Сохраняем server-owned настройки…";
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.sku_management_settings_path, {method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({base_revision:state.skuManagement.revision,forecast:skuForecastSettingsFromInputs(),table:state.skuManagement.table})});
+        const payload = await readJsonResponse(response,"non-json response from SKU settings route");
+        if (!response.ok) throw new Error((payload&&payload.error)||("SKU settings route returned "+response.status));
+        state.skuManagement.settings = payload.forecast || state.skuManagement.settings;
+        state.skuManagement.table = payload.table || state.skuManagement.table;
+        state.skuManagement.revision = Number(payload.revision || state.skuManagement.revision);
+        state.skuManagement.error = "";
+        if (!(options && options.noReload)) await loadSkuManagement({force:true});
+      } catch(error) { state.skuManagement.error=String(error&&error.message?error.message:error); }
+      finally { const repeat=state.skuManagement.savePending;state.skuManagement.savePending=false;state.skuManagement.saving=false;renderSkuManagement();if(repeat)saveSkuManagementSettings({noReload:true}); }
+    }
+
+    let skuManagementSaveTimer = null;
+    function scheduleSkuManagementPreferencesSave() {
+      if (skuManagementSaveTimer) window.clearTimeout(skuManagementSaveTimer);
+      skuManagementSaveTimer = window.setTimeout(function(){ saveSkuManagementSettings({noReload:true}); }, 350);
+    }
+
+    function skuManagementOrderedColumns() {
+      const byId = new Map(SKU_MANAGEMENT_COLUMNS.map(function(item){return [item.id,item];}));
+      const order = Array.isArray(state.skuManagement.table.column_order) && state.skuManagement.table.column_order.length ? state.skuManagement.table.column_order : SKU_MANAGEMENT_DEFAULT_COLUMNS;
+      const result=[]; const seen=new Set();
+      order.forEach(function(id){if(byId.has(id)&&!seen.has(id)){result.push(byId.get(id));seen.add(id);}});
+      SKU_MANAGEMENT_COLUMNS.forEach(function(item){if(!seen.has(item.id)) result.push(item);});
+      const visible = new Set(Array.isArray(state.skuManagement.table.visible_columns)&&state.skuManagement.table.visible_columns.length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);
+      return result.filter(function(item){return visible.has(item.id);});
+    }
+
+    function skuManagementFilteredRows() {
+      const filters=state.skuManagement.table.filters||{};
+      let rows=state.skuManagement.rows.slice();
+      const search=String(filters.search||"").toLowerCase().trim();
+      if(search) rows=rows.filter(function(row){return [row.sku,row.nm_id,row.name].some(function(v){return String(v||"").toLowerCase().includes(search);});});
+      if(filters.risk) rows=rows.filter(function(row){return row.risk===filters.risk;});
+      if(filters.promo==="yes") rows=rows.filter(function(row){return row.promo_participation!==null&&row.promo_participation!==undefined&&Number(row.promo_participation)>0;});
+      if(filters.promo==="no") rows=rows.filter(function(row){return row.promo_participation!==null&&row.promo_participation!==undefined&&Number(row.promo_participation)===0;});
+      if(filters.promo==="unknown") rows=rows.filter(function(row){return row.promo_participation===null||row.promo_participation===undefined;});
+      if(filters.coverage_min!==""&&filters.coverage_min!==undefined) rows=rows.filter(function(row){return row.coverage_pct!=null&&Number(row.coverage_pct)>=Number(filters.coverage_min);});
+      if(filters.coverage_max!==""&&filters.coverage_max!==undefined) rows=rows.filter(function(row){return row.coverage_pct!=null&&Number(row.coverage_pct)<=Number(filters.coverage_max);});
+      if(filters.deficit_min!==""&&filters.deficit_min!==undefined) rows=rows.filter(function(row){return row.deficit_units!=null&&Number(row.deficit_units)>=Number(filters.deficit_min);});
+      if(filters.deficit_max!==""&&filters.deficit_max!==undefined) rows=rows.filter(function(row){return row.deficit_units!=null&&Number(row.deficit_units)<=Number(filters.deficit_max);});
+      const sort=Array.isArray(state.skuManagement.table.sort)?state.skuManagement.table.sort:[];
+      if(sort.length){ rows.sort(function(a,b){for(const spec of sort){const av=skuManagementSortValue(a,spec.key),bv=skuManagementSortValue(b,spec.key);if(av===bv)continue;if(av===null)return 1;if(bv===null)return -1;const cmp=typeof av==="string"?av.localeCompare(bv,"ru"):av-bv;if(cmp!==0)return spec.direction==="desc"?-cmp:cmp;}return Number(a.nm_id)-Number(b.nm_id);}); }
+      return rows;
+    }
+
+    function skuManagementSortValue(row,key){
+      if(key==="product")return String(row.sku||row.name||row.nm_id||"");
+      if(key==="risk")return row.risk==="unknown"||row.risk_rank==null||Number(row.risk_rank)<0?null:Number(row.risk_rank);
+      if(key==="promo")return row.promo_count==null?null:Number(row.promo_count);
+      if(key==="campaigns")return Number(row.campaign_count||0);
+      if(key==="current_bid")return row.bid_sort_value==null?(row.current_bid==null?null:Number(row.current_bid)):Number(row.bid_sort_value);
+      if(key==="diagnostics")return String(row.quality||"");
+      const value=row[key]; if(value===null||value===undefined||value==="")return null; return typeof value==="number"?value:(/^\d{4}-\d{2}-\d{2}/.test(String(value))?String(value):Number.isFinite(Number(value))?Number(value):String(value));
+    }
+
+    function renderSkuManagement() {
+      if (!skuManagementPanelNode) return;
+      if (skuManagementErrorNode) skuManagementErrorNode.textContent=state.skuManagement.error||"";
+      if (skuManagementStatusNode) skuManagementStatusNode.textContent=state.skuManagement.loading?"Загрузка canonical SKU и evidence…":state.skuManagement.commitRunning?"Commit running / readback pending…":state.skuManagement.loaded?("SKU: "+state.skuManagement.rows.length+" · настройки и представление хранятся на сервере"):"Раздел не загружен.";
+      renderSkuManagementColumns();
+      const columns=skuManagementOrderedColumns();
+      const sort=(state.skuManagement.table.sort||[])[0]||{};const visibleSortKey=sort.key==="risk_rank"?"risk":sort.key;
+      if(skuManagementHeadNode) skuManagementHeadNode.innerHTML="<tr>"+columns.map(function(col){const marker=visibleSortKey===col.id?(sort.direction==="asc"?" ↑":" ↓"):"";const width=Number((state.skuManagement.table.column_widths||{})[col.id]||col.width||120);return '<th data-sku-sort="'+escapeHtml(col.id)+'" style="width:'+width+'px;min-width:'+width+'px">'+escapeHtml(col.label)+marker+'</th>';}).join("")+"</tr>";
+      if(!skuManagementBodyNode)return;
+      if(state.skuManagement.loading){skuManagementBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">Загрузка…</td></tr>';return;}
+      const rows=skuManagementFilteredRows();
+      if(!rows.length){skuManagementBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">Нет SKU по текущим фильтрам или evidence отсутствует.</td></tr>';return;}
+      skuManagementBodyNode.innerHTML=rows.map(function(row){return "<tr>"+columns.map(function(col){return renderSkuManagementCell(col.id,row);}).join("")+"</tr>";}).join("");
+    }
+
+    function renderSkuManagementCell(id,row){
+      const money=function(value){return value==null?"—":formatNumber(Number(value),2,true)+" ₽";};
+      const pct=function(value){return value==null?"—":formatNumber(Number(value)*((id==="spp_proxy"||id==="margin_pct"||id==="ads_drr"||id==="ads_drr_attributed")?100:1),1,true)+"%";};
+      if(id==="product")return '<td class="wrap"><strong>'+escapeHtml(row.sku||"—")+'</strong> · '+escapeHtml(row.nm_id)+'<br><span class="panel-meta">'+escapeHtml(row.name||"")+'</span></td>';
+      if(id==="risk")return '<td><span class="sku-risk '+escapeHtml(row.risk||"unknown")+'">'+escapeHtml({high:"высокий",medium:"средний",low:"низкий",unknown:"нет данных"}[row.risk]||row.risk)+'</span></td>';
+      if(id==="deficit_date")return '<td>'+escapeHtml(row.deficit_date||"—")+'</td>';
+      if(id==="coverage_pct")return '<td>'+pct(row.coverage_pct)+'</td>';
+      if(id==="deficit_units")return '<td>'+escapeHtml(row.deficit_units==null?"—":formatNumber(Number(row.deficit_units),0,true))+'</td>';
+      if(id==="first_problem_district")return '<td>'+escapeHtml(row.first_problem_district||"—")+'</td>';
+      if(id==="seller_price")return Number(state.skuManagement.editingPriceNmId)===Number(row.nm_id)?'<td><div class="sku-inline-edit"><input class="input" type="number" min="0.01" step="0.01" value="'+escapeHtml(row.seller_price==null?"":row.seller_price)+'" data-sku-price-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-price-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div></td>':'<td><button class="button ghost" type="button" data-sku-price-edit="'+escapeHtml(row.nm_id)+'">'+money(row.seller_price)+'</button></td>';
+      if(id==="buyer_price")return '<td>'+money(row.buyer_price)+'<br><span class="panel-meta">'+escapeHtml(row.buyer_price_quality||"missing")+(row.buyer_price_freshness?' · '+escapeHtml(row.buyer_price_freshness):'')+'</span></td>';
+      if(id==="spp_proxy")return '<td>'+pct(row.spp_proxy)+'</td>';
+      if(id==="promo")return '<td>'+escapeHtml(row.promo_label||"н/д")+'<br><span class="panel-meta">SKU участвует: '+escapeHtml(row.promo_participation==null?"н/д":Number(row.promo_participation)>0?"да":"нет")+' · доступно: '+escapeHtml(row.promo_count==null?"н/д":row.promo_count)+(row.promo_freshness?' · '+escapeHtml(row.promo_freshness):'')+'</span></td>';
+      if(id==="campaigns"){const names=Array.from(new Set((row.ad_options||[]).map(function(item){return item.campaign_name||String(item.advert_id||"");}).filter(Boolean)));return '<td class="wrap">'+escapeHtml(String(row.campaign_count||0))+' / '+escapeHtml(String(row.placement_count||0))+(names.length?'<br><span class="panel-meta">'+escapeHtml(names.join(", "))+'</span>':"")+'</td>';}
+      if(id==="current_bid")return '<td>'+renderSkuBidEditor(row)+'</td>';
+      if(id==="ads_drr"||id==="ads_drr_attributed"||id==="margin_pct")return '<td>'+pct(row[id])+'</td>';
+      if(id==="funnel"){const f=row.funnel||{};return '<td class="wrap">Просмотры '+escapeHtml(f.view_count==null?"—":f.view_count)+' · карточка '+escapeHtml(f.openCount==null?"—":f.openCount)+' · корзина '+escapeHtml(f.cartCount==null?"—":f.cartCount)+'<br><span class="panel-meta">в корзину '+escapeHtml(f.addToCartConversion==null?"—":formatNumber(Number(f.addToCartConversion)*100,1,true)+"%")+' · в заказ '+escapeHtml(f.cartToOrderConversion==null?"—":formatNumber(Number(f.cartToOrderConversion)*100,1,true)+"%")+'</span></td>';}
+      if(id==="orders")return '<td>'+money(row.sales_rub)+' / '+escapeHtml(row.orders==null?"—":row.orders)+'</td>';
+      if(id==="profit_rub")return '<td>'+money(row.profit_rub)+'</td>';
+      if(id==="last_price_change_at"||id==="last_bid_change_at")return '<td>'+escapeHtml(row[id]||"—")+'</td>';
+      if(id==="diagnostics")return '<td class="wrap"><strong>'+escapeHtml(row.quality||"unknown")+'</strong> · '+escapeHtml(row.reason||"")+(Array.isArray(row.quality_warnings)&&row.quality_warnings.length?'<br><span class="panel-meta">'+escapeHtml(row.quality_warnings.join("; "))+'</span>':"")+'</td>';
+      return '<td>'+escapeHtml(row[id]==null?"—":row[id])+'</td>';
+    }
+
+    function renderSkuBidEditor(row){
+      const options=Array.isArray(row.ad_options)?row.ad_options:[];
+      if(!options.length)return "—";
+      if(Number(state.skuManagement.editingBidNmId)!==Number(row.nm_id)){const values=options.map(function(item){return Number(item.current_bid_rub);}).filter(Number.isFinite);const range=values.length?(Math.min.apply(null,values)===Math.max.apply(null,values)?Math.min.apply(null,values)+" ₽":Math.min.apply(null,values)+"–"+Math.max.apply(null,values)+" ₽"):"н/д";const label=options.length===1?range:(options.length+" ставки · "+range);return '<button class="button ghost" type="button" data-sku-bid-edit="'+escapeHtml(row.nm_id)+'">'+escapeHtml(label)+'</button>';}
+      const select=options.length>1?'<select class="input" data-sku-bid-option="'+escapeHtml(row.nm_id)+'">'+options.map(function(item){return '<option value="'+escapeHtml(item.advert_id+"|"+item.placement)+'">'+escapeHtml((item.campaign_name||item.advert_id)+" · "+item.placement+" · "+(item.current_bid_rub==null?"—":item.current_bid_rub+" ₽"))+'</option>';}).join("")+'</select>':'';
+      const initial=options.length===1?options[0].current_bid_rub:"";
+      return '<div class="sku-inline-edit">'+select+'<input class="input" type="number" min="0" step="0.01" value="'+escapeHtml(initial==null?"":initial)+'" data-sku-bid-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-bid-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div>';
+    }
+
+    function renderSkuManagementColumns(){
+      if(!skuManagementColumnControlsNode)return;
+      const order=skuManagementOrderedAllIds(); const visible=new Set((state.skuManagement.table.visible_columns||[]).length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);
+      skuManagementColumnControlsNode.innerHTML=order.map(function(id,index){const col=SKU_MANAGEMENT_COLUMNS.find(function(item){return item.id===id;});const width=Number((state.skuManagement.table.column_widths||{})[id]||col.width||120);return '<div class="sku-column-row"><label><input type="checkbox" data-sku-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked":"")+'> '+escapeHtml(col.label)+'</label><input class="input" type="number" min="60" max="600" value="'+width+'" data-sku-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-sku-column-up="'+escapeHtml(id)+'" '+(index===0?"disabled":"")+'>↑</button><button class="button ghost" type="button" data-sku-column-down="'+escapeHtml(id)+'" '+(index===order.length-1?"disabled":"")+'>↓</button></div>';}).join("");
+    }
+
+    function skuManagementOrderedAllIds(){const allowed=new Set(SKU_MANAGEMENT_DEFAULT_COLUMNS);const result=[];(state.skuManagement.table.column_order||[]).forEach(function(id){if(allowed.has(id)&&!result.includes(id))result.push(id);});SKU_MANAGEMENT_DEFAULT_COLUMNS.forEach(function(id){if(!result.includes(id))result.push(id);});return result;}
+
+    function handleSkuManagementInput(event){
+      const filter=event.target.closest("[data-sku-filter]"); if(filter){const key=filter.getAttribute("data-sku-filter");state.skuManagement.table.filters=Object.assign({},state.skuManagement.table.filters||{}, {[key]:filter.value});renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
+      const visible=event.target.closest("[data-sku-column-visible]"); if(visible){const id=visible.getAttribute("data-sku-column-visible");const set=new Set((state.skuManagement.table.visible_columns||[]).length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);visible.checked?set.add(id):set.delete(id);state.skuManagement.table.visible_columns=Array.from(set);renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
+      const width=event.target.closest("[data-sku-column-width]"); if(width){if(event.type!=="change")return;const id=width.getAttribute("data-sku-column-width");state.skuManagement.table.column_widths=Object.assign({},state.skuManagement.table.column_widths||{}, {[id]:Math.min(600,Math.max(60,Number(width.value)||120))});renderSkuManagement();scheduleSkuManagementPreferencesSave();}
+    }
+
+    function handleSkuManagementClick(event){
+      const sort=event.target.closest("[data-sku-sort]"); if(sort){const key=sort.getAttribute("data-sku-sort");const current=(state.skuManagement.table.sort||[])[0]||{};state.skuManagement.table.sort=current.key!==key?[{key:key,direction:"asc"}]:current.direction==="asc"?[{key:key,direction:"desc"}]:current.direction==="desc"?[]:[{key:key,direction:"asc"}];renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
+      const up=event.target.closest("[data-sku-column-up],[data-sku-column-down]"); if(up){const id=up.getAttribute("data-sku-column-up")||up.getAttribute("data-sku-column-down");const order=skuManagementOrderedAllIds();const index=order.indexOf(id);const next=up.hasAttribute("data-sku-column-up")?index-1:index+1;if(index>=0&&next>=0&&next<order.length){[order[index],order[next]]=[order[next],order[index]];state.skuManagement.table.column_order=order;renderSkuManagement();scheduleSkuManagementPreferencesSave();}return;}
+      const priceEdit=event.target.closest("[data-sku-price-edit]"); if(priceEdit){state.skuManagement.editingPriceNmId=Number(priceEdit.getAttribute("data-sku-price-edit"));renderSkuManagement();return;}
+      const bidEdit=event.target.closest("[data-sku-bid-edit]"); if(bidEdit){state.skuManagement.editingBidNmId=Number(bidEdit.getAttribute("data-sku-bid-edit"));renderSkuManagement();return;}
+      const price=event.target.closest("[data-sku-price-preview]"); if(price){previewSkuPrice(Number(price.getAttribute("data-sku-price-preview")));return;}
+      const bid=event.target.closest("[data-sku-bid-preview]"); if(bid){previewSkuBid(Number(bid.getAttribute("data-sku-bid-preview")));}
+    }
+
+    async function previewSkuPrice(nmId){
+      const input=skuManagementPanelNode.querySelector('[data-sku-price-input="'+cssEscape(String(nmId))+'"]');
+      await requestSkuManagementPreview("price",{nm_id:nmId,target_seller_price:input&&input.value});
+    }
+
+    async function previewSkuBid(nmId){
+      const row=state.skuManagement.rows.find(function(item){return Number(item.nm_id)===Number(nmId);});const options=(row&&row.ad_options)||[];
+      const select=skuManagementPanelNode.querySelector('[data-sku-bid-option="'+cssEscape(String(nmId))+'"]');const token=select?select.value:(options[0]?options[0].advert_id+"|"+options[0].placement:"");const parts=String(token).split("|");
+      const input=skuManagementPanelNode.querySelector('[data-sku-bid-input="'+cssEscape(String(nmId))+'"]');
+      if(!parts[0]||!parts[1]){state.skuManagement.error="Выберите конкретные advert_id и placement.";renderSkuManagement();return;}
+      await requestSkuManagementPreview("bid",{nm_id:nmId,advert_id:Number(parts[0]),placement:parts[1],requested_bid_rub:input&&input.value});
+    }
+
+    async function requestSkuManagementPreview(kind,body){
+      state.skuManagement.error=""; if(skuManagementStatusNode)skuManagementStatusNode.textContent="Готовим preview…";
+      try{const path=kind==="price"?WEB_VITRINA_CONFIG.sku_management_price_preview_path:WEB_VITRINA_CONFIG.sku_management_bid_preview_path;const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify(body)});const payload=await readJsonResponse(response,"non-json SKU preview response");if(!response.ok)throw new Error((payload&&payload.error)||("preview route returned "+response.status));state.skuManagement.preview=payload.preview;state.skuManagement.previewKind=kind;renderSkuManagementPreview();}catch(error){state.skuManagement.error=String(error&&error.message?error.message:error);renderSkuManagement();}
+    }
+
+    function skuManagementWarningLabel(value){const labels={quarantine_risk_new_discounted_price_at_least_3x_lower:"Новая цена продавца минимум в 3 раза ниже текущей: WB может поместить товар в карантин.",promo_evidence_unavailable_or_stale:"Данные об акциях для этого SKU отсутствуют или устарели.",active_promo_participation:"SKU участвует в действующей акции; изменение цены может повлиять на условия акции.",public_buyer_price_missing_or_stale:"Свежая публичная цена покупателя не подтверждена и не будет подменена расчётом.",min_bid_unavailable:"Текущий минимум ставки WB не подтверждён."};return labels[String(value||"")]||String(value||"");}
+
+    function renderSkuManagementPreview(){
+      const p=state.skuManagement.preview;if(!p||!skuManagementModalNode)return;const warnings=Array.isArray(p.stabilization_warnings)?p.stabilization_warnings:[];const all=Array.isArray(p.warnings)?p.warnings:[];const overrideRequired=Array.isArray(p.override_required_warnings)?p.override_required_warnings:[];
+      let facts="";if(state.skuManagement.previewKind==="price")facts='<p><strong>Текущая / целевая цена продавца:</strong> '+escapeHtml(p.current.discountedPrice)+' → '+escapeHtml(p.target_seller_price)+' ₽</p><p><strong>Первоначальная цена:</strong> '+escapeHtml(p.current.price)+' → '+escapeHtml(p.new.price)+' ₽ · <strong>скидка:</strong> '+escapeHtml(p.current.discount)+'% → '+escapeHtml(p.new.discount)+'%</p><p><strong>Текущая цена покупателя:</strong> '+escapeHtml(p.current_buyer_price==null?"н/д":p.current_buyer_price+" ₽")+' · оценочная цена не подменяет факт.</p>';else facts='<p><strong>advert_id / placement:</strong> '+escapeHtml(p.advert_id)+' / '+escapeHtml(p.placement)+'</p><p><strong>Ставка:</strong> '+escapeHtml(p.old_value)+' → '+escapeHtml(p.requested_value)+' ₽ · минимум '+escapeHtml(p.min_bid_rub==null?"н/д":p.min_bid_rub+' ₽')+'</p>';
+      const detailedCodes=new Set(warnings.map(function(item){return String(item.code||"");}));skuManagementModalBodyNode.innerHTML=facts+(all.length?'<div class="ads-danger-note"><strong>Предупреждения</strong><ul>'+warnings.map(function(item){return '<li>'+escapeHtml(item.message||skuManagementWarningLabel(item.code))+'</li>';}).join("")+(all.filter(function(item){return typeof item==="string"&&!detailedCodes.has(item);}).map(function(item){return '<li>'+escapeHtml(skuManagementWarningLabel(item))+'</li>';}).join(""))+'</ul></div>':'<p class="panel-meta">Safety validation пройдена. Success будет показан только после WB readback.</p>');
+      skuManagementModalConfirmButton.textContent=overrideRequired.length?"Всё равно изменить":"Изменить";skuManagementModalConfirmButton.disabled=false;skuManagementModalNode.hidden=false;
+    }
+
+    function handleSkuManagementModalClick(event){if(state.skuManagement.commitRunning)return;if(event.target.closest("[data-sku-modal-cancel]")||event.target===skuManagementModalNode){skuManagementModalNode.hidden=true;state.skuManagement.preview=null;}}
+
+    async function commitSkuManagementPreview(){
+      const preview=state.skuManagement.preview;if(!preview||state.skuManagement.commitRunning)return;state.skuManagement.commitRunning=true;skuManagementModalConfirmButton.disabled=true;skuManagementModalBodyNode.insertAdjacentHTML("beforeend",'<p data-sku-commit-state>Commit running → readback pending…</p>');
+      try{const kind=state.skuManagement.previewKind;const path=kind==="price"?WEB_VITRINA_CONFIG.sku_management_price_commit_path:WEB_VITRINA_CONFIG.sku_management_bid_commit_path;const hasStabilization=Array.isArray(preview.stabilization_warnings)&&preview.stabilization_warnings.length>0;const hasOverrideWarnings=Array.isArray(preview.override_required_warnings)&&preview.override_required_warnings.length>0;const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({preview_id:preview.preview_id,confirm:true,override_stabilization:hasStabilization,override_warnings:hasOverrideWarnings})});const payload=await readJsonResponse(response,"non-json SKU commit response");if(!response.ok)throw new Error((payload&&payload.error)||("commit route returned "+response.status));const priceTuple=kind==="price"&&payload.confirmed_price!=null?(' · price '+escapeHtml(payload.confirmed_price)+' / discount '+escapeHtml(payload.confirmed_discount)+'%'):'';skuManagementModalBodyNode.innerHTML='<p class="prices-badge success">Success · WB readback подтверждён: '+escapeHtml(payload.confirmed_value)+priceTuple+'</p>';skuManagementModalConfirmButton.disabled=true;window.setTimeout(function(){skuManagementModalNode.hidden=true;state.skuManagement.preview=null;loadSkuManagement({force:true});if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});},700);}catch(error){skuManagementModalBodyNode.insertAdjacentHTML("beforeend",'<p class="research-error">'+escapeHtml(String(error&&error.message?error.message:error))+'</p>');skuManagementModalConfirmButton.disabled=false;if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});}finally{state.skuManagement.commitRunning=false;renderSkuManagement();}
+    }
+
+    async function loadSkuManagementHistory(){
+      if(!skuManagementHistoryBodyNode)return;skuManagementHistoryBodyNode.innerHTML='<tr><td colspan="9">Загрузка…</td></tr>';
+      const params=new URLSearchParams({limit:String(state.skuManagement.historyLimit),offset:String(state.skuManagement.historyOffset)});document.querySelectorAll("[data-sku-history-filter]").forEach(function(node){if(node.value)params.set(node.getAttribute("data-sku-history-filter"),node.value);});
+      try{const response=await fetch(WEB_VITRINA_CONFIG.sku_management_history_path+"?"+params.toString(),{headers:{"Accept":"application/json"}});const payload=await readJsonResponse(response,"non-json SKU history response");if(!response.ok)throw new Error((payload&&payload.error)||("history route returned "+response.status));state.skuManagement.historyRows=payload.rows||[];state.skuManagement.historyTotal=Number((payload.pagination||{}).total||0);renderSkuManagementHistory();}catch(error){skuManagementHistoryBodyNode.innerHTML='<tr><td colspan="9">'+escapeHtml(String(error&&error.message?error.message:error))+'</td></tr>';}
+    }
+
+    function renderSkuManagementHistory(){
+      const rows=state.skuManagement.historyRows||[];skuManagementHistoryBodyNode.innerHTML=rows.length?rows.map(function(row){const warnings=(row.warnings||[]).join(", ");const status=row.commit_status+" / "+(row.readback_status||"not_started")+(row.commit_status==="confirmed"?(": "+(row.confirmed_value==null?"—":row.confirmed_value)):(": "+(row.error||"controlled error")));return '<tr><td>'+escapeHtml(row.confirmed_at||row.requested_at||"—")+'</td><td>'+escapeHtml(row.nm_id)+'</td><td>'+escapeHtml(row.parameter)+'</td><td>'+escapeHtml(row.old_value==null?"—":row.old_value)+' → '+escapeHtml(row.confirmed_value==null?(row.requested_value==null?"—":row.requested_value):row.confirmed_value)+'</td><td>'+escapeHtml(row.delta==null?"—":row.delta)+'</td><td>'+escapeHtml((row.campaign||row.advert_id||"")+((row.placement)?" / "+row.placement:""))+'</td><td>'+escapeHtml(row.actor||"—")+'</td><td class="wrap">'+escapeHtml(warnings||"—")+((row.stabilization_override||row.warning_override)?" · override":"")+'</td><td class="wrap">'+escapeHtml(status)+'</td></tr>';}).join(""):'<tr><td colspan="9">История пуста.</td></tr>';
+      const page=Math.floor(state.skuManagement.historyOffset/state.skuManagement.historyLimit)+1;if(skuManagementHistoryPageNode)skuManagementHistoryPageNode.textContent=String(page);if(skuManagementHistoryPrevButton)skuManagementHistoryPrevButton.disabled=state.skuManagement.historyOffset<=0;if(skuManagementHistoryNextButton)skuManagementHistoryNextButton.disabled=state.skuManagement.historyOffset+state.skuManagement.historyLimit>=state.skuManagement.historyTotal;
     }
 
     applyUnifiedTabAccess();

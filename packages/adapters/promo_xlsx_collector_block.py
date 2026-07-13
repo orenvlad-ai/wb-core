@@ -28,7 +28,7 @@ from packages.contracts.promo_xlsx_collector_block import (
 )
 
 
-DEFAULT_SESSION_STATE_PATH = "/Users/ovlmacbook/Projects/wb-web-bot/storage_state.json"
+DEFAULT_SESSION_STATE_PATH = str(Path.home() / "Projects" / "wb-web-bot" / "storage_state.json")
 SERVER_DEFAULT_SESSION_STATE_PATH = "/opt/wb-web-bot/storage_state.json"
 TIMELINE_ACTION_SELECTOR = '[data-testid="timeline-action"]'
 COOKIE_ACCEPT_TEXT = "Принимаю"

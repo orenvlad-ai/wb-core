@@ -127,3 +127,13 @@ Server-side runtime registry отвечает за:
 
 Следующий практический шаг:
 - отдельным bounded шагом зафиксировать pilot runtime-registry fixture для 8-12 ключевых метрик и проверить на нём связку `METRICS_V2.calc_ref -> runtime registry -> FORMULAS_V2`, не переходя пока к полной server-side реализации.
+
+## SKU-management metric extension
+
+| Метрика | Runtime semantics |
+|---|---|
+| `seller_price_change_rub` | Confirmed SKU price-action events only; `sum_window` by nmID and Asia/Yekaterinburg business day; missing day is `null`. |
+| `advertising_bid_change_rub` | Confirmed exact-placement bid events only; daily scalar sums deltas across events/placements, while `advert_id + placement` remains in audit; missing day is `null`. |
+| `buyer_price_rub` | Last factually observed public buyer-price snapshot from `spp_proxy_block`; missing evidence is `null`, never an estimate. |
+
+The runtime registry may be a superset of a bounded display/pilot registry. Every display metric must resolve to runtime semantics; the reverse is not required because live operational extensions can be injected into the selector independently of a historical pilot bridge.

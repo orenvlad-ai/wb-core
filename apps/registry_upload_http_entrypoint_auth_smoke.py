@@ -31,6 +31,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
     DEFAULT_SHEET_STATUS_PATH,
+    DEFAULT_SKU_MANAGEMENT_PATH,
     DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
@@ -38,12 +39,16 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_TRADE_DOCUMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
+    _required_section_for_path,
+    WEB_AUTH_SECTION_SKU_MANAGEMENT,
 )
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
 def main() -> None:
+    if _required_section_for_path(DEFAULT_SKU_MANAGEMENT_PATH) != WEB_AUTH_SECTION_SKU_MANAGEMENT:
+        raise AssertionError("SKU management API must use its own section authorization boundary")
     username = "owner"
     password = "test-password-not-secret"
     with TemporaryDirectory(prefix="webcore-auth-smoke-") as tmp:
@@ -81,6 +86,9 @@ def main() -> None:
                 json_code, json_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH}")
                 if json_code != 401 or json_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated JSON route must return 401 JSON: {json_code} {json_payload}")
+                sku_code, sku_payload = _get_json(f"{base_url}{DEFAULT_SKU_MANAGEMENT_PATH}")
+                if sku_code != 401 or sku_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated SKU management route must return 401 JSON: {sku_code} {sku_payload}")
                 auto_code, auto_payload = _get_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH}")
                 if auto_code != 401 or auto_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation route must return 401 JSON: {auto_code} {auto_payload}")

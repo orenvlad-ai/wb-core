@@ -242,3 +242,7 @@ Public/live verification may open the page, read goods, run preview and inspect 
 - Automatic mass price changes.
 - Google Sheets/GAS integration.
 - Price index and auto-promo minimum price semantics without a separate official API research pass.
+
+## `Управление SKU` reuse
+
+The `Управление SKU` section reuses this module's official Prices API adapter, quarantine/current-value reads and upload-task contour. It deterministically derives an original-price/integer-discount pair for a desired seller price, blocks unavailable/current quarantine evidence, joins canonical per-SKU `promo_participation`/`promo_count_by_price` freshness (never the global `promoCurrentCount` denominator as SKU participation), records active or unavailable/stale promo evidence as an explicit override warning, and rechecks quarantine, promo evidence and the current tuple immediately before upload. It submits one target and polls task state plus fresh goods reads. The section records success only when original price, integer discount and seller price all match; equal seller price with another tuple is a controlled mismatch. Its dedicated application block is enabled by normal runtime construction and does not inherit the standalone `Цены` tab's legacy `WB_PRICES_WRITE_ENABLED` switch; section auth, preview, confirmation, stale/quarantine/promo validation, single-use action, audit and readback remain mandatory. Existing `Цены` and SPP-tester flag contracts are unchanged.

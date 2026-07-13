@@ -37,6 +37,7 @@ from packages.application.sheet_vitrina_v1_feedbacks import (
 )
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.application.wb_prices_management import WbPricesManagementError
+from packages.application.sku_management import SkuManagementError
 from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.wb_supplies import WbSuppliesBlockError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
@@ -110,6 +111,13 @@ DEFAULT_SHEET_PRICES_SPP_TEST_PLAN_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/
 DEFAULT_SHEET_PRICES_SPP_TEST_START_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/start"
 DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/status"
 DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/restore"
+DEFAULT_SKU_MANAGEMENT_PATH = "/v1/sheet-vitrina-v1/sku-management"
+DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/settings"
+DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price/preview"
+DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price/commit"
+DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/bid/preview"
+DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/bid/commit"
+DEFAULT_SKU_MANAGEMENT_HISTORY_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/history"
 DEFAULT_SHEET_REFRESH_PATH = "/v1/sheet-vitrina-v1/refresh"
 DEFAULT_SHEET_LOAD_PATH = "/v1/sheet-vitrina-v1/load"
 DEFAULT_SHEET_STATUS_PATH = "/v1/sheet-vitrina-v1/status"
@@ -149,6 +157,7 @@ WEB_AUTH_SECTION_REPORTS = "reports"
 WEB_AUTH_SECTION_FEEDBACKS = "feedbacks"
 WEB_AUTH_SECTION_ADS = "ads"
 WEB_AUTH_SECTION_PRICES = "prices"
+WEB_AUTH_SECTION_SKU_MANAGEMENT = "sku_management"
 WEB_AUTH_SECTION_RESEARCH = "research"
 WEB_AUTH_SECTION_SETTINGS = "settings"
 WEB_AUTH_SECTION_DEFINITIONS = (
@@ -158,6 +167,7 @@ WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_FEEDBACKS, "label": "Отзывы"},
     {"section_id": WEB_AUTH_SECTION_ADS, "label": "Реклама"},
     {"section_id": WEB_AUTH_SECTION_PRICES, "label": "Цены"},
+    {"section_id": WEB_AUTH_SECTION_SKU_MANAGEMENT, "label": "Управление SKU"},
     {"section_id": WEB_AUTH_SECTION_RESEARCH, "label": "Исследования"},
     {"section_id": WEB_AUTH_SECTION_SETTINGS, "label": "Настройки"},
 )
@@ -169,6 +179,7 @@ WEB_AUTH_UNIFIED_TAB_SECTIONS = {
     "feedbacks": WEB_AUTH_SECTION_FEEDBACKS,
     "ads": WEB_AUTH_SECTION_ADS,
     "prices": WEB_AUTH_SECTION_PRICES,
+    "sku-management": WEB_AUTH_SECTION_SKU_MANAGEMENT,
     "research": WEB_AUTH_SECTION_RESEARCH,
     "settings": WEB_AUTH_SECTION_SETTINGS,
 }
@@ -765,6 +776,41 @@ def _build_handler(
                     )
                     return
 
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            sku_management_post_handlers = {
+                DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH: lambda body, actor: entrypoint.handle_sku_management_settings_save_request(body, user_key=actor),
+                DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH: lambda body, actor: entrypoint.handle_sku_management_price_preview_request(body, actor=actor),
+                DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH: lambda body, actor: entrypoint.handle_sku_management_price_commit_request(body, actor=actor),
+                DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH: lambda body, actor: entrypoint.handle_sku_management_bid_preview_request(body, actor=actor),
+                DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH: lambda body, actor: entrypoint.handle_sku_management_bid_commit_request(body, actor=actor),
+            }
+            if parsed.path in sku_management_post_handlers:
+                try:
+                    payload = _load_request_payload(self)
+                    actor = _current_web_user_config_key(self)
+                    result = sku_management_post_handlers[parsed.path](payload, actor)
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except (WbPricesManagementError, SheetVitrinaV1AdsError) as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(getattr(exc, "payload", {}) or {})
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "sku management operation failed with a controlled server error"},
+                    )
+                    return
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
@@ -2020,6 +2066,30 @@ def _build_handler(
                         embedded_tab=embedded_tab,
                     ),
                 )
+                return
+
+            if parsed.path in {DEFAULT_SKU_MANAGEMENT_PATH, DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH, DEFAULT_SKU_MANAGEMENT_HISTORY_PATH}:
+                try:
+                    actor = _current_web_user_config_key(self)
+                    if parsed.path == DEFAULT_SKU_MANAGEMENT_PATH:
+                        payload = entrypoint.handle_sku_management_table_request(user_key=actor)
+                    elif parsed.path == DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH:
+                        payload = entrypoint.handle_sku_management_settings_request(user_key=actor)
+                    else:
+                        payload = entrypoint.handle_sku_management_history_request(_flatten_query_params(parsed.query))
+                except SkuManagementError as exc:
+                    response_payload = {"error": str(exc)}
+                    response_payload.update(exc.payload)
+                    _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
+                    return
+                except Exception:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "sku management read failed with a controlled server error"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == DEFAULT_SHEET_ADS_SKUS_PATH:
@@ -6137,7 +6207,7 @@ def _allowed_unified_tabs_for_role(role: str) -> list[str]:
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
         return ["factory-order"]
     if _role_has_full_operator_access(normalized):
-        return ["vitrina", "factory-order", "reports", "feedbacks", "ads", "prices", "research", "settings"]
+        return ["vitrina", "factory-order", "reports", "feedbacks", "ads", "prices", "sku-management", "research", "settings"]
     return []
 
 
@@ -6201,6 +6271,8 @@ def _required_section_for_path(path: str) -> str:
         return WEB_AUTH_SECTION_ADS
     if normalized.startswith("/v1/sheet-vitrina-v1/prices/"):
         return WEB_AUTH_SECTION_PRICES
+    if normalized == DEFAULT_SKU_MANAGEMENT_PATH or normalized.startswith(DEFAULT_SKU_MANAGEMENT_PATH + "/"):
+        return WEB_AUTH_SECTION_SKU_MANAGEMENT
     if normalized.startswith("/v1/sheet-vitrina-v1/research/"):
         return WEB_AUTH_SECTION_RESEARCH
     if normalized.startswith("/v1/sheet-vitrina-v1/supply/"):
@@ -6776,6 +6848,13 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "prices_spp_test_start_path": DEFAULT_SHEET_PRICES_SPP_TEST_START_PATH,
         "prices_spp_test_status_path": DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH,
         "prices_spp_test_restore_path": DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH,
+        "sku_management_path": DEFAULT_SKU_MANAGEMENT_PATH,
+        "sku_management_settings_path": DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH,
+        "sku_management_price_preview_path": DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH,
+        "sku_management_price_commit_path": DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH,
+        "sku_management_bid_preview_path": DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH,
+        "sku_management_bid_commit_path": DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH,
+        "sku_management_history_path": DEFAULT_SKU_MANAGEMENT_HISTORY_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,

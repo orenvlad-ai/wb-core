@@ -167,6 +167,7 @@ def main() -> None:
                     "feedbacks",
                     "ads",
                     "prices",
+                    "sku_management",
                     "research",
                     "settings",
                 ]:

@@ -596,3 +596,7 @@ Without that step a live/public task stays `live-complete = blocked`; reporting 
 The blocker must name the concrete missing access/value and must not be phrased as unspecified operational uncertainty.
 
 For server/operator-only changes that do not touch archived bound Apps Script guard code, `Sheet verify result` must stay `not in scope` rather than being filled with fake closure activity.
+
+## SKU management runtime/write contract
+
+The authenticated public route family is exact GET `/v1/sheet-vitrina-v1/sku-management` plus narrow GET/POST prefix `/v1/sheet-vitrina-v1/sku-management/`; app session and `sku_management` section authorization remain authoritative. Dedicated price and exact-placement bid blocks are part of normal runtime construction and require no post-deploy feature-flag enablement. `WB_PRICES_WRITE_ENABLED` and `SHEET_VITRINA_ADS_WRITE_ENABLED` continue to gate their legacy standalone tabs but do not disable this separately authorized workflow. Its sufficient mandatory gates are one stored target/preview, explicit confirmation, stale/min/quarantine validation, backend-only WB call, audit and exact readback. Deploy itself performs no WB mutation.
