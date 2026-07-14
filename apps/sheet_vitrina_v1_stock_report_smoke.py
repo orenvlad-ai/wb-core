@@ -367,13 +367,20 @@ def _seed_supplier_shipments(runtime: RegistryUploadDbBackedRuntime, nm_ids: lis
 
 
 def _supplier_shipment_header(shipment_id: str, order_status: str, *, product_qty_total: float) -> dict[str, object]:
+    actual_shipment_date = ""
+    actual_ff_acceptance_date = ""
+    if order_status == ORDER_STATUS_IN_TRANSIT:
+        actual_shipment_date = "2026-04-20"
+    elif order_status == ORDER_STATUS_ACCEPTED_FF:
+        actual_shipment_date = "2026-04-20"
+        actual_ff_acceptance_date = "2026-04-22"
     return {
         "shipment_id": shipment_id,
         "created_at": CAPTURED_AT,
         "updated_at": CAPTURED_AT,
         "shipment_date": "2026-04-19",
-        "actual_shipment_date": "",
-        "actual_ff_acceptance_date": "",
+        "actual_shipment_date": actual_shipment_date,
+        "actual_ff_acceptance_date": actual_ff_acceptance_date,
         "order_status": order_status,
         "expenses_complete": False,
         "invoice_no": shipment_id,

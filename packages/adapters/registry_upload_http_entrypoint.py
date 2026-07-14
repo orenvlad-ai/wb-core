@@ -24,6 +24,10 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.supplier_shipment_factual_correction import (
+    SupplierShipmentFactualCorrectionError,
+)
+from packages.business_time import current_business_date_iso
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import (
     SheetVitrinaV1FeedbacksAutoComplaintsError,
 )
@@ -266,6 +270,7 @@ DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipment
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH = f"{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}/compare-quote"
+DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT = "factual-date-correction"
 DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT = "documents"
 DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT = "financial-documents"
 DEFAULT_CNY_ACCOUNT_PATH = "/v1/sheet-vitrina-v1/supply/cny-account"
@@ -3602,6 +3607,23 @@ def _build_handler(
                 )
                 return
 
+            if _is_supplier_factual_date_correction_path(parsed.path):
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_factual_correction_path(parsed.path)
+                    payload = entrypoint.handle_supplier_shipment_factual_correction_request(shipment_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier factual correction status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_supplier_shipment_detail_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
@@ -4064,9 +4086,20 @@ def _build_handler(
                         if _is_supplier_order_status_only_payload(payload):
                             result = entrypoint.handle_supplier_shipments_order_status_patch_request(shipment_id, payload)
                         else:
-                            result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
+                            result = entrypoint.handle_supplier_shipments_patch_request(
+                                shipment_id,
+                                payload,
+                                actor=_current_web_user_config_key(self),
+                            )
                     else:
-                        result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
+                        result = entrypoint.handle_supplier_shipments_patch_request(
+                            shipment_id,
+                            payload,
+                            actor=_current_web_user_config_key(self),
+                        )
+                except SupplierShipmentFactualCorrectionError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -4077,7 +4110,12 @@ def _build_handler(
                         {"error": f"supplier shipment patch failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                response_status = (
+                    HTTPStatus.ACCEPTED
+                    if str(result.get("status") or "") == "accepted"
+                    else HTTPStatus.OK
+                )
+                _write_json_response(self, response_status, result)
                 return
 
             if _is_nomenclature_item_path(parsed.path):
@@ -4790,6 +4828,18 @@ def _is_supplier_shipment_detail_path(path: str) -> bool:
     return bool(suffix) and "/" not in suffix and suffix != "parse"
 
 
+def _is_supplier_factual_date_correction_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return (
+        len(parts) == 2
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT
+    )
+
+
 def _is_supplier_shipment_invoice_path(path: str) -> bool:
     if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
         return False
@@ -5030,6 +5080,13 @@ def _resolve_supplier_shipment_id_from_detail_path(path: str) -> str:
     if not _is_supplier_shipment_detail_path(path):
         raise ValueError(f"unsupported supplier shipment detail path: {path}")
     return path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+
+
+def _resolve_supplier_shipment_id_from_factual_correction_path(path: str) -> str:
+    if not _is_supplier_factual_date_correction_path(path):
+        raise ValueError(f"unsupported supplier factual correction path: {path}")
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/", 1)[0]
 
 
 def _resolve_supplier_shipment_id_from_invoice_path(path: str) -> str:
@@ -6957,6 +7014,8 @@ def _render_sheet_vitrina_supplier_ui(
         "can_recheck_prices": bool(can_recheck_prices),
         "can_manage_documents": bool(can_manage_documents),
         "can_manage_financial_documents": bool(can_manage_financial_documents),
+        "business_today": current_business_date_iso(),
+        "factual_date_correction_segment": DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT,
     }
     price_check_button_html = (
         '<button id="priceCheckButton" type="button" hidden>Проверить цены</button>'

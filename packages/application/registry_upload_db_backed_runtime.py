@@ -21,6 +21,7 @@ from packages.application.registry_upload_bundle_v1 import (
     load_registry_upload_bundle_v1_from_path,
     parse_registry_upload_bundle_v1_payload,
 )
+from packages.application.supplier_shipment_status import apply_derived_supplier_status
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
@@ -6788,7 +6789,7 @@ def _deserialize_temporal_source_payload(payload_json: str) -> Any:
 
 
 def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    return apply_derived_supplier_status({
         "shipment_id": row["shipment_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -6821,11 +6822,11 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source_file_sha256": row["source_file_sha256"] or "",
         "source_file_path": row["source_file_path"] or "",
         "invoice_document_id": row["invoice_document_id"] or "",
-    }
+    })
 
 
 def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    return apply_derived_supplier_status({
         "shipment_id": row["shipment_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -6863,7 +6864,7 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "parser_version": row["parser_version"] or "",
         "warnings": _loads_json_list(row["warnings_json"]),
         "errors": _loads_json_list(row["errors_json"]),
-    }
+    })
 
 
 def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:

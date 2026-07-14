@@ -751,17 +751,28 @@ def main() -> None:
         if effective_supplier_rows != [("26GN390", "2026-05-20", "2026-05-22", 33.0)]:
             raise AssertionError(f"supplier registry inbound must use shipment_date + 30 days and then ff_to_wb lead time, got {effective_supplier_rows}")
 
-        runtime.update_supplier_shipment_order_status(
-            shipment_id="sup_factory_inbound_inside_window",
-            order_status=ORDER_STATUS_ACCEPTED_FF,
-            updated_at=ACTIVATED_AT,
+        accepted_payload = runtime.load_supplier_shipment("sup_factory_inbound_inside_window")
+        if accepted_payload is None:
+            raise AssertionError("supplier shipment fixture must exist before factual acceptance update")
+        accepted_header = dict(accepted_payload["header"])
+        accepted_header.update(
+            {
+                "updated_at": ACTIVATED_AT,
+                "actual_shipment_date": "2026-04-20",
+                "actual_ff_acceptance_date": "2026-04-22",
+                "order_status": ORDER_STATUS_ACCEPTED_FF,
+            }
+        )
+        runtime.save_supplier_shipment(
+            header=accepted_header,
+            lines=[dict(item) for item in accepted_payload["lines"]],
         )
         patched_status = block.build_status()
         patched_supplier_summary = patched_status.supplier_registry_inbound_summary
         if any(item.shipment_id == "sup_factory_inbound_inside_window" for item in patched_supplier_summary.shipment_summary):
-            raise AssertionError("status after accepted_ff PATCH must exclude the shipment from supplier registry inbound summary")
+            raise AssertionError("status after factual acceptance update must exclude the shipment from supplier registry inbound summary")
         if patched_supplier_summary.diagnostics.excluded_accepted_ff_shipment_count != 2:
-            raise AssertionError("status after accepted_ff PATCH must count both accepted supplier shipments as excluded")
+            raise AssertionError("status after factual acceptance update must count both accepted supplier shipments as excluded")
         patched_supplier_result = block.calculate(
             {
                 "prod_lead_time_days": 10,
@@ -1251,6 +1262,7 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
             "created_at": "2026-04-18T09:05:00Z",
             "updated_at": "2026-04-18T09:05:00Z",
             "shipment_date": "2026-05-10",
+            "actual_shipment_date": "2026-05-10",
             "order_status": ORDER_STATUS_IN_TRANSIT,
             "invoice_no": "LATE-1",
             "invoice_date": "2026-05-09",
@@ -1282,6 +1294,8 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
             "created_at": "2026-04-18T09:10:00Z",
             "updated_at": "2026-04-18T09:10:00Z",
             "shipment_date": "2026-04-20",
+            "actual_shipment_date": "2026-04-20",
+            "actual_ff_acceptance_date": "2026-04-22",
             "order_status": ORDER_STATUS_ACCEPTED_FF,
             "invoice_no": "ACCEPTED-FF",
             "invoice_date": "2026-04-19",

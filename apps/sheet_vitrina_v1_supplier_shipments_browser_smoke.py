@@ -478,8 +478,8 @@ def main() -> None:
                 header_texts = frame.locator(".registry-wrap thead th:visible").evaluate_all(
                             "(nodes) => nodes.map((node) => node.textContent.trim())"
                         )
-                if any("Currency" in text or "Валюта" in text for text in header_texts):
-                        raise AssertionError(f"operator registry must hide Currency column, got {header_texts}")
+                if "Валюта" not in header_texts:
+                        raise AssertionError(f"operator registry must preserve Currency column, got {header_texts}")
                 try:
                         invoice_index = next(index for index, text in enumerate(header_texts) if text == "Документы")
                         status_index = header_texts.index("Статус заказа")
@@ -489,16 +489,8 @@ def main() -> None:
                 if not invoice_index < status_index < actions_index:
                         raise AssertionError(f"order status header must be after invoice and before actions, got {header_texts}")
                 active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
-                status_select = active_row.locator("[data-order-status-shipment]")
-                expect(status_select).to_have_value("production")
-                expect(status_select.locator("option:checked")).to_have_text("На производстве")
-                status_select.select_option("in_transit")
-                expect(frame.locator("#registryMessage")).to_contain_text("Статус заказа сохранён.", timeout=5000)
-                expect(frame.locator("#shipmentCard")).to_be_hidden()
-                frame.locator("body").evaluate("() => window.location.reload()")
-                expect(frame.locator("#shipmentRows").get_by_text("26GN390")).to_be_visible(timeout=5000)
-                active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
-                expect(active_row.locator("[data-order-status-shipment]")).to_have_value("in_transit")
+                expect(active_row.locator("[data-order-status-shipment]")).to_have_count(0)
+                expect(active_row.locator(".badge", has_text="В пути с 16.05.2026")).to_be_visible()
                 expect(active_row.locator("a[data-download]").first).to_have_text("Скачать invoice")
                 expect(active_row.locator("[data-delete-shipment]").first).to_have_text("Удалить")
                 active_row.click()
@@ -521,8 +513,22 @@ def main() -> None:
                 if active_row_style.get("outlineStyle") not in ("none", "") and active_row_style.get("outlineWidth") != "0px":
                     raise AssertionError(f"active supplier row must not use per-cell outline: {active_row_style}")
                 expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-16")
+                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_attribute("max", "2026-07-14")
                 expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("")
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_attribute("max", "2026-07-14")
                 expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("13.2")
+                frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-17")
+                frame.locator("#saveShipmentButton").evaluate("(button) => { button.click(); button.click(); }")
+                expect(frame.locator("#saveShipmentButton")).to_be_disabled()
+                expect(frame.locator("#cardMessage")).to_contain_text(
+                    re.compile(r"Сохраняем изменение|Пересчитываем зависимые данные|Проверяем результат"),
+                    timeout=5000,
+                )
+                expect(frame.locator("#cardMessage")).to_contain_text("Изменение сохранено и проверено.", timeout=10000)
+                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-17")
+                expect(frame.locator("#saveShipmentButton")).to_be_enabled()
+                active_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN390").first
+                expect(active_row.locator(".badge", has_text="В пути с 17.05.2026")).to_be_visible(timeout=5000)
                 expect(frame.get_by_role("link", name="下载发票 / Download invoice / Скачать invoice")).to_have_count(0)
                 expect(frame.get_by_role("tab", name="Документы")).to_be_visible()
                 frame.get_by_role("tab", name="Документы").click()
@@ -533,6 +539,7 @@ def main() -> None:
                 frame.get_by_role("button", name="Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
                 _seed_first_supplier_quote_and_customs_documents(runtime)
+                _seed_production_supplier_order(entrypoint, invoice_path)
 
                 operator_frame.get_by_role("button", name="Реестр поставок").click()
                 expect(operator_frame.locator("#shipmentRegistryTitle")).to_be_visible(timeout=5000)
@@ -546,6 +553,9 @@ def main() -> None:
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("H. Нормализованные метрики факта / по ДТ", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("I. Документы", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("26GN390", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("На производстве", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("В пути с 17.05.2026", timeout=5000)
+                expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text("Принято на ФФ с 28.05.2026", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: услуги логиста, USD/кг по весу КП", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: таможня, USD/кг по весу КП", timeout=5000)
                 expect(operator_frame.locator("#shipmentRegistryBody")).to_contain_text("КП: доставка+таможня, USD/кг по весу КП", timeout=5000)
@@ -1100,6 +1110,31 @@ def _seed_accepted_ff_supplier_order(
     shipment_id = str(created.get("shipment_id") or "")
     if not shipment_id:
         raise AssertionError(f"accepted_ff seed shipment was not created: {created}")
+    return shipment_id
+
+
+def _seed_production_supplier_order(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    invoice_path: Path,
+) -> str:
+    parsed = entrypoint.handle_supplier_shipments_parse_request(
+        invoice_path.read_bytes(),
+        uploaded_filename="production-browser-invoice.xlsx",
+    )
+    edited_payload = dict(parsed)
+    metadata = dict(edited_payload.get("metadata") or {})
+    metadata["invoice_no"] = "26GN392"
+    edited_payload["metadata"] = metadata
+    created = entrypoint.handle_supplier_shipments_create_request(
+        {
+            "upload_id": parsed.get("upload_id"),
+            "shipment_date": "2026-07-20",
+            "payload": edited_payload,
+        }
+    )
+    shipment_id = str(created.get("shipment_id") or "")
+    if not shipment_id or created.get("order_status") != "production":
+        raise AssertionError(f"production seed shipment was not created: {created}")
     return shipment_id
 
 

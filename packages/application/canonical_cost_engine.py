@@ -523,8 +523,7 @@ class CanonicalCostEngine:
                 JOIN sheet_vitrina_v1_supplier_ff_cost_layers AS layer
                   ON layer.supplier_shipment_id = shipment.shipment_id
                  AND layer.is_current = 1
-                WHERE shipment.order_status = 'accepted_ff'
-                  AND shipment.actual_ff_acceptance_date BETWEEN ? AND ?
+                WHERE shipment.actual_ff_acceptance_date BETWEEN ? AND ?
                   AND COALESCE(shipment.product_qty_total, 0) >= ?
                 ORDER BY shipment.product_qty_total DESC, shipment.shipment_id
                 """,

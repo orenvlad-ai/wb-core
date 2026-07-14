@@ -54,6 +54,9 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.supplier_shipments import SupplierShipmentsBlock
+from packages.application.supplier_shipment_factual_correction import (
+    SupplierShipmentFactualCorrectionBlock,
+)
 from packages.application.supplier_financial_documents import (
     SupplierFinancialDocumentsBlock,
     apply_supplier_order_document_match,
@@ -789,6 +792,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.supplier_shipments_block = SupplierShipmentsBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.supplier_shipment_factual_correction_block = SupplierShipmentFactualCorrectionBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -2136,10 +2143,69 @@ class RegistryUploadHttpEntrypoint:
         return self.supplier_shipments_block.create_shipment(payload)
 
     def handle_supplier_shipments_detail_request(self, shipment_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.get_shipment(shipment_id)
+        detail = self.supplier_shipments_block.get_shipment(shipment_id)
+        detail["factual_date_correction"] = (
+            self.supplier_shipment_factual_correction_block.latest_for_shipment(shipment_id)
+        )
+        return detail
 
-    def handle_supplier_shipments_patch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def handle_supplier_shipments_patch_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str = "operator",
+    ) -> dict[str, Any]:
+        if self.supplier_shipments_block.factual_date_change_required(shipment_id, payload):
+            if self.supplier_shipments_block.factual_date_correction_has_other_changes(
+                shipment_id,
+                payload,
+            ):
+                raise ValueError(
+                    "Коррекцию фактической даты отгрузки нужно сохранить отдельно от других изменений карточки."
+                )
+            new_value = self.supplier_shipments_block.desired_actual_shipment_date(
+                shipment_id,
+                payload,
+            )
+            correction = self.supplier_shipment_factual_correction_block.create_job(
+                shipment_id=shipment_id,
+                new_actual_shipment_date=new_value,
+                actor=actor or "operator",
+            )
+            if correction.get("status") == "zero_change":
+                return self.handle_supplier_shipments_detail_request(shipment_id)
+            if correction.get("deduplicated"):
+                return {
+                    "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
+                    "status": "accepted",
+                    "correction": correction,
+                    "job": None,
+                }
+            correction_id = str(correction["correction_id"])
+            job = self.operator_jobs.start(
+                operation="supplier_factual_date_correction",
+                runner=lambda emit: self.supplier_shipment_factual_correction_block.run_job(
+                    correction_id,
+                    emit,
+                ),
+            )
+            return {
+                "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
+                "status": "accepted",
+                "correction": correction,
+                "job": job,
+            }
         return self.supplier_shipments_block.update_shipment(shipment_id, payload)
+
+    def handle_supplier_shipment_factual_correction_request(
+        self,
+        shipment_id: str,
+    ) -> dict[str, Any]:
+        correction = self.supplier_shipment_factual_correction_block.latest_for_shipment(shipment_id)
+        if correction is None:
+            raise ValueError(f"supplier factual correction not found: {shipment_id}")
+        return correction
 
     def handle_supplier_shipments_order_status_patch_request(
         self,
