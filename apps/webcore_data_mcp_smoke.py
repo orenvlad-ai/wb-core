@@ -37,6 +37,7 @@ from packages.application.webcore_data_mcp import (  # noqa: E402
     SCOPE_OPS_READ,
     SCOPE_SUPPLY_READ,
     WebCoreDataMcpGateway,
+    _derived_supplier_status_sql,
 )
 from packages.application.webcore_ops_diagnostics import (  # noqa: E402
     CommandResult,
@@ -45,6 +46,7 @@ from packages.application.webcore_ops_diagnostics import (  # noqa: E402
 
 
 def main() -> int:
+    _assert_historical_status_sql_conflict()
     with TemporaryDirectory(prefix="webcore-data-mcp-smoke-") as tmp:
         root = Path(tmp)
         db_path = root / "registry_upload_runtime.sqlite3"
@@ -62,6 +64,37 @@ def main() -> int:
         _assert_audit(audit_log_path)
     print("webcore_data_mcp_smoke: OK")
     return 0
+
+
+def _assert_historical_status_sql_conflict() -> None:
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute(
+            """
+            CREATE TABLE supplier_status_fixture(
+                fixture_id TEXT PRIMARY KEY,
+                actual_shipment_date TEXT,
+                actual_ff_acceptance_date TEXT,
+                historical_status_exception TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO supplier_status_fixture VALUES(?,?,?,?)",
+            [
+                ("historical", None, None, "legacy_ff_accepted_without_date"),
+                ("conflicting", "2026-06-25", None, "legacy_ff_accepted_without_date"),
+            ],
+        )
+        rows = dict(
+            conn.execute(
+                "SELECT fixture_id, "
+                + _derived_supplier_status_sql("")
+                + " FROM supplier_status_fixture ORDER BY fixture_id",
+                ("2026-07-15", "2026-07-15"),
+            ).fetchall()
+        )
+    if rows != {"conflicting": "in_transit", "historical": "accepted_ff"}:
+        raise AssertionError(f"historical status SQL precedence drifted: {rows}")
 
 
 def _assert_read_only(gateway: WebCoreDataMcpGateway) -> None:

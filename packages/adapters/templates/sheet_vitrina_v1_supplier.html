@@ -1205,7 +1205,7 @@
             const tone = value === "accepted_ff" ? "success" : value === "in_transit" ? "info" : "neutral";
             const display = row.order_status_display || orderStatusLabels[value];
             const warnings = Array.isArray(row.order_status_warnings) ? row.order_status_warnings.join("; ") : "";
-            return '<td data-order-status-column><span class="badge ' + tone + '" title="' + escapeHtml(warnings || "Статус вычислен из фактических дат") + '">' + escapeHtml(display) + '</span></td>';
+            return '<td data-order-status-column><span class="badge ' + tone + '" title="' + escapeHtml(warnings || row.order_status_tooltip || "Статус вычислен из фактических дат") + '">' + escapeHtml(display) + '</span></td>';
           }
 
           function renderActionsContent(row) {

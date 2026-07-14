@@ -39,7 +39,11 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
     SupplierFinancialDocumentsBlock,
 )
+from packages.application.supplier_shipment_status import (  # noqa: E402
+    HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+)
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
+from packages.business_time import current_business_date_iso  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
 
 
@@ -457,7 +461,7 @@ def main() -> None:
                 expect(frame.locator(".registry-wrap thead")).to_contain_text("Ориент. себестоимость, ₽/шт")
                 expect(frame.locator("#shipmentRows")).to_contain_text("25,45", timeout=5000)
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
-                _seed_accepted_ff_supplier_order(entrypoint, invoice_path)
+                accepted_shipment_id = _seed_accepted_ff_supplier_order(entrypoint, invoice_path)
                 frame.locator("body").evaluate("() => window.location.reload()")
                 expect(frame.locator("#orderStatusFilter")).to_be_visible(timeout=5000)
                 expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
@@ -470,6 +474,16 @@ def main() -> None:
                 accepted_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN391").first
                 expect(accepted_row.locator("[data-order-status-shipment]")).to_have_count(0)
                 expect(accepted_row.locator(".badge", has_text="Принято на ФФ")).to_be_visible()
+                _mark_supplier_order_historical_accepted_without_date(entrypoint, accepted_shipment_id)
+                frame.locator("body").evaluate("() => window.location.reload()")
+                expect(frame.locator("#orderStatusFilter input[value='all']")).to_be_visible(timeout=5000)
+                frame.locator("#orderStatusFilter input[value='all']").check()
+                historical_accepted_row = frame.locator("#shipmentRows tr[data-row]", has_text="26GN391").first
+                expect(historical_accepted_row.locator("[data-order-status-shipment]")).to_have_count(0)
+                expect(
+                    historical_accepted_row.locator(".badge", has_text="Принято на ФФ · дата неизвестна")
+                ).to_be_visible()
+                _restore_supplier_order_accepted_with_date(entrypoint, accepted_shipment_id)
                 frame.locator("#orderStatusFilter input[value='all']").uncheck()
                 expect(frame.locator("#orderStatusFilter input[value='production']")).to_be_checked()
                 expect(frame.locator("#orderStatusFilter input[value='in_transit']")).to_be_checked()
@@ -513,9 +527,13 @@ def main() -> None:
                 if active_row_style.get("outlineStyle") not in ("none", "") and active_row_style.get("outlineWidth") != "0px":
                     raise AssertionError(f"active supplier row must not use per-cell outline: {active_row_style}")
                 expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_value("2026-05-16")
-                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_attribute("max", "2026-07-14")
+                expect(frame.get_by_label("Фактическая дата отгрузки")).to_have_attribute(
+                    "max", current_business_date_iso()
+                )
                 expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_value("")
-                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_attribute("max", "2026-07-14")
+                expect(frame.get_by_label("Фактическая дата приёмки на ФФ")).to_have_attribute(
+                    "max", current_business_date_iso()
+                )
                 expect(frame.get_by_label("Примерный курс юаня, ₽/¥")).to_have_value("13.2")
                 frame.get_by_label("Фактическая дата отгрузки").fill("2026-05-17")
                 frame.locator("#saveShipmentButton").evaluate("(button) => { button.click(); button.click(); }")
@@ -539,7 +557,7 @@ def main() -> None:
                 frame.get_by_role("button", name="Закрыть").click()
                 expect(frame.locator("#shipmentCard")).to_be_hidden()
                 _seed_first_supplier_quote_and_customs_documents(runtime)
-                _seed_production_supplier_order(entrypoint, invoice_path)
+                production_shipment_id = _seed_production_supplier_order(entrypoint, invoice_path)
 
                 operator_frame.get_by_role("button", name="Реестр поставок").click()
                 expect(operator_frame.locator("#shipmentRegistryTitle")).to_be_visible(timeout=5000)
@@ -672,6 +690,14 @@ def main() -> None:
                 section_box = operator_frame.locator("#shipmentRegistryBody th.shipment-registry-section-sticky").first.bounding_box()
                 if not sticky_box or not section_box or abs(float(sticky_box["x"]) - float(section_box["x"])) > 2:
                     raise AssertionError(f"shipment registry section labels must align with sticky metric labels: sticky={sticky_box}, section={section_box}")
+                _mark_supplier_order_historical_accepted_without_date(entrypoint, production_shipment_id)
+                operator_frame.locator("body").evaluate("() => window.location.reload()")
+                expect(operator_frame.get_by_role("button", name="Реестр поставок")).to_be_visible(timeout=5000)
+                operator_frame.get_by_role("button", name="Реестр поставок").click()
+                expect(operator_frame.locator("#shipmentRegistryHead")).to_contain_text(
+                    "Принято на ФФ · дата неизвестна", timeout=5000
+                )
+                _restore_supplier_order_production(entrypoint, production_shipment_id)
                 operator_frame.get_by_role("button", name="От поставщика").click()
                 expect(operator_frame.locator("iframe[title='От поставщика']")).to_be_visible(timeout=5000)
 
@@ -1136,6 +1162,51 @@ def _seed_production_supplier_order(
     if not shipment_id or created.get("order_status") != "production":
         raise AssertionError(f"production seed shipment was not created: {created}")
     return shipment_id
+
+
+def _mark_supplier_order_historical_accepted_without_date(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    shipment_id: str,
+) -> None:
+    detail = entrypoint.runtime.load_supplier_shipment(shipment_id)
+    if not detail:
+        raise AssertionError(f"historical accepted fixture shipment is missing: {shipment_id}")
+    header = dict(detail["header"])
+    header["actual_shipment_date"] = None
+    header["actual_ff_acceptance_date"] = None
+    header["historical_status_exception"] = HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE
+    header["order_status"] = "accepted_ff"
+    entrypoint.runtime.save_supplier_shipment(header=header, lines=list(detail["lines"]))
+
+
+def _restore_supplier_order_accepted_with_date(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    shipment_id: str,
+) -> None:
+    detail = entrypoint.runtime.load_supplier_shipment(shipment_id)
+    if not detail:
+        raise AssertionError(f"accepted fixture shipment is missing: {shipment_id}")
+    header = dict(detail["header"])
+    header["actual_shipment_date"] = "2026-05-16"
+    header["actual_ff_acceptance_date"] = "2026-05-28"
+    header["historical_status_exception"] = ""
+    header["order_status"] = "accepted_ff"
+    entrypoint.runtime.save_supplier_shipment(header=header, lines=list(detail["lines"]))
+
+
+def _restore_supplier_order_production(
+    entrypoint: RegistryUploadHttpEntrypoint,
+    shipment_id: str,
+) -> None:
+    detail = entrypoint.runtime.load_supplier_shipment(shipment_id)
+    if not detail:
+        raise AssertionError(f"production fixture shipment is missing: {shipment_id}")
+    header = dict(detail["header"])
+    header["actual_shipment_date"] = None
+    header["actual_ff_acceptance_date"] = None
+    header["historical_status_exception"] = ""
+    header["order_status"] = "production"
+    entrypoint.runtime.save_supplier_shipment(header=header, lines=list(detail["lines"]))
 
 
 def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> None:
