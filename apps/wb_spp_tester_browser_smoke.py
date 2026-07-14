@@ -67,6 +67,14 @@ def main() -> None:
                 )
                 if len(server.spp_prices_source.upload_payloads) != upload_count:
                     raise AssertionError("saving the UI schedule must not immediately start an SPP job")
+                page.locator("[data-spp-schedule-enabled]").uncheck()
+                page.locator("[data-spp-schedule-save]").click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-spp-schedule-note]')?.innerText.includes('сохранено и выключено')",
+                    timeout=7000,
+                )
+                if len(server.spp_prices_source.upload_payloads) != upload_count:
+                    raise AssertionError("disabling the UI schedule must not start an SPP job")
                 page.wait_for_selector("[data-spp-history-job]", timeout=7000)
                 page.locator("[data-spp-history-job]").first.locator("summary").click()
                 page.wait_for_selector("[data-spp-history-job] .spp-test-history-json", state="visible", timeout=7000)

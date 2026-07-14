@@ -16980,7 +16980,9 @@
         }
         state.prices.sppTest.schedule = payload.schedule || null;
         state.prices.sppTest.scheduleLoaded = true;
-        state.prices.sppTest.scheduleNote = "Расписание сохранено. Проверка ждёт назначенного времени.";
+        state.prices.sppTest.scheduleNote = payload.schedule && payload.schedule.enabled
+          ? "Расписание сохранено. Проверка ждёт назначенного времени."
+          : "Расписание сохранено и выключено.";
         applySppScheduleToForm();
       } catch (error) {
         state.prices.sppTest.error = String(error && error.message ? error.message : error);
