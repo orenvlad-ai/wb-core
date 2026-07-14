@@ -233,6 +233,8 @@
     .dropzone.is-dragover { background: rgba(56, 189, 248, 0.12); border-color: var(--accent-2); }
     .card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
     .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 900; background: rgba(167, 139, 250, 0.14); color: var(--accent); }
+    .badge.neutral { background: rgba(170, 176, 197, 0.12); color: var(--muted); }
+    .badge.info { background: rgba(56, 189, 248, 0.13); color: var(--accent-2); }
     .badge.success { background: rgba(52, 211, 153, 0.12); color: var(--success); }
     .badge.warning { background: rgba(251, 191, 36, 0.14); color: var(--warning); }
     .badge.error { background: rgba(251, 113, 133, 0.14); color: var(--danger); }
@@ -398,7 +400,7 @@
                     <th>匹配 / Matching / Матчинг</th>
                     <th>上传时间 / Uploaded / Дата загрузки</th>
                     <th>Документы</th>
-                    <th data-order-status-column hidden>Статус заказа</th>
+                    <th data-order-status-column>Статус заказа</th>
                     <th>操作 / Actions / Действия</th>
               </tr>
             </thead>
@@ -697,7 +699,6 @@
           const percentPointFormatter = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           const defaultSupplierName = "HanShang Technology";
           const canDeleteShipments = config.can_delete_shipments !== false;
-          const canEditOrderStatus = Boolean(config.can_edit_order_status);
           const canRecheckPrices = config.can_recheck_prices === true && Boolean(priceCheckButton);
           const canManageDocuments = Boolean(config.can_manage_documents);
           const canManageFinancialDocuments = Boolean(config.can_manage_financial_documents);
@@ -722,6 +723,11 @@
       let selectedFinancialDocumentId = "";
       let pendingDeepLinkShipmentId = String(queryParams.get("shipment_id") || "").trim();
       let pendingDeepLinkTab = String(queryParams.get("tab") || "").trim();
+      let saveRequestInFlight = false;
+      let factualCorrectionInFlight = false;
+
+      actualShipmentDateInput.max = String(config.business_today || "");
+      actualFfAcceptanceDateInput.max = String(config.business_today || "");
 
       function uiText(trilingual, russian) {
         return useRussianLabels ? russian : trilingual;
@@ -751,7 +757,6 @@
             in_transit: "В пути",
             accepted_ff: "Принято на ФФ"
           };
-          const selectableOrderStatuses = ["production", "in_transit"];
           const financialDocumentTypeLabels = {
             invoice: "Invoice",
             contract: "Контракт",
@@ -904,10 +909,10 @@
 
           function configureRegistryColumns() {
             Array.from(document.querySelectorAll("[data-currency-column]")).forEach((node) => {
-              node.hidden = canEditOrderStatus;
+              node.hidden = false;
             });
             Array.from(document.querySelectorAll("[data-order-status-column]")).forEach((node) => {
-              node.hidden = !canEditOrderStatus;
+              node.hidden = false;
             });
           }
 
@@ -1151,23 +1156,19 @@
                 '<td>' + escapeHtml(formatRegistryMoney(row.approx_landed_cost_per_unit_rub)) + '</td>',
                 '<td title="' + escapeHtml(exactCostTooltip(row)) + '">' + renderExactCostValue(row) + '</td>',
               ];
-              if (!canEditOrderStatus) {
-                cells.push('<td data-currency-column>' + escapeHtml(row.currency || "-") + '</td>');
-              }
+              cells.push('<td data-currency-column>' + escapeHtml(row.currency || "-") + '</td>');
               cells.push(
                 '<td>' + escapeHtml(status) + '</td>',
                 '<td>' + escapeHtml(row.created_at || "-") + '</td>',
                 '<td>' + renderRegistryDocumentCell(row) + '</td>'
               );
-              if (canEditOrderStatus) {
-                cells.push(renderOrderStatusCell(row));
-              }
+              cells.push(renderOrderStatusCell(row));
               cells.push('<td data-actions-cell>' + renderActionsContent(row) + '</td>', '</tr>');
               return cells.join("");
             }).join("");
             Array.from(shipmentRows.querySelectorAll("tr[data-row]")).forEach((row) => {
               row.addEventListener("click", (event) => {
-                if (event.target && event.target.closest("[data-download], [data-delete-shipment], [data-delete-confirm], [data-delete-cancel], [data-delete-confirmation], [data-order-status-shipment]")) {
+                if (event.target && event.target.closest("[data-download], [data-delete-shipment], [data-delete-confirm], [data-delete-cancel], [data-delete-confirmation]")) {
                   event.stopPropagation();
                   return;
                 }
@@ -1178,7 +1179,6 @@
                 openShipment(row.dataset.row);
               });
             });
-            bindOrderStatusControls();
             bindDeleteButtons();
             syncActiveRegistryRow();
           }
@@ -1202,13 +1202,10 @@
 
           function renderOrderStatusCell(row) {
             const value = orderStatusLabels[row.order_status] ? row.order_status : "production";
-            if (value === "accepted_ff") {
-              return '<td data-order-status-column><span class="badge success" title="Статус выставляется автоматически по фактической дате приёмки на ФФ">' + escapeHtml(orderStatusLabels[value]) + '</span></td>';
-            }
-            const options = selectableOrderStatuses.map((status) => (
-              '<option value="' + status + '"' + (status === value ? " selected" : "") + '>' + escapeHtml(orderStatusLabels[status]) + '</option>'
-            )).join("");
-            return '<td data-order-status-column><select class="order-status-select" data-order-status-shipment="' + escapeHtml(row.shipment_id) + '" data-previous-status="' + escapeHtml(value) + '" aria-label="Статус заказа">' + options + '</select></td>';
+            const tone = value === "accepted_ff" ? "success" : value === "in_transit" ? "info" : "neutral";
+            const display = row.order_status_display || orderStatusLabels[value];
+            const warnings = Array.isArray(row.order_status_warnings) ? row.order_status_warnings.join("; ") : "";
+            return '<td data-order-status-column><span class="badge ' + tone + '" title="' + escapeHtml(warnings || "Статус вычислен из фактических дат") + '">' + escapeHtml(display) + '</span></td>';
           }
 
           function renderActionsContent(row) {
@@ -1232,16 +1229,6 @@
             button.addEventListener("click", (event) => {
               event.stopPropagation();
               showDeleteConfirmation(button);
-            });
-          }
-
-          function bindOrderStatusControls() {
-            Array.from(shipmentRows.querySelectorAll("[data-order-status-shipment]")).forEach((select) => {
-              select.addEventListener("click", (event) => event.stopPropagation());
-              select.addEventListener("change", (event) => {
-                event.stopPropagation();
-                updateOrderStatus(select);
-              });
             });
           }
 
@@ -1278,38 +1265,6 @@
                 cell.innerHTML = renderActionsContent({ shipment_id: shipmentId });
                 bindDeleteButton(cell.querySelector("[data-delete-shipment]"));
               });
-            }
-          }
-
-          async function updateOrderStatus(select) {
-            const shipmentId = select.dataset.orderStatusShipment || "";
-            const previousStatus = select.dataset.previousStatus || "production";
-            if (!shipmentId || selectableOrderStatuses.indexOf(select.value) === -1) {
-              select.value = previousStatus;
-              return;
-            }
-            select.disabled = true;
-            setMessage(registryMessage, "Сохраняем статус заказа...", "");
-            try {
-              const payload = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json", Accept: "application/json" },
-                body: JSON.stringify({ order_status: select.value })
-              });
-              const savedStatus = orderStatusLabels[payload.order_status] ? payload.order_status : select.value;
-              select.value = savedStatus;
-              select.dataset.previousStatus = savedStatus;
-              notifyOperatorSupplierShipmentsChanged({
-                shipment_id: shipmentId,
-                changed_field: "order_status",
-                order_status: savedStatus
-              });
-              setMessage(registryMessage, "Статус заказа сохранён.", "success");
-            } catch (error) {
-              select.value = previousStatus;
-              setMessage(registryMessage, error.message, "error");
-            } finally {
-              select.disabled = false;
             }
           }
 
@@ -1375,6 +1330,12 @@
           syncActiveRegistryRow();
           shipmentCard.hidden = false;
           shipmentCard.scrollIntoView({ behavior: "smooth", block: "start" });
+          if (currentShipment.factual_date_correction && currentShipment.factual_date_correction.active) {
+            await pollFactualDateCorrection(
+              shipmentId,
+              currentShipment.factual_date_correction
+            );
+          }
           if (canManageFinancialDocuments) {
             loadFinancialDocuments();
           }
@@ -2325,7 +2286,7 @@
         exactLandedCostPerUnit.parentElement.title = exactCostTooltip(shipment);
         const hasDate = Boolean(shipmentDateInput.value);
         shipmentDateField.classList.toggle("required-missing", !hasDate);
-        saveShipmentButton.disabled = !hasDate || (isNewShipment && !currentUploadId);
+        saveShipmentButton.disabled = factualCorrectionInFlight || saveRequestInFlight || !hasDate || (isNewShipment && !currentUploadId);
         if (priceCheckButton) {
           priceCheckButton.disabled = !currentShipment || !currentShipment.shipment_id || cardDirty || !canRecheckPrices;
         }
@@ -2371,12 +2332,86 @@
         }, 0);
       }
 
+      function formatRussianDate(value) {
+        const parts = String(value || "").split("-");
+        return parts.length === 3 ? parts[2] + "." + parts[1] + "." + parts[0] : String(value || "");
+      }
+
+      function correctionStatusPath(shipmentId) {
+        return shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/"
+          + (config.factual_date_correction_segment || "factual-date-correction");
+      }
+
+      function setFactualCorrectionBlocking(active) {
+        factualCorrectionInFlight = Boolean(active);
+        Array.from(shipmentCard.querySelectorAll("input, select, textarea, button")).forEach((control) => {
+          if (control === closeShipmentButton) {
+            return;
+          }
+          control.disabled = factualCorrectionInFlight;
+        });
+        saveShipmentButton.setAttribute("aria-busy", factualCorrectionInFlight ? "true" : "false");
+        updateTotalsAndState();
+      }
+
+      function waitForCorrectionPoll() {
+        return new Promise((resolve) => window.setTimeout(resolve, 500));
+      }
+
+      async function pollFactualDateCorrection(shipmentId, initial) {
+        setFactualCorrectionBlocking(true);
+        let correction = initial || {};
+        for (let attempt = 0; attempt < 2400; attempt += 1) {
+          if (correction.progress_text) {
+            setMessage(cardMessage, correction.progress_text, "");
+          }
+          if (correction.status === "success") {
+            currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+              headers: { Accept: "application/json" }
+            });
+            cardDirty = false;
+            setFactualCorrectionBlocking(false);
+            renderCard();
+            await loadRegistry();
+            const scope = (correction.report && correction.report.scope) || {};
+            const range = scope.date_from && scope.date_to
+              ? " Диапазон пересчёта: " + formatRussianDate(scope.date_from) + "–" + formatRussianDate(scope.date_to) + "."
+              : "";
+            setMessage(cardMessage, "Изменение сохранено и проверено." + range, "success");
+            notifyOperatorSupplierShipmentsChanged({
+              shipment_id: shipmentId,
+              changed_field: "actual_shipment_date",
+              order_status: currentShipment.order_status
+            });
+            return currentShipment;
+          }
+          if (correction.status === "error") {
+            setFactualCorrectionBlocking(false);
+            currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+              headers: { Accept: "application/json" }
+            });
+            renderCard();
+            throw new Error(correction.error_message || "Не удалось сохранить изменение. Прежняя версия сохранена.");
+          }
+          await waitForCorrectionPoll();
+          correction = await fetchJson(correctionStatusPath(shipmentId), {
+            headers: { Accept: "application/json" }
+          });
+        }
+        setFactualCorrectionBlocking(false);
+        throw new Error("Операция всё ещё выполняется. Откройте поставку повторно, чтобы получить итог.");
+      }
+
       async function saveCurrentShipment() {
+        if (saveRequestInFlight || factualCorrectionInFlight) {
+          return;
+        }
         const payload = readCurrentPayload();
         if (!payload.shipment_date) {
           updateTotalsAndState();
           return;
         }
+        saveRequestInFlight = true;
         saveShipmentButton.disabled = true;
         setMessage(cardMessage, uiText("保存中 / Saving / Сохраняем...", "Сохраняем..."), "");
         try {
@@ -2396,7 +2431,8 @@
             isNewShipment = false;
             currentUploadId = "";
           } else {
-            currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), {
+            const shipmentId = currentShipment.shipment_id;
+            const response = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
               method: "PATCH",
               headers: { "Content-Type": "application/json", Accept: "application/json" },
               body: JSON.stringify({
@@ -2407,6 +2443,12 @@
                 payload
               })
             });
+            if (response.status === "accepted" && response.correction) {
+              saveRequestInFlight = false;
+              await pollFactualDateCorrection(shipmentId, response.correction);
+              return;
+            }
+            currentShipment = response;
           }
           cardDirty = false;
           renderCard();
@@ -2422,6 +2464,11 @@
         } catch (error) {
           setMessage(cardMessage, error.message, "error");
           updateTotalsAndState();
+        } finally {
+          saveRequestInFlight = false;
+          if (!factualCorrectionInFlight) {
+            updateTotalsAndState();
+          }
         }
       }
 

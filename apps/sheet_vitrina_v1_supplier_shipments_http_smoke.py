@@ -10,6 +10,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import time
 from urllib import error as urllib_error, request as urllib_request
 from uuid import uuid4
 
@@ -456,8 +457,8 @@ def main() -> None:
                 or detail.get("actual_ff_acceptance_date") not in {"", None}
             ):
                 raise AssertionError(f"created shipment must expose planned/fact dates, got {detail}")
-            if detail.get("order_status") != "production":
-                raise AssertionError(f"created shipment must default order_status=production, got {detail.get('order_status')}")
+            if detail.get("order_status") != "in_transit" or detail.get("order_status_display") != "В пути с 16.05.2026":
+                raise AssertionError(f"created shipment status must derive from actual date, got {detail.get('order_status_display')}")
             if detail.get("approx_yuan_rate") != 13.2 or detail.get("approx_invoice_cost_rub") != 435.6:
                 raise AssertionError(f"created shipment must expose approx yuan rate and invoice RUB cost, got {detail}")
             if detail.get("approx_landed_cost_per_unit_rub") is not None:
@@ -495,8 +496,8 @@ def main() -> None:
                 or listed_created.get("approx_landed_cost_per_unit_rub") != 25.45
             ):
                 raise AssertionError(f"list route must expose approximate landed cost with factual expenses, got {post_expense_list_status} {post_expense_list}")
-            if loaded_detail.get("order_status") != "production":
-                raise AssertionError("detail route must expose default order_status")
+            if loaded_detail.get("order_status") != "in_transit":
+                raise AssertionError("detail route must expose derived in-transit status")
             if (
                 loaded_detail.get("planned_shipment_date") != "2026-05-14"
                 or loaded_detail.get("actual_shipment_date") != "2026-05-16"
@@ -505,6 +506,33 @@ def main() -> None:
                 raise AssertionError("detail route must expose planned/fact shipment dates")
             if loaded_detail.get("product_lines", [{}])[0].get("price_conformity_checked_at") != "2026-05-30T08:00:00Z":
                 raise AssertionError("detail route must expose persisted price conformity metadata without recalculation")
+            future_shipment_status, future_shipment_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"actual_shipment_date": "2026-05-31"},
+            )
+            if future_shipment_status != 400 or "business today" not in str(future_shipment_payload.get("error", "")):
+                raise AssertionError(f"future shipment date must be rejected by API: {future_shipment_status} {future_shipment_payload}")
+            future_acceptance_status, future_acceptance_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"actual_ff_acceptance_date": "2026-05-31"},
+            )
+            if future_acceptance_status != 400 or "business today" not in str(future_acceptance_payload.get("error", "")):
+                raise AssertionError(f"future FF acceptance must be rejected by API: {future_acceptance_status} {future_acceptance_payload}")
+            early_acceptance_status, early_acceptance_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"actual_ff_acceptance_date": "2026-05-15"},
+            )
+            if early_acceptance_status != 400 or "раньше" not in str(early_acceptance_payload.get("error", "")):
+                raise AssertionError(f"acceptance before shipment must be rejected: {early_acceptance_status} {early_acceptance_payload}")
+            unchanged_status, unchanged_detail = _get_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}"
+            )
+            if (
+                unchanged_status != 200
+                or unchanged_detail.get("actual_shipment_date") != "2026-05-16"
+                or unchanged_detail.get("actual_ff_acceptance_date") not in {"", None}
+            ):
+                raise AssertionError("rejected factual dates must leave source unchanged")
             price_check_status, price_checked = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/price-check",
                 {"context": {"source": "http_smoke"}},
@@ -533,7 +561,7 @@ def main() -> None:
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 {
                     "shipment_date": "2026-05-15",
-                    "actual_shipment_date": "2026-05-17",
+                    "actual_shipment_date": "2026-05-16",
                     "approx_yuan_rate": "14.5",
                     "payload": edited,
                 },
@@ -542,41 +570,106 @@ def main() -> None:
                 raise AssertionError(f"patch route must update shipment date, got {patch_status} {patched}")
             if (
                 patched.get("planned_shipment_date") != "2026-05-15"
-                or patched.get("actual_shipment_date") != "2026-05-17"
+                or patched.get("actual_shipment_date") != "2026-05-16"
                 or patched.get("actual_ff_acceptance_date") not in {"", None}
             ):
                 raise AssertionError(f"patch route must update fact dates, got {patched}")
             if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 30.0:
                 raise AssertionError("patch route must mark manual_override and recalculate totals server-side")
-            if patched.get("order_status") != "production":
-                raise AssertionError("full patch must preserve existing order_status")
+            if patched.get("order_status") != "in_transit":
+                raise AssertionError("full patch must keep status derived from factual date")
             if patched.get("approx_yuan_rate") != 14.5 or patched.get("approx_invoice_cost_rub") != 507.5:
                 raise AssertionError(f"patch route must update approx_yuan_rate and derived invoice cost, got {patched}")
             if patched.get("approx_landed_cost_per_unit_rub") != 29.24:
                 raise AssertionError(f"patch route must recalculate approximate landed cost, got {patched}")
 
+            correction_started = threading.Event()
+            correction_release = threading.Event()
+
+            def hold_correction(phase: str) -> None:
+                if phase == "before_transaction":
+                    correction_started.set()
+                    if not correction_release.wait(timeout=5):
+                        raise RuntimeError("correction smoke hold timeout")
+
+            entrypoint.supplier_shipment_factual_correction_block.failure_injector = hold_correction
+            correction_status, correction_accepted = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"actual_shipment_date": "2026-05-17"},
+            )
+            if correction_status != 202 or correction_accepted.get("status") != "accepted":
+                raise AssertionError(f"date correction must start one persisted job, got {correction_status} {correction_accepted}")
+            if not correction_started.wait(timeout=5):
+                raise AssertionError("correction job did not reach a real running phase")
+            running_detail_status, running_detail = _get_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}"
+            )
+            running_correction = running_detail.get("factual_date_correction") or {}
+            if running_detail_status != 200 or not running_correction.get("active"):
+                raise AssertionError(f"detail reload must expose active persisted correction: {running_detail}")
+            duplicate_status, duplicate_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"actual_shipment_date": "2026-05-17"},
+            )
+            if (
+                duplicate_status != 202
+                or not (duplicate_payload.get("correction") or {}).get("deduplicated")
+                or (duplicate_payload.get("correction") or {}).get("correction_id")
+                != (correction_accepted.get("correction") or {}).get("correction_id")
+            ):
+                raise AssertionError(f"parallel duplicate save must reuse one job: {duplicate_status} {duplicate_payload}")
+            correction_release.set()
+            entrypoint.supplier_shipment_factual_correction_block.failure_injector = None
+            correction = _wait_for_factual_correction(base_url, shipment_id)
+            if correction.get("status") != "success":
+                raise AssertionError(f"date correction job did not succeed: {correction}")
+            detail_status, patched = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
+            if (
+                detail_status != 200
+                or patched.get("actual_shipment_date") != "2026-05-17"
+                or patched.get("order_status") != "in_transit"
+                or patched.get("order_status_display") != "В пути с 17.05.2026"
+            ):
+                raise AssertionError(f"date correction readback mismatch: {patched}")
+            repeated_status, repeated = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"actual_shipment_date": "2026-05-17"},
+            )
+            if repeated_status != 200 or repeated.get("actual_shipment_date") != "2026-05-17":
+                raise AssertionError(f"repeated correction must be zero-change: {repeated_status} {repeated}")
+
             status_patch_status, status_patched = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 {"order_status": "in_transit"},
             )
-            if status_patch_status != 200 or status_patched.get("order_status") != "in_transit":
-                raise AssertionError(f"status-only patch must persist in_transit, got {status_patch_status} {status_patched}")
+            if status_patch_status != 400 or "status-only PATCH" not in str(status_patched.get("error", "")):
+                raise AssertionError(f"matching status-only patch must be rejected, got {status_patch_status} {status_patched}")
+            after_status_reject_status, after_status_reject = _get_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}"
+            )
             if (
-                len(status_patched.get("product_lines", [])) != 3
-                or status_patched.get("source_file_sha256") != workbook_sha256
-                or status_patched.get("invoice_no") != "26GN390"
-                or status_patched.get("actual_shipment_date") != "2026-05-17"
-                or status_patched.get("actual_ff_acceptance_date") not in {"", None}
-                or status_patched.get("approx_yuan_rate") != 14.5
-                or status_patched.get("approx_landed_cost_per_unit_rub") != 29.24
+                after_status_reject_status != 200
+                or len(after_status_reject.get("product_lines", [])) != 3
+                or after_status_reject.get("source_file_sha256") != workbook_sha256
+                or after_status_reject.get("invoice_no") != "26GN390"
+                or after_status_reject.get("actual_shipment_date") != "2026-05-17"
+                or after_status_reject.get("actual_ff_acceptance_date") not in {"", None}
+                or after_status_reject.get("approx_yuan_rate") != 14.5
+                or after_status_reject.get("approx_landed_cost_per_unit_rub") != 29.24
             ):
-                raise AssertionError("status-only patch must not erase lines, metadata, source file, fact dates, or approx yuan rate")
+                raise AssertionError("rejected status-only patch must not erase lines, metadata, source file, fact dates, or approx yuan rate")
             invalid_status, invalid_payload = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 {"order_status": "delivered_to_mars"},
             )
             if invalid_status != 400 or "order_status" not in str(invalid_payload.get("error", "")):
                 raise AssertionError(f"invalid order_status must be rejected, got {invalid_status} {invalid_payload}")
+            divergent_status, divergent_payload = _patch_json(
+                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                {"order_status": "production"},
+            )
+            if divergent_status != 400 or "вычисляется" not in str(divergent_payload.get("error", "")):
+                raise AssertionError(f"manual divergent status must be rejected, got {divergent_status} {divergent_payload}")
             accepted_status, accepted_patched = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                 {"actual_ff_acceptance_date": "2026-05-30"},
@@ -1066,6 +1159,16 @@ def _registry_cell_display(registry, section_id: str, row_id: str, shipment_id: 
 def _get_json(url: str) -> tuple[int, dict[str, object]]:
     request = urllib_request.Request(url, headers={"Accept": "application/json"}, method="GET")
     return _open_json(request)
+
+
+def _wait_for_factual_correction(base_url: str, shipment_id: str) -> dict[str, object]:
+    url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-date-correction"
+    for _ in range(200):
+        status, payload = _get_json(url)
+        if status == 200 and payload.get("status") in {"success", "error"}:
+            return payload
+        time.sleep(0.02)
+    raise AssertionError("factual date correction status did not become terminal")
 
 
 def _open_json(request: urllib_request.Request) -> tuple[int, dict[str, object]]:

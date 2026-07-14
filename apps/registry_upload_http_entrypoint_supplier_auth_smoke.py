@@ -14,6 +14,7 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import time
 from urllib import error as urllib_error, parse as urllib_parse, request as urllib_request
 from uuid import uuid4
 
@@ -195,8 +196,8 @@ def main() -> None:
                     )
                 if create_code != 200 or not create_payload.get("shipment_id"):
                         raise AssertionError(f"supplier role must create supplier shipments, got {create_code} {create_payload}")
-                if create_payload.get("order_status") != "production":
-                        raise AssertionError("supplier role must not set order_status during create")
+                if create_payload.get("order_status") != "in_transit":
+                        raise AssertionError("supplier create status must derive from factual shipment date")
                 if (
                     create_payload.get("planned_shipment_date") != "2026-05-14"
                     or create_payload.get("actual_shipment_date") != "2026-05-16"
@@ -235,7 +236,7 @@ def main() -> None:
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                         {
                             "shipment_date": "2026-05-15",
-                            "actual_shipment_date": "2026-05-17",
+                            "actual_shipment_date": "2026-05-16",
                             "actual_ff_acceptance_date": "2026-05-30",
                             "payload": patched_payload,
                         },
@@ -243,11 +244,27 @@ def main() -> None:
                 if (
                     patch_code != 200
                     or patch_payload.get("shipment_date") != "2026-05-15"
-                    or patch_payload.get("actual_shipment_date") != "2026-05-17"
+                    or patch_payload.get("actual_shipment_date") != "2026-05-16"
                     or patch_payload.get("actual_ff_acceptance_date") != "2026-05-30"
                     or patch_payload.get("order_status") != "accepted_ff"
                 ):
                         raise AssertionError(f"supplier role must edit supplier shipments, got {patch_code} {patch_payload}")
+                correction_code, correction_payload = _opener_patch_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                        {"actual_shipment_date": "2026-05-17"},
+                    )
+                if correction_code != 202 or correction_payload.get("status") != "accepted":
+                        raise AssertionError(f"supplier role must start guarded factual correction, got {correction_code} {correction_payload}")
+                correction_result = _wait_supplier_correction(supplier, base_url, shipment_id)
+                if correction_result.get("status") != "success":
+                        raise AssertionError(f"supplier factual correction failed: {correction_result}")
+                detail_code, patch_payload = _opener_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    )
+                if detail_code != 200 or patch_payload.get("actual_shipment_date") != "2026-05-17":
+                        raise AssertionError(f"supplier factual correction readback failed: {patch_payload}")
                 supplier_status_code, supplier_status_payload = _opener_patch_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
@@ -258,10 +275,10 @@ def main() -> None:
                 operator_status_code, operator_status_payload = _opener_patch_json(
                         operator,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
-                        {"order_status": "accepted_ff"},
+                        {"order_status": "production"},
                     )
-                if operator_status_code != 400 or "actual_ff_acceptance_date" not in operator_status_payload.get("error", ""):
-                        raise AssertionError(f"operator role must not set accepted_ff by status-only PATCH, got {operator_status_code} {operator_status_payload}")
+                if operator_status_code != 400 or "вычисляется" not in operator_status_payload.get("error", ""):
+                        raise AssertionError(f"operator role must not set a divergent status, got {operator_status_code} {operator_status_payload}")
                 forbidden_html_code, _, _ = _opener_text(supplier, f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
                 if forbidden_html_code != 403:
                         raise AssertionError("supplier role must not access full web-vitrina/operator shell")
@@ -384,6 +401,20 @@ def _opener_json(opener: urllib_request.OpenerDirector, url: str) -> tuple[int, 
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib_error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _wait_supplier_correction(
+    opener: urllib_request.OpenerDirector,
+    base_url: str,
+    shipment_id: str,
+) -> dict[str, object]:
+    url = f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-date-correction"
+    for _ in range(200):
+        status, payload = _opener_json(opener, url)
+        if status == 200 and payload.get("status") in {"success", "error"}:
+            return payload
+        time.sleep(0.02)
+    raise AssertionError("supplier factual correction did not become terminal")
 
 
 def _opener_delete_json(opener: urllib_request.OpenerDirector, url: str) -> tuple[int, dict[str, object]]:

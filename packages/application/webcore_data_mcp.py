@@ -21,6 +21,8 @@ from packages.application.webcore_ops_diagnostics import (
     WebCoreOpsDiagnostics,
     WebCoreOpsDiagnosticsError,
 )
+from packages.application.supplier_shipment_status import apply_derived_supplier_status
+from packages.business_time import current_business_date_iso
 
 DB_FILENAME = "registry_upload_runtime.sqlite3"
 DEFAULT_MAX_LIMIT = 50
@@ -725,8 +727,9 @@ class WebCoreDataMcpGateway:
             where = ""
             params: list[Any] = []
             if status_filter:
-                where = "WHERE s.order_status = ?"
-                params.append(status_filter)
+                today = current_business_date_iso()
+                where = "WHERE " + _derived_supplier_status_sql("s") + " = ?"
+                params.extend((today, today, status_filter))
             rows = conn.execute(
                 f"""
                 SELECT s.shipment_id, s.shipment_date, s.actual_shipment_date, s.actual_ff_acceptance_date,
@@ -756,7 +759,7 @@ class WebCoreDataMcpGateway:
             ).fetchall()
         ranked: list[dict[str, Any]] = []
         for row in rows:
-            item = _row_dict(row)
+            item = apply_derived_supplier_status(_row_dict(row))
             qty = _first_number(item.get("product_qty_total"), item.get("line_qty_total"))
             base_amount = _first_number(item.get("invoice_amount_total"), item.get("product_amount_total"), item.get("line_amount_total"))
             expense = _number_or_zero(item.get("expense_amount_rub"))
@@ -1509,6 +1512,10 @@ class WebCoreDataMcpGateway:
     ) -> dict[str, Any]:
         spec = _require_table_spec(table)
         effective_offset = _cursor_to_offset(cursor, offset)
+        derived_supplier_status_filter: Any = None
+        effective_filters = dict(filters)
+        if table == "sheet_vitrina_v1_supplier_shipments":
+            derived_supplier_status_filter = effective_filters.pop("order_status", None)
         with self._connect() as conn:
             if not _table_exists(conn, table):
                 return _missing_table_result(table)
@@ -1517,11 +1524,39 @@ class WebCoreDataMcpGateway:
             where_sql, params, applied_filters = _build_table_where(
                 columns,
                 spec,
-                filters=filters,
+                filters=effective_filters,
                 date_from=date_from,
                 date_to=date_to,
             )
             order_sql = _order_by_sql(columns, spec, order_by)
+            if derived_supplier_status_filter is not None:
+                values = (
+                    list(derived_supplier_status_filter[:20])
+                    if isinstance(derived_supplier_status_filter, list)
+                    else [derived_supplier_status_filter]
+                )
+                if values:
+                    today = current_business_date_iso()
+                    predicate = _derived_supplier_status_sql("")
+                    predicate += " IN (" + ", ".join("?" for _ in values) + ")"
+                    where_sql = (
+                        where_sql + " AND " + predicate
+                        if where_sql
+                        else "WHERE " + predicate
+                    )
+                    params.extend((today, today, *values))
+                    applied_filters["order_status"] = (
+                        values if isinstance(derived_supplier_status_filter, list) else values[0]
+                    )
+            supplier_order_direction = _supplier_status_order_direction(order_by)
+            if table == "sheet_vitrina_v1_supplier_shipments" and supplier_order_direction:
+                today = current_business_date_iso()
+                order_sql = (
+                    "ORDER BY "
+                    + _derived_supplier_status_sql("")
+                    + f" {supplier_order_direction}"
+                )
+                params.extend((today, today))
             quoted_columns = ", ".join(_quote_ident(column) for column in selected_columns)
             rows = conn.execute(
                 f"""
@@ -1536,7 +1571,9 @@ class WebCoreDataMcpGateway:
         raw_columns = set(spec.get("raw_columns") or [])
         payload_rows = [
             _business_row_payload(
-                _row_dict(row),
+                apply_derived_supplier_status(_row_dict(row))
+                if table == "sheet_vitrina_v1_supplier_shipments"
+                else _row_dict(row),
                 raw_columns=raw_columns,
                 include_raw_business_payloads=include_raw_business_payloads,
             )
@@ -1590,7 +1627,10 @@ class WebCoreDataMcpGateway:
             _append_like_filter(clauses, params, "s.shipment_id", shipment_id)
             _append_like_filter(clauses, params, "s.invoice_no", invoice_no)
             _append_like_filter(clauses, params, "s.supplier_name", supplier_name)
-            _append_exact_filter(clauses, params, "s.order_status", order_status)
+            if order_status:
+                today = current_business_date_iso()
+                clauses.append(_derived_supplier_status_sql("s") + " = ?")
+                params.extend((today, today, order_status))
             _append_exact_filter(clauses, params, "s.match_status", match_status)
             if date_from:
                 clauses.append("COALESCE(s.shipment_date, s.invoice_date, s.created_at, '') >= ?")
@@ -1636,7 +1676,7 @@ class WebCoreDataMcpGateway:
             )
         result_rows = []
         for row in rows[:limit]:
-            item = _row_dict(row)
+            item = apply_derived_supplier_status(_row_dict(row))
             packing_summary = _packing_list_summary_from_documents(
                 packing_docs_by_shipment.get(str(item.get("shipment_id") or ""), []),
                 line_item_limit=0,
@@ -2417,7 +2457,8 @@ class WebCoreDataMcpGateway:
         rows = conn.execute(
             """
             SELECT 'shipment' AS object_type, shipment_id AS id, shipment_id AS title,
-                   shipment_date, order_status, invoice_no, supplier_name, match_status
+                   shipment_date, actual_shipment_date, actual_ff_acceptance_date,
+                   order_status, invoice_no, supplier_name, match_status
             FROM sheet_vitrina_v1_supplier_shipments
             WHERE shipment_id LIKE ? OR invoice_no LIKE ? OR supplier_name LIKE ?
             ORDER BY shipment_date DESC, updated_at DESC
@@ -2425,7 +2466,7 @@ class WebCoreDataMcpGateway:
             """,
             (like, like, like, limit),
         ).fetchall()
-        return [_row_dict(row) for row in rows]
+        return [apply_derived_supplier_status(_row_dict(row)) for row in rows]
 
     def _search_wb_supplies(self, conn: sqlite3.Connection, like: str, *, limit: int) -> list[dict[str, Any]]:
         rows = conn.execute(
@@ -2538,7 +2579,7 @@ class WebCoreDataMcpGateway:
         ).fetchone()
         if row is None:
             return None
-        item = _row_dict(row)
+        item = apply_derived_supplier_status(_row_dict(row))
         item["warnings"] = _bounded_list(_safe_json_loads(item.pop("warnings_json", None)), limit=20)
         item["errors"] = _bounded_list(_safe_json_loads(item.pop("errors_json", None)), limit=20)
         return item
@@ -4158,6 +4199,37 @@ def _append_exact_filter(clauses: list[str], params: list[Any], column_sql: str,
     if value:
         clauses.append(f"{column_sql} = ?")
         params.append(value)
+
+
+def _derived_supplier_status_sql(alias: str) -> str:
+    prefix = str(alias or "").strip()
+    qualifier = f"{prefix}." if prefix else ""
+    acceptance = f"{qualifier}actual_ff_acceptance_date"
+    shipment = f"{qualifier}actual_shipment_date"
+    return (
+        "CASE "
+        f"WHEN length({acceptance})=10 AND date({acceptance})={acceptance} AND {acceptance}<=? "
+        "THEN 'accepted_ff' "
+        f"WHEN length({shipment})=10 AND date({shipment})={shipment} AND {shipment}<=? "
+        "THEN 'in_transit' ELSE 'production' END"
+    )
+
+
+def _supplier_status_order_direction(order_by: str | None) -> str:
+    requested = str(order_by or "").strip()
+    if not requested:
+        return ""
+    direction = "ASC"
+    column = requested
+    if requested.startswith("-"):
+        column = requested[1:]
+        direction = "DESC"
+    elif " " in requested:
+        parts = requested.split()
+        column = parts[0]
+        if len(parts) > 1 and parts[1].upper() in {"ASC", "DESC"}:
+            direction = parts[1].upper()
+    return direction if column == "order_status" else ""
 
 
 def _recommended_call(step: int, tool: str, arguments: dict[str, Any], scope: str, expected_result: str) -> dict[str, Any]:

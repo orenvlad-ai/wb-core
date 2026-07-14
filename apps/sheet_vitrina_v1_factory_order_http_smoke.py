@@ -670,7 +670,7 @@ def main() -> None:
 
             patch_status, patch_payload = _patch_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window",
-                {"actual_ff_acceptance_date": "2026-05-23"},
+                {"actual_ff_acceptance_date": "2026-04-18"},
             )
             if patch_status != 200 or patch_payload.get("order_status") != ORDER_STATUS_ACCEPTED_FF:
                 raise AssertionError(f"actual_ff_acceptance_date PATCH must trigger accepted_ff, got {patch_status} {patch_payload}")
@@ -1129,6 +1129,7 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
             "created_at": "2026-04-18T09:00:00Z",
             "updated_at": "2026-04-18T09:00:00Z",
             "shipment_date": "2026-04-20",
+            "actual_shipment_date": "2026-04-17",
             "invoice_no": "26GN390",
             "invoice_date": "2026-04-19",
             "contract_no": "",
@@ -1190,6 +1191,7 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
             "created_at": "2026-04-18T09:05:00Z",
             "updated_at": "2026-04-18T09:05:00Z",
             "shipment_date": "2026-05-10",
+            "actual_shipment_date": "2026-04-18",
             "order_status": ORDER_STATUS_IN_TRANSIT,
             "invoice_no": "LATE-1",
             "invoice_date": "2026-05-09",
@@ -1221,6 +1223,8 @@ def _seed_supplier_factory_inbound_fixture(runtime: RegistryUploadDbBackedRuntim
             "created_at": "2026-04-18T09:10:00Z",
             "updated_at": "2026-04-18T09:10:00Z",
             "shipment_date": "2026-04-20",
+            "actual_shipment_date": "2026-04-17",
+            "actual_ff_acceptance_date": "2026-04-18",
             "order_status": ORDER_STATUS_ACCEPTED_FF,
             "invoice_no": "ACCEPTED-FF",
             "invoice_date": "2026-04-19",
