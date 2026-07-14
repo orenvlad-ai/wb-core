@@ -111,3 +111,7 @@ update_note: "Добавлен отдельный current-only public-card sourc
 # 7. Buyer-price metric reuse
 
 `buyer_price_rub` / `Цена для покупателя, ₽` is the same factual `public_buyer_price` observation from this contour, not a price inferred from SPP. It preserves source/measured-at/freshness/quality evidence. Missing or stale-unaccepted public evidence stays blank and is never replaced with an estimated buyer price. SKU-management price commits may request a fresh observation after confirmed seller-price readback, but do not redefine this source.
+
+# 8. Separation from authenticated SPP testing
+
+Module 42 `Цены -> Проверка СПП` additionally owns a dedicated persistent authenticated Wildberries buyer session and shows its personalized buyer price as the primary test fact. That session, its account fingerprint and its price result are not inputs to this global module. This module remains anonymous, current-only and independently refreshable; module 42 keeps its anonymous observation only as an explicit control and never uses it as fallback for a missing authenticated result.

@@ -28,6 +28,11 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH,
     DEFAULT_SHEET_PRICES_SPP_TEST_START_PATH,
     DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH,
+    DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_START_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
     DEFAULT_SHEET_STATUS_PATH,
     DEFAULT_UPLOAD_PATH,
     build_registry_upload_http_server,
@@ -212,6 +217,112 @@ class FakePublicSource:
         }
 
 
+class FakeBuyerSource:
+    def __init__(self, prices: FakeSppPricesSource, *, session_status: str = "valid", stale: bool = False) -> None:
+        self.prices = prices
+        self.session_status = session_status
+        self.stale = stale
+        self.reads = 0
+
+    def check_session(self) -> Mapping[str, Any]:
+        labels = {"valid": "Действует", "missing": "Не установлена", "expired": "Истекла", "wrong_account": "Другой аккаунт"}
+        return {
+            "status": self.session_status,
+            "status_label": labels.get(self.session_status, "Ошибка проверки"),
+            "valid": self.session_status == "valid",
+            "reason": "buyer_session_valid" if self.session_status == "valid" else "buyer_session_invalid",
+            "checked_at": NOW.isoformat(),
+            "session_fingerprint": "a" * 64 if self.session_status == "valid" else "",
+            "account_confirmed": self.session_status == "valid",
+        }
+
+    def fetch_authenticated_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
+        self.reads += 1
+        if self.session_status != "valid":
+            return {
+                "status": f"session_{self.session_status}",
+                "reason": "buyer_session_invalid",
+                "authenticated_buyer_price": None,
+            }
+        discounted = self.prices.discounted_price
+        anonymous_spp = 0.10 if discounted < 800 else 0.14
+        anonymous_price = round(discounted * (1 - anonymous_spp), 2)
+        authenticated_price = 617.58 if self.stale else round(anonymous_price * 0.98, 2)
+        return {
+            "status": "ok",
+            "nm_id": int(nm_id),
+            "authenticated_buyer_price": authenticated_price,
+            "normal_price": authenticated_price,
+            "wallet_price": round(authenticated_price * 0.97, 2),
+            "card_price": None,
+            "club_price": None,
+            "payment_context": "account_default_with_wallet_option",
+            "destination_context": {},
+            "measured_at": NOW.isoformat(),
+            "source_method": "authenticated_browser_network_json:sizes.0.price.product",
+            "source_endpoint": "https://card.wb.ru/cards/v4/detail",
+            "session_fingerprint": "a" * 64,
+            "freshness": {"live_read": True, "stability": "single_read"},
+            "diagnostics": {"network_primary": True},
+        }
+
+
+class SessionLossBuyerSource(FakeBuyerSource):
+    def __init__(self, prices: FakeSppPricesSource) -> None:
+        super().__init__(prices)
+        self.price_reads = 0
+        self.lost = False
+
+    def check_session(self) -> Mapping[str, Any]:
+        self.session_status = "expired" if self.lost else "valid"
+        return super().check_session()
+
+    def fetch_authenticated_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
+        self.price_reads += 1
+        if self.price_reads >= 2:
+            self.lost = True
+            return {
+                "status": "session_expired",
+                "reason": "buyer_login_required",
+                "authenticated_buyer_price": None,
+            }
+        return super().fetch_authenticated_buyer_price(nm_id)
+
+
+class FakeBuyerRecoveryController:
+    def __init__(self) -> None:
+        self.running = False
+
+    def read_status(self, *, launcher_download_path: str, run_id: str | None = None, with_probe: bool = True) -> Mapping[str, Any]:
+        return self._payload(launcher_download_path)
+
+    def start(self, *, replace: bool, launcher_download_path: str) -> Mapping[str, Any]:
+        self.running = True
+        return self._payload(launcher_download_path)
+
+    def stop(self, *, launcher_download_path: str) -> Mapping[str, Any]:
+        self.running = False
+        return self._payload(launcher_download_path)
+
+    def build_launcher_archive(self, *, public_status_url: str, public_operator_url: str) -> tuple[bytes, str]:
+        return b"safe-launcher", "wb-buyer-session-test.zip"
+
+    def _payload(self, launcher_download_path: str) -> Mapping[str, Any]:
+        return {
+            "contract_name": "wb_buyer_session_recovery_v1",
+            "run_id": "buyer-recovery-test",
+            "status": "awaiting_login" if self.running else "stopped",
+            "status_label": "Нужно войти" if self.running else "Остановлена",
+            "status_tone": "warning" if self.running else "neutral",
+            "running": self.running,
+            "run_is_final": not self.running,
+            "launcher_ready": self.running,
+            "can_download_launcher": self.running,
+            "launcher_download_path": launcher_download_path if self.running else "",
+            "session": {"status": "missing", "valid": False},
+        }
+
+
 def main() -> None:
     _run_backend_unit_smokes()
     _run_http_smoke()
@@ -296,6 +407,75 @@ def _run_backend_unit_smokes() -> None:
             raise AssertionError(f"threshold should be detected, got: {job}")
         if not job["restore"]["restored"]:
             raise AssertionError(f"baseline restore proof missing: {job['restore']}")
+
+        invalid_session_source = FakeSppPricesSource()
+        invalid_buyer = FakeBuyerSource(invalid_session_source, session_status="missing")
+        invalid_session_block = _build_block(
+            runtime,
+            runtime_dir / "buyer_missing",
+            invalid_session_source,
+            FakePublicSource(invalid_session_source),
+            buyer_source=invalid_buyer,
+        )
+        try:
+            invalid_session_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")
+        except WbSppTesterError as exc:
+            if exc.payload.get("reason") != "buyer_session_invalid" or exc.payload.get("action") != "Установить сессию":
+                raise
+        else:
+            raise AssertionError("missing buyer session must block before all seller writes")
+        if invalid_session_source.upload_payloads:
+            raise AssertionError("missing buyer session must not fall back to anonymous or write a seller price")
+
+        loss_prices = FakeSppPricesSource()
+        loss_buyer = SessionLossBuyerSource(loss_prices)
+        loss_block = _build_block(
+            runtime,
+            runtime_dir / "buyer_loss",
+            loss_prices,
+            FakePublicSource(loss_prices),
+            buyer_source=loss_buyer,
+        )
+        loss_job = loss_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")["job"]
+        if loss_job["measurements"][0]["status"] != "buyer_session_lost":
+            raise AssertionError(f"session loss during measurement must stop further reads: {loss_job}")
+        if not loss_job["restore"]["restored"] or loss_prices.good["discount"] != 10 or loss_prices.discounted_price != 900.0:
+            raise AssertionError(f"seller tuple restore must not depend on buyer price availability: {loss_job['restore']}")
+        if len(loss_prices.upload_payloads) != 2:
+            raise AssertionError("session loss must stop after one measurement write and one exact restore write")
+
+        schedule_clock = MutableClock(NOW)
+        schedule_prices = FakeSppPricesSource()
+        schedule_buyer = FakeBuyerSource(schedule_prices)
+        schedule_block = _build_block(
+            runtime,
+            runtime_dir / "buyer_schedule_skip",
+            schedule_prices,
+            FakePublicSource(schedule_prices),
+            clock=schedule_clock,
+            buyer_source=schedule_buyer,
+        )
+        saved_schedule = schedule_block.save_schedule(
+            {
+                "enabled": True,
+                "nmID": PRIMARY_NM,
+                "range_min_discounted": 700,
+                "range_max_discounted": 900,
+                "precision_rub": 2,
+                "max_measurements": 3,
+                "local_time_hhmm": "12:01",
+                "timezone": "Asia/Yekaterinburg",
+                "future_live_price_changes_confirmed": True,
+            },
+            actor="smoke",
+        )["schedule"]
+        schedule_buyer.session_status = "expired"
+        schedule_clock.value = datetime.fromisoformat(saved_schedule["next_run_at"]) + timedelta(minutes=1)
+        tick = schedule_block.run_due_schedule_tick()
+        if tick["status"] != "skipped" or tick["job"]["result_status"] != "buyer_session_invalid":
+            raise AssertionError(f"scheduled invalid session must produce observable skip: {tick}")
+        if schedule_prices.upload_payloads:
+            raise AssertionError("scheduled invalid session must not write seller prices")
 
         stale_source = FakeSppPricesSource()
         stale_block = _build_block(runtime, runtime_dir / "stale", stale_source, FakePublicSource(stale_source, stale=True))
@@ -616,6 +796,7 @@ def _run_http_smoke() -> None:
             now_factory=lambda: NOW,
             activated_at_factory=lambda: "2026-07-07T07:00:00Z",
             spp_tester_block=block,
+            buyer_session_recovery_controller=FakeBuyerRecoveryController(),  # type: ignore[arg-type]
         )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
@@ -635,6 +816,23 @@ def _run_http_smoke() -> None:
             status, baseline = _get_json(f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_BASELINE_PATH}?nmID={PRIMARY_NM}")
             if status != 200 or baseline["contract_name"] != "sheet_vitrina_v1_prices_spp_test_baseline":
                 raise AssertionError(f"baseline route failed: {status} {baseline}")
+            status, buyer_session = _get_json(f"{base_url}{DEFAULT_WB_BUYER_SESSION_CHECK_PATH}")
+            if status != 200 or buyer_session.get("status") != "valid" or not buyer_session.get("valid"):
+                raise AssertionError(f"buyer session check route failed: {status} {buyer_session}")
+            if any(marker in json.dumps(buyer_session).lower() for marker in ("cookie", "authorization", "phone", "otp", "storage_state")):
+                raise AssertionError("buyer session route leaked sensitive fields")
+            status, recovery_start = _post_json(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_START_PATH}", {"replace": True})
+            if status != 200 or not recovery_start.get("launcher_ready"):
+                raise AssertionError(f"buyer recovery start route failed: {status} {recovery_start}")
+            status, recovery_status = _get_json(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH}?probe=false")
+            if status != 200 or recovery_status.get("status") != "awaiting_login":
+                raise AssertionError(f"buyer recovery status route failed: {status} {recovery_status}")
+            with request.urlopen(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH}", timeout=10) as response:
+                if response.status != 200 or response.read() != b"safe-launcher":
+                    raise AssertionError("buyer recovery launcher route failed")
+            status, recovery_stop = _post_json(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_STOP_PATH}", {})
+            if status != 200 or recovery_stop.get("running"):
+                raise AssertionError(f"buyer recovery stop route failed: {status} {recovery_stop}")
             status, plan = _post_json(
                 f"{base_url}{DEFAULT_SHEET_PRICES_SPP_TEST_PLAN_PATH}",
                 _start_payload(700, 900, max_measurements=30),
@@ -713,6 +911,7 @@ def _build_block(
     zero_cadence: bool = True,
     clock: MutableClock | None = None,
     schedule_late_window_minutes: int = 15,
+    buyer_source: Any | None = None,
 ) -> WbSppTesterBlock:
     clock = clock or MutableClock(NOW)
     cadence_config = (
@@ -738,6 +937,7 @@ def _build_block(
         runtime_dir=runtime_dir,
         prices_source=prices_source,
         public_source=public_source,
+        buyer_source=buyer_source or FakeBuyerSource(prices_source, stale=public_source.stale),
         now_factory=clock.now,
         timestamp_factory=clock.timestamp,
         sleep=lambda _seconds: None,
