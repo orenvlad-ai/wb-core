@@ -35,6 +35,7 @@ from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitr
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
+from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
 from packages.application.sku_management import SkuManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -691,6 +692,8 @@ class RegistryUploadHttpEntrypoint:
         ads_block: SheetVitrinaV1AdsBlock | None = None,
         prices_block: WbPricesManagementBlock | None = None,
         spp_tester_block: WbSppTesterBlock | None = None,
+        buyer_session_block: WbBuyerSessionBlock | None = None,
+        buyer_session_recovery_controller: WbBuyerSessionRecoveryController | None = None,
         sku_management_block: SkuManagementBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
@@ -759,15 +762,22 @@ class RegistryUploadHttpEntrypoint:
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
         )
+        self.buyer_session_block = (
+            buyer_session_block
+            or (getattr(spp_tester_block, "buyer_source", None) if spp_tester_block is not None else None)
+            or WbBuyerSessionBlock()
+        )
         self.spp_tester_block = spp_tester_block or WbSppTesterBlock(
             runtime=self.runtime,
             runtime_dir=self.runtime.runtime_dir,
+            buyer_source=self.buyer_session_block,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
+        self.buyer_session_recovery = buyer_session_recovery_controller or WbBuyerSessionRecoveryController()
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
@@ -1295,6 +1305,47 @@ class RegistryUploadHttpEntrypoint:
         actor: str = "",
     ) -> dict[str, Any]:
         return self.spp_tester_block.save_schedule(payload, actor=actor)
+
+    def handle_wb_buyer_session_check_request(self) -> dict[str, Any]:
+        return self.buyer_session_block.check_session()
+
+    def handle_wb_buyer_session_recovery_status_request(
+        self,
+        *,
+        launcher_download_path: str,
+        run_id: str | None = None,
+        with_probe: bool = True,
+    ) -> dict[str, Any]:
+        return self.buyer_session_recovery.read_status(
+            launcher_download_path=launcher_download_path,
+            run_id=run_id,
+            with_probe=with_probe,
+        )
+
+    def handle_wb_buyer_session_recovery_start_request(
+        self,
+        *,
+        launcher_download_path: str,
+        replace: bool = True,
+    ) -> dict[str, Any]:
+        return self.buyer_session_recovery.start(
+            replace=replace,
+            launcher_download_path=launcher_download_path,
+        )
+
+    def handle_wb_buyer_session_recovery_stop_request(self, *, launcher_download_path: str) -> dict[str, Any]:
+        return self.buyer_session_recovery.stop(launcher_download_path=launcher_download_path)
+
+    def handle_wb_buyer_session_recovery_launcher_request(
+        self,
+        *,
+        public_status_url: str,
+        public_operator_url: str,
+    ) -> tuple[bytes, str]:
+        return self.buyer_session_recovery.build_launcher_archive(
+            public_status_url=public_status_url,
+            public_operator_url=public_operator_url,
+        )
 
     def handle_sku_management_table_request(self, *, user_key: str) -> dict[str, Any]:
         return self.sku_management_block.build_table(user_key=user_key)

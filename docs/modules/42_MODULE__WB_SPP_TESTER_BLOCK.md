@@ -3,11 +3,14 @@ title: "Модуль: wb_spp_tester_block"
 doc_id: "WB-CORE-MODULE-42-WB-SPP-TESTER-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать production MVP инструмента `Цены -> Проверка СПП` для безопасного live измерения `SPP-прокси` по пользовательскому диапазону discounted price."
-scope: "Server-owned one-nmID SPP tester inside unified operator shell: baseline capture, safe-slow plan/start/status/restore endpoints, guarded WB Prices live writes, anonymous public buyer-price polling, threshold detection over high-confidence points, cross-process runtime lock/state/audit, stale/orphan reconciliation, bounded history, one persistent daily schedule with a repo-owned due runner/systemd timer, staged baseline restore and fake-upstream smokes. The block does not change promo semantics, promo denominator or current prices table behavior."
+purpose: "Зафиксировать production MVP инструмента `Цены -> Проверка СПП` для безопасного live измерения персонализированной цены авторизованного покупателя и анонимного контроля по пользовательскому диапазону discounted price."
+scope: "Server-owned one-nmID SPP tester inside unified operator shell: separate persistent Wildberries buyer session with human-only login recovery, authenticated buyer price as the primary test fact, anonymous public buyer price as an explicit control, baseline capture, safe-slow plan/start/status/restore endpoints, guarded WB Prices live writes, threshold detection over high-confidence points, cross-process runtime locks/state/audit, stale/orphan reconciliation, bounded history, one persistent daily schedule with a repo-owned due runner/systemd timer, exact seller-tuple restore and fake-upstream smokes. The block does not change promo semantics, global anonymous spp_proxy semantics or current prices table behavior."
 source_basis:
   - "packages/contracts/wb_spp_tester.py"
+  - "packages/contracts/wb_buyer_session.py"
   - "packages/application/wb_spp_tester.py"
+  - "packages/application/wb_buyer_session.py"
+  - "packages/adapters/wb_buyer_session.py"
   - "packages/adapters/wb_prices_management.py"
   - "packages/adapters/spp_proxy_block.py"
   - "packages/application/registry_upload_http_entrypoint.py"
@@ -27,17 +30,24 @@ related_endpoints:
   - "GET /v1/sheet-vitrina-v1/prices/spp-test/history/{job_id}"
   - "GET /v1/sheet-vitrina-v1/prices/spp-test/schedule"
   - "POST /v1/sheet-vitrina-v1/prices/spp-test/schedule"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/check"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status"
+  - "POST /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start"
+  - "POST /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop"
+  - "GET /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip"
 related_runners:
   - "apps/wb_spp_tester_smoke.py"
   - "apps/wb_spp_tester_browser_smoke.py"
   - "apps/wb_spp_tester_schedule_tick.py"
+  - "apps/wb_buyer_session_recovery.py"
+  - "apps/wb_buyer_session_smoke.py"
 related_docs:
   - "docs/modules/41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
   - "docs/modules/35_MODULE__SPP_PROXY_BLOCK.md"
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Production SPP tester now reconciles interrupted runtime jobs through fresh live restore proof, terminalizes emergency restore, exposes bounded history over existing job files, and supports one consented persistent daily `Автопроверка` schedule through the same lock/write/restore path and repo-owned systemd due ticker."
+update_note: "Production SPP tester now requires a separate persistent authenticated buyer session, uses authenticated buyer price as primary test truth and anonymous price only as a control, exposes safe human-login recovery, fails closed without fallback on session loss, records buyer/payment/destination context, and keeps exact seller restore independent from later buyer-price availability."
 ---
 
 # 1. Идентификатор и статус
@@ -53,30 +63,44 @@ update_note: "Production SPP tester now reconciles interrupted runtime jobs thro
 
 Operator chooses exactly one SKU/nmID and manually enters discounted-price range. The tool:
 - captures baseline WB seller price/discount/discountedPrice;
-- captures anonymous public buyer price and current `SPP-прокси`;
+- validates the dedicated persistent buyer session and captures an authenticated buyer price plus its payment/destination context;
+- captures anonymous public buyer price independently as a control observation;
 - builds a safe-slow measurement plan from min/mid/max plus refinement budget;
 - temporarily changes seller price through WB Prices and Discounts API;
-- measures actual WB discounted price after readback and public buyer price after stable proof;
-- detects adjacent material jumps in `SPP-прокси`;
+- measures actual WB discounted price after readback and both buyer prices after stable proof;
+- detects adjacent material jumps from authenticated buyer price; the anonymous observation never substitutes for it;
 - restores baseline and records proof.
 
-The formula is unchanged:
+Primary test formula:
 
-`SPP-прокси = (seller discounted price - public buyer price) / seller discounted price`
+`authenticated_spp_proxy = (seller discounted price - authenticated buyer price) / seller discounted price`
+
+Control formula:
+
+`anonymous_spp_proxy = (seller discounted price - anonymous public buyer price) / seller discounted price`
+
+The global module 35 metric `spp_proxy` stays anonymous and unchanged. Only this tester and its schedule use the dedicated authenticated source as primary truth.
 
 # 3. Runtime State
 
 Runtime state is bounded under:
 
+- `wb_buyer_session/storage_state.json`
+- `wb_buyer_session/fingerprint.key`
+- `wb_buyer_session/account_fingerprint.json`
+- `wb_buyer_session/session_probe.json`
+- `wb_buyer_session/buyer_session.lock`
 - `sheet_vitrina_v1_prices/spp_tests/current_job.json`
 - `sheet_vitrina_v1_prices/spp_tests/jobs/{job_id}.json`
 - `sheet_vitrina_v1_prices/spp_tests/audit.jsonl`
 - `sheet_vitrina_v1_prices/spp_tests/schedule.json`
 - `sheet_vitrina_v1_prices/spp_tests/execution.lock`
 
+The buyer-session files live below the hosted runtime state root, outside Git and separately from Seller Portal storage. Directory mode is `0700`; storage/key/fingerprint/probe/recovery files are `0600`; state is saved atomically. `fingerprint.key` is runtime-random and the stored identity is only an HMAC-SHA256 fingerprint, never a phone/email/name/account id. The first accepted authenticated account binds that fingerprint; a different later account is `wrong_account`. `buyer_session.lock` excludes session recovery from browser measurement. Seller storage state and Seller recovery locks are never read or reused.
+
 `current_job.json` stores active/last job id, status, heartbeat, runner identity and TTL diagnostics. `jobs/*.json` and `audit.jsonl` remain the canonical history/evidence; schedule support does not add a DB or a parallel job journal. `schedule.json` stores the single daily business schedule and at-most-once claim state. `execution.lock` is an OS-level cross-process lock shared by manual threads, the systemd runner and emergency restore.
 
-An active or unrestored job blocks another start. TTL alone never unlocks or declares a restore. A live lock holder is reported as live; an active status without a lock holder is stale/orphaned and is reconciled by a fresh WB price/discount/discountedPrice readback, quarantine read and public buyer-price/SPP capture. Exact proof moves it to `interrupted_restored`; a mismatch, quarantine, unavailable proof or readback error moves it to `manual_restore_required`. This also closes jobs interrupted by deploy/restart while a daemon worker was sleeping. A successful emergency restore writes a terminal status instead of leaving `current_job.json` in `restoring`.
+An active or unrestored job blocks another start. TTL alone never unlocks or declares a restore. A live lock holder is reported as live; an active status without a lock holder is reconciled by a fresh WB price/discount/discountedPrice readback and quarantine read. Exact seller-tuple proof moves it to `interrupted_restored`; a mismatch, quarantine or seller readback error moves it to `manual_restore_required`. Authenticated/anonymous buyer captures at restore are diagnostic only: their later failure cannot invalidate an exact seller restore. This also closes jobs interrupted by deploy/restart while a daemon worker was sleeping.
 
 The browser is not source of truth. It renders server baseline, plan, job, measurements, thresholds and restore proof.
 
@@ -89,11 +113,12 @@ Start requires:
 - `editableSizePrice=false`;
 - quarantine absent at baseline;
 - nmID is still present in active server-owned nomenclature;
-- public buyer-price/SPP baseline is available and is not marked 429/timeout/stale;
+- buyer session status is `valid`, its irreversible fingerprint matches the first accepted account, and authenticated buyer price/context is available;
+- anonymous buyer-price control is available and is not marked 429/timeout/stale;
 - explicit live-change confirmation;
 - `restore_baseline=true`.
 
-Manual and scheduled starts acquire the same execution lock before baseline capture. The scheduled path additionally requires stored consent to future temporary live price changes, always passes `restore_baseline=true`, and captures a fresh baseline only after the due claim and lock acquisition. Saving or enabling a schedule never calls `start`.
+Manual and scheduled starts acquire the same execution lock before baseline capture. The buyer-session preflight happens before any seller write and again immediately before every measurement write. A session loss, account mismatch or recovery contention produces `buyer_session_lost`, stops further measurements, and proceeds directly to mandatory seller restore; there is no anonymous fallback. The scheduled path additionally requires stored consent to future temporary live price changes, always passes `restore_baseline=true`, and captures a fresh baseline only after the due claim and lock acquisition. Saving a disabled schedule is allowed without a buyer session; enabling one requires a valid session and never starts a job inline.
 
 All live writes are server-owned. Tests/smokes use fake upstream sources and must not call live `POST /api/v2/upload/task`.
 
@@ -109,6 +134,17 @@ Inputs:
 
 Measurement conversion keeps current discount and changes only integer `price`. After upload, the runner uses WB readback `discountedPrice`, not target price, as actual seller discounted price.
 
+For every measurement the tester polls an authenticated and anonymous observation pair until it has two consecutive identical values for each source under compatible destination context. The session fingerprint must stay unchanged. The result records:
+- seller discounted price;
+- authenticated buyer price as primary;
+- anonymous buyer price as control;
+- additional account discount in rubles and percent;
+- authenticated and anonymous SPP proxies;
+- ordinary, wallet, card and WB Club price fields when exposed;
+- chosen payment context, destination context, parser/source endpoint and session fingerprint.
+
+The authenticated network response owns the destination context for the pair. Module 42 creates an isolated anonymous card-source instance for that exact validated integer `dest`; it does not mutate the module 35 default source. An unsupported/invalid override fails the control read, and a mismatched destination blocks baseline/start instead of calculating a false account discount. The proven network primary is the authenticated browser response from `/__internal/card/cards/v4/detail`; its concrete price field is reported in `source_method` (for example `sizes.0.price.product`) rather than being hardcoded as an account-discount formula.
+
 Initial points are min/mid/max. Threshold detection uses high-confidence points only:
 - delta `< 0.005` = noise;
 - delta `>= 0.015` = material;
@@ -121,11 +157,12 @@ MVP refines one strongest material interval by midpoint until bracket width is w
 A point is high confidence only when:
 - upload task succeeds;
 - WB readback matches expected discounted price;
-- public buyer price reaches stable proof;
+- authenticated and anonymous buyer prices both reach a two-read stable proof;
+- the authenticated fingerprint remains bound and both observations have compatible destination context;
 - quarantine is absent;
 - there is no unresolved 429/timeout/stale evidence.
 
-Stale public price evidence is kept in the table/journal but excluded from threshold detection.
+Ambiguous payment context is recorded explicitly and cannot be silently normalized into a single factual price. Stale/ambiguous evidence is kept in the table/journal but excluded from threshold detection.
 
 WB Prices 429 stores endpoint/status/safe headers/body summary/retry hint in audit, respects `Retry-After` when present, otherwise uses a minimum cooldown, probes read-only after cooldown and stops probing after repeated rate limits so restore can run.
 
@@ -143,11 +180,10 @@ Final proof requires:
 - WB discount equals baseline discount;
 - WB discountedPrice equals baseline discountedPrice;
 - quarantine absent;
-- public buyer price and `SPP-прокси` captured.
 
 If proof fails or quarantine appears, status becomes `manual_restore_required` and no further probing is performed.
 
-Exact restore proof uses equality at kopeck precision for `discountedPrice`, exact integer `price` and `discount`, absent quarantine, plus captured public buyer price and final `SPP-прокси`. A prior proof is not trusted blindly by an emergency restore or orphan reconciliation: current live evidence is read again.
+Exact restore proof uses equality at kopeck precision for `discountedPrice`, exact integer `price` and `discount`, plus absent quarantine. Authenticated/anonymous buyer reads may be attached as diagnostics, but neither is part of seller restore success. A prior proof is not trusted blindly by an emergency restore or orphan reconciliation: current live seller evidence is read again.
 
 # 8. History
 
@@ -168,11 +204,11 @@ The UI exposes one fixed `Ежедневно` schedule:
 
 The repo-owned `apps/wb_spp_tester_schedule_tick.py` reads the persisted schedule and is invoked once per minute by non-persistent `wb-core-spp-tester-schedule-tick.timer`. Business time stays in `schedule.json`; systemd is only a due ticker. The oneshot allows up to three hours for a bounded safe-slow probe and restore. A due business date is claimed atomically before execution, so restart/deploy cannot duplicate it. The runner records due/start/skip/finish/restore evidence in the existing audit/jobs contour.
 
-Late-run policy is bounded: a due run may start at most 15 minutes late. A later tick records `missed_late_window`, advances to the next business date and does not mutate prices. Active/unrestored jobs, lock contention, disabled write guards, quarantine, `editableSizePrice=true` and incomplete baseline are visible scheduled skips. There is no arbitrary catch-up after a long restart.
+Late-run policy is bounded: a due run may start at most 15 minutes late. A later tick records `missed_late_window`, advances to the next business date and does not mutate prices. Invalid/missing/wrong-account buyer session records a visible `buyer_session_invalid` scheduled skip before any price write. Active/unrestored jobs, lock contention, disabled write guards, quarantine, `editableSizePrice=true` and incomplete baseline are also visible scheduled skips. There is no arbitrary catch-up after a long restart.
 
 # 10. UI
 
-The upper block continues to show the current/last job. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job. Compact rows show time, SKU/nmID, manual/automatic/unknown source, status and duration; details expose range, baseline, measurements, thresholds, warnings/errors, restore proof and lifecycle diagnostics.
+The upper block continues to show the current/last job. A compact `Покупательская сессия` block shows safe status, last check and exactly `Проверить сессию` / `Установить сессию`; the recovery launcher is downloaded only after an explicit operator action. Invalid state blocks plan/start and enabled schedule save with `Покупательская сессия недействительна — Установить сессию`. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job. Compact rows show time, SKU/nmID, manual/automatic/unknown source, status and duration; details expose range, baseline, both buyer-price contours, discount/context/session evidence, thresholds, warnings/errors, restore proof and lifecycle diagnostics.
 
 Manual UI remains intentionally small:
 - SKU selector from current prices/active registry rows;
@@ -182,15 +218,19 @@ Manual UI remains intentionally small:
 - measurements table;
 - threshold table.
 
+Baseline and measurements display authenticated and anonymous prices side by side, additional account discount, both SPP proxies, payment method, wallet/card/club fields and the irreversible session fingerprint. API/UI/audit never return cookies, authorization headers, raw storage state, raw account identifiers or internal buyer-state paths.
+
 Danger states use short explicit labels: `429`, `stale`, `карантин`, `нужен restore`.
 
 # 11. Verification
 
 Targeted smokes:
+- `python3 apps/spp_proxy_source_smoke.py`
+- `python3 apps/wb_buyer_session_smoke.py`
 - `python3 apps/wb_spp_tester_smoke.py`
 - `python3 apps/wb_spp_tester_browser_smoke.py`
 
-These cover legacy history compatibility, cursor pagination/detail traversal safety, interrupted/stale reconciliation, unrestored blocking, cross-process contention, schedule save/enable/disable, `next_run_at`, no immediate start, at-most-once/restart, late skip, safety skip, mandatory restore, 429/timeout/stale/quarantine, UI history expansion and deploy/systemd wiring.
+These cover buyer session missing/valid/wrong-account/expired states, restart-persistent fingerprint, atomic save and modes, settled post-login validation, full recovery process-group cleanup, per-read destination override without module 35 mutation, invalid-context no-fallback behavior, price/payment/destination parsing, ambiguous context, secret/path sanitization, legacy history compatibility, cursor pagination/detail traversal safety, interrupted/stale reconciliation, unrestored blocking, cross-process contention, session loss after a completed measurement, schedule save/enable/disable, session-invalid scheduled skip, `next_run_at`, no immediate start, at-most-once/restart, late skip, safety skip, mandatory exact seller restore, 429/timeout/stale/quarantine, UI history expansion and deploy/systemd wiring.
 
 Regression smokes:
 - `python3 apps/wb_prices_management_smoke.py`

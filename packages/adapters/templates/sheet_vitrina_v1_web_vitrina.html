@@ -5471,6 +5471,22 @@
         </section>
         <section class="prices-subpanel" data-prices-subpanel="spp-test" hidden>
           <p class="spp-test-warning">Тест временно меняет live цену на WB. План, запуск, restore и результат сохраняются на сервере.</p>
+          <section class="spp-test-card" data-wb-buyer-session-panel>
+            <div class="spp-test-main-head" style="padding:0 0 10px">
+              <h3>Покупательская сессия</h3>
+              <span class="prices-badge" data-wb-buyer-session-state>не проверена</span>
+            </div>
+            <div class="spp-test-field-grid" data-wb-buyer-session-meta>
+              <span class="spp-test-field">Статус<strong>Не проверена</strong></span>
+              <span class="spp-test-field">Последняя проверка<strong>—</strong></span>
+            </div>
+            <div class="spp-test-actions">
+              <button class="button secondary" type="button" data-wb-buyer-session-check>Проверить сессию</button>
+              <button class="button primary" type="button" data-wb-buyer-session-install>Установить сессию</button>
+              <span class="research-result-note" data-wb-buyer-session-note></span>
+            </div>
+            <p class="research-error" data-wb-buyer-session-error></p>
+          </section>
           <section class="spp-test-card spp-test-schedule">
             <div class="spp-test-main-head" style="padding:0 0 10px">
               <h3>Автопроверка</h3>
@@ -5532,8 +5548,12 @@
                 <span class="spp-test-field">Цена<strong>—</strong></span>
                 <span class="spp-test-field">Скидка<strong>—</strong></span>
                 <span class="spp-test-field">Со скидкой<strong>—</strong></span>
-                <span class="spp-test-field">Цена покупателя<strong>—</strong></span>
-                <span class="spp-test-field">SPP-прокси<strong>—</strong></span>
+                <span class="spp-test-field">Цена авторизованного покупателя<strong>—</strong></span>
+                <span class="spp-test-field">Анонимная цена<strong>—</strong></span>
+                <span class="spp-test-field">Доп. скидка аккаунта<strong>—</strong></span>
+                <span class="spp-test-field">SPP-прокси авторизованный<strong>—</strong></span>
+                <span class="spp-test-field">SPP-прокси анонимный<strong>—</strong></span>
+                <span class="spp-test-field">Payment context<strong>—</strong></span>
                 <span class="spp-test-field">Карантин<strong>—</strong></span>
                 <span class="spp-test-field">Тип цены<strong>—</strong></span>
               </div>
@@ -5581,9 +5601,13 @@
                 <thead>
                   <tr>
                     <th style="width:110px">Цель</th>
-                    <th style="width:130px">WB факт</th>
-                    <th style="width:130px">Покупатель</th>
-                    <th style="width:110px">SPP-прокси</th>
+                    <th style="width:130px">Продавец со скидкой</th>
+                    <th style="width:130px">Авториз. покупатель</th>
+                    <th style="width:130px">Анонимная</th>
+                    <th style="width:130px">Доп. скидка</th>
+                    <th style="width:110px">SPP авториз.</th>
+                    <th style="width:110px">SPP аноним.</th>
+                    <th style="width:160px">Payment</th>
                     <th style="width:110px">Delta</th>
                     <th style="width:110px">Уверенность</th>
                     <th style="width:120px">uploadID</th>
@@ -5592,7 +5616,7 @@
                   </tr>
                 </thead>
                 <tbody data-spp-test-measurements>
-                  <tr><td colspan="9">Измерений пока нет.</td></tr>
+                  <tr><td colspan="13">Измерений пока нет.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -6068,6 +6092,12 @@
     const sppTestThresholdsNode = document.querySelector("[data-spp-test-thresholds]");
     const sppTestStateNode = document.querySelector("[data-spp-test-state]");
     const sppTestStatusTitleNode = document.querySelector("[data-spp-test-status-title]");
+    const wbBuyerSessionStateNode = document.querySelector("[data-wb-buyer-session-state]");
+    const wbBuyerSessionMetaNode = document.querySelector("[data-wb-buyer-session-meta]");
+    const wbBuyerSessionCheckButton = document.querySelector("[data-wb-buyer-session-check]");
+    const wbBuyerSessionInstallButton = document.querySelector("[data-wb-buyer-session-install]");
+    const wbBuyerSessionNoteNode = document.querySelector("[data-wb-buyer-session-note]");
+    const wbBuyerSessionErrorNode = document.querySelector("[data-wb-buyer-session-error]");
     const sppScheduleEnabledNode = document.querySelector("[data-spp-schedule-enabled]");
     const sppScheduleNmSelect = document.querySelector("[data-spp-schedule-nm]");
     const sppScheduleTimeNode = document.querySelector("[data-spp-schedule-time]");
@@ -6578,6 +6608,15 @@
           statusLoading: false,
           job: null,
           activeJob: null,
+          buyerSessionLoading: false,
+          buyerSessionLoaded: false,
+          buyerSession: null,
+          buyerRecoveryStarting: false,
+          buyerRecovery: null,
+          buyerRecoveryPollSequence: 0,
+          buyerRecoveryLauncherDownloaded: false,
+          buyerSessionNote: "",
+          buyerSessionError: "",
           pollSequence: 0,
           scheduleLoading: false,
           scheduleSaving: false,
@@ -16607,6 +16646,14 @@
         buildSppTestPlan();
         return;
       }
+      if (event.target.closest("[data-wb-buyer-session-check]")) {
+        loadWbBuyerSession({force: true});
+        return;
+      }
+      if (event.target.closest("[data-wb-buyer-session-install]")) {
+        startWbBuyerRecovery();
+        return;
+      }
       if (event.target.closest("[data-spp-test-start]")) {
         startSppTest();
         return;
@@ -16656,6 +16703,9 @@
     function ensureSppTestReady() {
       renderSppTestSelector();
       renderSppTest();
+      if (!state.prices.sppTest.buyerSessionLoaded) {
+        loadWbBuyerSession({force: false});
+      }
       loadSppTestStatus({silent: true});
       if (!state.prices.sppTest.scheduleLoaded) {
         loadSppSchedule();
@@ -16663,6 +16713,152 @@
       if (!state.prices.sppTest.historyLoaded) {
         loadSppHistory({reset: true});
       }
+    }
+
+    async function loadWbBuyerSession(options) {
+      if (!WEB_VITRINA_CONFIG.wb_buyer_session_check_path || state.prices.sppTest.buyerSessionLoading) {
+        return;
+      }
+      state.prices.sppTest.buyerSessionLoading = true;
+      state.prices.sppTest.buyerSessionError = "";
+      renderWbBuyerSession();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.wb_buyer_session_check_path, {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from buyer session route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "buyer session route returned " + response.status);
+        }
+        state.prices.sppTest.buyerSession = payload || null;
+        state.prices.sppTest.buyerSessionLoaded = true;
+        state.prices.sppTest.buyerSessionNote = payload && payload.valid ? "Сессия подтверждена." : "Установить сессию перед запуском проверки.";
+        if (payload && payload.valid && state.prices.sppTest.selectedNmId) {
+          loadSppTestBaseline();
+        }
+      } catch (error) {
+        state.prices.sppTest.buyerSession = {status: "probe_error", valid: false, status_label: "Ошибка проверки"};
+        state.prices.sppTest.buyerSessionLoaded = true;
+        state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.buyerSessionLoading = false;
+        renderWbBuyerSession();
+        renderSppTest();
+      }
+    }
+
+    async function startWbBuyerRecovery() {
+      if (!WEB_VITRINA_CONFIG.wb_buyer_recovery_start_path || state.prices.sppTest.buyerRecoveryStarting) {
+        return;
+      }
+      state.prices.sppTest.buyerRecoveryStarting = true;
+      state.prices.sppTest.buyerRecoveryLauncherDownloaded = false;
+      state.prices.sppTest.buyerSessionError = "";
+      state.prices.sppTest.buyerSessionNote = "Запускаем защищённое окно входа…";
+      renderWbBuyerSession();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.wb_buyer_recovery_start_path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({replace: true})
+        });
+        const payload = await readJsonResponse(response, "non-json response from buyer recovery start route");
+        if (!response.ok) {
+          throw new Error(payload && payload.error ? payload.error : "buyer recovery start returned " + response.status);
+        }
+        state.prices.sppTest.buyerRecovery = payload || null;
+        state.prices.sppTest.buyerSessionNote = payload && payload.launcher_ready
+          ? "Launcher готов. Откройте загруженный файл и войдите в Wildberries."
+          : "Окно входа готовится…";
+        if (payload && payload.launcher_ready) downloadWbBuyerRecoveryLauncher();
+        pollWbBuyerRecovery(true);
+      } catch (error) {
+        state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.buyerRecoveryStarting = false;
+        renderWbBuyerSession();
+      }
+    }
+
+    function pollWbBuyerRecovery(force) {
+      const recovery = state.prices.sppTest.buyerRecovery || {};
+      if (!force && (!recovery.running || recovery.run_is_final)) {
+        return;
+      }
+      const sequence = ++state.prices.sppTest.buyerRecoveryPollSequence;
+      window.setTimeout(async function() {
+        if (sequence !== state.prices.sppTest.buyerRecoveryPollSequence || !WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path) {
+          return;
+        }
+        try {
+          const url = new URL(WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path, window.location.origin);
+          if (recovery.run_id) url.searchParams.set("run_id", recovery.run_id);
+          url.searchParams.set("probe", "false");
+          const response = await fetch(url.toString(), {credentials: "same-origin"});
+          const payload = await readJsonResponse(response, "non-json response from buyer recovery status route");
+          if (!response.ok) throw new Error(payload && payload.error ? payload.error : "buyer recovery status returned " + response.status);
+          state.prices.sppTest.buyerRecovery = payload || null;
+          if (payload && payload.launcher_ready) downloadWbBuyerRecoveryLauncher();
+          if (payload && payload.status === "completed") {
+            state.prices.sppTest.buyerSession = payload.session || null;
+            state.prices.sppTest.buyerSessionLoaded = true;
+            state.prices.sppTest.buyerSessionNote = "Покупательская сессия установлена.";
+            loadWbBuyerSession({force: true});
+          } else if (payload && payload.running) {
+            pollWbBuyerRecovery(false);
+          }
+        } catch (error) {
+          state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
+        } finally {
+          renderWbBuyerSession();
+          renderSppTest();
+        }
+      }, force ? 1200 : 2500);
+    }
+
+    function downloadWbBuyerRecoveryLauncher() {
+      const recovery = state.prices.sppTest.buyerRecovery || {};
+      const path = recovery.launcher_download_path || WEB_VITRINA_CONFIG.wb_buyer_recovery_launcher_path || "";
+      if (state.prices.sppTest.buyerRecoveryLauncherDownloaded) {
+        return;
+      }
+      if (!path || !recovery.launcher_ready) {
+        state.prices.sppTest.buyerSessionError = "Launcher ещё не готов.";
+        renderWbBuyerSession();
+        return;
+      }
+      const link = document.createElement("a");
+      link.href = path;
+      link.download = "";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      state.prices.sppTest.buyerRecoveryLauncherDownloaded = true;
+      state.prices.sppTest.buyerSessionNote = "Launcher скачан. Откройте его и войдите в Wildberries.";
+      renderWbBuyerSession();
+    }
+
+    function renderWbBuyerSession() {
+      const session = state.prices.sppTest.buyerSession || {};
+      const recovery = state.prices.sppTest.buyerRecovery || {};
+      const status = String(session.status || "");
+      const label = state.prices.sppTest.buyerSessionLoading ? "Проверка…" : (session.status_label || (status === "valid" ? "Действует" : "Не проверена"));
+      if (wbBuyerSessionStateNode) {
+        wbBuyerSessionStateNode.textContent = label;
+        wbBuyerSessionStateNode.className = "prices-badge " + (status === "valid" ? "success" : (recovery.running ? "warning" : "error"));
+      }
+      if (wbBuyerSessionMetaNode) {
+        wbBuyerSessionMetaNode.innerHTML = [
+          sppTestFact("Статус", label),
+          sppTestFact("Последняя проверка", formatTimestampDisplay(session.checked_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
+        ].join("");
+      }
+      if (wbBuyerSessionCheckButton) wbBuyerSessionCheckButton.disabled = state.prices.sppTest.buyerSessionLoading || !!recovery.running;
+      if (wbBuyerSessionInstallButton) {
+        wbBuyerSessionInstallButton.disabled = state.prices.sppTest.buyerRecoveryStarting || !!recovery.running;
+        wbBuyerSessionInstallButton.textContent = state.prices.sppTest.buyerRecoveryStarting ? "Запуск…" : "Установить сессию";
+      }
+      if (wbBuyerSessionNoteNode) wbBuyerSessionNoteNode.textContent = state.prices.sppTest.buyerSessionNote || "";
+      if (wbBuyerSessionErrorNode) wbBuyerSessionErrorNode.textContent = state.prices.sppTest.buyerSessionError || "";
     }
 
     function renderSppTestSelector() {
@@ -16721,6 +16917,10 @@
         if (baseline) {
           baseline._writeEnabled = !!payload.write_enabled;
           baseline._sppTestEnabled = !!payload.spp_test_enabled;
+          if (baseline.buyerSession) {
+            state.prices.sppTest.buyerSession = baseline.buyerSession;
+            state.prices.sppTest.buyerSessionLoaded = true;
+          }
         }
         state.prices.sppTest.baseline = baseline;
       } catch (error) {
@@ -16844,7 +17044,9 @@
         }
         state.prices.sppTest.schedule = payload.schedule || null;
         state.prices.sppTest.scheduleLoaded = true;
-        state.prices.sppTest.scheduleNote = "Расписание сохранено. Проверка ждёт назначенного времени.";
+        state.prices.sppTest.scheduleNote = payload.schedule && payload.schedule.enabled
+          ? "Расписание сохранено. Проверка ждёт назначенного времени."
+          : "Расписание сохранено и выключено.";
         applySppScheduleToForm();
       } catch (error) {
         state.prices.sppTest.error = String(error && error.message ? error.message : error);
@@ -16861,8 +17063,12 @@
         sppScheduleStateNode.className = "prices-badge " + (schedule.enabled ? "success" : "");
       }
       if (sppScheduleSaveButton) {
-        sppScheduleSaveButton.disabled = state.prices.sppTest.scheduleSaving;
+        const enablingSchedule = !!(sppScheduleEnabledNode && sppScheduleEnabledNode.checked);
+        sppScheduleSaveButton.disabled = state.prices.sppTest.scheduleSaving || (enablingSchedule && !sppBuyerSessionValid());
         sppScheduleSaveButton.textContent = state.prices.sppTest.scheduleSaving ? "Сохранение…" : "Сохранить расписание";
+        sppScheduleSaveButton.title = enablingSchedule && !sppBuyerSessionValid()
+          ? "Покупательская сессия недействительна — Установить сессию"
+          : "";
       }
       if (sppScheduleMetaNode) {
         const next = formatTimestampDisplay(schedule.next_run_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—";
@@ -16966,6 +17172,12 @@
               sppTestFact("Диапазон", pricesMoney(input.range_min_discounted, "RUB") + " … " + pricesMoney(input.range_max_discounted, "RUB")),
               sppTestFact("Точность / измерения", valueOrDash(input.precision_rub) + " / " + valueOrDash(input.max_measurements)),
               sppTestFact("Baseline", pricesMoney(baseline.price, "RUB") + " · " + pricesDiscount(baseline.discount) + " · " + pricesMoney(baseline.discountedPrice, "RUB")),
+              sppTestFact("Авторизованный покупатель", pricesMoney(baseline.authenticatedBuyerPrice, "RUB")),
+              sppTestFact("Анонимная цена", pricesMoney(baseline.anonymousBuyerPrice, "RUB")),
+              sppTestFact("Доп. скидка аккаунта", pricesMoney(baseline.additionalAccountDiscountRub, "RUB") + " · " + formatRatioPercent(baseline.additionalAccountDiscountPct)),
+              sppTestFact("SPP авториз. / аноним.", formatRatioPercent(baseline.authenticatedSppProxy) + " / " + formatRatioPercent(baseline.anonymousSppProxy)),
+              sppTestFact("Payment context", baseline.paymentContext || "unknown/mixed"),
+              sppTestFact("Покупательская сессия", (baseline.buyerSession || {}).status_label || (baseline.buyerSession || {}).status || "—"),
               sppTestFact("Измерений / порогов", String((job.measurements || []).length) + " / " + String((job.thresholds || []).length)),
               sppTestFact("Restore proof", restore.restored ? "подтверждён" : "не подтверждён"),
               sppTestFact("Exact tuple", [proof.price_matches, proof.discount_matches, proof.discountedPrice_matches].every(Boolean) ? "совпадает" : "не подтверждён"),
@@ -17072,6 +17284,10 @@
         }
         state.prices.sppTest.plan = payload.plan || null;
         state.prices.sppTest.activeJob = payload.active_job || null;
+        if (payload.buyer_session) {
+          state.prices.sppTest.buyerSession = payload.buyer_session;
+          state.prices.sppTest.buyerSessionLoaded = true;
+        }
       } catch (error) {
         state.prices.sppTest.error = String(error && error.message ? error.message : error);
       } finally {
@@ -17163,6 +17379,9 @@
       if (!state.prices.sppTest.selectedNmId) {
         return {canStart: false, reason: "выберите SKU/nmID"};
       }
+      if (!sppBuyerSessionValid()) {
+        return {canStart: false, reason: "Покупательская сессия недействительна — Установить сессию"};
+      }
       if (!sppTestInputsAreValid()) {
         return {canStart: false, reason: "диапазон невалиден"};
       }
@@ -17194,9 +17413,15 @@
       return sppTestStartEligibility().canStart;
     }
 
+    function sppBuyerSessionValid() {
+      const session = state.prices.sppTest.buyerSession || {};
+      return session.status === "valid" && session.valid === true;
+    }
+
     function renderSppTest() {
       syncPricesSubtabs();
       renderSppTestSelector();
+      renderWbBuyerSession();
       const selectedRow = selectedSppTestRow();
       if (sppTestProductNode) {
         sppTestProductNode.innerHTML = [
@@ -17217,8 +17442,14 @@
             sppTestFact("Цена", pricesMoney(baseline.price, baseline.currencyIsoCode4217 || "RUB")),
             sppTestFact("Скидка", pricesDiscount(baseline.discount)),
             sppTestFact("Со скидкой", pricesMoney(baseline.discountedPrice, baseline.currencyIsoCode4217 || "RUB")),
-            sppTestFact("Цена покупателя", pricesMoney(baseline.publicBuyerPrice, "RUB")),
-            sppTestFact("SPP-прокси", baseline.sppProxyLabel || "н/д"),
+            sppTestFact("Цена авторизованного покупателя", pricesMoney(baseline.authenticatedBuyerPrice, "RUB")),
+            sppTestFact("Анонимная цена", pricesMoney(baseline.anonymousBuyerPrice, "RUB")),
+            sppTestFact("Доп. скидка аккаунта", pricesMoney(baseline.additionalAccountDiscountRub, "RUB") + " · " + formatRatioPercent(baseline.additionalAccountDiscountPct)),
+            sppTestFact("SPP-прокси авторизованный", formatRatioPercent(baseline.authenticatedSppProxy)),
+            sppTestFact("SPP-прокси анонимный", formatRatioPercent(baseline.anonymousSppProxy)),
+            sppTestFact("Payment context", baseline.paymentContext || "unknown/mixed"),
+            sppTestFact("Wallet / card / club", [pricesMoney(baseline.walletPrice, "RUB"), pricesMoney(baseline.cardPrice, "RUB"), pricesMoney(baseline.clubPrice, "RUB")].join(" / ")),
+            sppTestFact("Покупательская сессия", (baseline.buyerSession || {}).status_label || (baseline.buyerSession || {}).status || "—"),
             sppTestFact("Карантин", baseline.quarantine && baseline.quarantine.is_quarantined ? "есть" : "нет"),
             sppTestFact("Тип цены", baseline.editableSizePriceLabel || "—"),
             sppTestFact("WB writes", baseline._writeEnabled ? "вкл" : "выкл"),
@@ -17230,8 +17461,9 @@
         sppTestErrorNode.textContent = state.prices.sppTest.error || "";
       }
       if (sppTestPlanButton) {
-        sppTestPlanButton.disabled = state.prices.sppTest.planLoading || !state.prices.sppTest.selectedNmId;
+        sppTestPlanButton.disabled = state.prices.sppTest.planLoading || !state.prices.sppTest.selectedNmId || !sppBuyerSessionValid();
         sppTestPlanButton.textContent = state.prices.sppTest.planLoading ? "План…" : "Построить план";
+        sppTestPlanButton.title = !sppBuyerSessionValid() ? "Покупательская сессия недействительна — Установить сессию" : "";
       }
       if (sppTestStartButton) {
         const eligibility = sppTestStartEligibility();
@@ -17314,15 +17546,19 @@
       if (sppTestMeasurementsNode) {
         const rows = Array.isArray(job.measurements) ? job.measurements : [];
         if (!rows.length) {
-          sppTestMeasurementsNode.innerHTML = '<tr><td colspan="9">Измерений пока нет.</td></tr>';
+          sppTestMeasurementsNode.innerHTML = '<tr><td colspan="13">Измерений пока нет.</td></tr>';
         } else {
           sppTestMeasurementsNode.innerHTML = rows.map(function(row) {
             return [
               "<tr>",
               "<td>" + escapeHtml(pricesMoney(row.target_discounted_price, "RUB")) + "</td>",
               "<td>" + escapeHtml(pricesMoney(row.actual_wb_discounted_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(pricesMoney(row.public_buyer_price, "RUB")) + "</td>",
-              "<td>" + escapeHtml(formatRatioPercent(row.spp_proxy)) + "</td>",
+              "<td>" + escapeHtml(pricesMoney(row.authenticated_buyer_price, "RUB")) + "</td>",
+              "<td>" + escapeHtml(pricesMoney(row.anonymous_buyer_price, "RUB")) + "</td>",
+              "<td>" + escapeHtml(pricesMoney(row.additional_account_discount_rub, "RUB") + " · " + formatRatioPercent(row.additional_account_discount_pct)) + "</td>",
+              "<td>" + escapeHtml(formatRatioPercent(row.authenticated_spp_proxy)) + "</td>",
+              "<td>" + escapeHtml(formatRatioPercent(row.anonymous_spp_proxy)) + "</td>",
+              "<td>" + escapeHtml(valueOrDash(row.payment_context)) + "</td>",
               "<td>" + escapeHtml(formatRatioPercent(row.delta_vs_previous_high_confidence)) + "</td>",
               "<td>" + escapeHtml(valueOrDash(row.confidence)) + "</td>",
               "<td>" + escapeHtml(valueOrDash(row.uploadID)) + "</td>",
@@ -17419,6 +17655,10 @@
       if (normalized === "ok") return "ok";
       if (normalized === "stale_public_price") return "stale";
       if (normalized === "public_429") return "429";
+      if (normalized === "buyer_session_invalid") return "нет buyer session";
+      if (normalized === "buyer_session_lost") return "buyer session потеряна";
+      if (normalized === "authenticated_unstable") return "auth цена unstable";
+      if (normalized === "buyer_destination_mismatch") return "region mismatch";
       if (normalized === "rate_limited_stop") return "429 stop";
       if (normalized === "quarantine_detected") return "карантин";
       if (normalized === "readback_mismatch") return "readback";
@@ -17429,7 +17669,7 @@
     function sppPointTone(value) {
       const normalized = String(value || "");
       if (normalized === "ok") return "success";
-      if (normalized === "stale_public_price" || normalized === "public_429" || normalized === "rate_limited_stop" || normalized === "quarantine_detected") return "warning";
+      if (normalized === "stale_public_price" || normalized === "public_429" || normalized === "rate_limited_stop" || normalized === "quarantine_detected" || normalized === "buyer_session_lost" || normalized === "buyer_destination_mismatch") return "warning";
       if (normalized && normalized !== "started") return "error";
       return "";
     }
@@ -17781,6 +18021,10 @@
       }
       if (target === sppTestConfirmLiveNode || target === sppTestRestoreBaselineNode) {
         renderSppTest();
+        return;
+      }
+      if (target === sppScheduleEnabledNode) {
+        renderSppSchedule();
         return;
       }
       if (target === pricesSearchNode) {

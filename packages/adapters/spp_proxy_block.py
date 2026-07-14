@@ -95,6 +95,7 @@ class HttpBackedPublicWbCardBuyerPriceSource:
             if dest is not None
             else os.environ.get(PUBLIC_WB_CARD_DEST_ENV, "").strip() or DEFAULT_PUBLIC_WB_CARD_DEST
         )
+        self._dest = _normalize_public_dest(self._dest)
         self._timeout_seconds = (
             timeout_seconds
             if timeout_seconds is not None
@@ -102,6 +103,18 @@ class HttpBackedPublicWbCardBuyerPriceSource:
         )
         self._http_get = http_get or _anonymous_http_get
         self._business_date_factory = business_date_factory or _current_business_date
+
+    def for_destination(self, dest: str) -> "HttpBackedPublicWbCardBuyerPriceSource":
+        """Return an isolated anonymous source for one explicit WB destination."""
+
+        return HttpBackedPublicWbCardBuyerPriceSource(
+            card_base_url=self._card_base_url,
+            card_api_base_url=self._card_api_base_url,
+            dest=_normalize_public_dest(dest),
+            timeout_seconds=self._timeout_seconds,
+            http_get=self._http_get,
+            business_date_factory=self._business_date_factory,
+        )
 
     def fetch(self, request: SppProxyRequest) -> Mapping[str, Any]:
         if request.snapshot_date != self._business_date_factory():
@@ -236,6 +249,13 @@ class HttpBackedPublicWbCardBuyerPriceSource:
 
 def public_wb_card_url(nm_id: int, *, base_url: str = DEFAULT_PUBLIC_WB_CARD_BASE_URL) -> str:
     return f"{base_url.rstrip('/')}/catalog/{int(nm_id)}/detail.aspx"
+
+
+def _normalize_public_dest(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not re.fullmatch(r"-?\d+(?:,-?\d+)*", normalized):
+        raise ValueError("WB public card destination must be a comma-separated integer list")
+    return normalized
 
 
 def extract_public_buyer_price_from_wb_card_html(

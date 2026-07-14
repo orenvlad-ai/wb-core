@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
+from urllib import parse as urllib_parse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -31,7 +32,9 @@ from packages.application.wb_prices_management import (
     normalize_goods_payload,
     normalize_quarantine_good,
 )
+from packages.application.wb_buyer_session import WbBuyerSessionBlock
 from packages.contracts.spp_proxy_block import SppProxyRequest
+from packages.contracts.wb_buyer_session import WbAuthenticatedBuyerPriceSource
 from packages.contracts.wb_spp_tester import (
     SPP_TEST_ACTIVE_STATUSES,
     SPP_TEST_CONTRACT_PREFIX,
@@ -67,6 +70,10 @@ SAFETY_STOP_POINT_STATUSES = {
     "upload_missing_id",
     "public_429",
     "public_unstable",
+    "buyer_session_invalid",
+    "buyer_session_lost",
+    "authenticated_unstable",
+    "buyer_destination_mismatch",
 }
 
 
@@ -82,7 +89,12 @@ class WbSppTesterError(ValueError):
 class WbSppPublicBuyerPriceSource(Protocol):
     """Anonymous public buyer price source used by SPP tester."""
 
-    def fetch_public_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
+    def fetch_public_buyer_price(
+        self,
+        nm_id: int,
+        *,
+        destination_context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         raise NotImplementedError("adapter skeleton only")
 
 
@@ -98,8 +110,45 @@ class SppTesterPublicCardSource:
         self.source = source or HttpBackedPublicWbCardBuyerPriceSource()
         self.business_date_factory = business_date_factory or _current_business_date
 
-    def fetch_public_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
-        payload = self.source.fetch(
+    def fetch_public_buyer_price(
+        self,
+        nm_id: int,
+        *,
+        destination_context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        source = self.source
+        raw_dest = (
+            str(destination_context.get("dest") or "").strip()
+            if isinstance(destination_context, Mapping)
+            else ""
+        )
+        requested_dest = _destination_dest(destination_context)
+        if raw_dest and not requested_dest:
+            return {
+                "status": "context_invalid",
+                "public_buyer_price": None,
+                "endpoint": "public_wb_card",
+                "http_status": None,
+                "headers": {},
+                "body_summary": "",
+                "diagnostics": {"reason": "anonymous_destination_override_invalid"},
+                "destination_context": {},
+            }
+        if requested_dest:
+            destination_factory = getattr(source, "for_destination", None)
+            if not callable(destination_factory):
+                return {
+                    "status": "context_unsupported",
+                    "public_buyer_price": None,
+                    "endpoint": "public_wb_card",
+                    "http_status": None,
+                    "headers": {},
+                    "body_summary": "",
+                    "diagnostics": {"reason": "anonymous_destination_override_unsupported"},
+                    "destination_context": {"dest": requested_dest, "currency": "rub"},
+                }
+            source = destination_factory(requested_dest)
+        payload = source.fetch(
             SppProxyRequest(
                 snapshot_type="spp_proxy",
                 snapshot_date=self.business_date_factory(),
@@ -110,6 +159,13 @@ class SppTesterPublicCardSource:
         item = next((row for row in items if _optional_int(row.get("nmId") or row.get("nm_id")) == int(nm_id)), None)
         missing = _payload_missing(payload, nm_id=int(nm_id))
         diagnostics = dict(item.get("diagnostics") or {}) if isinstance(item, Mapping) else dict(missing)
+        source = payload.get("source") if isinstance(payload.get("source"), Mapping) else {}
+        payload_diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), Mapping) else {}
+        destination_context = _destination_context_from_url(str((item or {}).get("api_url") or ""))
+        if not destination_context:
+            destination_context = _destination_context_from_region_label(
+                str(source.get("region_context") or payload_diagnostics.get("region_context") or "")
+            )
         if item is None:
             return {
                 "status": "missing",
@@ -128,6 +184,7 @@ class SppTesterPublicCardSource:
             "headers": {},
             "body_summary": "",
             "diagnostics": diagnostics,
+            "destination_context": destination_context,
         }
 
 
@@ -164,6 +221,7 @@ class WbSppTesterBlock:
         runtime_dir: Path,
         prices_source: WbPricesManagementSource | None = None,
         public_source: WbSppPublicBuyerPriceSource | None = None,
+        buyer_source: WbAuthenticatedBuyerPriceSource | None = None,
         now_factory: Callable[[], datetime] | None = None,
         timestamp_factory: Callable[[], str] | None = None,
         sleep: Callable[[float], None] | None = None,
@@ -174,6 +232,7 @@ class WbSppTesterBlock:
         self.runtime_dir = runtime_dir
         self.prices_source = prices_source or HttpBackedWbPricesManagementSource()
         self.public_source = public_source or SppTesterPublicCardSource()
+        self.buyer_source = buyer_source or WbBuyerSessionBlock()
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.timestamp_factory = timestamp_factory or (lambda: datetime.now(timezone.utc).isoformat())
         self.sleep = sleep or time.sleep
@@ -203,6 +262,7 @@ class WbSppTesterBlock:
         }
 
     def build_plan(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        buyer_session = self._require_buyer_session()
         nm_id, range_min, range_max, precision, max_measurements = self._parse_plan_input(payload)
         initial_values = _dedupe_money([range_min, (range_min + range_max) / Decimal("2"), range_max])
         initial_points = [
@@ -227,6 +287,8 @@ class WbSppTesterBlock:
                 "wb_uploads": max_measurements,
                 "wb_upload_status_polls": max_measurements * self.cadence.upload_status_max_polls,
                 "wb_readbacks": max_measurements * self.cadence.readback_max_polls,
+                "authenticated_reads": max_measurements * 3,
+                "anonymous_control_reads": max_measurements * 3,
                 "public_reads": max_measurements * 3,
                 "quarantine_checks": max_measurements + 4,
             },
@@ -245,6 +307,7 @@ class WbSppTesterBlock:
             "generated_at": self.timestamp_factory(),
             "plan": plan.to_dict(),
             "active_job": self._current_job_summary(),
+            "buyer_session": buyer_session,
         }
 
     def history(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -298,6 +361,8 @@ class WbSppTesterBlock:
 
     def save_schedule(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
         raw = payload.get("schedule") if isinstance(payload.get("schedule"), Mapping) else payload
+        if _coerce_bool(raw.get("enabled")):
+            self._require_buyer_session()
         now = self._now()
         with self._schedule_file_lock():
             existing = self._load_schedule_unlocked()
@@ -457,6 +522,7 @@ class WbSppTesterBlock:
                     payload={"reason": "active_or_unrestored_job", "active_job": blocking},
                 )
             nm_id, range_min, range_max, precision, max_measurements = self._parse_plan_input(payload)
+            buyer_session = self._require_buyer_session()
             baseline = self._capture_baseline(nm_id=nm_id, strict=True)
             plan_payload = self.build_plan(payload)["plan"]
             job_id = uuid4().hex
@@ -482,6 +548,7 @@ class WbSppTesterBlock:
                     "restore_baseline": True,
                 },
                 "baseline": baseline,
+                "buyer_session": buyer_session,
                 "plan": plan_payload,
                 "measurements": [],
                 "thresholds": [],
@@ -735,8 +802,17 @@ class WbSppTesterBlock:
             "upload_price": upload_price,
             "expected_discounted_price": _decimal_to_float(expected_discounted),
             "actual_wb_discounted_price": None,
+            "authenticated_buyer_price": None,
+            "anonymous_buyer_price": None,
             "public_buyer_price": None,
+            "authenticated_spp_proxy": None,
+            "anonymous_spp_proxy": None,
             "spp_proxy": None,
+            "additional_account_discount_rub": None,
+            "additional_account_discount_pct": None,
+            "payment_context": "unknown/mixed",
+            "destination_context": {},
+            "session_fingerprint": "",
             "delta_vs_previous_high_confidence": None,
             "confidence": "low",
             "uploadID": None,
@@ -745,6 +821,13 @@ class WbSppTesterBlock:
             "evidence": {},
         }
         self._append_audit(str(job["job_id"]), "measurement_started", measurement)
+        session = self._safe_buyer_session_preflight()
+        measurement["evidence"]["buyer_session_preflight"] = session
+        if session.get("status") != "valid":
+            measurement["status"] = "buyer_session_invalid"
+            measurement["note"] = "buyer session is invalid; no seller price write was attempted"
+            self._append_audit(str(job["job_id"]), "measurement_buyer_session_blocked", measurement)
+            return measurement
         upload = self._upload_price_with_backoff(job, [{"nmID": nm_id, "price": upload_price}])
         if upload.get("status") == "rate_limited_stop":
             measurement["status"] = "rate_limited_stop"
@@ -780,22 +863,42 @@ class WbSppTesterBlock:
             measurement["note"] = "nmID is in WB price quarantine"
             return measurement
 
-        public_proof = self._poll_public_stable(job)
-        measurement["evidence"]["public_proof"] = public_proof
-        public_price = _number_or_none(public_proof.get("public_buyer_price"))
-        measurement["public_buyer_price"] = public_price
-        if public_price is None or public_proof.get("stable") is not True:
-            measurement["status"] = str(public_proof.get("status") or "public_unstable")
-            measurement["note"] = "public buyer price did not reach stable proof"
+        buyer_proof = self._poll_buyer_pair_stable(job)
+        measurement["evidence"]["buyer_price_proof"] = buyer_proof
+        authenticated_price = _number_or_none(buyer_proof.get("authenticated_buyer_price"))
+        anonymous_price = _number_or_none(buyer_proof.get("anonymous_buyer_price"))
+        measurement["authenticated_buyer_price"] = authenticated_price
+        measurement["anonymous_buyer_price"] = anonymous_price
+        measurement["public_buyer_price"] = anonymous_price
+        measurement["payment_context"] = str(buyer_proof.get("payment_context") or "unknown/mixed")
+        measurement["destination_context"] = dict(buyer_proof.get("destination_context") or {})
+        measurement["session_fingerprint"] = str(buyer_proof.get("session_fingerprint") or "")
+        for key in ("normal_price", "wallet_price", "card_price", "club_price"):
+            measurement[key] = _number_or_none(buyer_proof.get(key))
+        if authenticated_price is None or anonymous_price is None or buyer_proof.get("stable") is not True:
+            measurement["status"] = str(buyer_proof.get("status") or "authenticated_unstable")
+            measurement["note"] = "authenticated buyer price did not reach stable proof"
             return measurement
 
-        spp = _spp_proxy(_parse_money(actual_discounted, "actual_discounted"), _parse_money(public_price, "public_price"))
-        measurement["spp_proxy"] = _decimal_to_float(spp)
+        authenticated_spp = _spp_proxy(
+            _parse_money(actual_discounted, "actual_discounted"),
+            _parse_money(authenticated_price, "authenticated_buyer_price"),
+        )
+        anonymous_spp = _spp_proxy(
+            _parse_money(actual_discounted, "actual_discounted"),
+            _parse_money(anonymous_price, "anonymous_buyer_price"),
+        )
+        measurement["authenticated_spp_proxy"] = _decimal_to_float(authenticated_spp)
+        measurement["anonymous_spp_proxy"] = _decimal_to_float(anonymous_spp)
+        measurement["spp_proxy"] = _decimal_to_float(authenticated_spp)
+        additional_rub, additional_pct = _account_discount(authenticated_price, anonymous_price)
+        measurement["additional_account_discount_rub"] = additional_rub
+        measurement["additional_account_discount_pct"] = additional_pct
         previous = _previous_high_confidence_point(job.get("measurements", []))
         if previous is not None:
             prev_spp = _number_or_none(previous.get("spp_proxy"))
             if prev_spp is not None:
-                delta = abs(spp - _parse_ratio(prev_spp, "prev_spp"))
+                delta = abs(authenticated_spp - _parse_ratio(prev_spp, "prev_spp"))
                 measurement["delta_vs_previous_high_confidence"] = _decimal_to_float(delta)
             if _looks_like_stale_public_price(measurement, previous, precision=_parse_money(job["input"]["precision_rub"], "precision")):
                 measurement["status"] = "stale_public_price"
@@ -805,7 +908,7 @@ class WbSppTesterBlock:
                 return measurement
         measurement["status"] = "ok"
         measurement["confidence"] = "high"
-        measurement["note"] = "upload/readback/public/quarantine proof complete"
+        measurement["note"] = "upload/readback/authenticated+anonymous/quarantine proof complete"
         self._append_audit(str(job["job_id"]), "measurement_finished", measurement)
         return measurement
 
@@ -863,7 +966,15 @@ class WbSppTesterBlock:
         reads: list[dict[str, Any]] = []
         self._sleep_with_heartbeat(job, self.cadence.first_public_poll_delay_seconds, phase="public_poll_initial")
         for attempt in range(3):
-            payload = dict(self.public_source.fetch_public_buyer_price(nm_id))
+            baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
+            payload = dict(
+                self.public_source.fetch_public_buyer_price(
+                    nm_id,
+                    destination_context=baseline.get("destinationContext")
+                    if isinstance(baseline.get("destinationContext"), Mapping)
+                    else None,
+                )
+            )
             reads.append(payload)
             self._append_audit(str(job["job_id"]), "public_buyer_price_read", payload)
             if _public_status_is_429(payload):
@@ -888,6 +999,118 @@ class WbSppTesterBlock:
             else:
                 self._sleep_with_heartbeat(job, self.cadence.public_poll_gap_seconds, phase="public_poll_gap")
         return {"status": "public_unstable", "stable": False, "reads": reads, "public_buyer_price": None}
+
+    def _poll_buyer_pair_stable(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        nm_id = int(job["nmID"])
+        reads: list[dict[str, Any]] = []
+        self._sleep_with_heartbeat(job, self.cadence.first_public_poll_delay_seconds, phase="buyer_poll_initial")
+        for attempt in range(3):
+            authenticated = dict(self.buyer_source.fetch_authenticated_buyer_price(nm_id))
+            self._append_audit(str(job["job_id"]), "authenticated_buyer_price_read", authenticated)
+            auth_status = str(authenticated.get("status") or "")
+            if auth_status != "ok":
+                lost = auth_status.startswith("session_") or auth_status in {
+                    "login_redirect",
+                    "security_challenge",
+                    "wrong_account",
+                }
+                return {
+                    "status": "buyer_session_lost" if lost else "authenticated_unstable",
+                    "stable": False,
+                    "reads": reads,
+                    "authenticated_buyer_price": None,
+                    "anonymous_buyer_price": None,
+                    "session_status": auth_status,
+                    "reason": str(authenticated.get("reason") or "authenticated_price_read_failed"),
+                }
+            anonymous = dict(
+                self.public_source.fetch_public_buyer_price(
+                    nm_id,
+                    destination_context=authenticated.get("destination_context")
+                    if isinstance(authenticated.get("destination_context"), Mapping)
+                    else None,
+                )
+            )
+            self._append_audit(str(job["job_id"]), "anonymous_buyer_price_read", anonymous)
+            pair = {"authenticated": authenticated, "anonymous": anonymous}
+            reads.append(pair)
+            if _public_status_is_429(anonymous):
+                return {
+                    "status": "public_429",
+                    "stable": False,
+                    "reads": reads,
+                    "authenticated_buyer_price": None,
+                    "anonymous_buyer_price": None,
+                    "reason": "anonymous control endpoint returned 429",
+                }
+            anonymous_status = str(anonymous.get("status") or "missing").strip().lower()
+            if anonymous_status != "ok" or _number_or_none(anonymous.get("public_buyer_price")) is None:
+                if attempt < 2:
+                    self._sleep_with_heartbeat(
+                        job,
+                        self.cadence.public_poll_gap_seconds,
+                        phase="anonymous_control_retry",
+                    )
+                    continue
+                return {
+                    "status": "public_unstable",
+                    "stable": False,
+                    "reads": reads,
+                    "authenticated_buyer_price": None,
+                    "anonymous_buyer_price": None,
+                    "reason": f"anonymous control status={anonymous_status}",
+                }
+            if not _buyer_contexts_compatible(authenticated, anonymous):
+                return {
+                    "status": "buyer_destination_mismatch",
+                    "stable": False,
+                    "reads": reads,
+                    "authenticated_buyer_price": None,
+                    "anonymous_buyer_price": None,
+                    "destination_context": {
+                        "authenticated": dict(authenticated.get("destination_context") or {}),
+                        "anonymous": dict(anonymous.get("destination_context") or {}),
+                    },
+                }
+            stable = _stable_buyer_pair(reads)
+            if stable is not None:
+                auth_price, anonymous_price = stable
+                return {
+                    "status": "ok",
+                    "stable": True,
+                    "reads": reads,
+                    "authenticated_buyer_price": auth_price,
+                    "anonymous_buyer_price": anonymous_price,
+                    "normal_price": _number_or_none(authenticated.get("normal_price")),
+                    "wallet_price": _number_or_none(authenticated.get("wallet_price")),
+                    "card_price": _number_or_none(authenticated.get("card_price")),
+                    "club_price": _number_or_none(authenticated.get("club_price")),
+                    "payment_context": str(authenticated.get("payment_context") or "unknown/mixed"),
+                    "destination_context": dict(authenticated.get("destination_context") or {}),
+                    "session_fingerprint": str(authenticated.get("session_fingerprint") or ""),
+                    "source_method": str(authenticated.get("source_method") or ""),
+                    "source_endpoint": str(authenticated.get("source_endpoint") or ""),
+                    "proof": "2_identical_authenticated_and_anonymous_reads",
+                }
+            self._sleep_with_heartbeat(
+                job,
+                self.cadence.extended_public_poll_gap_seconds if attempt == 0 else self.cadence.public_poll_gap_seconds,
+                phase="buyer_poll_gap",
+            )
+        anonymous_missing = any(
+            _number_or_none(
+                (row.get("anonymous") if isinstance(row.get("anonymous"), Mapping) else {}).get("public_buyer_price")
+            )
+            is None
+            for row in reads
+        )
+        return {
+            "status": "public_unstable" if anonymous_missing else "authenticated_unstable",
+            "stable": False,
+            "reads": reads,
+            "authenticated_buyer_price": None,
+            "anonymous_buyer_price": None,
+        }
 
     def _handle_429_backoff(
         self,
@@ -1024,10 +1247,37 @@ class WbSppTesterBlock:
             audit_event=f"wb_{event_prefix}_readback",
         )
         proof_quarantine = self._check_quarantine(job)
-        proof_public = dict(self.public_source.fetch_public_buyer_price(nm_id))
-        self._append_audit(str(job["job_id"]), f"public_{event_prefix}_read", proof_public)
-        public_price = _number_or_none(proof_public.get("public_buyer_price"))
-        public_status = str(proof_public.get("status") or "")
+        buyer_session = self._safe_buyer_session_preflight()
+        proof_authenticated = (
+            dict(self.buyer_source.fetch_authenticated_buyer_price(nm_id))
+            if buyer_session.get("status") == "valid"
+            else {
+                "status": f"session_{buyer_session.get('status') or 'invalid'}",
+                "reason": buyer_session.get("reason"),
+            }
+        )
+        try:
+            proof_context = (
+                proof_authenticated.get("destination_context")
+                if isinstance(proof_authenticated.get("destination_context"), Mapping)
+                else baseline.get("destinationContext")
+                if isinstance(baseline.get("destinationContext"), Mapping)
+                else None
+            )
+            proof_anonymous = dict(
+                self.public_source.fetch_public_buyer_price(
+                    nm_id,
+                    destination_context=proof_context,
+                )
+            )
+        except Exception:
+            proof_anonymous = {"status": "probe_error", "public_buyer_price": None}
+        self._append_audit(str(job["job_id"]), f"authenticated_{event_prefix}_read", proof_authenticated)
+        self._append_audit(str(job["job_id"]), f"anonymous_{event_prefix}_read", proof_anonymous)
+        authenticated_price = _number_or_none(proof_authenticated.get("authenticated_buyer_price"))
+        anonymous_price = _number_or_none(proof_anonymous.get("public_buyer_price"))
+        authenticated_status = str(proof_authenticated.get("status") or "")
+        anonymous_status = str(proof_anonymous.get("status") or "")
         proof: dict[str, Any] = {
             "captured_at": self.timestamp_factory(),
             "price_matches": _optional_int(proof_good.get("price")) == _optional_int(baseline.get("price")),
@@ -1037,18 +1287,33 @@ class WbSppTesterBlock:
                 baseline.get("discountedPrice"),
             ),
             "quarantine_absent": not proof_quarantine.get("is_quarantined"),
-            "public_evidence_captured": public_price is not None and public_status not in {"429", "timeout", "stale"},
-            "public_buyer_price": public_price,
-            "public_status": public_status,
+            "buyer_evidence_captured": authenticated_price is not None and authenticated_status == "ok",
+            "anonymous_evidence_captured": anonymous_price is not None and anonymous_status not in {"429", "timeout", "stale", "missing"},
+            "authenticated_buyer_price": authenticated_price,
+            "anonymous_buyer_price": anonymous_price,
+            "public_buyer_price": anonymous_price,
+            "authenticated_status": authenticated_status,
+            "anonymous_status": anonymous_status,
+            "buyer_session": buyer_session,
+            "authenticated_spp_proxy": None,
+            "anonymous_spp_proxy": None,
             "spp_proxy": None,
             "wb_readback": proof_good,
             "quarantine": proof_quarantine,
         }
-        if public_price is not None:
-            proof["spp_proxy"] = _decimal_to_float(
+        if authenticated_price is not None:
+            proof["authenticated_spp_proxy"] = _decimal_to_float(
                 _spp_proxy(
                     _parse_money(baseline.get("discountedPrice"), "baseline_discountedPrice"),
-                    _parse_money(public_price, "public_buyer_price"),
+                    _parse_money(authenticated_price, "authenticated_buyer_price"),
+                )
+            )
+            proof["spp_proxy"] = proof["authenticated_spp_proxy"]
+        if anonymous_price is not None:
+            proof["anonymous_spp_proxy"] = _decimal_to_float(
+                _spp_proxy(
+                    _parse_money(baseline.get("discountedPrice"), "baseline_discountedPrice"),
+                    _parse_money(anonymous_price, "anonymous_buyer_price"),
                 )
             )
         proof["proof_status"] = "confirmed" if _restore_proof_ok(proof) else "not_confirmed"
@@ -1144,6 +1409,7 @@ class WbSppTesterBlock:
         return thresholds, "inconclusive"
 
     def _capture_baseline(self, *, nm_id: int, strict: bool) -> dict[str, Any]:
+        buyer_session = self._safe_buyer_session_preflight()
         good = self._fetch_current_good(nm_id, job_id="", audit_event="baseline_prices_read")
         quarantine_payload = self.prices_source.fetch_quarantine_goods(limit=1000, offset=0)
         quarantine_rows = [
@@ -1156,14 +1422,38 @@ class WbSppTesterBlock:
             if isinstance(row, Mapping)
         ]
         quarantine_match = [row for row in quarantine_rows if _optional_int(row.get("nmID")) == nm_id]
-        public = dict(self.public_source.fetch_public_buyer_price(nm_id))
+        authenticated = (
+            dict(self.buyer_source.fetch_authenticated_buyer_price(nm_id))
+            if buyer_session.get("status") == "valid"
+            else {
+                "status": f"session_{buyer_session.get('status') or 'invalid'}",
+                "authenticated_buyer_price": None,
+                "reason": buyer_session.get("reason"),
+            }
+        )
+        public = dict(
+            self.public_source.fetch_public_buyer_price(
+                nm_id,
+                destination_context=authenticated.get("destination_context")
+                if isinstance(authenticated.get("destination_context"), Mapping)
+                else None,
+            )
+        )
         discounted = _number_or_none(good.get("discountedPrice"))
-        public_price = _number_or_none(public.get("public_buyer_price"))
-        spp_proxy = (
-            _decimal_to_float(_spp_proxy(_parse_money(discounted, "discountedPrice"), _parse_money(public_price, "public_buyer_price")))
-            if discounted is not None and public_price is not None
+        authenticated_price = _number_or_none(authenticated.get("authenticated_buyer_price"))
+        anonymous_price = _number_or_none(public.get("public_buyer_price"))
+        contexts_compatible = _buyer_contexts_compatible(authenticated, public)
+        authenticated_spp = (
+            _decimal_to_float(_spp_proxy(_parse_money(discounted, "discountedPrice"), _parse_money(authenticated_price, "authenticated_buyer_price")))
+            if discounted is not None and authenticated_price is not None
             else None
         )
+        anonymous_spp = (
+            _decimal_to_float(_spp_proxy(_parse_money(discounted, "discountedPrice"), _parse_money(anonymous_price, "anonymous_buyer_price")))
+            if discounted is not None and anonymous_price is not None
+            else None
+        )
+        additional_rub, additional_pct = _account_discount(authenticated_price, anonymous_price) if contexts_compatible else (None, None)
         enrichment = self._load_nomenclature_enrichment().get(nm_id, {})
         baseline = {
             "nmID": nm_id,
@@ -1173,9 +1463,24 @@ class WbSppTesterBlock:
             "price": _optional_int(good.get("price")),
             "discount": _optional_int(good.get("discount")),
             "discountedPrice": discounted,
-            "publicBuyerPrice": public_price,
-            "sppProxy": spp_proxy,
-            "sppProxyLabel": _format_percent_label(spp_proxy),
+            "authenticatedBuyerPrice": authenticated_price,
+            "anonymousBuyerPrice": anonymous_price,
+            "publicBuyerPrice": anonymous_price,
+            "authenticatedSppProxy": authenticated_spp,
+            "anonymousSppProxy": anonymous_spp,
+            "sppProxy": authenticated_spp,
+            "sppProxyLabel": _format_percent_label(authenticated_spp),
+            "additionalAccountDiscountRub": additional_rub,
+            "additionalAccountDiscountPct": additional_pct,
+            "normalPrice": _number_or_none(authenticated.get("normal_price")),
+            "walletPrice": _number_or_none(authenticated.get("wallet_price")),
+            "cardPrice": _number_or_none(authenticated.get("card_price")),
+            "clubPrice": _number_or_none(authenticated.get("club_price")),
+            "paymentContext": str(authenticated.get("payment_context") or "unknown/mixed"),
+            "destinationContext": dict(authenticated.get("destination_context") or {}),
+            "destinationCompatible": contexts_compatible,
+            "sessionFingerprint": str(authenticated.get("session_fingerprint") or buyer_session.get("session_fingerprint") or ""),
+            "buyerSession": buyer_session,
             "quarantine": {
                 "is_quarantined": bool(quarantine_match),
                 "rows": quarantine_match,
@@ -1184,6 +1489,7 @@ class WbSppTesterBlock:
             "editableSizePriceLabel": "размерные цены" if bool(good.get("editableSizePrice")) else "обычная цена",
             "currencyIsoCode4217": str(good.get("currencyIsoCode4217") or "RUB"),
             "public_read": public,
+            "authenticated_read": authenticated,
             "captured_at": self.timestamp_factory(),
         }
         blockers: list[str] = []
@@ -1196,8 +1502,15 @@ class WbSppTesterBlock:
         if not enrichment:
             blockers.append("active_nomenclature_missing")
         public_status = str(public.get("status") or "").strip().lower()
-        if baseline["publicBuyerPrice"] is None or baseline["sppProxy"] is None:
+        if buyer_session.get("status") != "valid":
+            blockers.append("buyer_session_invalid")
+        if baseline["authenticatedBuyerPrice"] is None or baseline["authenticatedSppProxy"] is None:
+            blockers.append("authenticated_spp_baseline_incomplete")
+        if baseline["anonymousBuyerPrice"] is None or baseline["anonymousSppProxy"] is None:
+            blockers.append("anonymous_spp_baseline_incomplete")
             blockers.append("public_spp_baseline_incomplete")
+        if not contexts_compatible:
+            blockers.append("buyer_destination_context_mismatch")
         elif public_status in {"429", "timeout", "stale", "missing"}:
             blockers.append(f"public_spp_baseline_{public_status}")
         baseline["can_start"] = not blockers
@@ -1209,6 +1522,30 @@ class WbSppTesterBlock:
                 payload={"baseline": baseline, "blockers": blockers},
             )
         return baseline
+
+    def _safe_buyer_session_preflight(self) -> dict[str, Any]:
+        try:
+            payload = dict(self.buyer_source.check_session())
+        except Exception:
+            payload = {
+                "status": "probe_error",
+                "valid": False,
+                "reason": "buyer_session_probe_failed",
+                "checked_at": self.timestamp_factory(),
+            }
+        payload.setdefault("status", "probe_error")
+        payload.setdefault("valid", payload.get("status") == "valid")
+        return payload
+
+    def _require_buyer_session(self) -> dict[str, Any]:
+        session = self._safe_buyer_session_preflight()
+        if session.get("status") != "valid" or session.get("valid") is not True:
+            raise WbSppTesterError(
+                "Покупательская сессия недействительна. Установить сессию.",
+                http_status=422,
+                payload={"reason": "buyer_session_invalid", "buyer_session": session, "action": "Установить сессию"},
+            )
+        return session
 
     def _fetch_current_good(self, nm_id: int, *, job_id: str, audit_event: str) -> dict[str, Any]:
         payload = self.prices_source.fetch_goods_by_nm_ids([int(nm_id)])
@@ -1971,8 +2308,6 @@ def _restore_proof_ok(proof: Mapping[str, Any]) -> bool:
         and proof.get("discount_matches")
         and proof.get("discountedPrice_matches")
         and proof.get("quarantine_absent")
-        and proof.get("public_evidence_captured")
-        and _number_or_none(proof.get("spp_proxy")) is not None
     )
 
 
@@ -2055,8 +2390,8 @@ def _spp_proxy(seller_discounted: Decimal, public_buyer_price: Decimal) -> Decim
 
 
 def _looks_like_stale_public_price(current: Mapping[str, Any], previous: Mapping[str, Any], *, precision: Decimal) -> bool:
-    current_public = _number_or_none(current.get("public_buyer_price"))
-    previous_public = _number_or_none(previous.get("public_buyer_price"))
+    current_public = _number_or_none(current.get("authenticated_buyer_price") or current.get("public_buyer_price"))
+    previous_public = _number_or_none(previous.get("authenticated_buyer_price") or previous.get("public_buyer_price"))
     current_discounted = _number_or_none(current.get("actual_wb_discounted_price"))
     previous_discounted = _number_or_none(previous.get("actual_wb_discounted_price"))
     current_spp = _number_or_none(current.get("spp_proxy"))
@@ -2066,6 +2401,110 @@ def _looks_like_stale_public_price(current: Mapping[str, Any], previous: Mapping
     discounted_delta = abs(_parse_money(current_discounted, "current_discounted") - _parse_money(previous_discounted, "previous_discounted"))
     spp_delta = abs(_parse_ratio(current_spp, "current_spp") - _parse_ratio(previous_spp, "previous_spp"))
     return current_public == previous_public and discounted_delta > precision and spp_delta >= Decimal("0.015")
+
+
+def _destination_context_from_url(value: str) -> dict[str, str]:
+    try:
+        parsed = urllib_parse.urlparse(str(value or ""))
+        query = urllib_parse.parse_qs(parsed.query)
+    except Exception:
+        return {}
+    result: dict[str, str] = {}
+    for target, keys in {
+        "dest": ("dest",),
+        "regions": ("regions",),
+        "currency": ("curr", "currency"),
+        "locale": ("locale",),
+    }.items():
+        for key in keys:
+            values = query.get(key)
+            if values:
+                result[target] = str(values[0])[:160]
+                break
+    return result
+
+
+def _destination_context_from_region_label(value: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, raw_value in urllib_parse.parse_qsl(str(value or "").replace(";", "&"), keep_blank_values=False):
+        normalized = str(key or "").strip().lower()
+        if normalized in {"dest", "regions", "curr", "currency", "locale"}:
+            target = "currency" if normalized == "curr" else normalized
+            result[target] = str(raw_value)[:160]
+    return result
+
+
+def _destination_dest(value: Mapping[str, Any] | None) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    dest = str(value.get("dest") or "").strip()
+    return dest if re.fullmatch(r"-?\d+(?:,-?\d+)*", dest) else ""
+
+
+def _buyer_contexts_compatible(authenticated: Mapping[str, Any], anonymous: Mapping[str, Any]) -> bool:
+    auth_context = authenticated.get("destination_context") if isinstance(authenticated.get("destination_context"), Mapping) else {}
+    anonymous_context = anonymous.get("destination_context") if isinstance(anonymous.get("destination_context"), Mapping) else {}
+    if not auth_context and not anonymous_context:
+        return True
+    if not auth_context or not anonymous_context:
+        return False
+    compared = False
+    for key in ("dest", "regions", "currency", "locale"):
+        left = str(auth_context.get(key) or "").strip().lower()
+        right = str(anonymous_context.get(key) or "").strip().lower()
+        if not left or not right:
+            continue
+        compared = True
+        if left != right:
+            return False
+    return compared
+
+
+def _stable_buyer_pair(reads: Sequence[Mapping[str, Any]]) -> tuple[float, float] | None:
+    if len(reads) < 2:
+        return None
+    left = reads[-2]
+    right = reads[-1]
+    left_auth = left.get("authenticated") if isinstance(left.get("authenticated"), Mapping) else {}
+    right_auth = right.get("authenticated") if isinstance(right.get("authenticated"), Mapping) else {}
+    left_anon = left.get("anonymous") if isinstance(left.get("anonymous"), Mapping) else {}
+    right_anon = right.get("anonymous") if isinstance(right.get("anonymous"), Mapping) else {}
+    auth_left = _number_or_none(left_auth.get("authenticated_buyer_price"))
+    auth_right = _number_or_none(right_auth.get("authenticated_buyer_price"))
+    anon_left = _number_or_none(left_anon.get("public_buyer_price"))
+    anon_right = _number_or_none(right_anon.get("public_buyer_price"))
+    if None in {auth_left, auth_right, anon_left, anon_right}:
+        return None
+    if not _buyer_contexts_compatible(left_auth, left_anon) or not _buyer_contexts_compatible(right_auth, right_anon):
+        return None
+    if not _money_exact(auth_left, auth_right) or not _money_exact(anon_left, anon_right):
+        return None
+    left_fingerprint = str(left_auth.get("session_fingerprint") or "")
+    right_fingerprint = str(right_auth.get("session_fingerprint") or "")
+    if not left_fingerprint or left_fingerprint != right_fingerprint:
+        return None
+    if _destination_signature(left_auth) != _destination_signature(right_auth):
+        return None
+    if _destination_signature(left_anon) != _destination_signature(right_anon):
+        return None
+    if str(left_auth.get("payment_context") or "unknown/mixed") != str(right_auth.get("payment_context") or "unknown/mixed"):
+        return None
+    return float(auth_right), float(anon_right)
+
+
+def _destination_signature(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    context = value.get("destination_context") if isinstance(value.get("destination_context"), Mapping) else {}
+    return tuple(str(context.get(key) or "").strip().lower() for key in ("dest", "regions", "currency", "locale"))
+
+
+def _account_discount(authenticated_price: Any, anonymous_price: Any) -> tuple[float | None, float | None]:
+    authenticated = _number_or_none(authenticated_price)
+    anonymous = _number_or_none(anonymous_price)
+    if authenticated is None or anonymous is None or anonymous <= 0:
+        return None, None
+    difference = (_parse_money(anonymous, "anonymous_price") - _parse_money(authenticated, "authenticated_price")).quantize(MONEY)
+    percent = (difference / _parse_money(anonymous, "anonymous_price")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    return _decimal_to_float(difference), _decimal_to_float(percent)
 
 
 def _previous_high_confidence_point(measurements: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
