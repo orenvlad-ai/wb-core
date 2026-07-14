@@ -33,10 +33,33 @@ def main() -> None:
     commit_payloads: list[dict[str, object]] = []
     history_queries: list[dict[str, list[str]]] = []
     committed_parameters: list[str] = []
+    table_reads = [0]
+    history_reads = [0]
+    price_commit_mode = ["success"]
+    force_settings_conflict = [False]
+    console_errors: list[str] = []
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page.add_init_script(
+            """
+            const nativeFetch = window.fetch.bind(window);
+            window.fetch = function(input, init) {
+              const url = String(input || "");
+              const delay = url.includes("/sku-management/price/preview") || url.includes("/sku-management/bid/preview")
+                ? 160
+                : url.includes("/sku-management/price/commit") || url.includes("/sku-management/bid/commit")
+                  ? 360
+                  : 0;
+              return delay
+                ? new Promise((resolve, reject) => window.setTimeout(() => nativeFetch(input, init).then(resolve, reject), delay))
+                : nativeFetch(input, init);
+            };
+            """
+        )
+        page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
+        page.on("pageerror", lambda error: console_errors.append(str(error)))
 
         def route_handler(route):
             request = route.request
@@ -48,6 +71,21 @@ def main() -> None:
                 if request.method == "POST":
                     body = json.loads(request.post_data or "{}")
                     saved_payloads.append(body)
+                    if force_settings_conflict[0]:
+                        force_settings_conflict[0] = False
+                        settings["revision"] = int(settings["revision"]) + 1
+                        route.fulfill(
+                            status=409,
+                            content_type="application/json",
+                            body=json.dumps({
+                                "error": "config_revision_conflict",
+                                "current": {
+                                    "revision": settings["revision"],
+                                    "config": {"forecast": settings["forecast"], "table": settings["table"]},
+                                },
+                            }),
+                        )
+                        return
                     forecast = body.get("forecast") or {}
                     if int(forecast.get("forecast_horizon_days") or 0) < 7:
                         route.fulfill(status=422, content_type="application/json", body='{"error":"forecast_horizon_days must be between 7 and 365"}')
@@ -84,6 +122,14 @@ def main() -> None:
             if path.startswith("/v1/sheet-vitrina-v1/sku-management/price/commit"):
                 body = json.loads(request.post_data or "{}")
                 commit_payloads.append(body)
+                if price_commit_mode[0] == "mismatch":
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "status": "success",
+                        "confirmed_value": 840,
+                        "readback_status": "mismatch",
+                        "error": "WB readback mismatch",
+                    }))
+                    return
                 committed_parameters.append("seller_price")
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({
                     "status": "success",
@@ -91,7 +137,8 @@ def main() -> None:
                     "confirmed_price": 1000,
                     "confirmed_discount": 15,
                     "readback_status": "matching",
-                    "event": {"event_id": "event-price"},
+                    "buyer_price": {"value": 701, "quality": "observed", "source": "public_wb_card", "freshness": "2026-07-14"},
+                    "event": {"event_id": "event-price", "confirmed_at": "2026-07-14T10:00:00Z"},
                 }))
                 return
             if path.startswith("/v1/sheet-vitrina-v1/sku-management/bid/preview"):
@@ -127,10 +174,11 @@ def main() -> None:
                     "status": "success",
                     "confirmed_value": 18,
                     "readback_status": "matching",
-                    "event": {"event_id": "event-bid"},
+                    "event": {"event_id": "event-bid", "confirmed_at": "2026-07-14T10:05:00Z"},
                 }))
                 return
             if path.startswith("/v1/sheet-vitrina-v1/sku-management/history"):
+                history_reads[0] += 1
                 query = parse_qs(urlsplit(path).query)
                 history_queries.append(query)
                 offset = int((query.get("offset") or ["0"])[0])
@@ -146,6 +194,7 @@ def main() -> None:
                 }))
                 return
             if path == "/v1/sheet-vitrina-v1/sku-management":
+                table_reads[0] += 1
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({
                     "settings": settings,
                     "rows": _rows(),
@@ -158,35 +207,64 @@ def main() -> None:
         page.goto("http://sku.test/page", wait_until="domcontentloaded")
         page.wait_for_selector("[data-sku-management-body] tr")
         if page.locator("[data-sku-management-body] tr").count() != 3:
-            raise AssertionError("SKU table must render every active row")
+            raise AssertionError("retired persisted filters must not hide active SKU rows")
         _assert_first_row(page, "HIGH", "default risk/deficit sort")
+        if page.locator("[data-sku-filter]").count() != 1 or page.locator('[data-sku-filter="search"]').count() != 1:
+            raise AssertionError("filter toolbar must contain only SKU search")
+        if page.locator("[data-sku-column-manager]").count() != 1:
+            raise AssertionError("filter toolbar must retain the server-owned column selector")
+        retired_controls = page.locator('[data-sku-filter="risk"], [data-sku-filter="promo"], [data-sku-filter^="coverage_"], [data-sku-filter^="deficit_"]')
+        if retired_controls.count() or "Проблемный округ" in page.locator("[data-sku-management-panel]").inner_text():
+            raise AssertionError("retired filters/problem-district presentation must not render")
+        nearest_text = page.locator('[data-sku-cell="nearest_inbound"]').first.inner_text().replace("\xa0", " ")
+        if "INV-071" not in nearest_text or "2 500 шт." not in nearest_text:
+            raise AssertionError("nearest supplier invoice/date/SKU quantity must render compactly")
+
+        modal_styles = page.evaluate(
+            """() => {
+              const cards = Array.from(document.querySelectorAll('.operator-modal-card')).map((node) => {
+                const style = getComputedStyle(node);
+                return {background: style.backgroundColor, opacity: style.opacity};
+              });
+              const backdrop = getComputedStyle(document.querySelector('.operator-modal-backdrop'));
+              const header = getComputedStyle(document.querySelector('[data-sku-management-head] th'));
+              const shell = document.querySelector('.sku-management-table-shell');
+              const cell = getComputedStyle(document.querySelector('[data-sku-management-body] td'));
+              return {
+                cards,
+                backdrop: backdrop.backgroundColor,
+                modalZ: Number(backdrop.zIndex),
+                headerZ: Number(header.zIndex),
+                headerPosition: header.position,
+                headerBackground: header.backgroundColor,
+                shellBorder: getComputedStyle(shell).borderStyle,
+                horizontalOverflow: shell.scrollWidth > shell.clientWidth,
+                rowSeparator: cell.borderBottomStyle,
+              };
+            }"""
+        )
+        if len(modal_styles["cards"]) != 3 or any(item != {"background": "rgb(23, 25, 31)", "opacity": "1"} for item in modal_styles["cards"]):
+            raise AssertionError(f"all operator modal cards must be fully opaque: {modal_styles}")
+        if "0.76" not in modal_styles["backdrop"] or modal_styles["modalZ"] <= modal_styles["headerZ"]:
+            raise AssertionError(f"modal backdrop/z-index contract mismatch: {modal_styles}")
+        if modal_styles["headerPosition"] != "sticky" or modal_styles["headerBackground"] != "rgb(32, 36, 44)":
+            raise AssertionError(f"structured opaque sticky header is missing: {modal_styles}")
+        if modal_styles["shellBorder"] != "solid" or modal_styles["rowSeparator"] != "solid" or not modal_styles["horizontalOverflow"]:
+            raise AssertionError(f"table grid/scroll structure mismatch: {modal_styles}")
+        page.locator("[data-sku-management-body] tr").first.hover()
+        hover_background = page.locator("[data-sku-management-body] tr").first.locator("td").first.evaluate("node => getComputedStyle(node).backgroundColor")
+        if hover_background != "rgb(29, 33, 41)":
+            raise AssertionError("row hover must visibly preserve the dark management-table language")
 
         _assert_three_state_sort(page, "risk", "LOW", "HIGH", "HIGH")
         _assert_three_state_sort(page, "seller_price", "LOW", "HIGH", "HIGH")
         _assert_three_state_sort(page, "coverage_pct", "HIGH", "LOW", "HIGH")
         _assert_three_state_sort(page, "deficit_units", "LOW", "HIGH", "HIGH")
         _assert_three_state_sort(page, "last_price_change_at", "LOW", "HIGH", "HIGH")
+        _assert_three_state_sort(page, "nearest_inbound", "LOW", "HIGH", "HIGH")
 
         _set_filter(page, "search", "102")
         _assert_only_row(page, "LOW", "SKU/nmID search")
-        _set_filter(page, "search", "")
-        _set_filter(page, "risk", "unknown")
-        _assert_only_row(page, "UNKNOWN", "risk filter")
-        _set_filter(page, "risk", "")
-        for value, token in (("yes", "HIGH"), ("no", "LOW"), ("unknown", "UNKNOWN")):
-            _set_filter(page, "promo", value)
-            _assert_only_row(page, token, f"promo={value} filter")
-        _set_filter(page, "promo", "")
-        _set_filter(page, "coverage_min", "100")
-        _set_filter(page, "coverage_max", "160")
-        _assert_only_row(page, "LOW", "coverage range")
-        _set_filter(page, "coverage_min", "")
-        _set_filter(page, "coverage_max", "")
-        _set_filter(page, "deficit_min", "70")
-        _set_filter(page, "deficit_max", "90")
-        _assert_only_row(page, "HIGH", "deficit range")
-        _set_filter(page, "deficit_min", "")
-        _set_filter(page, "deficit_max", "")
         _set_filter(page, "search", "no-such-sku")
         if "Нет SKU" not in page.locator("[data-sku-management-body]").inner_text():
             raise AssertionError("empty filtered state must be explicit")
@@ -194,27 +272,47 @@ def main() -> None:
 
         manager = page.locator("[data-sku-column-manager]")
         manager.locator("summary").click()
+        if not manager.locator('[data-sku-column-visible="product"]').is_disabled():
+            raise AssertionError("mandatory product column must not be accidentally hidden")
+        if manager.locator('[data-sku-column-visible="first_problem_district"]').count():
+            raise AssertionError("retired problem-district preference must be migrated out of the selector")
         manager.locator('[data-sku-column-visible="buyer_price"]').uncheck()
         manager.locator('[data-sku-column-width="product"]').fill("300")
         manager.locator('[data-sku-column-width="product"]').press("Tab")
-        manager.locator('[data-sku-column-down="product"]').click()
+        original_ids = manager.locator("[data-sku-column-row]").evaluate_all("nodes => nodes.map(node => node.dataset.skuColumnRow)")
+        manager.locator('[data-sku-column-row="buyer_price"]').drag_to(manager.locator('[data-sku-column-row="risk"]'))
+        reordered_ids = manager.locator("[data-sku-column-row]").evaluate_all("nodes => nodes.map(node => node.dataset.skuColumnRow)")
+        if reordered_ids == original_ids:
+            raise AssertionError("drag-and-drop must immediately reorder even a hidden column")
         page.wait_for_timeout(700)
         if page.locator('[data-sku-sort="buyer_price"]').count() != 0:
             raise AssertionError("column selector must hide buyer price")
         if not saved_payloads or "table" not in saved_payloads[-1]:
             raise AssertionError("column/filter/sort preferences must persist server-side")
+        persisted_table = saved_payloads[-1]["table"]
+        if persisted_table.get("filters") != {"search": ""} or "first_problem_district" in json.dumps(persisted_table):
+            raise AssertionError("persisted presentation state must drop retired filters and problem district")
         page.reload(wait_until="domcontentloaded")
         page.wait_for_selector("[data-sku-management-body] tr")
-        if page.locator("[data-sku-management-head] th").first.get_attribute("data-sku-sort") != "risk":
-            raise AssertionError("column order must survive page refresh")
+        expected_visible_first = next(item for item in reordered_ids if item != "buyer_price")
+        if page.locator("[data-sku-management-head] th").first.get_attribute("data-sku-sort") != expected_visible_first:
+            raise AssertionError("hidden-column order must survive page refresh without changing visible order")
         style = page.locator('[data-sku-sort="product"]').get_attribute("style") or ""
         if "300px" not in style or page.locator('[data-sku-sort="buyer_price"]').count() != 0:
             raise AssertionError("column width/visibility must survive page refresh")
         manager = page.locator("[data-sku-column-manager]")
         manager.locator("summary").click()
-        manager.locator('[data-sku-column-up="product"]').click()
+        restored_ids = manager.locator("[data-sku-column-row]").evaluate_all("nodes => nodes.map(node => node.dataset.skuColumnRow)")
+        if restored_ids != reordered_ids:
+            raise AssertionError("server-owned drag order must restore after reload")
         manager.locator('[data-sku-column-visible="buyer_price"]').check()
         page.wait_for_timeout(700)
+        visible_ids = page.locator("[data-sku-management-head] th").evaluate_all("nodes => nodes.map(node => node.dataset.skuSort)")
+        if (visible_ids.index("buyer_price") < visible_ids.index("risk")) != (restored_ids.index("buyer_price") < restored_ids.index("risk")):
+            raise AssertionError("visibility and order must remain independent preferences")
+        force_settings_conflict[0] = True
+        manager.locator('[data-sku-column-drag-handle="buyer_price"]').press("ArrowDown")
+        page.wait_for_function("() => document.querySelector('[data-sku-management-error]').textContent.includes('другой сессии')")
 
         page.locator("[data-sku-management-settings] summary").click()
         horizon = page.locator('[data-sku-setting="forecast_horizon_days"]')
@@ -272,50 +370,160 @@ def main() -> None:
         page.locator("[data-sku-history-prev]").click()
         page.wait_for_function("() => document.querySelector('[data-sku-history-page]').textContent === '1'")
 
+        _set_filter(page, "search", "risk")
+        page.locator('[data-sku-sort="seller_price"]').click()
+        page.wait_for_timeout(500)
         if page.locator('[data-sku-price-input="101"]').count() != 0:
             raise AssertionError("seller price must start as compact click-to-edit value")
         page.locator('[data-sku-price-edit="101"]').click()
         page.locator('[data-sku-price-input="101"]').fill("850")
         page.locator('[data-sku-price-preview="101"]').click()
-        page.wait_for_selector("[data-sku-management-modal]:not([hidden])")
+        _assert_modal_state(page, "preview_loading")
+        page.locator('[data-sku-modal-cancel]').first.click()
+        page.wait_for_timeout(260)
+        if not page.locator("[data-sku-management-modal]").is_hidden():
+            raise AssertionError("closing preview_loading must invalidate the pending response instead of reopening the modal")
+        page.locator('[data-sku-price-preview="101"]').click()
+        _assert_modal_state(page, "preview_loading")
+        page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'preview_ready'")
         if "Всё равно изменить" not in page.locator("[data-sku-modal-confirm]").inner_text():
             raise AssertionError("stabilization warning must expose explicit override")
         page.get_by_role("button", name="Отменить", exact=True).click()
         if not page.locator("[data-sku-management-modal]").is_hidden() or commit_payloads:
             raise AssertionError("Отменить must close preview without mutation")
         page.locator('[data-sku-price-preview="101"]').click()
-        page.wait_for_selector("[data-sku-management-modal]:not([hidden])")
+        _assert_modal_state(page, "preview_loading")
+        page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'preview_ready'")
+        scroll_before = page.evaluate(
+            """() => {
+              const shell = document.querySelector('.sku-management-table-shell');
+              shell.style.maxHeight = '76px';
+              shell.scrollLeft = 420;
+              shell.scrollTop = 22;
+              document.querySelector('[data-sku-row-nm-id="102"]').dataset.identity = 'untouched';
+              return {left: shell.scrollLeft, top: shell.scrollTop};
+            }"""
+        )
+        headers_before_price = page.locator("[data-sku-management-head] th").evaluate_all(
+            "nodes => nodes.map(node => ({id:node.dataset.skuSort,text:node.textContent}))"
+        )
+        reads_before_price = table_reads[0]
+        history_before_price = history_reads[0]
         page.locator("[data-sku-modal-confirm]").click()
-        page.wait_for_selector("[data-sku-management-modal] .prices-badge.success")
+        _assert_modal_state(page, "commit_running")
+        page.wait_for_timeout(160)
+        _assert_modal_state(page, "readback_pending")
+        page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'success'")
         modal_text = page.locator("[data-sku-management-modal]").inner_text()
-        if "WB readback подтверждён" not in modal_text or "discount 15%" not in modal_text:
-            raise AssertionError("price success must expose exact confirmed tuple after readback")
+        if "Цена изменена" not in modal_text or "950 → 850 ₽" not in modal_text or "WB readback" not in modal_text:
+            raise AssertionError("price success must expose old/confirmed values only after matching readback")
         if not commit_payloads[-1].get("override_stabilization") or not commit_payloads[-1].get("override_warnings"):
             raise AssertionError("explicit UI override must be sent and audited")
+        if page.locator('[data-sku-price-input="101"]').count() != 1 or page.locator('[data-sku-price-edit="101"]').count() != 0:
+            raise AssertionError("target display cell must not be replaced optimistically before the operator closes success")
+        page.wait_for_timeout(800)
+        _assert_modal_state(page, "success")
+        if page.locator("[data-sku-modal-confirm]").inner_text() != "Закрыть":
+            raise AssertionError("success modal must remain open with Закрыть as its primary action")
+        if not page.locator("[data-sku-modal-secondary]").is_hidden():
+            raise AssertionError("success modal must not retain Отменить as a competing action")
+        success_layout = page.evaluate(
+            """() => {
+              const card=document.querySelector('[data-sku-management-modal] .operator-modal-card');
+              const body=document.querySelector('[data-sku-modal-body]');
+              const cardBox=card.getBoundingClientRect();const bodyBox=body.getBoundingClientRect();
+              return {cardHeight:cardBox.height,bodyHeight:bodyBox.height,cardBackground:getComputedStyle(card).backgroundColor,bodyBackground:getComputedStyle(body).backgroundColor};
+            }"""
+        )
+        if success_layout["cardHeight"] < 200 or success_layout["bodyHeight"] < 100 or success_layout["cardBackground"] != "rgb(23, 25, 31)" or success_layout["bodyBackground"] != "rgb(23, 25, 31)":
+            raise AssertionError(f"success modal layout/opacity mismatch: {success_layout}")
+        page.screenshot(path="/tmp/wb-core-sku-management-price-success.png")
+        page.locator("[data-sku-management-modal] .operator-modal-card").screenshot(path="/tmp/wb-core-sku-management-price-success-card.png")
+        page.locator("[data-sku-modal-confirm]").click()
         page.wait_for_selector("[data-sku-management-modal]", state="hidden")
-        page.wait_for_timeout(150)
+        price_row = page.locator('[data-sku-row-nm-id="101"]')
+        if "850" not in price_row.locator('[data-sku-cell="seller_price"]').inner_text():
+            raise AssertionError("confirmed price must patch only the target seller-price cell")
+        if "701" not in price_row.locator('[data-sku-cell="buyer_price"]').inner_text():
+            raise AssertionError("factual buyer-price readback must patch the buyer-price cell")
+        if "2026-07-14T10:00:00Z" not in price_row.locator('[data-sku-cell="last_price_change_at"]').inner_text():
+            raise AssertionError("confirmed price timestamp/stabilization state must patch locally")
+        scroll_after_price = page.evaluate("() => { const shell=document.querySelector('.sku-management-table-shell'); return {left:shell.scrollLeft,top:shell.scrollTop}; }")
+        headers_after_price = page.locator("[data-sku-management-head] th").evaluate_all(
+            "nodes => nodes.map(node => ({id:node.dataset.skuSort,text:node.textContent}))"
+        )
+        if scroll_after_price != scroll_before or page.locator('[data-sku-filter="search"]').input_value() != "risk" or headers_after_price != headers_before_price:
+            raise AssertionError(f"price cell patch must preserve search and table scroll: {scroll_before} -> {scroll_after_price}")
+        if page.locator('[data-sku-row-nm-id="102"]').get_attribute("data-identity") != "untouched":
+            raise AssertionError("price success must not rebuild non-target rows")
+        if table_reads[0] != reads_before_price or history_reads[0] <= history_before_price:
+            raise AssertionError("price success may refresh open history, never the whole SKU table")
         if "950 → 850" not in page.locator("[data-sku-history-body]").inner_text():
             raise AssertionError("open history must refresh after confirmed mutation")
+
+        price_commit_mode[0] = "mismatch"
+        page.locator('[data-sku-price-edit="101"]').click()
+        page.locator('[data-sku-price-input="101"]').fill("840")
+        page.locator('[data-sku-price-preview="101"]').click()
+        page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'preview_ready'")
+        mismatch_reads_before = table_reads[0]
+        page.locator("[data-sku-modal-confirm]").click()
+        page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'controlled_error'")
+        if "Цена изменена" in page.locator("[data-sku-management-modal]").inner_text():
+            raise AssertionError("readback mismatch must never render green price success")
+        page.locator("[data-sku-modal-confirm]").click()
+        if "850" not in page.locator('[data-sku-row-nm-id="101"] [data-sku-cell="seller_price"]').inner_text():
+            raise AssertionError("readback mismatch must restore the unchanged confirmed target cell")
+        if table_reads[0] != mismatch_reads_before:
+            raise AssertionError("controlled readback mismatch must not refetch the table")
+        price_commit_mode[0] = "success"
 
         page.locator('[data-sku-bid-edit="101"]').click()
         page.locator('[data-sku-bid-option="101"]').select_option("78|recommendations")
         page.locator('[data-sku-bid-input="101"]').fill("18")
         page.locator('[data-sku-bid-preview="101"]').click()
-        page.wait_for_selector("[data-sku-management-modal]:not([hidden])")
+        _assert_modal_state(page, "preview_loading")
+        page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'preview_ready'")
         if "78 / recommendations" not in page.locator("[data-sku-management-modal]").inner_text() or "Всё равно изменить" not in page.locator("[data-sku-modal-confirm]").inner_text():
             raise AssertionError("multiple campaigns require exact advert_id/placement and cross-warning override")
         if preview_payloads[-1].get("advert_id") != 78 or preview_payloads[-1].get("placement") != "recommendations":
             raise AssertionError("frontend must not collapse placement identity")
+        bid_scroll_before = page.evaluate("() => { const shell=document.querySelector('.sku-management-table-shell'); shell.scrollLeft=360; shell.scrollTop=18; return {left:shell.scrollLeft,top:shell.scrollTop}; }")
+        reads_before_bid = table_reads[0]
+        history_before_bid = history_reads[0]
         page.locator("[data-sku-modal-confirm]").click()
-        page.wait_for_selector("[data-sku-management-modal] .prices-badge.success")
+        _assert_modal_state(page, "commit_running")
+        page.wait_for_timeout(160)
+        _assert_modal_state(page, "readback_pending")
+        page.wait_for_function("() => document.querySelector('[data-sku-management-modal]').dataset.skuModalState === 'success'")
+        if "Ставка изменена" not in page.locator("[data-sku-management-modal]").inner_text() or "17 → 18 ₽" not in page.locator("[data-sku-management-modal]").inner_text():
+            raise AssertionError("bid success must expose confirmed matching WB readback")
         if commit_payloads[-1].get("preview_id") != "bid-preview" or not commit_payloads[-1].get("override_stabilization"):
             raise AssertionError("bid commit must use only the confirmed preview with override")
+        page.wait_for_timeout(800)
+        _assert_modal_state(page, "success")
+        page.locator("[data-sku-modal-confirm]").click()
         page.wait_for_selector("[data-sku-management-modal]", state="hidden")
+        bid_scroll_after = page.evaluate("() => { const shell=document.querySelector('.sku-management-table-shell'); return {left:shell.scrollLeft,top:shell.scrollTop}; }")
+        if bid_scroll_after != bid_scroll_before or table_reads[0] != reads_before_bid or history_reads[0] <= history_before_bid:
+            raise AssertionError("bid cell patch must preserve scroll and refresh only open history")
+        bid_cell = page.locator('[data-sku-row-nm-id="101"] [data-sku-cell="current_bid"]')
+        if "15–18 ₽" not in bid_cell.inner_text():
+            raise AssertionError("only the selected advert_id/placement bid must update from confirmed readback")
+        if "2026-07-14T10:05:00Z" not in page.locator('[data-sku-row-nm-id="101"] [data-sku-cell="last_bid_change_at"]').inner_text():
+            raise AssertionError("confirmed bid timestamp/stabilization state must patch locally")
         if "17 → 18" not in page.locator("[data-sku-history-body]").inner_text():
             raise AssertionError("bid event must appear in persistent history after refresh")
+        page.screenshot(path="/tmp/wb-core-sku-management-ui-polish.png", full_page=True)
         history.locator("summary").click()
         if history.get_attribute("open") is not None:
             raise AssertionError("history block must close")
+        unexpected_console_errors = [
+            item for item in console_errors
+            if "status of 409 (Conflict)" not in item and "status of 422 (Unprocessable Entity)" not in item
+        ]
+        if unexpected_console_errors:
+            raise AssertionError(f"unexpected browser console errors: {unexpected_console_errors}")
         browser.close()
     print("sku_management_browser_smoke: OK")
 
@@ -325,12 +533,22 @@ def _assert_first_row(page: Page, token: str, context: str) -> None:
         raise AssertionError(f"{context}: expected first row {token}")
 
 
+def _assert_modal_state(page: Page, expected: str) -> None:
+    actual = page.locator("[data-sku-management-modal]").get_attribute("data-sku-modal-state")
+    if actual != expected:
+        raise AssertionError(f"expected modal state {expected}, got {actual}")
+
+
 def _assert_three_state_sort(page: Page, key: str, asc: str, desc: str, none: str) -> None:
     header = page.locator(f'[data-sku-sort="{key}"]')
     header.click()
     _assert_first_row(page, asc, f"{key} asc")
+    if key == "nearest_inbound" and "UNKNOWN" not in page.locator("[data-sku-management-body] tr").last.inner_text():
+        raise AssertionError("empty nearest-inbound values must stay at the bottom in ascending order")
     page.locator(f'[data-sku-sort="{key}"]').click()
     _assert_first_row(page, desc, f"{key} desc")
+    if key == "nearest_inbound" and "UNKNOWN" not in page.locator("[data-sku-management-body] tr").last.inner_text():
+        raise AssertionError("empty nearest-inbound values must stay at the bottom in descending order")
     page.locator(f'[data-sku-sort="{key}"]').click()
     _assert_first_row(page, none, f"{key} none")
 
@@ -350,7 +568,17 @@ def _settings() -> dict[str, object]:
     return {
         "status": "ok", "revision": 0, "updated_at": "", "canonical_store": "server_runtime_user_config",
         "forecast": {"sales_avg_period_days": 14, "forecast_horizon_days": 90, "future_order_period_days": 30, "production_lead_days": 30, "factory_to_ff_lead_days": 30, "ff_to_wb_lead_days": 7, "safety_stock_days": 14, "price_stabilization_days": 3, "bid_stabilization_days": 3, "cross_warnings_enabled": True, "order_batch_qty": 100},
-        "table": {"visible_columns": [], "column_order": [], "column_widths": {}, "filters": {}, "sort": [{"key": "risk_rank", "direction": "desc"}, {"key": "deficit_date", "direction": "asc"}]},
+        "table": {
+            "visible_columns": [],
+            "column_order": ["first_problem_district", "product", "risk"],
+            "column_widths": {"first_problem_district": 240},
+            "filters": {"risk": "unknown", "promo": "yes", "coverage_min": 100, "deficit_max": 5},
+            "sort": [
+                {"key": "first_problem_district", "direction": "asc"},
+                {"key": "risk_rank", "direction": "desc"},
+                {"key": "deficit_date", "direction": "asc"},
+            ],
+        },
     }
 
 
@@ -358,9 +586,9 @@ def _rows() -> list[dict[str, object]]:
     options = [{"advert_id": 77, "campaign_name": "Search", "placement": "search", "current_bid_rub": 15}, {"advert_id": 78, "campaign_name": "Recommendations", "placement": "recommendations", "current_bid_rub": 17}]
     common = {"quality": "complete", "quality_warnings": [], "buyer_price_source": "public_wb_card", "buyer_price_quality": "observed", "buyer_price_freshness": "2026-07-13", "spp_proxy": 0.136, "campaign_count": 2, "placement_count": 2, "current_bid": None, "ad_options": options, "ads_drr": 0.1, "ads_drr_attributed": 0.2, "funnel": {"view_count": 100, "openCount": 50, "cartCount": 20, "addToCartConversion": 0.4, "cartToOrderConversion": 0.5}, "orders": 10, "sales_rub": 9000, "profit_rub": 2000, "margin_pct": 0.22, "last_bid_change_at": "2026-07-01T10:00:00Z"}
     return [
-        {**common, "nm_id": 101, "sku": "HIGH", "name": "High risk", "risk": "high", "risk_rank": 2, "deficit_date": "2026-07-15", "coverage_pct": 20, "deficit_units": 80, "first_problem_district": "central", "reason": "near deficit", "seller_price": 950, "buyer_price": 777, "promo_label": "1 / 2", "promo_count": 1, "promo_participation": 1, "promo_freshness": "2026-07-13", "last_price_change_at": "2026-07-13T10:00:00Z"},
-        {**common, "nm_id": 102, "sku": "LOW", "name": "Low risk", "risk": "low", "risk_rank": 0, "deficit_date": "2026-09-01", "coverage_pct": 140, "deficit_units": 0, "first_problem_district": None, "reason": "no deficit", "seller_price": 700, "buyer_price": 650, "promo_label": "0 / 2", "promo_count": 0, "promo_participation": 0, "promo_freshness": "2026-07-13", "last_price_change_at": "2026-07-01T10:00:00Z"},
-        {**common, "nm_id": 103, "sku": "UNKNOWN", "name": "Partial evidence", "risk": "unknown", "risk_rank": -1, "deficit_date": None, "coverage_pct": None, "deficit_units": None, "first_problem_district": "unknown", "reason": "regional unknown", "quality": "partial", "quality_warnings": ["regional evidence missing"], "seller_price": 800, "buyer_price": None, "buyer_price_quality": "missing", "buyer_price_freshness": "", "promo_label": "н/д", "promo_count": None, "promo_participation": None, "promo_freshness": "", "last_price_change_at": ""},
+        {**common, "nm_id": 101, "sku": "HIGH", "name": "High risk", "risk": "high", "risk_rank": 2, "deficit_date": "2026-07-15", "coverage_pct": 20, "deficit_units": 80, "nearest_supplier_inbound": {"shipment_id": "shipment-071", "invoice_no": "INV-071", "arrival_date": "2026-08-18", "quantity": 2500, "date_source": "actual_shipment_date"}, "first_problem_district": "central", "reason": "near deficit", "seller_price": 950, "buyer_price": 777, "promo_label": "1 / 2", "promo_count": 1, "promo_participation": 1, "promo_freshness": "2026-07-13", "last_price_change_at": "2026-07-13T10:00:00Z"},
+        {**common, "nm_id": 102, "sku": "LOW", "name": "Low risk", "risk": "low", "risk_rank": 0, "deficit_date": "2026-09-01", "coverage_pct": 140, "deficit_units": 0, "nearest_supplier_inbound": {"shipment_id": "shipment-020", "invoice_no": "INV-020", "arrival_date": "2026-07-29", "quantity": 120, "date_source": "planned_shipment_date"}, "first_problem_district": None, "reason": "no deficit", "seller_price": 700, "buyer_price": 650, "promo_label": "0 / 2", "promo_count": 0, "promo_participation": 0, "promo_freshness": "2026-07-13", "last_price_change_at": "2026-07-01T10:00:00Z"},
+        {**common, "nm_id": 103, "sku": "UNKNOWN", "name": "Partial evidence", "risk": "unknown", "risk_rank": -1, "deficit_date": None, "coverage_pct": None, "deficit_units": None, "nearest_supplier_inbound": None, "first_problem_district": "unknown", "reason": "regional unknown", "quality": "partial", "quality_warnings": ["regional evidence missing"], "seller_price": 800, "buyer_price": None, "buyer_price_quality": "missing", "buyer_price_freshness": "", "promo_label": "н/д", "promo_count": None, "promo_participation": None, "promo_freshness": "", "last_price_change_at": ""},
     ]
 
 
