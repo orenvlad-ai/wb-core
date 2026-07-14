@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.supplier_shipment_status import (  # noqa: E402
+    HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
     resolve_supplier_shipment_status,
     validate_supplier_factual_dates,
 )
@@ -53,6 +54,38 @@ def main() -> int:
     )
     _equal(accepted_without_shipment.order_status, "accepted_ff", "cleared shipment keeps accepted")
 
+    historical = validate_supplier_factual_dates(
+        actual_shipment_date="",
+        actual_ff_acceptance_date="",
+        business_today=TODAY,
+        historical_status_exception=(
+            HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE
+        ),
+    )
+    _equal(historical.order_status, "accepted_ff", "historical terminal signal")
+    _equal(
+        historical.status_display,
+        "Принято на ФФ · дата неизвестна",
+        "historical unknown-date display",
+    )
+    _equal(historical.status_date, "", "historical signal does not fabricate date")
+    _assert(not historical.status_date_known, "historical date remains unknown")
+
+    factual_precedence = resolve_supplier_shipment_status(
+        actual_shipment_date="2026-06-25",
+        actual_ff_acceptance_date="2026-07-01",
+        business_today=TODAY,
+        historical_status_exception=(
+            HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE
+        ),
+    )
+    _equal(
+        factual_precedence.status_source,
+        "actual_ff_acceptance_date",
+        "factual acceptance takes precedence over stale exception",
+    )
+    _assert(factual_precedence.warnings, "conflicting legacy state fails closed with warning")
+
     _rejects(
         lambda: validate_supplier_factual_dates(
             actual_shipment_date="2026-07-15",
@@ -84,6 +117,17 @@ def main() -> int:
             business_today=TODAY,
         ),
         "ISO",
+    )
+    _rejects(
+        lambda: validate_supplier_factual_dates(
+            actual_shipment_date="2026-06-25",
+            actual_ff_acceptance_date="",
+            business_today=TODAY,
+            historical_status_exception=(
+                HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE
+            ),
+        ),
+        "requires empty factual",
     )
 
     legacy = resolve_supplier_shipment_status(

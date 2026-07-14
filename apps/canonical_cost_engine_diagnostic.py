@@ -606,6 +606,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             | (set(unique_first) - first_source_ids)
         )
         fixpoint = unique_first == unique_second
+        inventory_by_id = {
+            record["blocker_id"]: _inventory_record(record)
+            for record in blockers
+            if record["kind"] == "primary"
+        }
+        anomaly_inventory = sorted(
+            inventory_by_id.values(),
+            key=lambda item: (
+                item["reason_code"],
+                item["exact_identity"]["business_date"],
+                item["exact_identity"]["supply_id"],
+                int(item["exact_identity"]["nm_id"] or 0),
+                item["exact_identity"]["operation_id"],
+            ),
+        )
         report = {
             "contract_name": "canonical_cost_exhaustive_diagnostic_v1",
             "status": "blocked" if primary_ids else "ok",
@@ -624,6 +639,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 blockers, key=lambda item: (item["kind"], item["blocker_id"])
             ),
             "primary_blocker_count": len(unique_first),
+            "anomaly_inventory": anomaly_inventory,
+            "anomaly_inventory_fingerprint": _hash(anomaly_inventory),
             "cascading_blocker_count": sum(
                 record["kind"] == "cascading" for record in blockers
             ),
@@ -670,13 +687,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     if source_db.stat().st_ino != inode:
         raise ValueError("diagnostic collector changed live SQLite inode")
-    if source_digest != _tables_digest(source_db, SOURCE_TABLES):
-        raise ValueError("diagnostic collector changed authoritative sources")
-    if protected_digest != _tables_digest(source_db, PROTECTED_TABLES):
-        raise ValueError("diagnostic collector changed protected tables")
-    if legacy_digest != _legacy_digest(source_db):
-        raise ValueError("diagnostic collector changed pre-cutover rows")
-    return payload
+    live_source_after = _tables_digest(source_db, SOURCE_TABLES)
+    live_protected_after = _tables_digest(source_db, PROTECTED_TABLES)
+    live_legacy_after = _legacy_digest(source_db)
+    concurrent_live_drift = any(
+        (
+            source_digest != live_source_after,
+            protected_digest != live_protected_after,
+            legacy_digest != live_legacy_after,
+        )
+    )
+    preservation = dict(payload["preservation"])
+    preservation.update(
+        {
+            "concurrent_live_drift": concurrent_live_drift,
+            "source_digest_after": live_source_after,
+            "protected_digest_after": live_protected_after,
+            "legacy_pre_cutover_digest_after": live_legacy_after,
+            "snapshot_publishable": not concurrent_live_drift,
+        }
+    )
+    report = {
+        **{key: value for key, value in payload.items() if key != "fingerprint"},
+        "status": "stale_snapshot" if concurrent_live_drift else payload["status"],
+        "preservation": preservation,
+    }
+    return {**report, "fingerprint": _hash(report)}
 
 
 def _normalization_analysis(
@@ -1007,6 +1043,49 @@ def _primary_blocker(anomaly: Mapping[str, Any]) -> dict[str, Any]:
         "eligible_for_approved_normalization": bool(anomaly.get("eligible")),
         "recommended_fix": recommended_fix,
         "requires_new_business_decision": not bool(anomaly.get("eligible")),
+    }
+
+
+def _inventory_record(blocker: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = dict(blocker.get("raw_evidence") or {})
+    doprinato = dict(evidence.get("doprinato_evidence") or {})
+    manifest = dict(evidence.get("manifest_decision") or {})
+    actual = dict(manifest.get("actual") or {})
+    source_fingerprint = str(
+        actual.get("semantic_evidence_fingerprint")
+        or doprinato.get("semantic_evidence_fingerprint")
+        or actual.get("raw_row_line_fingerprint")
+        or doprinato.get("raw_row_line_fingerprint")
+        or evidence.get("evidence_fingerprint")
+        or blocker.get("blocker_id")
+        or ""
+    )
+    return {
+        "blocker_id": str(blocker.get("blocker_id") or ""),
+        "reason_code": str(blocker.get("code") or "unknown"),
+        "exact_identity": {
+            "operation_id": str(blocker.get("operation_id") or ""),
+            "supply_id": str(blocker.get("supply_id") or ""),
+            "shipment_id": str(blocker.get("shipment_id") or ""),
+            "document_id": str(blocker.get("document_id") or ""),
+            "nm_id": blocker.get("nm_id"),
+            "business_date": str(blocker.get("business_date") or ""),
+            "source_identity": str(blocker.get("source_identity") or ""),
+        },
+        "source_fingerprint": source_fingerprint,
+        "evidence_summary": {
+            "classification": str(
+                evidence.get("classification") or blocker.get("class") or ""
+            ),
+            "reason": str(evidence.get("reason") or blocker.get("actual") or ""),
+            "quantity": blocker.get("quantity_impact"),
+            "recognized_capital_impact_rub": blocker.get(
+                "recognized_capital_impact_rub"
+            ),
+            "paid_capital_impact_rub": blocker.get("paid_capital_impact_rub"),
+        },
+        "affected_scope": list(blocker.get("affected_pipeline_stages") or []),
+        "recommended_policy_category": str(blocker.get("recommended_fix") or ""),
     }
 
 

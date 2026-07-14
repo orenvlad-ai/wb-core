@@ -30,10 +30,17 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.supplier_shipment_factual_correction import (  # noqa: E402
     SupplierShipmentFactualCorrectionBlock,
 )
+from packages.application.supplier_shipment_status import (  # noqa: E402
+    HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+)
 
 
 SHIPMENT_ID = "sup_b3070385b00b4eb680bd805d751d65be"
 DOCUMENT_ID = "tdoc_baa149260aad400681f225761e0cbcc0"
+FACTUAL_SOURCE_SHA = "59910f328db9e0e47ab06839eae9d378e6abf49822566581fd85320ece03d9d4"
+HISTORICAL_SHIPMENT_ID = "sup_b8009d513e12422cacb91e40983c16af"
+HISTORICAL_DOCUMENT_ID = "tdoc_42087454b84d4977a48f987658c6becd"
+HISTORICAL_SOURCE_SHA = "92e5a2d63a1330f6c4a7812d9c90425cf7707545a8ac318618449f17d6578085"
 
 
 def main() -> int:
@@ -47,21 +54,46 @@ def main() -> int:
             runtime=runtime,
             timestamp_factory=lambda: "2026-07-14T12:00:00Z",
         )
+        historical_change = {
+            "shipment_id": HISTORICAL_SHIPMENT_ID,
+            "action": "activate",
+            "exception_code": HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+            "expected_invoice_no": "26GN237",
+            "expected_invoice_date": "2026-03-29",
+            "expected_shipment_date": "2026-05-22",
+            "reason": "legacy_ff_accepted_without_known_factual_date",
+            "provenance": "operator_confirmed_historical_registry_state",
+        }
         dry = block.dry_run(
             shipment_id=SHIPMENT_ID,
             new_actual_shipment_date="2026-06-25",
             actor="smoke",
             expected_invoice_no="26GN390",
             expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=historical_change,
         )
         _assert(dry["scope"] == {"date_from": "2026-07-01", "date_to": "2026-07-14"}, "bounded scope")
         _assert(dry["crosses_cutover"], "legacy July evidence must prove cross-cutover")
         _assert(dry["derived_status"]["order_status"] == "in_transit", "derived in-transit")
-        _assert(dry["preflight"]["partial_state_detected"] is False, "header still old before apply")
+        _assert(dry["preflight"]["partial_state_detected"] is True, "legacy partial state detected")
+        _assert(dry["source"] == "historical_factual_date_adoption", "truthful adoption source")
+        _assert(dry["factual_date_already_correct_before_apply"], "date is already correct")
         _assert(dry["rebuild"]["second_run_changed"] == 0, "candidate second rebuild")
         _assert(dry["reconciliation"]["status"] == "ok", "candidate reconciliation")
         _assert(dry["baseline_fingerprint_before"] == dry["baseline_fingerprint_after"], "baseline fingerprint")
         _assert(dry["would_change"], "first dry-run changes target")
+        _assert(
+            dry["historical_status_change"]["derived_status"]["status_display"]
+            == "Принято на ФФ · дата неизвестна",
+            "historical display",
+        )
+        _assert(
+            dry["historical_status_change"]["evidence_summary"][
+                "existing_acceptance_operation_count"
+            ]
+            == 0,
+            "historical signal has no acceptance movement",
+        )
         later_dry = SupplierShipmentFactualCorrectionBlock(
             runtime=runtime,
             timestamp_factory=lambda: "2026-07-14T13:00:00Z",
@@ -71,6 +103,7 @@ def main() -> int:
             actor="smoke",
             expected_invoice_no="26GN390",
             expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=historical_change,
         )
         _assert(
             later_dry["fingerprint"] == dry["fingerprint"],
@@ -95,6 +128,7 @@ def main() -> int:
                 backup_dir=root / "failed-backups",
                 expected_invoice_no="26GN390",
                 expected_invoice_document_id=DOCUMENT_ID,
+                historical_status_change=historical_change,
             )
         except RuntimeError as exc:
             _assert("synthetic" in str(exc), "synthetic failure surfaced")
@@ -111,23 +145,38 @@ def main() -> int:
             backup_dir=root / "backups",
             expected_invoice_no="26GN390",
             expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=historical_change,
         )
         _assert(applied["applied"] is True, "correction applied")
         _assert(applied["post_run"]["changed"] == 0, "post apply rebuild zero")
         _assert(runtime.db_path.stat().st_ino == inode, "apply preserves live inode")
         after = _evidence(runtime)
-        _assert(after["actual_shipment_date"] == "2026-06-25", "header corrected")
+        _assert(after["actual_shipment_date"] == "2026-06-25", "correct header date preserved")
         _assert(after["order_status"] == "in_transit", "cache status corrected")
+        _assert(after["correction_source"] == "historical_factual_date_adoption", "truthful adoption persisted")
+        _assert(after["correction_old_value"] == "2026-06-25", "adoption old value is truthful")
+        _assert(after["correction_new_value"] == "2026-06-25", "adoption new value is truthful")
         _assert(after["legacy_effective_date"] == "2026-07-25", "legacy evidence preserved")
         _assert(after["other_shipment"] == before["other_shipment"], "other shipment preserved")
         _assert(after["invoice_amount_total"] == before["invoice_amount_total"], "invoice preserved")
+        _assert(after["historical_exception"] == HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE, "historical signal persisted")
+        _assert(after["historical_ff_acceptance_date"] == "", "historical acceptance date remains null")
+        _assert(after["historical_status"] == "accepted_ff", "historical status cache")
+        _assert(after["historical_acceptance_operations"] == before["historical_acceptance_operations"], "no acceptance movement")
+        _assert(after["historical_ff_layers"] == before["historical_ff_layers"], "no FF cost layer")
+        _assert(after["historical_event_count"] == 1, "one audited historical event")
         _assert(applied["backup"]["mode"] == "0600", "verified backup")
+        repeated_change = {
+            **historical_change,
+            "expected_current_exception": HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+        }
         repeated = block.dry_run(
             shipment_id=SHIPMENT_ID,
             new_actual_shipment_date="2026-06-25",
             actor="smoke",
             expected_invoice_no="26GN390",
             expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=repeated_change,
         )
         _assert(repeated["would_change"] is False, "repeat dry-run is zero-change")
         repeated_apply = block.apply(
@@ -138,8 +187,40 @@ def main() -> int:
             backup_dir=root / "backups",
             expected_invoice_no="26GN390",
             expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=repeated_change,
         )
         _assert(repeated_apply["applied"] is False, "repeat apply does not write")
+        revert_change = {
+            **historical_change,
+            "action": "revert",
+            "expected_current_exception": HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+            "reverses_event_id": "sshse_" + dry["fingerprint"][:24],
+        }
+        revert = block.dry_run(
+            shipment_id=SHIPMENT_ID,
+            new_actual_shipment_date="2026-06-25",
+            actor="smoke",
+            expected_invoice_no="26GN390",
+            expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=revert_change,
+        )
+        reverted = block.apply(
+            shipment_id=SHIPMENT_ID,
+            new_actual_shipment_date="2026-06-25",
+            actor="smoke",
+            fingerprint=revert["fingerprint"],
+            backup_dir=root / "backups",
+            expected_invoice_no="26GN390",
+            expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=revert_change,
+        )
+        _assert(reverted["applied"], "controlled historical revert applied")
+        reverted_evidence = _evidence(runtime)
+        _assert(reverted_evidence["historical_exception"] == "", "historical exception reverted")
+        _assert(reverted_evidence["historical_status"] == "production", "revert restores derived production status")
+        _assert(reverted_evidence["historical_acceptance_operations"] == before["historical_acceptance_operations"], "revert creates no movement")
+        _assert(reverted_evidence["historical_ff_layers"] == before["historical_ff_layers"], "revert creates no FF layer")
+        _assert(reverted_evidence["historical_event_count"] == 2, "reversal audit recorded")
     _clearing_cases()
     print("supplier_shipment_factual_date_correction_smoke: ok")
     return 0
@@ -152,18 +233,39 @@ def _runtime_fixture(runtime_dir: Path) -> RegistryUploadDbBackedRuntime:
         _ensure_schema(conn)
         _insert_primary(conn)
         _insert_fallback_production(conn, nm_id=222, shipment_id=SHIPMENT_ID)
+        _insert_fallback_production(
+            conn, nm_id=333, shipment_id=HISTORICAL_SHIPMENT_ID
+        )
         conn.execute(
             """
             UPDATE sheet_vitrina_v1_supplier_shipments
-            SET actual_shipment_date='2026-07-25',order_status='in_transit',
-                invoice_no='26GN390',invoice_document_id=?
+            SET actual_shipment_date='2026-06-25',order_status='in_transit',
+                invoice_no='26GN390',invoice_document_id=?,source_file_sha256=?
             WHERE shipment_id=?
             """,
-            (DOCUMENT_ID, SHIPMENT_ID),
+            (DOCUMENT_ID, FACTUAL_SOURCE_SHA, SHIPMENT_ID),
+        )
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_supplier_shipments
+            SET actual_shipment_date=NULL,actual_ff_acceptance_date=NULL,
+                order_status='accepted_ff',invoice_no='26GN237',
+                invoice_date='2026-03-29',shipment_date='2026-05-22',
+                invoice_document_id=?,source_file_sha256=?
+            WHERE shipment_id=?
+            """,
+            (HISTORICAL_DOCUMENT_ID, HISTORICAL_SOURCE_SHA, HISTORICAL_SHIPMENT_ID),
         )
         _insert_supplier_payment(conn, shipment_id=SHIPMENT_ID, cny="1000", rub="10000")
         _insert_ff_balance(conn, nm_id=111, quantity=6750)
-        _insert_snapshot(conn, "2026-05-16", {222: {"onec_FF_STOCK_unit_cost_rub": 80}})
+        _insert_snapshot(
+            conn,
+            "2026-05-16",
+            {
+                222: {"onec_FF_STOCK_unit_cost_rub": 80},
+                333: {"onec_FF_STOCK_unit_cost_rub": 90},
+            },
+        )
         _insert_snapshot(conn, "2026-07-01", {111: {"stock_total": 93250}, 222: {"stock_total": 0}})
         conn.commit()
     dry = run_canonical_backfill(_backfill_args(runtime_dir))
@@ -227,6 +329,46 @@ def _evidence(runtime: RegistryUploadDbBackedRuntime) -> dict[str, object]:
         canonical = conn.execute(
             "SELECT COUNT(*),COALESCE(SUM(physical_quantity+0),0) FROM sheet_vitrina_v1_canonical_cost_daily_state"
         ).fetchone()
+        historical = conn.execute(
+            """
+            SELECT actual_ff_acceptance_date,historical_status_exception,order_status
+            FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?
+            """,
+            (HISTORICAL_SHIPMENT_ID,),
+        ).fetchone()
+        historical_acceptance_operations = conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations WHERE source_object_id=?",
+            (HISTORICAL_SHIPMENT_ID,),
+        ).fetchone()[0]
+        historical_ff_layers = conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers WHERE supplier_shipment_id=?",
+            (HISTORICAL_SHIPMENT_ID,),
+        ).fetchone()[0]
+        historical_event_count = (
+            conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_shipment_historical_status_events WHERE shipment_id=?",
+                (HISTORICAL_SHIPMENT_ID,),
+            ).fetchone()[0]
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_supplier_shipment_historical_status_events'"
+            ).fetchone()
+            else 0
+        )
+        correction = (
+            conn.execute(
+                """
+                SELECT source,old_value,new_value
+                FROM sheet_vitrina_v1_supplier_shipment_factual_corrections
+                WHERE shipment_id=? AND status='success'
+                ORDER BY completed_at DESC,correction_id DESC LIMIT 1
+                """,
+                (SHIPMENT_ID,),
+            ).fetchone()
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_supplier_shipment_factual_corrections'"
+            ).fetchone()
+            else None
+        )
     return {
         "actual_shipment_date": str(header["actual_shipment_date"] or ""),
         "order_status": str(header["order_status"] or ""),
@@ -234,6 +376,15 @@ def _evidence(runtime: RegistryUploadDbBackedRuntime) -> dict[str, object]:
         "legacy_effective_date": str(legacy["effective_date"] or "") if legacy else "",
         "other_shipment": tuple(other) if other else (),
         "canonical": tuple(canonical),
+        "historical_ff_acceptance_date": str(historical["actual_ff_acceptance_date"] or ""),
+        "historical_exception": str(historical["historical_status_exception"] or ""),
+        "historical_status": str(historical["order_status"] or ""),
+        "historical_acceptance_operations": int(historical_acceptance_operations),
+        "historical_ff_layers": int(historical_ff_layers),
+        "historical_event_count": int(historical_event_count),
+        "correction_source": str(correction["source"] or "") if correction else "",
+        "correction_old_value": str(correction["old_value"] or "") if correction else "",
+        "correction_new_value": str(correction["new_value"] or "") if correction else "",
     }
 
 

@@ -9636,7 +9636,7 @@
               "<th scope=\"col\">",
               "<button class=\"shipment-registry-column-link\" type=\"button\" data-shipment-registry-detail=\"" + escapeHtml(String(column.shipment_id || "")) + "\">" + escapeHtml(registryDisplayValue(column.title || column.shipment_id)) + "</button>",
               "<span class=\"shipment-registry-column-sub\">" + escapeHtml(registryDisplayValue(column.subtitle)) + "</span>",
-              "<span class=\"shipment-registry-status-badge " + (column.order_status === "accepted_ff" ? "is-accepted-ff" : column.order_status === "in_transit" ? "is-in-transit" : "is-production") + "\">" + escapeHtml(registryDisplayValue(column.order_status_display || column.order_status_label || column.order_status)) + "</span>",
+              "<span class=\"shipment-registry-status-badge " + (column.order_status === "accepted_ff" ? "is-accepted-ff" : column.order_status === "in_transit" ? "is-in-transit" : "is-production") + "\" title=\"" + escapeHtml(column.order_status_tooltip || "Статус вычислен из фактических дат") + "\">" + escapeHtml(registryDisplayValue(column.order_status_display || column.order_status_label || column.order_status)) + "</span>",
               "<label class=\"shipment-registry-select\">",
               "<input type=\"checkbox\" data-shipment-registry-select=\"" + escapeHtml(String(column.shipment_id || "")) + "\"" + (shipmentRegistrySelectedShipmentId === String(column.shipment_id || "") ? " checked" : "") + ">",
               "<span>Сравнить</span>",

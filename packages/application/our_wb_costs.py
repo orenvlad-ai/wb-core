@@ -96,6 +96,8 @@ class OurWbCostBlock:
         for shipment in self.runtime.list_supplier_shipments():
             if str(shipment.get("order_status") or "") != ORDER_STATUS_ACCEPTED_FF:
                 continue
+            if str(shipment.get("historical_status_exception") or ""):
+                continue
             result = self.materialize_supplier_ff_cost_layer(str(shipment.get("shipment_id") or ""))
             if result is not None and bool(result.get("materialized")):
                 count += 1
@@ -109,6 +111,10 @@ class OurWbCostBlock:
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = dict(detail.get("header") or {})
+        if str(header.get("historical_status_exception") or ""):
+            raise ValueError(
+                "historical accepted-without-date status does not materialize an FF cost layer"
+            )
         lines = [dict(item or {}) for item in (detail.get("lines") or [])]
         financial_documents = self.runtime.list_supplier_financial_documents(shipment_id)
         expense_lines = self.runtime.list_supplier_financial_expense_lines(shipment_id)

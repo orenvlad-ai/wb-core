@@ -2539,6 +2539,10 @@ def _registry_column(context: Mapping[str, Any]) -> dict[str, Any]:
         "order_status_label": header.get("order_status_label") or "",
         "order_status_date": header.get("order_status_date") or "",
         "order_status_display": header.get("order_status_display") or "",
+        "order_status_tooltip": header.get("order_status_tooltip") or "",
+        "order_status_source": header.get("order_status_source") or "",
+        "order_status_exception": header.get("order_status_exception") or "",
+        "order_status_date_known": bool(header.get("order_status_date_known")),
         "order_status_warnings": list(header.get("order_status_warnings") or []),
         "expenses_complete": bool(header.get("expenses_complete")),
     }

@@ -119,6 +119,26 @@ def _multiple_independent_blockers_are_collected() -> None:
             raise AssertionError("blocked coverage contains unexplained NOT_REACHED")
         if report["preservation"]["production_mutation"] is not False:
             raise AssertionError("diagnostic collector may not mutate production")
+        inventory = report.get("anomaly_inventory") or []
+        if len(inventory) != len(primary):
+            raise AssertionError("aggregate inventory did not expose every primary blocker")
+        required = {
+            "reason_code",
+            "exact_identity",
+            "source_fingerprint",
+            "evidence_summary",
+            "affected_scope",
+            "recommended_policy_category",
+        }
+        if any(not required.issubset(item) for item in inventory):
+            raise AssertionError("aggregate inventory contract is incomplete")
+        repeated = run(_args(runtime))
+        if (
+            repeated["anomaly_inventory"] != inventory
+            or repeated["anomaly_inventory_fingerprint"]
+            != report["anomaly_inventory_fingerprint"]
+        ):
+            raise AssertionError("aggregate diagnostic inventory is not deterministic")
 
 
 def _same_supply_doprinato_lines_are_collected_independently() -> None:

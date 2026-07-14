@@ -271,6 +271,10 @@ class SupplierShipmentsBlock:
         return payload
 
     def create_shipment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if "historical_status_exception" in payload:
+            raise ValueError(
+                "Историческое исключение статуса доступно только через audited repo-owned flow."
+            )
         upload_id = str(payload.get("upload_id") or "").strip()
         if not upload_id:
             raise ValueError("upload_id is required")
@@ -392,6 +396,16 @@ class SupplierShipmentsBlock:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        if (
+            "historical_status_exception" in payload
+            and str(payload.get("historical_status_exception") or "").strip()
+            != str(
+                existing.get("header", {}).get("historical_status_exception") or ""
+            ).strip()
+        ):
+            raise ValueError(
+                "Историческое исключение статуса доступно только через audited repo-owned flow."
+            )
         now = self.timestamp_factory()
         business_today = supplier_business_today(timestamp=now)
         edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
@@ -405,6 +419,9 @@ class SupplierShipmentsBlock:
             actual_shipment_date=actual_shipment_date,
             actual_ff_acceptance_date=actual_ff_acceptance_date,
             business_today=business_today,
+            historical_status_exception=existing_header.get(
+                "historical_status_exception"
+            ),
         )
         factual_date_changed = (
             str(existing_header.get("actual_shipment_date") or "").strip()

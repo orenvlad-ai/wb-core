@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 from uuid import uuid4
 
 from packages.application.canonical_cost_engine import (
@@ -23,12 +23,36 @@ from packages.application.canonical_cost_engine import (
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.supplier_shipment_status import (
+    HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
     supplier_business_today,
     validate_supplier_factual_dates,
 )
 
 
 CORRECTION_SOURCE = "operator_factual_date_correction"
+HISTORICAL_ADOPTION_SOURCE = "historical_factual_date_adoption"
+HISTORICAL_STATUS_EVENT_TABLE = (
+    "sheet_vitrina_v1_supplier_shipment_historical_status_events"
+)
+AUTHORIZED_HISTORICAL_EXCEPTION_INVOICE_NO = "26GN237"
+AUTHORIZED_FACTUAL_ADOPTION_IDENTITY = {
+    "shipment_id": "sup_b3070385b00b4eb680bd805d751d65be",
+    "invoice_no": "26GN390",
+    "invoice_document_id": "tdoc_baa149260aad400681f225761e0cbcc0",
+    "source_file_sha256": (
+        "59910f328db9e0e47ab06839eae9d378e6abf49822566581fd85320ece03d9d4"
+    ),
+}
+AUTHORIZED_HISTORICAL_EXCEPTION_IDENTITY = {
+    "shipment_id": "sup_b8009d513e12422cacb91e40983c16af",
+    "invoice_no": "26GN237",
+    "invoice_date": "2026-03-29",
+    "shipment_date": "2026-05-22",
+    "invoice_document_id": "tdoc_42087454b84d4977a48f987658c6becd",
+    "source_file_sha256": (
+        "92e5a2d63a1330f6c4a7812d9c90425cf7707545a8ac318618449f17d6578085"
+    ),
+}
 CORRECTION_TABLE = "sheet_vitrina_v1_supplier_shipment_factual_corrections"
 ACTIVE_CORRECTION_STATUSES = {"queued", "running"}
 FINAL_CORRECTION_STATUSES = {"success", "error"}
@@ -237,6 +261,7 @@ class SupplierShipmentFactualCorrectionBlock:
         expected_invoice_no: str | None = None,
         expected_invoice_document_id: str | None = None,
         require_cross_cutover_rebuild: bool = True,
+        historical_status_change: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._candidate(
             shipment_id=shipment_id,
@@ -246,6 +271,7 @@ class SupplierShipmentFactualCorrectionBlock:
             expected_invoice_no=expected_invoice_no,
             expected_invoice_document_id=expected_invoice_document_id,
             require_cross_cutover_rebuild=require_cross_cutover_rebuild,
+            historical_status_change=historical_status_change,
         ) as candidate:
             return dict(candidate["report"])
 
@@ -262,6 +288,7 @@ class SupplierShipmentFactualCorrectionBlock:
         expected_invoice_document_id: str | None = None,
         correction_id: str | None = None,
         require_cross_cutover_rebuild: bool = True,
+        historical_status_change: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         approved_fingerprint = _required_text(fingerprint, "fingerprint")
         backup_root = Path(backup_dir)
@@ -273,8 +300,13 @@ class SupplierShipmentFactualCorrectionBlock:
             expected_invoice_no=expected_invoice_no,
             expected_invoice_document_id=expected_invoice_document_id,
             require_cross_cutover_rebuild=require_cross_cutover_rebuild,
+            historical_status_change=historical_status_change,
         ) as candidate:
             report = dict(candidate["report"])
+            historical_plan = report.get("historical_status_change")
+            target_shipment_ids = [shipment_id]
+            if historical_plan:
+                target_shipment_ids.append(str(historical_plan["shipment_id"]))
             if str(report["fingerprint"]) != approved_fingerprint:
                 raise ValueError("apply requires the exact current dry-run fingerprint")
             if not report["would_change"]:
@@ -303,9 +335,13 @@ class SupplierShipmentFactualCorrectionBlock:
             with _connect(source_db) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    if report["target_before_digest"] != _target_header_digest_conn(conn, shipment_id):
+                    if report["target_before_digest"] != _target_headers_digest_conn(
+                        conn, target_shipment_ids
+                    ):
                         raise ValueError("optimistic target shipment drift")
-                    if report["non_target_digest"] != _non_target_digest_conn(conn, shipment_id):
+                    if report["non_target_digest"] != _non_target_digest_many_conn(
+                        conn, target_shipment_ids
+                    ):
                         raise ValueError("optimistic non-target digest drift")
                     if report["legacy_pre_cutover_digest"] != _legacy_pre_cutover_digest_conn(conn):
                         raise ValueError("optimistic pre-cutover digest drift")
@@ -322,10 +358,66 @@ class SupplierShipmentFactualCorrectionBlock:
                             shipment_id,
                         ),
                     )
+                    if historical_plan:
+                        conn.execute(
+                            """
+                            UPDATE sheet_vitrina_v1_supplier_shipments
+                            SET historical_status_exception=?,order_status=?,updated_at=?
+                            WHERE shipment_id=?
+                            """,
+                            (
+                                historical_plan["new_exception"],
+                                historical_plan["derived_status"]["order_status"],
+                                applied_at,
+                                historical_plan["shipment_id"],
+                            ),
+                        )
                     if materialized:
                         ensure_canonical_cost_schema(conn)
                         _replace_canonical_tables(conn, materialized)
                     _ensure_correction_schema(conn)
+                    if historical_plan:
+                        _ensure_historical_status_schema(conn)
+                        event_id = "sshse_" + approved_fingerprint[:24]
+                        conn.execute(
+                            f"""
+                            INSERT INTO {HISTORICAL_STATUS_EVENT_TABLE}(
+                                event_id,shipment_id,exception_code,action,
+                                previous_exception,new_exception,reason,provenance,
+                                actor,evidence_fingerprint,request_fingerprint,
+                                apply_fingerprint,reverses_event_id,reversible,status,
+                                created_at,updated_at,metadata_json
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(event_id) DO NOTHING
+                            """,
+                            (
+                                event_id,
+                                historical_plan["shipment_id"],
+                                historical_plan["exception_code"],
+                                historical_plan["action"],
+                                historical_plan["previous_exception"],
+                                historical_plan["new_exception"],
+                                historical_plan["reason"],
+                                historical_plan["provenance"],
+                                actor,
+                                historical_plan["evidence_fingerprint"],
+                                report["request_fingerprint"],
+                                approved_fingerprint,
+                                historical_plan.get("reverses_event_id") or "",
+                                1,
+                                "success",
+                                applied_at,
+                                applied_at,
+                                _json({
+                                    "no_acceptance_movement": True,
+                                    "no_ff_cost_layer": True,
+                                    "factual_dates_unchanged": True,
+                                    "reversible_to": historical_plan[
+                                        "previous_exception"
+                                    ],
+                                }),
+                            ),
+                        )
                     conn.execute(
                         f"""
                         INSERT INTO {CORRECTION_TABLE}(
@@ -349,8 +441,8 @@ class SupplierShipmentFactualCorrectionBlock:
                             report["old_value"],
                             report["new_value"],
                             actor,
-                            CORRECTION_SOURCE,
-                            CORRECTION_SOURCE,
+                            report["source"],
+                            report["reason"],
                             "success",
                             "completed",
                             "Изменение сохранено и проверено",
@@ -364,7 +456,9 @@ class SupplierShipmentFactualCorrectionBlock:
                             "",
                         ),
                     )
-                    if report["target_after_digest"] != _target_header_digest_conn(conn, shipment_id):
+                    if report["target_after_digest"] != _target_headers_digest_conn(
+                        conn, target_shipment_ids
+                    ):
                         raise ValueError("candidate target header digest mismatch in transaction")
                     if report["candidate_canonical_digest"] != _canonical_digest_conn(
                         conn,
@@ -372,7 +466,9 @@ class SupplierShipmentFactualCorrectionBlock:
                         date_to=report["scope"]["date_to"],
                     ):
                         raise ValueError("candidate canonical digest mismatch in transaction")
-                    if report["non_target_digest"] != _non_target_digest_conn(conn, shipment_id):
+                    if report["non_target_digest"] != _non_target_digest_many_conn(
+                        conn, target_shipment_ids
+                    ):
                         raise ValueError("non-target data changed in transaction")
                     if report["legacy_pre_cutover_digest"] != _legacy_pre_cutover_digest_conn(conn):
                         raise ValueError("pre-cutover history changed in transaction")
@@ -394,7 +490,9 @@ class SupplierShipmentFactualCorrectionBlock:
                 )
                 if post["changed"] != 0:
                     raise ValueError("post-apply rebuild was not zero-change")
-                if report["non_target_digest"] != _non_target_digest(source_db, shipment_id):
+                if report["non_target_digest"] != _non_target_digest_many(
+                    source_db, target_shipment_ids
+                ):
                     raise ValueError("post-apply non-target digest mismatch")
                 if report["legacy_pre_cutover_digest"] != _legacy_pre_cutover_digest(source_db):
                     raise ValueError("post-apply pre-cutover digest mismatch")
@@ -455,6 +553,7 @@ class SupplierShipmentFactualCorrectionBlock:
         expected_invoice_no: str | None,
         expected_invoice_document_id: str | None,
         require_cross_cutover_rebuild: bool,
+        historical_status_change: Mapping[str, Any] | None,
     ) -> Iterator[dict[str, Any]]:
         shipment_id = _required_text(shipment_id, "shipment_id")
         actor = _required_text(actor or "operator", "actor")
@@ -477,15 +576,51 @@ class SupplierShipmentFactualCorrectionBlock:
             and str(raw_header.get("invoice_document_id") or "") != expected_invoice_document_id
         ):
             raise ValueError("shipment invoice_document_id does not match the authorized correction")
+        adoption_requested = bool(
+            old_value == new_value
+            and expected_invoice_no
+            == AUTHORIZED_FACTUAL_ADOPTION_IDENTITY["invoice_no"]
+            and expected_invoice_document_id
+            == AUTHORIZED_FACTUAL_ADOPTION_IDENTITY["invoice_document_id"]
+        )
+        if adoption_requested:
+            for field, expected in AUTHORIZED_FACTUAL_ADOPTION_IDENTITY.items():
+                if str(raw_header.get(field) or "") != expected:
+                    raise ValueError(
+                        f"historical factual adoption exact identity mismatch: {field}"
+                    )
         operation_timestamp = self.timestamp_factory()
         business_today = supplier_business_today(timestamp=operation_timestamp)
+        historical_plan = _prepare_historical_status_change(
+            source_db,
+            historical_status_change,
+            actor=actor,
+            business_today=business_today,
+        )
+        target_shipment_ids = [shipment_id]
+        if historical_plan is not None:
+            historical_shipment_id = str(historical_plan["shipment_id"])
+            if historical_shipment_id == shipment_id:
+                raise ValueError("historical status target must differ from factual-date target")
+            target_shipment_ids.append(historical_shipment_id)
         derived = validate_supplier_factual_dates(
             actual_shipment_date=new_value,
             actual_ff_acceptance_date=raw_header.get("actual_ff_acceptance_date"),
             business_today=business_today,
+            historical_status_exception=raw_header.get(
+                "historical_status_exception"
+            ),
         )
-        target_before_digest = _target_header_digest(source_db, shipment_id)
-        non_target_digest = _non_target_digest(source_db, shipment_id)
+        historical_adoption = adoption_requested
+        correction_source = (
+            HISTORICAL_ADOPTION_SOURCE if historical_adoption else CORRECTION_SOURCE
+        )
+        target_before_digest = _target_headers_digest(
+            source_db, target_shipment_ids
+        )
+        non_target_digest = _non_target_digest_many(
+            source_db, target_shipment_ids
+        )
         legacy_digest = _legacy_pre_cutover_digest(source_db)
         canonical_before = _canonical_digest(
             source_db,
@@ -493,17 +628,30 @@ class SupplierShipmentFactualCorrectionBlock:
             date_to=business_today,
         )
         preflight = _preflight(source_db, shipment_id, business_today)
+        historical_preflight = (
+            _preflight(
+                source_db,
+                str(historical_plan["shipment_id"]),
+                business_today,
+            )
+            if historical_plan is not None
+            else None
+        )
+        target_nm_ids = sorted(
+            set(preflight.get("nm_ids") or [])
+            | set((historical_preflight or {}).get("nm_ids") or [])
+        )
         baseline_fingerprint_before = _current_baseline_fingerprint(source_db)
         stage_snapshots_before = {
             CUTOVER_DATE: _target_stage_snapshot(
                 source_db,
                 CUTOVER_DATE,
-                nm_ids=preflight.get("nm_ids") or [],
+                nm_ids=target_nm_ids,
             ),
             business_today: _target_stage_snapshot(
                 source_db,
                 business_today,
-                nm_ids=preflight.get("nm_ids") or [],
+                nm_ids=target_nm_ids,
             ),
         }
         legacy_dispatch_dates = {
@@ -527,6 +675,20 @@ class SupplierShipmentFactualCorrectionBlock:
                     """,
                     (new_value or None, derived.order_status, operation_timestamp, shipment_id),
                 )
+                if historical_plan is not None:
+                    conn.execute(
+                        """
+                        UPDATE sheet_vitrina_v1_supplier_shipments
+                        SET historical_status_exception=?,order_status=?,updated_at=?
+                        WHERE shipment_id=?
+                        """,
+                        (
+                            historical_plan["new_exception"],
+                            historical_plan["derived_status"]["order_status"],
+                            operation_timestamp,
+                            historical_plan["shipment_id"],
+                        ),
+                    )
                 conn.commit()
             engine = CanonicalCostEngine(
                 runtime=candidate_runtime,
@@ -587,13 +749,13 @@ class SupplierShipmentFactualCorrectionBlock:
                 _candidate_reconciliation(
                     candidate_runtime.db_path,
                     business_today,
-                    nm_ids=preflight.get("nm_ids") or [],
+                    nm_ids=target_nm_ids,
                 )
                 if baseline is not None
                 else {
                     "status": "not_materialized",
                     "as_of_date": business_today,
-                    "target_nm_ids": list(preflight.get("nm_ids") or []),
+                    "target_nm_ids": target_nm_ids,
                     "stages": {},
                 }
             )
@@ -601,12 +763,12 @@ class SupplierShipmentFactualCorrectionBlock:
                 CUTOVER_DATE: _target_stage_snapshot(
                     candidate_runtime.db_path,
                     CUTOVER_DATE,
-                    nm_ids=preflight.get("nm_ids") or [],
+                    nm_ids=target_nm_ids,
                 ),
                 business_today: _target_stage_snapshot(
                     candidate_runtime.db_path,
                     business_today,
-                    nm_ids=preflight.get("nm_ids") or [],
+                    nm_ids=target_nm_ids,
                 ),
             }
             reconciliation["target_before"] = stage_snapshots_before
@@ -615,8 +777,12 @@ class SupplierShipmentFactualCorrectionBlock:
                 stage_snapshots_before,
                 stage_snapshots_after,
             )
-            target_after_digest = _target_header_digest(candidate_runtime.db_path, shipment_id)
-            if non_target_digest != _non_target_digest(candidate_runtime.db_path, shipment_id):
+            target_after_digest = _target_headers_digest(
+                candidate_runtime.db_path, target_shipment_ids
+            )
+            if non_target_digest != _non_target_digest_many(
+                candidate_runtime.db_path, target_shipment_ids
+            ):
                 raise ValueError("candidate changed non-target data")
             if legacy_digest != _legacy_pre_cutover_digest(candidate_runtime.db_path):
                 raise ValueError("candidate changed pre-cutover history")
@@ -626,12 +792,13 @@ class SupplierShipmentFactualCorrectionBlock:
                     "old_value": old_value,
                     "new_value": new_value,
                     "actor": actor,
-                    "source": CORRECTION_SOURCE,
+                    "source": correction_source,
                     "target_before_digest": target_before_digest,
+                    "historical_status_change": historical_plan,
                 }
             )
             plan = {
-                "contract_name": "supplier_shipment_factual_date_correction_v1",
+                "contract_name": "supplier_shipment_factual_reconciliation_v2",
                 "status": "ready",
                 "scope": {"date_from": CUTOVER_DATE, "date_to": business_today},
                 "shipment_id": shipment_id,
@@ -640,8 +807,10 @@ class SupplierShipmentFactualCorrectionBlock:
                 "old_value": old_value,
                 "new_value": new_value,
                 "actor": actor,
-                "source": CORRECTION_SOURCE,
-                "reason": CORRECTION_SOURCE,
+                "source": correction_source,
+                "reason": correction_source,
+                "factual_date_already_correct_before_apply": historical_adoption,
+                "historical_status_change": historical_plan,
                 "crosses_cutover": crosses_cutover,
                 "baseline_fingerprint_before": baseline_fingerprint_before,
                 "baseline_fingerprint_after": baseline_fingerprint_after,
@@ -657,6 +826,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 "rebuild": rebuild_payload,
                 "reconciliation": reconciliation,
                 "preflight": preflight,
+                "historical_preflight": historical_preflight,
                 "affected_read_models": [
                     "supplier shipment detail/list",
                     "shipment registry matrix",
@@ -677,6 +847,11 @@ class SupplierShipmentFactualCorrectionBlock:
             }
             fingerprint = _hash(plan)
             successful = _successful_correction_by_values(source_db, shipment_id, new_value)
+            historical_successful = (
+                _successful_historical_status_change(source_db, historical_plan)
+                if historical_plan is not None
+                else True
+            )
             report = {
                 **plan,
                 "mode": "dry-run",
@@ -685,6 +860,7 @@ class SupplierShipmentFactualCorrectionBlock:
                     target_before_digest != target_after_digest
                     or canonical_before != canonical_after
                     or not successful
+                    or not historical_successful
                 ),
                 "applied": False,
                 "backup": None,
@@ -755,6 +931,200 @@ class SupplierShipmentFactualCorrectionBlock:
                 ),
             )
             conn.commit()
+
+
+def _prepare_historical_status_change(
+    db_path: Path,
+    change: Mapping[str, Any] | None,
+    *,
+    actor: str,
+    business_today: str,
+) -> dict[str, Any] | None:
+    if not change:
+        return None
+    shipment_id = _required_text(change.get("shipment_id"), "historical shipment_id")
+    action = _required_text(change.get("action") or "activate", "historical action")
+    if action not in {"activate", "revert"}:
+        raise ValueError("historical action must be activate or revert")
+    exception_code = _required_text(
+        change.get("exception_code")
+        or HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+        "historical exception_code",
+    )
+    if exception_code != HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE:
+        raise ValueError("unsupported historical status exception")
+    expected_invoice_no = _required_text(
+        change.get("expected_invoice_no"), "historical expected_invoice_no"
+    )
+    if expected_invoice_no != AUTHORIZED_HISTORICAL_EXCEPTION_INVOICE_NO:
+        raise ValueError("historical exception is authorized exact-only for 26GN237")
+    if shipment_id != AUTHORIZED_HISTORICAL_EXCEPTION_IDENTITY["shipment_id"]:
+        raise ValueError("historical exception shipment_id is not in the exact policy")
+    reason = _required_text(change.get("reason"), "historical reason")
+    provenance = _required_text(change.get("provenance"), "historical provenance")
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+            (shipment_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"historical supplier shipment not found: {shipment_id}")
+        header = dict(row)
+        history_head: dict[str, Any] = {}
+        if _table_exists(conn, HISTORICAL_STATUS_EVENT_TABLE):
+            history_row = conn.execute(
+                f"""
+                SELECT event_id,action,new_exception,apply_fingerprint,created_at
+                FROM {HISTORICAL_STATUS_EVENT_TABLE}
+                WHERE shipment_id=? AND status='success'
+                ORDER BY created_at DESC,event_id DESC LIMIT 1
+                """,
+                (shipment_id,),
+            ).fetchone()
+            if history_row is not None:
+                history_head = dict(history_row)
+    if str(header.get("invoice_no") or "") != expected_invoice_no:
+        raise ValueError("historical shipment invoice_no identity mismatch")
+    for field, expected in AUTHORIZED_HISTORICAL_EXCEPTION_IDENTITY.items():
+        if field == "shipment_id":
+            continue
+        if str(header.get(field) or "") != str(expected):
+            raise ValueError(f"historical shipment exact identity mismatch: {field}")
+    expected_invoice_date = str(change.get("expected_invoice_date") or "").strip()
+    if expected_invoice_date and str(header.get("invoice_date") or "") != expected_invoice_date:
+        raise ValueError("historical shipment invoice_date identity mismatch")
+    expected_shipment_date = str(change.get("expected_shipment_date") or "").strip()
+    if expected_shipment_date and str(header.get("shipment_date") or "") != expected_shipment_date:
+        raise ValueError("historical shipment shipment_date identity mismatch")
+    if action == "activate" and (
+        str(header.get("actual_shipment_date") or "").strip()
+        or str(header.get("actual_ff_acceptance_date") or "").strip()
+    ):
+        raise ValueError("historical accepted-without-date requires both factual dates to remain empty")
+    previous = str(header.get("historical_status_exception") or "").strip()
+    expected_previous = str(
+        change.get(
+            "expected_current_exception",
+            "" if action == "activate" else exception_code,
+        )
+        or ""
+    ).strip()
+    if previous != expected_previous:
+        raise ValueError(
+            "historical status exception drift: "
+            f"expected {expected_previous!r}, got {previous!r}"
+        )
+    reverses_event_id = str(change.get("reverses_event_id") or "").strip()
+    if action == "revert":
+        if not reverses_event_id:
+            raise ValueError("historical revert requires reverses_event_id")
+        with _connect(db_path) as conn:
+            if not _table_exists(conn, HISTORICAL_STATUS_EVENT_TABLE):
+                raise ValueError("historical revert activation event is missing")
+            activation = conn.execute(
+                f"""
+                SELECT 1 FROM {HISTORICAL_STATUS_EVENT_TABLE}
+                WHERE event_id=? AND shipment_id=? AND action='activate'
+                  AND new_exception=? AND status='success'
+                LIMIT 1
+                """,
+                (reverses_event_id, shipment_id, exception_code),
+            ).fetchone()
+        if activation is None:
+            raise ValueError("historical revert activation identity mismatch")
+    elif reverses_event_id:
+        raise ValueError("historical activation cannot reverse another event")
+    new_exception = exception_code if action == "activate" else ""
+    derived = validate_supplier_factual_dates(
+        actual_shipment_date=header.get("actual_shipment_date"),
+        actual_ff_acceptance_date=header.get("actual_ff_acceptance_date"),
+        business_today=business_today,
+        historical_status_exception=new_exception,
+    )
+    evidence = _historical_status_evidence(db_path, shipment_id)
+    expected_evidence = str(change.get("expected_evidence_fingerprint") or "").strip()
+    if expected_evidence and expected_evidence != evidence["fingerprint"]:
+        raise ValueError("historical status evidence fingerprint mismatch")
+    return {
+        "shipment_id": shipment_id,
+        "invoice_no": expected_invoice_no,
+        "invoice_date": str(header.get("invoice_date") or ""),
+        "action": action,
+        "exception_code": exception_code,
+        "previous_exception": previous,
+        "new_exception": new_exception,
+        "reason": reason,
+        "provenance": provenance,
+        "actor": actor,
+        "evidence_fingerprint": evidence["fingerprint"],
+        "evidence_summary": evidence["summary"],
+        "reverses_event_id": reverses_event_id,
+        "reversible": True,
+        "history_head": history_head,
+        "derived_status": derived.to_dict(),
+    }
+
+
+def _historical_status_evidence(db_path: Path, shipment_id: str) -> dict[str, Any]:
+    with _connect(db_path) as conn:
+        header_row = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+            (shipment_id,),
+        ).fetchone()
+        if header_row is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        raw_header = dict(header_row)
+        header = {
+            key: raw_header.get(key)
+            for key in (
+                "shipment_id",
+                "created_at",
+                "shipment_date",
+                "actual_shipment_date",
+                "actual_ff_acceptance_date",
+                "invoice_no",
+                "invoice_date",
+                "invoice_document_id",
+                "supplier_name",
+                "product_qty_total",
+                "invoice_amount_total",
+                "source_file_sha256",
+            )
+        }
+        lines = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT line_id,line_type,sort_order,internal_nm_id,qty,amount,match_status
+                FROM sheet_vitrina_v1_supplier_shipment_lines
+                WHERE shipment_id=? ORDER BY sort_order,line_id
+                """,
+                (shipment_id,),
+            ).fetchall()
+        ]
+        ff_operations = 0
+        ff_layers = 0
+        if _table_exists(conn, "sheet_vitrina_v1_ff_stock_operations"):
+            ff_operations = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations WHERE source_object_id=?",
+                    (shipment_id,),
+                ).fetchone()[0]
+            )
+        if _table_exists(conn, "sheet_vitrina_v1_supplier_ff_cost_layers"):
+            ff_layers = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers WHERE supplier_shipment_id=?",
+                    (shipment_id,),
+                ).fetchone()[0]
+            )
+    summary = {
+        "header": header,
+        "lines": lines,
+        "existing_acceptance_operation_count": ff_operations,
+        "existing_ff_cost_layer_count": ff_layers,
+    }
+    return {"fingerprint": _hash(summary), "summary": summary}
 
 
 def _preflight(db_path: Path, shipment_id: str, date_to: str) -> dict[str, Any]:
@@ -1079,6 +1449,25 @@ def _target_header_digest_conn(conn: sqlite3.Connection, shipment_id: str) -> st
     return _hash({"header": header, "lines": lines})
 
 
+def _target_headers_digest(db_path: Path, shipment_ids: Iterable[str]) -> str:
+    with _connect(db_path) as conn:
+        return _target_headers_digest_conn(conn, shipment_ids)
+
+
+def _target_headers_digest_conn(
+    conn: sqlite3.Connection, shipment_ids: Iterable[str]
+) -> str:
+    return _hash(
+        [
+            {
+                "shipment_id": shipment_id,
+                "digest": _target_header_digest_conn(conn, shipment_id),
+            }
+            for shipment_id in sorted({str(item) for item in shipment_ids})
+        ]
+    )
+
+
 def _non_target_digest(db_path: Path, shipment_id: str) -> str:
     with _connect(db_path) as conn:
         return _non_target_digest_conn(conn, shipment_id)
@@ -1117,6 +1506,70 @@ def _non_target_digest_conn(conn: sqlite3.Connection, shipment_id: str) -> str:
         "sheet_vitrina_v1_own_capital_wb_outstanding",
         "sheet_vitrina_v1_wb_opening_baseline",
     )
+    for table in tables:
+        if table not in existing:
+            continue
+        where, params = filtered.get(table, ("1=1", ()))
+        evidence[table] = [
+            list(row)
+            for row in conn.execute(
+                f'SELECT * FROM "{table}" WHERE {where} ORDER BY rowid',
+                params,
+            )
+        ]
+    return _hash(evidence)
+
+
+def _non_target_digest_many(db_path: Path, shipment_ids: Iterable[str]) -> str:
+    with _connect(db_path) as conn:
+        return _non_target_digest_many_conn(conn, shipment_ids)
+
+
+def _non_target_digest_many_conn(
+    conn: sqlite3.Connection, shipment_ids: Iterable[str]
+) -> str:
+    ids = sorted({str(item) for item in shipment_ids if str(item)})
+    if not ids:
+        raise ValueError("at least one target shipment is required")
+    placeholders = ",".join("?" for _ in ids)
+    filtered = {
+        "sheet_vitrina_v1_supplier_shipments": (
+            f"shipment_id NOT IN ({placeholders})",
+            tuple(ids),
+        ),
+        "sheet_vitrina_v1_supplier_shipment_lines": (
+            f"shipment_id NOT IN ({placeholders})",
+            tuple(ids),
+        ),
+    }
+    tables = (
+        "sheet_vitrina_v1_supplier_shipments",
+        "sheet_vitrina_v1_supplier_shipment_lines",
+        "sheet_vitrina_v1_supplier_financial_documents",
+        "sheet_vitrina_v1_supplier_financial_expense_lines",
+        "sheet_vitrina_v1_trade_documents",
+        "sheet_vitrina_v1_invoice_contract_links",
+        "sheet_vitrina_v1_supplier_ff_cost_layers",
+        "sheet_vitrina_v1_supplier_ff_cost_layer_lines",
+        "sheet_vitrina_v1_cny_documents",
+        "sheet_vitrina_v1_cny_ledger_operations",
+        "sheet_vitrina_v1_ff_stock_operations",
+        "sheet_vitrina_v1_ff_stock_operation_lines",
+        "sheet_vitrina_v1_wb_supplies",
+        "sheet_vitrina_v1_wb_supply_cost_layers",
+        "sheet_vitrina_v1_nomenclature_items",
+        "sheet_vitrina_v1_ready_snapshots",
+        "sheet_vitrina_v1_onec_stocks",
+        "sheet_vitrina_v1_own_capital_payment_layers",
+        "sheet_vitrina_v1_own_capital_events",
+        "sheet_vitrina_v1_own_capital_wb_outstanding",
+        "sheet_vitrina_v1_wb_opening_baseline",
+    )
+    existing = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    evidence: dict[str, Any] = {}
     for table in tables:
         if table not in existing:
             continue
@@ -1202,6 +1655,29 @@ def _successful_correction_by_values(db_path: Path, shipment_id: str, new_value:
     return row is not None
 
 
+def _successful_historical_status_change(
+    db_path: Path, plan: Mapping[str, Any]
+) -> bool:
+    with _connect(db_path) as conn:
+        if not _table_exists(conn, HISTORICAL_STATUS_EVENT_TABLE):
+            return False
+        row = conn.execute(
+            f"""
+            SELECT 1 FROM {HISTORICAL_STATUS_EVENT_TABLE}
+            WHERE shipment_id=? AND action=? AND new_exception=?
+              AND evidence_fingerprint=? AND status='success'
+            LIMIT 1
+            """,
+            (
+                plan["shipment_id"],
+                plan["action"],
+                plan["new_exception"],
+                plan["evidence_fingerprint"],
+            ),
+        ).fetchone()
+    return row is not None
+
+
 def _ensure_correction_schema(conn: sqlite3.Connection) -> None:
     script = f"""
         CREATE TABLE IF NOT EXISTS {CORRECTION_TABLE} (
@@ -1236,6 +1712,39 @@ def _ensure_correction_schema(conn: sqlite3.Connection) -> None:
         sql = statement.strip()
         if sql:
             conn.execute(sql)
+
+
+def _ensure_historical_status_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {HISTORICAL_STATUS_EVENT_TABLE} (
+            event_id TEXT PRIMARY KEY,
+            shipment_id TEXT NOT NULL,
+            exception_code TEXT NOT NULL,
+            action TEXT NOT NULL,
+            previous_exception TEXT NOT NULL DEFAULT '',
+            new_exception TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            evidence_fingerprint TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            apply_fingerprint TEXT NOT NULL,
+            reverses_event_id TEXT,
+            reversible INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{{}}'
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS supplier_historical_status_events_by_shipment
+        ON {HISTORICAL_STATUS_EVENT_TABLE}(shipment_id,created_at DESC,event_id DESC)
+        """
+    )
 
 
 def _correction_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
