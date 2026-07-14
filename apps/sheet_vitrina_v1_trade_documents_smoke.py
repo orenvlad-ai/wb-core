@@ -70,7 +70,7 @@ def main() -> None:
                 "our_sku": "SMOKE-IP14PRO-CLEAR",
                 "nm_id": 210183919,
                 "vendor_code": "SMOKE-IP14PRO-CLEAR",
-                "barcode": "210183919",
+                "barcode": "1111111111111",
                 "nomenclature_name": "Clear iPhone 14 Pro",
                 "product_type": "clear",
                 "match_key": "clear|iphone_14_pro",
@@ -582,9 +582,9 @@ def _build_invoice_fixture() -> bytes:
     sheet.append(["Date of Contract", "2026.5.13"])
     sheet.append(["Supplier:", "HanShang Technology", "", "Currency:", "RMB"])
     sheet.append(["Invoice Total:", 15])
-    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
-    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""])
-    sheet.append([2, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
+    sheet.append(["NO.", "MODELS", "NAME & SPECIFICATION", "Barcode", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
+    sheet.append([1, "iPhone 14 Pro", "高清膜 smk", "1111111111111", 10, 1, 10, ""])
+    sheet.append([2, "OPP bag packets", "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

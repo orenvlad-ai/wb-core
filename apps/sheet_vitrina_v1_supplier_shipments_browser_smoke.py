@@ -246,7 +246,7 @@ def main() -> None:
                 expect(draft_row.locator("[data-field='aliases']")).to_have_count(0)
                 expect(draft_row.locator("[data-field='comment']")).to_have_count(0)
                 draft_row.locator("[data-field='nm_id']").fill("210183919")
-                draft_row.locator("[data-field='barcode']").fill("1000000000001")
+                draft_row.locator("[data-field='barcode']").fill("1111111111111")
                 draft_row.locator("[data-field='nomenclature_name']").fill("Clear iPhone 14 Pro")
                 expect(draft_row.locator("[data-field='product_type']")).to_contain_text("Clean")
                 type_width = draft_row.locator("[data-field='product_type']").evaluate("(node) => node.getBoundingClientRect().width")
@@ -264,7 +264,7 @@ def main() -> None:
                 draft_row.get_by_role("button", name="Сохранить").click()
                 expect(settings_page.locator("#nomenclatureMessage")).to_contain_text("Справочник сохранён.", timeout=5000)
                 saved_first_row = settings_page.locator("#nomenclatureRows tr").first
-                expect(saved_first_row.locator("[data-field='barcode']")).to_have_value("1000000000001")
+                expect(saved_first_row.locator("[data-field='barcode']")).to_have_value("1111111111111")
                 expect(saved_first_row.locator(".barcode-status").first).to_contain_text("manual")
                 expect(saved_first_row.locator("details.compat-keys")).to_have_count(1)
                 expect(saved_first_row.locator("details.compat-keys")).not_to_have_attribute("open", "")
@@ -272,6 +272,7 @@ def main() -> None:
                 settings_page.get_by_role("button", name="Добавить строку").click()
                 compat_row = settings_page.locator("#nomenclatureRows tr").first
                 compat_row.locator("[data-field='nm_id']").fill("391662410")
+                compat_row.locator("[data-field='barcode']").fill("2222222222222")
                 compat_row.locator("[data-field='nomenclature_name']").fill("anti-spy iPhone 14 / 13 / 13Pro")
                 compat_row.locator("[data-field='product_type']").select_option("anti_spy")
                 compat_row.locator("[data-field='match_key']").fill("anti_spy|iphone_14_13_13pro")
@@ -281,6 +282,7 @@ def main() -> None:
                 settings_page.get_by_role("button", name="Добавить строку").click()
                 third_row = settings_page.locator("#nomenclatureRows tr").first
                 third_row.locator("[data-field='nm_id']").fill("391662411")
+                third_row.locator("[data-field='barcode']").fill("3333333333333")
                 third_row.locator("[data-field='nomenclature_name']").fill("anti-spy iPhone 14 Pro Max")
                 third_row.locator("[data-field='product_type']").select_option("anti_spy")
                 third_row.locator("[data-field='match_key']").fill("anti_spy|iphone_14_pro_max")
@@ -404,8 +406,8 @@ def main() -> None:
                     raise AssertionError(f"price conformity symbols must map to success/error classes, got {first_price_class!r}, {second_price_class!r}")
                 expect(frame.locator("#contractNoInput")).to_have_value("CNT-2026-0513")
                 expect(frame.locator("#contractDateInput")).to_have_value("2026-05-13")
-                expect(frame.locator("#productLines").get_by_text("Сопоставлено", exact=True).first).to_be_visible()
-                expect(frame.locator("#productLines").get_by_text("Сопоставлено по совместимости", exact=True)).to_be_visible()
+                expect(frame.locator("#productLines").get_by_text("Сопоставлено по штрихкоду", exact=True)).to_have_count(3)
+                expect(frame.locator("#productLines").get_by_text("Сопоставлено по совместимости", exact=True)).to_have_count(0)
                 expect(frame.locator("select[data-line-field='match_status']")).to_have_count(0)
                 expect(frame.get_by_role("button", name="重新匹配 / Re-match / Пересопоставить")).to_have_count(0)
                 frame.get_by_label("Плановая дата отгрузки").fill("2026-05-14")
@@ -1110,6 +1112,7 @@ def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> 
             "is_active": True,
             "our_sku": "",
             "nm_id": 210183919,
+            "barcode": "1111111111111",
             "nomenclature_name": "Clear iPhone 14 Pro",
             "product_type": "clear",
             "match_key": "clear|iphone_14_pro",
@@ -1128,6 +1131,7 @@ def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> 
             "is_active": True,
             "our_sku": "",
             "nm_id": 391662410,
+            "barcode": "2222222222222",
             "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
             "product_type": "anti_spy",
             "match_key": "anti_spy|iphone_14_13_13pro",
@@ -1146,6 +1150,7 @@ def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> 
             "is_active": True,
             "our_sku": "",
             "nm_id": 391662411,
+            "barcode": "3333333333333",
             "nomenclature_name": "anti-spy iPhone 14 Pro Max",
             "product_type": "anti_spy",
             "match_key": "anti_spy|iphone_14_pro_max",
@@ -1201,11 +1206,11 @@ def _build_invoice_fixture() -> bytes:
     sheet.append(["Date of Contract", "2026.5.13"])
     sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "RMB"])
     sheet.append(["Invoice Total:", 33])
-    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
-    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""])
-    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 17e / 16e /14 / 13 / 13Pro", 4, 2, 8, ""])
-    sheet.append([3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
-    sheet.append([4, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
+    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "Barcode", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
+    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", "1111111111111", 10, 1, 10, ""])
+    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 17e / 16e /14 / 13 / 13Pro", "2222222222222", 4, 2, 8, ""])
+    sheet.append([3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", "3333333333333", 5, 2, 10, ""])
+    sheet.append([4, "OPP bag packets", "", "", 100, 0.05, 5, "OPP packets"])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

@@ -13,6 +13,7 @@ from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, 
 from packages.contracts.supplier_shipments import (
     LINE_TYPE_PRODUCT,
     MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_BARCODE,
     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
 )
 
@@ -1665,7 +1666,11 @@ def _supplier_shipment_lines(shipment_detail: Mapping[str, Any]) -> tuple[list[d
         match_status = str(item.get("match_status") or "")
         nm_id = _optional_int(item.get("internal_nm_id"))
         quantity = _optional_float(item.get("qty"))
-        if match_status not in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY} or nm_id is None:
+        if match_status not in {
+            MATCH_STATUS_MATCHED,
+            MATCH_STATUS_MATCHED_BY_BARCODE,
+            MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+        } or nm_id is None:
             warnings.append(f"Строка поставщика {item.get('source_no') or item.get('sort_order') or ''}: нет matched nmId")
             continue
         if quantity is None or quantity <= 0:

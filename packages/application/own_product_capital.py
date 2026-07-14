@@ -2520,7 +2520,7 @@ def _validated_product_lines(lines: Iterable[Mapping[str, Any]]) -> list[dict[st
         amount = _optional_decimal(raw.get("amount"))
         if amount is None:
             amount = qty * _positive_decimal(raw.get("unit_price"), f"lines[{index}].unit_price")
-        if amount <= ZERO or match_status not in {"matched", "matched_by_compatibility"}:
+        if amount <= ZERO or match_status not in {"matched", "matched_by_barcode", "matched_by_compatibility"}:
             raise ValueError(f"supplier line {line_id} is not deterministically matched with positive value")
         result.append(
             {

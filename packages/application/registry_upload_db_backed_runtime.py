@@ -3845,6 +3845,7 @@ class RegistryUploadDbBackedRuntime:
                     line_type,
                     sort_order,
                     source_no,
+                    barcode,
                     product_type,
                     model_raw,
                     model_normalized,
@@ -3869,7 +3870,7 @@ class RegistryUploadDbBackedRuntime:
                     price_conformity_context_json,
                     raw_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -3878,6 +3879,7 @@ class RegistryUploadDbBackedRuntime:
                         str(item.get("line_type") or ""),
                         int(item.get("sort_order") or index),
                         str(item.get("source_no") or ""),
+                        str(item.get("barcode") or ""),
                         str(item.get("product_type") or ""),
                         str(item.get("model_raw") or ""),
                         str(item.get("model_normalized") or ""),
@@ -6867,11 +6869,13 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    raw_payload = _loads_json_object(row["raw_json"])
     return {
         "line_id": row["line_id"],
         "line_type": row["line_type"],
         "sort_order": row["sort_order"],
         "source_no": row["source_no"] or "",
+        "barcode": row["barcode"] or "",
         "product_type": row["product_type"] or "",
         "model_raw": row["model_raw"] or "",
         "model_normalized": row["model_normalized"] or "",
@@ -6886,6 +6890,7 @@ def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "comment": row["comment"] or "",
         "match_status": row["match_status"] or "",
         "manual_override": bool(row["manual_override"]),
+        "match_evidence": dict(raw_payload.get("match_evidence") or {}),
         "invoice_price_yuan_snapshot": row["invoice_price_yuan_snapshot"],
         "reference_purchase_price_yuan_snapshot": row["reference_purchase_price_yuan_snapshot"],
         "price_conformity_status": row["price_conformity_status"] or "not_checked",
@@ -6894,7 +6899,7 @@ def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "price_conformity_reason": row["price_conformity_reason"] or "not_checked",
         "price_conformity_actor": row["price_conformity_actor"] or "",
         "price_conformity_context": _loads_json_object(row["price_conformity_context_json"]),
-        "raw": _loads_json_object(row["raw_json"]),
+        "raw": raw_payload,
     }
 
 
@@ -8289,6 +8294,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             line_type TEXT NOT NULL,
             sort_order INTEGER NOT NULL,
             source_no TEXT,
+            barcode TEXT,
             product_type TEXT,
             model_raw TEXT,
             model_normalized TEXT,
@@ -8816,6 +8822,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             column_name=column_name,
             column_sql="TEXT",
         )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipment_lines",
+        column_name="barcode",
+        column_sql="TEXT",
+    )
     _ensure_column(
         conn,
         table_name="sheet_vitrina_v1_supplier_shipment_lines",

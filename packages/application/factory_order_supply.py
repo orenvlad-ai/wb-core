@@ -68,6 +68,7 @@ from packages.contracts.supplier_shipments import (
     LINE_TYPE_PRODUCT,
     MATCH_STATUS_AMBIGUOUS,
     MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_BARCODE,
     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
     MATCH_STATUS_UNMATCHED,
     ORDER_STATUS_ACCEPTED_FF,
@@ -1541,7 +1542,7 @@ def _summarize_supplier_shipment_for_factory_inbound(
         if qty is not None:
             total_product_quantity += qty
         match_status = str(line.get("match_status") or "").strip()
-        if match_status in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY} and _optional_int(line.get("internal_nm_id")) is not None:
+        if match_status in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_BARCODE, MATCH_STATUS_MATCHED_BY_COMPATIBILITY} and _optional_int(line.get("internal_nm_id")) is not None:
             matched_line_count += 1
         elif match_status == MATCH_STATUS_AMBIGUOUS:
             ambiguous_line_count += 1
@@ -1591,7 +1592,11 @@ def _supplier_line_is_usable_factory_inbound(line: Mapping[str, Any], *, has_val
         return False
     if line.get("line_type") != LINE_TYPE_PRODUCT:
         return False
-    if str(line.get("match_status") or "").strip() not in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY}:
+    if str(line.get("match_status") or "").strip() not in {
+        MATCH_STATUS_MATCHED,
+        MATCH_STATUS_MATCHED_BY_BARCODE,
+        MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+    }:
         return False
     if _optional_int(line.get("internal_nm_id")) is None:
         return False

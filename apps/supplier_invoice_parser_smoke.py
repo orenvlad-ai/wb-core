@@ -1,4 +1,4 @@
-"""Smoke-check supplier invoice XLSX parser and deterministic matching."""
+"""Smoke-check supplier invoice barcode detection and barcode-only matching."""
 
 from __future__ import annotations
 
@@ -13,168 +13,269 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.supplier_invoice_parser import extract_iphone_model_keys, parse_supplier_invoice_xlsx  # noqa: E402
+from packages.application.supplier_invoice_parser import (  # noqa: E402
+    normalize_barcode_value,
+    parse_supplier_invoice_xlsx,
+)
 from packages.application.supplier_shipments import _apply_nomenclature_matches  # noqa: E402
 
 
+PRIMARY_BARCODE = "0123456789012"
+SECONDARY_BARCODE = "1234567890123"
+THIRD_BARCODE = "1234567890124"
+
+
 def main() -> None:
-    expected_keys = {
-        "iPhone 17e / 16e /14 / 13 / 13Pro": [
-            "iphone_17e",
-            "iphone_16e",
-            "iphone_14",
-            "iphone_13",
-            "iphone_13_pro",
-        ],
-        "iPhone 15 / 16": ["iphone_15", "iphone_16"],
-        "iPhone 16 Pro/17": ["iphone_16_pro", "iphone_17"],
-    }
-    for raw_model, expected in expected_keys.items():
-        actual = extract_iphone_model_keys(raw_model)
-        if actual != expected:
-            raise AssertionError(f"compatible model normalizer mismatch for {raw_model!r}: {actual}")
-    workbook_bytes = _build_invoice_fixture()
+    _assert_header_aliases()
+    _assert_structural_detection()
+    _assert_conflict_and_rejection_paths()
+    _assert_lossless_barcode_values()
+    _assert_barcode_only_matching()
+    _assert_metadata_totals_and_extras()
+    print("supplier_invoice_parser_smoke: OK")
+
+
+def _assert_header_aliases() -> None:
+    aliases = [
+        "Braocde\n(条形码）",
+        "Barcode",
+        "Bar code",
+        "条形码",
+        "條形碼",
+        "ШК",
+        "Штрихкод",
+        "Штрих-код",
+        "  bAr \n CoDe  ",
+    ]
+    for header in aliases:
+        payload = parse_supplier_invoice_xlsx(_build_invoice_fixture(barcode_header=header), filename="sanitized.xlsx")
+        diagnostics = payload.get("diagnostics", {}).get("barcode_column", {})
+        if diagnostics.get("method") != "header_alias" or diagnostics.get("column_index") != 4:
+            raise AssertionError(f"barcode header alias {header!r} was not detected semantically: {diagnostics}")
+        product_lines = [line for line in payload["lines"] if line["line_type"] == "product"]
+        if [line.get("barcode") for line in product_lines] != [PRIMARY_BARCODE, SECONDARY_BARCODE, THIRD_BARCODE]:
+            raise AssertionError(f"barcode alias {header!r} changed extracted identities")
+
+
+def _assert_structural_detection() -> None:
+    moved_layout = ["no", "models", "name_spec", "comment", "barcode", "qty", "unit_price", "amount"]
+    moved_payload = parse_supplier_invoice_xlsx(
+        _build_invoice_fixture(barcode_header="Barcode", layout=moved_layout),
+        filename="moved.xlsx",
+    )
+    moved_diagnostics = moved_payload["diagnostics"]["barcode_column"]
+    if moved_diagnostics.get("method") != "header_alias" or moved_diagnostics.get("column_index") != 5:
+        raise AssertionError(f"semantic barcode column must survive movement away from D: {moved_diagnostics}")
+
+    relative_payload = parse_supplier_invoice_xlsx(
+        _build_invoice_fixture(barcode_header="Factory identifier", layout=moved_layout),
+        filename="relative.xlsx",
+    )
+    relative_diagnostics = relative_payload["diagnostics"]["barcode_column"]
+    if relative_diagnostics.get("method") != "relative_structure" or relative_diagnostics.get("column_index") != 5:
+        raise AssertionError(f"unknown moved barcode column must use relative structure: {relative_diagnostics}")
+
+    positional_payload = parse_supplier_invoice_xlsx(
+        _build_invoice_fixture(barcode_header="Factory identifier"),
+        filename="positional.xlsx",
+    )
+    positional_diagnostics = positional_payload["diagnostics"]["barcode_column"]
+    if positional_diagnostics.get("method") != "positional_d" or positional_diagnostics.get("column_index") != 4:
+        raise AssertionError(f"confirmed current-template D fallback changed: {positional_diagnostics}")
+
+
+def _assert_conflict_and_rejection_paths() -> None:
+    invalid_structure = _build_invoice_fixture(
+        barcode_header="Factory identifier",
+        layout=["no", "models", "comment", "barcode", "qty", "unit_price", "amount", "name_spec"],
+    )
+    _assert_parse_error(invalid_structure, "barcode column not found")
+
+    no_barcode_column = _build_invoice_fixture(
+        layout=["no", "models", "name_spec", "qty", "unit_price", "amount", "comment"],
+    )
+    _assert_parse_error(no_barcode_column, "barcode column not found")
+
+    ambiguous = _build_invoice_fixture(
+        barcode_header="Factory identifier A",
+        layout=["no", "models", "name_spec", "barcode", "barcode_copy", "qty", "unit_price", "amount"],
+    )
+    _assert_parse_error(ambiguous, "ambiguous barcode column")
+
+    missing_one = parse_supplier_invoice_xlsx(
+        _build_invoice_fixture(barcodes=[PRIMARY_BARCODE, "", THIRD_BARCODE]),
+        filename="missing-one.xlsx",
+    )
+    missing_lines = [line for line in missing_one["lines"] if line["line_type"] == "product"]
+    if missing_lines[1].get("barcode") or missing_lines[1].get("match_status") != "unmatched":
+        raise AssertionError("a missing product barcode must stay unmatched without a model fallback")
+
+
+def _assert_lossless_barcode_values() -> None:
     payload = parse_supplier_invoice_xlsx(
-        workbook_bytes,
-        filename="PI-test 26GN390 (14.5.2026).xlsx",
-        aliases=[
+        _build_invoice_fixture(barcodes=[PRIMARY_BARCODE, 1234567890123, "'1234567890124"]),
+        filename="lossless.xlsx",
+    )
+    product_lines = [line for line in payload["lines"] if line["line_type"] == "product"]
+    actual = [line.get("barcode") for line in product_lines]
+    if actual != [PRIMARY_BARCODE, SECONDARY_BARCODE, THIRD_BARCODE]:
+        raise AssertionError(f"text, numeric, apostrophe or leading-zero barcode normalization is lossy: {actual}")
+    if normalize_barcode_value(1234567890123.0) != SECONDARY_BARCODE:
+        raise AssertionError("an exact Excel numeric barcode must normalize without scientific notation")
+    if normalize_barcode_value(" 0123\u00a0456789012 ") != PRIMARY_BARCODE:
+        raise AssertionError("safe whitespace cleanup must preserve a leading zero")
+    try:
+        normalize_barcode_value("1.234567890123E+12")
+    except ValueError as exc:
+        if "scientific" not in str(exc).lower():
+            raise
+    else:
+        raise AssertionError("scientific-notation text must be rejected instead of guessed")
+
+
+def _assert_barcode_only_matching() -> None:
+    parsed = parse_supplier_invoice_xlsx(_build_invoice_fixture(), filename="matching.xlsx")
+    product_lines = [dict(line) for line in parsed["lines"] if line["line_type"] == "product"]
+    for line in product_lines:
+        line.update(
             {
-                "factory_type": "clear",
-                "normalized_model": "iphone_14_pro",
-                "match_key": "clear|iphone_14_pro",
-                "our_sku": "SKU-CLEAR-14PRO",
-                "nm_id": 210183919,
-                "nomenclature_name": "Clear iPhone 14 Pro",
-                "group": "clear",
-                "active": True,
+                "product_type": "intentionally_wrong",
+                "model_raw": "intentionally wrong model",
+                "model_normalized": "intentionally_wrong_model",
+                "match_key": "intentionally_wrong|model",
             }
+        )
+    matched = _apply_nomenclature_matches(
+        product_lines,
+        [
+            _nomenclature_item("nom-primary", 101, PRIMARY_BARCODE, []),
+            _nomenclature_item("nom-inactive-duplicate", 102, PRIMARY_BARCODE, [], active=False),
+            _nomenclature_item("nom-secondary", 202, "9999999999999", [SECONDARY_BARCODE]),
+            _nomenclature_item("nom-third", 303, THIRD_BARCODE, [], hidden=True),
         ],
     )
-    lines = payload["lines"]
+    if [line.get("internal_nm_id") for line in matched] != [101, 202, 303]:
+        raise AssertionError(f"primary/all/hidden barcode owners were not resolved: {matched}")
+    if any(line.get("match_status") != "matched_by_barcode" for line in matched):
+        raise AssertionError(f"barcode matches must expose matched_by_barcode evidence: {matched}")
+
+    unknown = _apply_nomenclature_matches(
+        [{**product_lines[0], "barcode": "8888888888888"}],
+        [_nomenclature_item("nom-model-fallback", 404, PRIMARY_BARCODE, [])],
+    )[0]
+    if unknown.get("match_status") != "unmatched" or unknown.get("internal_nm_id") is not None:
+        raise AssertionError(f"unknown barcode received a forbidden model/type fallback: {unknown}")
+    if unknown.get("match_evidence", {}).get("reason") != "barcode_unknown":
+        raise AssertionError(f"unknown barcode diagnostic is unclear: {unknown}")
+
+    missing = _apply_nomenclature_matches(
+        [{**product_lines[0], "barcode": ""}],
+        [_nomenclature_item("nom-missing-fallback", 505, PRIMARY_BARCODE, [])],
+    )[0]
+    if missing.get("match_status") != "unmatched" or missing.get("internal_nm_id") is not None:
+        raise AssertionError(f"missing barcode received a forbidden fallback: {missing}")
+    if missing.get("match_evidence", {}).get("reason") != "barcode_missing":
+        raise AssertionError(f"missing barcode diagnostic is unclear: {missing}")
+
+    ambiguous = _apply_nomenclature_matches(
+        [product_lines[0]],
+        [
+            _nomenclature_item("nom-duplicate-a", 606, PRIMARY_BARCODE, []),
+            _nomenclature_item("nom-duplicate-b", 607, PRIMARY_BARCODE, []),
+        ],
+    )[0]
+    if ambiguous.get("match_status") != "ambiguous" or ambiguous.get("internal_nm_id") is not None:
+        raise AssertionError(f"duplicate active barcode owners must be ambiguous: {ambiguous}")
+
+
+def _assert_metadata_totals_and_extras() -> None:
+    payload = parse_supplier_invoice_xlsx(_build_invoice_fixture(), filename="PI-test 26GN390 (14.5.2026).xlsx")
+    if payload["diagnostics"].get("worksheet") != "PI" or payload["diagnostics"].get("header_row") != 6:
+        raise AssertionError(f"sanitized current-template fixture shape changed: {payload['diagnostics']}")
     metadata = payload["metadata"]
     if metadata.get("contract_no") != "CNT-2026-0513" or metadata.get("contract_date") != "2026-05-13":
-        raise AssertionError(f"parser must extract contract no/date from cells, got {metadata}")
-    product_lines = [line for line in lines if line["line_type"] == "product"]
-    extra_lines = [line for line in lines if line["line_type"] == "extra"]
-    if len(product_lines) != 5 or len(extra_lines) != 2:
-        raise AssertionError(f"parser must keep product and extra rows separately, got {len(product_lines)} / {len(extra_lines)}")
-    if [line["product_type"] for line in product_lines] != ["clear", "clear", "anti_spy", "anti_spy", "matte"]:
-        raise AssertionError("parser must fill down clear/anti_spy/matte markers from Chinese/comment blocks")
-    if (
-        product_lines[0]["match_status"] != "matched"
-        or product_lines[0]["internal_nm_id"] != 210183919
-        or product_lines[0]["internal_sku"] != "SKU-CLEAR-14PRO"
-        or product_lines[0]["internal_name"] != "Clear iPhone 14 Pro"
-    ):
-        raise AssertionError("active deterministic nomenclature alias must fill SKU/nmId/name by exact type+model key")
-    if product_lines[1]["match_key"] != "clear|iphone_15_16" or product_lines[1]["match_status"] != "unmatched":
-        raise AssertionError("compatible model aliases like iPhone 15 / 16 must stay one invoice line")
-    if product_lines[3]["match_key"] != "anti_spy|iphone_16_pro_17":
-        raise AssertionError("iPhone 16 Pro/17 must stay one anti_spy invoice line")
-    if product_lines[4]["match_key"] != "matte|iphone_17e_16e_14_13_13pro":
-        raise AssertionError("multi-compatible matte alias must not be split into separate product rows")
+        raise AssertionError(f"cell metadata extraction regressed: {metadata}")
+    product_lines = [line for line in payload["lines"] if line["line_type"] == "product"]
+    extra_lines = [line for line in payload["lines"] if line["line_type"] == "extra"]
+    if len(product_lines) != 3 or len(extra_lines) != 1 or extra_lines[0].get("barcode"):
+        raise AssertionError("product/extra separation or optional extra barcode regressed")
     summary = payload["summary"]
-    if summary["product_qty_total"] != 40.0 or summary["product_amount_total"] != 42.0:
-        raise AssertionError(f"product totals mismatch: {summary}")
-    if summary["extras_amount_total"] != 5.0 or summary["invoice_amount_total"] != 47.0:
-        raise AssertionError(f"invoice totals mismatch: {summary}")
-    if summary["checksum_error"]:
-        raise AssertionError("declared invoice total must match parsed total in fixture")
+    if (
+        summary.get("product_qty_total") != 18.0
+        or summary.get("product_amount_total") != 26.0
+        or summary.get("extras_amount_total") != 5.0
+        or summary.get("invoice_amount_total") != 31.0
+        or summary.get("checksum_error")
+    ):
+        raise AssertionError(f"invoice totals/checksum regressed: {summary}")
+
     drawing_payload = parse_supplier_invoice_xlsx(
         _with_drawing_text_fixture(_build_invoice_fixture(contract_cells=False)),
         filename="PI-drawing 26GN391 (15.5.2026).xlsx",
     )
     drawing_metadata = drawing_payload["metadata"]
     if drawing_metadata.get("contract_no") != "26DRAW001" or drawing_metadata.get("contract_date") != "2026-05-13":
-        raise AssertionError(f"parser must extract contract no/date from drawing XML text, got {drawing_metadata}")
-    compatibility_lines = _apply_nomenclature_matches(
-        [
-            {
-                "line_type": "product",
-                "product_type": "anti_spy",
-                "model_raw": "iPhone 17e / 16e /14 / 13 / 13Pro",
-                "model_normalized": "iphone_17e_16e_14_13_13pro",
-                "match_key": "anti_spy|iphone_17e_16e_14_13_13pro",
-                "match_status": "unmatched",
-            }
-        ],
-        [
-            {
-                "item_id": "nom_compat",
-                "is_active": True,
-                "our_sku": "SKU-AS-141313P",
-                "nm_id": 391662410,
-                "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
-                "product_type": "anti_spy",
-                "match_key": "anti_spy|iphone_14_13_13pro",
-                "aliases": [],
-                "compatible_models_text": "iPhone 14, iPhone 13, iPhone 13 Pro",
-                "compatible_model_keys": ["iphone_14", "iphone_13", "iphone_13_pro"],
-            }
-        ],
-    )
-    if (
-        compatibility_lines[0].get("match_status") != "matched_by_compatibility"
-        or compatibility_lines[0].get("internal_nm_id") != 391662410
-        or compatibility_lines[0].get("internal_name") != "anti-spy iPhone 14 / 13 / 13Pro"
-    ):
-        raise AssertionError(f"compatibility matching must fill SKU/nmId/name, got {compatibility_lines[0]}")
-    type_guard_lines = _apply_nomenclature_matches(
-        [{**compatibility_lines[0], "internal_nm_id": None, "internal_name": "", "match_status": "unmatched"}],
-        [
-            {
-                "item_id": "nom_wrong_type",
-                "is_active": True,
-                "our_sku": "SKU-CLEAR-141313P",
-                "nm_id": 210183919,
-                "nomenclature_name": "clean iPhone 14",
-                "product_type": "clear",
-                "match_key": "clear|iphone_14",
-                "compatible_model_keys": ["iphone_14", "iphone_13", "iphone_13_pro"],
-            }
-        ],
-    )
-    if type_guard_lines[0].get("match_status") != "unmatched":
-        raise AssertionError("compatibility matching must not cross product_type")
-    ambiguous_lines = _apply_nomenclature_matches(
-        [
-            {
-                "line_type": "product",
-                "product_type": "matte",
-                "model_raw": "iPhone 12",
-                "model_normalized": "iphone_12",
-                "match_key": "matte|iphone_12",
-                "match_status": "unmatched",
-            }
-        ],
-        [
-            {
-                "item_id": "nom_ambiguous_1",
-                "is_active": True,
-                "nomenclature_name": "matte ambiguous 1",
-                "product_type": "matte",
-                "match_key": "matte|legacy_a",
-                "compatible_model_keys": ["iphone_12"],
-            },
-            {
-                "item_id": "nom_ambiguous_2",
-                "is_active": True,
-                "nomenclature_name": "matte ambiguous 2",
-                "product_type": "matte",
-                "match_key": "matte|legacy_b",
-                "compatible_model_keys": ["iphone_12"],
-            },
-        ],
-    )
-    if ambiguous_lines[0].get("match_status") != "ambiguous" or ambiguous_lines[0].get("internal_name"):
-        raise AssertionError(f"equal compatibility candidates must stay ambiguous without SKU fill: {ambiguous_lines[0]}")
-    print("supplier_invoice_parser_smoke: OK")
+        raise AssertionError(f"drawing XML metadata extraction regressed: {drawing_metadata}")
 
 
-def _build_invoice_fixture(*, contract_cells: bool = True) -> bytes:
+def _assert_parse_error(workbook_bytes: bytes, expected: str) -> None:
+    try:
+        parse_supplier_invoice_xlsx(workbook_bytes, filename="rejected.xlsx")
+    except ValueError as exc:
+        if expected not in str(exc).lower():
+            raise AssertionError(f"expected {expected!r}, got {exc!r}") from exc
+    else:
+        raise AssertionError(f"invalid invoice must fail with {expected!r}")
+
+
+def _nomenclature_item(
+    item_id: str,
+    nm_id: int,
+    barcode: str,
+    barcodes: list[str],
+    *,
+    hidden: bool = False,
+    active: bool = True,
+) -> dict[str, object]:
+    return {
+        "item_id": item_id,
+        "is_active": active,
+        "is_hidden": hidden,
+        "our_sku": f"SKU-{nm_id}",
+        "nm_id": nm_id,
+        "barcode": barcode,
+        "barcodes": barcodes,
+        "nomenclature_name": f"Barcode item {nm_id}",
+        "product_type": "wrong_type",
+        "match_key": "wrong|model",
+        "aliases": ["also wrong"],
+        "compatible_model_keys": ["iphone_99"],
+    }
+
+
+def _build_invoice_fixture(
+    *,
+    barcode_header: str = "Braocde\n(条形码）",
+    layout: list[str] | None = None,
+    barcodes: list[object] | None = None,
+    contract_cells: bool = True,
+) -> bytes:
+    layout = layout or ["no", "models", "name_spec", "barcode", "qty", "unit_price", "amount", "comment"]
+    barcodes = barcodes or [PRIMARY_BARCODE, SECONDARY_BARCODE, THIRD_BARCODE]
+    headers = {
+        "no": "NO.",
+        "models": "MODELS / （型号）",
+        "name_spec": "NAME & SPECIFICATION / （品名规格）",
+        "barcode": barcode_header,
+        "barcode_copy": "Factory identifier B",
+        "qty": "QTY (PCS) / （数量）",
+        "unit_price": "U.PRICE / （单价） (RMB/PCS)",
+        "amount": "AMOUNT / （总价） (RMB)",
+        "comment": "备注",
+    }
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Invoice"
+    sheet.title = "PI"
     sheet["A1"] = "Invoice No:"
     sheet["B1"] = "26GN390"
     sheet["A2"] = "Invoice Date:"
@@ -184,36 +285,63 @@ def _build_invoice_fixture(*, contract_cells: bool = True) -> bytes:
         sheet["B3"] = "CNT-2026-0513"
         sheet["A4"] = "Date of Contract"
         sheet["B4"] = "2026.5.13"
-        sheet["A5"] = "Supplier:"
-        sheet["B5"] = "Zhejiang Supplier"
-    else:
-        sheet["A3"] = "Supplier:"
-        sheet["B3"] = "Zhejiang Supplier"
-    headers = [
-        "NO.",
-        "MODELS / （型号）",
-        "NAME & SPECIFICATION / （品名规格）",
-        "QTY (PCS) / （数量）",
-        "U.PRICE / （单价） (RMB/PCS)",
-        "AMOUNT / （总价） (RMB)",
-        "备注",
+    sheet["A5"] = "Supplier:"
+    sheet["B5"] = "Sanitized Supplier"
+    sheet.append([headers[role] for role in layout])
+
+    product_rows = [
+        {
+            "no": 1,
+            "models": "iPhone 14 Pro",
+            "name_spec": "高清膜 smk",
+            "barcode": barcodes[0],
+            "barcode_copy": barcodes[0],
+            "qty": 10,
+            "unit_price": 1,
+            "amount": 10,
+            "comment": "packaging instruction",
+        },
+        {
+            "no": 2,
+            "models": "iPhone 15 / 16",
+            "name_spec": "高清膜 smk",
+            "barcode": barcodes[1],
+            "barcode_copy": barcodes[1],
+            "qty": 5,
+            "unit_price": 2,
+            "amount": 10,
+            "comment": "",
+        },
+        {
+            "no": 3,
+            "models": "iPhone 16 Pro/17",
+            "name_spec": "防窥膜 (Anti-Spy)",
+            "barcode": barcodes[2],
+            "barcode_copy": barcodes[2],
+            "qty": 3,
+            "unit_price": 2,
+            "amount": 6,
+            "comment": "",
+        },
+        {
+            "no": 4,
+            "models": "OPP bag packets",
+            "name_spec": "OPP bag packets",
+            "barcode": "",
+            "barcode_copy": "",
+            "qty": 100,
+            "unit_price": 0.05,
+            "amount": 5,
+            "comment": "OPP packets",
+        },
     ]
-    sheet.append(headers)
-    rows = [
-        [1, "iPhone 14 Pro", "高清膜 smk / 带包装", 10, 1, 10, "OPP袋子 + 标签 + 卡片 in packaging comment"],
-        [2, "iPhone 15 / 16", None, 5, 2, 10, ""],
-        [3, "iPhone 14 Pro Max", "防窥膜 (Anti-Spy)", 7, 1, 7, "OPP袋子 + 标签"],
-        [4, "iPhone 16 Pro/17", None, 3, 2, 6, ""],
-        [5, "iPhone 17e / 16e /14 / 13 / 13Pro", "磨砂膜 (Matte)", 15, 0.6, 9, ""],
-        [6, "OPP bag packets", "OPP bag packets", 100, 0.03, 3, "OPP packets"],
-        [7, "labels", "custom labels", 100, 0.02, 2, "labels"],
-    ]
-    for row in rows:
-        sheet.append(row)
-    sheet.append(["（总值）Total:", "", "", "", "", 47, "定金(15%)：120000元"])
-    product_start_row = 7 if contract_cells else 5
-    sheet.merge_cells(f"C{product_start_row}:C{product_start_row + 1}")
-    sheet.merge_cells(f"C{product_start_row + 2}:C{product_start_row + 3}")
+    for values in product_rows:
+        sheet.append([values.get(role, "") for role in layout])
+    sheet.append(["（总值）Total:" if role == "no" else 31 if role == "amount" else "" for role in layout])
+
+    if "name_spec" in layout:
+        name_column = layout.index("name_spec") + 1
+        sheet.merge_cells(start_row=7, start_column=name_column, end_row=8, end_column=name_column)
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
