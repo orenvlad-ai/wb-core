@@ -38,6 +38,9 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_TRADE_DOCUMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_START_PATH,
+    DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
     build_registry_upload_http_server,
     _required_section_for_path,
     WEB_AUTH_SECTION_SKU_MANAGEMENT,
@@ -117,6 +120,15 @@ def main() -> None:
                 tick_code, tick_payload = _post_json(f"{base_url}{DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_TICK_PATH}", {})
                 if tick_code != 401 or tick_payload.get("error") != "authentication_required":
                     raise AssertionError(f"unauthenticated automation tick must return 401 JSON: {tick_code} {tick_payload}")
+                buyer_check_code, buyer_check_payload = _get_json(f"{base_url}{DEFAULT_WB_BUYER_SESSION_CHECK_PATH}")
+                if buyer_check_code != 401 or buyer_check_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated buyer-session check must return 401 JSON: {buyer_check_code} {buyer_check_payload}")
+                buyer_start_code, buyer_start_payload = _post_json(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_START_PATH}", {})
+                if buyer_start_code != 401 or buyer_start_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated buyer recovery start must return 401 JSON: {buyer_start_code} {buyer_start_payload}")
+                buyer_launcher_code, buyer_launcher_payload = _get_json(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH}")
+                if buyer_launcher_code != 401 or buyer_launcher_payload.get("error") != "authentication_required":
+                    raise AssertionError(f"unauthenticated buyer launcher must return 401 JSON: {buyer_launcher_code} {buyer_launcher_payload}")
                 login_code, _, login_body = _request_text(f"{base_url}/login", headers={"Accept": "text/html"})
                 if login_code != 200 or "Вход в WebCore" not in login_body:
                     raise AssertionError("login form must be rendered")

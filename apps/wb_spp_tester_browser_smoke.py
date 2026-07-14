@@ -21,7 +21,7 @@ from apps.wb_prices_management_smoke import (  # noqa: E402
     _reserve_free_port,
     _seed_runtime,
 )
-from apps.wb_spp_tester_smoke import FakePublicSource, FakeSppPricesSource  # noqa: E402
+from apps.wb_spp_tester_smoke import FakeBuyerSource, FakePublicSource, FakeSppPricesSource  # noqa: E402
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -67,12 +67,23 @@ def main() -> None:
                 )
                 if len(server.spp_prices_source.upload_payloads) != upload_count:
                     raise AssertionError("saving the UI schedule must not immediately start an SPP job")
+                page.locator("[data-spp-schedule-enabled]").uncheck()
+                page.locator("[data-spp-schedule-save]").click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-spp-schedule-note]')?.innerText.includes('сохранено и выключено')",
+                    timeout=7000,
+                )
+                if len(server.spp_prices_source.upload_payloads) != upload_count:
+                    raise AssertionError("disabling the UI schedule must not start an SPP job")
                 page.wait_for_selector("[data-spp-history-job]", timeout=7000)
                 page.locator("[data-spp-history-job]").first.locator("summary").click()
                 page.wait_for_selector("[data-spp-history-job] .spp-test-history-json", state="visible", timeout=7000)
                 detail_text = page.locator("[data-spp-history-job] .spp-test-history-json").first.inner_text()
                 if '"baseline"' not in detail_text or '"measurements"' not in detail_text or '"restore"' not in detail_text:
                     raise AssertionError(f"expanded history detail is incomplete: {detail_text}")
+                for field in ("authenticated_buyer_price", "anonymous_buyer_price", "authenticated_spp_proxy", "anonymous_spp_proxy", "payment_context"):
+                    if field not in detail_text:
+                        raise AssertionError(f"expanded history is missing buyer evidence {field}: {detail_text}")
                 page.close()
 
             with _LocalSppUiServer(spp_test_enabled=False, prices_write_enabled=True) as server:
@@ -84,6 +95,30 @@ def main() -> None:
                 reason = page.locator("[data-spp-test-start-reason]").inner_text().strip()
                 if "включите WB_SPP_TEST_ENABLED" not in reason:
                     raise AssertionError(f"disabled SPP guard reason missing: {reason!r}")
+                page.close()
+
+            with _LocalSppUiServer(spp_test_enabled=True, prices_write_enabled=True, buyer_session_status="missing") as server:
+                page = browser.new_page(viewport={"width": 1440, "height": 940})
+                page.goto(f"{server.base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
+                page.locator('[data-unified-tab-button="prices"]').click()
+                page.locator('[data-prices-subtab="spp-test"]').click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Не установлена')",
+                    timeout=7000,
+                )
+                panel = page.locator('[data-prices-subpanel="spp-test"]')
+                if panel.locator("[data-wb-buyer-session-launcher]").count() != 0:
+                    raise AssertionError("buyer session UI must expose only check/install actions, not a permanent launcher button")
+                page.locator("[data-spp-test-nm]").select_option(str(PRIMARY_NM))
+                if not page.locator("[data-spp-test-plan]").is_disabled():
+                    raise AssertionError("invalid buyer session must disable manual plan before any write")
+                if "Установить сессию" not in (page.locator("[data-spp-test-plan]").get_attribute("title") or ""):
+                    raise AssertionError("invalid buyer session plan gate must name the install action")
+                page.locator("[data-spp-schedule-enabled]").check()
+                if not page.locator("[data-spp-schedule-save]").is_disabled():
+                    raise AssertionError("invalid buyer session must disable enabling the schedule")
+                if "Установить сессию" not in (page.locator("[data-spp-schedule-save]").get_attribute("title") or ""):
+                    raise AssertionError("invalid buyer session schedule gate must name the install action")
                 page.close()
         finally:
             browser.close()
@@ -114,7 +149,23 @@ def _prepare_spp_page(page, base_url: str) -> None:
     )
     page.locator("[data-spp-test-confirm-live]").check()
     panel_text = page.locator('[data-prices-subpanel="spp-test"]').inner_text()
-    for expected in ("Автопроверка", "Ежедневно", "Оренбург", "История проверок", "Baseline", "WB writes", "SPP guard"):
+    for expected in (
+        "Покупательская сессия",
+        "Проверить сессию",
+        "Установить сессию",
+        "Автопроверка",
+        "Ежедневно",
+        "Оренбург",
+        "История проверок",
+        "Цена авторизованного покупателя",
+        "Анонимная цена",
+        "SPP-прокси авторизованный",
+        "SPP-прокси анонимный",
+        "Payment context",
+        "Baseline",
+        "WB writes",
+        "SPP guard",
+    ):
         if expected not in panel_text:
             raise AssertionError(f"SPP tester panel missing text {expected!r}: {panel_text}")
     if "План и измерения" not in panel_text and "Результат:" not in panel_text:
@@ -124,7 +175,7 @@ def _prepare_spp_page(page, base_url: str) -> None:
 
 
 class _LocalSppUiServer:
-    def __init__(self, *, spp_test_enabled: bool, prices_write_enabled: bool) -> None:
+    def __init__(self, *, spp_test_enabled: bool, prices_write_enabled: bool, buyer_session_status: str = "valid") -> None:
         self.tmp: TemporaryDirectory[str] | None = None
         self.server = None
         self.thread: threading.Thread | None = None
@@ -132,6 +183,7 @@ class _LocalSppUiServer:
         self.spp_prices_source = FakeSppPricesSource()
         self.spp_test_enabled = spp_test_enabled
         self.prices_write_enabled = prices_write_enabled
+        self.buyer_session_status = buyer_session_status
 
     def __enter__(self) -> "_LocalSppUiServer":
         self.tmp = TemporaryDirectory(prefix="wb-spp-browser-")
@@ -144,6 +196,7 @@ class _LocalSppUiServer:
             runtime_dir=runtime_dir,
             prices_source=spp_prices_source,
             public_source=FakePublicSource(spp_prices_source),
+            buyer_source=FakeBuyerSource(spp_prices_source, session_status=self.buyer_session_status),
             now_factory=lambda: NOW,
             timestamp_factory=lambda: "2026-07-07T07:00:00Z",
             sleep=lambda _seconds: None,
@@ -153,7 +206,7 @@ class _LocalSppUiServer:
             ),
             cadence_config=WbSppTesterCadenceConfig(run_async=False),
         )
-        if self.spp_test_enabled and self.prices_write_enabled:
+        if self.spp_test_enabled and self.prices_write_enabled and self.buyer_session_status == "valid":
             spp_block.start(
                 {
                     "nmID": PRIMARY_NM,
