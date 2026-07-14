@@ -6,8 +6,10 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import time
 from typing import Any, Mapping
 import zipfile
 from io import BytesIO
@@ -20,8 +22,12 @@ if str(ROOT) not in sys.path:
 from apps.wb_buyer_session_recovery import (  # noqa: E402
     BuyerRecoveryConfig,
     _open_secure_log,
+    _probe_recovery_candidate,
+    _spawn,
+    _terminate,
     _write_status,
     build_macos_launcher_archive,
+    stop_recovery,
 )
 from packages.adapters.wb_buyer_session import (  # noqa: E402
     WbBuyerSessionAdapter,
@@ -39,6 +45,7 @@ def main() -> None:
     _run_session_and_security_smoke()
     _run_price_extraction_smoke()
     _run_launcher_smoke()
+    _run_recovery_lifecycle_smoke()
     print("wb_buyer_session_smoke: OK")
 
 
@@ -254,6 +261,82 @@ def _run_launcher_smoke() -> None:
             raise AssertionError("buyer launcher must have bounded lifecycle and tunnel cleanup")
         if "storage_state" in lowered or "raw-cookie" in lowered or "authorization" in lowered or "otp" in lowered:
             raise AssertionError("buyer launcher must not contain persistent credentials or storage state")
+
+
+def _run_recovery_lifecycle_smoke() -> None:
+    class FakePage:
+        url = "https://www.wildberries.ru/lk"
+
+        def __init__(self) -> None:
+            self.waits: list[int] = []
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+
+    class FakeAdapter:
+        def __init__(self, result: Mapping[str, Any]) -> None:
+            self.result = dict(result)
+
+        def check_session(self, **_kwargs: Any) -> dict[str, Any]:
+            return dict(self.result)
+
+    with TemporaryDirectory(prefix="wb-buyer-recovery-lifecycle-") as tmp:
+        state_dir = Path(tmp)
+        session = WbBuyerSessionConfig(state_dir=state_dir, storage_state_path=state_dir / "storage_state.json")
+        config = BuyerRecoveryConfig(session=session, poll_sec=0.75)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        config.candidate_path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+        page = FakePage()
+        fresh = FakeAdapter({"status": "valid", "valid": True, "account_confirmed": True})
+        recovered = _probe_recovery_candidate(
+            config,
+            FakeAdapter({"status": "login_redirect", "valid": False}),
+            page,
+            fresh_adapter_factory=lambda **_kwargs: fresh,
+        )
+        if recovered.get("status") != "valid" or page.waits != [750]:
+            raise AssertionError("post-login candidate must receive one settled fresh validation")
+
+        child_log = state_dir / "spawn-child.log"
+        child = _spawn([sys.executable, "-c", "import time; time.sleep(30)"], child_log)
+        try:
+            if os.getpgid(child.pid) != os.getpgrp():
+                raise AssertionError("recovery child must stay inside the supervisor process group")
+        finally:
+            _terminate(child)
+        if child.poll() is None:
+            raise AssertionError("normal recovery cleanup must terminate a child process")
+
+        child_pid_path = state_dir / "child.pid"
+        parent_code = (
+            "import subprocess,sys,time;"
+            f"p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']);"
+            f"open({str(child_pid_path)!r},'w').write(str(p.pid));"
+            "time.sleep(60)"
+        )
+        parent = subprocess.Popen([sys.executable, "-c", parent_code], start_new_session=True)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not child_pid_path.exists():
+            time.sleep(0.05)
+        if not child_pid_path.exists():
+            parent.kill()
+            raise AssertionError("stop lifecycle fixture did not start")
+        nested_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        config.pid_path.write_text(str(parent.pid), encoding="utf-8")
+        config.candidate_path.write_text("candidate-secret", encoding="utf-8")
+        _write_status(
+            config,
+            {"run_id": "lifecycle", "status": "awaiting_login", "reason": "buyer_login_window_ready"},
+        )
+        stop_recovery(config)
+        parent.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and Path(f"/proc/{nested_pid}").exists():
+            time.sleep(0.05)
+        if Path(f"/proc/{nested_pid}").exists():
+            raise AssertionError("stop must terminate the complete isolated recovery process group")
+        if config.candidate_path.exists() or config.pid_path.exists():
+            raise AssertionError("stop must remove temporary candidate state and supervisor pid")
 
 
 if __name__ == "__main__":

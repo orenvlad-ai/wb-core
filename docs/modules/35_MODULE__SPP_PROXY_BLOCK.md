@@ -115,3 +115,5 @@ update_note: "Добавлен отдельный current-only public-card sourc
 # 8. Separation from authenticated SPP testing
 
 Module 42 `Цены -> Проверка СПП` additionally owns a dedicated persistent authenticated Wildberries buyer session and shows its personalized buyer price as the primary test fact. That session, its account fingerprint and its price result are not inputs to this global module. This module remains anonymous, current-only and independently refreshable; module 42 keeps its anonymous observation only as an explicit control and never uses it as fallback for a missing authenticated result.
+
+When module 42 needs that control under the authenticated buyer destination, it creates a separate per-read anonymous adapter for the validated `dest`. This does not change `WB_PUBLIC_CARD_DEST`, the long-lived module 35 adapter or global `spp_proxy` semantics.

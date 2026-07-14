@@ -41,6 +41,7 @@ def main() -> None:
     _assert_missing_inputs_stay_blank()
     _assert_current_only_source_does_not_fetch_historical()
     _assert_public_api_v4_fallback_after_card_antibot()
+    _assert_isolated_destination_override()
     print("spp_proxy_source: ok")
 
 
@@ -201,6 +202,40 @@ def _assert_public_api_v4_fallback_after_card_antibot() -> None:
     _assert_equal(current["data"]["items"][0]["public_buyer_price"], 354.0, "v4 sizes.price.product extraction")
     if "/cards/v4/detail" not in calls[1]:
         raise AssertionError(f"v4 public card API must be first fallback, got {calls}")
+
+
+def _assert_isolated_destination_override() -> None:
+    calls: list[str] = []
+    api_payload = {
+        "products": [{"id": 259460529, "sizes": [{"price": {"product": 35400}}]}]
+    }
+
+    def http_get(url: str, timeout_seconds: float) -> tuple[int, str, dict[str, str]]:
+        del timeout_seconds
+        calls.append(url)
+        if "detail.aspx" in url:
+            return 498, "", {}
+        return 200, json.dumps(api_payload), {"content-type": "application/json"}
+
+    source = HttpBackedPublicWbCardBuyerPriceSource(
+        dest="-1257786",
+        http_get=http_get,
+        business_date_factory=lambda: "2026-06-08",
+    )
+    request = SppProxyRequest(snapshot_type="spp_proxy", snapshot_date="2026-06-08", nm_ids=[259460529])
+    source.for_destination("-6441813").fetch(request)
+    if "dest=-6441813" not in calls[1]:
+        raise AssertionError(f"retargeted anonymous control did not use requested buyer destination: {calls}")
+    calls.clear()
+    source.fetch(request)
+    if "dest=-1257786" not in calls[1]:
+        raise AssertionError("per-read destination override must not mutate the module 35 default source")
+    try:
+        source.for_destination("-6441813&token=unsafe")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid WB destination context must be rejected")
 
 
 if __name__ == "__main__":

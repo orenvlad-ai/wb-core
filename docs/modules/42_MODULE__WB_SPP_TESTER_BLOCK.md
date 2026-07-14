@@ -143,6 +143,8 @@ For every measurement the tester polls an authenticated and anonymous observatio
 - ordinary, wallet, card and WB Club price fields when exposed;
 - chosen payment context, destination context, parser/source endpoint and session fingerprint.
 
+The authenticated network response owns the destination context for the pair. Module 42 creates an isolated anonymous card-source instance for that exact validated integer `dest`; it does not mutate the module 35 default source. An unsupported/invalid override fails the control read, and a mismatched destination blocks baseline/start instead of calculating a false account discount. The proven network primary is the authenticated browser response from `/__internal/card/cards/v4/detail`; its concrete price field is reported in `source_method` (for example `sizes.0.price.product`) rather than being hardcoded as an account-discount formula.
+
 Initial points are min/mid/max. Threshold detection uses high-confidence points only:
 - delta `< 0.005` = noise;
 - delta `>= 0.015` = material;
@@ -223,11 +225,12 @@ Danger states use short explicit labels: `429`, `stale`, `карантин`, `н
 # 11. Verification
 
 Targeted smokes:
+- `python3 apps/spp_proxy_source_smoke.py`
 - `python3 apps/wb_buyer_session_smoke.py`
 - `python3 apps/wb_spp_tester_smoke.py`
 - `python3 apps/wb_spp_tester_browser_smoke.py`
 
-These cover buyer session missing/valid/wrong-account/expired states, restart-persistent fingerprint, atomic save and modes, price/payment/destination parsing, ambiguous context, secret/path sanitization, legacy history compatibility, cursor pagination/detail traversal safety, interrupted/stale reconciliation, unrestored blocking, cross-process contention, session loss after a completed measurement, schedule save/enable/disable, session-invalid scheduled skip, `next_run_at`, no immediate start, at-most-once/restart, late skip, safety skip, mandatory exact seller restore, 429/timeout/stale/quarantine, UI history expansion and deploy/systemd wiring.
+These cover buyer session missing/valid/wrong-account/expired states, restart-persistent fingerprint, atomic save and modes, settled post-login validation, full recovery process-group cleanup, per-read destination override without module 35 mutation, invalid-context no-fallback behavior, price/payment/destination parsing, ambiguous context, secret/path sanitization, legacy history compatibility, cursor pagination/detail traversal safety, interrupted/stale reconciliation, unrestored blocking, cross-process contention, session loss after a completed measurement, schedule save/enable/disable, session-invalid scheduled skip, `next_run_at`, no immediate start, at-most-once/restart, late skip, safety skip, mandatory exact seller restore, 429/timeout/stale/quarantine, UI history expansion and deploy/systemd wiring.
 
 Regression smokes:
 - `python3 apps/wb_prices_management_smoke.py`

@@ -89,7 +89,12 @@ class WbSppTesterError(ValueError):
 class WbSppPublicBuyerPriceSource(Protocol):
     """Anonymous public buyer price source used by SPP tester."""
 
-    def fetch_public_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
+    def fetch_public_buyer_price(
+        self,
+        nm_id: int,
+        *,
+        destination_context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         raise NotImplementedError("adapter skeleton only")
 
 
@@ -105,8 +110,45 @@ class SppTesterPublicCardSource:
         self.source = source or HttpBackedPublicWbCardBuyerPriceSource()
         self.business_date_factory = business_date_factory or _current_business_date
 
-    def fetch_public_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
-        payload = self.source.fetch(
+    def fetch_public_buyer_price(
+        self,
+        nm_id: int,
+        *,
+        destination_context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        source = self.source
+        raw_dest = (
+            str(destination_context.get("dest") or "").strip()
+            if isinstance(destination_context, Mapping)
+            else ""
+        )
+        requested_dest = _destination_dest(destination_context)
+        if raw_dest and not requested_dest:
+            return {
+                "status": "context_invalid",
+                "public_buyer_price": None,
+                "endpoint": "public_wb_card",
+                "http_status": None,
+                "headers": {},
+                "body_summary": "",
+                "diagnostics": {"reason": "anonymous_destination_override_invalid"},
+                "destination_context": {},
+            }
+        if requested_dest:
+            destination_factory = getattr(source, "for_destination", None)
+            if not callable(destination_factory):
+                return {
+                    "status": "context_unsupported",
+                    "public_buyer_price": None,
+                    "endpoint": "public_wb_card",
+                    "http_status": None,
+                    "headers": {},
+                    "body_summary": "",
+                    "diagnostics": {"reason": "anonymous_destination_override_unsupported"},
+                    "destination_context": {"dest": requested_dest, "currency": "rub"},
+                }
+            source = destination_factory(requested_dest)
+        payload = source.fetch(
             SppProxyRequest(
                 snapshot_type="spp_proxy",
                 snapshot_date=self.business_date_factory(),
@@ -924,7 +966,15 @@ class WbSppTesterBlock:
         reads: list[dict[str, Any]] = []
         self._sleep_with_heartbeat(job, self.cadence.first_public_poll_delay_seconds, phase="public_poll_initial")
         for attempt in range(3):
-            payload = dict(self.public_source.fetch_public_buyer_price(nm_id))
+            baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
+            payload = dict(
+                self.public_source.fetch_public_buyer_price(
+                    nm_id,
+                    destination_context=baseline.get("destinationContext")
+                    if isinstance(baseline.get("destinationContext"), Mapping)
+                    else None,
+                )
+            )
             reads.append(payload)
             self._append_audit(str(job["job_id"]), "public_buyer_price_read", payload)
             if _public_status_is_429(payload):
@@ -973,8 +1023,17 @@ class WbSppTesterBlock:
                     "session_status": auth_status,
                     "reason": str(authenticated.get("reason") or "authenticated_price_read_failed"),
                 }
-            anonymous = dict(self.public_source.fetch_public_buyer_price(nm_id))
+            anonymous = dict(
+                self.public_source.fetch_public_buyer_price(
+                    nm_id,
+                    destination_context=authenticated.get("destination_context")
+                    if isinstance(authenticated.get("destination_context"), Mapping)
+                    else None,
+                )
+            )
             self._append_audit(str(job["job_id"]), "anonymous_buyer_price_read", anonymous)
+            pair = {"authenticated": authenticated, "anonymous": anonymous}
+            reads.append(pair)
             if _public_status_is_429(anonymous):
                 return {
                     "status": "public_429",
@@ -984,8 +1043,23 @@ class WbSppTesterBlock:
                     "anonymous_buyer_price": None,
                     "reason": "anonymous control endpoint returned 429",
                 }
-            pair = {"authenticated": authenticated, "anonymous": anonymous}
-            reads.append(pair)
+            anonymous_status = str(anonymous.get("status") or "missing").strip().lower()
+            if anonymous_status != "ok" or _number_or_none(anonymous.get("public_buyer_price")) is None:
+                if attempt < 2:
+                    self._sleep_with_heartbeat(
+                        job,
+                        self.cadence.public_poll_gap_seconds,
+                        phase="anonymous_control_retry",
+                    )
+                    continue
+                return {
+                    "status": "public_unstable",
+                    "stable": False,
+                    "reads": reads,
+                    "authenticated_buyer_price": None,
+                    "anonymous_buyer_price": None,
+                    "reason": f"anonymous control status={anonymous_status}",
+                }
             if not _buyer_contexts_compatible(authenticated, anonymous):
                 return {
                     "status": "buyer_destination_mismatch",
@@ -1183,7 +1257,19 @@ class WbSppTesterBlock:
             }
         )
         try:
-            proof_anonymous = dict(self.public_source.fetch_public_buyer_price(nm_id))
+            proof_context = (
+                proof_authenticated.get("destination_context")
+                if isinstance(proof_authenticated.get("destination_context"), Mapping)
+                else baseline.get("destinationContext")
+                if isinstance(baseline.get("destinationContext"), Mapping)
+                else None
+            )
+            proof_anonymous = dict(
+                self.public_source.fetch_public_buyer_price(
+                    nm_id,
+                    destination_context=proof_context,
+                )
+            )
         except Exception:
             proof_anonymous = {"status": "probe_error", "public_buyer_price": None}
         self._append_audit(str(job["job_id"]), f"authenticated_{event_prefix}_read", proof_authenticated)
@@ -1345,7 +1431,14 @@ class WbSppTesterBlock:
                 "reason": buyer_session.get("reason"),
             }
         )
-        public = dict(self.public_source.fetch_public_buyer_price(nm_id))
+        public = dict(
+            self.public_source.fetch_public_buyer_price(
+                nm_id,
+                destination_context=authenticated.get("destination_context")
+                if isinstance(authenticated.get("destination_context"), Mapping)
+                else None,
+            )
+        )
         discounted = _number_or_none(good.get("discountedPrice"))
         authenticated_price = _number_or_none(authenticated.get("authenticated_buyer_price"))
         anonymous_price = _number_or_none(public.get("public_buyer_price"))
@@ -2341,6 +2434,13 @@ def _destination_context_from_region_label(value: str) -> dict[str, str]:
     return result
 
 
+def _destination_dest(value: Mapping[str, Any] | None) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    dest = str(value.get("dest") or "").strip()
+    return dest if re.fullmatch(r"-?\d+(?:,-?\d+)*", dest) else ""
+
+
 def _buyer_contexts_compatible(authenticated: Mapping[str, Any], anonymous: Mapping[str, Any]) -> bool:
     auth_context = authenticated.get("destination_context") if isinstance(authenticated.get("destination_context"), Mapping) else {}
     anonymous_context = anonymous.get("destination_context") if isinstance(anonymous.get("destination_context"), Mapping) else {}
@@ -2374,6 +2474,8 @@ def _stable_buyer_pair(reads: Sequence[Mapping[str, Any]]) -> tuple[float, float
     anon_left = _number_or_none(left_anon.get("public_buyer_price"))
     anon_right = _number_or_none(right_anon.get("public_buyer_price"))
     if None in {auth_left, auth_right, anon_left, anon_right}:
+        return None
+    if not _buyer_contexts_compatible(left_auth, left_anon) or not _buyer_contexts_compatible(right_auth, right_anon):
         return None
     if not _money_exact(auth_left, auth_right) or not _money_exact(anon_left, anon_right):
         return None

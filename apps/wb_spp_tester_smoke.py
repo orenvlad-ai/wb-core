@@ -40,6 +40,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.adapters.wb_prices_management import WbPricesApiError  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.wb_spp_tester import (  # noqa: E402
+    SppTesterPublicCardSource,
     WbSppTesterBlock,
     WbSppTesterCadenceConfig,
     WbSppTesterError,
@@ -177,9 +178,17 @@ class FakePublicSource:
         self.timeout_reads = set(timeout_reads or set())
         self.rate_limit_reads = set(rate_limit_reads or set())
         self.reads = 0
+        self.destination_contexts: list[dict[str, Any]] = []
 
-    def fetch_public_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
+    def fetch_public_buyer_price(
+        self,
+        nm_id: int,
+        *,
+        destination_context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         self.reads += 1
+        normalized_context = dict(destination_context or {})
+        self.destination_contexts.append(normalized_context)
         if self.reads in self.rate_limit_reads:
             return {
                 "status": "429",
@@ -189,6 +198,7 @@ class FakePublicSource:
                 "headers": {},
                 "body_summary": "rate limit",
                 "diagnostics": {"read": self.reads},
+                "destination_context": normalized_context,
             }
         if self.reads in self.timeout_reads:
             return {
@@ -199,6 +209,7 @@ class FakePublicSource:
                 "headers": {},
                 "body_summary": "timeout",
                 "diagnostics": {"read": self.reads},
+                "destination_context": normalized_context,
             }
         discounted = self.prices.discounted_price
         if self.stale:
@@ -214,6 +225,7 @@ class FakePublicSource:
             "headers": {},
             "body_summary": "",
             "diagnostics": {"read": self.reads},
+            "destination_context": normalized_context,
         }
 
 
@@ -257,7 +269,7 @@ class FakeBuyerSource:
             "card_price": None,
             "club_price": None,
             "payment_context": "account_default_with_wallet_option",
-            "destination_context": {},
+            "destination_context": {"dest": "-6441813", "currency": "rub"},
             "measured_at": NOW.isoformat(),
             "source_method": "authenticated_browser_network_json:sizes.0.price.product",
             "source_endpoint": "https://card.wb.ru/cards/v4/detail",
@@ -330,15 +342,29 @@ def main() -> None:
 
 
 def _run_backend_unit_smokes() -> None:
+    class MustNotFetch:
+        def fetch(self, _request: Any) -> Mapping[str, Any]:
+            raise AssertionError("invalid destination must fail before anonymous network fetch")
+
+    invalid_destination = SppTesterPublicCardSource(source=MustNotFetch()).fetch_public_buyer_price(
+        PRIMARY_NM,
+        destination_context={"dest": "-6441813&unsafe=1", "currency": "rub"},
+    )
+    if invalid_destination.get("status") != "context_invalid":
+        raise AssertionError("invalid authenticated destination must not fall back to module 35 default")
+
     with TemporaryDirectory(prefix="wb-spp-test-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = _seed_runtime(runtime_dir)
 
         source = FakeSppPricesSource()
-        block = _build_block(runtime, runtime_dir, source, FakePublicSource(source))
+        public_source = FakePublicSource(source)
+        block = _build_block(runtime, runtime_dir, source, public_source)
         baseline = block.build_baseline({"nmID": PRIMARY_NM})
         if not baseline["baseline"]["can_start"] or baseline["baseline"]["discountedPrice"] != 900:
             raise AssertionError(f"baseline capture mismatch: {baseline}")
+        if public_source.destination_contexts[0] != {"dest": "-6441813", "currency": "rub"}:
+            raise AssertionError("anonymous control must inherit the authenticated buyer destination")
         plan = block.build_plan(
             {
                 "nmID": PRIMARY_NM,

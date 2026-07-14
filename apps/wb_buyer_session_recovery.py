@@ -195,8 +195,12 @@ def stop_recovery(config: BuyerRecoveryConfig) -> dict[str, Any]:
         while time.monotonic() < deadline and _pid_running(pid):
             time.sleep(0.2)
         if _pid_running(pid):
-            os.killpg(pid, signal.SIGKILL)
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
     config.pid_path.unlink(missing_ok=True)
+    config.candidate_path.unlink(missing_ok=True)
     payload = _read_status(config.status_path)
     if str(payload.get("status") or "") not in FINAL_STATUSES:
         payload.update({"status": "stopped", "reason": "buyer_recovery_stopped", "finished_at": _now_text()})
@@ -303,11 +307,7 @@ def _capture_login(config: BuyerRecoveryConfig, adapter: WbBuyerSessionAdapter) 
                 while time.monotonic() < deadline:
                     context.storage_state(path=str(config.candidate_path))
                     os.chmod(config.candidate_path, 0o600)
-                    candidate = adapter.check_session(
-                        storage_state_path=config.candidate_path,
-                        persist_fingerprint=False,
-                        acquire_lock=False,
-                    )
+                    candidate = _probe_recovery_candidate(config, adapter, page)
                     last_session = candidate
                     if candidate.get("status") == "valid":
                         _write_status(config, {**_read_status(config.status_path), "status": "saving_session", "reason": "buyer_session_saving", "session": candidate})
@@ -347,6 +347,16 @@ def _capture_login(config: BuyerRecoveryConfig, adapter: WbBuyerSessionAdapter) 
                                 "session": candidate,
                             },
                         )
+                    else:
+                        _write_status(
+                            config,
+                            {
+                                **_read_status(config.status_path),
+                                "status": "awaiting_login",
+                                "reason": _candidate_wait_reason(candidate),
+                                "session": candidate,
+                            },
+                        )
                     page.wait_for_timeout(max(500, int(config.poll_sec * 1000)))
                 _write_status(
                     config,
@@ -366,6 +376,58 @@ def _capture_login(config: BuyerRecoveryConfig, adapter: WbBuyerSessionAdapter) 
             os.environ.pop("DISPLAY", None)
         else:
             os.environ["DISPLAY"] = old_display
+
+
+def _probe_recovery_candidate(
+    config: BuyerRecoveryConfig,
+    adapter: WbBuyerSessionAdapter,
+    page: Any,
+    *,
+    fresh_adapter_factory: Any = WbBuyerSessionAdapter,
+) -> dict[str, Any]:
+    candidate = adapter.check_session(
+        storage_state_path=config.candidate_path,
+        persist_fingerprint=False,
+        acquire_lock=False,
+    )
+    status = str(candidate.get("status") or "probe_error")
+    if status in {"valid", "wrong_account"} or not _visible_login_completed(page):
+        return candidate
+
+    # WB rotates browser-side auth material immediately after the /lk redirect.
+    # Revalidate this same secure snapshot after a short settle interval instead
+    # of overwriting it again first.
+    page.wait_for_timeout(min(3_000, max(750, int(config.poll_sec * 1000))))
+    return fresh_adapter_factory(config=config.session).check_session(
+        storage_state_path=config.candidate_path,
+        persist_fingerprint=False,
+        acquire_lock=False,
+    )
+
+
+def _visible_login_completed(page: Any) -> bool:
+    try:
+        parsed = urllib_parse.urlparse(str(page.url or ""))
+    except Exception:
+        return False
+    host = str(parsed.hostname or "").lower()
+    path = str(parsed.path or "").rstrip("/").lower()
+    return (host == "wildberries.ru" or host.endswith(".wildberries.ru")) and (
+        path == "/lk" or path.startswith("/lk/")
+    )
+
+
+def _candidate_wait_reason(candidate: Mapping[str, Any]) -> str:
+    status = str(candidate.get("status") or "probe_error")
+    reasons = {
+        "missing": "buyer_storage_state_missing",
+        "expired": "buyer_login_required",
+        "login_redirect": "buyer_login_redirect",
+        "security_challenge": "buyer_security_challenge",
+        "probe_error": "buyer_session_probe_failed",
+        "recovery_running": "buyer_session_lock_busy",
+    }
+    return reasons.get(status, "buyer_session_not_ready")
 
 
 def build_macos_launcher_archive(
@@ -469,7 +531,7 @@ def _spawn(args: list[str], log_path: Path, *, env: Mapping[str, str] | None = N
     merged = os.environ.copy()
     merged.update(dict(env or {}))
     log = _open_secure_log(log_path)
-    return subprocess.Popen(args, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT, env=merged, start_new_session=True)
+    return subprocess.Popen(args, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT, env=merged)
 
 
 def _open_secure_log(path: Path) -> Any:
@@ -506,14 +568,14 @@ def _terminate(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        process.terminate()
     except ProcessLookupError:
         return
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            process.kill()
         except ProcessLookupError:
             pass
 
@@ -526,6 +588,12 @@ def _read_pid(path: Path) -> int | None:
 
 
 def _pid_running(pid: int) -> bool:
+    try:
+        waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+        if waited_pid == pid:
+            return False
+    except ChildProcessError:
+        pass
     try:
         os.kill(pid, 0)
         return True
