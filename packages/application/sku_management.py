@@ -19,10 +19,14 @@ from packages.application.wb_prices_management import WbPricesManagementBlock, n
 from packages.business_time import current_business_date_iso
 from packages.contracts.spp_proxy_block import SppProxyRequest
 from packages.contracts.stocks_block import StocksRequest
+from packages.contracts.supplier_shipments import (
+    MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+)
 
 
 SKU_MANAGEMENT_CONFIG_KEY = "sku_management"
-SKU_MANAGEMENT_CONFIG_SCHEMA_VERSION = 1
+SKU_MANAGEMENT_CONFIG_SCHEMA_VERSION = 2
 PRICE_PARAMETER = "seller_price"
 BID_PARAMETER = "advertising_bid"
 
@@ -58,14 +62,13 @@ DEFAULT_TABLE_PREFERENCES: dict[str, Any] = {
 }
 TABLE_COLUMN_KEYS = {
     "product", "risk", "deficit_date", "coverage_pct", "deficit_units",
-    "first_problem_district", "seller_price", "buyer_price", "spp_proxy", "promo",
+    "nearest_inbound", "seller_price", "buyer_price", "spp_proxy", "promo",
     "campaigns", "current_bid", "ads_drr", "ads_drr_attributed", "funnel", "orders",
     "profit_rub", "margin_pct", "last_price_change_at", "last_bid_change_at", "diagnostics",
 }
 TABLE_SORT_KEYS = TABLE_COLUMN_KEYS | {"risk_rank"}
-TABLE_FILTER_KEYS = {
-    "search", "risk", "promo", "coverage_min", "coverage_max", "deficit_min", "deficit_max",
-}
+TABLE_FILTER_KEYS = {"search"}
+TABLE_MANDATORY_COLUMNS = ("product",)
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,50 @@ class ForecastInbound:
     synthetic: bool = False
     consumes_initial_ff: bool = False
     initial_ff_reservation_qty: float | None = None
+
+
+def select_nearest_supplier_inbound(
+    inbounds: Sequence[Mapping[str, Any]],
+    *,
+    as_of_date: str,
+) -> dict[str, Any] | None:
+    """Select the nearest invoice projection already admitted to the forecast timeline."""
+
+    if not _is_iso_date(as_of_date):
+        return None
+    today = date.fromisoformat(as_of_date)
+    eligible: list[dict[str, Any]] = []
+    for raw in inbounds:
+        arrival_date = str(raw.get("arrival_date") or "")
+        invoice_no = str(raw.get("invoice_no") or "").strip()
+        quantity = _optional_float(raw.get("quantity"))
+        if (
+            not invoice_no
+            or not _is_iso_date(arrival_date)
+            or date.fromisoformat(arrival_date) < today
+            or quantity is None
+            or quantity <= 0
+        ):
+            continue
+        eligible.append(
+            {
+                "shipment_id": str(raw.get("shipment_id") or ""),
+                "invoice_no": invoice_no,
+                "arrival_date": arrival_date,
+                "quantity": round(quantity, 2),
+                "date_source": str(raw.get("date_source") or ""),
+            }
+        )
+    if not eligible:
+        return None
+    return min(
+        eligible,
+        key=lambda item: (
+            item["arrival_date"],
+            item["invoice_no"].casefold(),
+            item["shipment_id"],
+        ),
+    )
 
 
 def validate_forecast_settings(payload: Mapping[str, Any] | None) -> ForecastSettings:
@@ -533,6 +580,10 @@ class SkuManagementBlock:
                 {
                     **sku,
                     **forecast,
+                    "nearest_supplier_inbound": select_nearest_supplier_inbound(
+                        item_evidence.get("supplier_inbounds", []),
+                        as_of_date=str(item_evidence.get("as_of_date") or ""),
+                    ),
                     "seller_price": price.get("discountedPrice"),
                     "initial_price": price.get("price"),
                     "seller_discount": price.get("discount"),
@@ -890,7 +941,19 @@ class SkuManagementBlock:
     def _collect_forecast_evidence(self, *, active: Sequence[Mapping[str, Any]], settings: ForecastSettings) -> dict[int, dict[str, Any]]:
         today = current_business_date_iso(self.now_factory())
         nm_ids = [int(item["nm_id"]) for item in active]
-        result = {nm_id: {"as_of_date": today, "stock_wb": None, "stock_ff": None, "daily_demand": None, "real_inbounds": [], "districts": {}, "warnings": []} for nm_id in nm_ids}
+        result = {
+            nm_id: {
+                "as_of_date": today,
+                "stock_wb": None,
+                "stock_ff": None,
+                "daily_demand": None,
+                "real_inbounds": [],
+                "supplier_inbounds": [],
+                "districts": {},
+                "warnings": [],
+            }
+            for nm_id in nm_ids
+        }
         if self.stocks_block is None:
             for row in result.values():
                 row["warnings"].append("stocks contour is unavailable")
@@ -996,7 +1059,20 @@ class SkuManagementBlock:
                             f"supplier shipment {shipment_id} status {order_status or 'unknown'} is not usable forecast evidence"
                         )
                 continue
-            base_date = str(header.get("actual_shipment_date") or header.get("shipment_date") or "")
+            actual_shipment_date = str(
+                header.get("actual_shipment_date")
+                or shipment.get("actual_shipment_date")
+                or ""
+            )
+            planned_shipment_date = str(
+                header.get("planned_shipment_date")
+                or header.get("shipment_date")
+                or shipment.get("planned_shipment_date")
+                or shipment.get("shipment_date")
+                or ""
+            )
+            uses_actual_shipment_date = _is_iso_date(actual_shipment_date)
+            base_date = actual_shipment_date if uses_actual_shipment_date else planned_shipment_date
             if not _is_iso_date(base_date):
                 for line in detail.get("lines", []):
                     nm_id = _optional_int(line.get("internal_nm_id"))
@@ -1008,9 +1084,15 @@ class SkuManagementBlock:
             arrival = date.fromisoformat(base_date) + timedelta(
                 days=settings.factory_to_ff_lead_days + settings.ff_to_wb_lead_days
             )
+            invoice_no = str(header.get("invoice_no") or shipment.get("invoice_no") or "").strip()
             quantity_by_nm: dict[int, float] = {}
             for line in detail.get("lines", []):
                 if str(line.get("line_type") or "product") != "product":
+                    continue
+                if bool(line.get("manual_override")) or str(line.get("match_status") or "") not in {
+                    MATCH_STATUS_MATCHED,
+                    MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+                }:
                     continue
                 nm_id = _optional_int(line.get("internal_nm_id"))
                 qty = _optional_float(line.get("qty"))
@@ -1024,6 +1106,19 @@ class SkuManagementBlock:
                         "supplier_shipment",
                         f"{shipment_id}:{nm_id}",
                     )
+                )
+                result[nm_id].setdefault("supplier_inbounds", []).append(
+                    {
+                        "shipment_id": shipment_id,
+                        "invoice_no": invoice_no,
+                        "arrival_date": arrival.isoformat(),
+                        "quantity": quantity,
+                        "date_source": (
+                            "actual_shipment_date"
+                            if uses_actual_shipment_date
+                            else "planned_shipment_date"
+                        ),
+                    }
                 )
 
     def _append_factory_order_inbounds(self, result: dict[int, dict[str, Any]], *, settings: ForecastSettings) -> None:
@@ -1659,8 +1754,12 @@ def _sanitize_table_preferences(payload: Mapping[str, Any]) -> dict[str, Any]:
             and str(item.get("direction")) in {"asc", "desc"}
         ):
             sort.append({"key": str(item.get("key") or ""), "direction": str(item["direction"])})
+    visible_columns = [item for item in _string_list(payload.get("visible_columns")) if item in TABLE_COLUMN_KEYS]
+    if visible_columns:
+        visible_columns = [*TABLE_MANDATORY_COLUMNS, *visible_columns]
+        visible_columns = list(dict.fromkeys(visible_columns))
     return {
-        "visible_columns": [item for item in _string_list(payload.get("visible_columns")) if item in TABLE_COLUMN_KEYS],
+        "visible_columns": visible_columns,
         "column_order": [item for item in _string_list(payload.get("column_order")) if item in TABLE_COLUMN_KEYS],
         "column_widths": widths,
         "filters": filters,

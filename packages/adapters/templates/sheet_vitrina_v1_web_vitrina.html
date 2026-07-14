@@ -3971,15 +3971,25 @@
     }
 
     .sku-management-panel { min-width: 0; display: grid; gap: 12px; }
-    .sku-management-toolbar, .sku-management-filters, .sku-management-settings-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); align-items: end; }
+    .sku-management-toolbar, .sku-management-settings-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); align-items: end; }
     .sku-management-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
-    .sku-management-settings, .sku-management-history { margin: 0; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+    .sku-management-filters { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+    .sku-management-filters .research-field { flex: 1 1 320px; max-width: 520px; }
+    .sku-management-settings, .sku-management-history { margin: 0; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--panel-bg); }
+    .sku-management-history { margin-top: 2px; }
     .sku-management-settings summary, .sku-management-history summary { cursor: pointer; font-weight: 650; }
-    .sku-management-table-shell { overflow: auto; max-height: 68vh; border: 1px solid var(--line); border-radius: 10px; }
+    .sku-management-table-shell { overflow: auto; max-height: 68vh; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--panel-bg); }
     .sku-management-table { border-collapse: separate; border-spacing: 0; min-width: 1800px; width: max-content; }
-    .sku-management-table th, .sku-management-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
-    .sku-management-table th { position: sticky; top: 0; z-index: 2; background: var(--surface-elevated); text-align: left; cursor: pointer; }
+    .sku-management-table th, .sku-management-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); border-right: 1px solid rgba(58,65,77,.52); vertical-align: middle; white-space: nowrap; line-height: 1.35; }
+    .sku-management-table th:last-child, .sku-management-table td:last-child { border-right: 0; }
+    .sku-management-table th { position: sticky; top: 0; z-index: 5; background: #20242c; color: var(--muted-strong); text-align: left; cursor: pointer; box-shadow: inset 0 -1px 0 var(--border-strong); }
+    .sku-management-table tbody tr:last-child td { border-bottom: 0; }
+    .sku-management-table tbody tr:hover td { background: #1d2129; }
     .sku-management-table td.wrap { white-space: normal; max-width: 280px; }
+    .sku-management-table td.sku-cell-number { text-align: right; font-variant-numeric: tabular-nums; }
+    .sku-management-table .sku-cell-truncate { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sku-nearest-inbound { display: grid; gap: 2px; min-width: 0; }
+    .sku-nearest-inbound strong, .sku-nearest-inbound span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sku-risk { display: inline-flex; border-radius: 999px; padding: 3px 8px; font-size: 12px; }
     .sku-risk.high { background: rgba(210, 52, 52, .14); color: #c23232; }
     .sku-risk.medium { background: rgba(222, 151, 30, .16); color: #ad6d08; }
@@ -3988,12 +3998,16 @@
     .sku-inline-edit { display: flex; gap: 6px; align-items: center; }
     .sku-inline-edit .input { width: 92px; }
     .sku-inline-edit select.input { width: 180px; }
+    .sku-edit-trigger { min-height: 30px; border: 1px solid transparent; border-radius: 6px; color: var(--text); font-variant-numeric: tabular-nums; }
+    .sku-edit-trigger:hover { border-color: var(--accent-border); background: var(--accent-soft); }
     .sku-column-controls { display: grid; gap: 6px; max-height: 320px; overflow: auto; min-width: 330px; }
-    .sku-column-row { display: grid; grid-template-columns: 1fr 64px 30px 30px; gap: 5px; align-items: center; }
+    .sku-column-row { display: grid; grid-template-columns: 30px minmax(150px, 1fr) 64px 30px 30px; gap: 5px; align-items: center; border: 1px solid transparent; border-radius: 6px; padding: 3px; }
+    .sku-column-row:hover { border-color: var(--border); background: var(--panel-subtle); }
+    .sku-column-row.is-dragging { opacity: .55; border-color: var(--accent-border); }
+    .sku-column-drag-handle { cursor: grab; user-select: none; touch-action: none; }
+    .sku-column-drag-handle:active { cursor: grabbing; }
     .sku-management-status { min-height: 20px; color: var(--text-muted); }
-    .sku-management-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: rgba(0,0,0,.45); padding: 20px; }
-    .sku-management-modal-backdrop[hidden] { display: none; }
-    .sku-management-modal { width: min(760px, 100%); max-height: 86vh; overflow: auto; border-radius: 12px; padding: 16px; background: var(--surface); box-shadow: 0 18px 60px rgba(0,0,0,.28); }
+    .sku-management-modal { width: min(760px, 100%); }
 
     .ads-toolbar {
       display: flex;
@@ -4075,7 +4089,7 @@
       min-width: 0;
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--panel);
+      background: var(--panel-bg);
       padding: 12px;
       display: grid;
       gap: 10px;
@@ -4152,7 +4166,7 @@
     .spp-test-main {
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--panel);
+      background: var(--panel-bg);
       overflow: hidden;
     }
 
@@ -4523,6 +4537,47 @@
       gap: 10px;
       padding: 14px;
     }
+
+    .operator-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 140;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(4, 6, 10, 0.76);
+      backdrop-filter: blur(2px);
+      isolation: isolate;
+    }
+
+    .operator-modal-backdrop[hidden] { display: none; }
+    .operator-modal-card [hidden] { display: none !important; }
+
+    .operator-modal-card {
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: #17191f;
+      background-color: #17191f;
+      color: var(--text);
+      opacity: 1;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.52);
+    }
+
+    .operator-modal-card .ads-modal-head,
+    .operator-modal-card .ads-modal-actions,
+    .operator-modal-card .ads-modal-body,
+    .operator-modal-card .prices-modal-body,
+    .operator-modal-card [data-sku-modal-body] {
+      background-color: #17191f;
+    }
+
+    .operator-modal-card [data-sku-modal-body] { display: grid; gap: 10px; padding: 14px; }
+    .operator-modal-card .ads-modal-actions { border-top: 1px solid var(--border); border-bottom: 0; }
+    .sku-modal-state { margin: 0; border: 1px solid var(--border); border-radius: 7px; padding: 12px; background: var(--panel-subtle); }
+    .sku-modal-state.success { border-color: rgba(34,197,94,.42); background: #14251b; color: var(--success-text); }
+    .sku-modal-state.error { border-color: rgba(248,113,113,.42); background: #2a1719; color: var(--error-text); }
 
     .prices-preview-table {
       width: 100%;
@@ -5625,13 +5680,7 @@
           <div class="research-actions" style="margin-top:10px"><button class="button primary" type="button" data-sku-settings-save>Сохранить настройки</button></div>
         </details>
         <div class="sku-management-filters">
-          <label class="research-field"><span>SKU / nmID</span><input class="input" type="search" data-sku-filter="search"></label>
-          <label class="research-field"><span>Риск</span><select class="input" data-sku-filter="risk"><option value="">Все</option><option value="high">Высокий</option><option value="medium">Средний</option><option value="low">Низкий</option><option value="unknown">Нет данных</option></select></label>
-          <label class="research-field"><span>Акции</span><select class="input" data-sku-filter="promo"><option value="">Все</option><option value="yes">Есть</option><option value="no">Нет</option><option value="unknown">н/д</option></select></label>
-          <label class="research-field"><span>Обеспеченность от, %</span><input class="input" type="number" data-sku-filter="coverage_min"></label>
-          <label class="research-field"><span>Обеспеченность до, %</span><input class="input" type="number" data-sku-filter="coverage_max"></label>
-          <label class="research-field"><span>Дефицит от, шт.</span><input class="input" type="number" data-sku-filter="deficit_min"></label>
-          <label class="research-field"><span>Дефицит до, шт.</span><input class="input" type="number" data-sku-filter="deficit_max"></label>
+          <label class="research-field"><span>SKU / nmID / название</span><input class="input" type="search" data-sku-filter="search"></label>
           <details class="column-manager" data-sku-column-manager><summary class="button secondary">Колонки</summary><div class="column-manager-panel"><div class="sku-column-controls" data-sku-column-controls></div></div></details>
         </div>
         <p class="sku-management-status" data-sku-management-status>Раздел не загружен.</p>
@@ -5804,8 +5853,8 @@
     </section>
   </main>
 
-  <div class="ads-modal-backdrop" data-ads-modal hidden>
-    <section class="ads-modal" role="dialog" aria-modal="true" aria-labelledby="ads-bid-modal-title">
+  <div class="ads-modal-backdrop operator-modal-backdrop" data-ads-modal hidden>
+    <section class="ads-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="ads-bid-modal-title">
       <div class="ads-modal-head">
         <h3 class="ads-modal-title" id="ads-bid-modal-title">Подтверждение ставки</h3>
         <button class="button ghost" type="button" data-ads-modal-close>Закрыть</button>
@@ -5818,8 +5867,8 @@
     </section>
   </div>
 
-  <div class="prices-modal-backdrop" data-prices-modal hidden>
-    <section class="prices-modal" role="dialog" aria-modal="true" aria-labelledby="prices-modal-title">
+  <div class="prices-modal-backdrop operator-modal-backdrop" data-prices-modal hidden>
+    <section class="prices-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="prices-modal-title">
       <div class="ads-modal-head">
         <h3 class="ads-modal-title" id="prices-modal-title">Подтверждение изменения цен</h3>
         <button class="button ghost" type="button" data-prices-modal-close>Закрыть</button>
@@ -5832,11 +5881,11 @@
     </section>
   </div>
 
-  <div class="sku-management-modal-backdrop" data-sku-management-modal hidden>
-    <section class="sku-management-modal" role="dialog" aria-modal="true">
-      <div class="ads-modal-head"><h3 class="ads-modal-title">Подтверждение изменения SKU</h3><button class="button ghost" type="button" data-sku-modal-cancel>Закрыть</button></div>
+  <div class="sku-management-modal-backdrop operator-modal-backdrop" data-sku-management-modal hidden>
+    <section class="sku-management-modal operator-modal-card" role="dialog" aria-modal="true" aria-labelledby="sku-management-modal-title">
+      <div class="ads-modal-head"><h3 class="ads-modal-title" id="sku-management-modal-title" data-sku-modal-title>Подтверждение изменения SKU</h3><button class="button ghost" type="button" data-sku-modal-cancel>Закрыть</button></div>
       <div data-sku-modal-body></div>
-      <div class="ads-modal-actions"><button class="button secondary" type="button" data-sku-modal-cancel>Отменить</button><button class="button danger" type="button" data-sku-modal-confirm disabled>Изменить</button></div>
+      <div class="ads-modal-actions"><button class="button secondary" type="button" data-sku-modal-cancel data-sku-modal-secondary>Отменить</button><button class="button danger" type="button" data-sku-modal-confirm disabled>Изменить</button></div>
     </section>
   </div>
 
@@ -6023,6 +6072,8 @@
     const skuManagementHistoryPageNode = document.querySelector("[data-sku-history-page]");
     const skuManagementModalNode = document.querySelector("[data-sku-management-modal]");
     const skuManagementModalBodyNode = document.querySelector("[data-sku-modal-body]");
+    const skuManagementModalTitleNode = document.querySelector("[data-sku-modal-title]");
+    const skuManagementModalSecondaryButton = document.querySelector("[data-sku-modal-secondary]");
     const skuManagementModalConfirmButton = document.querySelector("[data-sku-modal-confirm]");
     const pricesSubtabButtons = Array.from(document.querySelectorAll("[data-prices-subtab]"));
     const pricesSubpanels = Array.from(document.querySelectorAll("[data-prices-subpanel]"));
@@ -6216,7 +6267,7 @@
     const SKU_MANAGEMENT_COLUMNS = [
       {id:"product", label:"SKU / nmID / название", width:240}, {id:"risk", label:"Риск", width:90},
       {id:"deficit_date", label:"Дата дефицита", width:120}, {id:"coverage_pct", label:"Обеспеченность, %", width:125},
-      {id:"deficit_units", label:"Дефицит, шт.", width:110}, {id:"first_problem_district", label:"Проблемный округ", width:130},
+      {id:"deficit_units", label:"Дефицит, шт.", width:110}, {id:"nearest_inbound", label:"Ближ. поставка", width:170},
       {id:"seller_price", label:"Наша цена", width:190}, {id:"buyer_price", label:"Цена покупателя", width:120},
       {id:"spp_proxy", label:"СПП / прокси", width:110}, {id:"promo", label:"Акции", width:100},
       {id:"campaigns", label:"Кампании", width:100}, {id:"current_bid", label:"Рекламная ставка", width:300},
@@ -6227,6 +6278,7 @@
       {id:"diagnostics", label:"Диагностика / качество", width:280}
     ];
     const SKU_MANAGEMENT_DEFAULT_COLUMNS = SKU_MANAGEMENT_COLUMNS.map(function(item){ return item.id; });
+    const SKU_MANAGEMENT_MANDATORY_COLUMNS = ["product"];
     const RESEARCH_UNIFIED_TAB = "research";
     const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
@@ -6595,6 +6647,11 @@
         error: "",
         preview: null,
         previewKind: "",
+        modalState: "idle",
+        modalError: "",
+        modalRequestToken: 0,
+        pendingConfirmedUpdate: null,
+        draggingColumnId: "",
         commitRunning: false,
         historyRows: [],
         historyOffset: 0,
@@ -6695,12 +6752,19 @@
       skuManagementPanelNode.addEventListener("change", handleSkuManagementInput);
       skuManagementPanelNode.addEventListener("click", handleSkuManagementClick);
     }
+    if (skuManagementColumnControlsNode) {
+      skuManagementColumnControlsNode.addEventListener("dragstart", handleSkuManagementColumnDragStart);
+      skuManagementColumnControlsNode.addEventListener("dragover", handleSkuManagementColumnDragOver);
+      skuManagementColumnControlsNode.addEventListener("drop", handleSkuManagementColumnDrop);
+      skuManagementColumnControlsNode.addEventListener("dragend", handleSkuManagementColumnDragEnd);
+      skuManagementColumnControlsNode.addEventListener("keydown", handleSkuManagementColumnKeydown);
+    }
     if (skuManagementHistoryNode) skuManagementHistoryNode.addEventListener("toggle", function(){ if (skuManagementHistoryNode.open) loadSkuManagementHistory({force:true}); });
     if (skuManagementHistoryRefreshButton) skuManagementHistoryRefreshButton.addEventListener("click", function(){ state.skuManagement.historyOffset=0; loadSkuManagementHistory({force:true}); });
     if (skuManagementHistoryPrevButton) skuManagementHistoryPrevButton.addEventListener("click", function(){ state.skuManagement.historyOffset=Math.max(0,state.skuManagement.historyOffset-state.skuManagement.historyLimit); loadSkuManagementHistory({force:true}); });
     if (skuManagementHistoryNextButton) skuManagementHistoryNextButton.addEventListener("click", function(){ if(state.skuManagement.historyOffset+state.skuManagement.historyLimit<state.skuManagement.historyTotal){state.skuManagement.historyOffset+=state.skuManagement.historyLimit;loadSkuManagementHistory({force:true});} });
     if (skuManagementModalNode) skuManagementModalNode.addEventListener("click", handleSkuManagementModalClick);
-    if (skuManagementModalConfirmButton) skuManagementModalConfirmButton.addEventListener("click", commitSkuManagementPreview);
+    if (skuManagementModalConfirmButton) skuManagementModalConfirmButton.addEventListener("click", handleSkuManagementModalPrimaryAction);
 
     loadRefreshButton.addEventListener("click", function() {
       runSourceRefreshAndReload();
@@ -18713,7 +18777,7 @@
         state.skuManagement.rows = Array.isArray(payload.rows) ? payload.rows : [];
         state.skuManagement.settings = (payload.settings || {}).forecast || {};
         state.skuManagement.revision = Number((payload.settings || {}).revision || 0);
-        state.skuManagement.table = Object.assign({visible_columns:[],column_order:[],column_widths:{},filters:{},sort:[]}, (payload.settings || {}).table || {});
+        state.skuManagement.table = normalizeSkuManagementTablePreferences((payload.settings || {}).table || {});
         state.skuManagement.loaded = true;
         syncSkuManagementSettingsInputs();
       } catch (error) {
@@ -18724,6 +18788,19 @@
       }
     }
 
+    function normalizeSkuManagementTablePreferences(raw) {
+      const source=raw&&typeof raw==="object"?raw:{};
+      const allowed=new Set(SKU_MANAGEMENT_DEFAULT_COLUMNS);
+      const order=[];(Array.isArray(source.column_order)?source.column_order:[]).forEach(function(id){id=String(id||"");if(allowed.has(id)&&!order.includes(id))order.push(id);});
+      SKU_MANAGEMENT_DEFAULT_COLUMNS.forEach(function(id){if(!order.includes(id))order.push(id);});
+      let visible=(Array.isArray(source.visible_columns)?source.visible_columns:[]).map(String).filter(function(id,index,items){return allowed.has(id)&&items.indexOf(id)===index;});
+      if(visible.length){SKU_MANAGEMENT_MANDATORY_COLUMNS.slice().reverse().forEach(function(id){if(!visible.includes(id))visible.unshift(id);});}
+      const widths={};Object.entries(source.column_widths||{}).forEach(function(entry){if(allowed.has(entry[0])&&Number.isFinite(Number(entry[1])))widths[entry[0]]=Math.min(600,Math.max(60,Number(entry[1])));});
+      const validSortKeys=new Set(SKU_MANAGEMENT_DEFAULT_COLUMNS.concat(["risk_rank"]));
+      const sort=(Array.isArray(source.sort)?source.sort:[]).filter(function(item){return item&&validSortKeys.has(String(item.key||""))&&(item.direction==="asc"||item.direction==="desc");}).map(function(item){return {key:String(item.key),direction:String(item.direction)};});
+      return {visible_columns:visible,column_order:order,column_widths:widths,filters:{search:String((source.filters||{}).search||"").slice(0,200)},sort:sort};
+    }
+
     function syncSkuManagementSettingsInputs() {
       const settings = state.skuManagement.settings || {};
       document.querySelectorAll("[data-sku-setting]").forEach(function(node){
@@ -18732,7 +18809,7 @@
         if (node.type === "checkbox") node.checked = !!settings[key]; else node.value = settings[key];
       });
       const filters = state.skuManagement.table.filters || {};
-      document.querySelectorAll("[data-sku-filter]").forEach(function(node){ const key=node.getAttribute("data-sku-filter"); node.value = filters[key] === undefined ? "" : filters[key]; });
+      document.querySelectorAll("[data-sku-filter]").forEach(function(node){node.value=String(filters.search||"");});
     }
 
     function skuForecastSettingsFromInputs() {
@@ -18751,9 +18828,19 @@
       try {
         const response = await fetch(WEB_VITRINA_CONFIG.sku_management_settings_path, {method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({base_revision:state.skuManagement.revision,forecast:skuForecastSettingsFromInputs(),table:state.skuManagement.table})});
         const payload = await readJsonResponse(response,"non-json response from SKU settings route");
-        if (!response.ok) throw new Error((payload&&payload.error)||("SKU settings route returned "+response.status));
+        if (!response.ok) {
+          if(response.status===409&&payload&&payload.current){
+            const current=payload.current||{};const config=current.config||{};
+            state.skuManagement.revision=Number(current.revision||state.skuManagement.revision);
+            state.skuManagement.settings=config.forecast||state.skuManagement.settings;
+            state.skuManagement.table=normalizeSkuManagementTablePreferences(config.table||{});
+            syncSkuManagementSettingsInputs();
+            throw new Error("Настройки изменились в другой сессии. Загружена актуальная server-owned версия; повторите действие.");
+          }
+          throw new Error((payload&&payload.error)||("SKU settings route returned "+response.status));
+        }
         state.skuManagement.settings = payload.forecast || state.skuManagement.settings;
-        state.skuManagement.table = payload.table || state.skuManagement.table;
+        state.skuManagement.table = normalizeSkuManagementTablePreferences(payload.table || state.skuManagement.table);
         state.skuManagement.revision = Number(payload.revision || state.skuManagement.revision);
         state.skuManagement.error = "";
         if (!(options && options.noReload)) await loadSkuManagement({force:true});
@@ -18774,6 +18861,7 @@
       order.forEach(function(id){if(byId.has(id)&&!seen.has(id)){result.push(byId.get(id));seen.add(id);}});
       SKU_MANAGEMENT_COLUMNS.forEach(function(item){if(!seen.has(item.id)) result.push(item);});
       const visible = new Set(Array.isArray(state.skuManagement.table.visible_columns)&&state.skuManagement.table.visible_columns.length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);
+      SKU_MANAGEMENT_MANDATORY_COLUMNS.forEach(function(id){visible.add(id);});
       return result.filter(function(item){return visible.has(item.id);});
     }
 
@@ -18782,14 +18870,6 @@
       let rows=state.skuManagement.rows.slice();
       const search=String(filters.search||"").toLowerCase().trim();
       if(search) rows=rows.filter(function(row){return [row.sku,row.nm_id,row.name].some(function(v){return String(v||"").toLowerCase().includes(search);});});
-      if(filters.risk) rows=rows.filter(function(row){return row.risk===filters.risk;});
-      if(filters.promo==="yes") rows=rows.filter(function(row){return row.promo_participation!==null&&row.promo_participation!==undefined&&Number(row.promo_participation)>0;});
-      if(filters.promo==="no") rows=rows.filter(function(row){return row.promo_participation!==null&&row.promo_participation!==undefined&&Number(row.promo_participation)===0;});
-      if(filters.promo==="unknown") rows=rows.filter(function(row){return row.promo_participation===null||row.promo_participation===undefined;});
-      if(filters.coverage_min!==""&&filters.coverage_min!==undefined) rows=rows.filter(function(row){return row.coverage_pct!=null&&Number(row.coverage_pct)>=Number(filters.coverage_min);});
-      if(filters.coverage_max!==""&&filters.coverage_max!==undefined) rows=rows.filter(function(row){return row.coverage_pct!=null&&Number(row.coverage_pct)<=Number(filters.coverage_max);});
-      if(filters.deficit_min!==""&&filters.deficit_min!==undefined) rows=rows.filter(function(row){return row.deficit_units!=null&&Number(row.deficit_units)>=Number(filters.deficit_min);});
-      if(filters.deficit_max!==""&&filters.deficit_max!==undefined) rows=rows.filter(function(row){return row.deficit_units!=null&&Number(row.deficit_units)<=Number(filters.deficit_max);});
       const sort=Array.isArray(state.skuManagement.table.sort)?state.skuManagement.table.sort:[];
       if(sort.length){ rows.sort(function(a,b){for(const spec of sort){const av=skuManagementSortValue(a,spec.key),bv=skuManagementSortValue(b,spec.key);if(av===bv)continue;if(av===null)return 1;if(bv===null)return -1;const cmp=typeof av==="string"?av.localeCompare(bv,"ru"):av-bv;if(cmp!==0)return spec.direction==="desc"?-cmp:cmp;}return Number(a.nm_id)-Number(b.nm_id);}); }
       return rows;
@@ -18800,6 +18880,7 @@
       if(key==="risk")return row.risk==="unknown"||row.risk_rank==null||Number(row.risk_rank)<0?null:Number(row.risk_rank);
       if(key==="promo")return row.promo_count==null?null:Number(row.promo_count);
       if(key==="campaigns")return Number(row.campaign_count||0);
+      if(key==="nearest_inbound")return row.nearest_supplier_inbound&&row.nearest_supplier_inbound.arrival_date?String(row.nearest_supplier_inbound.arrival_date):null;
       if(key==="current_bid")return row.bid_sort_value==null?(row.current_bid==null?null:Number(row.current_bid)):Number(row.bid_sort_value);
       if(key==="diagnostics")return String(row.quality||"");
       const value=row[key]; if(value===null||value===undefined||value==="")return null; return typeof value==="number"?value:(/^\d{4}-\d{2}-\d{2}/.test(String(value))?String(value):Number.isFinite(Number(value))?Number(value):String(value));
@@ -18817,37 +18898,48 @@
       if(state.skuManagement.loading){skuManagementBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">Загрузка…</td></tr>';return;}
       const rows=skuManagementFilteredRows();
       if(!rows.length){skuManagementBodyNode.innerHTML='<tr><td colspan="'+columns.length+'">Нет SKU по текущим фильтрам или evidence отсутствует.</td></tr>';return;}
-      skuManagementBodyNode.innerHTML=rows.map(function(row){return "<tr>"+columns.map(function(col){return renderSkuManagementCell(col.id,row);}).join("")+"</tr>";}).join("");
+      skuManagementBodyNode.innerHTML=rows.map(function(row){return '<tr data-sku-row-nm-id="'+escapeHtml(row.nm_id)+'">'+columns.map(function(col){return renderSkuManagementCell(col.id,row);}).join("")+"</tr>";}).join("");
     }
 
     function renderSkuManagementCell(id,row){
       const money=function(value){return value==null?"—":formatNumber(Number(value),2,true)+" ₽";};
       const pct=function(value){return value==null?"—":formatNumber(Number(value)*((id==="spp_proxy"||id==="margin_pct"||id==="ads_drr"||id==="ads_drr_attributed")?100:1),1,true)+"%";};
-      if(id==="product")return '<td class="wrap"><strong>'+escapeHtml(row.sku||"—")+'</strong> · '+escapeHtml(row.nm_id)+'<br><span class="panel-meta">'+escapeHtml(row.name||"")+'</span></td>';
-      if(id==="risk")return '<td><span class="sku-risk '+escapeHtml(row.risk||"unknown")+'">'+escapeHtml({high:"высокий",medium:"средний",low:"низкий",unknown:"нет данных"}[row.risk]||row.risk)+'</span></td>';
-      if(id==="deficit_date")return '<td>'+escapeHtml(row.deficit_date||"—")+'</td>';
-      if(id==="coverage_pct")return '<td>'+pct(row.coverage_pct)+'</td>';
-      if(id==="deficit_units")return '<td>'+escapeHtml(row.deficit_units==null?"—":formatNumber(Number(row.deficit_units),0,true))+'</td>';
-      if(id==="first_problem_district")return '<td>'+escapeHtml(row.first_problem_district||"—")+'</td>';
-      if(id==="seller_price")return Number(state.skuManagement.editingPriceNmId)===Number(row.nm_id)?'<td><div class="sku-inline-edit"><input class="input" type="number" min="0.01" step="0.01" value="'+escapeHtml(row.seller_price==null?"":row.seller_price)+'" data-sku-price-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-price-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div></td>':'<td><button class="button ghost" type="button" data-sku-price-edit="'+escapeHtml(row.nm_id)+'">'+money(row.seller_price)+'</button></td>';
-      if(id==="buyer_price")return '<td>'+money(row.buyer_price)+'<br><span class="panel-meta">'+escapeHtml(row.buyer_price_quality||"missing")+(row.buyer_price_freshness?' · '+escapeHtml(row.buyer_price_freshness):'')+'</span></td>';
-      if(id==="spp_proxy")return '<td>'+pct(row.spp_proxy)+'</td>';
-      if(id==="promo")return '<td>'+escapeHtml(row.promo_label||"н/д")+'<br><span class="panel-meta">SKU участвует: '+escapeHtml(row.promo_participation==null?"н/д":Number(row.promo_participation)>0?"да":"нет")+' · доступно: '+escapeHtml(row.promo_count==null?"н/д":row.promo_count)+(row.promo_freshness?' · '+escapeHtml(row.promo_freshness):'')+'</span></td>';
-      if(id==="campaigns"){const names=Array.from(new Set((row.ad_options||[]).map(function(item){return item.campaign_name||String(item.advert_id||"");}).filter(Boolean)));return '<td class="wrap">'+escapeHtml(String(row.campaign_count||0))+' / '+escapeHtml(String(row.placement_count||0))+(names.length?'<br><span class="panel-meta">'+escapeHtml(names.join(", "))+'</span>':"")+'</td>';}
-      if(id==="current_bid")return '<td>'+renderSkuBidEditor(row)+'</td>';
-      if(id==="ads_drr"||id==="ads_drr_attributed"||id==="margin_pct")return '<td>'+pct(row[id])+'</td>';
-      if(id==="funnel"){const f=row.funnel||{};return '<td class="wrap">Просмотры '+escapeHtml(f.view_count==null?"—":f.view_count)+' · карточка '+escapeHtml(f.openCount==null?"—":f.openCount)+' · корзина '+escapeHtml(f.cartCount==null?"—":f.cartCount)+'<br><span class="panel-meta">в корзину '+escapeHtml(f.addToCartConversion==null?"—":formatNumber(Number(f.addToCartConversion)*100,1,true)+"%")+' · в заказ '+escapeHtml(f.cartToOrderConversion==null?"—":formatNumber(Number(f.cartToOrderConversion)*100,1,true)+"%")+'</span></td>';}
-      if(id==="orders")return '<td>'+money(row.sales_rub)+' / '+escapeHtml(row.orders==null?"—":row.orders)+'</td>';
-      if(id==="profit_rub")return '<td>'+money(row.profit_rub)+'</td>';
-      if(id==="last_price_change_at"||id==="last_bid_change_at")return '<td>'+escapeHtml(row[id]||"—")+'</td>';
-      if(id==="diagnostics")return '<td class="wrap"><strong>'+escapeHtml(row.quality||"unknown")+'</strong> · '+escapeHtml(row.reason||"")+(Array.isArray(row.quality_warnings)&&row.quality_warnings.length?'<br><span class="panel-meta">'+escapeHtml(row.quality_warnings.join("; "))+'</span>':"")+'</td>';
-      return '<td>'+escapeHtml(row[id]==null?"—":row[id])+'</td>';
+      const td=function(content,className,title){return '<td data-sku-cell="'+escapeHtml(id)+'"'+(className?' class="'+escapeHtml(className)+'"':'')+(title?' title="'+escapeHtml(title)+'"':'')+'>'+content+'</td>';};
+      if(id==="product")return td('<strong>'+escapeHtml(row.sku||"—")+'</strong> · '+escapeHtml(row.nm_id)+'<br><span class="panel-meta sku-cell-truncate">'+escapeHtml(row.name||"")+'</span>',"wrap");
+      if(id==="risk")return td('<span class="sku-risk '+escapeHtml(row.risk||"unknown")+'">'+escapeHtml({high:"высокий",medium:"средний",low:"низкий",unknown:"нет данных"}[row.risk]||row.risk)+'</span>');
+      if(id==="deficit_date")return td(escapeHtml(row.deficit_date||"—"));
+      if(id==="coverage_pct")return td(pct(row.coverage_pct),"sku-cell-number");
+      if(id==="deficit_units")return td(escapeHtml(row.deficit_units==null?"—":formatNumber(Number(row.deficit_units),0,true)),"sku-cell-number");
+      if(id==="nearest_inbound"){
+        const inbound=row.nearest_supplier_inbound||null;if(!inbound)return td("—");
+        const title=[inbound.shipment_id,inbound.date_source].filter(Boolean).join(" · ");
+        return td('<div class="sku-nearest-inbound"><strong>'+escapeHtml(inbound.invoice_no||"—")+'</strong><span class="panel-meta">'+escapeHtml(formatSkuInboundDate(inbound.arrival_date))+' · '+escapeHtml(formatNumber(Number(inbound.quantity),0,true))+' шт.</span></div>',"",title);
+      }
+      if(id==="seller_price")return Number(state.skuManagement.editingPriceNmId)===Number(row.nm_id)?td('<div class="sku-inline-edit"><input class="input" type="number" min="0.01" step="0.01" value="'+escapeHtml(row.seller_price==null?"":row.seller_price)+'" data-sku-price-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-price-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div>'):td('<button class="button ghost sku-edit-trigger" type="button" data-sku-price-edit="'+escapeHtml(row.nm_id)+'">'+money(row.seller_price)+'</button>',"sku-cell-number");
+      if(id==="buyer_price")return td(money(row.buyer_price)+'<br><span class="panel-meta">'+escapeHtml(row.buyer_price_quality||"missing")+(row.buyer_price_freshness?' · '+escapeHtml(row.buyer_price_freshness):'')+'</span>',"sku-cell-number");
+      if(id==="spp_proxy")return td(pct(row.spp_proxy),"sku-cell-number");
+      if(id==="promo")return td(escapeHtml(row.promo_label||"н/д")+'<br><span class="panel-meta">SKU участвует: '+escapeHtml(row.promo_participation==null?"н/д":Number(row.promo_participation)>0?"да":"нет")+' · доступно: '+escapeHtml(row.promo_count==null?"н/д":row.promo_count)+(row.promo_freshness?' · '+escapeHtml(row.promo_freshness):'')+'</span>');
+      if(id==="campaigns"){const names=Array.from(new Set((row.ad_options||[]).map(function(item){return item.campaign_name||String(item.advert_id||"");}).filter(Boolean)));return td(escapeHtml(String(row.campaign_count||0))+' / '+escapeHtml(String(row.placement_count||0))+(names.length?'<br><span class="panel-meta sku-cell-truncate">'+escapeHtml(names.join(", "))+'</span>':""),"wrap",names.join(", "));}
+      if(id==="current_bid")return td(renderSkuBidEditor(row),"sku-cell-number");
+      if(id==="ads_drr"||id==="ads_drr_attributed"||id==="margin_pct")return td(pct(row[id]),"sku-cell-number");
+      if(id==="funnel"){const f=row.funnel||{};return td('Просмотры '+escapeHtml(f.view_count==null?"—":f.view_count)+' · карточка '+escapeHtml(f.openCount==null?"—":f.openCount)+' · корзина '+escapeHtml(f.cartCount==null?"—":f.cartCount)+'<br><span class="panel-meta">в корзину '+escapeHtml(f.addToCartConversion==null?"—":formatNumber(Number(f.addToCartConversion)*100,1,true)+"%")+' · в заказ '+escapeHtml(f.cartToOrderConversion==null?"—":formatNumber(Number(f.cartToOrderConversion)*100,1,true)+"%")+'</span>',"wrap");}
+      if(id==="orders")return td(money(row.sales_rub)+' / '+escapeHtml(row.orders==null?"—":row.orders),"sku-cell-number");
+      if(id==="profit_rub")return td(money(row.profit_rub),"sku-cell-number");
+      if(id==="last_price_change_at"||id==="last_bid_change_at")return td(escapeHtml(row[id]||"—"));
+      if(id==="diagnostics")return td('<strong>'+escapeHtml(row.quality||"unknown")+'</strong> · '+escapeHtml(row.reason||"")+(Array.isArray(row.quality_warnings)&&row.quality_warnings.length?'<br><span class="panel-meta">'+escapeHtml(row.quality_warnings.join("; "))+'</span>':""),"wrap");
+      return td(escapeHtml(row[id]==null?"—":row[id]));
+    }
+
+    function formatSkuInboundDate(value){
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||"")))return "—";
+      const parsed=new Date(String(value)+"T00:00:00Z");
+      return new Intl.DateTimeFormat("ru-RU",{day:"numeric",month:"short",timeZone:"UTC"}).format(parsed).replace(" г.","");
     }
 
     function renderSkuBidEditor(row){
       const options=Array.isArray(row.ad_options)?row.ad_options:[];
       if(!options.length)return "—";
-      if(Number(state.skuManagement.editingBidNmId)!==Number(row.nm_id)){const values=options.map(function(item){return Number(item.current_bid_rub);}).filter(Number.isFinite);const range=values.length?(Math.min.apply(null,values)===Math.max.apply(null,values)?Math.min.apply(null,values)+" ₽":Math.min.apply(null,values)+"–"+Math.max.apply(null,values)+" ₽"):"н/д";const label=options.length===1?range:(options.length+" ставки · "+range);return '<button class="button ghost" type="button" data-sku-bid-edit="'+escapeHtml(row.nm_id)+'">'+escapeHtml(label)+'</button>';}
+      if(Number(state.skuManagement.editingBidNmId)!==Number(row.nm_id)){const values=options.map(function(item){return Number(item.current_bid_rub);}).filter(Number.isFinite);const range=values.length?(Math.min.apply(null,values)===Math.max.apply(null,values)?Math.min.apply(null,values)+" ₽":Math.min.apply(null,values)+"–"+Math.max.apply(null,values)+" ₽"):"н/д";const label=options.length===1?range:(options.length+" ставки · "+range);return '<button class="button ghost sku-edit-trigger" type="button" data-sku-bid-edit="'+escapeHtml(row.nm_id)+'">'+escapeHtml(label)+'</button>';}
       const select=options.length>1?'<select class="input" data-sku-bid-option="'+escapeHtml(row.nm_id)+'">'+options.map(function(item){return '<option value="'+escapeHtml(item.advert_id+"|"+item.placement)+'">'+escapeHtml((item.campaign_name||item.advert_id)+" · "+item.placement+" · "+(item.current_bid_rub==null?"—":item.current_bid_rub+" ₽"))+'</option>';}).join("")+'</select>':'';
       const initial=options.length===1?options[0].current_bid_rub:"";
       return '<div class="sku-inline-edit">'+select+'<input class="input" type="number" min="0" step="0.01" value="'+escapeHtml(initial==null?"":initial)+'" data-sku-bid-input="'+escapeHtml(row.nm_id)+'"><button class="button primary" type="button" data-sku-bid-preview="'+escapeHtml(row.nm_id)+'">Изменить</button></div>';
@@ -18856,24 +18948,57 @@
     function renderSkuManagementColumns(){
       if(!skuManagementColumnControlsNode)return;
       const order=skuManagementOrderedAllIds(); const visible=new Set((state.skuManagement.table.visible_columns||[]).length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);
-      skuManagementColumnControlsNode.innerHTML=order.map(function(id,index){const col=SKU_MANAGEMENT_COLUMNS.find(function(item){return item.id===id;});const width=Number((state.skuManagement.table.column_widths||{})[id]||col.width||120);return '<div class="sku-column-row"><label><input type="checkbox" data-sku-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked":"")+'> '+escapeHtml(col.label)+'</label><input class="input" type="number" min="60" max="600" value="'+width+'" data-sku-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-sku-column-up="'+escapeHtml(id)+'" '+(index===0?"disabled":"")+'>↑</button><button class="button ghost" type="button" data-sku-column-down="'+escapeHtml(id)+'" '+(index===order.length-1?"disabled":"")+'>↓</button></div>';}).join("");
+      SKU_MANAGEMENT_MANDATORY_COLUMNS.forEach(function(id){visible.add(id);});
+      skuManagementColumnControlsNode.innerHTML=order.map(function(id,index){const col=SKU_MANAGEMENT_COLUMNS.find(function(item){return item.id===id;});const width=Number((state.skuManagement.table.column_widths||{})[id]||col.width||120);const mandatory=SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(id);return '<div class="sku-column-row'+(state.skuManagement.draggingColumnId===id?' is-dragging':'')+'" draggable="true" data-sku-column-row="'+escapeHtml(id)+'"><button class="button ghost sku-column-drag-handle" type="button" data-sku-column-drag-handle="'+escapeHtml(id)+'" aria-label="Перетащить колонку '+escapeHtml(col.label)+'" title="Перетащить или используйте стрелки">⋮⋮</button><label><input type="checkbox" data-sku-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked":"")+' '+(mandatory?'disabled aria-label="Обязательная колонка"':'')+'> '+escapeHtml(col.label)+'</label><input class="input" type="number" min="60" max="600" value="'+width+'" data-sku-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-sku-column-up="'+escapeHtml(id)+'" '+(index===0?"disabled":"")+' aria-label="Поднять колонку">↑</button><button class="button ghost" type="button" data-sku-column-down="'+escapeHtml(id)+'" '+(index===order.length-1?"disabled":"")+' aria-label="Опустить колонку">↓</button></div>';}).join("");
     }
 
     function skuManagementOrderedAllIds(){const allowed=new Set(SKU_MANAGEMENT_DEFAULT_COLUMNS);const result=[];(state.skuManagement.table.column_order||[]).forEach(function(id){if(allowed.has(id)&&!result.includes(id))result.push(id);});SKU_MANAGEMENT_DEFAULT_COLUMNS.forEach(function(id){if(!result.includes(id))result.push(id);});return result;}
 
     function handleSkuManagementInput(event){
       const filter=event.target.closest("[data-sku-filter]"); if(filter){const key=filter.getAttribute("data-sku-filter");state.skuManagement.table.filters=Object.assign({},state.skuManagement.table.filters||{}, {[key]:filter.value});renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
-      const visible=event.target.closest("[data-sku-column-visible]"); if(visible){const id=visible.getAttribute("data-sku-column-visible");const set=new Set((state.skuManagement.table.visible_columns||[]).length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);visible.checked?set.add(id):set.delete(id);state.skuManagement.table.visible_columns=Array.from(set);renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
+      const visible=event.target.closest("[data-sku-column-visible]"); if(visible){const id=visible.getAttribute("data-sku-column-visible");if(SKU_MANAGEMENT_MANDATORY_COLUMNS.includes(id)){visible.checked=true;return;}const set=new Set((state.skuManagement.table.visible_columns||[]).length?state.skuManagement.table.visible_columns:SKU_MANAGEMENT_DEFAULT_COLUMNS);visible.checked?set.add(id):set.delete(id);SKU_MANAGEMENT_MANDATORY_COLUMNS.forEach(function(item){set.add(item);});state.skuManagement.table.visible_columns=Array.from(set);renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
       const width=event.target.closest("[data-sku-column-width]"); if(width){if(event.type!=="change")return;const id=width.getAttribute("data-sku-column-width");state.skuManagement.table.column_widths=Object.assign({},state.skuManagement.table.column_widths||{}, {[id]:Math.min(600,Math.max(60,Number(width.value)||120))});renderSkuManagement();scheduleSkuManagementPreferencesSave();}
     }
 
     function handleSkuManagementClick(event){
       const sort=event.target.closest("[data-sku-sort]"); if(sort){const key=sort.getAttribute("data-sku-sort");const current=(state.skuManagement.table.sort||[])[0]||{};state.skuManagement.table.sort=current.key!==key?[{key:key,direction:"asc"}]:current.direction==="asc"?[{key:key,direction:"desc"}]:current.direction==="desc"?[]:[{key:key,direction:"asc"}];renderSkuManagement();scheduleSkuManagementPreferencesSave();return;}
-      const up=event.target.closest("[data-sku-column-up],[data-sku-column-down]"); if(up){const id=up.getAttribute("data-sku-column-up")||up.getAttribute("data-sku-column-down");const order=skuManagementOrderedAllIds();const index=order.indexOf(id);const next=up.hasAttribute("data-sku-column-up")?index-1:index+1;if(index>=0&&next>=0&&next<order.length){[order[index],order[next]]=[order[next],order[index]];state.skuManagement.table.column_order=order;renderSkuManagement();scheduleSkuManagementPreferencesSave();}return;}
+      const up=event.target.closest("[data-sku-column-up],[data-sku-column-down]"); if(up){const id=up.getAttribute("data-sku-column-up")||up.getAttribute("data-sku-column-down");moveSkuManagementColumnByOffset(id,up.hasAttribute("data-sku-column-up")?-1:1);return;}
       const priceEdit=event.target.closest("[data-sku-price-edit]"); if(priceEdit){state.skuManagement.editingPriceNmId=Number(priceEdit.getAttribute("data-sku-price-edit"));renderSkuManagement();return;}
       const bidEdit=event.target.closest("[data-sku-bid-edit]"); if(bidEdit){state.skuManagement.editingBidNmId=Number(bidEdit.getAttribute("data-sku-bid-edit"));renderSkuManagement();return;}
       const price=event.target.closest("[data-sku-price-preview]"); if(price){previewSkuPrice(Number(price.getAttribute("data-sku-price-preview")));return;}
       const bid=event.target.closest("[data-sku-bid-preview]"); if(bid){previewSkuBid(Number(bid.getAttribute("data-sku-bid-preview")));}
+    }
+
+    function persistSkuManagementColumnOrder(order){state.skuManagement.table.column_order=order;renderSkuManagement();scheduleSkuManagementPreferencesSave();}
+
+    function moveSkuManagementColumnByOffset(id,offset){
+      const order=skuManagementOrderedAllIds();const index=order.indexOf(String(id||""));const next=index+Number(offset||0);
+      if(index<0||next<0||next>=order.length)return;[order[index],order[next]]=[order[next],order[index]];persistSkuManagementColumnOrder(order);
+    }
+
+    function handleSkuManagementColumnDragStart(event){
+      const row=event.target.closest("[data-sku-column-row]");if(!row)return;
+      state.skuManagement.draggingColumnId=String(row.getAttribute("data-sku-column-row")||"");
+      row.classList.add("is-dragging");
+      if(event.dataTransfer){event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",state.skuManagement.draggingColumnId);}
+    }
+
+    function handleSkuManagementColumnDragOver(event){if(event.target.closest("[data-sku-column-row]")){event.preventDefault();if(event.dataTransfer)event.dataTransfer.dropEffect="move";}}
+
+    function handleSkuManagementColumnDrop(event){
+      const target=event.target.closest("[data-sku-column-row]");if(!target)return;event.preventDefault();
+      const sourceId=state.skuManagement.draggingColumnId||(event.dataTransfer?event.dataTransfer.getData("text/plain"):"");
+      const targetId=String(target.getAttribute("data-sku-column-row")||"");
+      const order=skuManagementOrderedAllIds();const from=order.indexOf(sourceId);const to=order.indexOf(targetId);if(from<0||to<0||from===to){handleSkuManagementColumnDragEnd();return;}
+      order.splice(from,1);let insertAt=order.indexOf(targetId);const rect=target.getBoundingClientRect();if(event.clientY>rect.top+rect.height/2)insertAt+=1;order.splice(insertAt,0,sourceId);
+      state.skuManagement.draggingColumnId="";persistSkuManagementColumnOrder(order);
+    }
+
+    function handleSkuManagementColumnDragEnd(){state.skuManagement.draggingColumnId="";skuManagementColumnControlsNode.querySelectorAll(".is-dragging").forEach(function(node){node.classList.remove("is-dragging");});}
+
+    function handleSkuManagementColumnKeydown(event){
+      const handle=event.target.closest("[data-sku-column-drag-handle]");if(!handle||!(["ArrowUp","ArrowDown"].includes(event.key)))return;
+      event.preventDefault();moveSkuManagementColumnByOffset(handle.getAttribute("data-sku-column-drag-handle"),event.key==="ArrowUp"?-1:1);
     }
 
     async function previewSkuPrice(nmId){
@@ -18890,24 +19015,112 @@
     }
 
     async function requestSkuManagementPreview(kind,body){
-      state.skuManagement.error=""; if(skuManagementStatusNode)skuManagementStatusNode.textContent="Готовим preview…";
-      try{const path=kind==="price"?WEB_VITRINA_CONFIG.sku_management_price_preview_path:WEB_VITRINA_CONFIG.sku_management_bid_preview_path;const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify(body)});const payload=await readJsonResponse(response,"non-json SKU preview response");if(!response.ok)throw new Error((payload&&payload.error)||("preview route returned "+response.status));state.skuManagement.preview=payload.preview;state.skuManagement.previewKind=kind;renderSkuManagementPreview();}catch(error){state.skuManagement.error=String(error&&error.message?error.message:error);renderSkuManagement();}
+      const requestToken=++state.skuManagement.modalRequestToken;state.skuManagement.error="";state.skuManagement.modalError="";state.skuManagement.preview=null;state.skuManagement.previewKind=kind;state.skuManagement.modalState="preview_loading";skuManagementModalNode.hidden=false;renderSkuManagementModal();renderSkuManagementFeedback();
+      try{
+        const path=kind==="price"?WEB_VITRINA_CONFIG.sku_management_price_preview_path:WEB_VITRINA_CONFIG.sku_management_bid_preview_path;
+        const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify(body)});
+        const payload=await readJsonResponse(response,"non-json SKU preview response");
+        if(requestToken!==state.skuManagement.modalRequestToken)return;
+        if(!response.ok)throw new Error((payload&&payload.error)||("preview route returned "+response.status));
+        if(!payload||payload.status!=="preview_ready"||!payload.preview)throw new Error("preview route did not return preview_ready");
+        state.skuManagement.preview=payload.preview;state.skuManagement.modalState="preview_ready";renderSkuManagementModal();renderSkuManagementFeedback();
+      }catch(error){
+        if(requestToken!==state.skuManagement.modalRequestToken)return;
+        state.skuManagement.modalError=String(error&&error.message?error.message:error);state.skuManagement.error=state.skuManagement.modalError;state.skuManagement.modalState="controlled_error";renderSkuManagementModal();renderSkuManagementFeedback();
+      }
     }
 
     function skuManagementWarningLabel(value){const labels={quarantine_risk_new_discounted_price_at_least_3x_lower:"Новая цена продавца минимум в 3 раза ниже текущей: WB может поместить товар в карантин.",promo_evidence_unavailable_or_stale:"Данные об акциях для этого SKU отсутствуют или устарели.",active_promo_participation:"SKU участвует в действующей акции; изменение цены может повлиять на условия акции.",public_buyer_price_missing_or_stale:"Свежая публичная цена покупателя не подтверждена и не будет подменена расчётом.",min_bid_unavailable:"Текущий минимум ставки WB не подтверждён."};return labels[String(value||"")]||String(value||"");}
 
-    function renderSkuManagementPreview(){
-      const p=state.skuManagement.preview;if(!p||!skuManagementModalNode)return;const warnings=Array.isArray(p.stabilization_warnings)?p.stabilization_warnings:[];const all=Array.isArray(p.warnings)?p.warnings:[];const overrideRequired=Array.isArray(p.override_required_warnings)?p.override_required_warnings:[];
-      let facts="";if(state.skuManagement.previewKind==="price")facts='<p><strong>Текущая / целевая цена продавца:</strong> '+escapeHtml(p.current.discountedPrice)+' → '+escapeHtml(p.target_seller_price)+' ₽</p><p><strong>Первоначальная цена:</strong> '+escapeHtml(p.current.price)+' → '+escapeHtml(p.new.price)+' ₽ · <strong>скидка:</strong> '+escapeHtml(p.current.discount)+'% → '+escapeHtml(p.new.discount)+'%</p><p><strong>Текущая цена покупателя:</strong> '+escapeHtml(p.current_buyer_price==null?"н/д":p.current_buyer_price+" ₽")+' · оценочная цена не подменяет факт.</p>';else facts='<p><strong>advert_id / placement:</strong> '+escapeHtml(p.advert_id)+' / '+escapeHtml(p.placement)+'</p><p><strong>Ставка:</strong> '+escapeHtml(p.old_value)+' → '+escapeHtml(p.requested_value)+' ₽ · минимум '+escapeHtml(p.min_bid_rub==null?"н/д":p.min_bid_rub+' ₽')+'</p>';
-      const detailedCodes=new Set(warnings.map(function(item){return String(item.code||"");}));skuManagementModalBodyNode.innerHTML=facts+(all.length?'<div class="ads-danger-note"><strong>Предупреждения</strong><ul>'+warnings.map(function(item){return '<li>'+escapeHtml(item.message||skuManagementWarningLabel(item.code))+'</li>';}).join("")+(all.filter(function(item){return typeof item==="string"&&!detailedCodes.has(item);}).map(function(item){return '<li>'+escapeHtml(skuManagementWarningLabel(item))+'</li>';}).join(""))+'</ul></div>':'<p class="panel-meta">Safety validation пройдена. Success будет показан только после WB readback.</p>');
-      skuManagementModalConfirmButton.textContent=overrideRequired.length?"Всё равно изменить":"Изменить";skuManagementModalConfirmButton.disabled=false;skuManagementModalNode.hidden=false;
+    function skuManagementPreviewFactsHtml(p){
+      if(!p)return "";
+      if(state.skuManagement.previewKind==="price")return '<p><strong>Текущая / целевая цена продавца:</strong> '+escapeHtml(p.current.discountedPrice)+' → '+escapeHtml(p.target_seller_price)+' ₽</p><p><strong>Первоначальная цена:</strong> '+escapeHtml(p.current.price)+' → '+escapeHtml(p.new.price)+' ₽ · <strong>скидка:</strong> '+escapeHtml(p.current.discount)+'% → '+escapeHtml(p.new.discount)+'%</p><p><strong>Текущая цена покупателя:</strong> '+escapeHtml(p.current_buyer_price==null?"н/д":p.current_buyer_price+" ₽")+' · оценочная цена не подменяет факт.</p>';
+      return '<p><strong>advert_id / placement:</strong> '+escapeHtml(p.advert_id)+' / '+escapeHtml(p.placement)+'</p><p><strong>Ставка:</strong> '+escapeHtml(p.old_value)+' → '+escapeHtml(p.requested_value)+' ₽ · минимум '+escapeHtml(p.min_bid_rub==null?"н/д":p.min_bid_rub+' ₽')+'</p>';
     }
 
-    function handleSkuManagementModalClick(event){if(state.skuManagement.commitRunning)return;if(event.target.closest("[data-sku-modal-cancel]")||event.target===skuManagementModalNode){skuManagementModalNode.hidden=true;state.skuManagement.preview=null;}}
+    function renderSkuManagementModal(){
+      if(!skuManagementModalNode)return;const modalState=String(state.skuManagement.modalState||"idle");const p=state.skuManagement.preview;
+      skuManagementModalNode.setAttribute("data-sku-modal-state",modalState);skuManagementModalNode.hidden=modalState==="idle";
+      if(skuManagementModalSecondaryButton)skuManagementModalSecondaryButton.hidden=["commit_running","readback_pending","success","controlled_error"].includes(modalState);
+      if(modalState==="preview_loading"){
+        skuManagementModalTitleNode.textContent="Готовим preview";skuManagementModalBodyNode.innerHTML='<p class="sku-modal-state" data-sku-preview-loading>Готовим preview…</p>';skuManagementModalConfirmButton.textContent="Изменить";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=true;return;
+      }
+      if(modalState==="preview_ready"&&p){
+        const warnings=Array.isArray(p.stabilization_warnings)?p.stabilization_warnings:[];const all=Array.isArray(p.warnings)?p.warnings:[];const overrideRequired=Array.isArray(p.override_required_warnings)?p.override_required_warnings:[];const detailedCodes=new Set(warnings.map(function(item){return String(item.code||"");}));
+        skuManagementModalTitleNode.textContent=state.skuManagement.previewKind==="price"?"Подтверждение изменения цены":"Подтверждение изменения ставки";
+        skuManagementModalBodyNode.innerHTML=skuManagementPreviewFactsHtml(p)+(all.length?'<div class="ads-danger-note"><strong>Предупреждения</strong><ul>'+warnings.map(function(item){return '<li>'+escapeHtml(item.message||skuManagementWarningLabel(item.code))+'</li>';}).join("")+(all.filter(function(item){return typeof item==="string"&&!detailedCodes.has(item);}).map(function(item){return '<li>'+escapeHtml(skuManagementWarningLabel(item))+'</li>';}).join(""))+'</ul></div>':'<p class="panel-meta">Safety validation пройдена. Success будет показан только после WB readback.</p>');
+        skuManagementModalConfirmButton.textContent=overrideRequired.length?"Всё равно изменить":"Изменить";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=false;return;
+      }
+      if((modalState==="commit_running"||modalState==="readback_pending")&&p){
+        skuManagementModalTitleNode.textContent=modalState==="commit_running"?"Отправляем изменение":"Проверяем значение в WB";
+        skuManagementModalBodyNode.innerHTML=skuManagementPreviewFactsHtml(p)+'<p class="sku-modal-state" data-sku-commit-state="'+escapeHtml(modalState)+'">'+(modalState==="commit_running"?"Изменение отправляется через guarded backend…":"Ожидаем canonical WB readback. Success появится только после совпадения значения.")+'</p>';
+        skuManagementModalConfirmButton.textContent="Изменение выполняется…";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=true;return;
+      }
+      if(modalState==="success"&&state.skuManagement.pendingConfirmedUpdate){
+        const update=state.skuManagement.pendingConfirmedUpdate;const payload=update.payload||{};const preview=update.preview||{};const oldValue=update.kind==="price"?(preview.current||{}).discountedPrice:preview.old_value;const label=update.kind==="price"?"Цена изменена":"Ставка изменена";
+        skuManagementModalTitleNode.textContent=label;skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state success"><strong>'+escapeHtml(label)+'</strong><p>'+escapeHtml(oldValue)+' → '+escapeHtml(payload.confirmed_value)+' ₽</p><p>Изменение проверено через WB readback: значение совпадает.</p></div>';
+        skuManagementModalConfirmButton.textContent="Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;return;
+      }
+      if(modalState==="controlled_error"){
+        skuManagementModalTitleNode.textContent="Изменение не подтверждено";skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state error"><strong>Controlled error</strong><p>'+escapeHtml(state.skuManagement.modalError||"WB readback не подтвердил изменение.")+'</p><p>Зелёный success не показан, локальное значение не изменено.</p></div>';
+        skuManagementModalConfirmButton.textContent="Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;
+      }
+    }
+
+    function renderSkuManagementFeedback(){
+      if(skuManagementErrorNode)skuManagementErrorNode.textContent=state.skuManagement.error||"";
+      if(!skuManagementStatusNode)return;const modalState=String(state.skuManagement.modalState||"");
+      skuManagementStatusNode.textContent=modalState==="preview_loading"?"Готовим preview…":modalState==="commit_running"?"Commit running…":modalState==="readback_pending"?"WB readback pending…":state.skuManagement.loaded?("SKU: "+state.skuManagement.rows.length+" · настройки и представление хранятся на сервере"):"Раздел не загружен.";
+    }
+
+    function closeSkuManagementModal(){
+      if(state.skuManagement.commitRunning)return;
+      state.skuManagement.modalRequestToken+=1;
+      if(state.skuManagement.modalState==="success"&&state.skuManagement.pendingConfirmedUpdate)applySkuManagementConfirmedUpdate(state.skuManagement.pendingConfirmedUpdate);
+      if(state.skuManagement.modalState==="controlled_error"&&state.skuManagement.preview){
+        const nmId=Number(state.skuManagement.preview.nm_id);if(state.skuManagement.previewKind==="price"){state.skuManagement.editingPriceNmId=null;patchSkuManagementRowCells(nmId,["seller_price"]);}else{state.skuManagement.editingBidNmId=null;patchSkuManagementRowCells(nmId,["current_bid"]);}
+      }
+      state.skuManagement.preview=null;state.skuManagement.modalError="";state.skuManagement.pendingConfirmedUpdate=null;state.skuManagement.modalState="idle";skuManagementModalNode.hidden=true;renderSkuManagementFeedback();
+    }
+
+    function handleSkuManagementModalClick(event){if(event.target.closest("[data-sku-modal-cancel]")||event.target===skuManagementModalNode)closeSkuManagementModal();}
+
+    function handleSkuManagementModalPrimaryAction(){
+      if(state.skuManagement.modalState==="success"||state.skuManagement.modalState==="controlled_error"){closeSkuManagementModal();return;}
+      if(state.skuManagement.modalState==="preview_ready")commitSkuManagementPreview();
+    }
 
     async function commitSkuManagementPreview(){
-      const preview=state.skuManagement.preview;if(!preview||state.skuManagement.commitRunning)return;state.skuManagement.commitRunning=true;skuManagementModalConfirmButton.disabled=true;skuManagementModalBodyNode.insertAdjacentHTML("beforeend",'<p data-sku-commit-state>Commit running → readback pending…</p>');
-      try{const kind=state.skuManagement.previewKind;const path=kind==="price"?WEB_VITRINA_CONFIG.sku_management_price_commit_path:WEB_VITRINA_CONFIG.sku_management_bid_commit_path;const hasStabilization=Array.isArray(preview.stabilization_warnings)&&preview.stabilization_warnings.length>0;const hasOverrideWarnings=Array.isArray(preview.override_required_warnings)&&preview.override_required_warnings.length>0;const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({preview_id:preview.preview_id,confirm:true,override_stabilization:hasStabilization,override_warnings:hasOverrideWarnings})});const payload=await readJsonResponse(response,"non-json SKU commit response");if(!response.ok)throw new Error((payload&&payload.error)||("commit route returned "+response.status));const priceTuple=kind==="price"&&payload.confirmed_price!=null?(' · price '+escapeHtml(payload.confirmed_price)+' / discount '+escapeHtml(payload.confirmed_discount)+'%'):'';skuManagementModalBodyNode.innerHTML='<p class="prices-badge success">Success · WB readback подтверждён: '+escapeHtml(payload.confirmed_value)+priceTuple+'</p>';skuManagementModalConfirmButton.disabled=true;window.setTimeout(function(){skuManagementModalNode.hidden=true;state.skuManagement.preview=null;loadSkuManagement({force:true});if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});},700);}catch(error){skuManagementModalBodyNode.insertAdjacentHTML("beforeend",'<p class="research-error">'+escapeHtml(String(error&&error.message?error.message:error))+'</p>');skuManagementModalConfirmButton.disabled=false;if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});}finally{state.skuManagement.commitRunning=false;renderSkuManagement();}
+      const preview=state.skuManagement.preview;if(!preview||state.skuManagement.commitRunning)return;const kind=state.skuManagement.previewKind;state.skuManagement.commitRunning=true;state.skuManagement.modalState="commit_running";state.skuManagement.error="";renderSkuManagementModal();renderSkuManagementFeedback();
+      const readbackTimer=window.setTimeout(function(){if(state.skuManagement.commitRunning&&state.skuManagement.modalState==="commit_running"){state.skuManagement.modalState="readback_pending";renderSkuManagementModal();renderSkuManagementFeedback();}},100);
+      try{
+        const path=kind==="price"?WEB_VITRINA_CONFIG.sku_management_price_commit_path:WEB_VITRINA_CONFIG.sku_management_bid_commit_path;const hasStabilization=Array.isArray(preview.stabilization_warnings)&&preview.stabilization_warnings.length>0;const hasOverrideWarnings=Array.isArray(preview.override_required_warnings)&&preview.override_required_warnings.length>0;
+        const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({preview_id:preview.preview_id,confirm:true,override_stabilization:hasStabilization,override_warnings:hasOverrideWarnings})});const payload=await readJsonResponse(response,"non-json SKU commit response");
+        if(!response.ok)throw new Error((payload&&payload.error)||("commit route returned "+response.status));
+        if(!payload||payload.status!=="success"||payload.readback_status!=="matching"||payload.confirmed_value===null||payload.confirmed_value===undefined)throw new Error("WB readback mismatch: matching confirmation was not returned");
+        state.skuManagement.pendingConfirmedUpdate={kind:kind,preview:preview,payload:payload};state.skuManagement.modalState="success";state.skuManagement.error="";
+        if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});
+      }catch(error){
+        state.skuManagement.modalError=String(error&&error.message?error.message:error);state.skuManagement.error=state.skuManagement.modalError;state.skuManagement.pendingConfirmedUpdate=null;state.skuManagement.modalState="controlled_error";
+        if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});
+      }finally{window.clearTimeout(readbackTimer);state.skuManagement.commitRunning=false;renderSkuManagementModal();renderSkuManagementFeedback();}
+    }
+
+    function applySkuManagementConfirmedUpdate(update){
+      const preview=update.preview||{};const payload=update.payload||{};const nmId=Number(preview.nm_id);const row=state.skuManagement.rows.find(function(item){return Number(item.nm_id)===nmId;});if(!row)return;
+      const cells=[];const confirmedAt=String((payload.event||{}).confirmed_at||"");
+      if(update.kind==="price"){
+        row.seller_price=Number(payload.confirmed_value);if(payload.confirmed_price!=null)row.initial_price=Number(payload.confirmed_price);if(payload.confirmed_discount!=null)row.seller_discount=Number(payload.confirmed_discount);if(confirmedAt)row.last_price_change_at=confirmedAt;state.skuManagement.editingPriceNmId=null;cells.push("seller_price","last_price_change_at");
+        const buyer=payload.buyer_price||{};if(buyer.quality==="observed"&&buyer.value!==null&&buyer.value!==undefined){row.buyer_price=Number(buyer.value);row.buyer_price_quality="observed";row.buyer_price_source=String(buyer.source||"public_wb_card");row.buyer_price_freshness=String(buyer.freshness||buyer.observed_at||"");cells.push("buyer_price");}
+      }else{
+        const option=(row.ad_options||[]).find(function(item){return Number(item.advert_id)===Number(preview.advert_id)&&String(item.placement||"")===String(preview.placement||"");});if(option)option.current_bid_rub=Number(payload.confirmed_value);const bidValues=(row.ad_options||[]).map(function(item){return Number(item.current_bid_rub);}).filter(Number.isFinite);row.current_bid=(row.ad_options||[]).length===1&&bidValues.length?bidValues[0]:null;row.bid_sort_value=bidValues.length?Math.min.apply(null,bidValues):null;if(confirmedAt)row.last_bid_change_at=confirmedAt;state.skuManagement.editingBidNmId=null;cells.push("current_bid","last_bid_change_at");
+      }
+      patchSkuManagementRowCells(nmId,cells);state.skuManagement.error="";
+    }
+
+    function patchSkuManagementRowCells(nmId,cellIds){
+      const row=state.skuManagement.rows.find(function(item){return Number(item.nm_id)===Number(nmId);});const rowNode=skuManagementBodyNode&&skuManagementBodyNode.querySelector('[data-sku-row-nm-id="'+cssEscape(String(nmId))+'"]');if(!row||!rowNode)return;
+      Array.from(new Set(cellIds)).forEach(function(id){const cell=rowNode.querySelector('[data-sku-cell="'+cssEscape(String(id))+'"]');if(cell)cell.outerHTML=renderSkuManagementCell(id,row);});
     }
 
     async function loadSkuManagementHistory(){
