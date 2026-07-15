@@ -1,0 +1,31 @@
+name: Baseline CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout proposed change
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate Python syntax
+        run: python3 -m compileall -q apps packages
+
+      - name: Validate diff hygiene
+        if: github.event_name == 'pull_request'
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+      - name: Validate Release Train
+        run: python3 apps/github_release_train_smoke.py
