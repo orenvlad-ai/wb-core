@@ -23,6 +23,9 @@ from packages.application.registry_upload_db_backed_runtime import (
     _ensure_schema,
 )
 from packages.application.our_wb_costs import _extract_snapshot_sku_metric
+from packages.application.supplier_financial_document_exact_policy import (
+    AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY,
+)
 from packages.application.supplier_shipment_status import (
     HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
 )
@@ -1738,6 +1741,12 @@ class CanonicalCostEngine:
                     """,
                     (shipment_id,),
                 ).fetchall()
+                exact_expense_allocations = _exact_supplier_expense_allocations(
+                    conn,
+                    shipment_id=shipment_id,
+                    expenses=expenses,
+                    product_lines=lines,
+                )
                 for line in lines:
                     nm_id = int(line["internal_nm_id"] or 0)
                     qty = _decimal(line["qty"])
@@ -1753,17 +1762,44 @@ class CanonicalCostEngine:
                             payment_rub, payment_cny
                         )
                     recognized_total = recognized_unit * qty
-                    expense_allocations: list[tuple[sqlite3.Row, Decimal]] = [
-                        (expense, _decimal(expense["amount_rub"]) * _safe_ratio(qty, product_qty_total))
-                        for expense in expenses
-                        if not opening_carry
-                        or str(expense["document_date"] or "")[:10] > CUTOVER_DATE
-                    ]
-                    recognized_expenses = sum((amount for _, amount in expense_allocations), ZERO)
+                    expense_allocations: list[
+                        tuple[sqlite3.Row, Decimal, Mapping[str, Any] | None]
+                    ] = []
+                    for expense in expenses:
+                        if (
+                            opening_carry
+                            and str(expense["document_date"] or "")[:10]
+                            <= CUTOVER_DATE
+                        ):
+                            continue
+                        exact_allocation = exact_expense_allocations.get(
+                            (str(expense["financial_document_id"]), nm_id)
+                        )
+                        allocated = (
+                            _decimal(exact_allocation["capital_rub"])
+                            if exact_allocation is not None
+                            else _decimal(expense["amount_rub"])
+                            * _safe_ratio(qty, product_qty_total)
+                        )
+                        expense_allocations.append(
+                            (expense, allocated, exact_allocation)
+                        )
+                    recognized_expenses_already_in_ff_cost = sum(
+                        (
+                            amount
+                            for _, amount, exact_allocation in expense_allocations
+                            if exact_allocation is None
+                        ),
+                        ZERO,
+                    )
                     invoice_recognized = (
                         recognized_total
                         if opening_carry
-                        else max(recognized_total - recognized_expenses, ZERO)
+                        else max(
+                            recognized_total
+                            - recognized_expenses_already_in_ff_cost,
+                            ZERO,
+                        )
                     )
                     plans.append(
                         {
@@ -1825,7 +1861,7 @@ class CanonicalCostEngine:
                                 "confirmation_status": "confirmed",
                             }
                         )
-                    for expense, allocated in expense_allocations:
+                    for expense, allocated, exact_allocation in expense_allocations:
                         plans.append(
                             {
                                 "component_type": str(expense["document_type"] or expense["category"] or "factual_expense"),
@@ -1835,16 +1871,33 @@ class CanonicalCostEngine:
                                 "quantity": _text(qty),
                                 "recognized_amount_rub": _text(allocated),
                                 "recognized_date": str(expense["document_date"] or accepted_date)[:10],
-                                "paid_amount_rub": "0",
+                                "paid_amount_rub": _text(
+                                    allocated if exact_allocation is not None else ZERO
+                                ),
                                 "paid_equivalent_quantity": "0",
-                                "paid_date": None,
-                                "allocation_method": "shipment_product_quantity_proportional",
+                                "paid_date": (
+                                    str(exact_allocation["effective_date"])
+                                    if exact_allocation is not None
+                                    else None
+                                ),
+                                "allocation_method": (
+                                    "exact_legacy_cost_payment_product_invoice_value_proportional"
+                                    if exact_allocation is not None
+                                    else "shipment_product_quantity_proportional"
+                                ),
                                 "source_document_id": str(expense["financial_document_id"]),
                                 "source_line_id": str(expense["line_id"]),
                                 "evidence": {
                                     "category": str(expense["category"]),
                                     "file_sha256": str(expense["file_sha256"] or ""),
                                     "ff_cost_layer_line_id": str((ff or {}).get("layer_line_id") or ""),
+                                    "exact_cost_payment_event_id": str(
+                                        (exact_allocation or {}).get("event_id") or ""
+                                    ),
+                                    "exact_cost_payment_evidence_hash": str(
+                                        (exact_allocation or {}).get("evidence_hash") or ""
+                                    ),
+                                    "quantity_movement": "0",
                                 },
                                 "confirmation_status": "confirmed",
                             }
@@ -2459,6 +2512,9 @@ class CanonicalCostEngine:
     ) -> dict[tuple[int, str], dict[str, Decimal | str]]:
         """Full physical quantity plus date-bounded paid-equivalent allocation."""
         result: dict[tuple[int, str], dict[str, Decimal | str]] = {}
+        exact_expense_cache: dict[
+            str, dict[tuple[str, int], dict[str, Any]]
+        ] = {}
         baseline = self._baseline_costs()
         with _connect(self.runtime.db_path) as conn:
             rows = conn.execute(
@@ -2486,6 +2542,22 @@ class CanonicalCostEngine:
                     continue
                 stage = STAGE_PRODUCTION_TO_FF if shipped and shipped <= as_of_date else STAGE_PRODUCTION
                 shipment_id = str(row["shipment_id"])
+                if shipment_id not in exact_expense_cache:
+                    exact_expense_cache[shipment_id] = (
+                        _exact_supplier_expense_allocations_for_shipment(
+                            conn, shipment_id=shipment_id
+                        )
+                    )
+                exact_expense = exact_expense_cache[shipment_id].get(
+                    (
+                        str(
+                            AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY[
+                                "document_id"
+                            ]
+                        ),
+                        int(row["internal_nm_id"]),
+                    )
+                )
                 payments = conn.execute(
                     """
                     SELECT cny_delta,rub_value_delta FROM sheet_vitrina_v1_cny_ledger_operations
@@ -2536,6 +2608,16 @@ class CanonicalCostEngine:
                 bucket["paid_equivalent"] = _decimal(bucket["paid_equivalent"]) + paid_equivalent
                 bucket["recognized_capital"] = _decimal(bucket["recognized_capital"]) + qty * recognized_unit
                 bucket["paid_capital"] = _decimal(bucket["paid_capital"]) + allocated_paid
+                if (
+                    exact_expense is not None
+                    and str(exact_expense["effective_date"]) <= as_of_date
+                ):
+                    bucket["recognized_capital"] = _decimal(
+                        bucket["recognized_capital"]
+                    ) + _decimal(exact_expense["capital_rub"])
+                    bucket["paid_capital"] = _decimal(
+                        bucket["paid_capital"]
+                    ) + _decimal(exact_expense["capital_rub"])
                 if recognized_unit > ZERO:
                     bucket["covered"] = _decimal(bucket["covered"]) + qty
                 if ff_line is not None and str(ff_line["source_status"]) == "confirmed":
@@ -5703,6 +5785,254 @@ def _historical_terminal_supplier_shipment(row: Mapping[str, Any]) -> bool:
     return (
         str(value or "")
         == HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE
+    )
+
+
+def _exact_supplier_expense_allocations(
+    conn: sqlite3.Connection,
+    *,
+    shipment_id: str,
+    expenses: Iterable[sqlite3.Row],
+    product_lines: Iterable[sqlite3.Row],
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Adopt the one approved legacy cost-payment group as canonical capital."""
+
+    expected = AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY
+    document_id = str(expected["document_id"])
+    document = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_supplier_financial_documents "
+        "WHERE document_id=? AND supplier_order_id=?",
+        (document_id, shipment_id),
+    ).fetchone()
+    exact_expenses = [
+        expense
+        for expense in expenses
+        if str(expense["financial_document_id"] or "") == document_id
+    ]
+    if document is None or str(document["parse_status"] or "") != "confirmed":
+        return {}
+    if shipment_id != str(expected["shipment_id"]) or len(exact_expenses) != 1:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_identity_drift",
+            {"document_id": document_id, "shipment_id": shipment_id},
+        )
+    expense = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines "
+        "WHERE line_id=? AND financial_document_id=? AND supplier_order_id=?",
+        (expected["expense_line_id"], document_id, shipment_id),
+    ).fetchone()
+    if document is None or expense is None:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_evidence_missing",
+            {"document_id": document_id, "expense_line_id": expected["expense_line_id"]},
+        )
+    expense_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_financial_expense_lines "
+            "WHERE financial_document_id=?",
+            (document_id,),
+        ).fetchone()[0]
+    )
+    if expense_count != 1:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_line_drift",
+            {"document_id": document_id, "expense_line_count": expense_count},
+        )
+    document_checks = {
+        "document_type": expected["document_type"],
+        "document_number": expected["document_number"],
+        "document_date": expected["document_date"],
+        "currency": expected["currency"],
+        "file_sha256": expected["file_sha256"],
+    }
+    for field, value in document_checks.items():
+        if str(document[field] or "") != str(value):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_document_drift",
+                {"document_id": document_id, "field": field},
+            )
+    if _decimal(document["total_amount_rub"]) != _decimal(
+        expected["total_amount_rub"]
+    ):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_document_drift",
+            {"document_id": document_id, "field": "total_amount_rub"},
+        )
+    expense_checks = {
+        "category": expected["expense_category"],
+        "stage": expected["expense_stage"],
+        "currency": expected["currency"],
+    }
+    for field, value in expense_checks.items():
+        if str(expense[field] or "") != str(value):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_line_drift",
+                {"expense_line_id": expected["expense_line_id"], "field": field},
+            )
+    expense_amount = _decimal(expense["amount_rub"])
+    if expense_amount != _decimal(expected["expense_amount_rub"]):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_line_drift",
+            {"expense_line_id": expected["expense_line_id"], "field": "amount_rub"},
+        )
+
+    lines = sorted(
+        product_lines,
+        key=lambda line: (int(line["sort_order"] or 0), str(line["line_id"] or "")),
+    )
+    if len(lines) != int(expected["event_count"]):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_product_line_drift",
+            {"document_id": document_id, "count": len(lines)},
+        )
+    product_values: list[tuple[int, Decimal]] = []
+    seen_nm_ids: set[int] = set()
+    for line in lines:
+        nm_id = int(line["internal_nm_id"] or 0)
+        quantity = _decimal(line["qty"])
+        amount = _decimal(line["amount"])
+        if amount <= ZERO:
+            amount = quantity * _decimal(line["unit_price"])
+        if (
+            nm_id <= 0
+            or nm_id in seen_nm_ids
+            or quantity <= ZERO
+            or amount <= ZERO
+            or str(line["match_status"] or "")
+            not in {"matched", "matched_by_compatibility"}
+        ):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_product_line_drift",
+                {"document_id": document_id, "nm_id": nm_id},
+            )
+        seen_nm_ids.add(nm_id)
+        product_values.append((nm_id, amount))
+    total_value = sum((amount for _, amount in product_values), ZERO)
+    remaining = expense_amount
+    expected_by_ordinal: dict[int, tuple[int, str]] = {}
+    for ordinal, (nm_id, amount) in enumerate(product_values, start=1):
+        allocated = (
+            remaining
+            if ordinal == len(product_values)
+            else expense_amount * amount / total_value
+        )
+        remaining -= allocated
+        expected_by_ordinal[ordinal] = (nm_id, _text(allocated))
+
+    prefix = f"cost_payment:financial_expense:{document_id}:"
+    events = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_own_capital_events "
+        "WHERE substr(event_id,1,?)=? ORDER BY event_id",
+        (len(prefix), prefix),
+    ).fetchall()
+    if len(events) != int(expected["event_count"]):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_event_count_drift",
+            {"document_id": document_id, "count": len(events)},
+        )
+    result: dict[tuple[str, int], dict[str, Any]] = {}
+    stored_total = ZERO
+    for event in events:
+        event_id = str(event["event_id"] or "")
+        try:
+            ordinal = int(event_id.rsplit(":", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_event_identity_drift",
+                {"document_id": document_id, "event_id": event_id},
+            ) from exc
+        expected_item = expected_by_ordinal.get(ordinal)
+        if expected_item is None:
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_event_identity_drift",
+                {"document_id": document_id, "event_id": event_id},
+            )
+        nm_id, capital_text = expected_item
+        exact_event_id = f"{prefix}{nm_id}:{ordinal}"
+        checks = {
+            "event_id": exact_event_id,
+            "event_type": "cost_payment",
+            "effective_date": expected["document_date"],
+            "shipment_id": shipment_id,
+            "stage_from": "",
+            "stage_to": expected["event_stage"],
+            "cost_layer_id": f"expense:financial_expense:{document_id}:{nm_id}:{ordinal}",
+            "evidence_hash": expected["event_evidence_hash"],
+        }
+        for field, value in checks.items():
+            if str(event[field] or "") != str(value):
+                raise CanonicalCostBlocked(
+                    "exact_supplier_expense_event_identity_drift",
+                    {"document_id": document_id, "event_id": event_id, "field": field},
+                )
+        if (
+            int(event["nm_id"] or 0) != nm_id
+            or _decimal(event["quantity"]) != ZERO
+            or _decimal(event["confirmed_quantity"]) != ZERO
+            or _text(_decimal(event["capital_rub"])) != capital_text
+        ):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_event_accounting_drift",
+                {"document_id": document_id, "event_id": event_id},
+            )
+        key = (document_id, nm_id)
+        if key in result:
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_duplicate_nm",
+                {"document_id": document_id, "nm_id": nm_id},
+            )
+        stored_total += _decimal(event["capital_rub"])
+        result[key] = {
+            "event_id": event_id,
+            "effective_date": str(event["effective_date"]),
+            "capital_rub": capital_text,
+            "evidence_hash": str(event["evidence_hash"]),
+        }
+    tolerance = Decimal("0.000001") * Decimal(len(events))
+    if abs(expense_amount - stored_total) > tolerance or set(seen_nm_ids) != {
+        nm_id for _, nm_id in result
+    }:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_conservation_drift",
+            {"document_id": document_id},
+        )
+    return result
+
+
+def _exact_supplier_expense_allocations_for_shipment(
+    conn: sqlite3.Connection,
+    *,
+    shipment_id: str,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    expected = AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY
+    if shipment_id != str(expected["shipment_id"]):
+        return {}
+    expenses = conn.execute(
+        """
+        SELECT expense.line_id,expense.financial_document_id,expense.category,
+               expense.amount_rub,document.document_type,document.document_date,
+               document.parse_status,document.file_sha256
+        FROM sheet_vitrina_v1_supplier_financial_expense_lines expense
+        JOIN sheet_vitrina_v1_supplier_financial_documents document
+          ON document.document_id=expense.financial_document_id
+        WHERE expense.supplier_order_id=? AND expense.financial_document_id=?
+          AND COALESCE(expense.amount_rub,0)>0 AND document.parse_status='confirmed'
+        ORDER BY document.document_date,document.document_id,expense.sort_order
+        """,
+        (shipment_id, expected["document_id"]),
+    ).fetchall()
+    if not expenses:
+        return {}
+    product_lines = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines "
+        "WHERE shipment_id=? AND line_type='product' ORDER BY sort_order",
+        (shipment_id,),
+    ).fetchall()
+    return _exact_supplier_expense_allocations(
+        conn,
+        shipment_id=shipment_id,
+        expenses=expenses,
+        product_lines=product_lines,
     )
 
 
