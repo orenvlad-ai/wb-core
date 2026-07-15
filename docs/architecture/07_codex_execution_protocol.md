@@ -119,6 +119,16 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 
 Для `production data mutation/backfill` выполняются применимый GitHub/runtime closure, обязательный safety-контур и human gates.
 
+Если PR явно поставлен в repo-owned GitHub Release Train, Codex не передаёт ответственность очереди и не завершает task на метке `release:ready`. Task owner обязан:
+
+- использовать отдельную branch/worktree и отдельный PR для каждого независимого change;
+- добавить ровно одну label `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`;
+- ставить `release:ready` только после targeted checks, semantic review, fixes/recheck и docs sync;
+- наблюдать workflow до `release:done`/`release:production` либо исправить `release:blocked`/`release:halted`;
+- не разрешать Release Train автоматически выполнять production data mutation/backfill.
+
+Release Train сериализует только финальную критическую секцию и не выполняет semantic conflict resolution. Полный контракт: [`11_github_release_train.md`](11_github_release_train.md).
+
 Явное ограничение пользователя имеет приоритет: «только ветка», «до commit», «до draft PR», «без merge», «без deploy», «без production mutations» или другая точная граница. Тогда Codex останавливается ровно на ней, подтверждает достигнутое состояние и не считает отсутствие дальнейшего closure ошибкой. Ограничение closure не расширяет authority для иных mutations.
 
 ## Проверка И Semantic Review
@@ -164,6 +174,8 @@ Review только списка файлов не считается semantic r
 8. merge;
 9. удаление remote/local feature branch;
 10. `fetch --prune` и подтверждение результата в актуальном `origin/main`.
+
+Для PR, вошедшего в Release Train, steps 5–10 выполняются через canonical queue workflow и подтверждаются его фактическим terminal state; Codex остаётся task owner и проверяет GitHub/live evidence после завершения workflow.
 
 Если пользователь задал более раннюю границу, например draft PR без merge, выполняются только шаги до этой границы включительно. Manual handoff допустим только при конкретной permission/protection/approval ошибке.
 

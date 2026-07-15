@@ -199,6 +199,14 @@ Supported commands:
 - `public-probe`
 - `deploy-and-verify`
 
+## GitHub Release Train Binding
+
+Repo-owned [GitHub Release Train](11_github_release_train.md) является optional explicit queue binding поверх этого canonical runner, а не вторым deploy implementation. Для PR с `scope:live-runtime + release:ready` workflow обязан до merge доказать required `baseline` на final head SHA и SSH connectivity к active EU target, затем squash-merge exact head, checkout exact merge SHA и вызвать только:
+
+`python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify`
+
+Production failure после merge ставит global `release:halted` и блокирует следующие releases. `scope:repo-only` не вызывает deploy. `scope:production-mutation` автоматически не выполняется. GitHub Environment secrets `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS` остаются вне Git; отсутствие любого из них блокирует live PR до merge.
+
 Read-only commands may inspect rollback-only target metadata (`print-plan`, `deploy --dry-run`, `apply-nginx-routes --dry-run`, bounded probes when explicitly needed), but routine writes must not target selleros.
 
 ## Canonical Target Definition

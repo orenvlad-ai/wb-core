@@ -115,7 +115,7 @@ Legacy-репозитории остаются рабочими, но счита
 
 - full legacy parity по всем историческим registry rows и metric sections;
 - production storage binding для registry upload и broader user-management beyond current simple WebCore auth;
-- granted deploy access + live publish wiring для already materialized hosted runtime contract;
+- configured GitHub Environment production credentials для автоматического live release; repo-owned wiring остаётся fail-closed до их binding;
 - материализованные слои `packages/domain`, `infra/`, `tests/`, `api/`, `jobs/`, `db/`.
 
 ## Governance Pointers
@@ -126,6 +126,7 @@ Legacy-репозитории остаются рабочими, но счита
 - [docs/architecture/07_codex_execution_protocol.md](docs/architecture/07_codex_execution_protocol.md)
 - [docs/architecture/02_repo_workspace_blueprint.md](docs/architecture/02_repo_workspace_blueprint.md)
 - [docs/architecture/10_hosted_runtime_deploy_contract.md](docs/architecture/10_hosted_runtime_deploy_contract.md)
+- [docs/architecture/11_github_release_train.md](docs/architecture/11_github_release_train.md)
 
 `README.md` остаётся summary/navigation entrypoint и не должен использоваться как самостоятельный carrier operational governance.
 
@@ -135,6 +136,7 @@ Legacy-репозитории остаются рабочими, но счита
 - [docs/architecture/00_migration_charter.md](docs/architecture/00_migration_charter.md)
 - [docs/architecture/01_target_architecture.md](docs/architecture/01_target_architecture.md)
 - [docs/architecture/10_hosted_runtime_deploy_contract.md](docs/architecture/10_hosted_runtime_deploy_contract.md)
+- [docs/architecture/11_github_release_train.md](docs/architecture/11_github_release_train.md)
 - [migration/75_registry_v2_minimal_schema.md](migration/75_registry_v2_minimal_schema.md)
 - [migration/76_metric_runtime_registry_minimal_schema.md](migration/76_metric_runtime_registry_minimal_schema.md)
 - [migration/77_registry_implementation_path.md](migration/77_registry_implementation_path.md)
