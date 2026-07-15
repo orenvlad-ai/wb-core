@@ -148,6 +148,16 @@ POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {
         "accepted_line_set_fingerprint": "sha256:7add90d1d03f7f7e4048ebeac583aeb3a3febe16e26971a56e0e502f9a36a416",
         "evidence_fingerprint": "sha256:37f7d2ebd9a9c7097ac7f3aa568a0ea79ce3df836f43ffb5c2bb2293f426171e",
     },
+    "ffso_9f7bd066f7b943cdb702": {
+        "operation_id": "ffso_9f7bd066f7b943cdb702",
+        "supply_id": "40561872",
+        "source_key": "wb_supply_debit:supply:40561872",
+        "business_date": "2026-07-02",
+        "line_set_fingerprint": "sha256:4fa026e3afac75ec43479e96837a0d05217ba062db91a6002029b6a12cc87aaa",
+        "accepted_line_set_fingerprint": "sha256:e8f56d3ecc5dfe5aa6465ccede384b4c43007a4637ae7f67fda86d89e9c34a1c",
+        "evidence_fingerprint": "sha256:06d8540fc06f4790fbef75feaec7640c6946a722e7f60bdc4945bd06c6611e7c",
+        "allow_baseline_cost_reference_without_legacy_supply_cost_rows": True,
+    },
 }
 
 # Exact source-evidence absorptions approved for the one-time canonical
@@ -4145,6 +4155,9 @@ def _source_anomaly_preflight_conn(
             "missing_cost_nm_ids": missing_cost_nm_ids,
             "normalized_quantity_within_500": surplus_total <= Decimal("500"),
         }
+        baseline_cost_only_policy = (
+            _postcutover_manifest_allows_baseline_cost_reference(operation_row)
+        )
         operation_row["postcutover_normalization"] = {
             "policy": POSTCUTOVER_NORMALIZATION_POLICY,
             "surplus_quantity": _text(surplus_total),
@@ -4164,6 +4177,7 @@ def _source_anomaly_preflight_conn(
             "legacy_supply_cost_rows": legacy_cost_rows,
             "checks": normalization_checks,
             "manifest_match": _postcutover_manifest_matches(operation_row),
+            "baseline_cost_only_policy": baseline_cost_only_policy,
         }
         operations.append(operation_row)
         if resolution.effective_date < CUTOVER_DATE:
@@ -4230,6 +4244,11 @@ def _source_anomaly_preflight_conn(
                 "legacy_supply_cost_evidence_present",
                 "normalized_quantity_within_500",
             ):
+                if (
+                    check_name == "legacy_supply_cost_evidence_present"
+                    and baseline_cost_only_policy
+                ):
+                    continue
                 if not bool(normalization_checks[check_name]):
                     guard_failures.append(check_name)
             if missing_cost_nm_ids:
@@ -4993,7 +5012,27 @@ def _postcutover_manifest_matches(operation: Mapping[str, Any]) -> bool:
         ),
         "evidence_fingerprint": str(operation.get("evidence_fingerprint") or ""),
     }
-    return actual == expected
+    expected_identity = {key: expected.get(key) for key in actual}
+    return actual == expected_identity
+
+
+def _postcutover_manifest_allows_baseline_cost_reference(
+    operation: Mapping[str, Any],
+) -> bool:
+    """Permit one exact operation to use the complete canonical baseline costs.
+
+    This is not a generic missing-cost exemption: the full operation/source/date
+    and both immutable line-set fingerprints must match the manifest first.
+    """
+
+    operation_id = str(operation.get("operation_id") or "")
+    expected = POSTCUTOVER_NORMALIZATION_MANIFEST.get(operation_id) or {}
+    return bool(
+        _postcutover_manifest_matches(operation)
+        and expected.get(
+            "allow_baseline_cost_reference_without_legacy_supply_cost_rows"
+        )
+    )
 
 
 def _doprinato_fact_fingerprint_payload(
