@@ -62,6 +62,62 @@ def _without_plans(report: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in report.items() if key != "plans"}
 
 
+def _verify_disposable_publication_no_op(
+    db_path: Path,
+    *,
+    publication: Mapping[str, Any],
+    date_from: str,
+    date_to: str,
+) -> dict[str, Any]:
+    """Apply a publication plan only to the correction's disposable candidate."""
+
+    resolved = db_path.resolve()
+    if not (
+        resolved.parent.name == "runtime"
+        and resolved.parent.parent.name.startswith("supplier-factual-date-candidate-")
+    ):
+        raise ValueError("publication no-op proof requires a disposable supplier candidate")
+    current = build_publication_report(
+        resolved,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    if current["fingerprint"] != publication["fingerprint"]:
+        raise ValueError("disposable publication candidate drift")
+    with _connect(resolved) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for day, plan_json in publication["plans"].items():
+                updated = conn.execute(
+                    "UPDATE sheet_vitrina_v1_ready_snapshots "
+                    "SET plan_json=? WHERE as_of_date=?",
+                    (plan_json, day),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError(
+                        f"disposable publication snapshot identity drift: {day}"
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    no_op = build_publication_report(
+        resolved,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    if int(no_op["changed_cells"]) != 0:
+        raise ValueError("disposable publication zero-change proof failed")
+    if no_op["published_output_digest"] != publication["published_output_digest"]:
+        raise ValueError("disposable publication output digest drift")
+    return {
+        **_without_plans(no_op),
+        "mode": "disposable-candidate-proof",
+        "applied_to_production": False,
+        "idempotent": True,
+    }
+
+
 def build_chain_report(args: argparse.Namespace) -> dict[str, Any]:
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
     block = SupplierShipmentFactualCorrectionBlock(runtime=runtime)
@@ -70,6 +126,12 @@ def build_chain_report(args: argparse.Namespace) -> dict[str, Any]:
         supplier = dict(candidate["report"])
         publication = build_publication_report(
             Path(candidate["db_path"]),
+            date_from=args.publication_date_from,
+            date_to=args.publication_date_to,
+        )
+        publication_no_op = _verify_disposable_publication_no_op(
+            Path(candidate["db_path"]),
+            publication=publication,
             date_from=args.publication_date_from,
             date_to=args.publication_date_to,
         )
@@ -103,6 +165,11 @@ def build_chain_report(args: argparse.Namespace) -> dict[str, Any]:
         ],
         "publication_output_digest": publication["published_output_digest"],
         "publication_changed_cells": publication["changed_cells"],
+        "publication_second_run_fingerprint": publication_no_op["fingerprint"],
+        "publication_second_run_changed_cells": publication_no_op["changed_cells"],
+        "publication_second_run_output_digest": publication_no_op[
+            "published_output_digest"
+        ],
         "stop_conditions": [
             "supplier semantic fingerprint drift",
             "publication fingerprint drift",
@@ -119,6 +186,7 @@ def build_chain_report(args: argparse.Namespace) -> dict[str, Any]:
         "applied": False,
         "supplier": supplier,
         "publication": _without_plans(publication),
+        "publication_second_run": publication_no_op,
     }
 
 

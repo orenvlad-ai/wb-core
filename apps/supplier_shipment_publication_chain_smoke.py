@@ -17,7 +17,11 @@ from apps.supplier_shipment_factual_date_correction_smoke import (
     _materialize_legacy_conflict,
     _runtime_fixture,
 )
-from apps.supplier_shipment_publication_chain import apply_chain, build_chain_report
+from apps.supplier_shipment_publication_chain import (
+    _verify_disposable_publication_no_op,
+    apply_chain,
+    build_chain_report,
+)
 from packages.application.canonical_cost_engine import CanonicalCostEngine
 from packages.application.registry_upload_db_backed_runtime import _connect
 
@@ -64,6 +68,21 @@ def main() -> int:
         assert first["chain_fingerprint"] == second["chain_fingerprint"]
         assert first["supplier_fingerprint"] == second["supplier_fingerprint"]
         assert first["publication_fingerprint"] == second["publication_fingerprint"]
+        assert first["publication_second_run"] == second["publication_second_run"]
+        assert first["publication_second_run_changed_cells"] == 0
+        assert first["publication_second_run"]["idempotent"] is True
+        assert first["publication_second_run"]["applied_to_production"] is False
+        try:
+            _verify_disposable_publication_no_op(
+                runtime.db_path,
+                publication={},
+                date_from="2026-07-01",
+                date_to="2026-07-14",
+            )
+        except ValueError as exc:
+            assert "disposable supplier candidate" in str(exc)
+        else:
+            raise AssertionError("production-shaped publication no-op proof was accepted")
         args.apply = True
         args.fingerprint = first["supplier_fingerprint"]
         args.publication_fingerprint = first["publication_fingerprint"]
