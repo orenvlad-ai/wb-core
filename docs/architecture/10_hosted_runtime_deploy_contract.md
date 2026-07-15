@@ -488,6 +488,7 @@ Loopback/runtime probe validates the hosted process behind the reverse proxy or 
 Canonical `loopback-probe`, `public-probe` and `deploy-and-verify` are auth-aware and fast by default:
 - when production WebCore app-level auth is configured, the runner may create a short-lived same-origin session cookie from the hosted runtime env file and use it only in memory for probe requests; the cookie, password hash and session secret must not be printed in JSON, logs, PR text or handoff;
 - unauthenticated browser/curl reads may return login redirect or auth error after auth hardening, but the canonical runner must verify the authenticated operator surface with sanitized auth metadata only;
+- bounded JSON reads must continue across short socket chunks until EOF or the configured byte limit plus one byte; a short transport read is not EOF and must not turn a valid large response into a false `expected JSON object response` failure;
 - full `POST /v1/sheet-vitrina-v1/refresh` is a heavy mutating/deep check and is not part of ordinary health probes; it runs only when `--include-refresh` is passed, while `--skip-refresh` remains a compatibility force-skip flag;
 - deploy closure must use canonical probes for service health and may run the explicit deep refresh probe only when the task scope actually changes refresh semantics.
 
