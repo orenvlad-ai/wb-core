@@ -29,6 +29,7 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V3,
     _ff_opening_boundary_context,
     _normalized_acceptance_plan,
+    _postcutover_manifest_allows_baseline_cost_reference,
     _source_anomaly_preflight_conn,
     _unmatched_doprinato_manifest_decision,
     _unmatched_doprinato_manifest_report,
@@ -292,6 +293,23 @@ def _cutover_boundary_and_normalization_policy() -> None:
         )
     finally:
         POSTCUTOVER_NORMALIZATION_MANIFEST.pop(operation["operation_id"], None)
+
+    baseline_only = {
+        **operation,
+        "operation_id": "baseline-cost-only-fixture",
+        "allow_baseline_cost_reference_without_legacy_supply_cost_rows": True,
+    }
+    POSTCUTOVER_NORMALIZATION_MANIFEST[baseline_only["operation_id"]] = dict(
+        baseline_only
+    )
+    try:
+        if not _postcutover_manifest_allows_baseline_cost_reference(baseline_only):
+            raise AssertionError("exact baseline-cost-only policy must match")
+        drifted = {**baseline_only, "accepted_line_set_fingerprint": "sha256:drift"}
+        if _postcutover_manifest_allows_baseline_cost_reference(drifted):
+            raise AssertionError("baseline-cost-only policy must fail on evidence drift")
+    finally:
+        POSTCUTOVER_NORMALIZATION_MANIFEST.pop(baseline_only["operation_id"], None)
 
     with TemporaryDirectory() as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
