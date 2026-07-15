@@ -108,7 +108,10 @@ def main() -> int:
     try:
         payload = run(build_parser().parse_args())
     except Exception as exc:
-        print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False, sort_keys=True))
+        error = {"status": "error", "error": str(exc)}
+        if isinstance(getattr(exc, "report", None), dict):
+            error["collateral_diagnostic"] = exc.report
+        print(json.dumps(error, ensure_ascii=False, sort_keys=True))
         return 1
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str))
     return 0
