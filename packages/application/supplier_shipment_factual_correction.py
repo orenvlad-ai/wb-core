@@ -87,6 +87,14 @@ class SupplierShipmentFactualCorrectionError(RuntimeError):
     """A safe operator-visible correction failure."""
 
 
+class SupplierShipmentCandidateCollateralDrift(ValueError):
+    """Exact disposable-candidate collateral drift with sanitized row evidence."""
+
+    def __init__(self, report: Mapping[str, Any]) -> None:
+        super().__init__("candidate changed non-target data")
+        self.report = dict(report)
+
+
 class SupplierShipmentFactualCorrectionBlock:
     def __init__(
         self,
@@ -856,7 +864,14 @@ class SupplierShipmentFactualCorrectionBlock:
                 candidate_runtime.db_path, target_shipment_ids, target_nm_ids
             )
             if collateral_source_digest != collateral_candidate_digest:
-                raise ValueError("candidate changed non-target data")
+                raise SupplierShipmentCandidateCollateralDrift(
+                    _candidate_collateral_change_report(
+                        source_db,
+                        candidate_runtime.db_path,
+                        shipment_ids=target_shipment_ids,
+                        target_nm_ids=target_nm_ids,
+                    )
+                )
             if legacy_digest != _legacy_pre_cutover_digest(candidate_runtime.db_path):
                 raise ValueError("candidate changed pre-cutover history")
             request_fingerprint = _hash(
@@ -1645,6 +1660,235 @@ def _collateral_digest_many(
 ) -> str:
     with _connect(db_path) as conn:
         return _collateral_digest_many_conn(conn, shipment_ids, target_nm_ids)
+
+
+def _candidate_collateral_change_report(
+    source_db: Path,
+    candidate_db: Path,
+    *,
+    shipment_ids: Iterable[str],
+    target_nm_ids: Iterable[int],
+) -> dict[str, Any]:
+    """Localize every row covered by the transaction collateral invariant."""
+
+    targets = sorted({str(item) for item in shipment_ids if str(item)})
+    nm_ids = sorted({int(item) for item in target_nm_ids})
+    with _connect(source_db) as before_conn, _connect(candidate_db) as after_conn:
+        before = _collateral_row_inventory_conn(before_conn, targets, nm_ids)
+        after = _collateral_row_inventory_conn(after_conn, targets, nm_ids)
+    changes: list[dict[str, Any]] = []
+    for key in sorted(set(before) | set(after), key=repr):
+        before_row = before.get(key)
+        after_row = after.get(key)
+        before_values = dict((before_row or {}).get("values") or {})
+        after_values = dict((after_row or {}).get("values") or {})
+        before_fingerprint = _hash(list(before_values.items())) if before_row else None
+        after_fingerprint = _hash(list(after_values.items())) if after_row else None
+        if before_fingerprint == after_fingerprint:
+            continue
+        fields = sorted(
+            field
+            for field in set(before_values) | set(after_values)
+            if before_values.get(field) != after_values.get(field)
+        )
+        sample = after_row or before_row or {}
+        scope = str(sample.get("scope") or "")
+        changes.append(
+            {
+                "scope": scope,
+                "table": sample.get("table"),
+                "identity": sample.get("identity"),
+                "change_kind": (
+                    "added"
+                    if before_row is None
+                    else "removed"
+                    if after_row is None
+                    else "updated"
+                ),
+                "before_row_fingerprint": before_fingerprint,
+                "after_row_fingerprint": after_fingerprint,
+                "changed_fields": fields,
+                "values": {
+                    field: {
+                        "before": _safe_collateral_value(
+                            field, before_values.get(field)
+                        ),
+                        "after": _safe_collateral_value(
+                            field, after_values.get(field)
+                        ),
+                    }
+                    for field in fields
+                },
+                "writer": (
+                    "canonical cost engine rebuild"
+                    if scope == "canonical_rows_outside_target_skus"
+                    else _collateral_writer(str(sample.get("table") or ""))
+                ),
+                "target_shipment_related": False,
+                "target_sku_dependency_related": False,
+                "can_change_canonical_candidate": scope
+                == "canonical_rows_outside_target_skus",
+                "can_change_accounting_effects": scope
+                == "canonical_rows_outside_target_skus",
+                "classification": "forbidden_candidate_collateral_change",
+                "recommended_policy_category": (
+                    "canonical_rebuild_collateral"
+                    if scope == "canonical_rows_outside_target_skus"
+                    else "source_collateral"
+                ),
+            }
+        )
+    payload = {
+        "contract_name": "supplier_candidate_collateral_localization_v1",
+        "read_only_production": True,
+        "disposable_candidate_mutation_only": True,
+        "target_shipment_ids": targets,
+        "target_nm_ids": nm_ids,
+        "source_digest": _collateral_digest_many(source_db, targets, nm_ids),
+        "candidate_digest": _collateral_digest_many(candidate_db, targets, nm_ids),
+        "change_count": len(changes),
+        "changes": changes,
+    }
+    return {**payload, "fingerprint": _hash(payload)}
+
+
+def _collateral_row_inventory_conn(
+    conn: sqlite3.Connection,
+    shipment_ids: list[str],
+    target_nm_ids: list[int],
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    inventory: dict[tuple[Any, ...], dict[str, Any]] = {}
+    existing = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    shipment_placeholders = ",".join("?" for _ in shipment_ids)
+    for table in PROTECTED_COLLATERAL_TABLES:
+        if table not in existing:
+            continue
+        where = "1=1"
+        params: tuple[Any, ...] = ()
+        if table in {
+            "sheet_vitrina_v1_supplier_shipments",
+            "sheet_vitrina_v1_supplier_shipment_lines",
+        }:
+            where = f"shipment_id NOT IN ({shipment_placeholders})"
+            params = tuple(shipment_ids)
+        _append_collateral_table_inventory(
+            conn,
+            inventory,
+            scope="source_rows",
+            table=table,
+            where=where,
+            params=params,
+            excluded_columns=set(),
+        )
+    canonical_tables = sorted(
+        table for table in existing if table.startswith(CANONICAL_TABLE_PREFIX)
+    )
+    for table in canonical_tables:
+        info = list(conn.execute(f'PRAGMA table_info("{table}")'))
+        available = {
+            str(row[1])
+            for row in info
+            if str(row[1]) not in VOLATILE_CANONICAL_COLUMNS
+        }
+        where = "1=1"
+        params = ()
+        if target_nm_ids and "nm_id" in available:
+            placeholders = ",".join("?" for _ in target_nm_ids)
+            where = f"CAST(nm_id AS INTEGER) NOT IN ({placeholders})"
+            params = tuple(target_nm_ids)
+        _append_collateral_table_inventory(
+            conn,
+            inventory,
+            scope="canonical_rows_outside_target_skus",
+            table=table,
+            where=where,
+            params=params,
+            excluded_columns=VOLATILE_CANONICAL_COLUMNS,
+        )
+    return inventory
+
+
+def _append_collateral_table_inventory(
+    conn: sqlite3.Connection,
+    inventory: dict[tuple[Any, ...], dict[str, Any]],
+    *,
+    scope: str,
+    table: str,
+    where: str,
+    params: tuple[Any, ...],
+    excluded_columns: set[str],
+) -> None:
+    info = list(conn.execute(f'PRAGMA table_info("{table}")'))
+    columns = [str(row[1]) for row in info if str(row[1]) not in excluded_columns]
+    if not columns:
+        return
+    primary = [
+        str(row[1])
+        for row in sorted(info, key=lambda item: int(item[5] or 0))
+        if int(row[5] or 0) > 0 and str(row[1]) in columns
+    ]
+    selected = ",".join(f'"{column}"' for column in columns)
+    order = ",".join(f'"{column}"' for column in (primary or columns))
+    rows = conn.execute(
+        f'SELECT {selected} FROM "{table}" WHERE {where} ORDER BY {order}', params
+    ).fetchall()
+    for row in rows:
+        values = {column: row[index] for index, column in enumerate(columns)}
+        raw_identity = tuple(values[column] for column in (primary or columns))
+        identity = tuple(_identity_collateral_value(value) for value in raw_identity)
+        identity_fields = primary or columns
+        inventory[(scope, table, *identity)] = {
+            "scope": scope,
+            "table": table,
+            "identity": {
+                field: _safe_collateral_value(field, value)
+                for field, value in zip(identity_fields, raw_identity)
+            },
+            "values": values,
+        }
+
+
+def _identity_collateral_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return _hash({"bytes": value.hex()})
+    try:
+        hash(value)
+    except TypeError:
+        return _hash(value)
+    return value
+
+
+def _safe_collateral_value(field: str, value: Any) -> Any:
+    if value is None or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, bytes):
+        return {"sha256": hashlib.sha256(value).hexdigest(), "bytes": len(value)}
+    text = str(value)
+    sensitive = (
+        "json",
+        "payload",
+        "raw_",
+        "blob",
+        "path",
+        "filename",
+        "comment",
+        "name",
+    )
+    if any(part in field.lower() for part in sensitive) or len(text) > 120:
+        return {"sha256": hashlib.sha256(text.encode()).hexdigest(), "characters": len(text)}
+    return text
+
+
+def _collateral_writer(table: str) -> str:
+    return {
+        "sheet_vitrina_v1_ready_snapshots": "sheet-vitrina refresh/materialization/publication",
+        "sheet_vitrina_v1_wb_supplies": "WB supplies sync/enrichment",
+        "sheet_vitrina_v1_onec_stocks": "1C stock refresh",
+        "sheet_vitrina_v1_supplier_financial_documents": "supplier financial document writer/read refresh",
+    }.get(table, "repository-owned domain writer")
 
 
 def _collateral_digest_many_conn(

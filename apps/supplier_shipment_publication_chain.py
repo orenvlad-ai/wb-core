@@ -355,9 +355,12 @@ def main() -> int:
     try:
         result = apply_chain(args) if args.apply else build_chain_report(args)
     except Exception as exc:
+        error = {"status": "error", "error": str(exc)}
+        if isinstance(getattr(exc, "report", None), dict):
+            error["collateral_diagnostic"] = exc.report
         print(
             json.dumps(
-                {"status": "error", "error": str(exc)},
+                error,
                 ensure_ascii=False,
                 sort_keys=True,
             )
