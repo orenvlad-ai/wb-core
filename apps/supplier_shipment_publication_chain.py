@@ -156,6 +156,18 @@ def build_chain_report(args: argparse.Namespace) -> dict[str, Any]:
         "supplier_candidate_canonical_digest": supplier[
             "candidate_canonical_digest"
         ],
+        "supplier_canonical_rollforward_fingerprint": supplier[
+            "expected_canonical_rollforward"
+        ]["fingerprint"],
+        "supplier_canonical_rollforward_before_digest": supplier[
+            "expected_canonical_rollforward"
+        ]["before_digest"],
+        "supplier_canonical_rollforward_after_digest": supplier[
+            "expected_canonical_rollforward"
+        ]["after_digest"],
+        "supplier_canonical_rollforward_change_count": supplier[
+            "expected_canonical_rollforward"
+        ]["change_count"],
         "publication_fingerprint": publication["fingerprint"],
         "publication_snapshot_input_digest": publication[
             "snapshot_input_digest"

@@ -302,6 +302,7 @@ def main() -> int:
         _assert(reverted_evidence["historical_ff_layers"] == before["historical_ff_layers"], "revert creates no FF layer")
         _assert(reverted_evidence["historical_event_count"] == 2, "reversal audit recorded")
     _clearing_cases()
+    _canonical_rollforward_case()
     print("supplier_shipment_factual_date_correction_smoke: ok")
     return 0
 
@@ -523,6 +524,82 @@ def _clearing_cases() -> None:
                 _assert(header.get("actual_ff_acceptance_date") == "2026-07-12", "acceptance evidence preserved")
 
 
+def _canonical_rollforward_case() -> None:
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        runtime = _runtime_fixture(root / "runtime")
+        _materialize_legacy_conflict(runtime)
+        block = SupplierShipmentFactualCorrectionBlock(
+            runtime=runtime,
+            timestamp_factory=lambda: "2026-07-15T12:00:00Z",
+        )
+        historical_change = {
+            "shipment_id": HISTORICAL_SHIPMENT_ID,
+            "action": "activate",
+            "exception_code": HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+            "expected_invoice_no": "26GN237",
+            "expected_invoice_date": "2026-03-29",
+            "expected_shipment_date": "2026-05-22",
+            "reason": "legacy_ff_accepted_without_known_factual_date",
+            "provenance": "operator_confirmed_historical_registry_state",
+        }
+        dry = block.dry_run(
+            shipment_id=SHIPMENT_ID,
+            new_actual_shipment_date="2026-06-25",
+            actor="rollforward-smoke",
+            expected_invoice_no="26GN390",
+            expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=historical_change,
+        )
+        rollforward = dry["expected_canonical_rollforward"]
+        _assert(rollforward["change_count"] > 0, "global daily rollforward is explicit")
+        _assert(
+            all(
+                str(item["identity"]["as_of_date"]) == "2026-07-15"
+                for item in rollforward["changes"]
+            ),
+            "rollforward rows are bounded to the current business date",
+        )
+        _assert(
+            dry["collateral_invariant"]["candidate_source_unchanged"],
+            "global canonical rollforward preserves source collateral",
+        )
+        applied = block.apply(
+            shipment_id=SHIPMENT_ID,
+            new_actual_shipment_date="2026-06-25",
+            actor="rollforward-smoke",
+            fingerprint=dry["fingerprint"],
+            backup_dir=root / "backups",
+            expected_invoice_no="26GN390",
+            expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=historical_change,
+        )
+        _assert(applied["applied"], "exact canonical rollforward applied")
+        _assert(applied["post_run"]["changed"] == 0, "rollforward second rebuild")
+        repeated = block.dry_run(
+            shipment_id=SHIPMENT_ID,
+            new_actual_shipment_date="2026-06-25",
+            actor="rollforward-smoke",
+            expected_invoice_no="26GN390",
+            expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=historical_change,
+        )
+        _assert(
+            repeated["expected_canonical_rollforward"]["change_count"] == 0,
+            "second canonical rollforward is zero-change",
+        )
+        second_apply = block.apply(
+            shipment_id=SHIPMENT_ID,
+            new_actual_shipment_date="2026-06-25",
+            actor="rollforward-smoke",
+            fingerprint=repeated["fingerprint"],
+            backup_dir=root / "second-backups",
+            expected_invoice_no="26GN390",
+            expected_invoice_document_id=DOCUMENT_ID,
+            historical_status_change=historical_change,
+        )
+        _assert(not second_apply["applied"], "second apply is a no-op")
+        _assert(second_apply["post_run"]["changed"] == 0, "second apply changed zero rows")
 def _assert(condition: object, label: str) -> None:
     if not condition:
         raise AssertionError(label)
