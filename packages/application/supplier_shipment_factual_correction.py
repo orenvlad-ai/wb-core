@@ -414,11 +414,19 @@ class SupplierShipmentFactualCorrectionBlock:
                         != report["source_anomaly_preflight"].get("fingerprint")
                     ):
                         raise ValueError("optimistic canonical source evidence drift")
-                    collateral_before_digest = _collateral_digest_many_conn(
-                        conn,
-                        target_shipment_ids,
-                        report["reconciliation"].get("target_nm_ids") or [],
+                    target_nm_ids = report["reconciliation"].get("target_nm_ids") or []
+                    source_collateral_before_digest = _non_target_digest_many_conn(
+                        conn, target_shipment_ids
                     )
+                    canonical_non_target_before_digest = (
+                        _canonical_non_target_digest_conn(conn, target_nm_ids)
+                    )
+                    expected_rollforward = report["expected_canonical_rollforward"]
+                    if (
+                        canonical_non_target_before_digest
+                        != expected_rollforward["before_digest"]
+                    ):
+                        raise ValueError("optimistic canonical non-target input drift")
                     conn.execute(
                         """
                         UPDATE sheet_vitrina_v1_supplier_shipments
@@ -540,13 +548,24 @@ class SupplierShipmentFactualCorrectionBlock:
                         date_to=report["scope"]["date_to"],
                     ):
                         raise ValueError("candidate canonical digest mismatch in transaction")
-                    collateral_after_digest = _collateral_digest_many_conn(
-                        conn,
-                        target_shipment_ids,
-                        report["reconciliation"].get("target_nm_ids") or [],
+                    source_collateral_after_digest = _non_target_digest_many_conn(
+                        conn, target_shipment_ids
                     )
-                    if collateral_before_digest != collateral_after_digest:
-                        raise ValueError("apply changed collateral rows in transaction")
+                    if (
+                        source_collateral_before_digest
+                        != source_collateral_after_digest
+                    ):
+                        raise ValueError("apply changed source collateral rows in transaction")
+                    canonical_non_target_after_digest = (
+                        _canonical_non_target_digest_conn(conn, target_nm_ids)
+                    )
+                    if (
+                        canonical_non_target_after_digest
+                        != expected_rollforward["after_digest"]
+                    ):
+                        raise ValueError(
+                            "apply canonical non-target output differs from approved rollforward"
+                        )
                     if report["legacy_pre_cutover_digest"] != _legacy_pre_cutover_digest_conn(conn):
                         raise ValueError("pre-cutover history changed in transaction")
                     self._inject_failure("before_commit")
@@ -711,8 +730,11 @@ class SupplierShipmentFactualCorrectionBlock:
             set(preflight.get("nm_ids") or [])
             | set((historical_preflight or {}).get("nm_ids") or [])
         )
-        collateral_source_digest = _collateral_digest_many(
-            source_db, target_shipment_ids, target_nm_ids
+        source_collateral_before_digest = _non_target_digest_many(
+            source_db, target_shipment_ids
+        )
+        canonical_non_target_before_digest = _canonical_non_target_digest(
+            source_db, target_nm_ids
         )
         baseline_fingerprint_before = _current_baseline_fingerprint(source_db)
         stage_snapshots_before = {
@@ -860,18 +882,38 @@ class SupplierShipmentFactualCorrectionBlock:
             target_after_digest = _target_headers_digest(
                 candidate_runtime.db_path, target_shipment_ids
             )
-            collateral_candidate_digest = _collateral_digest_many(
-                candidate_runtime.db_path, target_shipment_ids, target_nm_ids
+            source_collateral_candidate_digest = _non_target_digest_many(
+                candidate_runtime.db_path, target_shipment_ids
             )
-            if collateral_source_digest != collateral_candidate_digest:
-                raise SupplierShipmentCandidateCollateralDrift(
-                    _candidate_collateral_change_report(
-                        source_db,
-                        candidate_runtime.db_path,
-                        shipment_ids=target_shipment_ids,
-                        target_nm_ids=target_nm_ids,
-                    )
-                )
+            canonical_non_target_candidate_digest = _canonical_non_target_digest(
+                candidate_runtime.db_path, target_nm_ids
+            )
+            collateral_changes = _candidate_collateral_change_report(
+                source_db,
+                candidate_runtime.db_path,
+                shipment_ids=target_shipment_ids,
+                target_nm_ids=target_nm_ids,
+            )
+            source_collateral_changes = [
+                item
+                for item in collateral_changes["changes"]
+                if item["scope"] == "source_rows"
+            ]
+            if (
+                source_collateral_before_digest
+                != source_collateral_candidate_digest
+                or source_collateral_changes
+            ):
+                raise SupplierShipmentCandidateCollateralDrift(collateral_changes)
+            canonical_rollforward = _expected_canonical_rollforward_report(
+                before_digest=canonical_non_target_before_digest,
+                after_digest=canonical_non_target_candidate_digest,
+                changes=[
+                    item
+                    for item in collateral_changes["changes"]
+                    if item["scope"] == "canonical_rows_outside_target_skus"
+                ],
+            )
             if legacy_digest != _legacy_pre_cutover_digest(candidate_runtime.db_path):
                 raise ValueError("candidate changed pre-cutover history")
             request_fingerprint = _hash(
@@ -895,6 +937,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 "legacy_pre_cutover_digest": legacy_digest,
                 "canonical_before_digest": canonical_before,
                 "candidate_canonical_digest": canonical_after,
+                "expected_canonical_rollforward": canonical_rollforward,
                 "rebuild": rebuild_payload,
                 "target_before": stage_snapshots_before,
                 "target_after": stage_snapshots_after,
@@ -926,6 +969,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 "legacy_pre_cutover_digest": legacy_digest,
                 "canonical_before_digest": canonical_before,
                 "candidate_canonical_digest": canonical_after,
+                "expected_canonical_rollforward": canonical_rollforward,
                 "canonical_changed_rows": canonical_counts,
                 "rebuild": rebuild_payload,
                 "reconciliation": reconciliation,
@@ -972,14 +1016,27 @@ class SupplierShipmentFactualCorrectionBlock:
                 "post_run": None,
                 "integrity_check": _integrity_check(source_db),
                 "collateral_invariant": {
-                    "contract_name": "supplier_correction_transaction_collateral_v1",
-                    "scope": "all protected non-target source rows plus canonical rows outside target SKU closure",
-                    "source_digest": collateral_source_digest,
-                    "candidate_digest": collateral_candidate_digest,
-                    "candidate_unchanged": collateral_source_digest
-                    == collateral_candidate_digest,
-                    "included_in_human_fingerprint": False,
-                    "apply_contract": "BEGIN IMMEDIATE before/after equality",
+                    "contract_name": "supplier_correction_transaction_collateral_v2",
+                    "source_scope": "all protected non-target source rows",
+                    "source_digest": source_collateral_before_digest,
+                    "candidate_digest": source_collateral_candidate_digest,
+                    "candidate_unchanged": source_collateral_before_digest
+                    == source_collateral_candidate_digest,
+                    "candidate_source_digest": source_collateral_candidate_digest,
+                    "candidate_source_unchanged": source_collateral_before_digest
+                    == source_collateral_candidate_digest,
+                    "canonical_scope": "all canonical rows outside target SKU closure",
+                    "canonical_before_digest": canonical_non_target_before_digest,
+                    "canonical_candidate_digest": canonical_non_target_candidate_digest,
+                    "expected_canonical_rollforward_fingerprint": canonical_rollforward[
+                        "fingerprint"
+                    ],
+                    "source_snapshot_included_in_human_fingerprint": False,
+                    "expected_canonical_rollforward_included_in_human_fingerprint": True,
+                    "apply_contract": (
+                        "BEGIN IMMEDIATE source before/after equality plus exact "
+                        "canonical before/candidate-after equality"
+                    ),
                 },
             }
             yield {
@@ -1089,7 +1146,8 @@ def _prepare_historical_status_change(
         if _table_exists(conn, HISTORICAL_STATUS_EVENT_TABLE):
             history_row = conn.execute(
                 f"""
-                SELECT event_id,action,new_exception,apply_fingerprint,created_at
+                SELECT event_id,action,new_exception,apply_fingerprint,created_at,
+                       evidence_fingerprint,reason,provenance
                 FROM {HISTORICAL_STATUS_EVENT_TABLE}
                 WHERE shipment_id=? AND status='success'
                 ORDER BY created_at DESC,event_id DESC LIMIT 1
@@ -1117,12 +1175,22 @@ def _prepare_historical_status_change(
     ):
         raise ValueError("historical accepted-without-date requires both factual dates to remain empty")
     previous = str(header.get("historical_status_exception") or "").strip()
+    evidence = _historical_status_evidence(db_path, shipment_id)
+    exact_repeat = bool(
+        action == "activate"
+        and previous == exception_code
+        and str(history_head.get("action") or "") == "activate"
+        and str(history_head.get("new_exception") or "") == exception_code
+        and str(history_head.get("evidence_fingerprint") or "")
+        == evidence["fingerprint"]
+        and str(history_head.get("reason") or "") == reason
+        and str(history_head.get("provenance") or "") == provenance
+    )
+    default_expected_previous = (
+        exception_code if exact_repeat or action == "revert" else ""
+    )
     expected_previous = str(
-        change.get(
-            "expected_current_exception",
-            "" if action == "activate" else exception_code,
-        )
-        or ""
+        change.get("expected_current_exception", default_expected_previous) or ""
     ).strip()
     if previous != expected_previous:
         raise ValueError(
@@ -1156,7 +1224,6 @@ def _prepare_historical_status_change(
         business_today=business_today,
         historical_status_exception=new_exception,
     )
-    evidence = _historical_status_evidence(db_path, shipment_id)
     expected_evidence = str(change.get("expected_evidence_fingerprint") or "").strip()
     if expected_evidence and expected_evidence != evidence["fingerprint"]:
         raise ValueError("historical status evidence fingerprint mismatch")
@@ -1913,6 +1980,41 @@ def _collateral_digest_many_conn(
             ),
         }
     )
+
+
+def _expected_canonical_rollforward_report(
+    *,
+    before_digest: str,
+    after_digest: str,
+    changes: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    exact_changes = [
+        {
+            **dict(item),
+            "classification": "expected_full_rebuild_rollforward",
+            "recommended_policy_category": "exact_canonical_rebuild_output",
+        }
+        for item in changes
+    ]
+    payload = {
+        "contract_name": "supplier_canonical_rollforward_v1",
+        "scope": "canonical rows outside target SKU closure changed by the required full rebuild",
+        "before_digest": before_digest,
+        "after_digest": after_digest,
+        "change_count": len(exact_changes),
+        "changes": exact_changes,
+        "wildcards": False,
+        "source_rows_changed": False,
+        "apply_contract": "exact before digest and exact candidate after digest",
+    }
+    return {**payload, "fingerprint": _hash(payload)}
+
+
+def _canonical_non_target_digest(
+    db_path: Path, target_nm_ids: Iterable[int]
+) -> str:
+    with _connect(db_path) as conn:
+        return _canonical_non_target_digest_conn(conn, target_nm_ids)
 
 
 def _canonical_non_target_digest_conn(
