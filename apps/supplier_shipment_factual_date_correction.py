@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--historical-reason")
     parser.add_argument("--historical-provenance")
     parser.add_argument("--historical-reverses-event-id")
+    parser.add_argument("--confirm-financial-document-id")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--fingerprint", default="")
     parser.add_argument("--backup-dir")
@@ -72,6 +73,11 @@ def build_correction_request(args: argparse.Namespace) -> dict[str, object]:
             historical_status_change["expected_evidence_fingerprint"] = (
                 args.historical_expected_evidence_fingerprint
             )
+    financial_document_confirmation = None
+    if str(getattr(args, "confirm_financial_document_id", "") or "").strip():
+        financial_document_confirmation = {
+            "document_id": args.confirm_financial_document_id,
+        }
     return {
         "shipment_id": args.shipment_id,
         "new_actual_shipment_date": args.new_actual_shipment_date,
@@ -81,6 +87,7 @@ def build_correction_request(args: argparse.Namespace) -> dict[str, object]:
         "expected_invoice_document_id": args.expected_invoice_document_id,
         "require_cross_cutover_rebuild": True,
         "historical_status_change": historical_status_change,
+        "financial_document_confirmation": financial_document_confirmation,
     }
 
 

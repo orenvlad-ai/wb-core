@@ -136,10 +136,11 @@ def build_chain_report(args: argparse.Namespace) -> dict[str, Any]:
             date_to=args.publication_date_to,
         )
     approval = {
-        "contract_name": "supplier_reconciliation_vitrina_publication_chain_v1",
+        "contract_name": "supplier_reconciliation_vitrina_publication_chain_v2",
         "operation_order": [
             "supplier_relevant_source_recheck",
             "fresh_supplier_backup",
+            "exact_financial_document_confirmation",
             "supplier_reconciliation_apply",
             "supplier_post_apply_zero_change_rebuild",
             "fresh_publication_backup",
@@ -168,6 +169,21 @@ def build_chain_report(args: argparse.Namespace) -> dict[str, Any]:
         "supplier_canonical_rollforward_change_count": supplier[
             "expected_canonical_rollforward"
         ]["change_count"],
+        "supplier_financial_document_confirmation": supplier.get(
+            "financial_document_confirmation"
+        ),
+        "supplier_financial_document_canonical_before": supplier.get(
+            "financial_document_canonical_before"
+        ),
+        "supplier_financial_document_canonical_after": supplier.get(
+            "financial_document_canonical_after"
+        ),
+        "supplier_financial_document_evidence_fingerprint": str(
+            (supplier.get("financial_document_confirmation") or {}).get(
+                "evidence_fingerprint"
+            )
+            or ""
+        ),
         "publication_fingerprint": publication["fingerprint"],
         "publication_snapshot_input_digest": publication[
             "snapshot_input_digest"

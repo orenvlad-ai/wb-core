@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +23,9 @@ from packages.application.canonical_cost_engine import (
     ensure_canonical_cost_schema,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.supplier_financial_document_exact_policy import (
+    AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY,
+)
 from packages.application.supplier_shipment_status import (
     HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
     supplier_business_today,
@@ -53,6 +57,10 @@ AUTHORIZED_HISTORICAL_EXCEPTION_IDENTITY = {
         "92e5a2d63a1330f6c4a7812d9c90425cf7707545a8ac318618449f17d6578085"
     ),
 }
+FINANCIAL_DOCUMENT_CONFIRMATION_SOURCE = (
+    "exact_chained_supplier_financial_document_confirmation"
+)
+MONEY_QUANT = Decimal("0.000001")
 CORRECTION_TABLE = "sheet_vitrina_v1_supplier_shipment_factual_corrections"
 ACTIVE_CORRECTION_STATUSES = {"queued", "running"}
 FINAL_CORRECTION_STATUSES = {"success", "error"}
@@ -293,6 +301,7 @@ class SupplierShipmentFactualCorrectionBlock:
         expected_invoice_document_id: str | None = None,
         require_cross_cutover_rebuild: bool = True,
         historical_status_change: Mapping[str, Any] | None = None,
+        financial_document_confirmation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._candidate(
             shipment_id=shipment_id,
@@ -303,6 +312,7 @@ class SupplierShipmentFactualCorrectionBlock:
             expected_invoice_document_id=expected_invoice_document_id,
             require_cross_cutover_rebuild=require_cross_cutover_rebuild,
             historical_status_change=historical_status_change,
+            financial_document_confirmation=financial_document_confirmation,
         ) as candidate:
             return dict(candidate["report"])
 
@@ -318,6 +328,7 @@ class SupplierShipmentFactualCorrectionBlock:
         expected_invoice_document_id: str | None = None,
         require_cross_cutover_rebuild: bool = True,
         historical_status_change: Mapping[str, Any] | None = None,
+        financial_document_confirmation: Mapping[str, Any] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Expose the verified disposable candidate to chained dry-run planners."""
 
@@ -330,6 +341,7 @@ class SupplierShipmentFactualCorrectionBlock:
             expected_invoice_document_id=expected_invoice_document_id,
             require_cross_cutover_rebuild=require_cross_cutover_rebuild,
             historical_status_change=historical_status_change,
+            financial_document_confirmation=financial_document_confirmation,
         ) as candidate:
             yield candidate
 
@@ -347,6 +359,7 @@ class SupplierShipmentFactualCorrectionBlock:
         correction_id: str | None = None,
         require_cross_cutover_rebuild: bool = True,
         historical_status_change: Mapping[str, Any] | None = None,
+        financial_document_confirmation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         approved_fingerprint = _required_text(fingerprint, "fingerprint")
         backup_root = Path(backup_dir)
@@ -359,9 +372,16 @@ class SupplierShipmentFactualCorrectionBlock:
             expected_invoice_document_id=expected_invoice_document_id,
             require_cross_cutover_rebuild=require_cross_cutover_rebuild,
             historical_status_change=historical_status_change,
+            financial_document_confirmation=financial_document_confirmation,
         ) as candidate:
             report = dict(candidate["report"])
             historical_plan = report.get("historical_status_change")
+            financial_document_plan = report.get("financial_document_confirmation")
+            target_financial_document_ids = (
+                [str(financial_document_plan["document_id"])]
+                if financial_document_plan
+                else []
+            )
             target_shipment_ids = [shipment_id]
             if historical_plan:
                 target_shipment_ids.append(str(historical_plan["shipment_id"]))
@@ -415,8 +435,28 @@ class SupplierShipmentFactualCorrectionBlock:
                     ):
                         raise ValueError("optimistic canonical source evidence drift")
                     target_nm_ids = report["reconciliation"].get("target_nm_ids") or []
+                    if financial_document_plan:
+                        current_financial_plan = (
+                            _prepare_financial_document_confirmation_conn(
+                                conn,
+                                document_id=str(financial_document_plan["document_id"]),
+                                actor=actor,
+                                target_shipment_id=shipment_id,
+                            )
+                        )
+                        for field in (
+                            "evidence_fingerprint",
+                            "before_digest",
+                            "previous_status",
+                        ):
+                            if current_financial_plan[field] != financial_document_plan[field]:
+                                raise ValueError(
+                                    "optimistic financial document evidence drift"
+                                )
                     source_collateral_before_digest = _non_target_digest_many_conn(
-                        conn, target_shipment_ids
+                        conn,
+                        target_shipment_ids,
+                        target_financial_document_ids=target_financial_document_ids,
                     )
                     canonical_non_target_before_digest = (
                         _canonical_non_target_digest_conn(conn, target_nm_ids)
@@ -454,6 +494,25 @@ class SupplierShipmentFactualCorrectionBlock:
                                 historical_plan["shipment_id"],
                             ),
                         )
+                    if financial_document_plan:
+                        if financial_document_plan["previous_status"] != "confirmed":
+                            updated = conn.execute(
+                                """
+                                UPDATE sheet_vitrina_v1_supplier_financial_documents
+                                SET parse_status='confirmed',updated_at=?
+                                WHERE document_id=? AND supplier_order_id=? AND parse_status=?
+                                """,
+                                (
+                                    applied_at,
+                                    financial_document_plan["document_id"],
+                                    financial_document_plan["shipment_id"],
+                                    financial_document_plan["previous_status"],
+                                ),
+                            )
+                            if int(updated.rowcount or 0) != 1:
+                                raise ValueError(
+                                    "financial document confirmation identity drift in transaction"
+                                )
                     if materialized:
                         ensure_canonical_cost_schema(conn)
                         _replace_canonical_tables(conn, materialized)
@@ -548,8 +607,29 @@ class SupplierShipmentFactualCorrectionBlock:
                         date_to=report["scope"]["date_to"],
                     ):
                         raise ValueError("candidate canonical digest mismatch in transaction")
+                    if financial_document_plan:
+                        confirmed_financial_plan = (
+                            _prepare_financial_document_confirmation_conn(
+                                conn,
+                                document_id=str(financial_document_plan["document_id"]),
+                                actor=actor,
+                                target_shipment_id=shipment_id,
+                            )
+                        )
+                        if (
+                            confirmed_financial_plan["previous_status"] != "confirmed"
+                            or confirmed_financial_plan["evidence_fingerprint"]
+                            != financial_document_plan["evidence_fingerprint"]
+                            or confirmed_financial_plan["before_digest"]
+                            != financial_document_plan["after_digest"]
+                        ):
+                            raise ValueError(
+                                "financial document confirmation verification failed in transaction"
+                            )
                     source_collateral_after_digest = _non_target_digest_many_conn(
-                        conn, target_shipment_ids
+                        conn,
+                        target_shipment_ids,
+                        target_financial_document_ids=target_financial_document_ids,
                     )
                     if (
                         source_collateral_before_digest
@@ -646,6 +726,7 @@ class SupplierShipmentFactualCorrectionBlock:
         expected_invoice_document_id: str | None,
         require_cross_cutover_rebuild: bool,
         historical_status_change: Mapping[str, Any] | None,
+        financial_document_confirmation: Mapping[str, Any] | None,
     ) -> Iterator[dict[str, Any]]:
         shipment_id = _required_text(shipment_id, "shipment_id")
         actor = _required_text(actor or "operator", "actor")
@@ -689,6 +770,24 @@ class SupplierShipmentFactualCorrectionBlock:
             actor=actor,
             business_today=business_today,
         )
+        financial_document_plan = _prepare_financial_document_confirmation(
+            source_db,
+            financial_document_confirmation,
+            actor=actor,
+            target_shipment_id=shipment_id,
+        )
+        target_financial_document_ids = (
+            [str(financial_document_plan["document_id"])]
+            if financial_document_plan is not None
+            else []
+        )
+        financial_canonical_before = (
+            _canonical_financial_document_effect(
+                source_db, str(financial_document_plan["document_id"])
+            )
+            if financial_document_plan is not None
+            else None
+        )
         target_shipment_ids = [shipment_id]
         if historical_plan is not None:
             historical_shipment_id = str(historical_plan["shipment_id"])
@@ -729,9 +828,12 @@ class SupplierShipmentFactualCorrectionBlock:
         target_nm_ids = sorted(
             set(preflight.get("nm_ids") or [])
             | set((historical_preflight or {}).get("nm_ids") or [])
+            | set((financial_document_plan or {}).get("nm_ids") or [])
         )
         source_collateral_before_digest = _non_target_digest_many(
-            source_db, target_shipment_ids
+            source_db,
+            target_shipment_ids,
+            target_financial_document_ids=target_financial_document_ids,
         )
         canonical_non_target_before_digest = _canonical_non_target_digest(
             source_db, target_nm_ids
@@ -784,6 +886,25 @@ class SupplierShipmentFactualCorrectionBlock:
                             historical_plan["shipment_id"],
                         ),
                     )
+                if financial_document_plan is not None:
+                    if financial_document_plan["previous_status"] != "confirmed":
+                        updated = conn.execute(
+                            """
+                            UPDATE sheet_vitrina_v1_supplier_financial_documents
+                            SET parse_status='confirmed',updated_at=?
+                            WHERE document_id=? AND supplier_order_id=? AND parse_status=?
+                            """,
+                            (
+                                operation_timestamp,
+                                financial_document_plan["document_id"],
+                                financial_document_plan["shipment_id"],
+                                financial_document_plan["previous_status"],
+                            ),
+                        )
+                        if int(updated.rowcount or 0) != 1:
+                            raise ValueError(
+                                "financial document confirmation candidate identity drift"
+                            )
                 conn.commit()
             engine = CanonicalCostEngine(
                 runtime=candidate_runtime,
@@ -847,6 +968,41 @@ class SupplierShipmentFactualCorrectionBlock:
                 rebuild_payload = {"status": "ok", **asdict(first), "second_run_changed": 0}
                 canonical_after = first_digest
                 canonical_counts = _canonical_changed_counts(source_db, candidate_runtime.db_path)
+            financial_canonical_after = (
+                _canonical_financial_document_effect(
+                    candidate_runtime.db_path,
+                    str(financial_document_plan["document_id"]),
+                )
+                if financial_document_plan is not None
+                else None
+            )
+            if financial_document_plan is not None:
+                accounting_proof = financial_document_plan["accounting_proof"]
+                if (
+                    financial_canonical_after is None
+                    or financial_canonical_after["component_count"]
+                    != accounting_proof["event_count"]
+                    or financial_canonical_after["unique_nm_id_count"]
+                    != accounting_proof["unique_nm_id_count"]
+                    or financial_canonical_after["recognized_capital_rub"]
+                    != accounting_proof["stored_event_capital_rub"]
+                    or financial_canonical_after["paid_capital_rub"]
+                    != accounting_proof["stored_event_capital_rub"]
+                    or financial_canonical_after["paid_equivalent_quantity"] != "0"
+                    or int(rebuild_payload.get("movement_rows_changed") or 0) != 0
+                    or int(rebuild_payload.get("outstanding_rows_changed") or 0) != 0
+                ):
+                    raise ValueError(
+                        "financial document canonical accounting proof failed"
+                    )
+                if (
+                    financial_document_plan["previous_status"] == "parsed"
+                    and int((financial_canonical_before or {}).get("component_count") or 0)
+                    != 0
+                ):
+                    raise ValueError(
+                        "financial document was already present in canonical components"
+                    )
             reconciliation = (
                 _candidate_reconciliation(
                     candidate_runtime.db_path,
@@ -879,11 +1035,31 @@ class SupplierShipmentFactualCorrectionBlock:
                 stage_snapshots_before,
                 stage_snapshots_after,
             )
+            if financial_document_plan is not None:
+                candidate_financial_plan = _prepare_financial_document_confirmation(
+                    candidate_runtime.db_path,
+                    {"document_id": financial_document_plan["document_id"]},
+                    actor=actor,
+                    target_shipment_id=shipment_id,
+                )
+                if (
+                    candidate_financial_plan is None
+                    or candidate_financial_plan["previous_status"] != "confirmed"
+                    or candidate_financial_plan["evidence_fingerprint"]
+                    != financial_document_plan["evidence_fingerprint"]
+                    or candidate_financial_plan["before_digest"]
+                    != financial_document_plan["after_digest"]
+                ):
+                    raise ValueError(
+                        "financial document confirmation candidate verification failed"
+                    )
             target_after_digest = _target_headers_digest(
                 candidate_runtime.db_path, target_shipment_ids
             )
             source_collateral_candidate_digest = _non_target_digest_many(
-                candidate_runtime.db_path, target_shipment_ids
+                candidate_runtime.db_path,
+                target_shipment_ids,
+                target_financial_document_ids=target_financial_document_ids,
             )
             canonical_non_target_candidate_digest = _canonical_non_target_digest(
                 candidate_runtime.db_path, target_nm_ids
@@ -893,6 +1069,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 candidate_runtime.db_path,
                 shipment_ids=target_shipment_ids,
                 target_nm_ids=target_nm_ids,
+                target_financial_document_ids=target_financial_document_ids,
             )
             source_collateral_changes = [
                 item
@@ -925,6 +1102,9 @@ class SupplierShipmentFactualCorrectionBlock:
                     "source": correction_source,
                     "target_before_digest": target_before_digest,
                     "historical_status_change": historical_plan,
+                    "financial_document_confirmation": financial_document_plan,
+                    "financial_document_canonical_before": financial_canonical_before,
+                    "financial_document_canonical_after": financial_canonical_after,
                 }
             )
             dependency_closure = {
@@ -932,6 +1112,9 @@ class SupplierShipmentFactualCorrectionBlock:
                 "preflight": preflight,
                 "historical_preflight": historical_preflight,
                 "historical_status_change": historical_plan,
+                "financial_document_confirmation": financial_document_plan,
+                "financial_document_canonical_before": financial_canonical_before,
+                "financial_document_canonical_after": financial_canonical_after,
                 "source_anomaly_preflight": source_anomaly_preflight,
                 "baseline_fingerprint": baseline_fingerprint_before,
                 "legacy_pre_cutover_digest": legacy_digest,
@@ -945,7 +1128,7 @@ class SupplierShipmentFactualCorrectionBlock:
             }
             dependency_closure_digest = _hash(dependency_closure)
             plan = {
-                "contract_name": "supplier_shipment_factual_reconciliation_v3",
+                "contract_name": "supplier_shipment_factual_reconciliation_v4",
                 "status": "ready",
                 "scope": {"date_from": CUTOVER_DATE, "date_to": business_today},
                 "shipment_id": shipment_id,
@@ -958,6 +1141,9 @@ class SupplierShipmentFactualCorrectionBlock:
                 "reason": correction_source,
                 "factual_date_already_correct_before_apply": historical_adoption,
                 "historical_status_change": historical_plan,
+                "financial_document_confirmation": financial_document_plan,
+                "financial_document_canonical_before": financial_canonical_before,
+                "financial_document_canonical_after": financial_canonical_after,
                 "crosses_cutover": crosses_cutover,
                 "baseline_fingerprint_before": baseline_fingerprint_before,
                 "baseline_fingerprint_after": baseline_fingerprint_after,
@@ -1010,6 +1196,10 @@ class SupplierShipmentFactualCorrectionBlock:
                     or canonical_before != canonical_after
                     or not successful
                     or not historical_successful
+                    or bool(
+                        financial_document_plan is not None
+                        and financial_document_plan["previous_status"] != "confirmed"
+                    )
                 ),
                 "applied": False,
                 "backup": None,
@@ -1307,6 +1497,333 @@ def _historical_status_evidence(db_path: Path, shipment_id: str) -> dict[str, An
         "existing_ff_cost_layer_count": ff_layers,
     }
     return {"fingerprint": _hash(summary), "summary": summary}
+
+
+def _prepare_financial_document_confirmation(
+    db_path: Path,
+    change: Mapping[str, Any] | None,
+    *,
+    actor: str,
+    target_shipment_id: str,
+) -> dict[str, Any] | None:
+    if not change:
+        return None
+    document_id = _required_text(
+        change.get("document_id"), "financial confirmation document_id"
+    )
+    expected = AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY
+    if document_id != expected["document_id"]:
+        raise ValueError("financial document confirmation is exact-only for invoice 136")
+    if target_shipment_id != expected["shipment_id"]:
+        raise ValueError("financial document confirmation shipment identity mismatch")
+    with _connect(db_path) as conn:
+        return _prepare_financial_document_confirmation_conn(
+            conn,
+            document_id=document_id,
+            actor=actor,
+            target_shipment_id=target_shipment_id,
+        )
+
+
+def _prepare_financial_document_confirmation_conn(
+    conn: sqlite3.Connection,
+    *,
+    document_id: str,
+    actor: str,
+    target_shipment_id: str,
+) -> dict[str, Any]:
+    expected = AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY
+    if document_id != expected["document_id"] or target_shipment_id != expected["shipment_id"]:
+        raise ValueError("financial document confirmation exact identity mismatch")
+    row = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_supplier_financial_documents "
+        "WHERE document_id=? AND supplier_order_id=?",
+        (document_id, target_shipment_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("authorized financial document is missing")
+    document = dict(row)
+    previous_status = str(document.get("parse_status") or "").strip()
+    if previous_status not in {"parsed", "confirmed"}:
+        raise ValueError("authorized financial document status is not confirmable")
+    for field in (
+        "document_id",
+        "document_type",
+        "document_number",
+        "document_date",
+        "currency",
+        "file_sha256",
+    ):
+        if str(document.get(field) or "") != str(expected[field]):
+            raise ValueError(f"financial document exact identity mismatch: {field}")
+    if str(document.get("supplier_order_id") or "") != str(expected["shipment_id"]):
+        raise ValueError("financial document exact identity mismatch: shipment_id")
+    if _exact_decimal(document.get("total_amount_rub")) != _exact_decimal(
+        expected["total_amount_rub"]
+    ):
+        raise ValueError("financial document exact identity mismatch: total_amount_rub")
+
+    expense_rows = [
+        dict(item)
+        for item in conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines "
+            "WHERE financial_document_id=? ORDER BY sort_order,line_id",
+            (document_id,),
+        ).fetchall()
+    ]
+    if len(expense_rows) != 1:
+        raise ValueError("authorized financial document expense-line cardinality drift")
+    expense = expense_rows[0]
+    expense_expectations = {
+        "line_id": expected["expense_line_id"],
+        "financial_document_id": document_id,
+        "supplier_order_id": target_shipment_id,
+        "category": expected["expense_category"],
+        "stage": expected["expense_stage"],
+        "currency": expected["currency"],
+    }
+    for field, value in expense_expectations.items():
+        if str(expense.get(field) or "") != str(value):
+            raise ValueError(f"financial expense line exact identity mismatch: {field}")
+    if _exact_decimal(expense.get("amount_rub")) != _exact_decimal(
+        expected["expense_amount_rub"]
+    ):
+        raise ValueError("financial expense line exact identity mismatch: amount_rub")
+
+    product_rows = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT line_id,sort_order,internal_nm_id,qty,unit_price,amount,match_status
+            FROM sheet_vitrina_v1_supplier_shipment_lines
+            WHERE shipment_id=? AND line_type='product'
+            ORDER BY sort_order,line_id
+            """,
+            (target_shipment_id,),
+        ).fetchall()
+    ]
+    if len(product_rows) != int(expected["event_count"]):
+        raise ValueError("financial allocation product-line cardinality drift")
+    normalized_products: list[dict[str, Any]] = []
+    seen_nm_ids: set[int] = set()
+    for item in product_rows:
+        nm_id = int(item.get("internal_nm_id") or 0)
+        quantity = _exact_decimal(item.get("qty"))
+        amount = _exact_decimal(item.get("amount"))
+        if amount <= 0:
+            amount = quantity * _exact_decimal(item.get("unit_price"))
+        if (
+            nm_id <= 0
+            or nm_id in seen_nm_ids
+            or quantity <= 0
+            or amount <= 0
+            or str(item.get("match_status") or "")
+            not in {"matched", "matched_by_compatibility"}
+        ):
+            raise ValueError("financial allocation product-line evidence is not exact")
+        seen_nm_ids.add(nm_id)
+        normalized_products.append(
+            {
+                "line_id": str(item.get("line_id") or ""),
+                "sort_order": int(item.get("sort_order") or 0),
+                "nm_id": nm_id,
+                "quantity": _decimal_text(quantity),
+                "invoice_value": _decimal_text(amount),
+            }
+        )
+    total_value = sum(
+        (_exact_decimal(item["invoice_value"]) for item in normalized_products),
+        Decimal("0"),
+    )
+    expense_amount = _exact_decimal(expense.get("amount_rub"))
+    remaining = expense_amount
+    expected_allocations: list[dict[str, Any]] = []
+    for index, item in enumerate(normalized_products, start=1):
+        allocated = (
+            remaining
+            if index == len(normalized_products)
+            else expense_amount
+            * _exact_decimal(item["invoice_value"])
+            / total_value
+        )
+        remaining -= allocated
+        expected_allocations.append(
+            {
+                "ordinal": index,
+                "nm_id": item["nm_id"],
+                "capital_rub": _money_text(allocated),
+            }
+        )
+
+    event_prefix = f"cost_payment:financial_expense:{document_id}:"
+    events = [
+        dict(item)
+        for item in conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_own_capital_events "
+            "WHERE event_id LIKE ? ESCAPE '\\' ORDER BY event_id",
+            (_literal_like_prefix(event_prefix),),
+        ).fetchall()
+    ]
+    if len(events) != int(expected["event_count"]):
+        raise ValueError("financial allocation event cardinality drift")
+    events_by_ordinal: dict[int, dict[str, Any]] = {}
+    for event in events:
+        parts = str(event.get("event_id") or "").split(":")
+        if len(parts) < 2:
+            raise ValueError("financial allocation event identity drift")
+        try:
+            ordinal = int(parts[-1])
+        except ValueError as exc:
+            raise ValueError("financial allocation event ordinal drift") from exc
+        if ordinal in events_by_ordinal:
+            raise ValueError("financial allocation duplicate event ordinal")
+        events_by_ordinal[ordinal] = event
+
+    allocation_evidence: list[dict[str, Any]] = []
+    event_semantic: list[dict[str, Any]] = []
+    for allocation in expected_allocations:
+        event = events_by_ordinal.get(int(allocation["ordinal"]))
+        if event is None:
+            raise ValueError("financial allocation event sequence drift")
+        expected_event_id = (
+            f"{event_prefix}{allocation['nm_id']}:{allocation['ordinal']}"
+        )
+        exact_fields = {
+            "event_id": expected_event_id,
+            "event_type": "cost_payment",
+            "effective_date": expected["document_date"],
+            "shipment_id": target_shipment_id,
+            "supply_id": "",
+            "nm_id": allocation["nm_id"],
+            "stage_from": "",
+            "stage_to": expected["event_stage"],
+            "quantity": "0",
+            "confirmed_quantity": "0",
+            "cost_layer_id": (
+                f"expense:financial_expense:{document_id}:"
+                f"{allocation['nm_id']}:{allocation['ordinal']}"
+            ),
+            "evidence_hash": expected["event_evidence_hash"],
+        }
+        for field, value in exact_fields.items():
+            if field in {"nm_id"}:
+                matches = int(event.get(field) or 0) == int(value)
+            elif field in {"quantity", "confirmed_quantity"}:
+                matches = _exact_decimal(event.get(field)) == _exact_decimal(value)
+            else:
+                matches = str(event.get(field) or "") == str(value)
+            if not matches:
+                raise ValueError(f"financial allocation event drift: {field}")
+        persisted_capital = _money_text(_exact_decimal(event.get("capital_rub")))
+        if persisted_capital != allocation["capital_rub"]:
+            raise ValueError("financial allocation amount drift")
+        allocation_evidence.append(
+            {
+                **allocation,
+                "event_id": expected_event_id,
+                "persisted_capital_rub": persisted_capital,
+            }
+        )
+        event_semantic.append(
+            {
+                **exact_fields,
+                "capital_rub": persisted_capital,
+                "payload_fingerprint": _hash(str(event.get("payload_json") or "{}")),
+                "created_at": str(event.get("created_at") or ""),
+            }
+        )
+    stored_total = sum(
+        (_exact_decimal(item["persisted_capital_rub"]) for item in allocation_evidence),
+        Decimal("0"),
+    )
+    rounding_delta = expense_amount - stored_total
+    rounding_tolerance = MONEY_QUANT * Decimal(len(allocation_evidence))
+    if abs(rounding_delta) > rounding_tolerance:
+        raise ValueError("financial allocation conservation drift")
+
+    document_semantic = {
+        key: value
+        for key, value in document.items()
+        if key not in {"updated_at", "stored_file_path", "parse_status"}
+    }
+    evidence = {
+        "contract_name": "supplier_financial_document_confirmation_evidence_v1",
+        "document": document_semantic,
+        "expense_lines": expense_rows,
+        "product_lines": normalized_products,
+        "allocations": allocation_evidence,
+        "events": event_semantic,
+        "allocation_method": "product_invoice_value_proportional",
+        "event_count": len(event_semantic),
+        "stored_allocation_sum_rub": _money_text(stored_total),
+        "document_amount_rub": _money_text(expense_amount),
+        "rounding_delta_rub": _money_text(rounding_delta),
+        "rounding_tolerance_rub": _money_text(rounding_tolerance),
+        "quantity_delta": "0",
+        "new_capital_event_count": 0,
+    }
+    evidence_fingerprint = _hash(evidence)
+    before_digest = _hash(
+        {"evidence_fingerprint": evidence_fingerprint, "parse_status": previous_status}
+    )
+    after_digest = _hash(
+        {"evidence_fingerprint": evidence_fingerprint, "parse_status": "confirmed"}
+    )
+    return {
+        "contract_name": "supplier_financial_document_confirmation_v1",
+        "source": FINANCIAL_DOCUMENT_CONFIRMATION_SOURCE,
+        "document_id": document_id,
+        "shipment_id": target_shipment_id,
+        "document_number": str(document.get("document_number") or ""),
+        "document_date": str(document.get("document_date") or ""),
+        "document_type": str(document.get("document_type") or ""),
+        "file_sha256": str(document.get("file_sha256") or ""),
+        "expense_line_id": str(expense.get("line_id") or ""),
+        "previous_status": previous_status,
+        "new_status": "confirmed",
+        "actor": actor,
+        "reason": "operator_confirmed_invoice_136_for_canonical_cost",
+        "provenance": "user_confirmed_business_document_in_chained_reconciliation",
+        "evidence_fingerprint": evidence_fingerprint,
+        "before_digest": before_digest,
+        "after_digest": after_digest,
+        "nm_ids": sorted(seen_nm_ids),
+        "accounting_proof": {
+            "expense_amount_rub": _money_text(expense_amount),
+            "stored_event_capital_rub": _money_text(stored_total),
+            "rounding_delta_rub": _money_text(rounding_delta),
+            "rounding_tolerance_rub": _money_text(rounding_tolerance),
+            "event_count": len(event_semantic),
+            "unique_nm_id_count": len(seen_nm_ids),
+            "quantity_delta": "0",
+            "new_event_count": 0,
+            "event_evidence_hash": str(expected["event_evidence_hash"]),
+            "allocation_method": "product_invoice_value_proportional",
+            "allocations": allocation_evidence,
+            "event_ids": [item["event_id"] for item in allocation_evidence],
+            "all_allocations_match": True,
+            "all_quantity_zero": True,
+            "double_count_prevented": True,
+        },
+        "reversible_by_verified_chain_backup": True,
+        "volatile_fields_excluded_from_evidence": ["updated_at", "stored_file_path"],
+    }
+
+
+def _exact_decimal(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value or "0"))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"invalid decimal evidence: {value!r}") from exc
+
+
+def _money_text(value: Decimal) -> str:
+    return _decimal_text(value.quantize(MONEY_QUANT))
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f").rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def _preflight(db_path: Path, shipment_id: str, date_to: str) -> dict[str, Any]:
@@ -1679,13 +2196,25 @@ def _non_target_digest_conn(conn: sqlite3.Connection, shipment_id: str) -> str:
     return _hash(evidence)
 
 
-def _non_target_digest_many(db_path: Path, shipment_ids: Iterable[str]) -> str:
+def _non_target_digest_many(
+    db_path: Path,
+    shipment_ids: Iterable[str],
+    *,
+    target_financial_document_ids: Iterable[str] = (),
+) -> str:
     with _connect(db_path) as conn:
-        return _non_target_digest_many_conn(conn, shipment_ids)
+        return _non_target_digest_many_conn(
+            conn,
+            shipment_ids,
+            target_financial_document_ids=target_financial_document_ids,
+        )
 
 
 def _non_target_digest_many_conn(
-    conn: sqlite3.Connection, shipment_ids: Iterable[str]
+    conn: sqlite3.Connection,
+    shipment_ids: Iterable[str],
+    *,
+    target_financial_document_ids: Iterable[str] = (),
 ) -> str:
     ids = sorted({str(item) for item in shipment_ids if str(item)})
     if not ids:
@@ -1701,6 +2230,15 @@ def _non_target_digest_many_conn(
             tuple(ids),
         ),
     }
+    financial_document_ids = sorted(
+        {str(item) for item in target_financial_document_ids if str(item)}
+    )
+    if financial_document_ids:
+        document_placeholders = ",".join("?" for _ in financial_document_ids)
+        filtered["sheet_vitrina_v1_supplier_financial_documents"] = (
+            f"document_id NOT IN ({document_placeholders})",
+            tuple(financial_document_ids),
+        )
     existing = {
         str(row[0])
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -1724,9 +2262,16 @@ def _collateral_digest_many(
     db_path: Path,
     shipment_ids: Iterable[str],
     target_nm_ids: Iterable[int],
+    *,
+    target_financial_document_ids: Iterable[str] = (),
 ) -> str:
     with _connect(db_path) as conn:
-        return _collateral_digest_many_conn(conn, shipment_ids, target_nm_ids)
+        return _collateral_digest_many_conn(
+            conn,
+            shipment_ids,
+            target_nm_ids,
+            target_financial_document_ids=target_financial_document_ids,
+        )
 
 
 def _candidate_collateral_change_report(
@@ -1735,14 +2280,22 @@ def _candidate_collateral_change_report(
     *,
     shipment_ids: Iterable[str],
     target_nm_ids: Iterable[int],
+    target_financial_document_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Localize every row covered by the transaction collateral invariant."""
 
     targets = sorted({str(item) for item in shipment_ids if str(item)})
     nm_ids = sorted({int(item) for item in target_nm_ids})
+    financial_document_ids = sorted(
+        {str(item) for item in target_financial_document_ids if str(item)}
+    )
     with _connect(source_db) as before_conn, _connect(candidate_db) as after_conn:
-        before = _collateral_row_inventory_conn(before_conn, targets, nm_ids)
-        after = _collateral_row_inventory_conn(after_conn, targets, nm_ids)
+        before = _collateral_row_inventory_conn(
+            before_conn, targets, nm_ids, financial_document_ids
+        )
+        after = _collateral_row_inventory_conn(
+            after_conn, targets, nm_ids, financial_document_ids
+        )
     changes: list[dict[str, Any]] = []
     for key in sorted(set(before) | set(after), key=repr):
         before_row = before.get(key)
@@ -1811,8 +2364,19 @@ def _candidate_collateral_change_report(
         "disposable_candidate_mutation_only": True,
         "target_shipment_ids": targets,
         "target_nm_ids": nm_ids,
-        "source_digest": _collateral_digest_many(source_db, targets, nm_ids),
-        "candidate_digest": _collateral_digest_many(candidate_db, targets, nm_ids),
+        "target_financial_document_ids": financial_document_ids,
+        "source_digest": _collateral_digest_many(
+            source_db,
+            targets,
+            nm_ids,
+            target_financial_document_ids=financial_document_ids,
+        ),
+        "candidate_digest": _collateral_digest_many(
+            candidate_db,
+            targets,
+            nm_ids,
+            target_financial_document_ids=financial_document_ids,
+        ),
         "change_count": len(changes),
         "changes": changes,
     }
@@ -1823,6 +2387,7 @@ def _collateral_row_inventory_conn(
     conn: sqlite3.Connection,
     shipment_ids: list[str],
     target_nm_ids: list[int],
+    target_financial_document_ids: list[str],
 ) -> dict[tuple[Any, ...], dict[str, Any]]:
     inventory: dict[tuple[Any, ...], dict[str, Any]] = {}
     existing = {
@@ -1841,6 +2406,15 @@ def _collateral_row_inventory_conn(
         }:
             where = f"shipment_id NOT IN ({shipment_placeholders})"
             params = tuple(shipment_ids)
+        elif (
+            table == "sheet_vitrina_v1_supplier_financial_documents"
+            and target_financial_document_ids
+        ):
+            document_placeholders = ",".join(
+                "?" for _ in target_financial_document_ids
+            )
+            where = f"document_id NOT IN ({document_placeholders})"
+            params = tuple(target_financial_document_ids)
         _append_collateral_table_inventory(
             conn,
             inventory,
@@ -1962,6 +2536,8 @@ def _collateral_digest_many_conn(
     conn: sqlite3.Connection,
     shipment_ids: Iterable[str],
     target_nm_ids: Iterable[int],
+    *,
+    target_financial_document_ids: Iterable[str] = (),
 ) -> str:
     """Hash rows that the bounded correction is forbidden to change.
 
@@ -1974,7 +2550,11 @@ def _collateral_digest_many_conn(
 
     return _hash(
         {
-            "source_rows": _non_target_digest_many_conn(conn, shipment_ids),
+            "source_rows": _non_target_digest_many_conn(
+                conn,
+                shipment_ids,
+                target_financial_document_ids=target_financial_document_ids,
+            ),
             "canonical_rows_outside_target_skus": _canonical_non_target_digest_conn(
                 conn, target_nm_ids
             ),
@@ -2126,6 +2706,62 @@ def _canonical_digest_conn(conn: sqlite3.Connection, *, date_from: str, date_to:
             continue
         evidence.append({"table": table, "columns": columns, "rows": [list(row) for row in rows]})
     return _hash(evidence)
+
+
+def _canonical_financial_document_effect(
+    db_path: Path, document_id: str
+) -> dict[str, Any]:
+    with _connect(db_path) as conn:
+        if not _table_exists(
+            conn, "sheet_vitrina_v1_canonical_cost_components"
+        ):
+            rows: list[dict[str, Any]] = []
+        else:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT component_identity,component_type,shipment_id,nm_id,quantity,
+                           recognized_amount_rub,recognized_date,paid_amount_rub,paid_date,
+                           paid_equivalent_quantity,allocation_method,source_document_id,
+                           source_line_id,evidence_json,confirmation_status,fingerprint
+                    FROM sheet_vitrina_v1_canonical_cost_components
+                    WHERE source_document_id=? AND is_current=1
+                    ORDER BY component_identity
+                    """,
+                    (document_id,),
+                ).fetchall()
+            ]
+    recognized = sum(
+        (_exact_decimal(row["recognized_amount_rub"]) for row in rows),
+        Decimal("0"),
+    )
+    paid = sum(
+        (_exact_decimal(row["paid_amount_rub"]) for row in rows), Decimal("0")
+    )
+    paid_equivalent = sum(
+        (_exact_decimal(row["paid_equivalent_quantity"]) for row in rows),
+        Decimal("0"),
+    )
+    quantity_context = sum(
+        (_exact_decimal(row["quantity"]) for row in rows), Decimal("0")
+    )
+    payload = {
+        "contract_name": "supplier_financial_document_canonical_effect_v1",
+        "document_id": document_id,
+        "component_count": len(rows),
+        "unique_component_identity_count": len(
+            {str(row["component_identity"]) for row in rows}
+        ),
+        "unique_nm_id_count": len({int(row["nm_id"]) for row in rows}),
+        "recognized_capital_rub": _money_text(recognized),
+        "paid_capital_rub": _money_text(paid),
+        "paid_equivalent_quantity": _money_text(paid_equivalent),
+        "component_quantity_context": _money_text(quantity_context),
+        "physical_movement_quantity": "0",
+        "components": rows,
+    }
+    return {**payload, "fingerprint": _hash(payload)}
 
 
 def _successful_correction_by_values(db_path: Path, shipment_id: str, new_value: str) -> bool:
