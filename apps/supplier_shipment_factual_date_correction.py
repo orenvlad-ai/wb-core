@@ -50,9 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(args: argparse.Namespace) -> dict[str, object]:
-    runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
-    block = SupplierShipmentFactualCorrectionBlock(runtime=runtime)
+def build_correction_request(args: argparse.Namespace) -> dict[str, object]:
     historical_status_change = None
     if str(args.historical_status_shipment_id or "").strip():
         historical_status_change = {
@@ -74,7 +72,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             historical_status_change["expected_evidence_fingerprint"] = (
                 args.historical_expected_evidence_fingerprint
             )
-    common = {
+    return {
         "shipment_id": args.shipment_id,
         "new_actual_shipment_date": args.new_actual_shipment_date,
         "actor": args.actor,
@@ -84,6 +82,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "require_cross_cutover_rebuild": True,
         "historical_status_change": historical_status_change,
     }
+
+
+def run(args: argparse.Namespace) -> dict[str, object]:
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
+    block = SupplierShipmentFactualCorrectionBlock(runtime=runtime)
+    common = build_correction_request(args)
     if not args.apply:
         result = block.dry_run(**common)
         if str(args.prepare_backup_dir or "").strip():

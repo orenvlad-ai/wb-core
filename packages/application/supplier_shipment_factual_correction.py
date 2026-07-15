@@ -58,6 +58,29 @@ ACTIVE_CORRECTION_STATUSES = {"queued", "running"}
 FINAL_CORRECTION_STATUSES = {"success", "error"}
 VOLATILE_CANONICAL_COLUMNS = {"calculated_at", "created_at", "superseded_at"}
 ProgressEmitter = Callable[[str], None]
+PROTECTED_COLLATERAL_TABLES = (
+    "sheet_vitrina_v1_supplier_shipments",
+    "sheet_vitrina_v1_supplier_shipment_lines",
+    "sheet_vitrina_v1_supplier_financial_documents",
+    "sheet_vitrina_v1_supplier_financial_expense_lines",
+    "sheet_vitrina_v1_trade_documents",
+    "sheet_vitrina_v1_invoice_contract_links",
+    "sheet_vitrina_v1_supplier_ff_cost_layers",
+    "sheet_vitrina_v1_supplier_ff_cost_layer_lines",
+    "sheet_vitrina_v1_cny_documents",
+    "sheet_vitrina_v1_cny_ledger_operations",
+    "sheet_vitrina_v1_ff_stock_operations",
+    "sheet_vitrina_v1_ff_stock_operation_lines",
+    "sheet_vitrina_v1_wb_supplies",
+    "sheet_vitrina_v1_wb_supply_cost_layers",
+    "sheet_vitrina_v1_nomenclature_items",
+    "sheet_vitrina_v1_ready_snapshots",
+    "sheet_vitrina_v1_onec_stocks",
+    "sheet_vitrina_v1_own_capital_payment_layers",
+    "sheet_vitrina_v1_own_capital_events",
+    "sheet_vitrina_v1_own_capital_wb_outstanding",
+    "sheet_vitrina_v1_wb_opening_baseline",
+)
 
 
 class SupplierShipmentFactualCorrectionError(RuntimeError):
@@ -275,6 +298,33 @@ class SupplierShipmentFactualCorrectionBlock:
         ) as candidate:
             return dict(candidate["report"])
 
+    @contextmanager
+    def candidate(
+        self,
+        *,
+        shipment_id: str,
+        new_actual_shipment_date: Any,
+        actor: str,
+        expected_old_value: str | None = None,
+        expected_invoice_no: str | None = None,
+        expected_invoice_document_id: str | None = None,
+        require_cross_cutover_rebuild: bool = True,
+        historical_status_change: Mapping[str, Any] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Expose the verified disposable candidate to chained dry-run planners."""
+
+        with self._candidate(
+            shipment_id=shipment_id,
+            new_actual_shipment_date=new_actual_shipment_date,
+            actor=actor,
+            expected_old_value=expected_old_value,
+            expected_invoice_no=expected_invoice_no,
+            expected_invoice_document_id=expected_invoice_document_id,
+            require_cross_cutover_rebuild=require_cross_cutover_rebuild,
+            historical_status_change=historical_status_change,
+        ) as candidate:
+            yield candidate
+
     def apply(
         self,
         *,
@@ -332,6 +382,7 @@ class SupplierShipmentFactualCorrectionBlock:
             applied_at = self.timestamp_factory()
             correction_identity = correction_id or "ssfc_" + approved_fingerprint[:24]
             self._inject_failure("before_transaction")
+            source_engine = CanonicalCostEngine(runtime=self.runtime)
             with _connect(source_db) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
@@ -339,12 +390,27 @@ class SupplierShipmentFactualCorrectionBlock:
                         conn, target_shipment_ids
                     ):
                         raise ValueError("optimistic target shipment drift")
-                    if report["non_target_digest"] != _non_target_digest_many_conn(
-                        conn, target_shipment_ids
-                    ):
-                        raise ValueError("optimistic non-target digest drift")
                     if report["legacy_pre_cutover_digest"] != _legacy_pre_cutover_digest_conn(conn):
                         raise ValueError("optimistic pre-cutover digest drift")
+                    if report["canonical_before_digest"] != _canonical_digest_conn(
+                        conn,
+                        date_from=CUTOVER_DATE,
+                        date_to=report["scope"]["date_to"],
+                    ):
+                        raise ValueError("optimistic canonical input drift")
+                    current_anomalies = source_engine.source_anomaly_preflight(
+                        date_to=report["scope"]["date_to"]
+                    )
+                    if (
+                        current_anomalies.get("fingerprint")
+                        != report["source_anomaly_preflight"].get("fingerprint")
+                    ):
+                        raise ValueError("optimistic canonical source evidence drift")
+                    collateral_before_digest = _collateral_digest_many_conn(
+                        conn,
+                        target_shipment_ids,
+                        report["reconciliation"].get("target_nm_ids") or [],
+                    )
                     conn.execute(
                         """
                         UPDATE sheet_vitrina_v1_supplier_shipments
@@ -466,10 +532,13 @@ class SupplierShipmentFactualCorrectionBlock:
                         date_to=report["scope"]["date_to"],
                     ):
                         raise ValueError("candidate canonical digest mismatch in transaction")
-                    if report["non_target_digest"] != _non_target_digest_many_conn(
-                        conn, target_shipment_ids
-                    ):
-                        raise ValueError("non-target data changed in transaction")
+                    collateral_after_digest = _collateral_digest_many_conn(
+                        conn,
+                        target_shipment_ids,
+                        report["reconciliation"].get("target_nm_ids") or [],
+                    )
+                    if collateral_before_digest != collateral_after_digest:
+                        raise ValueError("apply changed collateral rows in transaction")
                     if report["legacy_pre_cutover_digest"] != _legacy_pre_cutover_digest_conn(conn):
                         raise ValueError("pre-cutover history changed in transaction")
                     self._inject_failure("before_commit")
@@ -490,10 +559,6 @@ class SupplierShipmentFactualCorrectionBlock:
                 )
                 if post["changed"] != 0:
                     raise ValueError("post-apply rebuild was not zero-change")
-                if report["non_target_digest"] != _non_target_digest_many(
-                    source_db, target_shipment_ids
-                ):
-                    raise ValueError("post-apply non-target digest mismatch")
                 if report["legacy_pre_cutover_digest"] != _legacy_pre_cutover_digest(source_db):
                     raise ValueError("post-apply pre-cutover digest mismatch")
                 self._inject_failure("after_post_verify")
@@ -618,9 +683,6 @@ class SupplierShipmentFactualCorrectionBlock:
         target_before_digest = _target_headers_digest(
             source_db, target_shipment_ids
         )
-        non_target_digest = _non_target_digest_many(
-            source_db, target_shipment_ids
-        )
         legacy_digest = _legacy_pre_cutover_digest(source_db)
         canonical_before = _canonical_digest(
             source_db,
@@ -640,6 +702,9 @@ class SupplierShipmentFactualCorrectionBlock:
         target_nm_ids = sorted(
             set(preflight.get("nm_ids") or [])
             | set((historical_preflight or {}).get("nm_ids") or [])
+        )
+        collateral_source_digest = _collateral_digest_many(
+            source_db, target_shipment_ids, target_nm_ids
         )
         baseline_fingerprint_before = _current_baseline_fingerprint(source_db)
         stage_snapshots_before = {
@@ -694,6 +759,13 @@ class SupplierShipmentFactualCorrectionBlock:
                 runtime=candidate_runtime,
                 timestamp_factory=lambda: operation_timestamp,
             )
+            source_anomaly_preflight = engine.source_anomaly_preflight(
+                date_to=business_today
+            )
+            if source_anomaly_preflight.get("status") != "ok":
+                raise SupplierShipmentFactualCorrectionError(
+                    "Canonical rebuild заблокирован: cutover_source_anomaly_preflight_blocked."
+                )
             baseline = engine.current_baseline_report()
             baseline_fingerprint_after = str((baseline or {}).get("fingerprint") or "")
             if baseline_fingerprint_before != baseline_fingerprint_after:
@@ -780,9 +852,10 @@ class SupplierShipmentFactualCorrectionBlock:
             target_after_digest = _target_headers_digest(
                 candidate_runtime.db_path, target_shipment_ids
             )
-            if non_target_digest != _non_target_digest_many(
-                candidate_runtime.db_path, target_shipment_ids
-            ):
+            collateral_candidate_digest = _collateral_digest_many(
+                candidate_runtime.db_path, target_shipment_ids, target_nm_ids
+            )
+            if collateral_source_digest != collateral_candidate_digest:
                 raise ValueError("candidate changed non-target data")
             if legacy_digest != _legacy_pre_cutover_digest(candidate_runtime.db_path):
                 raise ValueError("candidate changed pre-cutover history")
@@ -797,8 +870,24 @@ class SupplierShipmentFactualCorrectionBlock:
                     "historical_status_change": historical_plan,
                 }
             )
+            dependency_closure = {
+                "target_before_digest": target_before_digest,
+                "preflight": preflight,
+                "historical_preflight": historical_preflight,
+                "historical_status_change": historical_plan,
+                "source_anomaly_preflight": source_anomaly_preflight,
+                "baseline_fingerprint": baseline_fingerprint_before,
+                "legacy_pre_cutover_digest": legacy_digest,
+                "canonical_before_digest": canonical_before,
+                "candidate_canonical_digest": canonical_after,
+                "rebuild": rebuild_payload,
+                "target_before": stage_snapshots_before,
+                "target_after": stage_snapshots_after,
+                "reconciliation": reconciliation,
+            }
+            dependency_closure_digest = _hash(dependency_closure)
             plan = {
-                "contract_name": "supplier_shipment_factual_reconciliation_v2",
+                "contract_name": "supplier_shipment_factual_reconciliation_v3",
                 "status": "ready",
                 "scope": {"date_from": CUTOVER_DATE, "date_to": business_today},
                 "shipment_id": shipment_id,
@@ -818,7 +907,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 "request_fingerprint": request_fingerprint,
                 "target_before_digest": target_before_digest,
                 "target_after_digest": target_after_digest,
-                "non_target_digest": non_target_digest,
+                "dependency_closure_digest": dependency_closure_digest,
                 "legacy_pre_cutover_digest": legacy_digest,
                 "canonical_before_digest": canonical_before,
                 "candidate_canonical_digest": canonical_after,
@@ -827,6 +916,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 "reconciliation": reconciliation,
                 "preflight": preflight,
                 "historical_preflight": historical_preflight,
+                "source_anomaly_preflight": source_anomaly_preflight,
                 "affected_read_models": [
                     "supplier shipment detail/list",
                     "shipment registry matrix",
@@ -866,6 +956,16 @@ class SupplierShipmentFactualCorrectionBlock:
                 "backup": None,
                 "post_run": None,
                 "integrity_check": _integrity_check(source_db),
+                "collateral_invariant": {
+                    "contract_name": "supplier_correction_transaction_collateral_v1",
+                    "scope": "all protected non-target source rows plus canonical rows outside target SKU closure",
+                    "source_digest": collateral_source_digest,
+                    "candidate_digest": collateral_candidate_digest,
+                    "candidate_unchanged": collateral_source_digest
+                    == collateral_candidate_digest,
+                    "included_in_human_fingerprint": False,
+                    "apply_contract": "BEGIN IMMEDIATE before/after equality",
+                },
             }
             yield {
                 "db_path": candidate_runtime.db_path,
@@ -1483,30 +1583,7 @@ def _non_target_digest_conn(conn: sqlite3.Connection, shipment_id: str) -> str:
         "sheet_vitrina_v1_supplier_shipments": ("shipment_id <> ?", (shipment_id,)),
         "sheet_vitrina_v1_supplier_shipment_lines": ("shipment_id <> ?", (shipment_id,)),
     }
-    tables = (
-        "sheet_vitrina_v1_supplier_shipments",
-        "sheet_vitrina_v1_supplier_shipment_lines",
-        "sheet_vitrina_v1_supplier_financial_documents",
-        "sheet_vitrina_v1_supplier_financial_expense_lines",
-        "sheet_vitrina_v1_trade_documents",
-        "sheet_vitrina_v1_invoice_contract_links",
-        "sheet_vitrina_v1_supplier_ff_cost_layers",
-        "sheet_vitrina_v1_supplier_ff_cost_layer_lines",
-        "sheet_vitrina_v1_cny_documents",
-        "sheet_vitrina_v1_cny_ledger_operations",
-        "sheet_vitrina_v1_ff_stock_operations",
-        "sheet_vitrina_v1_ff_stock_operation_lines",
-        "sheet_vitrina_v1_wb_supplies",
-        "sheet_vitrina_v1_wb_supply_cost_layers",
-        "sheet_vitrina_v1_nomenclature_items",
-        "sheet_vitrina_v1_ready_snapshots",
-        "sheet_vitrina_v1_onec_stocks",
-        "sheet_vitrina_v1_own_capital_payment_layers",
-        "sheet_vitrina_v1_own_capital_events",
-        "sheet_vitrina_v1_own_capital_wb_outstanding",
-        "sheet_vitrina_v1_wb_opening_baseline",
-    )
-    for table in tables:
+    for table in PROTECTED_COLLATERAL_TABLES:
         if table not in existing:
             continue
         where, params = filtered.get(table, ("1=1", ()))
@@ -1542,35 +1619,12 @@ def _non_target_digest_many_conn(
             tuple(ids),
         ),
     }
-    tables = (
-        "sheet_vitrina_v1_supplier_shipments",
-        "sheet_vitrina_v1_supplier_shipment_lines",
-        "sheet_vitrina_v1_supplier_financial_documents",
-        "sheet_vitrina_v1_supplier_financial_expense_lines",
-        "sheet_vitrina_v1_trade_documents",
-        "sheet_vitrina_v1_invoice_contract_links",
-        "sheet_vitrina_v1_supplier_ff_cost_layers",
-        "sheet_vitrina_v1_supplier_ff_cost_layer_lines",
-        "sheet_vitrina_v1_cny_documents",
-        "sheet_vitrina_v1_cny_ledger_operations",
-        "sheet_vitrina_v1_ff_stock_operations",
-        "sheet_vitrina_v1_ff_stock_operation_lines",
-        "sheet_vitrina_v1_wb_supplies",
-        "sheet_vitrina_v1_wb_supply_cost_layers",
-        "sheet_vitrina_v1_nomenclature_items",
-        "sheet_vitrina_v1_ready_snapshots",
-        "sheet_vitrina_v1_onec_stocks",
-        "sheet_vitrina_v1_own_capital_payment_layers",
-        "sheet_vitrina_v1_own_capital_events",
-        "sheet_vitrina_v1_own_capital_wb_outstanding",
-        "sheet_vitrina_v1_wb_opening_baseline",
-    )
     existing = {
         str(row[0])
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     evidence: dict[str, Any] = {}
-    for table in tables:
+    for table in PROTECTED_COLLATERAL_TABLES:
         if table not in existing:
             continue
         where, params = filtered.get(table, ("1=1", ()))
@@ -1581,6 +1635,88 @@ def _non_target_digest_many_conn(
                 params,
             )
         ]
+    return _hash(evidence)
+
+
+def _collateral_digest_many(
+    db_path: Path,
+    shipment_ids: Iterable[str],
+    target_nm_ids: Iterable[int],
+) -> str:
+    with _connect(db_path) as conn:
+        return _collateral_digest_many_conn(conn, shipment_ids, target_nm_ids)
+
+
+def _collateral_digest_many_conn(
+    conn: sqlite3.Connection,
+    shipment_ids: Iterable[str],
+    target_nm_ids: Iterable[int],
+) -> str:
+    """Hash rows that the bounded correction is forbidden to change.
+
+    The value is deliberately transaction-local.  It is not an absolute live
+    snapshot in the human approval fingerprint: unrelated refresh writers may
+    legitimately change these rows before apply.  BEGIN IMMEDIATE freezes the
+    comparison boundary and before/after equality proves that this apply did
+    not touch collateral rows.
+    """
+
+    return _hash(
+        {
+            "source_rows": _non_target_digest_many_conn(conn, shipment_ids),
+            "canonical_rows_outside_target_skus": _canonical_non_target_digest_conn(
+                conn, target_nm_ids
+            ),
+        }
+    )
+
+
+def _canonical_non_target_digest_conn(
+    conn: sqlite3.Connection,
+    target_nm_ids: Iterable[int],
+) -> str:
+    nm_ids = sorted({int(item) for item in target_nm_ids})
+    tables = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ? ORDER BY name",
+            (CANONICAL_TABLE_PREFIX + "%",),
+        ).fetchall()
+    ]
+    evidence: list[dict[str, Any]] = []
+    for table in tables:
+        table_info = list(conn.execute(f'PRAGMA table_info("{table}")'))
+        columns = [
+            str(row[1])
+            for row in table_info
+            if str(row[1]) not in VOLATILE_CANONICAL_COLUMNS
+        ]
+        if not columns:
+            continue
+        where = "1=1"
+        params: tuple[Any, ...] = ()
+        if nm_ids and "nm_id" in columns:
+            placeholders = ",".join("?" for _ in nm_ids)
+            where = f"CAST(nm_id AS INTEGER) NOT IN ({placeholders})"
+            params = tuple(nm_ids)
+        selected = ",".join(f'"{column}"' for column in columns)
+        primary = [
+            str(row[1])
+            for row in sorted(table_info, key=lambda item: int(item[5] or 0))
+            if int(row[5] or 0) > 0
+        ]
+        order = ",".join(f'"{column}"' for column in (primary or columns))
+        rows = conn.execute(
+            f'SELECT {selected} FROM "{table}" WHERE {where} ORDER BY {order}',
+            params,
+        ).fetchall()
+        if not rows:
+            # Schema-only creation on the disposable candidate is not a
+            # collateral business-row change.
+            continue
+        evidence.append(
+            {"table": table, "columns": columns, "rows": [list(row) for row in rows]}
+        )
     return _hash(evidence)
 
 
@@ -1640,6 +1776,8 @@ def _canonical_digest_conn(conn: sqlite3.Connection, *, date_from: str, date_to:
             rows = conn.execute(
                 f'SELECT {select_columns} FROM "{table}" ORDER BY rowid'
             ).fetchall()
+        if not rows:
+            continue
         evidence.append({"table": table, "columns": columns, "rows": [list(row) for row in rows]})
     return _hash(evidence)
 
@@ -1783,6 +1921,22 @@ def _restore_backup_in_place(backup: Path, destination: Path) -> None:
     ) as destination_conn:
         source_conn.backup(destination_conn)
         destination_conn.commit()
+
+
+def restore_verified_supplier_backup(backup: Path, destination: Path) -> dict[str, Any]:
+    """Restore one repo-owned SQLite backup and verify inode/integrity."""
+
+    inode = destination.stat().st_ino
+    _restore_backup_in_place(Path(backup), Path(destination))
+    integrity = _integrity_check(Path(destination))
+    if destination.stat().st_ino != inode or integrity != "ok":
+        raise ValueError("supplier backup restore verification failed")
+    return {
+        "path": str(destination),
+        "inode_preserved": True,
+        "integrity": integrity,
+        "restored_from": str(backup),
+    }
 
 
 def _integrity_check(db_path: Path) -> str:
