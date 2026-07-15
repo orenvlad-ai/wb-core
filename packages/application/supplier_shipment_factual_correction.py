@@ -89,6 +89,9 @@ PROTECTED_COLLATERAL_TABLES = (
     "sheet_vitrina_v1_own_capital_wb_outstanding",
     "sheet_vitrina_v1_wb_opening_baseline",
 )
+NON_SEMANTIC_COLLATERAL_COLUMNS = {
+    "sheet_vitrina_v1_supplier_financial_documents": frozenset({"updated_at"}),
+}
 
 
 class SupplierShipmentFactualCorrectionError(RuntimeError):
@@ -2186,13 +2189,12 @@ def _non_target_digest_conn(conn: sqlite3.Connection, shipment_id: str) -> str:
         if table not in existing:
             continue
         where, params = filtered.get(table, ("1=1", ()))
-        evidence[table] = [
-            list(row)
-            for row in conn.execute(
-                f'SELECT * FROM "{table}" WHERE {where} ORDER BY rowid',
-                params,
-            )
-        ]
+        evidence[table] = _collateral_table_rows(
+            conn,
+            table,
+            where=where,
+            params=params,
+        )
     return _hash(evidence)
 
 
@@ -2248,14 +2250,38 @@ def _non_target_digest_many_conn(
         if table not in existing:
             continue
         where, params = filtered.get(table, ("1=1", ()))
-        evidence[table] = [
-            list(row)
-            for row in conn.execute(
-                f'SELECT * FROM "{table}" WHERE {where} ORDER BY rowid',
-                params,
-            )
-        ]
+        evidence[table] = _collateral_table_rows(
+            conn,
+            table,
+            where=where,
+            params=params,
+        )
     return _hash(evidence)
+
+
+def _collateral_table_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    where: str,
+    params: tuple[Any, ...],
+) -> list[list[Any]]:
+    excluded = NON_SEMANTIC_COLLATERAL_COLUMNS.get(table, frozenset())
+    columns = [
+        str(row[1])
+        for row in conn.execute(f'PRAGMA table_info("{table}")')
+        if str(row[1]) not in excluded
+    ]
+    if not columns:
+        return []
+    projection = ",".join(f'"{column}"' for column in columns)
+    return [
+        list(row)
+        for row in conn.execute(
+            f'SELECT {projection} FROM "{table}" WHERE {where} ORDER BY rowid',
+            params,
+        )
+    ]
 
 
 def _collateral_digest_many(
@@ -2422,7 +2448,9 @@ def _collateral_row_inventory_conn(
             table=table,
             where=where,
             params=params,
-            excluded_columns=set(),
+            excluded_columns=set(
+                NON_SEMANTIC_COLLATERAL_COLUMNS.get(table, frozenset())
+            ),
         )
     canonical_tables = sorted(
         table for table in existing if table.startswith(CANONICAL_TABLE_PREFIX)

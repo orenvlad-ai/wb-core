@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 import json
 from pathlib import Path
+import shutil
 import sys
 from tempfile import TemporaryDirectory
 
@@ -30,6 +31,8 @@ from packages.application.supplier_financial_document_exact_policy import (  # n
 )
 from packages.application.supplier_shipment_factual_correction import (  # noqa: E402
     SupplierShipmentFactualCorrectionBlock,
+    _candidate_collateral_change_report,
+    _non_target_digest_many,
 )
 
 
@@ -150,6 +153,69 @@ def main() -> int:
         assert (
             after_volatile_touch["financial_document_confirmation"]["evidence_fingerprint"]
             == plan["evidence_fingerprint"]
+        )
+        collateral_candidate = root / "volatile-collateral-candidate.sqlite3"
+        shutil.copy2(runtime.db_path, collateral_candidate)
+        with _connect(collateral_candidate) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_financial_documents "
+                "SET updated_at='2026-07-15T16:05:32Z' WHERE document_id=?",
+                ("fdoc_volatile_read_refresh",),
+            )
+            conn.commit()
+        target_shipments = [SHIPMENT_ID, HISTORICAL_SHIPMENT_ID]
+        target_nm_ids = first["reconciliation"]["target_nm_ids"]
+        digest_args = {
+            "target_financial_document_ids": [FINANCIAL_DOCUMENT_ID],
+        }
+        assert _non_target_digest_many(
+            runtime.db_path,
+            target_shipments,
+            **digest_args,
+        ) == _non_target_digest_many(
+            collateral_candidate,
+            target_shipments,
+            **digest_args,
+        )
+        timestamp_only_report = _candidate_collateral_change_report(
+            runtime.db_path,
+            collateral_candidate,
+            shipment_ids=target_shipments,
+            target_nm_ids=target_nm_ids,
+            **digest_args,
+        )
+        assert not [
+            item
+            for item in timestamp_only_report["changes"]
+            if item["scope"] == "source_rows"
+        ]
+        with _connect(collateral_candidate) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_financial_documents "
+                "SET total_amount_rub=total_amount_rub+1 WHERE document_id=?",
+                ("fdoc_volatile_read_refresh",),
+            )
+            conn.commit()
+        assert _non_target_digest_many(
+            runtime.db_path,
+            target_shipments,
+            **digest_args,
+        ) != _non_target_digest_many(
+            collateral_candidate,
+            target_shipments,
+            **digest_args,
+        )
+        semantic_report = _candidate_collateral_change_report(
+            runtime.db_path,
+            collateral_candidate,
+            shipment_ids=target_shipments,
+            target_nm_ids=target_nm_ids,
+            **digest_args,
+        )
+        assert any(
+            item["table"] == "sheet_vitrina_v1_supplier_financial_documents"
+            and item["changed_fields"] == ["total_amount_rub"]
+            for item in semantic_report["changes"]
         )
         try:
             block.dry_run(
