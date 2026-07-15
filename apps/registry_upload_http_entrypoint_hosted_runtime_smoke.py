@@ -42,7 +42,39 @@ STATUS_HEADER = [
 ]
 
 
+class _ShortReadResponse:
+    def __init__(self, payload: bytes, *, chunk_size: int) -> None:
+        self.headers = {"Content-Type": "application/json; charset=utf-8"}
+        self._payload = payload
+        self._chunk_size = chunk_size
+        self._offset = 0
+
+    def read(self, requested: int) -> bytes:
+        if self._offset >= len(self._payload):
+            return b""
+        size = min(requested, self._chunk_size, len(self._payload) - self._offset)
+        chunk = self._payload[self._offset : self._offset + size]
+        self._offset += size
+        return chunk
+
+
 def main() -> None:
+    complete_payload = json.dumps({"rows": ["x" * 256] * 4096}, separators=(",", ":")).encode("utf-8")
+    body, truncated, bytes_read = hosted_runtime._read_probe_response_body(
+        _ShortReadResponse(complete_payload, chunk_size=64 * 1024)
+    )
+    if truncated is not True or bytes_read != hosted_runtime.PROBE_BODY_LIMIT_BYTES:
+        raise AssertionError("probe reader must keep reading short socket chunks through the bounded limit")
+    if not body.startswith('{"rows":['):
+        raise AssertionError("probe reader must retain the bounded JSON prefix")
+
+    short_payload = json.dumps({"rows": ["ok"] * 1000}, separators=(",", ":")).encode("utf-8")
+    body, truncated, bytes_read = hosted_runtime._read_probe_response_body(
+        _ShortReadResponse(short_payload, chunk_size=1024)
+    )
+    if truncated is not False or bytes_read != len(short_payload) or json.loads(body)["rows"][-1] != "ok":
+        raise AssertionError("probe reader must assemble all short reads before declaring EOF")
+
     with TemporaryDirectory(prefix="hosted-runtime-contract-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)

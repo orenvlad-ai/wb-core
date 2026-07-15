@@ -2607,7 +2607,15 @@ def _read_probe_response_body(response: Any) -> tuple[str, bool, int]:
         )
     ):
         return "", False, 0
-    raw = response.read(PROBE_BODY_LIMIT_BYTES + 1)
+    chunks: list[bytes] = []
+    remaining = PROBE_BODY_LIMIT_BYTES + 1
+    while remaining > 0:
+        chunk = response.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
     body_truncated = len(raw) > PROBE_BODY_LIMIT_BYTES
     if body_truncated:
         raw = raw[:PROBE_BODY_LIMIT_BYTES]
@@ -2846,7 +2854,15 @@ def _read_probe_response_body(response):
         )
     ):
         return "", False, 0
-    raw = response.read(PROBE_BODY_LIMIT_BYTES + 1)
+    chunks = []
+    remaining = PROBE_BODY_LIMIT_BYTES + 1
+    while remaining > 0:
+        chunk = response.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
     body_truncated = len(raw) > PROBE_BODY_LIMIT_BYTES
     if body_truncated:
         raw = raw[:PROBE_BODY_LIMIT_BYTES]
