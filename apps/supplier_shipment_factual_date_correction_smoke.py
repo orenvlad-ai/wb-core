@@ -22,6 +22,7 @@ from apps.canonical_cost_engine_smoke import (  # noqa: E402
     _insert_supplier_payment,
 )
 from packages.application.own_product_capital import OwnProductCapitalBlock  # noqa: E402
+import packages.application.supplier_shipment_factual_correction as correction_module  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
     _connect,
@@ -94,6 +95,16 @@ def main() -> int:
             == 0,
             "historical signal has no acceptance movement",
         )
+        first_collateral_digest = dry["collateral_invariant"]["source_digest"]
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_ready_snapshots
+                SET refreshed_at='2026-07-14T12:30:00Z'
+                WHERE as_of_date='2026-07-01'
+                """
+            )
+            conn.commit()
         later_dry = SupplierShipmentFactualCorrectionBlock(
             runtime=runtime,
             timestamp_factory=lambda: "2026-07-14T13:00:00Z",
@@ -107,8 +118,77 @@ def main() -> int:
         )
         _assert(
             later_dry["fingerprint"] == dry["fingerprint"],
-            "exact apply fingerprint must stay stable across same-business-day dry-runs",
+            "unrelated ready-snapshot activity must not stale the semantic fingerprint",
         )
+        _assert(
+            later_dry["collateral_invariant"]["source_digest"]
+            != first_collateral_digest,
+            "diagnostic collateral snapshot must still observe unrelated activity",
+        )
+        _assert(
+            later_dry["dependency_closure_digest"]
+            == dry["dependency_closure_digest"],
+            "unrelated activity must preserve the bounded dependency closure",
+        )
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_shipments SET invoice_amount_total=COALESCE(invoice_amount_total,0)+1 WHERE shipment_id=?",
+                (SHIPMENT_ID,),
+            )
+            conn.commit()
+        try:
+            block.apply(
+                shipment_id=SHIPMENT_ID,
+                new_actual_shipment_date="2026-06-25",
+                actor="smoke",
+                fingerprint=dry["fingerprint"],
+                backup_dir=root / "target-drift-backups",
+                expected_invoice_no="26GN390",
+                expected_invoice_document_id=DOCUMENT_ID,
+                historical_status_change=historical_change,
+            )
+        except ValueError as exc:
+            _assert("exact current dry-run fingerprint" in str(exc), "target drift fail closed")
+        else:
+            raise AssertionError("target header drift unexpectedly passed")
+        with _connect(runtime.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_supplier_shipments SET invoice_amount_total=invoice_amount_total-1 WHERE shipment_id=?",
+                (SHIPMENT_ID,),
+            )
+            conn.commit()
+
+        original_replace = correction_module._replace_canonical_tables
+
+        def replace_with_collateral_write(conn, materialized):
+            original_replace(conn, materialized)
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at='2099-01-01T00:00:00Z' WHERE as_of_date='2026-07-01'"
+            )
+
+        correction_module._replace_canonical_tables = replace_with_collateral_write
+        try:
+            block.apply(
+                shipment_id=SHIPMENT_ID,
+                new_actual_shipment_date="2026-06-25",
+                actor="smoke",
+                fingerprint=dry["fingerprint"],
+                backup_dir=root / "collateral-backups",
+                expected_invoice_no="26GN390",
+                expected_invoice_document_id=DOCUMENT_ID,
+                historical_status_change=historical_change,
+            )
+        except ValueError as exc:
+            _assert("collateral rows" in str(exc), "collateral mutation fail closed")
+        else:
+            raise AssertionError("collateral mutation unexpectedly committed")
+        finally:
+            correction_module._replace_canonical_tables = original_replace
+        with _connect(runtime.db_path) as conn:
+            refreshed_at = conn.execute(
+                "SELECT refreshed_at FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date='2026-07-01'"
+            ).fetchone()[0]
+        _assert(refreshed_at == "2026-07-14T12:30:00Z", "collateral mutation rolled back")
 
         def fail_before_post_verify(phase: str) -> None:
             if phase == "before_post_verify":

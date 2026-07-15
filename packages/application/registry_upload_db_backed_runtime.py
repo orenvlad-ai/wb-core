@@ -8272,6 +8272,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             shipment_id, created_at DESC, event_id DESC
         );
 
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_publication_chain_jobs (
+            chain_job_id TEXT PRIMARY KEY,
+            chain_fingerprint TEXT NOT NULL,
+            supplier_fingerprint TEXT NOT NULL,
+            publication_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            report_json TEXT NOT NULL DEFAULT '{}',
+            error_message TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS supplier_publication_chain_jobs_by_status
+        ON sheet_vitrina_v1_supplier_publication_chain_jobs(
+            status, updated_at DESC, chain_job_id DESC
+        );
+
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_trade_documents (
             document_id TEXT PRIMARY KEY,
             document_type TEXT NOT NULL,

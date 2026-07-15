@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
-from dataclasses import asdict
 from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import sqlite3
 import sys
 from typing import Any
@@ -30,7 +28,6 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
     STAGE_FF_TO_WB,
     STAGE_PRODUCTION,
     STAGE_WB,
-    CanonicalCostEngine,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
@@ -57,6 +54,15 @@ def _dec(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _publication_date_column(value: Any, *, date_from: str, date_to: str) -> bool:
+    normalized = str(value or "").strip()
+    try:
+        parsed = date.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return date.fromisoformat(date_from) <= parsed <= date.fromisoformat(date_to)
 
 
 def _value_for_metric(metric: str, nm_id: int | None, lookup: dict[int, dict[str, Any]]) -> float | str:
@@ -100,34 +106,88 @@ def _value_for_metric(metric: str, nm_id: int | None, lookup: dict[int, dict[str
     return ""
 
 
+def _semantic_lookup(lookup: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    fields = (
+        "physical_quantity",
+        "paid_equivalent_quantity",
+        "recognized_capital_rub",
+        "paid_capital_rub",
+    )
+    return {
+        str(nm_id): {
+            str(stage): {field: values.get(field) for field in fields}
+            for stage, values in sorted((item.get("stages") or {}).items())
+        }
+        for nm_id, item in sorted(lookup.items())
+    }
+
+
+def _semantic_lookups_conn(
+    conn: sqlite3.Connection, available: list[str]
+) -> tuple[dict[str, dict[int, dict[str, Any]]], dict[str, Any]]:
+    lookups: dict[str, dict[int, dict[str, Any]]] = {}
+    semantic: dict[str, Any] = {}
+    latest: dict[int, dict[str, Any]] = {}
+    for day in available:
+        rows = conn.execute(
+            """
+            SELECT nm_id,stage,physical_quantity,paid_equivalent_quantity,
+                   recognized_capital_rub,paid_capital_rub
+            FROM sheet_vitrina_v1_canonical_cost_daily_state
+            WHERE as_of_date=? ORDER BY nm_id,stage
+            """,
+            (day,),
+        ).fetchall()
+        current: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            item = current.setdefault(int(row["nm_id"]), {"stages": {}})
+            item["stages"][str(row["stage"])] = dict(row)
+        if current:
+            latest = current
+        resolved = current or latest
+        lookups[day] = resolved
+        semantic[day] = _semantic_lookup(resolved)
+    return lookups, semantic
+
+
 def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict[str, Any]:
-    runtime = RegistryUploadDbBackedRuntime(runtime_dir=db_path.parent)
-    engine = CanonicalCostEngine(runtime=runtime)
     with _connect(db_path) as conn:
         rows = conn.execute(
             "SELECT as_of_date, plan_json FROM sheet_vitrina_v1_ready_snapshots "
             "WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date",
             (date_from, date_to),
         ).fetchall()
-    available = sorted({str(row[0]) for row in rows})
-    raw_lookups = {day: engine.load_daily_metric_lookup(day) for day in available}
-    lookups = {}
-    latest = None
-    for day in available:
-        if raw_lookups[day]:
-            latest = raw_lookups[day]
-        lookups[day] = raw_lookups[day] or (latest or {})
+        if not rows:
+            raise ValueError("no ready snapshots exist in the publication range")
+        decoded_plans = {str(row[0]): json.loads(row[1]) for row in rows}
+        projection_dates = sorted(
+            {
+                str(value)
+                for plan in decoded_plans.values()
+                for sheet in plan.get("sheets", [])
+                for value in sheet.get("header", [])
+                if _publication_date_column(
+                    value, date_from=date_from, date_to=date_to
+                )
+            }
+        )
+        lookups, semantic_lookups = _semantic_lookups_conn(conn, projection_dates)
     changed_cells = 0
     snapshots: list[dict[str, Any]] = []
     plans: dict[str, str] = {}
     for row in rows:
         day = str(row[0])
-        plan = json.loads(row[1])
-        lookup = lookups[day]
+        plan = decoded_plans[day]
         changed = 0
         for sheet in plan.get("sheets", []):
             header = sheet.get("header", [])
-            date_columns = [i for i, value in enumerate(header) if str(value) >= date_from]
+            date_columns = [
+                (index, str(value))
+                for index, value in enumerate(header)
+                if _publication_date_column(
+                    value, date_from=date_from, date_to=date_to
+                )
+            ]
             for values in sheet.get("rows", []):
                 if len(values) < 2:
                     continue
@@ -154,8 +214,10 @@ def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict
                     metric_name = "onec_" + metric_name[len("own_capital_"):]
                 if metric_name == "total_our_wb_unit_cost_rub":
                     metric_name = "our_wb_unit_cost_rub"
-                value = _value_for_metric(metric_name, nm_id, lookup)
-                for index in date_columns:
+                for index, projection_date in date_columns:
+                    value = _value_for_metric(
+                        metric_name, nm_id, lookups.get(projection_date, {})
+                    )
                     if index < len(values) and values[index] != value:
                         values[index] = value
                         changed += 1
@@ -171,7 +233,42 @@ def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict
         plans[day] = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
         snapshots.append({"as_of_date": day, "changed_cells": changed})
         changed_cells += changed
-    return {"snapshots": snapshots, "plans": plans, "changed_cells": changed_cells}
+    snapshot_inputs = {
+        str(row[0]): "sha256:" + hashlib.sha256(str(row[1]).encode()).hexdigest()
+        for row in rows
+    }
+    return {
+        "snapshots": snapshots,
+        "plans": plans,
+        "changed_cells": changed_cells,
+        "snapshot_input_digest": "sha256:" + _hash(snapshot_inputs),
+        "canonical_input_digest": "sha256:" + _hash(semantic_lookups),
+        "published_output_digest": "sha256:" + _hash(plans),
+    }
+
+
+def build_publication_report(
+    db_path: Path,
+    *,
+    date_from: str,
+    date_to: str,
+) -> dict[str, Any]:
+    payload = _publication_payload(db_path, date_from=date_from, date_to=date_to)
+    approval = {
+        "contract_name": "canonical_cost_engine_vitrina_publication_v2",
+        "date_from": date_from,
+        "date_to": date_to,
+        "snapshot_input_digest": payload["snapshot_input_digest"],
+        "canonical_input_digest": payload["canonical_input_digest"],
+        "published_output_digest": payload["published_output_digest"],
+        "snapshots": payload["snapshots"],
+        "changed_cells": payload["changed_cells"],
+    }
+    return {
+        **approval,
+        "fingerprint": "sha256:" + _hash(approval),
+        "plans": payload["plans"],
+    }
 
 
 def _backup(source: Path, destination: Path) -> dict[str, Any]:
@@ -187,7 +284,105 @@ def _backup(source: Path, destination: Path) -> dict[str, Any]:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest_hash.update(chunk)
     digest = digest_hash.hexdigest()
-    return {"path": str(destination), "mode": oct(destination.stat().st_mode & 0o777), "integrity": integrity, "sha256": digest, "size": destination.stat().st_size}
+    return {"path": str(destination), "mode": f"{destination.stat().st_mode & 0o777:04o}", "integrity": integrity, "sha256": digest, "size": destination.stat().st_size}
+
+
+def _restore_backup(backup: Path, destination: Path) -> dict[str, Any]:
+    inode = destination.stat().st_ino
+    with closing(sqlite3.connect(backup)) as source, closing(
+        sqlite3.connect(destination, timeout=60)
+    ) as target:
+        source.backup(target)
+        target.commit()
+    with closing(
+        sqlite3.connect(f"file:{destination.resolve()}?mode=ro", uri=True)
+    ) as conn:
+        integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+    if destination.stat().st_ino != inode or integrity.lower() != "ok":
+        raise ValueError("post-publication restore verification failed")
+    return {"inode_preserved": True, "integrity": "ok", "path": str(destination)}
+
+
+def apply_publication(
+    db_path: Path,
+    *,
+    date_from: str,
+    date_to: str,
+    fingerprint: str,
+    backup_dir: Path,
+) -> dict[str, Any]:
+    before = build_publication_report(
+        db_path, date_from=date_from, date_to=date_to
+    )
+    if str(fingerprint) != str(before["fingerprint"]):
+        raise ValueError("exact publication fingerprint mismatch")
+    backup_path = Path(backup_dir) / (
+        f"{db_path.stem}.vitrina-publication-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.sqlite3"
+    )
+    backup = _backup(db_path, backup_path)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current_rows = conn.execute(
+                "SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                "WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date",
+                (date_from, date_to),
+            ).fetchall()
+            current_input = "sha256:" + _hash(
+                {
+                    str(row[0]): "sha256:"
+                    + hashlib.sha256(str(row[1]).encode()).hexdigest()
+                    for row in current_rows
+                }
+            )
+            if current_input != before["snapshot_input_digest"]:
+                raise ValueError("publication snapshot input drift")
+            projection_dates = sorted(
+                {
+                    str(value)
+                    for row in current_rows
+                    for sheet in json.loads(row[1]).get("sheets", [])
+                    for value in sheet.get("header", [])
+                    if _publication_date_column(
+                        value, date_from=date_from, date_to=date_to
+                    )
+                }
+            )
+            _, semantic_lookups = _semantic_lookups_conn(conn, projection_dates)
+            current_canonical_input = "sha256:" + _hash(semantic_lookups)
+            if current_canonical_input != before["canonical_input_digest"]:
+                raise ValueError("publication canonical input drift")
+            for day, plan_json in before["plans"].items():
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?",
+                    (plan_json, day),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    try:
+        after = build_publication_report(
+            db_path, date_from=date_from, date_to=date_to
+        )
+        if int(after["changed_cells"]) != 0:
+            raise ValueError("post-publication zero-change failed")
+    except Exception:
+        _restore_backup(backup_path, db_path)
+        raise
+    return {
+        **{key: value for key, value in before.items() if key != "plans"},
+        "mode": "apply",
+        "applied": True,
+        "backup": backup,
+        "post_run": {
+            "changed_cells": 0,
+            "idempotent": True,
+            "fingerprint": after["fingerprint"],
+            "published_output_digest": after["published_output_digest"],
+        },
+    }
 
 
 def main() -> int:
@@ -200,33 +395,28 @@ def main() -> int:
     parser.add_argument("--backup-dir", default="")
     args = parser.parse_args()
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
-    before = _publication_payload(runtime.db_path, date_from=args.date_from, date_to=args.date_to)
-    fingerprint = _hash({"date_from": args.date_from, "date_to": args.date_to, "plans": before["plans"]})
-    report = {"contract": "canonical_cost_engine_vitrina_publication_v1", "date_from": args.date_from, "date_to": args.date_to, "fingerprint": fingerprint, "changed_cells": before["changed_cells"], "snapshots": before["snapshots"], "mode": "apply" if args.apply else "dry-run", "applied": False, "backup": None, "post_run": None}
+    before = build_publication_report(
+        runtime.db_path, date_from=args.date_from, date_to=args.date_to
+    )
+    report = {
+        **{key: value for key, value in before.items() if key != "plans"},
+        "mode": "apply" if args.apply else "dry-run",
+        "applied": False,
+        "backup": None,
+        "post_run": None,
+    }
     if not args.apply:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0
-    if args.fingerprint != fingerprint:
-        raise SystemExit("exact publication fingerprint mismatch")
     if not args.backup_dir:
         raise SystemExit("apply requires --backup-dir")
-    backup_path = Path(args.backup_dir) / f"{runtime.db_path.stem}.vitrina-publication-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.sqlite3"
-    report["backup"] = _backup(runtime.db_path, backup_path)
-    with _connect(runtime.db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            for day, plan_json in before["plans"].items():
-                conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?", (plan_json, day))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-    after = _publication_payload(runtime.db_path, date_from=args.date_from, date_to=args.date_to)
-    after_fp = _hash({"date_from": args.date_from, "date_to": args.date_to, "plans": after["plans"]})
-    if after["changed_cells"] or after_fp != _hash({"date_from": args.date_from, "date_to": args.date_to, "plans": before["plans"]}):
-        raise SystemExit("post-publication zero-change failed")
-    report["applied"] = True
-    report["post_run"] = {"changed_cells": 0, "fingerprint": after_fp, "idempotent": True}
+    report = apply_publication(
+        runtime.db_path,
+        date_from=args.date_from,
+        date_to=args.date_to,
+        fingerprint=args.fingerprint,
+        backup_dir=Path(args.backup_dir),
+    )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 
