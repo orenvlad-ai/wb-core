@@ -448,7 +448,14 @@ def _run_backend_unit_smokes() -> None:
         if not job["restore"]["restored"]:
             raise AssertionError(f"baseline restore proof missing: {job['restore']}")
         completed_status = block.status({})
-        if completed_status["active_job"] is not None or completed_status["job"]["job_id"] != job["job_id"]:
+        if (
+            completed_status["active_job"] is not None
+            or completed_status["job"]["job_id"] != job["job_id"]
+            or (completed_status["job"].get("lifecycle_diagnostics") or {})
+            .get("restore_proof", {})
+            .get("proof_status")
+            != "confirmed"
+        ):
             raise AssertionError(f"restored terminal job must clear active pointer but remain the latest job: {completed_status}")
         if (runtime_dir / "sheet_vitrina_v1_prices" / "spp_tests" / "current_job.json").exists():
             raise AssertionError("normal restored completion must remove current_job.json")
@@ -638,6 +645,10 @@ def _run_backend_unit_smokes() -> None:
             or diagnostic_proof.get("proof_status") != "confirmed"
             or diagnostic_proof.get("authenticated_status") != "probe_error"
             or diagnostic_proof.get("anonymous_status") != "probe_error"
+            or (diagnostic_repeated["job"].get("lifecycle_diagnostics") or {})
+            .get("restore_proof", {})
+            .get("proof_status")
+            != "confirmed"
             or diagnostic_repeated["active_job"] is not None
         ):
             raise AssertionError(
@@ -694,6 +705,8 @@ def _run_backend_unit_smokes() -> None:
         if (
             reconciled["status"] != "interrupted_restored"
             or not reconciled["restore"]["restored"]
+            or (reconciled.get("lifecycle_diagnostics") or {}).get("restore_proof", {}).get("proof_status")
+            != "confirmed"
             or orphan_status["active_job"] is not None
             or (runtime_dir / "orphan" / "sheet_vitrina_v1_prices" / "spp_tests" / "current_job.json").exists()
         ):

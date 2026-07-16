@@ -650,6 +650,7 @@ class WbSppTesterBlock:
                     classification="terminal",
                     phase="interrupted_restored",
                     reconciled_at=self.timestamp_factory(),
+                    restore_proof=(job.get("restore") or {}).get("proof"),
                 )
                 self._append_timeline(job, "interrupted_restored", "emergency_restore_confirmed")
             else:
@@ -701,7 +702,12 @@ class WbSppTesterBlock:
             job["updated_at"] = self.timestamp_factory()
             job["finished_at"] = self.timestamp_factory()
             job["manual_restore_required"] = False
-            self._set_lifecycle(job, classification="terminal", phase=final_status)
+            self._set_lifecycle(
+                job,
+                classification="terminal",
+                phase=final_status,
+                restore_proof=(job.get("restore") or {}).get("proof"),
+            )
             self._append_timeline(job, final_status, result_status)
             self._save_job(job)
             self._write_current_job(job)
@@ -732,7 +738,12 @@ class WbSppTesterBlock:
                 job["manual_restore_required"] = True
             job["updated_at"] = self.timestamp_factory()
             job["finished_at"] = self.timestamp_factory()
-            self._set_lifecycle(job, classification="terminal", phase=str(job["status"]))
+            self._set_lifecycle(
+                job,
+                classification="terminal",
+                phase=str(job["status"]),
+                restore_proof=(job.get("restore") or {}).get("proof"),
+            )
             self._save_job(job)
             self._write_current_job(job)
             self._append_audit(
@@ -1717,6 +1728,7 @@ class WbSppTesterBlock:
                 classification="stale_orphan_restored_confirmed" if was_unfinished else "terminal_restored_reconciled",
                 phase=str(mutable.get("status") or "interrupted_restored"),
                 reconciled_at=self.timestamp_factory(),
+                restore_proof=proof,
             )
             self._append_timeline(
                 mutable,
