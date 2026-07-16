@@ -172,11 +172,13 @@ class FakePublicSource:
         stale: bool = False,
         timeout_reads: set[int] | None = None,
         rate_limit_reads: set[int] | None = None,
+        raise_on_read: bool = False,
     ) -> None:
         self.prices = prices
         self.stale = stale
         self.timeout_reads = set(timeout_reads or set())
         self.rate_limit_reads = set(rate_limit_reads or set())
+        self.raise_on_read = raise_on_read
         self.reads = 0
         self.destination_contexts: list[dict[str, Any]] = []
 
@@ -187,6 +189,8 @@ class FakePublicSource:
         destination_context: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         self.reads += 1
+        if self.raise_on_read:
+            raise RuntimeError("fake anonymous buyer diagnostic failure")
         normalized_context = dict(destination_context or {})
         self.destination_contexts.append(normalized_context)
         if self.reads in self.rate_limit_reads:
@@ -230,10 +234,18 @@ class FakePublicSource:
 
 
 class FakeBuyerSource:
-    def __init__(self, prices: FakeSppPricesSource, *, session_status: str = "valid", stale: bool = False) -> None:
+    def __init__(
+        self,
+        prices: FakeSppPricesSource,
+        *,
+        session_status: str = "valid",
+        stale: bool = False,
+        raise_on_price: bool = False,
+    ) -> None:
         self.prices = prices
         self.session_status = session_status
         self.stale = stale
+        self.raise_on_price = raise_on_price
         self.reads = 0
 
     def check_session(self) -> Mapping[str, Any]:
@@ -250,6 +262,8 @@ class FakeBuyerSource:
 
     def fetch_authenticated_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
         self.reads += 1
+        if self.raise_on_price:
+            raise RuntimeError("fake authenticated buyer diagnostic failure")
         if self.session_status != "valid":
             return {
                 "status": f"session_{self.session_status}",
@@ -433,6 +447,11 @@ def _run_backend_unit_smokes() -> None:
             raise AssertionError(f"threshold should be detected, got: {job}")
         if not job["restore"]["restored"]:
             raise AssertionError(f"baseline restore proof missing: {job['restore']}")
+        completed_status = block.status({})
+        if completed_status["active_job"] is not None or completed_status["job"]["job_id"] != job["job_id"]:
+            raise AssertionError(f"restored terminal job must clear active pointer but remain the latest job: {completed_status}")
+        if (runtime_dir / "sheet_vitrina_v1_prices" / "spp_tests" / "current_job.json").exists():
+            raise AssertionError("normal restored completion must remove current_job.json")
 
         invalid_session_source = FakeSppPricesSource()
         invalid_buyer = FakeBuyerSource(invalid_session_source, session_status="missing")
@@ -516,11 +535,37 @@ def _run_backend_unit_smokes() -> None:
         if "wb_prices_429_backoff" not in audit_text or not rate_job["restore"]["restored"]:
             raise AssertionError("429 backoff must be audited and restore must still run")
 
+        repeated_rate_source = FakeSppPricesSource(rate_limit_upload_attempts=3)
+        repeated_rate_block = _build_block(
+            runtime,
+            runtime_dir / "repeated_rate",
+            repeated_rate_source,
+            FakePublicSource(repeated_rate_source),
+        )
+        repeated_rate_job = repeated_rate_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")["job"]
+        repeated_rate_audit = (
+            runtime_dir / "repeated_rate" / "sheet_vitrina_v1_prices" / "spp_tests" / "audit.jsonl"
+        ).read_text(encoding="utf-8")
+        if (
+            repeated_rate_source.upload_attempts != 3
+            or repeated_rate_job["measurements"][0]["status"] != "rate_limited_stop"
+            or not repeated_rate_job["restore"]["restored"]
+            or "wb_prices_429_stop" not in repeated_rate_audit
+        ):
+            raise AssertionError(f"repeated 429 must stop probing and enter seller restore: {repeated_rate_job}")
+
         high_source = FakeSppPricesSource()
         high_block = _build_block(runtime, runtime_dir / "high", high_source, FakePublicSource(high_source))
         high_job = high_block.start(_start_payload(1400, 1600, max_measurements=3), actor="smoke")["job"]
         if not any(step.get("kind") == "bridge" for step in high_job["restore"]["steps"]):
             raise AssertionError(f"large downward restore must use bridge steps, got: {high_job['restore']['steps']}")
+        if any(
+            step.get("status") != "ok"
+            or (step.get("quarantine") or {}).get("is_quarantined")
+            or (step.get("readback") or {}).get("discountedPrice") != step.get("expected_discounted_price")
+            for step in high_job["restore"]["steps"]
+        ):
+            raise AssertionError(f"every bridge/final seller step needs readback and quarantine proof: {high_job['restore']}")
 
         emergency_source = FakeSppPricesSource()
         emergency_block = _build_block(runtime, runtime_dir / "emergency", emergency_source, FakePublicSource(emergency_source))
@@ -550,9 +595,54 @@ def _run_backend_unit_smokes() -> None:
         if (
             restored["status"] != "restored"
             or restored["job"]["status"] != "interrupted_restored"
+            or restored["job"]["result_status"] != "inconclusive"
             or not restored["job"]["restore"]["restored"]
+            or restored["active_job"] is not None
         ):
             raise AssertionError(f"emergency restore failed: {restored}")
+        emergency_current = runtime_dir / "emergency" / "sheet_vitrina_v1_prices" / "spp_tests" / "current_job.json"
+        if emergency_current.exists():
+            raise AssertionError("emergency seller restore proof must clear current_job.json")
+
+        diagnostic_source = FakeSppPricesSource()
+        diagnostic_buyer = FakeBuyerSource(diagnostic_source)
+        diagnostic_public = FakePublicSource(diagnostic_source)
+        diagnostic_block = _build_block(
+            runtime,
+            runtime_dir / "restore_diagnostics",
+            diagnostic_source,
+            diagnostic_public,
+            buyer_source=diagnostic_buyer,
+        )
+        diagnostic_job = dict(manual_job)
+        diagnostic_job["job_id"] = "already_baseline_diagnostic_failure"
+        diagnostic_job["baseline"] = diagnostic_block._capture_baseline(nm_id=PRIMARY_NM, strict=False)
+        diagnostic_job["measurements"] = []
+        diagnostic_buyer.raise_on_price = True
+        diagnostic_public.raise_on_read = True
+        diagnostic_block._save_job(diagnostic_job)
+        diagnostic_block._write_current_job(diagnostic_job)
+        diagnostic_restored = diagnostic_block.restore(
+            {"job_id": diagnostic_job["job_id"], "confirm_restore": True},
+            actor="smoke",
+        )
+        diagnostic_repeated = diagnostic_block.restore(
+            {"job_id": diagnostic_job["job_id"], "confirm_restore": True},
+            actor="smoke",
+        )
+        diagnostic_proof = diagnostic_repeated["job"]["restore"]["proof"]
+        if (
+            diagnostic_source.upload_payloads
+            or diagnostic_restored["job"]["status"] != "interrupted_restored"
+            or diagnostic_repeated["job"]["status"] != "interrupted_restored"
+            or diagnostic_proof.get("proof_status") != "confirmed"
+            or diagnostic_proof.get("authenticated_status") != "probe_error"
+            or diagnostic_proof.get("anonymous_status") != "probe_error"
+            or diagnostic_repeated["active_job"] is not None
+        ):
+            raise AssertionError(
+                f"already-baseline idempotent restore must ignore buyer diagnostics and clear lock: {diagnostic_repeated}"
+            )
 
         timeout_source = FakeSppPricesSource()
         timeout_public = FakePublicSource(timeout_source, timeout_reads={2, 3, 4})
@@ -599,9 +689,15 @@ def _run_backend_unit_smokes() -> None:
         active_job["restore"] = {"required": True, "restored": False, "proof": None, "steps": []}
         orphan_block._save_job(active_job)
         orphan_block._write_current_job(active_job)
-        reconciled = orphan_block.status({})["job"]
-        if reconciled["status"] != "interrupted_restored" or not reconciled["restore"]["restored"]:
-            raise AssertionError(f"orphan with fresh baseline proof must become terminal: {reconciled}")
+        orphan_status = orphan_block.status({})
+        reconciled = orphan_status["job"]
+        if (
+            reconciled["status"] != "interrupted_restored"
+            or not reconciled["restore"]["restored"]
+            or orphan_status["active_job"] is not None
+            or (runtime_dir / "orphan" / "sheet_vitrina_v1_prices" / "spp_tests" / "current_job.json").exists()
+        ):
+            raise AssertionError(f"orphan with fresh baseline proof must become terminal and clear active lock: {orphan_status}")
 
         unrestored_source = FakeSppPricesSource()
         unrestored_block = _build_block(runtime, runtime_dir / "unrestored", unrestored_source, FakePublicSource(unrestored_source))
@@ -619,6 +715,16 @@ def _run_backend_unit_smokes() -> None:
             raise AssertionError("unrestored orphan must reject a new SPP job")
         if unrestored_block.status({})["job"]["status"] != "manual_restore_required":
             raise AssertionError("unrestored orphan must become manual_restore_required")
+        unrestored_restore = unrestored_block.restore(
+            {"job_id": "unrestored_job", "confirm_restore": True},
+            actor="smoke",
+        )
+        if (
+            unrestored_restore["status"] != "restored"
+            or not unrestored_source.upload_payloads
+            or unrestored_restore["active_job"] is not None
+        ):
+            raise AssertionError(f"not-baseline orphan restore must stage seller restore and clear lock: {unrestored_restore}")
 
         lock_source = FakeSppPricesSource()
         lock_block = _build_block(runtime, runtime_dir / "lock", lock_source, FakePublicSource(lock_source))

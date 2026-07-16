@@ -598,12 +598,11 @@ class WbSppTesterBlock:
     def status(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         requested_job_id = str(_single_param(params.get("job_id") or params.get("jobID")) or "").strip()
+        active_job = self._current_job_summary()
         if requested_job_id:
             job = self._load_job(requested_job_id)
-            active_job = self._current_job_summary()
         else:
-            active_job = self._current_job_summary()
-            job = self._load_current_job_payload()
+            job = self._load_current_job_payload() or self._load_latest_job_payload()
         return {
             "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_status",
             "generated_at": self.timestamp_factory(),
@@ -643,9 +642,15 @@ class WbSppTesterBlock:
             job = self._load_job(str(job["job_id"])) or job
             if restored:
                 job["status"] = "interrupted_restored"
-                job["result_status"] = str(job.get("result_status") or "inconclusive")
+                job["result_status"] = _restored_result_status(job.get("result_status"))
                 job["manual_restore_required"] = False
                 job["finished_at"] = self.timestamp_factory()
+                self._set_lifecycle(
+                    job,
+                    classification="terminal",
+                    phase="interrupted_restored",
+                    reconciled_at=self.timestamp_factory(),
+                )
                 self._append_timeline(job, "interrupted_restored", "emergency_restore_confirmed")
             else:
                 job["status"] = "manual_restore_required"
@@ -664,6 +669,7 @@ class WbSppTesterBlock:
         return {
             "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_restore",
             "status": "restored" if restored else "manual_restore_required",
+            "active_job": self._current_job_summary(),
             "job": self._job_public_payload(job, details=True),
         }
 
@@ -688,8 +694,9 @@ class WbSppTesterBlock:
                 self._write_current_job(job)
                 self._append_audit(job_id, "job_finish", {"status": job["status"], "restored": False})
                 return
-            result_status = str(job.get("result_status") or "inconclusive")
-            final_status = "complete" if result_status not in {"manual_restore_required"} else result_status
+            result_status = _restored_result_status(job.get("result_status"))
+            final_status = "complete"
+            job["result_status"] = result_status
             job["status"] = final_status
             job["updated_at"] = self.timestamp_factory()
             job["finished_at"] = self.timestamp_factory()
@@ -717,7 +724,8 @@ class WbSppTesterBlock:
             job = self._load_job(job_id) or job
             if restored:
                 job["status"] = "failed"
-                job["result_status"] = job.get("result_status") or "inconclusive"
+                job["result_status"] = _restored_result_status(job.get("result_status"))
+                job["manual_restore_required"] = False
             else:
                 job["status"] = "manual_restore_required"
                 job["result_status"] = "manual_restore_required"
@@ -1124,6 +1132,18 @@ class WbSppTesterBlock:
         cooldown = max(cooldown, self.cadence.rate_limit_min_cooldown_seconds)
         if attempt > 1:
             cooldown *= 2
+        if attempt >= 3:
+            self._append_audit(
+                str(job["job_id"]),
+                "wb_prices_429_stop",
+                {
+                    "phase": phase,
+                    "attempt": attempt,
+                    "reason": "repeated_rate_limit_restore_required",
+                    "error": exc.to_dict(),
+                },
+            )
+            return False
         self._append_audit(
             str(job["job_id"]),
             "wb_prices_429_backoff",
@@ -1248,14 +1268,21 @@ class WbSppTesterBlock:
         )
         proof_quarantine = self._check_quarantine(job)
         buyer_session = self._safe_buyer_session_preflight()
-        proof_authenticated = (
-            dict(self.buyer_source.fetch_authenticated_buyer_price(nm_id))
-            if buyer_session.get("status") == "valid"
-            else {
+        if buyer_session.get("status") == "valid":
+            try:
+                proof_authenticated = dict(self.buyer_source.fetch_authenticated_buyer_price(nm_id))
+            except Exception:
+                proof_authenticated = {
+                    "status": "probe_error",
+                    "reason": "authenticated_buyer_diagnostic_failed",
+                    "authenticated_buyer_price": None,
+                }
+        else:
+            proof_authenticated = {
                 "status": f"session_{buyer_session.get('status') or 'invalid'}",
                 "reason": buyer_session.get("reason"),
+                "authenticated_buyer_price": None,
             }
-        )
         try:
             proof_context = (
                 proof_authenticated.get("destination_context")
@@ -1271,7 +1298,11 @@ class WbSppTesterBlock:
                 )
             )
         except Exception:
-            proof_anonymous = {"status": "probe_error", "public_buyer_price": None}
+            proof_anonymous = {
+                "status": "probe_error",
+                "reason": "anonymous_buyer_diagnostic_failed",
+                "public_buyer_price": None,
+            }
         self._append_audit(str(job["job_id"]), f"authenticated_{event_prefix}_read", proof_authenticated)
         self._append_audit(str(job["job_id"]), f"anonymous_{event_prefix}_read", proof_anonymous)
         authenticated_price = _number_or_none(proof_authenticated.get("authenticated_buyer_price"))
@@ -1614,12 +1645,18 @@ class WbSppTesterBlock:
         reconcile: bool = True,
         caller_holds_execution_lock: bool = False,
     ) -> dict[str, Any] | None:
-        job = (
+        if reconcile:
             self._reconcile_current_job(caller_holds_execution_lock=caller_holds_execution_lock)
-            if reconcile
-            else self._load_current_job_payload()
-        )
-        return self._job_summary(job) if job else None
+        job = self._load_current_job_payload()
+        if not job:
+            return None
+        status = str(job.get("status") or "")
+        restore = job.get("restore") if isinstance(job.get("restore"), Mapping) else {}
+        if status in SPP_TEST_ACTIVE_STATUSES or status == "manual_restore_required":
+            return self._job_summary(job)
+        if status == "failed" and not restore.get("restored"):
+            return self._job_summary(job)
+        return None
 
     def _reconcile_current_job(self, *, caller_holds_execution_lock: bool = False) -> dict[str, Any] | None:
         job = self._load_current_job_payload()
@@ -1627,14 +1664,12 @@ class WbSppTesterBlock:
             return None
         status = str(job.get("status") or "")
         restore = job.get("restore") if isinstance(job.get("restore"), Mapping) else {}
-        needs_restore_confirmation = status in SPP_TEST_ACTIVE_STATUSES or status == "manual_restore_required" or (
-            status == "failed" and not restore.get("restored")
-        )
-        if not needs_restore_confirmation:
+        baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
+        if not baseline:
             return job
         if not caller_holds_execution_lock and self._execution_lock_is_held():
             lifecycle = job.get("lifecycle_diagnostics") if isinstance(job.get("lifecycle_diagnostics"), Mapping) else {}
-            if lifecycle.get("classification") != "live":
+            if status in SPP_TEST_ACTIVE_STATUSES and lifecycle.get("classification") != "live":
                 mutable = dict(job)
                 self._set_lifecycle(mutable, classification="live", phase=status)
                 self._save_job(mutable)
@@ -1669,18 +1704,26 @@ class WbSppTesterBlock:
         mutable["restore"] = restore_state
         mutable["updated_at"] = self.timestamp_factory()
         if restored:
-            mutable["status"] = "interrupted_restored"
-            mutable["result_status"] = str(mutable.get("result_status") or "inconclusive")
+            was_unfinished = status in SPP_TEST_ACTIVE_STATUSES or status == "manual_restore_required" or (
+                status == "failed" and not restore.get("restored")
+            )
+            if was_unfinished:
+                mutable["status"] = "interrupted_restored"
+            mutable["result_status"] = _restored_result_status(mutable.get("result_status"))
             mutable["manual_restore_required"] = False
-            mutable["finished_at"] = self.timestamp_factory()
+            mutable["finished_at"] = str(mutable.get("finished_at") or self.timestamp_factory())
             self._set_lifecycle(
                 mutable,
-                classification="stale_orphan_restored_confirmed",
-                phase="interrupted_restored",
+                classification="stale_orphan_restored_confirmed" if was_unfinished else "terminal_restored_reconciled",
+                phase=str(mutable.get("status") or "interrupted_restored"),
                 reconciled_at=self.timestamp_factory(),
             )
-            self._append_timeline(mutable, "interrupted_restored", "fresh_live_baseline_readback_confirmed")
-            audit_event = "orphan_reconcile_restored"
+            self._append_timeline(
+                mutable,
+                str(mutable.get("status") or "interrupted_restored"),
+                "fresh_live_baseline_readback_confirmed",
+            )
+            audit_event = "orphan_reconcile_restored" if was_unfinished else "terminal_restore_reconciled"
         else:
             mutable["status"] = "manual_restore_required"
             mutable["result_status"] = "manual_restore_required"
@@ -1759,6 +1802,10 @@ class WbSppTesterBlock:
             if len(jobs) >= 10000:
                 break
         return jobs
+
+    def _load_latest_job_payload(self) -> dict[str, Any] | None:
+        jobs = self._load_history_jobs()
+        return max(jobs, key=_history_sort_key) if jobs else None
 
     def _history_summary(self, job: Mapping[str, Any]) -> dict[str, Any]:
         baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
@@ -2140,6 +2187,22 @@ class WbSppTesterBlock:
 
     def _write_current_job(self, job: Mapping[str, Any]) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
+        status = str(job.get("status") or "")
+        restore = job.get("restore") if isinstance(job.get("restore"), Mapping) else {}
+        proof = restore.get("proof") if isinstance(restore.get("proof"), Mapping) else {}
+        if (
+            status not in SPP_TEST_ACTIVE_STATUSES
+            and status != "manual_restore_required"
+            and bool(restore.get("restored"))
+            and _restore_proof_ok(proof)
+        ):
+            if self._clear_current_job_pointer(str(job.get("job_id") or "")):
+                self._append_audit(
+                    str(job.get("job_id") or ""),
+                    "current_job_cleared",
+                    {"status": status, "reason": "fresh_seller_baseline_proof"},
+                )
+            return
         current = {
             "job_id": str(job.get("job_id") or ""),
             "status": str(job.get("status") or ""),
@@ -2155,6 +2218,25 @@ class WbSppTesterBlock:
         }
         with self._state_lock:
             _atomic_write_json(self._current_job_path, current)
+
+    def _clear_current_job_pointer(self, job_id: str) -> bool:
+        normalized = str(job_id or "").strip()
+        if not JOB_ID_RE.fullmatch(normalized):
+            return False
+        with self._state_lock:
+            if not self._current_job_path.exists():
+                return False
+            try:
+                current = json.loads(self._current_job_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return False
+            if not isinstance(current, Mapping) or str(current.get("job_id") or "") != normalized:
+                return False
+            try:
+                self._current_job_path.unlink()
+            except FileNotFoundError:
+                return False
+        return True
 
     def _load_current_job_payload(self) -> dict[str, Any] | None:
         if not self._current_job_path.exists():
@@ -2309,6 +2391,11 @@ def _restore_proof_ok(proof: Mapping[str, Any]) -> bool:
         and proof.get("discountedPrice_matches")
         and proof.get("quarantine_absent")
     )
+
+
+def _restored_result_status(value: Any) -> str:
+    normalized = str(value or "").strip()
+    return "inconclusive" if normalized in {"", "manual_restore_required"} else normalized
 
 
 def _money_exact(left: Any, right: Any) -> bool:
