@@ -241,6 +241,14 @@ def main() -> None:
                 expect(settings_page.get_by_role("button", name="Загрузить Excel")).to_be_visible()
                 expect(settings_page.get_by_role("button", name="Синхронизировать SKU с WB")).to_be_visible()
                 expect(settings_page.get_by_role("button", name="Группы SKU")).to_be_visible()
+                settings_page.get_by_role("button", name="Группы SKU").click()
+                settings_page.get_by_role("button", name="Добавить группу").click()
+                dynamic_group_row = settings_page.locator("#skuGroupRows tr[data-group-key='']").first
+                dynamic_group_row.locator("[data-group-field='group_key']").fill("browser_dynamic_group")
+                dynamic_group_row.locator("[data-group-field='label']").fill("Browser Dynamic Group")
+                dynamic_group_row.get_by_role("button", name="Сохранить").click()
+                expect(settings_page.locator("#skuGroupsMessage")).to_contain_text("Группа сохранена.", timeout=5000)
+                settings_page.get_by_role("button", name="Номенклатура").click()
                 expect(settings_page.locator("#nomenclatureMessage")).to_have_text("", timeout=5000)
                 expect(settings_page.locator("#nomenclatureRows")).to_contain_text("Справочник пуст.", timeout=5000)
                 settings_page.locator("#addItemButton").click()
@@ -253,6 +261,8 @@ def main() -> None:
                 draft_row.locator("[data-field='barcode']").fill("1111111111111")
                 draft_row.locator("[data-field='nomenclature_name']").fill("Clear iPhone 14 Pro")
                 expect(draft_row.locator("[data-field='product_type']")).to_contain_text("Clean")
+                expect(draft_row.locator("[data-field='product_type']")).to_contain_text("Browser Dynamic Group")
+                draft_row.locator("[data-field='product_type']").select_option("no_frame_clean")
                 type_width = draft_row.locator("[data-field='product_type']").evaluate("(node) => node.getBoundingClientRect().width")
                 if type_width < 120:
                     raise AssertionError(f"product type select must not be squeezed, got width={type_width}")
@@ -260,7 +270,7 @@ def main() -> None:
                 settings_page.locator("[data-column-option='match_key']").check()
                 settings_page.locator("[data-column-option='compatible_models']").check()
                 settings_page.locator("#nomenclatureColumnPicker summary").click()
-                draft_row.locator("[data-field='match_key']").fill("clear|iphone_14_pro")
+                draft_row.locator("[data-field='match_key']").fill("no_frame_clean|iphone_14_pro")
                 draft_row.locator("[data-field='purchase_price_yuan']").fill("1,0")
                 draft_row.locator("[data-field='compatible_models_text']").fill("iPhone 14 Pro")
                 expect(draft_row.get_by_role("button", name="Сохранить")).to_be_visible()
@@ -278,8 +288,8 @@ def main() -> None:
                 compat_row.locator("[data-field='nm_id']").fill("391662410")
                 compat_row.locator("[data-field='barcode']").fill("2222222222222")
                 compat_row.locator("[data-field='nomenclature_name']").fill("anti-spy iPhone 14 / 13 / 13Pro")
-                compat_row.locator("[data-field='product_type']").select_option("anti_spy")
-                compat_row.locator("[data-field='match_key']").fill("anti_spy|iphone_14_13_13pro")
+                compat_row.locator("[data-field='product_type']").select_option("no_frame_anti_spy")
+                compat_row.locator("[data-field='match_key']").fill("no_frame_anti_spy|iphone_14_13_13pro")
                 compat_row.locator("[data-field='compatible_models_text']").fill("iPhone 14, iPhone 13, iPhone 13 Pro")
                 compat_row.get_by_role("button", name="Сохранить").click()
                 expect(settings_page.locator("#nomenclatureMessage")).to_contain_text("Справочник сохранён.", timeout=5000)
@@ -288,8 +298,8 @@ def main() -> None:
                 third_row.locator("[data-field='nm_id']").fill("391662411")
                 third_row.locator("[data-field='barcode']").fill("3333333333333")
                 third_row.locator("[data-field='nomenclature_name']").fill("anti-spy iPhone 14 Pro Max")
-                third_row.locator("[data-field='product_type']").select_option("anti_spy")
-                third_row.locator("[data-field='match_key']").fill("anti_spy|iphone_14_pro_max")
+                third_row.locator("[data-field='product_type']").select_option("no_frame_anti_spy")
+                third_row.locator("[data-field='match_key']").fill("no_frame_anti_spy|iphone_14_pro_max")
                 third_row.locator("[data-field='purchase_price_yuan']").fill("2")
                 third_row.get_by_role("button", name="Сохранить").click()
                 expect(settings_page.locator("#nomenclatureMessage")).to_contain_text("Справочник сохранён.", timeout=5000)
@@ -392,7 +402,7 @@ def main() -> None:
                 expect(frame.locator("#cardMessage")).not_to_contain_text("Unexpected token")
                 page.unroute(parse_url)
                 frame.locator("#invoiceFileInput").set_input_files(str(invoice_path))
-                expect(frame.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
+                expect(frame.locator("#productLines input[data-source-model]").first).to_be_visible()
                 expect(frame.get_by_text("nmId", exact=True)).to_be_visible()
                 expect(frame.get_by_text("Штрихкод", exact=True)).to_be_visible()
                 expect(frame.get_by_text("Номенклатура", exact=True)).to_be_visible()
@@ -403,9 +413,14 @@ def main() -> None:
                 expect(frame.locator("#productLines input[data-line-field='internal_sku']")).to_have_count(0)
                 expect(frame.locator("#productLines input[data-source-barcode]").first).to_have_value("1111111111111")
                 expect(frame.locator("#productLines input[data-source-barcode]").first).to_have_attribute("readonly", "")
-                expect(frame.locator("#productLines input[data-line-field='internal_nm_id']").first).to_have_value("210183919")
-                expect(frame.locator("#productLines input[data-line-field='internal_nm_id']").first).to_have_attribute("readonly", "")
-                expect(frame.locator("#productLines input[data-line-field='internal_name']").first).to_have_attribute("readonly", "")
+                expect(frame.locator("#productLines input[data-source-model]").first).to_have_attribute("readonly", "")
+                expect(frame.locator("#productLines input[data-authoritative-nmid]").first).to_have_value("210183919")
+                expect(frame.locator("#productLines input[data-authoritative-nmid]").first).to_have_attribute("readonly", "")
+                expect(frame.locator("#productLines input[data-authoritative-name]").first).to_have_attribute("readonly", "")
+                expect(frame.locator("#productLines input[data-authoritative-match-key]").first).to_have_attribute("readonly", "")
+                expect(frame.locator("#productLines [data-authoritative-group]").first).to_contain_text("No Frame Clean")
+                expect(frame.locator("#productLines select[data-line-field='product_type']")).to_have_count(0)
+                expect(frame.locator("#productLines [data-model-diagnostic]")).to_have_count(3)
                 expect(frame.locator("#productLines .price-conformity")).to_have_count(3)
                 expect(frame.locator("#productLines .price-conformity").nth(0)).to_have_text("✓")
                 expect(frame.locator("#productLines .price-conformity").nth(1)).to_have_text("✕")
@@ -796,7 +811,10 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_have_value("")
             expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
             page.locator("#invoiceFileInput").set_input_files(str(invoice_path))
-            expect(page.locator("#productLines input[data-line-field='model_raw']").first).to_be_visible()
+            expect(page.locator("#productLines input[data-source-model]").first).to_be_visible()
+            expect(page.locator("#productLines [data-authoritative-group]").first).to_contain_text("No Frame Clean")
+            expect(page.locator("#productLines select[data-line-field='product_type']")).to_have_count(0)
+            expect(page.locator("#productLines input[data-authoritative-match-key]").first).to_have_attribute("readonly", "")
             expect(page.locator("#productLines .price-conformity")).to_have_count(3)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
             page.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки").fill("2026-05-14")
@@ -1225,8 +1243,8 @@ def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> 
             "nm_id": 210183919,
             "barcode": "1111111111111",
             "nomenclature_name": "Clear iPhone 14 Pro",
-            "product_type": "clear",
-            "match_key": "clear|iphone_14_pro",
+            "product_type": "no_frame_clean",
+            "match_key": "no_frame_clean|iphone_14_pro",
             "purchase_price_yuan": 1.0,
             "aliases": [],
             "compatible_models_text": "",
@@ -1244,8 +1262,8 @@ def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> 
             "nm_id": 391662410,
             "barcode": "2222222222222",
             "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
-            "product_type": "anti_spy",
-            "match_key": "anti_spy|iphone_14_13_13pro",
+            "product_type": "no_frame_anti_spy",
+            "match_key": "no_frame_anti_spy|iphone_14_13_13pro",
             "purchase_price_yuan": 2.0,
             "aliases": [],
             "compatible_models_text": "iPhone 14, iPhone 13, iPhone 13 Pro",
@@ -1263,8 +1281,8 @@ def _seed_supplier_role_nomenclature(runtime: RegistryUploadDbBackedRuntime) -> 
             "nm_id": 391662411,
             "barcode": "3333333333333",
             "nomenclature_name": "anti-spy iPhone 14 Pro Max",
-            "product_type": "anti_spy",
-            "match_key": "anti_spy|iphone_14_pro_max",
+            "product_type": "no_frame_anti_spy",
+            "match_key": "no_frame_anti_spy|iphone_14_pro_max",
             "purchase_price_yuan": 2.0,
             "aliases": [],
             "compatible_models_text": "",

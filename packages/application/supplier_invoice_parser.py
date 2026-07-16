@@ -22,9 +22,9 @@ from packages.contracts.supplier_shipments import (
     LINE_TYPE_PRODUCT,
     MATCH_STATUS_EXTRA,
     MATCH_STATUS_UNMATCHED,
-    PRODUCT_TYPE_ANTI_SPY,
-    PRODUCT_TYPE_CLEAR,
-    PRODUCT_TYPE_MATTE,
+    SOURCE_PRODUCT_TYPE_ANTI_SPY,
+    SOURCE_PRODUCT_TYPE_CLEAR,
+    SOURCE_PRODUCT_TYPE_MATTE,
     SUPPLIER_INVOICE_PARSER_VERSION,
 )
 
@@ -190,9 +190,11 @@ class SupplierInvoiceParser:
                         "source_no": source_no,
                         "barcode": barcode,
                         "product_type": "",
+                        "source_product_type": "",
                         "model_raw": model_raw or name_spec,
                         "model_normalized": normalize_invoice_model(model_raw or name_spec),
                         "match_key": "",
+                        "source_match_key": "",
                         "internal_sku": "",
                         "internal_nm_id": None,
                         "internal_name": "",
@@ -230,10 +232,15 @@ class SupplierInvoiceParser:
                     "sort_order": sort_order,
                     "source_no": source_no,
                     "barcode": barcode,
-                    "product_type": product_type,
+                    # Invoice text classification is source evidence only.  The
+                    # authoritative group and match key are projected later from
+                    # the unique active nomenclature owner of the barcode.
+                    "product_type": "",
+                    "source_product_type": product_type,
                     "model_raw": model_raw,
                     "model_normalized": normalized_model,
-                    "match_key": match_key,
+                    "match_key": "",
+                    "source_match_key": match_key,
                     "internal_sku": "",
                     "internal_nm_id": None,
                     "internal_name": "",
@@ -263,11 +270,11 @@ def detect_product_type(value: Any) -> str:
     if not text:
         return ""
     if "防窥膜" in text or "anti-spy" in text or "anti spy" in text:
-        return PRODUCT_TYPE_ANTI_SPY
+        return SOURCE_PRODUCT_TYPE_ANTI_SPY
     if "磨砂膜" in text or "matte" in text:
-        return PRODUCT_TYPE_MATTE
+        return SOURCE_PRODUCT_TYPE_MATTE
     if "高清膜" in text or re.search(r"\bsmk\b", text):
-        return PRODUCT_TYPE_CLEAR
+        return SOURCE_PRODUCT_TYPE_CLEAR
     return ""
 
 

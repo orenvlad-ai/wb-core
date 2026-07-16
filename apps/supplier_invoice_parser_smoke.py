@@ -37,6 +37,7 @@ def main() -> None:
     _assert_conflict_and_rejection_paths()
     _assert_lossless_barcode_values()
     _assert_barcode_only_matching()
+    _assert_authoritative_projection_and_model_diagnostics()
     _assert_source_identity_and_atomic_numbers()
     _assert_synthetic_34_of_34_mapping()
     _assert_metadata_totals_and_extras()
@@ -256,6 +257,65 @@ def _assert_source_identity_and_atomic_numbers() -> None:
         raise AssertionError(f"atomic save must reject invalid {field}")
 
 
+def _assert_authoritative_projection_and_model_diagnostics() -> None:
+    parsed = parse_supplier_invoice_xlsx(_build_invoice_fixture(), filename="authoritative-projection.xlsx")
+    products = [dict(line) for line in parsed["lines"] if line["line_type"] == "product"]
+    owners = [
+        _nomenclature_item("owner-clean", 701, PRIMARY_BARCODE, []),
+        _nomenclature_item("owner-matte", 702, SECONDARY_BARCODE, []),
+        _nomenclature_item("owner-anti-spy", 703, THIRD_BARCODE, []),
+    ]
+    owner_fields = [
+        ("no_frame_clean", "no_frame_clean|iphone_14_pro", ["iphone_14_pro"]),
+        ("no_frame_matte", "no_frame_matte|iphone_16", ["iphone_16"]),
+        ("no_frame_anti_spy", "no_frame_anti_spy|iphone_18", ["iphone_18"]),
+    ]
+    for owner, (group_key, match_key, model_keys) in zip(owners, owner_fields, strict=True):
+        owner["product_type"] = group_key
+        owner["match_key"] = match_key
+        owner["compatible_model_keys"] = model_keys
+    sku_groups = [
+        {"group_key": "no_frame_clean", "label": "No Frame Clean", "is_active": True},
+        {"group_key": "no_frame_matte", "label": "No Frame Matte", "is_active": True},
+        {"group_key": "no_frame_anti_spy", "label": "No Frame Anti-spy", "is_active": True},
+    ]
+    matched = _apply_nomenclature_matches(products, owners, sku_groups)
+    if [line.get("source_product_type") for line in matched] != ["clear", "clear", "anti_spy"]:
+        raise AssertionError(f"parser classification must remain source-only evidence: {matched}")
+    if [line.get("product_type") for line in matched] != [
+        "no_frame_clean",
+        "no_frame_matte",
+        "no_frame_anti_spy",
+    ]:
+        raise AssertionError(f"barcode owners must replace source groups: {matched}")
+    if [line.get("match_key") for line in matched] != [value[1] for value in owner_fields]:
+        raise AssertionError(f"authoritative match keys must come from the same barcode owners: {matched}")
+    if [line.get("group_label") for line in matched] != [
+        "No Frame Clean",
+        "No Frame Matte",
+        "No Frame Anti-spy",
+    ]:
+        raise AssertionError(f"group labels must resolve through server-owned SKU groups: {matched}")
+    if [line.get("model_diagnostic", {}).get("status") for line in matched] != [
+        "consistent",
+        "consistent",
+        "mismatch",
+    ]:
+        raise AssertionError(f"model checks must be non-blocking canonical diagnostics: {matched}")
+    if matched[2].get("internal_nm_id") != 703 or matched[2].get("match_status") != "matched_by_barcode":
+        raise AssertionError("model mismatch must not change the barcode owner or match status")
+
+    uncheckable_line = {**products[0], "model_raw": "unrecognized factory model"}
+    uncheckable = _apply_nomenclature_matches([uncheckable_line], [owners[0]], sku_groups)[0]
+    if uncheckable.get("model_diagnostic", {}).get("status") != "not_checkable":
+        raise AssertionError(f"unrecognized models must not be guessed: {uncheckable}")
+
+    renamed_groups = [{**group, "label": "Renamed runtime label"} for group in sku_groups if group["group_key"] == "no_frame_clean"]
+    renamed = _apply_nomenclature_matches([products[0]], [owners[0]], renamed_groups)[0]
+    if renamed.get("group_label") != "Renamed runtime label":
+        raise AssertionError("invoice group labels must follow the runtime SKU-group resolver without code changes")
+
+
 def _assert_synthetic_34_of_34_mapping() -> None:
     categories = ["No Frame Clean"] * 10 + ["No Frame Anti-spy"] * 12 + ["No Frame Matte"] * 12
     barcodes = [f"3{index:012d}" for index in range(1, 35)]
@@ -275,6 +335,11 @@ def _assert_synthetic_34_of_34_mapping() -> None:
     ):
         raise AssertionError(f"synthetic 26GN583 structure changed: {diagnostics}, products={len(products)}")
     nomenclature = []
+    category_keys = {
+        "No Frame Clean": "no_frame_clean",
+        "No Frame Anti-spy": "no_frame_anti_spy",
+        "No Frame Matte": "no_frame_matte",
+    }
     for index, (barcode, category) in enumerate(zip(barcodes, categories, strict=True), start=1):
         item = _nomenclature_item(
             f"synthetic-{index}",
@@ -283,8 +348,14 @@ def _assert_synthetic_34_of_34_mapping() -> None:
             [] if index % 2 else [barcode],
         )
         item["nomenclature_name"] = f"{category} synthetic {index:02d}"
+        item["product_type"] = category_keys[category]
+        item["match_key"] = f"{category_keys[category]}|synthetic_{index:02d}"
         nomenclature.append(item)
-    matched = _apply_nomenclature_matches(products, nomenclature)
+    sku_groups = [
+        {"group_key": key, "label": label, "is_active": True}
+        for label, key in category_keys.items()
+    ]
+    matched = _apply_nomenclature_matches(products, nomenclature, sku_groups)
     matched_categories = Counter(
         str(line.get("internal_name") or "").rsplit(" synthetic ", 1)[0]
         for line in matched
@@ -293,6 +364,8 @@ def _assert_synthetic_34_of_34_mapping() -> None:
         len(matched) != 34
         or any(line.get("match_status") != "matched_by_barcode" for line in matched)
         or len({line.get("internal_nm_id") for line in matched}) != 34
+        or Counter(line.get("product_type") for line in matched)
+        != Counter({"no_frame_clean": 10, "no_frame_anti_spy": 12, "no_frame_matte": 12})
         or matched_categories
         != Counter({"No Frame Clean": 10, "No Frame Anti-spy": 12, "No Frame Matte": 12})
     ):

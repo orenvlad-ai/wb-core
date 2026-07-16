@@ -207,8 +207,8 @@ def _application_runtime_xlsx_smoke() -> None:
                 "nm_id": 501000,
                 "barcode": " 1000000000001 ",
                 "nomenclature_name": "Manual Clear",
-                "product_type": "clear",
-                "match_key": "clear|iphone_14",
+                "product_type": "clean",
+                "match_key": "clean|iphone_14",
                 "purchase_price_yuan": "1.2",
             }
         )["item"]
@@ -224,8 +224,8 @@ def _application_runtime_xlsx_smoke() -> None:
                 "is_active": True,
                 "nm_id": 501001,
                 "nomenclature_name": "WB Clear",
-                "product_type": "clear",
-                "match_key": "clear|iphone_15",
+                "product_type": "clean",
+                "match_key": "clean|iphone_15",
                 "purchase_price_yuan": "1.5",
             }
         )["item"]
@@ -248,8 +248,8 @@ def _application_runtime_xlsx_smoke() -> None:
                 "is_active": True,
                 "nm_id": 501002,
                 "nomenclature_name": "Token Missing",
-                "product_type": "clear",
-                "match_key": "clear|iphone_16",
+                "product_type": "clean",
+                "match_key": "clean|iphone_16",
                 "purchase_price_yuan": "1.0",
             }
         )["item"]
@@ -278,8 +278,8 @@ def _application_runtime_xlsx_smoke() -> None:
         if old_import["created_count"] != 1:
             raise AssertionError(f"old import workbook without barcode must remain valid, got {old_import}")
         legacy_row = next(item for item in runtime.list_nomenclature_items() if item["match_key"] == "clear|iphone_18")
-        if legacy_row["product_type"] != "clear":
-            raise AssertionError(f"legacy clear product type must survive import, got {legacy_row}")
+        if legacy_row["product_type"] != "clean":
+            raise AssertionError(f"legacy Russian label must resolve through the current Clean group, got {legacy_row}")
         legacy_export_bytes, _, _ = block.export_nomenclature_xlsx()
         legacy_workbook = load_workbook(BytesIO(legacy_export_bytes), data_only=True)
         legacy_headers = [cell.value for cell in next(legacy_workbook.active.iter_rows(min_row=1, max_row=1))]
@@ -291,7 +291,7 @@ def _application_runtime_xlsx_smoke() -> None:
             if row[match_index] == "clear|iphone_18"
         )
         if legacy_export_row[group_index] != "Clean":
-            raise AssertionError(f"legacy clear label must export as Clean, got {legacy_export_row[group_index]}")
+            raise AssertionError(f"runtime Clean label must drive the export, got {legacy_export_row[group_index]}")
 
         _wb_card_sync_smoke(runtime)
 
@@ -567,8 +567,8 @@ def _http_route_smoke() -> None:
                     "nm_id": 601001,
                     "barcode": "6000000000001",
                     "nomenclature_name": "HTTP Manual",
-                    "product_type": "clear",
-                    "match_key": "clear|http_manual",
+                    "product_type": "clean",
+                    "match_key": "clean|http_manual",
                     "purchase_price_yuan": "1",
                 },
             )
@@ -580,8 +580,8 @@ def _http_route_smoke() -> None:
                     "is_active": True,
                     "nm_id": 601002,
                     "nomenclature_name": "HTTP Token Missing",
-                    "product_type": "clear",
-                    "match_key": "clear|http_token_missing",
+                    "product_type": "clean",
+                    "match_key": "clean|http_token_missing",
                     "purchase_price_yuan": "1",
                 },
             )

@@ -518,17 +518,6 @@
       const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
       const NOMENCLATURE_COLUMNS_STORAGE_KEY = "wb-core:sheet-vitrina-v1:nomenclature-columns:v1";
 
-      const productTypeLabels = {
-        clear: "Clean",
-        clean: "Clean",
-        anti_spy: "Anti-spy",
-        matte: "Matte",
-        no_frame_clean: "No Frame Clean",
-        no_frame_anti_spy: "No Frame Anti-spy",
-        no_frame_matte: "No Frame Matte",
-        extra: "Доп. строка",
-        other: "Другое"
-      };
       const nomenclatureColumns = [
         {key: "active", label: "Вкл.", defaultVisible: true},
         {key: "nm_id", label: "nmID", defaultVisible: true},
@@ -757,7 +746,7 @@
           item.barcode, (item.barcodes || []).join(" "),
           item.barcode_source, item.barcode_status,
           item.vendor_code, item.wb_title, item.wb_subject_name, item.wb_updated_at, item.wb_sync_status,
-          item.product_type, productTypeLabels[item.product_type] || "",
+          item.product_type, item.group_label || skuGroupLabel(item.product_type),
           item.compatible_models_text, (item.compatible_model_keys || []).join(" ")
         ].join(" ").toLowerCase();
       }
@@ -774,7 +763,7 @@
           '<td data-column="nm_id"><input class="narrow" data-field="nm_id" value="' + escapeHtml(item.nm_id ?? "") + '"></td>',
           '<td data-column="barcode"><input class="wide" data-field="barcode" inputmode="numeric" value="' + escapeHtml(item.barcode || "") + '">' + renderBarcodeStatus(item) + '</td>',
           '<td data-column="nomenclature_name"><input class="wide" data-field="nomenclature_name" value="' + escapeHtml(item.nomenclature_name || "") + '"></td>',
-          '<td data-column="group"><select class="type-select" data-field="product_type">' + productTypeOptions(item.product_type || "clean") + '</select></td>',
+          '<td data-column="group"><select class="type-select" data-field="product_type">' + productTypeOptions(item.product_type || defaultSkuGroupKey()) + '</select></td>',
           '<td data-column="purchase_price_yuan"><input class="price-input" data-field="purchase_price_yuan" inputmode="decimal" value="' + escapeHtml(item.purchase_price_yuan ?? "") + '"></td>',
           '<td data-column="sync_status">' + renderSyncStatus(item) + '</td>',
           '<td data-column="actions"><div class="actions-cell"><button class="icon-button save" type="button" data-save-item title="Сохранить" aria-label="Сохранить">✓</button><button class="icon-button" type="button" data-sync-barcode title="Обновить ШК по строке" aria-label="Обновить ШК по строке">↻</button>' + hiddenAction + '</div></td>',
@@ -860,17 +849,28 @@
           const key = String(group.group_key || "");
           if (!key || seen.has(key)) return;
           seen.add(key);
-          options.push({key, label: group.label || productTypeLabels[key] || key});
+          options.push({key, label: group.label || key});
         });
         if (value && !seen.has(value)) {
-          options.push({key: value, label: productTypeLabels[value] || value});
+          options.push({key: value, label: skuGroupLabel(value)});
         }
         if (!options.length) {
-          ["clean", "anti_spy", "matte", "extra", "other"].forEach((key) => options.push({key, label: productTypeLabels[key] || key}));
+          return '<option value="">Справочник групп SKU пуст</option>';
         }
         return options.map((item) => (
           '<option value="' + escapeHtml(item.key) + '"' + (item.key === value ? " selected" : "") + '>' + escapeHtml(item.label) + '</option>'
         )).join("");
+      }
+
+      function skuGroupLabel(groupKey) {
+        const key = String(groupKey || "");
+        const group = skuGroups.find((item) => String(item.group_key || "") === key);
+        return String((group && group.label) || key);
+      }
+
+      function defaultSkuGroupKey() {
+        const group = skuGroups.find((item) => item.is_active !== false && String(item.group_key || ""));
+        return group ? String(group.group_key || "") : "";
       }
 
       function readRow(row) {
@@ -1982,7 +1982,7 @@
           wb_sync_status: "",
           wb_sync_evidence: {},
           nomenclature_name: "",
-          product_type: "clean",
+          product_type: defaultSkuGroupKey(),
           match_key: "",
           purchase_price_yuan: null,
           compatible_models_text: "",
