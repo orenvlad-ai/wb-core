@@ -239,7 +239,7 @@ update_note: "Обновлён под Google Sheets decommission and current pla
     - row set = full active `config_v2` SKU table; legacy `<50` threshold remains diagnostic only and no longer filters rows
     - default order follows active `config_v2` display order, while the operator table provides browser-local sorting
     - immediately after `Акция`, the visible table columns are `на произв.`, `в пути Китай`, `ост. ФФ`, `поставки ВБ`, `ост. ВБ`
-    - `на произв.` / `в пути Китай` are read-only aggregations from existing supplier shipment registry product lines by `internal_nm_id`, including only positive matched / matched-by-compatibility quantities in statuses `production` (`На производстве`) and `in_transit` (`В пути`) respectively
+    - `на произв.` / `в пути Китай` are read-only aggregations from existing supplier shipment registry product lines by `internal_nm_id`, including positive `matched_by_barcode` quantities (plus readable legacy `matched` / `matched_by_compatibility`) in statuses `production` (`На производстве`) and `in_transit` (`В пути`) respectively
     - `ост. ФФ` reads current server-owned `ff_stock_ledger` balances by active SKU
     - `поставки ВБ` is read-only aggregation from existing WB supplies runtime cache `raw_goods` by `nmId`, excluding only status ids `1/2/5` (`Не запланировано` / `Запланировано` / `Принято`); all other WB supply statuses are included when goods composition has positive active-SKU quantity
     - `ост. ВБ` is the existing `stock_total` WB stock value from the persisted ready snapshot, exposed with alias `stock_wb` for the report table without changing the source semantics

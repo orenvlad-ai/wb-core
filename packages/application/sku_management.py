@@ -21,6 +21,7 @@ from packages.contracts.spp_proxy_block import SppProxyRequest
 from packages.contracts.stocks_block import StocksRequest
 from packages.contracts.supplier_shipments import (
     MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_BARCODE,
     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
 )
 
@@ -1091,6 +1092,7 @@ class SkuManagementBlock:
                     continue
                 if bool(line.get("manual_override")) or str(line.get("match_status") or "") not in {
                     MATCH_STATUS_MATCHED,
+                    MATCH_STATUS_MATCHED_BY_BARCODE,
                     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
                 }:
                     continue

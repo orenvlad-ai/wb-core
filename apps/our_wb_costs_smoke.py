@@ -55,12 +55,26 @@ from packages.contracts.supplier_shipments import ORDER_STATUS_ACCEPTED_FF, ORDE
 
 
 NOW = "2026-07-07T07:00:00Z"
+SUPPLIER_BARCODE = "1497413000000"
 BUNDLE_FIXTURE = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
 
 
 def main() -> None:
     with TemporaryDirectory(prefix="our-wb-costs-smoke-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "our-wb-costs-supplier-sku-1",
+                "is_active": True,
+                "our_sku": "SKU-1",
+                "nm_id": 497413000,
+                "barcode": SUPPLIER_BARCODE,
+                "nomenclature_name": "SKU 1",
+                "purchase_price_yuan": 90,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
         _seed_supplier_shipment(runtime)
         _seed_financial_inputs(runtime)
 
@@ -215,6 +229,7 @@ def _supplier_line_payload(line_id: str) -> dict[str, object]:
     return {
         "line_id": line_id,
         "line_type": "product",
+        "barcode": SUPPLIER_BARCODE,
         "sort_order": 1,
         "source_no": "1",
         "product_type": "glass",
@@ -229,7 +244,7 @@ def _supplier_line_payload(line_id: str) -> dict[str, object]:
         "amount": 900.0,
         "currency": "CNY",
         "comment": "",
-        "match_status": "matched",
+        "match_status": "matched_by_barcode",
         "manual_override": False,
         "invoice_price_yuan_snapshot": 90.0,
         "reference_purchase_price_yuan_snapshot": 90.0,

@@ -55,9 +55,9 @@ def main() -> None:
     with TemporaryDirectory(prefix="supplier-auth-smoke-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
-        for item_id, nm_id, name, product_type, match_key, price in (
-            ("supplier_auth_clear", 210183919, "Clear iPhone 14 Pro", "clear", "clear|iphone_14_pro", 1.0),
-            ("supplier_auth_anti", 210184534, "Anti-Spy iPhone 14 Pro Max", "anti_spy", "anti_spy|iphone_14_pro_max", 2.0),
+        for item_id, nm_id, barcode, name, product_type, match_key, price in (
+            ("supplier_auth_clear", 210183919, "1111111111111", "Clear iPhone 14 Pro", "clear", "clear|iphone_14_pro", 1.0),
+            ("supplier_auth_anti", 210184534, "2222222222222", "Anti-Spy iPhone 14 Pro Max", "anti_spy", "anti_spy|iphone_14_pro_max", 2.0),
         ):
             runtime.save_nomenclature_item(
                 {
@@ -65,6 +65,7 @@ def main() -> None:
                     "is_active": True,
                     "our_sku": "",
                     "nm_id": nm_id,
+                    "barcode": barcode,
                     "nomenclature_name": name,
                     "product_type": product_type,
                     "match_key": match_key,
@@ -545,9 +546,9 @@ def _build_invoice_fixture() -> bytes:
     sheet.append(["Date of Contract", "2026.5.13"])
     sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "USD"])
     sheet.append(["Invoice Total:", 33])
-    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
-    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""])
-    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
+    sheet.append(["NO.", "MODELS", "NAME & SPECIFICATION", "Barcode", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
+    sheet.append([1, "iPhone 14 Pro", "高清膜 smk", "1111111111111", 10, 1, 10, ""])
+    sheet.append([2, "iPhone 14 Pro Max", "防窥膜 (Anti-Spy)", "2222222222222", 5, 2, 10, ""])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

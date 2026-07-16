@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import socket
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -53,6 +54,7 @@ def _assert_price_conformity_application_smoke() -> None:
             {
                 "is_active": True,
                 "nm_id": 501001,
+                "barcode": "1111111111111",
                 "nomenclature_name": "Clear iPhone 14 Pro",
                 "product_type": "clear",
                 "match_key": "clear|iphone_14_pro",
@@ -63,6 +65,7 @@ def _assert_price_conformity_application_smoke() -> None:
             {
                 "is_active": True,
                 "nm_id": 501002,
+                "barcode": "2222222222222",
                 "nomenclature_name": "Anti-Spy iPhone 14",
                 "product_type": "anti_spy",
                 "match_key": "anti_spy|iphone_14",
@@ -73,6 +76,7 @@ def _assert_price_conformity_application_smoke() -> None:
             {
                 "is_active": True,
                 "nm_id": 501003,
+                "barcode": "4444444444444",
                 "nomenclature_name": "Clear iPhone 15",
                 "product_type": "clear",
                 "match_key": "clear|iphone_15",
@@ -83,6 +87,7 @@ def _assert_price_conformity_application_smoke() -> None:
             {
                 "is_active": True,
                 "nm_id": 501004,
+                "barcode": "5555555555555",
                 "nomenclature_name": "Matte iPhone 16",
                 "product_type": "matte",
                 "match_key": "matte|iphone_16",
@@ -95,18 +100,21 @@ def _assert_price_conformity_application_smoke() -> None:
         expected = ["matched", "mismatched", "sku_not_found", "reference_price_missing", "invoice_price_missing"]
         if statuses != expected:
             raise AssertionError(f"price conformity parse statuses changed: {statuses}")
+        block.create_nomenclature_item(
+            {
+                "is_active": True,
+                "nm_id": 501005,
+                "barcode": "3333333333333",
+                "nomenclature_name": "Temporary exact barcode owner",
+                "product_type": "other",
+                "match_key": "",
+                "purchase_price_yuan": "4",
+            }
+        )
         accepted_parsed = json.loads(json.dumps(parsed))
-        accepted_parsed["lines"] = [
-            line
-            for line in accepted_parsed.get("lines") or []
-            if line.get("line_type") != "product"
-            or (
-                line.get("internal_nm_id")
-                and float(line.get("qty") or 0) > 0
-                and float(line.get("unit_price") or 0) > 0
-                and float(line.get("amount") or 0) > 0
-            )
-        ]
+        accepted_products = [line for line in accepted_parsed.get("lines") or [] if line.get("line_type") == "product"]
+        accepted_products[-1]["unit_price"] = 5
+        accepted_products[-1]["amount"] = 5
         detail = block.create_shipment(
             {
                 "upload_id": parsed["upload_id"],
@@ -192,15 +200,23 @@ def _assert_price_conformity_application_smoke() -> None:
         legacy = block.get_shipment("sup_legacy_price_check")
         if (
             legacy["product_lines"][0].get("price_conformity_check_mode") != "migration_backfill"
+            or legacy["product_lines"][0].get("barcode") != ""
             or legacy["product_lines"][0].get("raw", {}).get("preserve") is not True
         ):
             raise AssertionError(f"backfill must preserve unrelated line fields, got {legacy['product_lines'][0]}")
+        legacy_rematch = block.rematch_shipment("sup_legacy_price_check")
+        if (
+            legacy_rematch.get("rematch_diagnostics", {}).get("reason") != "legacy_product_barcode_missing"
+            or legacy_rematch.get("product_lines", [{}])[0].get("internal_nm_id") != 501002
+        ):
+            raise AssertionError(f"legacy rematch must skip safely without fuzzy overwrite: {legacy_rematch}")
         second_backfill = block.backfill_price_conformity_checks()
         if second_backfill.get("processed_shipments") != 0 or second_backfill.get("updated_line_count") != 0:
             raise AssertionError(f"backfill must be idempotent, got {second_backfill}")
 
 
 def main() -> None:
+    _assert_barcode_schema_upgrade_smoke()
     _assert_price_conformity_application_smoke()
     workbook_bytes = _build_invoice_fixture()
     workbook_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
@@ -249,6 +265,7 @@ def main() -> None:
                     "is_active": True,
                     "our_sku": "SKU-CLEAR-14P",
                     "nm_id": 210183919,
+                    "barcode": "1111111111111",
                     "nomenclature_name": "Clear iPhone 14 Pro",
                     "product_type": "clear",
                     "match_key": "clear|iphone_14_pro",
@@ -281,6 +298,7 @@ def main() -> None:
                     "is_active": True,
                     "our_sku": "SKU-AS-141313P",
                     "nm_id": 391662410,
+                    "barcode": "2222222222222",
                     "nomenclature_name": "anti-spy iPhone 14 / 13 / 13Pro",
                     "product_type": "anti_spy",
                     "match_key": "anti_spy|iphone_14_13_13pro",
@@ -301,6 +319,7 @@ def main() -> None:
                     "is_active": True,
                     "our_sku": "SKU-AS-14PM",
                     "nm_id": 210184534,
+                    "barcode": "3333333333333",
                     "nomenclature_name": "Anti-Spy iPhone 14 Pro Max",
                     "product_type": "anti_spy",
                     "match_key": "anti_spy|iphone_14_pro_max",
@@ -386,15 +405,15 @@ def main() -> None:
             ):
                 raise AssertionError(f"parse route must expose contract no/date, got {parse_payload.get('metadata')}")
             product_lines = [item for item in parse_payload.get("lines", []) if item.get("line_type") == "product"]
-            if product_lines[0].get("internal_nm_id") != 210183919 or product_lines[0].get("match_status") != "matched":
-                raise AssertionError("parse route must resolve active nomenclature match_key into nmId/name")
+            if product_lines[0].get("internal_nm_id") != 210183919 or product_lines[0].get("match_status") != "matched_by_barcode":
+                raise AssertionError("parse route must resolve active primary barcode into nmId/name")
             if (
-                product_lines[1].get("match_status") != "matched_by_compatibility"
+                product_lines[1].get("match_status") != "matched_by_barcode"
                 or product_lines[1].get("internal_nm_id") != 391662410
             ):
-                raise AssertionError(f"parse route must resolve compatible model overlap, got {product_lines[1]}")
-            if product_lines[2].get("match_status") != "matched" or product_lines[2].get("internal_nm_id") != 210184534:
-                raise AssertionError("all product lines must deterministically match before acceptance")
+                raise AssertionError(f"parse route must resolve a barcode from all known barcodes, got {product_lines[1]}")
+            if product_lines[2].get("match_status") != "matched_by_barcode" or product_lines[2].get("internal_nm_id") != 210184534:
+                raise AssertionError("all product lines must match exact active barcodes before acceptance")
             price_statuses = [line.get("price_conformity_status") for line in product_lines]
             if price_statuses != ["matched", "mismatched", "matched"]:
                 raise AssertionError(f"parse route must attach price conformity statuses, got {price_statuses}")
@@ -436,6 +455,11 @@ def main() -> None:
             if invalid_rate_status != 400 or "approx_yuan_rate" not in str(invalid_rate_payload.get("error", "")):
                 raise AssertionError(f"create must reject non-positive approx_yuan_rate, got {invalid_rate_status} {invalid_rate_payload}")
 
+            parse_payload["lines"][0]["barcode"] = "9999999999999"
+            parse_payload["lines"][0]["internal_nm_id"] = 999999
+            parse_payload["lines"][0]["internal_name"] = "Client supplied identity"
+            parse_payload["lines"][0]["match_status"] = "matched"
+            parse_payload["lines"][0]["manual_override"] = True
             create_status, detail = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
                 {
@@ -473,6 +497,8 @@ def main() -> None:
                 raise AssertionError("detail must split product and extra lines")
             if detail["product_lines"][0].get("internal_name") != "Clear iPhone 14 Pro":
                 raise AssertionError("created shipment must persist nomenclature auto-match")
+            if detail["product_lines"][0].get("barcode") != "1111111111111":
+                raise AssertionError("shipment detail must persist and return source-owned barcode")
             if detail["product_lines"][0].get("price_conformity_status") != "matched":
                 raise AssertionError("created shipment must persist price conformity status")
 
@@ -555,6 +581,7 @@ def main() -> None:
             edited["lines"][0]["internal_name"] = "Manual SKU"
             edited["lines"][0]["match_status"] = "matched"
             edited["lines"][0]["manual_override"] = True
+            edited["lines"][0]["barcode"] = "9999999999999"
             edited["lines"][0]["amount"] = 12
             edited["metadata"]["declared_invoice_total"] = 35
             patch_status, patched = _patch_json(
@@ -574,8 +601,17 @@ def main() -> None:
                 or patched.get("actual_ff_acceptance_date") not in {"", None}
             ):
                 raise AssertionError(f"patch route must update fact dates, got {patched}")
-            if patched.get("match_status") != "manual_override" or patched.get("summary", {}).get("product_amount_total") != 30.0:
-                raise AssertionError("patch route must mark manual_override and recalculate totals server-side")
+            if patched.get("match_status") != "all_matched" or patched.get("summary", {}).get("product_amount_total") != 30.0:
+                raise AssertionError("patch route must reapply barcode identity and recalculate totals server-side")
+            first_patched_line = patched.get("product_lines", [{}])[0]
+            if (
+                first_patched_line.get("barcode") != "1111111111111"
+                or first_patched_line.get("internal_nm_id") != 210183919
+                or first_patched_line.get("internal_name") != "Clear iPhone 14 Pro"
+                or first_patched_line.get("match_status") != "matched_by_barcode"
+                or first_patched_line.get("manual_override") is not False
+            ):
+                raise AssertionError(f"manual override must not bypass source barcode identity: {first_patched_line}")
             if patched.get("order_status") != "in_transit":
                 raise AssertionError("full patch must keep status derived from factual date")
             if patched.get("approx_yuan_rate") != 14.5 or patched.get("approx_invoice_cost_rub") != 507.5:
@@ -689,8 +725,8 @@ def main() -> None:
             if rematch_status != 200:
                 raise AssertionError(f"rematch route must return updated detail, got {rematch_status} {rematched}")
             rematched_products = rematched.get("product_lines", [])
-            if rematched_products[0].get("internal_sku") != "SKU-MANUAL":
-                raise AssertionError("rematch must not overwrite manual_override rows by default")
+            if rematched_products[0].get("internal_sku") != "SKU-CLEAR-14P":
+                raise AssertionError("rematch must resolve source barcode and ignore legacy manual override flags")
             if rematched_products[2].get("internal_nm_id") != 210184534:
                 raise AssertionError("rematch must preserve deterministic authoritative match")
             if rematched.get("approx_yuan_rate") != 14.5 or rematched.get("approx_landed_cost_per_unit_rub") != 29.24:
@@ -905,6 +941,54 @@ def main() -> None:
     print("sheet_vitrina_v1_supplier_shipments_http_smoke: OK")
 
 
+def _assert_barcode_schema_upgrade_smoke() -> None:
+    with TemporaryDirectory(prefix="supplier-barcode-schema-upgrade-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        runtime.save_supplier_shipment(
+            header={
+                "shipment_id": "sup_legacy_barcode_schema",
+                "created_at": "2026-05-01T00:00:00Z",
+                "updated_at": "2026-05-01T00:00:00Z",
+                "shipment_date": "2026-05-02",
+                "invoice_no": "LEGACY-SCHEMA",
+                "currency": "RMB",
+                "product_qty_total": 1,
+                "product_amount_total": 1,
+                "extras_amount_total": 0,
+                "invoice_amount_total": 1,
+                "declared_invoice_total": 1,
+                "match_status": "all_matched",
+                "parser_version": "legacy",
+                "warnings": [],
+                "errors": [],
+            },
+            lines=[
+                {
+                    "line_id": "ln_legacy_barcode_schema",
+                    "line_type": "product",
+                    "sort_order": 1,
+                    "internal_nm_id": 1,
+                    "qty": 1,
+                    "unit_price": 1,
+                    "amount": 1,
+                    "currency": "RMB",
+                    "match_status": "matched",
+                    "manual_override": False,
+                    "raw": {"legacy": True},
+                }
+            ],
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute("ALTER TABLE sheet_vitrina_v1_supplier_shipment_lines DROP COLUMN barcode")
+            conn.commit()
+        loaded = runtime.load_supplier_shipment("sup_legacy_barcode_schema")
+        if loaded is None or len(loaded.get("lines") or []) != 1:
+            raise AssertionError("non-destructive barcode schema upgrade lost a legacy shipment line")
+        legacy_line = loaded["lines"][0]
+        if legacy_line.get("barcode") != "" or legacy_line.get("raw", {}).get("legacy") is not True:
+            raise AssertionError(f"legacy shipment line must survive with an empty barcode: {legacy_line}")
+
+
 def _build_invoice_fixture() -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -915,11 +999,11 @@ def _build_invoice_fixture() -> bytes:
     sheet.append(["Date of Contract", "2026.5.13"])
     sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "RMB"])
     sheet.append(["Invoice Total:", 33])
-    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
-    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 10, 1, 10, ""])
-    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 17e / 16e /14 / 13 / 13Pro", 4, 2, 8, ""])
-    sheet.append([3, "防窥膜 (Anti-Spy)", "iPhone 14 Pro Max", 5, 2, 10, ""])
-    sheet.append([4, "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
+    sheet.append(["NO.", "MODELS", "NAME & SPECIFICATION", "Braocde\n(条形码）", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
+    sheet.append([1, "iPhone 14 Pro", "高清膜 smk", "1111111111111", 10, 1, 10, ""])
+    sheet.append([2, "iPhone 17e / 16e /14 / 13 / 13Pro", "防窥膜 (Anti-Spy)", "2222222222222", 4, 2, 8, ""])
+    sheet.append([3, "iPhone 14 Pro Max", "防窥膜 (Anti-Spy)", "3333333333333", 5, 2, 10, ""])
+    sheet.append([4, "OPP bag packets", "OPP bag packets", "", 100, 0.05, 5, "OPP packets"])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -996,12 +1080,12 @@ def _build_price_conformity_invoice_fixture() -> bytes:
     sheet.append(["Date of Contract", "2026.5.30"])
     sheet.append(["Supplier:", "Zhejiang Supplier", "", "Currency:", "RMB"])
     sheet.append(["Invoice Total:", 16])
-    sheet.append(["NO.", "NAME & SPECIFICATION", "MODELS", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
-    sheet.append([1, "高清膜 smk", "iPhone 14 Pro", 1, 1, 1, "matched"])
-    sheet.append([2, "防窥膜 (Anti-Spy)", "iPhone 14", 1, 2, 2, "mismatched"])
-    sheet.append([3, "高清膜 smk", "iPhone 99", 1, 4, 4, "sku missing"])
-    sheet.append([4, "高清膜 smk", "iPhone 15", 1, 4, 4, "reference price missing"])
-    sheet.append([5, "磨砂膜 Matte", "iPhone 16", 1, "", "", "invoice price missing"])
+    sheet.append(["NO.", "MODELS", "NAME & SPECIFICATION", "Barcode", "QTY", "U.PRICE", "AMOUNT", "COMMENT"])
+    sheet.append([1, "iPhone 14 Pro", "高清膜 smk", "1111111111111", 1, 1, 1, "matched"])
+    sheet.append([2, "iPhone 14", "防窥膜 (Anti-Spy)", "2222222222222", 1, 2, 2, "mismatched"])
+    sheet.append([3, "iPhone 99", "高清膜 smk", "3333333333333", 1, 4, 4, "sku missing"])
+    sheet.append([4, "iPhone 15", "高清膜 smk", "4444444444444", 1, 4, 4, "reference price missing"])
+    sheet.append([5, "iPhone 16", "磨砂膜 Matte", "5555555555555", 1, "", "", "invoice price missing"])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

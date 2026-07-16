@@ -655,7 +655,7 @@ class CanonicalCostEngine:
                     """
                     SELECT COUNT(*) AS product_count,
                            SUM(CASE WHEN internal_nm_id IS NOT NULL
-                                         AND match_status IN ('matched','matched_by_compatibility')
+                                         AND match_status IN ('matched','matched_by_barcode','matched_by_compatibility')
                                     THEN 1 ELSE 0 END) AS matched_count,
                            COUNT(DISTINCT internal_nm_id) AS sku_count
                     FROM sheet_vitrina_v1_supplier_shipment_lines
@@ -5938,7 +5938,7 @@ def _exact_supplier_expense_allocations(
             or quantity <= ZERO
             or amount <= ZERO
             or str(line["match_status"] or "")
-            not in {"matched", "matched_by_compatibility"}
+            not in {"matched", "matched_by_barcode", "matched_by_compatibility"}
         ):
             raise CanonicalCostBlocked(
                 "exact_supplier_expense_product_line_drift",

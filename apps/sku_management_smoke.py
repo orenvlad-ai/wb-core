@@ -316,7 +316,7 @@ def _supplier_inbound_projection_checks() -> None:
                 "shipment_date": "2026-07-10",
             },
             "lines": [
-                {"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 20},
+                {"line_type": "product", "match_status": "matched_by_barcode", "internal_nm_id": NM_ID, "qty": 20},
                 {"line_type": "product", "match_status": "matched_by_compatibility", "internal_nm_id": NM_ID, "qty": 5},
                 {"line_type": "extra", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 999},
             ],

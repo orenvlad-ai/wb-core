@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from io import BytesIO
-import json
+import math
 from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping
+import unicodedata
 from zipfile import BadZipFile, ZipFile
 from xml.etree import ElementTree
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from packages.contracts.supplier_shipments import (
     LINE_TYPE_EXTRA,
     LINE_TYPE_PRODUCT,
     MATCH_STATUS_EXTRA,
-    MATCH_STATUS_MATCHED,
     MATCH_STATUS_UNMATCHED,
     PRODUCT_TYPE_ANTI_SPY,
     PRODUCT_TYPE_CLEAR,
@@ -27,53 +28,31 @@ from packages.contracts.supplier_shipments import (
     SUPPLIER_INVOICE_PARSER_VERSION,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ALIAS_MAP_PATH = ROOT / "artifacts" / "supplier_shipments" / "factory_invoice_aliases.json"
-
-
-@dataclass(frozen=True)
-class SupplierInvoiceAlias:
-    factory_type: str
-    normalized_model: str
-    match_key: str
-    internal_sku: str
-    internal_nm_id: int | None
-    internal_name: str
-    group: str
-    active: bool
+BARCODE_HEADER_ALIASES = (
+    "barcode",
+    "braocde",
+    "条形码",
+    "條形碼",
+    "штрихкод",
+    "шк",
+)
+BARCODE_PROFILE_MIN_DIGITS = 8
+BARCODE_PROFILE_MAX_DIGITS = 32
+MAX_EXACT_FLOAT_INTEGER = 2**53
 
 
 def parse_supplier_invoice_xlsx(
     workbook_bytes: bytes,
     *,
     filename: str = "",
-    aliases: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Parse a supplier XLSX invoice into editable shipment payload."""
 
-    parser = SupplierInvoiceParser(aliases=aliases)
+    parser = SupplierInvoiceParser()
     return parser.parse(workbook_bytes, filename=filename)
 
 
-def load_factory_invoice_aliases(path: Path = DEFAULT_ALIAS_MAP_PATH) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"factory invoice alias map must be valid JSON: {path}") from exc
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"factory invoice alias map must contain a JSON object: {path}")
-    aliases = payload.get("aliases") or []
-    if not isinstance(aliases, list):
-        raise ValueError(f"factory invoice alias map aliases must be a list: {path}")
-    return [dict(item) for item in aliases if isinstance(item, Mapping)]
-
-
 class SupplierInvoiceParser:
-    def __init__(self, *, aliases: Iterable[Mapping[str, Any]] | None = None) -> None:
-        self.aliases = _normalize_aliases(aliases or load_factory_invoice_aliases())
-
     def parse(self, workbook_bytes: bytes, *, filename: str = "") -> dict[str, Any]:
         if not workbook_bytes:
             raise ValueError("supplier invoice workbook is empty")
@@ -84,9 +63,32 @@ class SupplierInvoiceParser:
         if not workbook.worksheets:
             raise ValueError("supplier invoice workbook does not contain worksheets")
 
-        worksheet = workbook.worksheets[0]
-        merged_values = _build_merged_value_index(worksheet)
-        header_row, columns = _find_header_row(worksheet, merged_values)
+        worksheet: Worksheet | None = None
+        merged_values: dict[tuple[int, int], Any] = {}
+        header_row = 0
+        columns: dict[str, int] = {}
+        barcode_diagnostics: dict[str, Any] = {}
+        last_header_error: ValueError | None = None
+        for candidate_sheet in workbook.worksheets:
+            candidate_merged_values = _build_merged_value_index(candidate_sheet)
+            try:
+                candidate_header_row, candidate_columns, candidate_diagnostics = _find_header_row(
+                    candidate_sheet,
+                    candidate_merged_values,
+                )
+            except ValueError as exc:
+                if "ambiguous barcode column" in str(exc).lower():
+                    raise
+                last_header_error = exc
+                continue
+            worksheet = candidate_sheet
+            merged_values = candidate_merged_values
+            header_row = candidate_header_row
+            columns = candidate_columns
+            barcode_diagnostics = candidate_diagnostics
+            break
+        if worksheet is None:
+            raise last_header_error or ValueError("supplier invoice table headers not found")
         metadata = _extract_metadata(
             worksheet,
             merged_values,
@@ -112,6 +114,11 @@ class SupplierInvoiceParser:
 
         return {
             "parser_version": SUPPLIER_INVOICE_PARSER_VERSION,
+            "diagnostics": {
+                "worksheet": worksheet.title,
+                "header_row": header_row,
+                "barcode_column": barcode_diagnostics,
+            },
             "metadata": metadata,
             "summary": summary,
             "lines": lines,
@@ -148,6 +155,12 @@ class SupplierInvoiceParser:
             unit_price = _to_number(row_values.get("unit_price"))
             amount = _to_number(row_values.get("amount"))
             source_no = _stringify(row_values.get("no"))
+            barcode = ""
+            barcode_error = ""
+            try:
+                barcode = normalize_barcode_value(row_values.get("barcode"))
+            except ValueError as exc:
+                barcode_error = str(exc)
 
             if not row_text:
                 blank_run += 1
@@ -175,6 +188,7 @@ class SupplierInvoiceParser:
                         "line_type": LINE_TYPE_EXTRA,
                         "sort_order": sort_order,
                         "source_no": source_no,
+                        "barcode": barcode,
                         "product_type": "",
                         "model_raw": model_raw or name_spec,
                         "model_normalized": normalize_invoice_model(model_raw or name_spec),
@@ -189,6 +203,7 @@ class SupplierInvoiceParser:
                         "comment": comment,
                         "match_status": MATCH_STATUS_EXTRA,
                         "manual_override": False,
+                        "match_evidence": {"method": "barcode", "status": "extra"},
                         "raw": _raw_row_payload(row_index, row_values),
                     }
                 )
@@ -199,12 +214,14 @@ class SupplierInvoiceParser:
             product_type = detected_type or current_product_type
             normalized_model = normalize_invoice_model(model_raw)
             match_key = f"{product_type}|{normalized_model}" if product_type and normalized_model else ""
-            alias = self.aliases.get(match_key)
-            match_status = MATCH_STATUS_MATCHED if alias else MATCH_STATUS_UNMATCHED
             if not product_type:
                 warnings.append(f"row {row_index}: product type is not detected")
             if not normalized_model:
                 warnings.append(f"row {row_index}: model is empty or unsupported")
+            if barcode_error:
+                warnings.append(f"row {row_index}: barcode cannot be normalized losslessly ({barcode_error})")
+            elif not barcode:
+                warnings.append(f"row {row_index}: product barcode is missing")
 
             sort_order += 1
             lines.append(
@@ -212,20 +229,26 @@ class SupplierInvoiceParser:
                     "line_type": LINE_TYPE_PRODUCT,
                     "sort_order": sort_order,
                     "source_no": source_no,
+                    "barcode": barcode,
                     "product_type": product_type,
                     "model_raw": model_raw,
                     "model_normalized": normalized_model,
                     "match_key": match_key,
-                    "internal_sku": alias.internal_sku if alias else "",
-                    "internal_nm_id": alias.internal_nm_id if alias else None,
-                    "internal_name": alias.internal_name if alias else "",
+                    "internal_sku": "",
+                    "internal_nm_id": None,
+                    "internal_name": "",
                     "qty": qty,
                     "unit_price": unit_price,
                     "amount": amount,
                     "currency": "",
                     "comment": comment,
-                    "match_status": match_status,
+                    "match_status": MATCH_STATUS_UNMATCHED,
                     "manual_override": False,
+                    "match_evidence": {
+                        "method": "barcode",
+                        "status": "unmatched",
+                        "reason": "barcode_invalid" if barcode_error else "barcode_not_resolved" if barcode else "barcode_missing",
+                    },
                     "raw": _raw_row_payload(row_index, row_values),
                 }
             )
@@ -304,37 +327,6 @@ def extract_iphone_model_keys(value: Any) -> list[str]:
     return keys
 
 
-def _normalize_aliases(raw_aliases: Iterable[Mapping[str, Any]]) -> dict[str, SupplierInvoiceAlias]:
-    aliases: dict[str, SupplierInvoiceAlias] = {}
-    for item in raw_aliases:
-        active = bool(item.get("active"))
-        factory_type = str(item.get("factory_type") or item.get("product_type") or "").strip()
-        normalized_model = normalize_invoice_model(item.get("normalized_model") or item.get("factory_model_raw") or "")
-        match_key = str(item.get("match_key") or "").strip()
-        if not match_key and factory_type and normalized_model:
-            match_key = f"{factory_type}|{normalized_model}"
-        if not active or not match_key:
-            continue
-        raw_nm_id = item.get("internal_nm_id") or item.get("nm_id")
-        try:
-            internal_nm_id = int(raw_nm_id) if raw_nm_id not in {None, ""} else None
-        except (TypeError, ValueError):
-            internal_nm_id = None
-        aliases[match_key] = SupplierInvoiceAlias(
-            factory_type=factory_type,
-            normalized_model=normalized_model,
-            match_key=match_key,
-            internal_sku=str(item.get("internal_sku") or item.get("our_sku") or item.get("sku") or "").strip(),
-            internal_nm_id=internal_nm_id,
-            internal_name=str(
-                item.get("internal_name") or item.get("nomenclature_name") or item.get("name") or ""
-            ).strip(),
-            group=str(item.get("group") or "").strip(),
-            active=active,
-        )
-    return aliases
-
-
 def _build_merged_value_index(worksheet: Worksheet) -> dict[tuple[int, int], Any]:
     merged_values: dict[tuple[int, int], Any] = {}
     for merged_range in worksheet.merged_cells.ranges:
@@ -359,29 +351,318 @@ def _cell_value(
 def _find_header_row(
     worksheet: Worksheet,
     merged_values: Mapping[tuple[int, int], Any],
-) -> tuple[int, dict[str, int]]:
+) -> tuple[int, dict[str, int], dict[str, Any]]:
     for row_index in range(1, min(worksheet.max_row, 80) + 1):
         columns: dict[str, int] = {}
         for col_index in range(1, worksheet.max_column + 1):
-            normalized = _normalize_header(_cell_value(worksheet, row_index, col_index, merged_values))
-            if normalized in {"NO", "NO."}:
-                columns["no"] = col_index
-            elif "MODEL" in normalized or "型号" in normalized:
-                columns["models"] = col_index
-            elif "QTY" in normalized or "数量" in normalized:
-                columns["qty"] = col_index
-            elif normalized in {"U.PRICE", "U PRICE", "UNIT PRICE", "UNITPRICE"} or "单价" in normalized:
-                columns["unit_price"] = col_index
-            elif "AMOUNT" in normalized or "总价" in normalized or "金额" in normalized:
-                columns["amount"] = col_index
-            elif ("NAME" in normalized and "SPEC" in normalized) or "品名" in normalized or "规格" in normalized:
-                columns["name_spec"] = col_index
-            elif normalized in {"COMMENT", "COMMENTS", "REMARK", "REMARKS"} or "备注" in normalized:
-                columns["comment"] = col_index
+            role = _invoice_header_role(_cell_value(worksheet, row_index, col_index, merged_values))
+            if role and role not in columns:
+                columns[role] = col_index
         required = {"no", "models", "qty", "unit_price", "amount"}
         if required.issubset(columns):
-            return row_index, columns
+            barcode_column, diagnostics = _detect_barcode_column(
+                worksheet,
+                merged_values,
+                header_row=row_index,
+                columns=columns,
+            )
+            return row_index, {**columns, "barcode": barcode_column}, diagnostics
     raise ValueError("supplier invoice table headers not found: expected NO., MODELS, QTY, U.PRICE, AMOUNT")
+
+
+def _invoice_header_role(value: Any) -> str:
+    compact = _normalize_header_compact(value)
+    if not compact:
+        return ""
+    if compact in {"no", "number", "序号", "序號"}:
+        return "no"
+    if "model" in compact or "型号" in compact or "型號" in compact:
+        return "models"
+    if "qty" in compact or "quantity" in compact or "数量" in compact or "數量" in compact:
+        return "qty"
+    if "uprice" in compact or "unitprice" in compact or "单价" in compact or "單價" in compact:
+        return "unit_price"
+    if "amount" in compact or "总价" in compact or "總價" in compact or "金额" in compact or "金額" in compact:
+        return "amount"
+    if ("name" in compact and ("spec" in compact or "description" in compact)) or any(
+        token in compact for token in ("品名规格", "品名規格", "产品名称", "產品名稱")
+    ):
+        return "name_spec"
+    if compact in {"comment", "comments", "remark", "remarks", "备注", "備註"}:
+        return "comment"
+    return ""
+
+
+def _detect_barcode_column(
+    worksheet: Worksheet,
+    merged_values: Mapping[tuple[int, int], Any],
+    *,
+    header_row: int,
+    columns: Mapping[str, int],
+) -> tuple[int, dict[str, Any]]:
+    known_columns = set(columns.values())
+    semantic_candidates = [
+        col_index
+        for col_index in range(1, worksheet.max_column + 1)
+        if col_index not in known_columns
+        and _is_barcode_header(_cell_value(worksheet, header_row, col_index, merged_values))
+    ]
+    semantic_confirmed = _confirmed_barcode_candidates(
+        worksheet,
+        merged_values,
+        header_row=header_row,
+        columns=columns,
+        candidates=semantic_candidates,
+    )
+    if len(semantic_confirmed) > 1:
+        raise _ambiguous_barcode_column_error(worksheet, merged_values, header_row, semantic_confirmed)
+    if len(semantic_confirmed) == 1:
+        return _barcode_column_result(
+            worksheet,
+            merged_values,
+            header_row=header_row,
+            column=semantic_confirmed[0],
+            method="header_alias",
+            columns=columns,
+        )
+    if semantic_candidates:
+        candidate_text = _barcode_candidate_text(worksheet, merged_values, header_row, semantic_candidates)
+        raise ValueError(
+            "supplier invoice barcode column header was found but its values could not be confirmed: "
+            + candidate_text
+        )
+
+    name_column = columns.get("name_spec")
+    qty_column = columns.get("qty")
+    relative_candidates: list[int] = []
+    if name_column is not None and qty_column is not None and name_column < qty_column:
+        relative_candidates = [
+            col_index
+            for col_index in range(name_column + 1, qty_column)
+            if col_index not in known_columns
+        ]
+    relative_confirmed = _confirmed_barcode_candidates(
+        worksheet,
+        merged_values,
+        header_row=header_row,
+        columns=columns,
+        candidates=relative_candidates,
+    )
+    if len(relative_confirmed) > 1:
+        raise _ambiguous_barcode_column_error(worksheet, merged_values, header_row, relative_confirmed)
+    if len(relative_confirmed) == 1:
+        column = relative_confirmed[0]
+        method = "positional_d" if column == 4 and _has_confirmed_current_template_structure(columns) else "relative_structure"
+        return _barcode_column_result(
+            worksheet,
+            merged_values,
+            header_row=header_row,
+            column=column,
+            method=method,
+            columns=columns,
+        )
+
+    if _has_confirmed_current_template_structure(columns) and 4 not in known_columns:
+        positional_confirmed = _confirmed_barcode_candidates(
+            worksheet,
+            merged_values,
+            header_row=header_row,
+            columns=columns,
+            candidates=[4],
+        )
+        if positional_confirmed:
+            return _barcode_column_result(
+                worksheet,
+                merged_values,
+                header_row=header_row,
+                column=4,
+                method="positional_d",
+                columns=columns,
+            )
+
+    raise ValueError(
+        "supplier invoice barcode column not found: no semantic alias or structure-confirmed barcode-like column"
+    )
+
+
+def _confirmed_barcode_candidates(
+    worksheet: Worksheet,
+    merged_values: Mapping[tuple[int, int], Any],
+    *,
+    header_row: int,
+    columns: Mapping[str, int],
+    candidates: Iterable[int],
+) -> list[int]:
+    return [
+        col_index
+        for col_index in candidates
+        if _barcode_value_profile(
+            worksheet,
+            merged_values,
+            header_row=header_row,
+            columns=columns,
+            candidate_column=col_index,
+        )["confirmed"]
+    ]
+
+
+def _barcode_value_profile(
+    worksheet: Worksheet,
+    merged_values: Mapping[tuple[int, int], Any],
+    *,
+    header_row: int,
+    columns: Mapping[str, int],
+    candidate_column: int,
+) -> dict[str, Any]:
+    product_rows = 0
+    nonempty_values = 0
+    valid_values = 0
+    digit_values = 0
+    barcode_length_values = 0
+    invalid_values = 0
+    blank_run = 0
+    for row_index in range(header_row + 1, min(worksheet.max_row, header_row + 160) + 1):
+        role_values = {
+            key: _cell_value(worksheet, row_index, col_index, merged_values)
+            for key, col_index in columns.items()
+        }
+        row_text = " ".join(_stringify(value) for value in role_values.values() if _stringify(value))
+        if not row_text:
+            blank_run += 1
+            if blank_run >= 12 and product_rows:
+                break
+            continue
+        blank_run = 0
+        if _is_total_row(row_text):
+            break
+        model_raw = _stringify(role_values.get("models"))
+        name_spec = _stringify(role_values.get("name_spec"))
+        source_no = _stringify(role_values.get("no"))
+        has_numeric_payload = any(
+            _to_number(role_values.get(key)) is not None for key in ("qty", "unit_price", "amount")
+        )
+        if not has_numeric_payload or not (model_raw or name_spec or source_no):
+            continue
+        if _is_extra_row(source_no, model_raw, name_spec):
+            continue
+        product_rows += 1
+        raw_value = _cell_value(worksheet, row_index, candidate_column, merged_values)
+        if raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
+            continue
+        nonempty_values += 1
+        try:
+            barcode = normalize_barcode_value(raw_value)
+        except ValueError:
+            invalid_values += 1
+            continue
+        if not barcode:
+            continue
+        valid_values += 1
+        if barcode.isdigit():
+            digit_values += 1
+            if BARCODE_PROFILE_MIN_DIGITS <= len(barcode) <= BARCODE_PROFILE_MAX_DIGITS:
+                barcode_length_values += 1
+    coverage = nonempty_values / product_rows if product_rows else 0.0
+    digit_ratio = digit_values / valid_values if valid_values else 0.0
+    length_ratio = barcode_length_values / digit_values if digit_values else 0.0
+    confirmed = bool(
+        product_rows
+        and valid_values
+        and invalid_values == 0
+        and coverage >= 0.6
+        and digit_ratio >= 0.8
+        and length_ratio >= 0.6
+    )
+    return {
+        "confirmed": confirmed,
+        "product_row_count": product_rows,
+        "nonempty_count": nonempty_values,
+        "valid_count": valid_values,
+        "digit_count": digit_values,
+    }
+
+
+def _barcode_column_result(
+    worksheet: Worksheet,
+    merged_values: Mapping[tuple[int, int], Any],
+    *,
+    header_row: int,
+    column: int,
+    method: str,
+    columns: Mapping[str, int],
+) -> tuple[int, dict[str, Any]]:
+    header_value = _cell_value(worksheet, header_row, column, merged_values)
+    profile = _barcode_value_profile(
+        worksheet,
+        merged_values,
+        header_row=header_row,
+        columns=columns,
+        candidate_column=column,
+    )
+    return column, {
+        "method": method,
+        "column_index": column,
+        "column_letter": get_column_letter(column),
+        "header_normalized": _normalize_header_compact(header_value),
+        "value_profile": {
+            "product_row_count": profile["product_row_count"],
+            "nonempty_count": profile["nonempty_count"],
+            "valid_count": profile["valid_count"],
+            "digit_count": profile["digit_count"],
+        },
+    }
+
+
+def _has_confirmed_current_template_structure(columns: Mapping[str, int]) -> bool:
+    return all(
+        columns.get(role) == expected
+        for role, expected in {
+            "no": 1,
+            "models": 2,
+            "name_spec": 3,
+            "qty": 5,
+            "unit_price": 6,
+            "amount": 7,
+        }.items()
+    )
+
+
+def _ambiguous_barcode_column_error(
+    worksheet: Worksheet,
+    merged_values: Mapping[tuple[int, int], Any],
+    header_row: int,
+    candidates: Iterable[int],
+) -> ValueError:
+    return ValueError(
+        "ambiguous barcode column: multiple equally confirmed candidates: "
+        + _barcode_candidate_text(worksheet, merged_values, header_row, candidates)
+    )
+
+
+def _barcode_candidate_text(
+    worksheet: Worksheet,
+    merged_values: Mapping[tuple[int, int], Any],
+    header_row: int,
+    candidates: Iterable[int],
+) -> str:
+    return ", ".join(
+        f"{get_column_letter(col_index)} ({_normalize_header_compact(_cell_value(worksheet, header_row, col_index, merged_values)) or 'empty'})"
+        for col_index in candidates
+    )
+
+
+def _is_barcode_header(value: Any) -> bool:
+    compact = _normalize_header_compact(value)
+    if not compact:
+        return False
+    for alias in BARCODE_HEADER_ALIASES:
+        if alias == "шк":
+            if compact == alias:
+                return True
+            continue
+        if alias in compact:
+            return True
+    return False
 
 
 def _extract_metadata(
@@ -668,8 +949,48 @@ def _is_total_row(row_text: str) -> bool:
     return bool(re.search(r"\btotal\b|合计|总计|总值", _stringify(row_text), re.IGNORECASE))
 
 
-def _normalize_header(value: Any) -> str:
-    return re.sub(r"\s+", " ", _stringify(value).upper()).strip()
+def _normalize_header_compact(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", _stringify(value)).casefold()
+    return "".join(character for character in text if character.isalnum())
+
+
+def normalize_barcode_value(value: Any) -> str:
+    """Return an exact barcode identity or reject lossy Excel representations."""
+
+    if value is None or value == "":
+        return ""
+    if isinstance(value, bool):
+        raise ValueError("boolean barcode value is invalid")
+    if isinstance(value, int):
+        if value < 0 or value > MAX_EXACT_FLOAT_INTEGER:
+            raise ValueError("numeric barcode cannot be restored losslessly")
+        return str(value)
+    if isinstance(value, Decimal):
+        if (
+            not value.is_finite()
+            or value < 0
+            or value > MAX_EXACT_FLOAT_INTEGER
+            or value != value.to_integral_value()
+        ):
+            raise ValueError("numeric barcode is not an exact integer")
+        return format(value, "f").split(".", 1)[0]
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer() or value < 0 or value > MAX_EXACT_FLOAT_INTEGER:
+            raise ValueError("numeric barcode cannot be restored losslessly")
+        return str(int(value))
+    if not isinstance(value, str):
+        raise ValueError(f"unsupported barcode cell type: {type(value).__name__}")
+    text = value.replace("\u00a0", "").replace("\u202f", "")
+    text = re.sub(r"\s+", "", text)
+    if text.startswith("'"):
+        text = text[1:]
+    if not text:
+        return ""
+    if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+", text):
+        raise ValueError("scientific-notation barcode text is not accepted")
+    if not text.isascii() or not text.isdigit():
+        raise ValueError("barcode text must contain ASCII digits only")
+    return text
 
 
 def _stringify(value: Any) -> str:

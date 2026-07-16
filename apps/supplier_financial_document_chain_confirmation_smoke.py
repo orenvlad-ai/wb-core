@@ -399,7 +399,7 @@ def _insert_invoice_136(db_path: Path) -> None:
                     line_id,shipment_id,line_type,sort_order,internal_sku,internal_nm_id,
                     internal_name,qty,unit_price,amount,currency,match_status,
                     manual_override,raw_json
-                ) VALUES(?,?, 'product',?,?,?,?,100,?,?, 'CNY','matched',0,'{}')
+                ) VALUES(?,?, 'product',?,?,?,?,100,?,?, 'CNY','matched_by_barcode',0,'{}')
                 """,
                 (
                     f"invoice-136-line-{index}",

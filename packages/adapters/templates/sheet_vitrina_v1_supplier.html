@@ -496,6 +496,7 @@
               <tr>
                 <th>商品类型 / Product type / Тип товара</th>
                 <th>发票型号 / Invoice model / Модель из invoice</th>
+                <th>条形码 / Barcode / Штрихкод</th>
                 <th>标准型号 / Normalized model / Нормализованная модель</th>
                 <th>匹配键 / Match key / Match key</th>
                 <th>平台ID / nmId / nmId</th>
@@ -744,15 +745,16 @@
         manual_override: "手动修改 / Manual override / Ручная правка",
         checksum_error: "金额错误 / Total error / Ошибка суммы"
       };
-          const lineStatusLabels = {
-            matched: uiText("已匹配 / Matched / Сопоставлено", "Сопоставлено"),
-            matched_by_compatibility: uiText("按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости", "Сопоставлено по совместимости"),
-            unmatched: uiText("未匹配 / Unmatched / Не сопоставлено", "Не сопоставлено"),
+      const lineStatusLabels = {
+        matched: uiText("已匹配 / Matched / Сопоставлено", "Сопоставлено"),
+        matched_by_compatibility: uiText("按兼容型号匹配 / Matched by compatibility / Сопоставлено по совместимости", "Сопоставлено по совместимости"),
+        matched_by_barcode: uiText("按条形码匹配 / Matched by barcode / Сопоставлено по штрихкоду", "Сопоставлено по штрихкоду"),
+        unmatched: uiText("未匹配 / Unmatched / Не сопоставлено", "Не сопоставлено"),
         ambiguous: uiText("不明确 / Ambiguous / Неоднозначно", "Неоднозначно"),
         manual_override: uiText("手动修改 / Manual override / Ручная правка", "Ручная правка"),
-            extra: uiText("其他 / Extra / Прочее", "Прочее")
-          };
-          const orderStatusLabels = {
+        extra: uiText("其他 / Extra / Прочее", "Прочее")
+      };
+      const orderStatusLabels = {
             production: "На производстве",
             in_transit: "В пути",
             accepted_ff: "Принято на ФФ"
@@ -975,7 +977,7 @@
             if (supplyHeadings[0]) supplyHeadings[0].textContent = "Товарные строки";
             if (supplyHeadings[1]) supplyHeadings[1].textContent = "Прочие позиции";
             setTableHeaders("#productLines", [
-              "Тип товара", "Модель из invoice", "Нормализованная модель", "Match key", "nmId",
+              "Тип товара", "Модель из invoice", "Штрихкод", "Нормализованная модель", "Match key", "nmId",
               "Номенклатура", "Количество", "Цена", "Соответствие цены", "Сумма", "Комментарий", "Матчинг"
             ]);
             setTableHeaders("#extraLines", ["Номер строки", "Позиция", "Количество", "Цена", "Сумма", "Комментарий"]);
@@ -2135,7 +2137,7 @@
       function renderLineTables(lines) {
         const products = lines.filter((line) => line.line_type !== "extra");
         const extras = lines.filter((line) => line.line_type === "extra");
-        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="12">' + escapeHtml(uiText("未识别商品明细 / No product lines recognized / Товарные строки не распознаны.", "Товарные строки не распознаны.")) + '</td></tr>';
+        productLines.innerHTML = products.length ? products.map(renderProductLine).join("") : '<tr><td colspan="13">' + escapeHtml(uiText("未识别商品明细 / No product lines recognized / Товарные строки не распознаны.", "Товарные строки не распознаны.")) + '</td></tr>';
         extraLines.innerHTML = extras.length ? extras.map(renderExtraLine).join("") : '<tr><td colspan="6">' + escapeHtml(uiText("未识别其他项目 / No extras recognized / Прочие позиции не распознаны.", "Прочие позиции не распознаны.")) + '</td></tr>';
         Array.from(shipmentCard.querySelectorAll("[data-line-field]")).forEach((input) => {
           input.addEventListener("input", () => {
@@ -2155,16 +2157,17 @@
           '<tr data-line-kind="product" data-line-index="' + index + '">',
           '<td><select class="line-input" data-line-field="product_type">' + productTypeOptions(line.product_type) + '</select></td>',
           '<td><input class="line-input wide" data-line-field="model_raw" value="' + escapeHtml(line.model_raw || "") + '"></td>',
+          '<td><input class="line-input small" data-source-barcode aria-label="' + escapeHtml(uiText("条形码 / Barcode / Штрихкод", "Штрихкод")) + '" value="' + escapeHtml(line.barcode || "") + '" readonly></td>',
           '<td><input class="line-input wide" data-line-field="model_normalized" value="' + escapeHtml(line.model_normalized || "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="match_key" value="' + escapeHtml(line.match_key || "") + '"></td>',
-          '<td><input class="line-input small" data-line-field="internal_nm_id" aria-label="' + escapeHtml(uiText("平台ID / nmId / nmId", "nmId")) + '" value="' + escapeHtml(line.internal_nm_id || "") + '"></td>',
-          '<td><input class="line-input wide" data-line-field="internal_name" value="' + escapeHtml(line.internal_name || "") + '"></td>',
+          '<td><input class="line-input small" data-line-field="internal_nm_id" aria-label="' + escapeHtml(uiText("平台ID / nmId / nmId", "nmId")) + '" value="' + escapeHtml(line.internal_nm_id || "") + '" readonly></td>',
+          '<td><input class="line-input wide" data-line-field="internal_name" value="' + escapeHtml(line.internal_name || "") + '" readonly></td>',
           '<td><input class="line-input small" data-line-field="qty" value="' + escapeHtml(line.qty ?? "") + '"></td>',
           '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
           '<td>' + renderPriceConformity(line) + '</td>',
           '<td><input class="line-input small" data-line-field="amount" value="' + escapeHtml(line.amount ?? "") + '"></td>',
           '<td><input class="line-input wide" data-line-field="comment" value="' + escapeHtml(line.comment || "") + '"></td>',
-          '<td><span class="badge ' + (line.manual_override ? "warning" : (line.match_status === "matched" || line.match_status === "matched_by_compatibility") ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? lineStatusLabels.manual_override : (lineStatusLabels[line.match_status] || line.match_status || lineStatusLabels.unmatched)) + '</span></td>',
+          '<td><span class="badge ' + (line.manual_override ? "warning" : (["matched", "matched_by_barcode", "matched_by_compatibility"].includes(line.match_status)) ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? lineStatusLabels.manual_override : (lineStatusLabels[line.match_status] || line.match_status || lineStatusLabels.unmatched)) + '</span></td>',
           '</tr>'
         ].join("");
       }
@@ -2319,7 +2322,7 @@
         if (lines.some((line) => line.manual_override)) {
           return "manual_override";
         }
-        if (lines.some((line) => line.line_type !== "extra" && !["matched", "matched_by_compatibility"].includes(line.match_status))) {
+        if (lines.some((line) => line.line_type !== "extra" && !["matched", "matched_by_barcode", "matched_by_compatibility"].includes(line.match_status))) {
           return "has_unmatched";
         }
         return "all_matched";

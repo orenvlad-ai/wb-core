@@ -1621,7 +1621,7 @@ def _prepare_financial_document_confirmation_conn(
             or quantity <= 0
             or amount <= 0
             or str(item.get("match_status") or "")
-            not in {"matched", "matched_by_compatibility"}
+            not in {"matched", "matched_by_barcode", "matched_by_compatibility"}
         ):
             raise ValueError("financial allocation product-line evidence is not exact")
         seen_nm_ids.add(nm_id)

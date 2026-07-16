@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -30,6 +31,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.supplier_invoice_parser import (
     extract_iphone_model_keys,
+    normalize_barcode_value,
     normalize_invoice_model,
     parse_supplier_invoice_xlsx,
 )
@@ -44,7 +46,9 @@ from packages.contracts.supplier_shipments import (
     LINE_TYPE_PRODUCT,
     MATCH_STATUS_AMBIGUOUS,
     MATCH_STATUS_MATCHED,
+    MATCH_STATUS_MATCHED_BY_BARCODE,
     MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
+    MATCH_STATUSES_WITH_AUTHORITATIVE_NM_ID,
     MATCH_STATUS_UNMATCHED,
     ORDER_STATUS_DEFAULT,
     ORDER_STATUS_ACCEPTED_FF,
@@ -220,7 +224,6 @@ class SupplierShipmentsBlock:
         parsed_payload = parse_supplier_invoice_xlsx(
             workbook_bytes,
             filename=filename,
-            aliases=self._active_nomenclature_aliases(),
         )
         parsed_payload["metadata"] = _supplier_order_metadata(parsed_payload.get("metadata"))
         nomenclature_items = self._active_nomenclature_items()
@@ -284,6 +287,11 @@ class SupplierShipmentsBlock:
         now = self.timestamp_factory()
         business_today = supplier_business_today(timestamp=now)
         edited_payload = _resolve_edited_payload(payload, fallback=upload["parsed_payload"])
+        edited_payload = _bind_source_owned_line_identity(
+            edited_payload,
+            trusted_payload=upload["parsed_payload"],
+            context="supplier invoice upload",
+        )
         shipment_date = _validate_iso_date(str(payload.get("shipment_date") or edited_payload.get("shipment_date") or ""))
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_ff_acceptance_date")
@@ -396,6 +404,15 @@ class SupplierShipmentsBlock:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        legacy_product_barcodes_missing = any(
+            item.get("line_type") == LINE_TYPE_PRODUCT and not str(item.get("barcode") or "").strip()
+            for item in existing.get("lines") or []
+        )
+        if legacy_product_barcodes_missing and _payload_contains_explicit_lines(payload):
+            raise ValueError(
+                "legacy supplier shipment product lines do not have source-owned barcodes; "
+                "line edits are blocked until the invoice is reparsed"
+            )
         if (
             "historical_status_exception" in payload
             and str(payload.get("historical_status_exception") or "").strip()
@@ -409,6 +426,11 @@ class SupplierShipmentsBlock:
         now = self.timestamp_factory()
         business_today = supplier_business_today(timestamp=now)
         edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
+        edited_payload = _bind_source_owned_line_identity(
+            edited_payload,
+            trusted_payload=_detail_payload(existing),
+            context=f"saved supplier shipment {shipment_id}",
+        )
         shipment_date = _validate_iso_date(
             str(payload.get("shipment_date") or edited_payload.get("shipment_date") or existing["header"].get("shipment_date") or "")
         )
@@ -443,7 +465,16 @@ class SupplierShipmentsBlock:
             shipment_date=shipment_date,
             force_manual_override=False,
         )
-        _assert_atomic_supplier_product_matching(lines)
+        if legacy_product_barcodes_missing:
+            lines = [dict(item) for item in existing.get("lines") or []]
+            summary = _recalculate_summary(lines, declared_total=_optional_number(metadata.get("declared_invoice_total")))
+            match_status = str(existing.get("header", {}).get("match_status") or match_status)
+        else:
+            nomenclature_items = self._active_nomenclature_items()
+            lines = _apply_nomenclature_matches(lines, nomenclature_items)
+            _assert_atomic_supplier_product_matching(lines)
+            summary = _recalculate_summary(lines, declared_total=_optional_number(metadata.get("declared_invoice_total")))
+            match_status = _shipment_match_status(lines, checksum_error=summary["checksum_error"])
         order_status = status_resolution.order_status
         if "order_status" in payload:
             requested_status = _normalize_order_status(payload.get("order_status"))
@@ -759,11 +790,23 @@ class SupplierShipmentsBlock:
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         detail_payload = _detail_payload(existing)
-        overwrite_manual = bool((payload or {}).get("overwrite_manual"))
+        missing_barcode_lines = [
+            item
+            for item in detail_payload.get("lines") or []
+            if item.get("line_type") == LINE_TYPE_PRODUCT and not str(item.get("barcode") or "").strip()
+        ]
+        if missing_barcode_lines:
+            result = self.get_shipment(shipment_id)
+            result["rematch_diagnostics"] = {
+                "status": "skipped",
+                "reason": "legacy_product_barcode_missing",
+                "line_count": len(missing_barcode_lines),
+                "message": "rematch skipped: legacy product lines do not have source-owned barcodes; reparse the invoice",
+            }
+            return result
         detail_payload["lines"] = _apply_nomenclature_matches(
             detail_payload.get("lines") or [],
             self._active_nomenclature_items(),
-            overwrite_manual=overwrite_manual,
         )
         shipment_date = _validate_iso_date(str(detail_payload.get("shipment_date") or ""))
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
@@ -771,6 +814,7 @@ class SupplierShipmentsBlock:
             shipment_date=shipment_date,
             force_manual_override=False,
         )
+        _assert_atomic_supplier_product_matching(lines)
         existing_header = dict(existing["header"])
         now = self.timestamp_factory()
         header = {
@@ -1872,7 +1916,6 @@ class SupplierShipmentsBlock:
             parsed_payload = parse_supplier_invoice_xlsx(
                 workbook_bytes,
                 filename=filename,
-                aliases=self._active_nomenclature_aliases(),
             )
         except Exception as exc:
             return {}, [], [f"supplier invoice parser skipped: {exc}"], ""
@@ -2125,13 +2168,6 @@ class SupplierShipmentsBlock:
             return hashlib.sha256(file_path.read_bytes()).hexdigest()
         return hashlib.sha256(str(fallback_seed or relative_path or "missing").encode("utf-8")).hexdigest()
 
-    def _active_nomenclature_aliases(self) -> list[dict[str, Any]]:
-        self._ensure_nomenclature_ready()
-        aliases: list[dict[str, Any]] = []
-        for item in self.runtime.list_nomenclature_items(active_only=True):
-            aliases.extend(_nomenclature_item_aliases(item))
-        return aliases
-
     def _active_nomenclature_items(self) -> list[dict[str, Any]]:
         self._ensure_nomenclature_ready()
         return self.runtime.list_nomenclature_items(active_only=True)
@@ -2246,6 +2282,80 @@ def _resolve_edited_payload(payload: Mapping[str, Any], *, fallback: Mapping[str
     return resolved
 
 
+def _payload_contains_explicit_lines(payload: Mapping[str, Any]) -> bool:
+    if "lines" in payload:
+        return True
+    for key in ("payload", "edited_payload"):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping) and "lines" in nested:
+            return True
+    return False
+
+
+def _bind_source_owned_line_identity(
+    edited_payload: Mapping[str, Any],
+    *,
+    trusted_payload: Mapping[str, Any],
+    context: str,
+) -> dict[str, Any]:
+    result = deepcopy(dict(edited_payload))
+    edited_lines = result.get("lines") or []
+    trusted_lines = trusted_payload.get("lines") or []
+    if not isinstance(edited_lines, list) or not isinstance(trusted_lines, list):
+        raise ValueError("supplier shipment lines must be a list")
+    if len(edited_lines) != len(trusted_lines):
+        raise ValueError(
+            f"{context}: invoice lines cannot be added or removed; expected {len(trusted_lines)}, got {len(edited_lines)}"
+        )
+
+    trusted_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for index, raw_line in enumerate(trusted_lines, start=1):
+        if not isinstance(raw_line, Mapping):
+            raise ValueError(f"{context}: trusted invoice line #{index} is invalid")
+        key = _source_line_identity_key(raw_line)
+        if key is None or key in trusted_by_key:
+            raise ValueError(f"{context}: source invoice row identity is missing or duplicated at line #{index}")
+        trusted_by_key[key] = raw_line
+
+    used_keys: set[tuple[str, str]] = set()
+    bound_lines: list[dict[str, Any]] = []
+    for index, raw_line in enumerate(edited_lines, start=1):
+        if not isinstance(raw_line, Mapping):
+            raise ValueError("supplier shipment lines must be JSON objects")
+        key = _source_line_identity_key(raw_line)
+        expected_key = _source_line_identity_key(trusted_lines[index - 1])
+        if key != expected_key:
+            raise ValueError(
+                f"{context}: source invoice row identity/order cannot be changed at edited line #{index}"
+            )
+        trusted_line = trusted_by_key.get(key) if key is not None else None
+        if trusted_line is None or key in used_keys:
+            raise ValueError(f"{context}: edited line #{index} is not bound to a unique source invoice row")
+        used_keys.add(key)
+        bound_line = dict(raw_line)
+        bound_line["line_type"] = str(trusted_line.get("line_type") or "")
+        bound_line["barcode"] = str(trusted_line.get("barcode") or "")
+        bound_line["raw"] = deepcopy(dict(trusted_line.get("raw") or {}))
+        if trusted_line.get("line_id"):
+            bound_line["line_id"] = str(trusted_line.get("line_id") or "")
+        bound_lines.append(bound_line)
+    if used_keys != set(trusted_by_key):
+        raise ValueError(f"{context}: not every source invoice row is present in the edited payload")
+    result["lines"] = bound_lines
+    return result
+
+
+def _source_line_identity_key(line: Mapping[str, Any]) -> tuple[str, str] | None:
+    line_id = str(line.get("line_id") or "").strip()
+    if line_id:
+        return "line_id", line_id
+    raw_payload = line.get("raw") if isinstance(line.get("raw"), Mapping) else {}
+    worksheet_row = _optional_int(raw_payload.get("worksheet_row"))
+    if worksheet_row is not None:
+        return "worksheet_row", str(worksheet_row)
+    return None
+
+
 def _resolve_optional_date_field(
     payload: Mapping[str, Any],
     edited_payload: Mapping[str, Any],
@@ -2336,6 +2446,10 @@ def _normalize_line(
     if "amount" in raw and raw.get("amount") not in {None, ""} and amount is None:
         raise ValueError(f"line #{index}: amount must be numeric")
     internal_nm_id = _optional_int(raw.get("internal_nm_id"))
+    try:
+        barcode = normalize_barcode_value(raw.get("barcode"))
+    except ValueError as exc:
+        raise ValueError(f"line #{index}: barcode cannot be normalized losslessly ({exc})") from exc
     product_type = str(raw.get("product_type") or "").strip()
     model_normalized = str(raw.get("model_normalized") or "").strip()
     match_key = str(raw.get("match_key") or "").strip()
@@ -2347,17 +2461,23 @@ def _normalize_line(
         match_status = "extra"
     elif match_status not in {
         MATCH_STATUS_MATCHED,
+        MATCH_STATUS_MATCHED_BY_BARCODE,
         MATCH_STATUS_MATCHED_BY_COMPATIBILITY,
         MATCH_STATUS_UNMATCHED,
         MATCH_STATUS_AMBIGUOUS,
     }:
         match_status = MATCH_STATUS_MATCHED if has_internal_match else MATCH_STATUS_UNMATCHED
-    raw_payload = raw.get("raw") if isinstance(raw.get("raw"), Mapping) else {}
+    raw_payload = dict(raw.get("raw")) if isinstance(raw.get("raw"), Mapping) else {}
+    match_evidence = raw.get("match_evidence") if isinstance(raw.get("match_evidence"), Mapping) else {}
+    if not match_evidence and isinstance(raw_payload.get("match_evidence"), Mapping):
+        match_evidence = raw_payload.get("match_evidence") or {}
+    raw_payload["match_evidence"] = dict(match_evidence)
     return {
         "line_id": str(raw.get("line_id") or ("ln_" + uuid4().hex)).strip(),
         "line_type": line_type,
         "sort_order": _optional_int(raw.get("sort_order")) or index,
         "source_no": str(raw.get("source_no") or "").strip(),
+        "barcode": barcode,
         "product_type": product_type,
         "model_raw": str(raw.get("model_raw") or "").strip(),
         "model_normalized": model_normalized,
@@ -2372,6 +2492,7 @@ def _normalize_line(
         "comment": str(raw.get("comment") or "").strip(),
         "match_status": match_status,
         "manual_override": bool(raw.get("manual_override")) or force_manual_override,
+        "match_evidence": dict(match_evidence),
         "invoice_price_yuan_snapshot": _optional_number(raw.get("invoice_price_yuan_snapshot")),
         "reference_purchase_price_yuan_snapshot": _optional_number(raw.get("reference_purchase_price_yuan_snapshot")),
         "price_conformity_status": _normalize_price_conformity_status(raw.get("price_conformity_status")),
@@ -2380,7 +2501,7 @@ def _normalize_line(
         "price_conformity_reason": str(raw.get("price_conformity_reason") or "not_checked").strip() or "not_checked",
         "price_conformity_actor": str(raw.get("price_conformity_actor") or "").strip(),
         "price_conformity_context": _normalize_json_object(raw.get("price_conformity_context")),
-        "raw": dict(raw_payload),
+        "raw": raw_payload,
     }
 
 
@@ -2409,9 +2530,14 @@ def _assert_atomic_supplier_product_matching(lines: Iterable[Mapping[str, Any]])
         product_count += 1
         line_id = str(line.get("line_id") or line.get("source_no") or index)
         status = str(line.get("match_status") or "")
-        if status not in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY}:
-            problems.append(f"строка {line_id}: SKU {status or 'не сопоставлен'}")
-        if _optional_int(line.get("internal_nm_id")) is None:
+        barcode = str(line.get("barcode") or "").strip()
+        reason = str((line.get("match_evidence") or {}).get("reason") or "")
+        if not barcode:
+            problems.append(f"строка {line_id}: отсутствует source-owned barcode")
+        elif status != MATCH_STATUS_MATCHED_BY_BARCODE:
+            problems.append(f"строка {line_id}: barcode {reason or status or 'не сопоставлен'}")
+        internal_nm_id = _optional_int(line.get("internal_nm_id"))
+        if internal_nm_id is None or internal_nm_id <= 0:
             problems.append(f"строка {line_id}: отсутствует nmID")
         if (_optional_number(line.get("qty")) or 0) <= 0:
             problems.append(f"строка {line_id}: отсутствует положительное количество")
@@ -2423,7 +2549,7 @@ def _assert_atomic_supplier_product_matching(lines: Iterable[Mapping[str, Any]])
         problems.append("товарные строки отсутствуют")
     if problems:
         raise ValueError(
-            "supplier document rejected atomically; correct authoritative nomenclature/aliases and reparse: "
+            "supplier document rejected atomically; correct authoritative nomenclature barcodes and reparse: "
             + "; ".join(problems)
         )
 
@@ -2435,7 +2561,7 @@ def _shipment_match_status(lines: list[Mapping[str, Any]], *, checksum_error: bo
         return SHIPMENT_STATUS_MANUAL_OVERRIDE
     if any(
         item.get("line_type") == LINE_TYPE_PRODUCT
-        and item.get("match_status") not in {MATCH_STATUS_MATCHED, MATCH_STATUS_MATCHED_BY_COMPATIBILITY}
+        and item.get("match_status") not in MATCH_STATUSES_WITH_AUTHORITATIVE_NM_ID
         for item in lines
     ):
         return SHIPMENT_STATUS_HAS_UNMATCHED
@@ -2495,23 +2621,12 @@ def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:
 def _apply_nomenclature_matches(
     lines: list[Mapping[str, Any]],
     nomenclature_items: list[Mapping[str, Any]],
-    *,
-    overwrite_manual: bool = False,
 ) -> list[dict[str, Any]]:
     index = _build_nomenclature_match_index(nomenclature_items)
     matched_lines: list[dict[str, Any]] = []
     for raw_line in lines:
         line = dict(raw_line)
         if line.get("line_type") != LINE_TYPE_PRODUCT:
-            matched_lines.append(line)
-            continue
-        product_type = str(line.get("product_type") or "").strip()
-        normalized_model = str(line.get("model_normalized") or "").strip()
-        match_key = str(line.get("match_key") or "").strip()
-        if not match_key and product_type and normalized_model:
-            match_key = f"{product_type}|{normalized_model}"
-            line["match_key"] = match_key
-        if bool(line.get("manual_override")) and not overwrite_manual:
             matched_lines.append(line)
             continue
         resolution = _resolve_nomenclature_match(line, index)
@@ -2521,93 +2636,95 @@ def _apply_nomenclature_matches(
 
 
 def _build_nomenclature_match_index(items: list[Mapping[str, Any]]) -> dict[str, Any]:
-    exact_by_key: dict[str, list[dict[str, Any]]] = {}
-    alias_by_key: dict[str, list[dict[str, Any]]] = {}
-    compatible: list[dict[str, Any]] = []
+    by_barcode: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         if not bool(item.get("is_active")):
             continue
         item_payload = _nomenclature_item_match_payload(item)
-        base_match_key = str(item.get("match_key") or "").strip()
-        if base_match_key:
-            exact_by_key.setdefault(base_match_key, []).append(item_payload)
-        for alias in _nomenclature_item_aliases(item):
-            alias_key = str(alias.get("match_key") or "").strip()
-            if alias_key and alias_key != base_match_key:
-                alias_by_key.setdefault(alias_key, []).append(_nomenclature_item_match_payload({**item, **alias}))
-        compatible_keys = _infer_compatible_model_keys(item)
-        if compatible_keys and str(item.get("product_type") or "") in {"clear", "anti_spy", "matte"}:
-            compatible.append({**item_payload, "compatible_model_keys": compatible_keys})
-    return {
-        "exact_by_key": exact_by_key,
-        "alias_by_key": alias_by_key,
-        "compatible": compatible,
-    }
+        raw_barcodes = [item.get("barcode"), *_raw_barcode_list(item.get("barcodes"))]
+        seen_item_barcodes: set[str] = set()
+        for raw_barcode in raw_barcodes:
+            try:
+                barcode = normalize_barcode_value(raw_barcode)
+            except ValueError:
+                continue
+            if not barcode or barcode in seen_item_barcodes:
+                continue
+            seen_item_barcodes.add(barcode)
+            by_barcode.setdefault(barcode, []).append(item_payload)
+    return {"by_barcode": by_barcode}
 
 
 def _resolve_nomenclature_match(line: Mapping[str, Any], index: Mapping[str, Any]) -> dict[str, Any] | None:
-    product_type = str(line.get("product_type") or "").strip()
-    match_key = str(line.get("match_key") or "").strip()
-    exact_candidates = list((index.get("exact_by_key") or {}).get(match_key) or [])
-    if len(exact_candidates) == 1:
-        return {**exact_candidates[0], "match_status": MATCH_STATUS_MATCHED}
-    if len(exact_candidates) > 1:
-        return {"match_status": MATCH_STATUS_AMBIGUOUS}
-
-    alias_candidates = list((index.get("alias_by_key") or {}).get(match_key) or [])
-    if len(alias_candidates) == 1:
-        return {**alias_candidates[0], "match_status": MATCH_STATUS_MATCHED}
-    if len(alias_candidates) > 1:
-        return {"match_status": MATCH_STATUS_AMBIGUOUS}
-
-    invoice_keys = _line_compatible_model_keys(line)
-    if product_type not in {"clear", "anti_spy", "matte"} or not invoice_keys:
-        return None
-    invoice_key_set = set(invoice_keys)
-    scored: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
-    for candidate in index.get("compatible") or []:
-        if str(candidate.get("product_type") or "") != product_type:
-            continue
-        candidate_keys = [str(item) for item in candidate.get("compatible_model_keys") or [] if str(item or "").strip()]
-        if not candidate_keys:
-            continue
-        candidate_key_set = set(candidate_keys)
-        intersection = sorted(invoice_key_set & candidate_key_set)
-        if not intersection:
-            continue
-        subset_bonus = 1 if candidate_key_set.issubset(invoice_key_set) or invoice_key_set.issubset(candidate_key_set) else 0
-        exact_size_bonus = 1 if candidate_key_set == invoice_key_set else 0
-        score = (subset_bonus, len(intersection), exact_size_bonus)
-        scored.append((score, {**candidate, "matched_model_keys": intersection}))
-    if not scored:
-        return None
-    scored.sort(key=lambda item: item[0], reverse=True)
-    top_score, top_candidate = scored[0]
-    if len(scored) > 1 and scored[1][0] == top_score:
-        return {"match_status": MATCH_STATUS_AMBIGUOUS}
-    return {**top_candidate, "match_status": MATCH_STATUS_MATCHED_BY_COMPATIBILITY}
+    try:
+        barcode = normalize_barcode_value(line.get("barcode"))
+    except ValueError:
+        return {
+            "match_status": MATCH_STATUS_UNMATCHED,
+            "match_evidence": {"method": "barcode", "status": "unmatched", "reason": "barcode_invalid"},
+        }
+    if not barcode:
+        return {
+            "match_status": MATCH_STATUS_UNMATCHED,
+            "match_evidence": {"method": "barcode", "status": "unmatched", "reason": "barcode_missing"},
+        }
+    candidates = list((index.get("by_barcode") or {}).get(barcode) or [])
+    if not candidates:
+        return {
+            "match_status": MATCH_STATUS_UNMATCHED,
+            "match_evidence": {"method": "barcode", "status": "unmatched", "reason": "barcode_unknown"},
+        }
+    if len(candidates) > 1:
+        return {
+            "match_status": MATCH_STATUS_AMBIGUOUS,
+            "match_evidence": {
+                "method": "barcode",
+                "status": "ambiguous",
+                "reason": "barcode_multiple_active_owners",
+                "candidate_count": len(candidates),
+            },
+        }
+    owner_nm_id = _optional_int(candidates[0].get("internal_nm_id") or candidates[0].get("nm_id"))
+    if owner_nm_id is None or owner_nm_id <= 0:
+        return {
+            "match_status": MATCH_STATUS_UNMATCHED,
+            "match_evidence": {
+                "method": "barcode",
+                "status": "unmatched",
+                "reason": "barcode_owner_missing_nmid",
+                "owner_item_id": str(candidates[0].get("item_id") or ""),
+            },
+        }
+    return {
+        **candidates[0],
+        "match_status": MATCH_STATUS_MATCHED_BY_BARCODE,
+        "match_evidence": {"method": "barcode", "status": "matched", "reason": "exact_active_barcode"},
+    }
 
 
 def _apply_match_resolution(line: dict[str, Any], resolution: Mapping[str, Any] | None) -> None:
-    if not resolution:
+    match_evidence = dict((resolution or {}).get("match_evidence") or {})
+    status = str((resolution or {}).get("match_status") or MATCH_STATUS_UNMATCHED)
+    if not resolution or status in {MATCH_STATUS_UNMATCHED, MATCH_STATUS_AMBIGUOUS}:
         line["internal_sku"] = ""
         line["internal_nm_id"] = None
         line["internal_name"] = ""
-        line["match_status"] = MATCH_STATUS_UNMATCHED
+        line["match_status"] = status
         line["manual_override"] = False
-        return
-    if str(resolution.get("match_status") or "") == MATCH_STATUS_AMBIGUOUS:
-        line["internal_sku"] = ""
-        line["internal_nm_id"] = None
-        line["internal_name"] = ""
-        line["match_status"] = MATCH_STATUS_AMBIGUOUS
-        line["manual_override"] = False
+        line["match_evidence"] = match_evidence
+        raw_payload = dict(line.get("raw") or {})
+        raw_payload["match_evidence"] = match_evidence
+        line["raw"] = raw_payload
         return
     line["internal_sku"] = str(resolution.get("internal_sku") or resolution.get("our_sku") or "")
     line["internal_nm_id"] = _optional_int(resolution.get("internal_nm_id") or resolution.get("nm_id"))
     line["internal_name"] = str(resolution.get("internal_name") or resolution.get("nomenclature_name") or "")
-    line["match_status"] = str(resolution.get("match_status") or MATCH_STATUS_MATCHED)
+    line["match_status"] = status
     line["manual_override"] = False
+    line["match_evidence"] = match_evidence
+    raw_payload = dict(line.get("raw") or {})
+    raw_payload["match_evidence"] = match_evidence
+    line["raw"] = raw_payload
 
 
 def _apply_price_conformity_checks(
@@ -2738,8 +2855,11 @@ def _resolve_price_reference_item(
     resolution = _resolve_nomenclature_match(line, reference_index.get("match_index") or {})
     if not resolution:
         return None, "sku_not_found"
-    if str(resolution.get("match_status") or "") == MATCH_STATUS_AMBIGUOUS:
+    resolution_status = str(resolution.get("match_status") or "")
+    if resolution_status == MATCH_STATUS_AMBIGUOUS:
         return None, "reference_match_ambiguous"
+    if resolution_status not in MATCH_STATUSES_WITH_AUTHORITATIVE_NM_ID:
+        return None, str((resolution.get("match_evidence") or {}).get("reason") or "sku_not_found")
     item_id = str(resolution.get("item_id") or "")
     item = (reference_index.get("by_item_id") or {}).get(item_id)
     if item is not None:
@@ -2935,14 +3055,14 @@ def _prepare_nomenclature_barcode_payload(
 
 
 def _normalize_barcode(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "").strip())
+    return normalize_barcode_value(value)
 
 
-def _raw_barcode_list(value: Any) -> list[str]:
+def _raw_barcode_list(value: Any) -> list[Any]:
     if isinstance(value, str):
         return [item for item in re.split(r"[\n,;]+", value)]
     if isinstance(value, list):
-        return [str(item) for item in value]
+        return list(value)
     return []
 
 
@@ -3816,22 +3936,6 @@ def _nomenclature_import_result(
     }
 
 
-def _line_compatible_model_keys(line: Mapping[str, Any]) -> list[str]:
-    parts = [
-        line.get("model_raw"),
-        line.get("model_normalized"),
-        str(line.get("match_key") or "").split("|", 1)[1] if "|" in str(line.get("match_key") or "") else "",
-    ]
-    keys: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        for key in extract_iphone_model_keys(part):
-            if key not in seen:
-                seen.add(key)
-                keys.append(key)
-    return keys
-
-
 def _infer_compatible_model_keys(item: Mapping[str, Any]) -> list[str]:
     raw_keys = item.get("compatible_model_keys")
     if isinstance(raw_keys, list):
@@ -3864,10 +3968,7 @@ def _nomenclature_item_match_payload(item: Mapping[str, Any]) -> dict[str, Any]:
         "internal_nm_id": _optional_int(item.get("nm_id") or item.get("internal_nm_id")),
         "internal_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
         "nomenclature_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
-        "match_key": str(item.get("match_key") or ""),
         "purchase_price_yuan": item.get("purchase_price_yuan"),
-        "compatible_model_keys": _infer_compatible_model_keys(item),
-        "group": "nomenclature",
     }
 
 
@@ -3896,45 +3997,6 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
-
-
-def _nomenclature_item_aliases(item: Mapping[str, Any]) -> list[dict[str, Any]]:
-    if not bool(item.get("is_active")):
-        return []
-    base_match_key = str(item.get("match_key") or "").strip()
-    payload_base = {
-        "active": True,
-        "product_type": str(item.get("product_type") or ""),
-        "factory_type": str(item.get("product_type") or ""),
-        "internal_sku": str(item.get("our_sku") or ""),
-        "internal_nm_id": _optional_int(item.get("nm_id")),
-        "internal_name": str(item.get("nomenclature_name") or ""),
-        "nomenclature_name": str(item.get("nomenclature_name") or ""),
-        "item_id": str(item.get("item_id") or ""),
-        "purchase_price_yuan": item.get("purchase_price_yuan"),
-        "group": "nomenclature",
-    }
-    aliases: list[dict[str, Any]] = []
-    if base_match_key:
-        aliases.append({**payload_base, "match_key": base_match_key})
-    product_type = str(item.get("product_type") or "").strip()
-    for raw_alias in item.get("aliases") or []:
-        alias_text = str(raw_alias or "").strip()
-        if not alias_text:
-            continue
-        if "|" in alias_text:
-            aliases.append({**payload_base, "match_key": _normalize_match_key(alias_text)})
-            continue
-        normalized_model = normalize_invoice_model(alias_text)
-        if product_type and normalized_model:
-            aliases.append(
-                {
-                    **payload_base,
-                    "normalized_model": normalized_model,
-                    "match_key": f"{product_type}|{normalized_model}",
-                }
-            )
-    return aliases
 
 
 def _product_type_from_config_item(display_name: str, group: str) -> str:
@@ -4934,7 +4996,8 @@ def _optional_number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     text = str(value).strip().replace("\u00a0", " ")
     if not text:
         return None
@@ -4946,9 +5009,10 @@ def _optional_number(value: Any) -> float | None:
     elif "," in text:
         text = text.replace(",", ".")
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
         return None
+    return number if math.isfinite(number) else None
 
 
 def _optional_int(value: Any) -> int | None:
