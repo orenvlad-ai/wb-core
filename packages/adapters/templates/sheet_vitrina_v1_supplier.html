@@ -494,7 +494,7 @@
           <table>
             <thead>
               <tr>
-                <th>商品类型 / Product type / Тип товара</th>
+                <th>SKU组 / Nomenclature group / Группа номенклатуры</th>
                 <th>发票型号 / Invoice model / Модель из invoice</th>
                 <th>条形码 / Barcode / Штрихкод</th>
                 <th>标准型号 / Normalized model / Нормализованная модель</th>
@@ -977,7 +977,7 @@
             if (supplyHeadings[0]) supplyHeadings[0].textContent = "Товарные строки";
             if (supplyHeadings[1]) supplyHeadings[1].textContent = "Прочие позиции";
             setTableHeaders("#productLines", [
-              "Тип товара", "Модель из invoice", "Штрихкод", "Нормализованная модель", "Match key", "nmId",
+              "Группа номенклатуры", "Модель из invoice", "Штрихкод", "Нормализованная модель", "Match key", "nmId",
               "Номенклатура", "Количество", "Цена", "Соответствие цены", "Сумма", "Комментарий", "Матчинг"
             ]);
             setTableHeaders("#extraLines", ["Номер строки", "Позиция", "Количество", "Цена", "Сумма", "Комментарий"]);
@@ -2155,13 +2155,13 @@
       function renderProductLine(line, index) {
         return [
           '<tr data-line-kind="product" data-line-index="' + index + '">',
-          '<td><select class="line-input" data-line-field="product_type">' + productTypeOptions(line.product_type) + '</select></td>',
-          '<td><input class="line-input wide" data-line-field="model_raw" value="' + escapeHtml(line.model_raw || "") + '"></td>',
+          '<td data-authoritative-group>' + renderAuthoritativeGroup(line) + '</td>',
+          '<td><input class="line-input wide" data-source-model value="' + escapeHtml(line.model_raw || "") + '" readonly>' + renderModelDiagnostic(line) + '</td>',
           '<td><input class="line-input small" data-source-barcode aria-label="' + escapeHtml(uiText("条形码 / Barcode / Штрихкод", "Штрихкод")) + '" value="' + escapeHtml(line.barcode || "") + '" readonly></td>',
-          '<td><input class="line-input wide" data-line-field="model_normalized" value="' + escapeHtml(line.model_normalized || "") + '"></td>',
-          '<td><input class="line-input wide" data-line-field="match_key" value="' + escapeHtml(line.match_key || "") + '"></td>',
-          '<td><input class="line-input small" data-line-field="internal_nm_id" aria-label="' + escapeHtml(uiText("平台ID / nmId / nmId", "nmId")) + '" value="' + escapeHtml(line.internal_nm_id || "") + '" readonly></td>',
-          '<td><input class="line-input wide" data-line-field="internal_name" value="' + escapeHtml(line.internal_name || "") + '" readonly></td>',
+          '<td><input class="line-input wide" data-source-model-normalized value="' + escapeHtml(line.model_normalized || "") + '" readonly></td>',
+          '<td><input class="line-input wide" data-authoritative-match-key value="' + escapeHtml(line.match_key || "") + '" readonly></td>',
+          '<td><input class="line-input small" data-authoritative-nmid aria-label="' + escapeHtml(uiText("平台ID / nmId / nmId", "nmId")) + '" value="' + escapeHtml(line.internal_nm_id || "") + '" readonly></td>',
+          '<td><input class="line-input wide" data-authoritative-name value="' + escapeHtml(line.internal_name || "") + '" readonly></td>',
           '<td><input class="line-input small" data-line-field="qty" value="' + escapeHtml(line.qty ?? "") + '"></td>',
           '<td><input class="line-input small" data-line-field="unit_price" value="' + escapeHtml(line.unit_price ?? "") + '"></td>',
           '<td>' + renderPriceConformity(line) + '</td>',
@@ -2170,6 +2170,27 @@
           '<td><span class="badge ' + (line.manual_override ? "warning" : (["matched", "matched_by_barcode", "matched_by_compatibility"].includes(line.match_status)) ? "success" : "warning") + '" data-match-status>' + escapeHtml(line.manual_override ? lineStatusLabels.manual_override : (lineStatusLabels[line.match_status] || line.match_status || lineStatusLabels.unmatched)) + '</span></td>',
           '</tr>'
         ].join("");
+      }
+
+      function renderAuthoritativeGroup(line) {
+        const key = String(line.group_key || line.product_type || "");
+        const label = String(line.group_label || key || "—");
+        const diagnostic = String(line.group_diagnostic || "");
+        const title = diagnostic ? ("SKU groups: " + diagnostic) : "Server-owned SKU groups";
+        const keyLine = key && key !== label ? '<div class="muted">' + escapeHtml(key) + '</div>' : "";
+        return '<div title="' + escapeHtml(title) + '"><strong>' + escapeHtml(label) + '</strong>' + keyLine + '</div>';
+      }
+
+      function renderModelDiagnostic(line) {
+        const diagnostic = line.model_diagnostic && typeof line.model_diagnostic === "object" ? line.model_diagnostic : {};
+        const status = String(diagnostic.status || "not_checkable");
+        const labels = {
+          consistent: uiText("型号一致 / Model consistent / соответствует", "соответствует"),
+          mismatch: uiText("需要复核 / Needs review / требуется проверка", "требуется проверка"),
+          not_checkable: uiText("数据不足 / Not checkable / недостаточно данных", "недостаточно данных")
+        };
+        const tone = status === "consistent" ? "success" : (status === "mismatch" ? "warning" : "");
+        return '<div><span class="badge ' + tone + '" data-model-diagnostic="' + escapeHtml(status) + '">' + escapeHtml(labels[status] || labels.not_checkable) + '</span></div>';
       }
 
       function renderPriceConformity(line) {
@@ -2202,12 +2223,6 @@
         ].join("");
       }
 
-      function productTypeOptions(value) {
-        return ["clear", "anti_spy", "matte", ""].map((item) => (
-          '<option value="' + item + '"' + (item === value ? " selected" : "") + '>' + (item || "-") + '</option>'
-        )).join("");
-      }
-
       function syncLinesFromInputs() {
         if (!currentShipment) {
           return;
@@ -2238,8 +2253,6 @@
         });
         if (lineType === "extra") {
           line.match_status = "extra";
-        } else if (row.dataset.dirty === "1") {
-          line.match_status = (line.internal_sku || line.internal_nm_id || line.internal_name) ? "matched" : "unmatched";
         }
         return line;
       }

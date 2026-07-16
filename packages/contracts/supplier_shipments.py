@@ -5,9 +5,9 @@ from __future__ import annotations
 LINE_TYPE_PRODUCT = "product"
 LINE_TYPE_EXTRA = "extra"
 
-PRODUCT_TYPE_CLEAR = "clear"
-PRODUCT_TYPE_ANTI_SPY = "anti_spy"
-PRODUCT_TYPE_MATTE = "matte"
+SOURCE_PRODUCT_TYPE_CLEAR = "clear"
+SOURCE_PRODUCT_TYPE_ANTI_SPY = "anti_spy"
+SOURCE_PRODUCT_TYPE_MATTE = "matte"
 
 MATCH_STATUS_MATCHED = "matched"
 MATCH_STATUS_MATCHED_BY_COMPATIBILITY = "matched_by_compatibility"

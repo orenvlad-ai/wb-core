@@ -56,8 +56,8 @@ def _assert_price_conformity_application_smoke() -> None:
                 "nm_id": 501001,
                 "barcode": "1111111111111",
                 "nomenclature_name": "Clear iPhone 14 Pro",
-                "product_type": "clear",
-                "match_key": "clear|iphone_14_pro",
+                "product_type": "clean",
+                "match_key": "clean|iphone_14_pro",
                 "purchase_price_yuan": "1",
             }
         )["item"]
@@ -78,8 +78,8 @@ def _assert_price_conformity_application_smoke() -> None:
                 "nm_id": 501003,
                 "barcode": "4444444444444",
                 "nomenclature_name": "Clear iPhone 15",
-                "product_type": "clear",
-                "match_key": "clear|iphone_15",
+                "product_type": "clean",
+                "match_key": "clean|iphone_15",
                 "purchase_price_yuan": None,
             }
         )
@@ -215,9 +215,149 @@ def _assert_price_conformity_application_smoke() -> None:
             raise AssertionError(f"backfill must be idempotent, got {second_backfill}")
 
 
+def _assert_authoritative_group_rebinding_smoke() -> None:
+    timestamp_counter = {"value": 0}
+
+    def next_timestamp() -> str:
+        timestamp_counter["value"] += 1
+        return f"2026-06-01T09:{timestamp_counter['value']:02d}:00Z"
+
+    with TemporaryDirectory(prefix="supplier-authoritative-groups-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        block = SupplierShipmentsBlock(runtime=runtime, timestamp_factory=next_timestamp)
+        try:
+            block.create_nomenclature_item(
+                {
+                    "is_active": True,
+                    "nm_id": 600999,
+                    "barcode": "6009990000000",
+                    "nomenclature_name": "Invoice-local group must fail",
+                    "product_type": "invoice_local_group",
+                    "match_key": "invoice_local_group|iphone_14",
+                }
+            )
+        except ValueError as exc:
+            if "server-owned SKU groups" not in str(exc):
+                raise
+        else:
+            raise AssertionError("new nomenclature rows must reference the server-owned SKU-group registry")
+        owner_specs = [
+            ("1111111111111", 601001, "SKU-NFC", "No Frame Clean iPhone 14 Pro", "no_frame_clean", "iphone_14_pro"),
+            ("2222222222222", 601002, "SKU-NFAS", "No Frame Anti-spy iPhone 16e", "no_frame_anti_spy", "iphone_16e"),
+            ("3333333333333", 601003, "SKU-NFAS-PM", "No Frame Anti-spy iPhone 14 Pro Max", "no_frame_anti_spy", "iphone_14_pro_max"),
+        ]
+        owners = []
+        for barcode, nm_id, sku, name, group_key, model_key in owner_specs:
+            owners.append(
+                block.create_nomenclature_item(
+                    {
+                        "is_active": True,
+                        "our_sku": sku,
+                        "nm_id": nm_id,
+                        "barcode": barcode,
+                        "nomenclature_name": name,
+                        "product_type": group_key,
+                        "match_key": f"{group_key}|{model_key}",
+                        "compatible_model_keys": [model_key],
+                    }
+                )["item"]
+            )
+
+        parsed = block.parse_upload(_build_invoice_fixture(), uploaded_filename="authoritative-groups.xlsx")
+        products = [line for line in parsed["lines"] if line.get("line_type") == "product"]
+        if [line.get("source_product_type") for line in products] != ["clear", "anti_spy", "anti_spy"]:
+            raise AssertionError(f"source parser classification must remain diagnostic: {products}")
+        if [line.get("product_type") for line in products] != [
+            "no_frame_clean",
+            "no_frame_anti_spy",
+            "no_frame_anti_spy",
+        ]:
+            raise AssertionError(f"parse must project barcode-owner groups: {products}")
+        if [line.get("group_label") for line in products] != [
+            "No Frame Clean",
+            "No Frame Anti-spy",
+            "No Frame Anti-spy",
+        ]:
+            raise AssertionError(f"parse must resolve labels from SKU groups: {products}")
+
+        barcode_tamper = json.loads(json.dumps(parsed))
+        barcode_tamper["lines"][0]["barcode"] = "9999999999999"
+        barcode_tamper_result = block.create_shipment(
+            {"upload_id": parsed["upload_id"], "shipment_date": "2026-06-01", "payload": barcode_tamper}
+        )
+        if barcode_tamper_result["product_lines"][0].get("barcode") != "1111111111111":
+            raise AssertionError("client-provided barcode must be ignored in favor of source-owned invoice evidence")
+
+        tampered = json.loads(json.dumps(parsed))
+        for line in tampered["lines"]:
+            if line.get("line_type") != "product":
+                continue
+            line.update(
+                {
+                    "nomenclature_item_id": "client-owner",
+                    "product_type": "clear",
+                    "group_key": "clear",
+                    "group_label": "Client group",
+                    "match_key": "client|match",
+                    "internal_sku": "CLIENT-SKU",
+                    "internal_nm_id": 999,
+                    "internal_name": "Client name",
+                    "match_status": "matched",
+                    "match_evidence": {"method": "client"},
+                }
+            )
+        created = block.create_shipment(
+            {"upload_id": parsed["upload_id"], "shipment_date": "2026-06-01", "payload": tampered}
+        )
+        created_products = created["product_lines"]
+        if [line.get("internal_nm_id") for line in created_products] != [601001, 601002, 601003]:
+            raise AssertionError(f"create must rebind all server-owned owner fields: {created_products}")
+        if any(line.get("match_evidence", {}).get("method") != "barcode" for line in created_products):
+            raise AssertionError("client match evidence must be ignored")
+
+        update_payload = json.loads(json.dumps(created))
+        update_payload["lines"][0].update(
+            {
+                "product_type": "matte",
+                "group_key": "matte",
+                "group_label": "Client matte",
+                "match_key": "matte|client",
+                "internal_nm_id": 1,
+                "internal_name": "Client update",
+            }
+        )
+        updated = block.update_shipment(created["shipment_id"], {"payload": update_payload})
+        if (
+            updated["product_lines"][0].get("product_type") != "no_frame_clean"
+            or updated["product_lines"][0].get("internal_nm_id") != 601001
+        ):
+            raise AssertionError(f"update must repeat server-side barcode rebinding: {updated['product_lines'][0]}")
+
+        first_owner = owners[0]
+        block.update_nomenclature_item(
+            str(first_owner["item_id"]),
+            {
+                **first_owner,
+                "product_type": "no_frame_matte",
+                "match_key": "no_frame_matte|iphone_14_pro",
+            },
+        )
+        rematched = block.rematch_shipment(created["shipment_id"])
+        first_line = rematched["product_lines"][0]
+        if first_line.get("product_type") != "no_frame_matte" or first_line.get("match_key") != "no_frame_matte|iphone_14_pro":
+            raise AssertionError(f"explicit rematch must rebind group and match key from the current barcode owner: {first_line}")
+
+        matte_group = next(group for group in block.list_sku_groups()["groups"] if group["group_key"] == "no_frame_matte")
+        block.update_sku_group("no_frame_matte", {**matte_group, "label": "Runtime-renamed group"})
+        reopened = block.get_shipment(created["shipment_id"])
+        if reopened["product_lines"][0].get("group_label") != "Runtime-renamed group":
+            raise AssertionError("saved invoice labels must resolve live through the same SKU-group registry")
+
+
 def main() -> None:
     _assert_barcode_schema_upgrade_smoke()
     _assert_price_conformity_application_smoke()
+    _assert_authoritative_group_rebinding_smoke()
     workbook_bytes = _build_invoice_fixture()
     workbook_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
     with TemporaryDirectory(prefix="supplier-shipments-http-") as tmp:
@@ -267,8 +407,8 @@ def main() -> None:
                     "nm_id": 210183919,
                     "barcode": "1111111111111",
                     "nomenclature_name": "Clear iPhone 14 Pro",
-                    "product_type": "clear",
-                    "match_key": "clear|iphone_14_pro",
+                    "product_type": "clean",
+                    "match_key": "clean|iphone_14_pro",
                     "purchase_price_yuan": "1,0",
                     "aliases": ["iPhone 14 Pro"],
                     "compatible_models_text": "iPhone 14 Pro",
@@ -286,8 +426,8 @@ def main() -> None:
                 {
                     "is_active": True,
                     "nomenclature_name": "Duplicate",
-                    "product_type": "clear",
-                    "match_key": "clear|iphone_14_pro",
+                    "product_type": "clean",
+                    "match_key": "clean|iphone_14_pro",
                 },
             )
             if duplicate_nom_status != 400 or "duplicate" not in str(duplicate_nom_payload.get("error", "")).lower():
@@ -784,8 +924,8 @@ def main() -> None:
                     "our_sku": "",
                     "nm_id": 700001,
                     "nomenclature_name": "Duplicate A",
-                    "product_type": "clear",
-                    "match_key": "clear|duplicate",
+                    "product_type": "clean",
+                    "match_key": "clean|duplicate",
                     "purchase_price_yuan": None,
                     "aliases": [],
                     "compatible_models_text": "",
@@ -802,8 +942,8 @@ def main() -> None:
                     "our_sku": "",
                     "nm_id": 700002,
                     "nomenclature_name": "Duplicate B",
-                    "product_type": "clear",
-                    "match_key": "clear|duplicate",
+                    "product_type": "clean",
+                    "match_key": "clean|duplicate",
                     "purchase_price_yuan": None,
                     "aliases": [],
                     "compatible_models_text": "",
@@ -1173,7 +1313,7 @@ def _build_ambiguous_nomenclature_import_fixture() -> bytes:
     sheet = workbook.active
     sheet.title = "Номенклатура"
     sheet.append(["Включено", "nmId", "Номенклатура", "Тип", "Match key", "Цена закупки, ¥"])
-    sheet.append(["да", 700003, "Duplicate import", "clear", "clear|duplicate", 2])
+    sheet.append(["да", 700003, "Duplicate import", "clean", "clean|duplicate", 2])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

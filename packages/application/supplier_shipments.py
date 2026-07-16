@@ -125,26 +125,13 @@ NOMENCLATURE_XLSX_HEADERS = [
     "Ключи совместимости",
     "Обновлено",
 ]
-NOMENCLATURE_PRODUCT_TYPE_LABELS = {
-    "clear": "Clean",
-    "clean": "Clean",
-    "anti_spy": "Anti-spy",
-    "matte": "Matte",
-    "no_frame_clean": "No Frame Clean",
-    "no_frame_anti_spy": "No Frame Anti-spy",
-    "no_frame_matte": "No Frame Matte",
-    "extra": "Доп. строка",
-    "other": "Другое",
-}
+# These aliases are migration-only input compatibility for old nomenclature
+# workbooks. Current group keys and labels come exclusively from the runtime
+# SKU-group registry.
 NOMENCLATURE_LEGACY_PRODUCT_TYPE_LABELS = {
-    "прозрачное": "clear",
+    "прозрачное": "clean",
     "антишпион": "anti_spy",
     "матовое": "matte",
-}
-NOMENCLATURE_PRODUCT_TYPE_BY_LABEL = {
-    **{key: key for key in NOMENCLATURE_PRODUCT_TYPE_LABELS},
-    **{value.casefold(): key for key, value in NOMENCLATURE_PRODUCT_TYPE_LABELS.items()},
-    **NOMENCLATURE_LEGACY_PRODUCT_TYPE_LABELS,
 }
 DEFAULT_SKU_GROUPS: tuple[dict[str, Any], ...] = (
     {"group_key": "clean", "label": "Clean", "aliases": ["clean", "clear", "transparent", "прозрач"]},
@@ -227,7 +214,7 @@ class SupplierShipmentsBlock:
         )
         parsed_payload["metadata"] = _supplier_order_metadata(parsed_payload.get("metadata"))
         nomenclature_items = self._active_nomenclature_items()
-        parsed_payload["lines"] = _apply_nomenclature_matches(
+        parsed_payload["lines"] = self._apply_authoritative_nomenclature_matches(
             [dict(item) for item in parsed_payload.get("lines") or []],
             nomenclature_items,
         )
@@ -314,7 +301,7 @@ class SupplierShipmentsBlock:
             force_manual_override=False,
         )
         nomenclature_items = self._active_nomenclature_items()
-        lines = _apply_nomenclature_matches(lines, nomenclature_items)
+        lines = self._apply_authoritative_nomenclature_matches(lines, nomenclature_items)
         _assert_atomic_supplier_product_matching(lines)
         lines = _apply_price_conformity_checks(
             lines,
@@ -394,7 +381,18 @@ class SupplierShipmentsBlock:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        return self._with_approx_cost_fields(self._with_document_fields(_detail_payload(detail)))
+        payload = _detail_payload(detail)
+        payload["lines"] = _project_supplier_line_contract(
+            payload.get("lines") or [],
+            self._sku_groups(),
+        )
+        payload["product_lines"] = [
+            item for item in payload["lines"] if item.get("line_type") == LINE_TYPE_PRODUCT
+        ]
+        payload["extra_lines"] = [
+            item for item in payload["lines"] if item.get("line_type") == LINE_TYPE_EXTRA
+        ]
+        return self._with_approx_cost_fields(self._with_document_fields(payload))
 
     def update_shipment(
         self,
@@ -471,7 +469,7 @@ class SupplierShipmentsBlock:
             match_status = str(existing.get("header", {}).get("match_status") or match_status)
         else:
             nomenclature_items = self._active_nomenclature_items()
-            lines = _apply_nomenclature_matches(lines, nomenclature_items)
+            lines = self._apply_authoritative_nomenclature_matches(lines, nomenclature_items)
             _assert_atomic_supplier_product_matching(lines)
             summary = _recalculate_summary(lines, declared_total=_optional_number(metadata.get("declared_invoice_total")))
             match_status = _shipment_match_status(lines, checksum_error=summary["checksum_error"])
@@ -804,7 +802,7 @@ class SupplierShipmentsBlock:
                 "message": "rematch skipped: legacy product lines do not have source-owned barcodes; reparse the invoice",
             }
             return result
-        detail_payload["lines"] = _apply_nomenclature_matches(
+        detail_payload["lines"] = self._apply_authoritative_nomenclature_matches(
             detail_payload.get("lines") or [],
             self._active_nomenclature_items(),
         )
@@ -1406,6 +1404,8 @@ class SupplierShipmentsBlock:
         self._ensure_nomenclature_ready()
         visibility_mode = _normalize_visibility_mode(visibility)
         all_items = self.runtime.list_nomenclature_items()
+        sku_groups = self._sku_groups()
+        all_items = [_with_sku_group_projection(item, sku_groups) for item in all_items]
         if visibility_mode == "visible":
             items = [item for item in all_items if not bool(item.get("is_hidden"))]
         elif visibility_mode == "hidden":
@@ -1417,17 +1417,19 @@ class SupplierShipmentsBlock:
             "status": "ok",
             "visibility": visibility_mode,
             "summary": _nomenclature_barcode_summary(all_items),
-            "sku_groups": self.list_sku_groups(include_inactive=True)["groups"],
+            "sku_groups": sku_groups,
             "items": items,
         }
 
     def export_nomenclature_xlsx(self) -> tuple[bytes, str, str]:
         self._ensure_nomenclature_ready()
+        sku_groups = self._sku_groups()
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.title = "Номенклатура"
         worksheet.append(NOMENCLATURE_XLSX_HEADERS)
-        for item in self.runtime.list_nomenclature_items():
+        for raw_item in self.runtime.list_nomenclature_items():
+            item = _with_sku_group_projection(raw_item, sku_groups)
             worksheet.append(
                 [
                     str(item.get("item_id") or ""),
@@ -1444,7 +1446,7 @@ class SupplierShipmentsBlock:
                     str(item.get("wb_updated_at") or ""),
                     str(item.get("wb_sync_status") or ""),
                     str(item.get("nomenclature_name") or ""),
-                    NOMENCLATURE_PRODUCT_TYPE_LABELS.get(str(item.get("product_type") or ""), str(item.get("product_type") or "")),
+                    str(item.get("group_label") or item.get("group_key") or ""),
                     str(item.get("match_key") or ""),
                     item.get("purchase_price_yuan") if item.get("purchase_price_yuan") is not None else "",
                     str(item.get("compatible_models_text") or ""),
@@ -1484,6 +1486,7 @@ class SupplierShipmentsBlock:
             raise ValueError("nomenclature import workbook must contain a header row")
 
         existing_items = self.runtime.list_nomenclature_items()
+        sku_groups = self._sku_groups()
         existing_by_id = {str(item.get("item_id") or ""): dict(item) for item in existing_items}
         active_by_match_key: dict[str, list[dict[str, Any]]] = {}
         for item in existing_items:
@@ -1509,8 +1512,15 @@ class SupplierShipmentsBlock:
                     row_number=row_number,
                     existing_by_id=existing_by_id,
                     active_by_match_key=active_by_match_key,
+                    sku_groups=sku_groups,
                     now=now,
                 )
+                if operation is not None:
+                    operation_item = operation["item"]
+                    self._validate_nomenclature_group(
+                        operation_item,
+                        existing=existing_by_id.get(str(operation_item.get("item_id") or "")),
+                    )
             except ValueError as exc:
                 errors.append({"row": row_number, "message": str(exc)})
                 continue
@@ -1612,6 +1622,7 @@ class SupplierShipmentsBlock:
             created_at=now,
             updated_at=now,
         )
+        self._validate_nomenclature_group(item)
         item, barcode_sync = self._sync_nomenclature_barcode_item(
             item,
             reason="auto_save",
@@ -1649,6 +1660,7 @@ class SupplierShipmentsBlock:
             created_at=str(existing.get("created_at") or now),
             updated_at=now,
         )
+        self._validate_nomenclature_group(item, existing=existing)
         item, barcode_sync = self._sync_nomenclature_barcode_item(
             item,
             reason="auto_save",
@@ -2172,6 +2184,18 @@ class SupplierShipmentsBlock:
         self._ensure_nomenclature_ready()
         return self.runtime.list_nomenclature_items(active_only=True)
 
+    def _sku_groups(self) -> list[dict[str, Any]]:
+        self._ensure_sku_groups_ready()
+        return self.runtime.list_sku_groups(include_inactive=True)
+
+    def _apply_authoritative_nomenclature_matches(
+        self,
+        lines: list[Mapping[str, Any]],
+        nomenclature_items: list[Mapping[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        items = nomenclature_items if nomenclature_items is not None else self._active_nomenclature_items()
+        return _apply_nomenclature_matches(lines, items, self._sku_groups())
+
     def _ensure_nomenclature_ready(self) -> None:
         self._ensure_sku_groups_ready()
         self._seed_nomenclature_from_current_config_if_empty()
@@ -2205,6 +2229,22 @@ class SupplierShipmentsBlock:
             )
         ):
             raise ValueError(f"duplicate active nomenclature match_key: {item.get('match_key')}")
+
+    def _validate_nomenclature_group(
+        self,
+        item: Mapping[str, Any],
+        *,
+        existing: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._ensure_sku_groups_ready()
+        group_key = str(item.get("product_type") or "").strip()
+        group = self.runtime.load_sku_group(group_key)
+        if group is None:
+            if existing is not None and str(existing.get("product_type") or "").strip() == group_key:
+                return
+            raise ValueError(f"nomenclature group is absent from server-owned SKU groups: {group_key}")
+        if bool(item.get("is_active")) and not bool(group.get("is_active", True)):
+            raise ValueError(f"nomenclature group is inactive: {group_key}")
 
     def _seed_nomenclature_from_current_config_if_empty(self) -> None:
         if self.runtime.list_nomenclature_items():
@@ -2333,8 +2373,17 @@ def _bind_source_owned_line_identity(
             raise ValueError(f"{context}: edited line #{index} is not bound to a unique source invoice row")
         used_keys.add(key)
         bound_line = dict(raw_line)
-        bound_line["line_type"] = str(trusted_line.get("line_type") or "")
-        bound_line["barcode"] = str(trusted_line.get("barcode") or "")
+        for source_owned_field in (
+            "line_type",
+            "source_no",
+            "sort_order",
+            "barcode",
+            "model_raw",
+            "model_normalized",
+            "source_product_type",
+            "source_match_key",
+        ):
+            bound_line[source_owned_field] = deepcopy(trusted_line.get(source_owned_field))
         bound_line["raw"] = deepcopy(dict(trusted_line.get("raw") or {}))
         if trusted_line.get("line_id"):
             bound_line["line_id"] = str(trusted_line.get("line_id") or "")
@@ -2453,8 +2502,6 @@ def _normalize_line(
     product_type = str(raw.get("product_type") or "").strip()
     model_normalized = str(raw.get("model_normalized") or "").strip()
     match_key = str(raw.get("match_key") or "").strip()
-    if line_type == LINE_TYPE_PRODUCT and product_type and model_normalized and not match_key:
-        match_key = f"{product_type}|{model_normalized}"
     has_internal_match = bool(str(raw.get("internal_sku") or "").strip() or internal_nm_id or str(raw.get("internal_name") or "").strip())
     match_status = str(raw.get("match_status") or "").strip()
     if line_type == LINE_TYPE_EXTRA:
@@ -2468,6 +2515,14 @@ def _normalize_line(
     }:
         match_status = MATCH_STATUS_MATCHED if has_internal_match else MATCH_STATUS_UNMATCHED
     raw_payload = dict(raw.get("raw")) if isinstance(raw.get("raw"), Mapping) else {}
+    source_product_type = str(
+        raw.get("source_product_type") or raw_payload.get("source_product_type") or ""
+    ).strip()
+    source_match_key = str(
+        raw.get("source_match_key") or raw_payload.get("source_match_key") or ""
+    ).strip()
+    raw_payload["source_product_type"] = source_product_type
+    raw_payload["source_match_key"] = source_match_key
     match_evidence = raw.get("match_evidence") if isinstance(raw.get("match_evidence"), Mapping) else {}
     if not match_evidence and isinstance(raw_payload.get("match_evidence"), Mapping):
         match_evidence = raw_payload.get("match_evidence") or {}
@@ -2479,9 +2534,11 @@ def _normalize_line(
         "source_no": str(raw.get("source_no") or "").strip(),
         "barcode": barcode,
         "product_type": product_type,
+        "source_product_type": source_product_type,
         "model_raw": str(raw.get("model_raw") or "").strip(),
         "model_normalized": model_normalized,
         "match_key": match_key,
+        "source_match_key": source_match_key,
         "internal_sku": str(raw.get("internal_sku") or "").strip(),
         "internal_nm_id": internal_nm_id,
         "internal_name": str(raw.get("internal_name") or "").strip(),
@@ -2618,11 +2675,86 @@ def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _sku_group_index(sku_groups: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(group.get("group_key") or "").strip(): dict(group)
+        for group in sku_groups
+        if str(group.get("group_key") or "").strip()
+    }
+
+
+def _with_sku_group_projection(
+    payload: Mapping[str, Any],
+    sku_groups: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    projected = dict(payload)
+    group_key = str(projected.get("group_key") or projected.get("product_type") or "").strip()
+    group = _sku_group_index(sku_groups).get(group_key)
+    if not group_key:
+        group_label = ""
+        resolution_status = "group_key_missing"
+    elif group is None:
+        group_label = group_key
+        resolution_status = "group_not_found"
+    else:
+        group_label = str(group.get("label") or group_key).strip() or group_key
+        resolution_status = "resolved" if bool(group.get("is_active", True)) else "group_inactive"
+    projected["group_key"] = group_key
+    projected["group_label"] = group_label
+    projected["group_resolution_status"] = resolution_status
+    projected["group_diagnostic"] = "" if resolution_status == "resolved" else resolution_status
+    return projected
+
+
+def _project_supplier_line_contract(
+    lines: list[Mapping[str, Any]],
+    sku_groups: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    projected_lines: list[dict[str, Any]] = []
+    for raw_line in lines:
+        line = dict(raw_line)
+        raw_payload = dict(line.get("raw") or {})
+        line["source_product_type"] = str(
+            line.get("source_product_type") or raw_payload.get("source_product_type") or ""
+        )
+        line["source_match_key"] = str(
+            line.get("source_match_key") or raw_payload.get("source_match_key") or ""
+        )
+        line["nomenclature_item_id"] = str(
+            line.get("nomenclature_item_id") or raw_payload.get("nomenclature_item_id") or ""
+        )
+        model_diagnostic = line.get("model_diagnostic")
+        if not isinstance(model_diagnostic, Mapping):
+            model_diagnostic = raw_payload.get("model_diagnostic")
+        line["model_diagnostic"] = dict(model_diagnostic) if isinstance(model_diagnostic, Mapping) else {
+            "status": "not_checkable",
+            "needs_review": False,
+            "reason": "diagnostic_not_available",
+        }
+        is_authoritative_barcode_line = bool(
+            str(line.get("barcode") or "").strip()
+            and (
+                str(line.get("match_status") or "") == MATCH_STATUS_MATCHED_BY_BARCODE
+                or str(raw_payload.get("authoritative_group_key") or "").strip()
+            )
+        )
+        if line.get("line_type") == LINE_TYPE_PRODUCT and is_authoritative_barcode_line:
+            line = _with_sku_group_projection(line, sku_groups)
+        else:
+            line["group_key"] = str(line.get("product_type") or "")
+            line["group_label"] = ""
+            line["group_resolution_status"] = "legacy_unbound" if line.get("line_type") == LINE_TYPE_PRODUCT else "not_applicable"
+            line["group_diagnostic"] = line["group_resolution_status"]
+        projected_lines.append(line)
+    return projected_lines
+
+
 def _apply_nomenclature_matches(
     lines: list[Mapping[str, Any]],
     nomenclature_items: list[Mapping[str, Any]],
+    sku_groups: list[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    index = _build_nomenclature_match_index(nomenclature_items)
+    index = _build_nomenclature_match_index(nomenclature_items, sku_groups or [])
     matched_lines: list[dict[str, Any]] = []
     for raw_line in lines:
         line = dict(raw_line)
@@ -2635,12 +2767,15 @@ def _apply_nomenclature_matches(
     return matched_lines
 
 
-def _build_nomenclature_match_index(items: list[Mapping[str, Any]]) -> dict[str, Any]:
+def _build_nomenclature_match_index(
+    items: list[Mapping[str, Any]],
+    sku_groups: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     by_barcode: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         if not bool(item.get("is_active")):
             continue
-        item_payload = _nomenclature_item_match_payload(item)
+        item_payload = _nomenclature_item_match_payload(item, sku_groups=sku_groups or [])
         raw_barcodes = [item.get("barcode"), *_raw_barcode_list(item.get("barcodes"))]
         seen_item_barcodes: set[str] = set()
         for raw_barcode in raw_barcodes:
@@ -2698,33 +2833,139 @@ def _resolve_nomenclature_match(line: Mapping[str, Any], index: Mapping[str, Any
     return {
         **candidates[0],
         "match_status": MATCH_STATUS_MATCHED_BY_BARCODE,
-        "match_evidence": {"method": "barcode", "status": "matched", "reason": "exact_active_barcode"},
+        "match_evidence": {
+            "method": "barcode",
+            "status": "matched",
+            "reason": "exact_active_barcode",
+            "owner_item_id": str(candidates[0].get("item_id") or ""),
+        },
     }
 
 
 def _apply_match_resolution(line: dict[str, Any], resolution: Mapping[str, Any] | None) -> None:
+    raw_payload = dict(line.get("raw") or {})
+    source_product_type = str(
+        line.get("source_product_type")
+        or raw_payload.get("source_product_type")
+        or (
+            line.get("product_type")
+            if str(line.get("match_status") or "") != MATCH_STATUS_MATCHED_BY_BARCODE
+            else ""
+        )
+        or ""
+    ).strip()
+    source_match_key = str(
+        line.get("source_match_key")
+        or raw_payload.get("source_match_key")
+        or (
+            line.get("match_key")
+            if str(line.get("match_status") or "") != MATCH_STATUS_MATCHED_BY_BARCODE
+            else ""
+        )
+        or ""
+    ).strip()
+    line["source_product_type"] = source_product_type
+    line["source_match_key"] = source_match_key
+    raw_payload["source_product_type"] = source_product_type
+    raw_payload["source_match_key"] = source_match_key
     match_evidence = dict((resolution or {}).get("match_evidence") or {})
     status = str((resolution or {}).get("match_status") or MATCH_STATUS_UNMATCHED)
     if not resolution or status in {MATCH_STATUS_UNMATCHED, MATCH_STATUS_AMBIGUOUS}:
+        line["nomenclature_item_id"] = ""
         line["internal_sku"] = ""
         line["internal_nm_id"] = None
         line["internal_name"] = ""
+        line["product_type"] = ""
+        line["group_key"] = ""
+        line["group_label"] = ""
+        line["group_resolution_status"] = "not_resolved"
+        line["group_diagnostic"] = "not_resolved"
+        line["match_key"] = ""
+        line["model_diagnostic"] = {
+            "status": "not_checkable",
+            "needs_review": False,
+            "reason": "barcode_owner_not_resolved",
+        }
         line["match_status"] = status
         line["manual_override"] = False
         line["match_evidence"] = match_evidence
-        raw_payload = dict(line.get("raw") or {})
+        raw_payload.pop("nomenclature_item_id", None)
+        raw_payload.pop("authoritative_group_key", None)
+        raw_payload.pop("authoritative_match_key", None)
         raw_payload["match_evidence"] = match_evidence
+        raw_payload["model_diagnostic"] = line["model_diagnostic"]
         line["raw"] = raw_payload
         return
+    line["nomenclature_item_id"] = str(resolution.get("item_id") or "")
     line["internal_sku"] = str(resolution.get("internal_sku") or resolution.get("our_sku") or "")
     line["internal_nm_id"] = _optional_int(resolution.get("internal_nm_id") or resolution.get("nm_id"))
     line["internal_name"] = str(resolution.get("internal_name") or resolution.get("nomenclature_name") or "")
+    line["product_type"] = str(resolution.get("group_key") or resolution.get("product_type") or "").strip()
+    line["group_key"] = line["product_type"]
+    line["group_label"] = str(resolution.get("group_label") or line["group_key"] or "").strip()
+    line["group_resolution_status"] = str(resolution.get("group_resolution_status") or "group_not_found")
+    line["group_diagnostic"] = str(resolution.get("group_diagnostic") or "")
+    line["match_key"] = str(resolution.get("match_key") or "").strip()
+    line["model_diagnostic"] = _build_invoice_model_diagnostic(line, resolution)
+    missing_projection_fields = [
+        field
+        for field, value in (
+            ("group_key", line["group_key"]),
+            ("match_key", line["match_key"]),
+        )
+        if not str(value or "").strip()
+    ]
+    if missing_projection_fields:
+        match_evidence["authoritative_projection_status"] = "incomplete"
+        match_evidence["missing_authoritative_fields"] = missing_projection_fields
+    else:
+        match_evidence["authoritative_projection_status"] = "complete"
     line["match_status"] = status
     line["manual_override"] = False
     line["match_evidence"] = match_evidence
-    raw_payload = dict(line.get("raw") or {})
+    raw_payload["nomenclature_item_id"] = line["nomenclature_item_id"]
+    raw_payload["authoritative_group_key"] = line["group_key"]
+    raw_payload["authoritative_match_key"] = line["match_key"]
     raw_payload["match_evidence"] = match_evidence
+    raw_payload["model_diagnostic"] = line["model_diagnostic"]
     line["raw"] = raw_payload
+
+
+def _build_invoice_model_diagnostic(
+    line: Mapping[str, Any],
+    owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    source_model_keys = _dedupe(extract_iphone_model_keys(line.get("model_raw")))
+    owner_model_keys = _dedupe(
+        [str(value) for value in owner.get("compatible_model_keys") or []]
+    )
+    if not source_model_keys or not owner_model_keys:
+        return {
+            "status": "not_checkable",
+            "needs_review": False,
+            "reason": "model_evidence_missing",
+            "source_model_keys": source_model_keys,
+            "authoritative_model_keys": owner_model_keys,
+            "intersection": [],
+        }
+    intersection = sorted(set(source_model_keys).intersection(owner_model_keys))
+    if intersection:
+        return {
+            "status": "consistent",
+            "needs_review": False,
+            "reason": "canonical_model_intersection",
+            "source_model_keys": source_model_keys,
+            "authoritative_model_keys": owner_model_keys,
+            "intersection": intersection,
+        }
+    return {
+        "status": "mismatch",
+        "needs_review": True,
+        "reason": "canonical_model_disjoint",
+        "source_model_keys": source_model_keys,
+        "authoritative_model_keys": owner_model_keys,
+        "intersection": [],
+    }
 
 
 def _apply_price_conformity_checks(
@@ -2845,6 +3086,14 @@ def _resolve_price_reference_item(
     line: Mapping[str, Any],
     reference_index: Mapping[str, Any],
 ) -> tuple[dict[str, Any] | None, str]:
+    raw_payload = line.get("raw") if isinstance(line.get("raw"), Mapping) else {}
+    owner_item_id = str(
+        line.get("nomenclature_item_id") or raw_payload.get("nomenclature_item_id") or ""
+    ).strip()
+    if owner_item_id:
+        owner_item = (reference_index.get("by_item_id") or {}).get(owner_item_id)
+        if owner_item is not None:
+            return dict(owner_item), ""
     internal_nm_id = _optional_int(line.get("internal_nm_id"))
     if internal_nm_id is not None:
         candidates = list((reference_index.get("by_nm_id") or {}).get(internal_nm_id) or [])
@@ -3657,6 +3906,7 @@ def _normalize_nomenclature_import_row(
     row_number: int,
     existing_by_id: Mapping[str, dict[str, Any]],
     active_by_match_key: Mapping[str, list[dict[str, Any]]],
+    sku_groups: list[Mapping[str, Any]],
     now: str,
 ) -> dict[str, Any] | None:
     raw_item_id = _cell_text(row_values.get("item_id"))
@@ -3685,7 +3935,7 @@ def _normalize_nomenclature_import_row(
         else bool(base.get("is_hidden", False))
     )
     product_type = (
-        _parse_nomenclature_product_type(row_values.get("product_type"))
+        _parse_nomenclature_product_type(row_values.get("product_type"), sku_groups=sku_groups)
         if "product_type" in row_values and _cell_text(row_values.get("product_type"))
         else str(base.get("product_type") or "")
     )
@@ -3799,16 +4049,35 @@ def _parse_nomenclature_bool(value: Any, *, default: bool) -> bool:
     raise ValueError("Включено должно быть да/нет, true/false или 1/0")
 
 
-def _parse_nomenclature_product_type(value: Any) -> str:
+def _parse_nomenclature_product_type(
+    value: Any,
+    *,
+    sku_groups: list[Mapping[str, Any]],
+) -> str:
     normalized = _cell_text(value).casefold().replace("ё", "е")
-    if normalized in NOMENCLATURE_PRODUCT_TYPE_BY_LABEL:
-        return NOMENCLATURE_PRODUCT_TYPE_BY_LABEL[normalized]
     normalized_key = _normalize_sku_group_key(normalized)
-    if _valid_sku_group_key(normalized_key):
+    group_keys = {
+        str(group.get("group_key") or "").strip()
+        for group in sku_groups
+        if str(group.get("group_key") or "").strip()
+    }
+    if normalized_key in group_keys:
         return normalized_key
-    normalized_no_dot = normalized.replace(".", "")
-    if normalized_no_dot in {"доп строка", "дополнительная строка"}:
-        return "extra"
+    by_label = {
+        str(group.get("label") or "").strip().casefold().replace("ё", "е"): str(group.get("group_key") or "").strip()
+        for group in sku_groups
+        if str(group.get("label") or "").strip() and str(group.get("group_key") or "").strip()
+    }
+    if normalized in by_label:
+        return by_label[normalized]
+    legacy_key = NOMENCLATURE_LEGACY_PRODUCT_TYPE_LABELS.get(normalized)
+    if legacy_key:
+        return legacy_key
+    if _valid_sku_group_key(normalized_key):
+        # Stable keys from historical exports remain readable without silently
+        # remapping them to a different current group. The API projection marks
+        # a key absent from the registry with group_not_found.
+        return normalized_key
     raise ValueError("Группа должна быть stable key или label из справочника групп SKU")
 
 
@@ -3958,17 +4227,28 @@ def _infer_compatible_model_keys(item: Mapping[str, Any]) -> list[str]:
     return keys
 
 
-def _nomenclature_item_match_payload(item: Mapping[str, Any]) -> dict[str, Any]:
+def _nomenclature_item_match_payload(
+    item: Mapping[str, Any],
+    *,
+    sku_groups: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    projected_item = _with_sku_group_projection(item, sku_groups)
     return {
         "active": True,
-        "item_id": str(item.get("item_id") or ""),
-        "product_type": str(item.get("product_type") or ""),
-        "factory_type": str(item.get("product_type") or ""),
-        "internal_sku": str(item.get("our_sku") or item.get("internal_sku") or ""),
-        "internal_nm_id": _optional_int(item.get("nm_id") or item.get("internal_nm_id")),
-        "internal_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
-        "nomenclature_name": str(item.get("nomenclature_name") or item.get("internal_name") or ""),
-        "purchase_price_yuan": item.get("purchase_price_yuan"),
+        "item_id": str(projected_item.get("item_id") or ""),
+        "product_type": str(projected_item.get("product_type") or ""),
+        "group_key": str(projected_item.get("group_key") or ""),
+        "group_label": str(projected_item.get("group_label") or ""),
+        "group_resolution_status": str(projected_item.get("group_resolution_status") or ""),
+        "group_diagnostic": str(projected_item.get("group_diagnostic") or ""),
+        "match_key": str(projected_item.get("match_key") or ""),
+        "factory_type": str(projected_item.get("product_type") or ""),
+        "internal_sku": str(projected_item.get("our_sku") or projected_item.get("internal_sku") or ""),
+        "internal_nm_id": _optional_int(projected_item.get("nm_id") or projected_item.get("internal_nm_id")),
+        "internal_name": str(projected_item.get("nomenclature_name") or projected_item.get("internal_name") or ""),
+        "nomenclature_name": str(projected_item.get("nomenclature_name") or projected_item.get("internal_name") or ""),
+        "compatible_model_keys": _infer_compatible_model_keys(projected_item),
+        "purchase_price_yuan": projected_item.get("purchase_price_yuan"),
     }
 
 
@@ -4006,7 +4286,7 @@ def _product_type_from_config_item(display_name: str, group: str) -> str:
     if "matte" in text:
         return "matte"
     if "clean" in text or "clear" in text:
-        return "clear"
+        return "clean"
     return ""
 
 
