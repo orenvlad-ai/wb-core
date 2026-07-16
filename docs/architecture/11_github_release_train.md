@@ -93,6 +93,8 @@ PR-specific failure до merge не изменяет `main` или production и
 
 После merge этих артефактов push-to-main run создаёт labels. Для реального live release администратор один раз добавляет два secrets в GitHub Environment `production` и проверяет первый bounded canary PR.
 
+Первый activation canary должен быть business-no-op change без production data mutation. Его terminal `release:production` подтверждает environment secret binding, strict SSH, exact merge, canonical deploy и production verify до постановки рабочих live PR в очередь.
+
 Обычный task owner:
 
 1. создаёт отдельную branch/worktree от актуального `origin/main`;
