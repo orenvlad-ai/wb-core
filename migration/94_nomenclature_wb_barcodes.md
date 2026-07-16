@@ -40,7 +40,7 @@ Legacy `clear` / `anti_spy` / `matte` values survive. UI/export labels for the l
 
 Supplier invoice parser v2 uses the supplier XLSX barcode as the only automatic product identity. It detects the barcode column by normalized multilingual header aliases first, then by the confirmed relative `NAME & SPECIFICATION -> barcode-like values -> QTY` structure, and uses the current D position only when the complete A:G template and value profile confirm it. Ambiguous or unconfirmed columns reject the file explicitly.
 
-Matching indexes primary `barcode` plus every value in `barcodes_json` for all active nomenclature rows, including hidden active rows. One owner produces `matched_by_barcode`; zero owners is unmatched; multiple active owners is ambiguous. Product type, model, match key, aliases and compatible models are not fallback identity paths.
+Matching indexes primary `barcode` plus every value in `barcodes_json` for all active nomenclature rows, including hidden active rows. One owner with a positive nmID produces `matched_by_barcode`; zero owners or an owner without nmID is unmatched with explicit evidence; multiple active owners is ambiguous. Product type, model, match key, aliases and compatible models are not fallback identity paths.
 
 `sheet_vitrina_v1_supplier_shipment_lines` gains nullable `barcode TEXT`. The runtime migration uses `ALTER TABLE ... ADD COLUMN` through the existing idempotent schema guard, so old shipment rows remain readable with an empty barcode. New parsed uploads and saved lines persist the exact normalized source barcode. This migration performs no production backfill; legacy rematch without a stored barcode is skipped safely with diagnostics.
 

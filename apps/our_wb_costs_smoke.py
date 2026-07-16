@@ -120,7 +120,7 @@ def main() -> None:
         try:
             supplier_block.update_order_status("sup_smoke", ORDER_STATUS_ACCEPTED_FF)
         except ValueError as exc:
-            if "actual_ff_acceptance_date" not in str(exc):
+            if "status-only PATCH" not in str(exc):
                 raise
         else:
             raise AssertionError("status-only accepted_ff PATCH must be rejected")

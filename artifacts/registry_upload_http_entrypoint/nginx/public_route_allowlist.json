@@ -289,6 +289,36 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_wb_buyer_session_check",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/check",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_wb_buyer_recovery_status",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_wb_buyer_recovery_start",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_wb_buyer_recovery_stop",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_wb_buyer_recovery_launcher",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_supply_factory_order",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/supply/factory-order/",

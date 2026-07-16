@@ -21,6 +21,8 @@ from packages.application.webcore_ops_diagnostics import (
     WebCoreOpsDiagnostics,
     WebCoreOpsDiagnosticsError,
 )
+from packages.application.supplier_shipment_status import apply_derived_supplier_status
+from packages.business_time import current_business_date_iso
 
 DB_FILENAME = "registry_upload_runtime.sqlite3"
 DEFAULT_MAX_LIMIT = 50
@@ -722,15 +724,30 @@ class WebCoreDataMcpGateway:
         with self._connect() as conn:
             if not _table_exists(conn, "sheet_vitrina_v1_supplier_shipments"):
                 return _missing_table_result("sheet_vitrina_v1_supplier_shipments")
+            supplier_columns = _table_columns(
+                conn, "sheet_vitrina_v1_supplier_shipments"
+            )
+            historical_exception_select = (
+                "s.historical_status_exception"
+                if "historical_status_exception" in supplier_columns
+                else "'' AS historical_status_exception"
+            )
             where = ""
             params: list[Any] = []
             if status_filter:
-                where = "WHERE s.order_status = ?"
-                params.append(status_filter)
+                today = current_business_date_iso()
+                where = "WHERE " + _derived_supplier_status_sql(
+                    "s",
+                    historical_exception_available=(
+                        "historical_status_exception"
+                        in _table_columns(conn, "sheet_vitrina_v1_supplier_shipments")
+                    ),
+                ) + " = ?"
+                params.extend((today, today, status_filter))
             rows = conn.execute(
                 f"""
                 SELECT s.shipment_id, s.shipment_date, s.actual_shipment_date, s.actual_ff_acceptance_date,
-                       s.order_status, s.currency, s.product_qty_total, s.product_amount_total,
+                       {historical_exception_select}, s.order_status, s.currency, s.product_qty_total, s.product_amount_total,
                        s.extras_amount_total, s.invoice_amount_total, s.match_status,
                        COUNT(l.line_id) AS line_count,
                        COALESCE(SUM(CASE WHEN l.qty IS NULL THEN 0 ELSE l.qty END), 0) AS line_qty_total,
@@ -756,7 +773,7 @@ class WebCoreDataMcpGateway:
             ).fetchall()
         ranked: list[dict[str, Any]] = []
         for row in rows:
-            item = _row_dict(row)
+            item = apply_derived_supplier_status(_row_dict(row))
             qty = _first_number(item.get("product_qty_total"), item.get("line_qty_total"))
             base_amount = _first_number(item.get("invoice_amount_total"), item.get("product_amount_total"), item.get("line_amount_total"))
             expense = _number_or_zero(item.get("expense_amount_rub"))
@@ -1509,6 +1526,10 @@ class WebCoreDataMcpGateway:
     ) -> dict[str, Any]:
         spec = _require_table_spec(table)
         effective_offset = _cursor_to_offset(cursor, offset)
+        derived_supplier_status_filter: Any = None
+        effective_filters = dict(filters)
+        if table == "sheet_vitrina_v1_supplier_shipments":
+            derived_supplier_status_filter = effective_filters.pop("order_status", None)
         with self._connect() as conn:
             if not _table_exists(conn, table):
                 return _missing_table_result(table)
@@ -1517,11 +1538,49 @@ class WebCoreDataMcpGateway:
             where_sql, params, applied_filters = _build_table_where(
                 columns,
                 spec,
-                filters=filters,
+                filters=effective_filters,
                 date_from=date_from,
                 date_to=date_to,
             )
             order_sql = _order_by_sql(columns, spec, order_by)
+            if derived_supplier_status_filter is not None:
+                values = (
+                    list(derived_supplier_status_filter[:20])
+                    if isinstance(derived_supplier_status_filter, list)
+                    else [derived_supplier_status_filter]
+                )
+                if values:
+                    today = current_business_date_iso()
+                    predicate = _derived_supplier_status_sql(
+                        "",
+                        historical_exception_available=(
+                            "historical_status_exception" in columns
+                        ),
+                    )
+                    predicate += " IN (" + ", ".join("?" for _ in values) + ")"
+                    where_sql = (
+                        where_sql + " AND " + predicate
+                        if where_sql
+                        else "WHERE " + predicate
+                    )
+                    params.extend((today, today, *values))
+                    applied_filters["order_status"] = (
+                        values if isinstance(derived_supplier_status_filter, list) else values[0]
+                    )
+            supplier_order_direction = _supplier_status_order_direction(order_by)
+            if table == "sheet_vitrina_v1_supplier_shipments" and supplier_order_direction:
+                today = current_business_date_iso()
+                order_sql = (
+                    "ORDER BY "
+                    + _derived_supplier_status_sql(
+                        "",
+                        historical_exception_available=(
+                            "historical_status_exception" in columns
+                        ),
+                    )
+                    + f" {supplier_order_direction}"
+                )
+                params.extend((today, today))
             quoted_columns = ", ".join(_quote_ident(column) for column in selected_columns)
             rows = conn.execute(
                 f"""
@@ -1536,7 +1595,9 @@ class WebCoreDataMcpGateway:
         raw_columns = set(spec.get("raw_columns") or [])
         payload_rows = [
             _business_row_payload(
-                _row_dict(row),
+                apply_derived_supplier_status(_row_dict(row))
+                if table == "sheet_vitrina_v1_supplier_shipments"
+                else _row_dict(row),
                 raw_columns=raw_columns,
                 include_raw_business_payloads=include_raw_business_payloads,
             )
@@ -1585,12 +1646,34 @@ class WebCoreDataMcpGateway:
         with self._connect() as conn:
             if not _table_exists(conn, "sheet_vitrina_v1_supplier_shipments"):
                 return _missing_table_result("sheet_vitrina_v1_supplier_shipments")
+            supplier_columns = _table_columns(
+                conn, "sheet_vitrina_v1_supplier_shipments"
+            )
+            historical_exception_select = (
+                "s.historical_status_exception"
+                if "historical_status_exception" in supplier_columns
+                else "'' AS historical_status_exception"
+            )
             clauses: list[str] = []
             params: list[Any] = []
             _append_like_filter(clauses, params, "s.shipment_id", shipment_id)
             _append_like_filter(clauses, params, "s.invoice_no", invoice_no)
             _append_like_filter(clauses, params, "s.supplier_name", supplier_name)
-            _append_exact_filter(clauses, params, "s.order_status", order_status)
+            if order_status:
+                today = current_business_date_iso()
+                clauses.append(
+                    _derived_supplier_status_sql(
+                        "s",
+                        historical_exception_available=(
+                            "historical_status_exception"
+                            in _table_columns(
+                                conn, "sheet_vitrina_v1_supplier_shipments"
+                            )
+                        ),
+                    )
+                    + " = ?"
+                )
+                params.extend((today, today, order_status))
             _append_exact_filter(clauses, params, "s.match_status", match_status)
             if date_from:
                 clauses.append("COALESCE(s.shipment_date, s.invoice_date, s.created_at, '') >= ?")
@@ -1609,7 +1692,8 @@ class WebCoreDataMcpGateway:
             rows = conn.execute(
                 f"""
                 SELECT s.shipment_id, s.created_at, s.updated_at, s.shipment_date, s.actual_shipment_date,
-                       s.actual_ff_acceptance_date, s.order_status, s.invoice_no, s.invoice_date, s.contract_no,
+                       s.actual_ff_acceptance_date, {historical_exception_select},
+                       s.order_status, s.invoice_no, s.invoice_date, s.contract_no,
                        s.contract_date, s.supplier_name, s.currency, s.product_qty_total, s.product_amount_total,
                        s.extras_amount_total, s.invoice_amount_total, s.declared_invoice_total, s.match_status,
                        COUNT(DISTINCT l.line_id) AS line_count,
@@ -1636,7 +1720,7 @@ class WebCoreDataMcpGateway:
             )
         result_rows = []
         for row in rows[:limit]:
-            item = _row_dict(row)
+            item = apply_derived_supplier_status(_row_dict(row))
             packing_summary = _packing_list_summary_from_documents(
                 packing_docs_by_shipment.get(str(item.get("shipment_id") or ""), []),
                 line_item_limit=0,
@@ -2414,10 +2498,18 @@ class WebCoreDataMcpGateway:
         return [_row_dict(row) for row in rows]
 
     def _search_shipments(self, conn: sqlite3.Connection, like: str, *, limit: int) -> list[dict[str, Any]]:
+        historical_exception_select = (
+            "historical_status_exception"
+            if "historical_status_exception"
+            in _table_columns(conn, "sheet_vitrina_v1_supplier_shipments")
+            else "'' AS historical_status_exception"
+        )
         rows = conn.execute(
-            """
+            f"""
             SELECT 'shipment' AS object_type, shipment_id AS id, shipment_id AS title,
-                   shipment_date, order_status, invoice_no, supplier_name, match_status
+                   shipment_date, actual_shipment_date, actual_ff_acceptance_date,
+                   {historical_exception_select},
+                   order_status, invoice_no, supplier_name, match_status
             FROM sheet_vitrina_v1_supplier_shipments
             WHERE shipment_id LIKE ? OR invoice_no LIKE ? OR supplier_name LIKE ?
             ORDER BY shipment_date DESC, updated_at DESC
@@ -2425,7 +2517,7 @@ class WebCoreDataMcpGateway:
             """,
             (like, like, like, limit),
         ).fetchall()
-        return [_row_dict(row) for row in rows]
+        return [apply_derived_supplier_status(_row_dict(row)) for row in rows]
 
     def _search_wb_supplies(self, conn: sqlite3.Connection, like: str, *, limit: int) -> list[dict[str, Any]]:
         rows = conn.execute(
@@ -2523,10 +2615,17 @@ class WebCoreDataMcpGateway:
     def _supplier_shipment_row(self, conn: sqlite3.Connection, shipment_id: str) -> dict[str, Any] | None:
         if not _table_exists(conn, "sheet_vitrina_v1_supplier_shipments"):
             return None
+        historical_exception_select = (
+            "historical_status_exception"
+            if "historical_status_exception"
+            in _table_columns(conn, "sheet_vitrina_v1_supplier_shipments")
+            else "'' AS historical_status_exception"
+        )
         row = conn.execute(
-            """
+            f"""
             SELECT shipment_id, created_at, updated_at, shipment_date, actual_shipment_date,
-                   actual_ff_acceptance_date, order_status, invoice_no, invoice_date, contract_no,
+                   actual_ff_acceptance_date, {historical_exception_select},
+                   order_status, invoice_no, invoice_date, contract_no,
                    contract_date, supplier_name, customer_name, currency, product_qty_total,
                    product_amount_total, extras_amount_total, invoice_amount_total,
                    declared_invoice_total, match_status, parser_version, warnings_json, errors_json
@@ -2538,7 +2637,7 @@ class WebCoreDataMcpGateway:
         ).fetchone()
         if row is None:
             return None
-        item = _row_dict(row)
+        item = apply_derived_supplier_status(_row_dict(row))
         item["warnings"] = _bounded_list(_safe_json_loads(item.pop("warnings_json", None)), limit=20)
         item["errors"] = _bounded_list(_safe_json_loads(item.pop("errors_json", None)), limit=20)
         return item
@@ -4158,6 +4257,48 @@ def _append_exact_filter(clauses: list[str], params: list[Any], column_sql: str,
     if value:
         clauses.append(f"{column_sql} = ?")
         params.append(value)
+
+
+def _derived_supplier_status_sql(
+    alias: str, *, historical_exception_available: bool = True
+) -> str:
+    prefix = str(alias or "").strip()
+    qualifier = f"{prefix}." if prefix else ""
+    acceptance = f"{qualifier}actual_ff_acceptance_date"
+    shipment = f"{qualifier}actual_shipment_date"
+    exception_clause = (
+        f"WHEN {qualifier}historical_status_exception="
+        "'legacy_ff_accepted_without_date' "
+        f"AND COALESCE({shipment},'')='' AND COALESCE({acceptance},'')='' "
+        "THEN 'accepted_ff' "
+        if historical_exception_available
+        else ""
+    )
+    return (
+        "CASE "
+        f"WHEN length({acceptance})=10 AND date({acceptance})={acceptance} AND {acceptance}<=? "
+        "THEN 'accepted_ff' "
+        f"{exception_clause}"
+        f"WHEN length({shipment})=10 AND date({shipment})={shipment} AND {shipment}<=? "
+        "THEN 'in_transit' ELSE 'production' END"
+    )
+
+
+def _supplier_status_order_direction(order_by: str | None) -> str:
+    requested = str(order_by or "").strip()
+    if not requested:
+        return ""
+    direction = "ASC"
+    column = requested
+    if requested.startswith("-"):
+        column = requested[1:]
+        direction = "DESC"
+    elif " " in requested:
+        parts = requested.split()
+        column = parts[0]
+        if len(parts) > 1 and parts[1].upper() in {"ASC", "DESC"}:
+            direction = parts[1].upper()
+    return direction if column == "order_status" else ""
 
 
 def _recommended_call(step: int, tool: str, arguments: dict[str, Any], scope: str, expected_result: str) -> dict[str, Any]:

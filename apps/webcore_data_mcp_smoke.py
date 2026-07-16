@@ -37,6 +37,7 @@ from packages.application.webcore_data_mcp import (  # noqa: E402
     SCOPE_OPS_READ,
     SCOPE_SUPPLY_READ,
     WebCoreDataMcpGateway,
+    _derived_supplier_status_sql,
 )
 from packages.application.webcore_ops_diagnostics import (  # noqa: E402
     CommandResult,
@@ -45,6 +46,7 @@ from packages.application.webcore_ops_diagnostics import (  # noqa: E402
 
 
 def main() -> int:
+    _assert_historical_status_sql_conflict()
     with TemporaryDirectory(prefix="webcore-data-mcp-smoke-") as tmp:
         root = Path(tmp)
         db_path = root / "registry_upload_runtime.sqlite3"
@@ -62,6 +64,37 @@ def main() -> int:
         _assert_audit(audit_log_path)
     print("webcore_data_mcp_smoke: OK")
     return 0
+
+
+def _assert_historical_status_sql_conflict() -> None:
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute(
+            """
+            CREATE TABLE supplier_status_fixture(
+                fixture_id TEXT PRIMARY KEY,
+                actual_shipment_date TEXT,
+                actual_ff_acceptance_date TEXT,
+                historical_status_exception TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO supplier_status_fixture VALUES(?,?,?,?)",
+            [
+                ("historical", None, None, "legacy_ff_accepted_without_date"),
+                ("conflicting", "2026-06-25", None, "legacy_ff_accepted_without_date"),
+            ],
+        )
+        rows = dict(
+            conn.execute(
+                "SELECT fixture_id, "
+                + _derived_supplier_status_sql("")
+                + " FROM supplier_status_fixture ORDER BY fixture_id",
+                ("2026-07-15", "2026-07-15"),
+            ).fetchall()
+        )
+    if rows != {"conflicting": "in_transit", "historical": "accepted_ff"}:
+        raise AssertionError(f"historical status SQL precedence drifted: {rows}")
 
 
 def _assert_read_only(gateway: WebCoreDataMcpGateway) -> None:
@@ -190,6 +223,7 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("get_webcore_business_table_schema", {"table": "sheet_vitrina_v1_supplier_shipments"}),
         ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_wb_supplies", "limit": 5, "include_raw_business_payloads": True}),
         ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_supplier_financial_documents", "filters": {"supplier_order_id": "SHIP-1", "document_type": "packing_list"}, "limit": 5, "include_raw_business_payloads": True}),
+        ("get_webcore_business_table_rows", {"table": "sheet_vitrina_v1_supplier_shipments", "filters": {"order_status": "production"}, "order_by": "order_status DESC", "limit": 5}),
         ("get_supplier_shipments_registry", {"limit": 5, "sort_by": "product_qty_total_desc"}),
         ("get_supplier_shipment_full_details", {"shipment_id": "SHIP-1", "include_raw_business_payloads": True}),
         ("get_wb_supplies_registry", {"limit": 5}),
@@ -205,6 +239,7 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
         ("get_supply_artifact", {"artifact_ref": "financial_document:SHIP-1:FD-1", "mode": "base64_chunk", "max_bytes": 64}),
         ("get_supply_artifact", {"artifact_ref": "financial_document:SHIP-1:FD-BAD", "mode": "base64_chunk"}),
         ("search_business_objects", {"query": "210183142"}),
+        ("search_business_objects", {"query": "SHIP-1", "object_types": ["shipment"]}),
         ("explain_metric_source", {"metric_key": "orders_revenue_rub"}),
         ("get_wb_supplies_summary", {"limit": 5}),
         ("get_wb_supply_details", {"supply_id": "WB-SUP-1"}),
@@ -275,10 +310,20 @@ def _assert_direct_tools(gateway: WebCoreDataMcpGateway) -> None:
                 payload = (((rows or [{}])[0] or {}).get("normalized_parse_json_scrubbed_payload") or {})
                 if payload.get("total_cartons") != 221.0 or payload.get("document_type") != "packing_list":
                     raise AssertionError(f"packing-list business payload not exposed safely: {result}")
+            if args.get("table") == "sheet_vitrina_v1_supplier_shipments":
+                row = (rows or [{}])[0]
+                if row.get("order_status") != "production" or not row.get("order_status_warnings"):
+                    raise AssertionError(f"generic supplier rows must expose/filter derived status: {result}")
         if name == "get_supplier_shipments_registry":
             row = (result.get("rows") or [{}])[0]
             if row.get("shipment_id") != "SHIP-1" or row.get("packing_list_total_cartons") != 221.0:
                 raise AssertionError(f"registry missing packing-list summary fields: {result}")
+            if row.get("order_status") != "production" or not row.get("order_status_warnings"):
+                raise AssertionError(f"registry must expose derived legacy-inconsistency status: {result}")
+        if name == "search_business_objects" and args.get("object_types") == ["shipment"]:
+            row = (result.get("results") or [{}])[0]
+            if row.get("order_status") != "production" or not row.get("order_status_warnings"):
+                raise AssertionError(f"shipment search must expose derived status: {result}")
         if name == "get_supplier_shipment_full_details":
             packing = result.get("packing_list_summary") or {}
             if packing.get("total_cartons") != 221.0 or packing.get("total_boxes") != 221.0 or packing.get("line_item_count") != 2:

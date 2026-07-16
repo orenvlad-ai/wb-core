@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -35,6 +36,10 @@ from packages.application.supplier_invoice_parser import (
     parse_supplier_invoice_xlsx,
 )
 from packages.application.supplier_financial_documents import build_financial_summary
+from packages.application.supplier_shipment_status import (
+    supplier_business_today,
+    validate_supplier_factual_dates,
+)
 from packages.contracts.supplier_shipments import (
     DEFAULT_SUPPLIER_NAME,
     LINE_TYPE_EXTRA,
@@ -269,12 +274,18 @@ class SupplierShipmentsBlock:
         return payload
 
     def create_shipment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if "historical_status_exception" in payload:
+            raise ValueError(
+                "Историческое исключение статуса доступно только через audited repo-owned flow."
+            )
         upload_id = str(payload.get("upload_id") or "").strip()
         if not upload_id:
             raise ValueError("upload_id is required")
         upload = self.runtime.load_supplier_shipment_upload(upload_id)
         if upload is None:
             raise ValueError(f"supplier shipment upload not found: {upload_id}")
+        now = self.timestamp_factory()
+        business_today = supplier_business_today(timestamp=now)
         edited_payload = _resolve_edited_payload(payload, fallback=upload["parsed_payload"])
         edited_payload = _bind_source_owned_line_identity(
             edited_payload,
@@ -285,13 +296,23 @@ class SupplierShipmentsBlock:
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, None, "actual_ff_acceptance_date")
         approx_yuan_rate = _resolve_optional_positive_decimal_field(payload, edited_payload, None, "approx_yuan_rate")
-        order_status = ORDER_STATUS_ACCEPTED_FF if actual_ff_acceptance_date else ORDER_STATUS_DEFAULT
+        status_resolution = validate_supplier_factual_dates(
+            actual_shipment_date=actual_shipment_date,
+            actual_ff_acceptance_date=actual_ff_acceptance_date,
+            business_today=business_today,
+        )
+        order_status = status_resolution.order_status
+        if "order_status" in payload:
+            requested_status = _normalize_order_status(payload.get("order_status"))
+            if requested_status != order_status:
+                raise ValueError(
+                    "Статус поставки вычисляется из фактических дат и не может быть задан вручную."
+                )
         metadata, lines, warnings, errors, summary, match_status = _normalize_edit_payload(
             edited_payload,
             shipment_date=shipment_date,
             force_manual_override=False,
         )
-        now = self.timestamp_factory()
         nomenclature_items = self._active_nomenclature_items()
         lines = _apply_nomenclature_matches(lines, nomenclature_items)
         _assert_atomic_supplier_product_matching(lines)
@@ -375,7 +396,11 @@ class SupplierShipmentsBlock:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         return self._with_approx_cost_fields(self._with_document_fields(_detail_payload(detail)))
 
-    def update_shipment(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def update_shipment(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
@@ -388,6 +413,18 @@ class SupplierShipmentsBlock:
                 "legacy supplier shipment product lines do not have source-owned barcodes; "
                 "line edits are blocked until the invoice is reparsed"
             )
+        if (
+            "historical_status_exception" in payload
+            and str(payload.get("historical_status_exception") or "").strip()
+            != str(
+                existing.get("header", {}).get("historical_status_exception") or ""
+            ).strip()
+        ):
+            raise ValueError(
+                "Историческое исключение статуса доступно только через audited repo-owned flow."
+            )
+        now = self.timestamp_factory()
+        business_today = supplier_business_today(timestamp=now)
         edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
         edited_payload = _bind_source_owned_line_identity(
             edited_payload,
@@ -400,6 +437,22 @@ class SupplierShipmentsBlock:
         existing_header = dict(existing["header"])
         actual_shipment_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_shipment_date")
         actual_ff_acceptance_date = _resolve_optional_date_field(payload, edited_payload, existing_header, "actual_ff_acceptance_date")
+        status_resolution = validate_supplier_factual_dates(
+            actual_shipment_date=actual_shipment_date,
+            actual_ff_acceptance_date=actual_ff_acceptance_date,
+            business_today=business_today,
+            historical_status_exception=existing_header.get(
+                "historical_status_exception"
+            ),
+        )
+        factual_date_changed = (
+            str(existing_header.get("actual_shipment_date") or "").strip()
+            != actual_shipment_date
+        )
+        if factual_date_changed:
+            raise ValueError(
+                "Изменение фактической даты отгрузки требует audited correction flow."
+            )
         existing_ff_acceptance_date = str(existing_header.get("actual_ff_acceptance_date") or "").strip()
         if existing_ff_acceptance_date and actual_ff_acceptance_date != existing_ff_acceptance_date:
             if self._has_current_ff_cost_layer(shipment_id):
@@ -422,14 +475,13 @@ class SupplierShipmentsBlock:
             _assert_atomic_supplier_product_matching(lines)
             summary = _recalculate_summary(lines, declared_total=_optional_number(metadata.get("declared_invoice_total")))
             match_status = _shipment_match_status(lines, checksum_error=summary["checksum_error"])
-        order_status = _normalize_order_status(
-            payload.get("order_status") if "order_status" in payload else existing_header.get("order_status")
-        )
-        if actual_ff_acceptance_date:
-            order_status = ORDER_STATUS_ACCEPTED_FF
-        elif order_status == ORDER_STATUS_ACCEPTED_FF:
-            raise ValueError("accepted_ff status is set only by actual_ff_acceptance_date")
-        now = self.timestamp_factory()
+        order_status = status_resolution.order_status
+        if "order_status" in payload:
+            requested_status = _normalize_order_status(payload.get("order_status"))
+            if requested_status != order_status:
+                raise ValueError(
+                    "Статус поставки вычисляется из фактических дат и не может быть задан вручную."
+                )
         cost_affecting_changed = (
             [dict(item) for item in existing.get("lines") or []] != [dict(item) for item in lines]
             or str(existing_header.get("currency") or "") != str(metadata.get("currency") or "")
@@ -475,17 +527,6 @@ class SupplierShipmentsBlock:
         if actual_ff_acceptance_date:
             self._record_ff_stock_receipt({"header": header, "lines": lines})
             self._materialize_ff_cost_layer(shipment_id)
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-
-        OwnProductCapitalBlock(
-            runtime=self.runtime,
-            timestamp_factory=self.timestamp_factory,
-        ).materialize_supplier_boundaries(
-            shipment_id=shipment_id,
-            actual_shipment_date=actual_shipment_date,
-            actual_ff_acceptance_date=actual_ff_acceptance_date,
-            expenses_complete=bool(header.get("expenses_complete")),
-        )
         if "contract_document_id" in payload:
             contract_document_id = str(payload.get("contract_document_id") or "").strip()
             if contract_document_id:
@@ -503,22 +544,95 @@ class SupplierShipmentsBlock:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        normalized = _normalize_order_status(order_status)
-        if normalized == ORDER_STATUS_ACCEPTED_FF:
-            raise ValueError("accepted_ff status is set only by actual_ff_acceptance_date")
-        if normalized not in {ORDER_STATUS_PRODUCTION, ORDER_STATUS_IN_TRANSIT}:
-            raise ValueError(f"unsupported selectable supplier order_status: {normalized}")
-        existing_header = dict(existing["header"])
-        if str(existing_header.get("order_status") or "") == ORDER_STATUS_ACCEPTED_FF:
-            raise ValueError("accepted_ff shipment status cannot be changed by status dropdown")
-        updated = self.runtime.update_supplier_shipment_order_status(
-            shipment_id=shipment_id,
-            order_status=normalized,
-            updated_at=self.timestamp_factory(),
+        raise ValueError(
+            "order_status вычисляется из фактических дат; ручной status-only PATCH не поддерживается."
         )
-        if not updated:
+
+    def factual_date_change_required(self, shipment_id: str, payload: Mapping[str, Any]) -> bool:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        return self.get_shipment(shipment_id)
+        edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
+        desired = _resolve_optional_date_field(
+            payload,
+            edited_payload,
+            dict(existing["header"]),
+            "actual_shipment_date",
+        )
+        return desired != str(existing["header"].get("actual_shipment_date") or "").strip()
+
+    def desired_actual_shipment_date(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> str:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
+        return _resolve_optional_date_field(
+            payload,
+            edited_payload,
+            dict(existing["header"]),
+            "actual_shipment_date",
+        )
+
+    def factual_date_correction_has_other_changes(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        existing = self.runtime.load_supplier_shipment(shipment_id)
+        if existing is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        header = dict(existing["header"])
+        edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
+        shipment_date = _validate_iso_date(
+            str(
+                payload.get("shipment_date")
+                or edited_payload.get("shipment_date")
+                or header.get("shipment_date")
+                or ""
+            )
+        )
+        acceptance = _resolve_optional_date_field(
+            payload,
+            edited_payload,
+            header,
+            "actual_ff_acceptance_date",
+        )
+        approx_rate = _resolve_optional_positive_decimal_field(
+            payload,
+            edited_payload,
+            header,
+            "approx_yuan_rate",
+        )
+        metadata, lines, _, _, _, _ = _normalize_edit_payload(
+            edited_payload,
+            shipment_date=shipment_date,
+            force_manual_override=False,
+        )
+        header_fields = (
+            "invoice_no",
+            "invoice_date",
+            "contract_no",
+            "contract_date",
+            "supplier_name",
+            "customer_name",
+            "currency",
+        )
+        return bool(
+            shipment_date != str(header.get("shipment_date") or "")
+            or acceptance != str(header.get("actual_ff_acceptance_date") or "").strip()
+            or _optional_number(approx_rate) != _optional_number(header.get("approx_yuan_rate"))
+            or any(
+                str(metadata.get(field) or "") != str(header.get(field) or "")
+                for field in header_fields
+            )
+            or [dict(item) for item in lines]
+            != [dict(item) for item in existing.get("lines") or []]
+            or "contract_document_id" in payload
+        )
 
     def update_expenses_complete(self, shipment_id: str, expenses_complete: Any) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
@@ -2209,6 +2323,11 @@ def _bind_source_owned_line_identity(
         if not isinstance(raw_line, Mapping):
             raise ValueError("supplier shipment lines must be JSON objects")
         key = _source_line_identity_key(raw_line)
+        expected_key = _source_line_identity_key(trusted_lines[index - 1])
+        if key != expected_key:
+            raise ValueError(
+                f"{context}: source invoice row identity/order cannot be changed at edited line #{index}"
+            )
         trusted_line = trusted_by_key.get(key) if key is not None else None
         if trusted_line is None or key in used_keys:
             raise ValueError(f"{context}: edited line #{index} is not bound to a unique source invoice row")
@@ -2417,7 +2536,8 @@ def _assert_atomic_supplier_product_matching(lines: Iterable[Mapping[str, Any]])
             problems.append(f"строка {line_id}: отсутствует source-owned barcode")
         elif status != MATCH_STATUS_MATCHED_BY_BARCODE:
             problems.append(f"строка {line_id}: barcode {reason or status or 'не сопоставлен'}")
-        if _optional_int(line.get("internal_nm_id")) is None:
+        internal_nm_id = _optional_int(line.get("internal_nm_id"))
+        if internal_nm_id is None or internal_nm_id <= 0:
             problems.append(f"строка {line_id}: отсутствует nmID")
         if (_optional_number(line.get("qty")) or 0) <= 0:
             problems.append(f"строка {line_id}: отсутствует положительное количество")
@@ -2562,6 +2682,17 @@ def _resolve_nomenclature_match(line: Mapping[str, Any], index: Mapping[str, Any
                 "status": "ambiguous",
                 "reason": "barcode_multiple_active_owners",
                 "candidate_count": len(candidates),
+            },
+        }
+    owner_nm_id = _optional_int(candidates[0].get("internal_nm_id") or candidates[0].get("nm_id"))
+    if owner_nm_id is None or owner_nm_id <= 0:
+        return {
+            "match_status": MATCH_STATUS_UNMATCHED,
+            "match_evidence": {
+                "method": "barcode",
+                "status": "unmatched",
+                "reason": "barcode_owner_missing_nmid",
+                "owner_item_id": str(candidates[0].get("item_id") or ""),
             },
         }
     return {
@@ -4865,7 +4996,8 @@ def _optional_number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     text = str(value).strip().replace("\u00a0", " ")
     if not text:
         return None
@@ -4877,9 +5009,10 @@ def _optional_number(value: Any) -> float | None:
     elif "," in text:
         text = text.replace(",", ".")
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
         return None
+    return number if math.isfinite(number) else None
 
 
 def _optional_int(value: Any) -> int | None:

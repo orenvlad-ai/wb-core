@@ -35,6 +35,7 @@ from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitr
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
+from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
 from packages.application.sku_management import SkuManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -53,6 +54,9 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.supplier_shipments import SupplierShipmentsBlock
+from packages.application.supplier_shipment_factual_correction import (
+    SupplierShipmentFactualCorrectionBlock,
+)
 from packages.application.supplier_financial_documents import (
     SupplierFinancialDocumentsBlock,
     apply_supplier_order_document_match,
@@ -691,6 +695,8 @@ class RegistryUploadHttpEntrypoint:
         ads_block: SheetVitrinaV1AdsBlock | None = None,
         prices_block: WbPricesManagementBlock | None = None,
         spp_tester_block: WbSppTesterBlock | None = None,
+        buyer_session_block: WbBuyerSessionBlock | None = None,
+        buyer_session_recovery_controller: WbBuyerSessionRecoveryController | None = None,
         sku_management_block: SkuManagementBlock | None = None,
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
@@ -759,15 +765,22 @@ class RegistryUploadHttpEntrypoint:
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
         )
+        self.buyer_session_block = (
+            buyer_session_block
+            or (getattr(spp_tester_block, "buyer_source", None) if spp_tester_block is not None else None)
+            or WbBuyerSessionBlock()
+        )
         self.spp_tester_block = spp_tester_block or WbSppTesterBlock(
             runtime=self.runtime,
             runtime_dir=self.runtime.runtime_dir,
+            buyer_source=self.buyer_session_block,
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
+        self.buyer_session_recovery = buyer_session_recovery_controller or WbBuyerSessionRecoveryController()
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
@@ -779,6 +792,10 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.supplier_shipments_block = SupplierShipmentsBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.supplier_shipment_factual_correction_block = SupplierShipmentFactualCorrectionBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
         )
@@ -1295,6 +1312,47 @@ class RegistryUploadHttpEntrypoint:
         actor: str = "",
     ) -> dict[str, Any]:
         return self.spp_tester_block.save_schedule(payload, actor=actor)
+
+    def handle_wb_buyer_session_check_request(self) -> dict[str, Any]:
+        return self.buyer_session_block.check_session()
+
+    def handle_wb_buyer_session_recovery_status_request(
+        self,
+        *,
+        launcher_download_path: str,
+        run_id: str | None = None,
+        with_probe: bool = True,
+    ) -> dict[str, Any]:
+        return self.buyer_session_recovery.read_status(
+            launcher_download_path=launcher_download_path,
+            run_id=run_id,
+            with_probe=with_probe,
+        )
+
+    def handle_wb_buyer_session_recovery_start_request(
+        self,
+        *,
+        launcher_download_path: str,
+        replace: bool = True,
+    ) -> dict[str, Any]:
+        return self.buyer_session_recovery.start(
+            replace=replace,
+            launcher_download_path=launcher_download_path,
+        )
+
+    def handle_wb_buyer_session_recovery_stop_request(self, *, launcher_download_path: str) -> dict[str, Any]:
+        return self.buyer_session_recovery.stop(launcher_download_path=launcher_download_path)
+
+    def handle_wb_buyer_session_recovery_launcher_request(
+        self,
+        *,
+        public_status_url: str,
+        public_operator_url: str,
+    ) -> tuple[bytes, str]:
+        return self.buyer_session_recovery.build_launcher_archive(
+            public_status_url=public_status_url,
+            public_operator_url=public_operator_url,
+        )
 
     def handle_sku_management_table_request(self, *, user_key: str) -> dict[str, Any]:
         return self.sku_management_block.build_table(user_key=user_key)
@@ -2085,10 +2143,69 @@ class RegistryUploadHttpEntrypoint:
         return self.supplier_shipments_block.create_shipment(payload)
 
     def handle_supplier_shipments_detail_request(self, shipment_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.get_shipment(shipment_id)
+        detail = self.supplier_shipments_block.get_shipment(shipment_id)
+        detail["factual_date_correction"] = (
+            self.supplier_shipment_factual_correction_block.latest_for_shipment(shipment_id)
+        )
+        return detail
 
-    def handle_supplier_shipments_patch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def handle_supplier_shipments_patch_request(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+        *,
+        actor: str = "operator",
+    ) -> dict[str, Any]:
+        if self.supplier_shipments_block.factual_date_change_required(shipment_id, payload):
+            if self.supplier_shipments_block.factual_date_correction_has_other_changes(
+                shipment_id,
+                payload,
+            ):
+                raise ValueError(
+                    "Коррекцию фактической даты отгрузки нужно сохранить отдельно от других изменений карточки."
+                )
+            new_value = self.supplier_shipments_block.desired_actual_shipment_date(
+                shipment_id,
+                payload,
+            )
+            correction = self.supplier_shipment_factual_correction_block.create_job(
+                shipment_id=shipment_id,
+                new_actual_shipment_date=new_value,
+                actor=actor or "operator",
+            )
+            if correction.get("status") == "zero_change":
+                return self.handle_supplier_shipments_detail_request(shipment_id)
+            if correction.get("deduplicated"):
+                return {
+                    "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
+                    "status": "accepted",
+                    "correction": correction,
+                    "job": None,
+                }
+            correction_id = str(correction["correction_id"])
+            job = self.operator_jobs.start(
+                operation="supplier_factual_date_correction",
+                runner=lambda emit: self.supplier_shipment_factual_correction_block.run_job(
+                    correction_id,
+                    emit,
+                ),
+            )
+            return {
+                "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
+                "status": "accepted",
+                "correction": correction,
+                "job": job,
+            }
         return self.supplier_shipments_block.update_shipment(shipment_id, payload)
+
+    def handle_supplier_shipment_factual_correction_request(
+        self,
+        shipment_id: str,
+    ) -> dict[str, Any]:
+        correction = self.supplier_shipment_factual_correction_block.latest_for_shipment(shipment_id)
+        if correction is None:
+            raise ValueError(f"supplier factual correction not found: {shipment_id}")
+        return correction
 
     def handle_supplier_shipments_order_status_patch_request(
         self,

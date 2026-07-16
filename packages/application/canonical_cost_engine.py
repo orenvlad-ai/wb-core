@@ -23,6 +23,12 @@ from packages.application.registry_upload_db_backed_runtime import (
     _ensure_schema,
 )
 from packages.application.our_wb_costs import _extract_snapshot_sku_metric
+from packages.application.supplier_financial_document_exact_policy import (
+    AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY,
+)
+from packages.application.supplier_shipment_status import (
+    HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+)
 
 
 CUTOVER_DATE = "2026-07-01"
@@ -95,6 +101,16 @@ UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V2 = "2026-07-13"
 UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V2 = (
     "99eca22fa972f0207b60cd4fb699b608d637ca4fcee41ca7fd273aa93863c2ec"
 )
+UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V3 = (
+    "CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V3"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_REASON_V3 = (
+    "exact_source_evidence_amendment_for_current_paid_reference_and_new_row"
+)
+UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V3 = "2026-07-15"
+UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V3 = (
+    "4ede9d65e659219e191ee064ad438c7aca23c600d53a892ee5459ed85fa6f7d3"
+)
 POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {
     "ffso_14303efbdb04425baf54": {
         "operation_id": "ffso_14303efbdb04425baf54",
@@ -131,6 +147,16 @@ POSTCUTOVER_NORMALIZATION_MANIFEST: dict[str, dict[str, Any]] = {
         "line_set_fingerprint": "sha256:320d56dd3c4d13553dbc61e667f321b53af5d732719339e05f684def1fb8a50b",
         "accepted_line_set_fingerprint": "sha256:7add90d1d03f7f7e4048ebeac583aeb3a3febe16e26971a56e0e502f9a36a416",
         "evidence_fingerprint": "sha256:37f7d2ebd9a9c7097ac7f3aa568a0ea79ce3df836f43ffb5c2bb2293f426171e",
+    },
+    "ffso_9f7bd066f7b943cdb702": {
+        "operation_id": "ffso_9f7bd066f7b943cdb702",
+        "supply_id": "40561872",
+        "source_key": "wb_supply_debit:supply:40561872",
+        "business_date": "2026-07-02",
+        "line_set_fingerprint": "sha256:4fa026e3afac75ec43479e96837a0d05217ba062db91a6002029b6a12cc87aaa",
+        "accepted_line_set_fingerprint": "sha256:e8f56d3ecc5dfe5aa6465ccede384b4c43007a4637ae7f67fda86d89e9c34a1c",
+        "evidence_fingerprint": "sha256:06d8540fc06f4790fbef75feaec7640c6946a722e7f60bdc4945bd06c6611e7c",
+        "allow_baseline_cost_reference_without_legacy_supply_cost_rows": True,
     },
 }
 
@@ -451,6 +477,94 @@ UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2: dict[
     },
 }
 
+# V3 is an exact amendment, never a tolerance.  Five identities supersede
+# their V1 entries because the raw WB evidence is unchanged while the current
+# paid-cost projection is now backed by a later factual payment allocation.
+# The sixth identity is a newly observed one-unit doprinato row.  Every source
+# and semantic fingerprint is pinned; no cross-supply allocation is allowed.
+UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V3: dict[
+    tuple[str, int], dict[str, Any]
+] = {
+    ("40739431", 391659990): {
+        "supply_id": "40739431", "business_date": "2026-07-10",
+        "nm_id": 391659990, "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14", "quantity": "1",
+        "source_identity": "supply:40739431", "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:1a316aa794752e4e7aabb47acdaa68436e8fd9efd4685126efd4046c19990734",
+        "raw_source_line_fingerprint": "sha256:baa77d9ea7d6e731c5568fe8f32d6b0fe92bc84f3ce07d43e38d939318b9ef46",
+        "raw_row_line_fingerprint": "sha256:c2715065c5d72657083e01f10217b0cf24f2cd0ea12865f6f3913e5b8929b4fd",
+        "semantic_evidence_fingerprint": "sha256:ad29501b613f69bebd4021c889d9b9b3e22fbddced60de7930a17e9ed2019130",
+        "status": "final-accepted", "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "119.941548",
+        "paid_reference_unit_cost_rub": "82.223602",
+    },
+    ("40739432", 210183142): {
+        "supply_id": "40739432", "business_date": "2026-07-10",
+        "nm_id": 210183142, "warehouse": "Электросталь",
+        "destination": "Электросталь", "quantity": "1",
+        "source_identity": "supply:40739432", "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:0494297f8f3272b7e16780ce58e37a8efd37a38185dca885a27d98b201b3f566",
+        "raw_source_line_fingerprint": "sha256:ff574f341ce807aceedf52c86cd51d4c641703bda7b79da833489549b82fbc21",
+        "raw_row_line_fingerprint": "sha256:88430e4065c9818b8ae5ad9223d1d4c0ff8c70d085a1e1a06e3189bbcfa079e0",
+        "semantic_evidence_fingerprint": "sha256:198a8b7a367efebc2f40587bc9e955c0e7c09cf57ff10dbc3e9a19193617271a",
+        "status": "final-accepted", "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "93.547548",
+        "paid_reference_unit_cost_rub": "54.842802",
+    },
+    ("40765457", 210183142): {
+        "supply_id": "40765457", "business_date": "2026-07-11",
+        "nm_id": 210183142, "warehouse": "Электросталь",
+        "destination": "Электросталь", "quantity": "1",
+        "source_identity": "supply:40765457", "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:5a3c2002d5fac188e34da8cd6e72511e5d1e8971ea35f4e5c8adcaf1c3ae1e5e",
+        "raw_source_line_fingerprint": "sha256:ff574f341ce807aceedf52c86cd51d4c641703bda7b79da833489549b82fbc21",
+        "raw_row_line_fingerprint": "sha256:b9d25d11d4154b47c1a08c8f1f1559cb9db85d183d351999ae01d21441188026",
+        "semantic_evidence_fingerprint": "sha256:be7ee7f129f92005d90166dd380656f37abd71b16ef7e646f9aacd7a06805609",
+        "status": "final-accepted", "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "93.547548",
+        "paid_reference_unit_cost_rub": "54.842802",
+    },
+    ("40765458", 391662410): {
+        "supply_id": "40765458", "business_date": "2026-07-11",
+        "nm_id": 391662410, "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14", "quantity": "2",
+        "source_identity": "supply:40765458", "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:68d7558524b2181e946d105c4cdb88edaf108167b42008c92eab0454e9b9e7e4",
+        "raw_source_line_fingerprint": "sha256:3a0cee049b10051863811bfba94c441d5a6f38a231983082b61bab5380c1f914",
+        "raw_row_line_fingerprint": "sha256:020b1b7f159cc34325c9086ad552b5dbc3715851760c4a829d3fe039291f59a3",
+        "semantic_evidence_fingerprint": "sha256:6ecc994240ac9178bbb0ca1befa603798381ef44fb0b215843f62c753bd9f1b9",
+        "status": "final-accepted", "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "116.642298",
+        "paid_reference_unit_cost_rub": "0",
+    },
+    ("40778404", 391659990): {
+        "supply_id": "40778404", "business_date": "2026-07-12",
+        "nm_id": 391659990, "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14", "quantity": "1",
+        "source_identity": "supply:40778404", "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:4b7a040e5e874950f7678978c1b3aa60352b1a2b41fcbb6aae91c65977e1da46",
+        "raw_source_line_fingerprint": "sha256:838214145935adbd796b968d7c22dfa5e469ef0191e820b2b22298dfcb2d3657",
+        "raw_row_line_fingerprint": "sha256:13060d8db62c9470bf1e8fe88f035cb84759b381c34312bb26c83050ac59d36d",
+        "semantic_evidence_fingerprint": "sha256:decc83a3ebe741fd20dacd083ba97fb96ac16944390f353fd5a18e643c69d8e7",
+        "status": "final-accepted", "cost_reference_stage": STAGE_PRODUCTION,
+        "recognized_reference_unit_cost_rub": "119.941548",
+        "paid_reference_unit_cost_rub": "82.223602",
+    },
+    ("40820482", 391662410): {
+        "supply_id": "40820482", "business_date": "2026-07-14",
+        "nm_id": 391662410, "warehouse": "Екатеринбург - Перспективная 14",
+        "destination": "Екатеринбург - Перспективная 14", "quantity": "1",
+        "source_identity": "supply:40820482", "original_supply_id": "",
+        "raw_source_row_fingerprint": "sha256:93d391ac25654431b7a98be21a0446352392737ec3d033788e7a2b903f265eaf",
+        "raw_source_line_fingerprint": "sha256:416fea3d2b0bceddce54cc834f07e237ea0a43178e32edeae3fc7f55cac0dbf9",
+        "raw_row_line_fingerprint": "sha256:e05a91e47d9e0dc7040990ab2f41def268075e747acfd504b0c483b0485724e6",
+        "semantic_evidence_fingerprint": "sha256:9cda7d1cd03d49189d01e755edf96a52c099df65191f66f973e265d37f76ccab",
+        "status": "final-accepted", "cost_reference_stage": STAGE_WB,
+        "recognized_reference_unit_cost_rub": "116.642298",
+        "paid_reference_unit_cost_rub": "116.642298",
+    },
+}
+
 
 class CanonicalCostBlocked(ValueError):
     """A fail-closed source, cost-coverage or reconciliation failure."""
@@ -523,8 +637,7 @@ class CanonicalCostEngine:
                 JOIN sheet_vitrina_v1_supplier_ff_cost_layers AS layer
                   ON layer.supplier_shipment_id = shipment.shipment_id
                  AND layer.is_current = 1
-                WHERE shipment.order_status = 'accepted_ff'
-                  AND shipment.actual_ff_acceptance_date BETWEEN ? AND ?
+                WHERE shipment.actual_ff_acceptance_date BETWEEN ? AND ?
                   AND COALESCE(shipment.product_qty_total, 0) >= ?
                 ORDER BY shipment.product_qty_total DESC, shipment.shipment_id
                 """,
@@ -1104,6 +1217,7 @@ class CanonicalCostEngine:
                 "unmatched_doprinato_absorption": [
                     UNMATCHED_DOPRINATO_ABSORPTION_POLICY,
                     UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V2,
+                    UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V3,
                 ],
             },
             "cutover_date": CUTOVER_DATE,
@@ -1241,6 +1355,7 @@ class CanonicalCostEngine:
                 """
                 SELECT shipment.shipment_id, shipment.created_at, shipment.shipment_date,
                        shipment.actual_shipment_date, shipment.actual_ff_acceptance_date,
+                       shipment.historical_status_exception,
                        line.internal_nm_id, line.qty
                 FROM sheet_vitrina_v1_supplier_shipments AS shipment
                 JOIN sheet_vitrina_v1_supplier_shipment_lines AS line
@@ -1250,6 +1365,8 @@ class CanonicalCostEngine:
                 """
             ).fetchall()
             for row in supplier_rows:
+                if _historical_terminal_supplier_shipment(row):
+                    continue
                 registered = min(
                     value for value in (
                         str(row["shipment_date"] or "")[:10],
@@ -1467,12 +1584,15 @@ class CanonicalCostEngine:
             shipments = conn.execute(
                 """
                 SELECT shipment_id,created_at,shipment_date,actual_shipment_date,
-                       actual_ff_acceptance_date,invoice_amount_total,product_amount_total
+                       actual_ff_acceptance_date,historical_status_exception,
+                       invoice_amount_total,product_amount_total
                 FROM sheet_vitrina_v1_supplier_shipments
                 ORDER BY shipment_id
                 """
             ).fetchall()
             for shipment in shipments:
+                if _historical_terminal_supplier_shipment(shipment):
+                    continue
                 registered = min(
                     value for value in (
                         str(shipment["shipment_date"] or "")[:10],
@@ -1578,6 +1698,8 @@ class CanonicalCostEngine:
                 (date_to, CUTOVER_DATE, CUTOVER_DATE),
             ).fetchall()
             for shipment in shipments:
+                if _historical_terminal_supplier_shipment(shipment):
+                    continue
                 shipment_id = str(shipment["shipment_id"])
                 opening_carry = str(shipment["shipment_date"] or "")[:10] <= CUTOVER_DATE
                 lines = conn.execute(
@@ -1629,6 +1751,12 @@ class CanonicalCostEngine:
                     """,
                     (shipment_id,),
                 ).fetchall()
+                exact_expense_allocations = _exact_supplier_expense_allocations(
+                    conn,
+                    shipment_id=shipment_id,
+                    expenses=expenses,
+                    product_lines=lines,
+                )
                 for line in lines:
                     nm_id = int(line["internal_nm_id"] or 0)
                     qty = _decimal(line["qty"])
@@ -1644,17 +1772,44 @@ class CanonicalCostEngine:
                             payment_rub, payment_cny
                         )
                     recognized_total = recognized_unit * qty
-                    expense_allocations: list[tuple[sqlite3.Row, Decimal]] = [
-                        (expense, _decimal(expense["amount_rub"]) * _safe_ratio(qty, product_qty_total))
-                        for expense in expenses
-                        if not opening_carry
-                        or str(expense["document_date"] or "")[:10] > CUTOVER_DATE
-                    ]
-                    recognized_expenses = sum((amount for _, amount in expense_allocations), ZERO)
+                    expense_allocations: list[
+                        tuple[sqlite3.Row, Decimal, Mapping[str, Any] | None]
+                    ] = []
+                    for expense in expenses:
+                        if (
+                            opening_carry
+                            and str(expense["document_date"] or "")[:10]
+                            <= CUTOVER_DATE
+                        ):
+                            continue
+                        exact_allocation = exact_expense_allocations.get(
+                            (str(expense["financial_document_id"]), nm_id)
+                        )
+                        allocated = (
+                            _decimal(exact_allocation["capital_rub"])
+                            if exact_allocation is not None
+                            else _decimal(expense["amount_rub"])
+                            * _safe_ratio(qty, product_qty_total)
+                        )
+                        expense_allocations.append(
+                            (expense, allocated, exact_allocation)
+                        )
+                    recognized_expenses_already_in_ff_cost = sum(
+                        (
+                            amount
+                            for _, amount, exact_allocation in expense_allocations
+                            if exact_allocation is None
+                        ),
+                        ZERO,
+                    )
                     invoice_recognized = (
                         recognized_total
                         if opening_carry
-                        else max(recognized_total - recognized_expenses, ZERO)
+                        else max(
+                            recognized_total
+                            - recognized_expenses_already_in_ff_cost,
+                            ZERO,
+                        )
                     )
                     plans.append(
                         {
@@ -1716,7 +1871,7 @@ class CanonicalCostEngine:
                                 "confirmation_status": "confirmed",
                             }
                         )
-                    for expense, allocated in expense_allocations:
+                    for expense, allocated, exact_allocation in expense_allocations:
                         plans.append(
                             {
                                 "component_type": str(expense["document_type"] or expense["category"] or "factual_expense"),
@@ -1726,16 +1881,33 @@ class CanonicalCostEngine:
                                 "quantity": _text(qty),
                                 "recognized_amount_rub": _text(allocated),
                                 "recognized_date": str(expense["document_date"] or accepted_date)[:10],
-                                "paid_amount_rub": "0",
+                                "paid_amount_rub": _text(
+                                    allocated if exact_allocation is not None else ZERO
+                                ),
                                 "paid_equivalent_quantity": "0",
-                                "paid_date": None,
-                                "allocation_method": "shipment_product_quantity_proportional",
+                                "paid_date": (
+                                    str(exact_allocation["effective_date"])
+                                    if exact_allocation is not None
+                                    else None
+                                ),
+                                "allocation_method": (
+                                    "exact_legacy_cost_payment_product_invoice_value_proportional"
+                                    if exact_allocation is not None
+                                    else "shipment_product_quantity_proportional"
+                                ),
                                 "source_document_id": str(expense["financial_document_id"]),
                                 "source_line_id": str(expense["line_id"]),
                                 "evidence": {
                                     "category": str(expense["category"]),
                                     "file_sha256": str(expense["file_sha256"] or ""),
                                     "ff_cost_layer_line_id": str((ff or {}).get("layer_line_id") or ""),
+                                    "exact_cost_payment_event_id": str(
+                                        (exact_allocation or {}).get("event_id") or ""
+                                    ),
+                                    "exact_cost_payment_evidence_hash": str(
+                                        (exact_allocation or {}).get("evidence_hash") or ""
+                                    ),
+                                    "quantity_movement": "0",
                                 },
                                 "confirmation_status": "confirmed",
                             }
@@ -2350,6 +2522,9 @@ class CanonicalCostEngine:
     ) -> dict[tuple[int, str], dict[str, Decimal | str]]:
         """Full physical quantity plus date-bounded paid-equivalent allocation."""
         result: dict[tuple[int, str], dict[str, Decimal | str]] = {}
+        exact_expense_cache: dict[
+            str, dict[tuple[str, int], dict[str, Any]]
+        ] = {}
         baseline = self._baseline_costs()
         with _connect(self.runtime.db_path) as conn:
             rows = conn.execute(
@@ -2363,6 +2538,8 @@ class CanonicalCostEngine:
                 """
             ).fetchall()
             for row in rows:
+                if _historical_terminal_supplier_shipment(row):
+                    continue
                 registered = min(
                     value for value in (str(row["shipment_date"] or "")[:10], str(row["created_at"] or "")[:10])
                     if value
@@ -2375,6 +2552,22 @@ class CanonicalCostEngine:
                     continue
                 stage = STAGE_PRODUCTION_TO_FF if shipped and shipped <= as_of_date else STAGE_PRODUCTION
                 shipment_id = str(row["shipment_id"])
+                if shipment_id not in exact_expense_cache:
+                    exact_expense_cache[shipment_id] = (
+                        _exact_supplier_expense_allocations_for_shipment(
+                            conn, shipment_id=shipment_id
+                        )
+                    )
+                exact_expense = exact_expense_cache[shipment_id].get(
+                    (
+                        str(
+                            AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY[
+                                "document_id"
+                            ]
+                        ),
+                        int(row["internal_nm_id"]),
+                    )
+                )
                 payments = conn.execute(
                     """
                     SELECT cny_delta,rub_value_delta FROM sheet_vitrina_v1_cny_ledger_operations
@@ -2425,6 +2618,16 @@ class CanonicalCostEngine:
                 bucket["paid_equivalent"] = _decimal(bucket["paid_equivalent"]) + paid_equivalent
                 bucket["recognized_capital"] = _decimal(bucket["recognized_capital"]) + qty * recognized_unit
                 bucket["paid_capital"] = _decimal(bucket["paid_capital"]) + allocated_paid
+                if (
+                    exact_expense is not None
+                    and str(exact_expense["effective_date"]) <= as_of_date
+                ):
+                    bucket["recognized_capital"] = _decimal(
+                        bucket["recognized_capital"]
+                    ) + _decimal(exact_expense["capital_rub"])
+                    bucket["paid_capital"] = _decimal(
+                        bucket["paid_capital"]
+                    ) + _decimal(exact_expense["capital_rub"])
                 if recognized_unit > ZERO:
                     bucket["covered"] = _decimal(bucket["covered"]) + qty
                 if ff_line is not None and str(ff_line["source_status"]) == "confirmed":
@@ -3952,6 +4155,9 @@ def _source_anomaly_preflight_conn(
             "missing_cost_nm_ids": missing_cost_nm_ids,
             "normalized_quantity_within_500": surplus_total <= Decimal("500"),
         }
+        baseline_cost_only_policy = (
+            _postcutover_manifest_allows_baseline_cost_reference(operation_row)
+        )
         operation_row["postcutover_normalization"] = {
             "policy": POSTCUTOVER_NORMALIZATION_POLICY,
             "surplus_quantity": _text(surplus_total),
@@ -3971,6 +4177,7 @@ def _source_anomaly_preflight_conn(
             "legacy_supply_cost_rows": legacy_cost_rows,
             "checks": normalization_checks,
             "manifest_match": _postcutover_manifest_matches(operation_row),
+            "baseline_cost_only_policy": baseline_cost_only_policy,
         }
         operations.append(operation_row)
         if resolution.effective_date < CUTOVER_DATE:
@@ -4037,6 +4244,11 @@ def _source_anomaly_preflight_conn(
                 "legacy_supply_cost_evidence_present",
                 "normalized_quantity_within_500",
             ):
+                if (
+                    check_name == "legacy_supply_cost_evidence_present"
+                    and baseline_cost_only_policy
+                ):
+                    continue
                 if not bool(normalization_checks[check_name]):
                     guard_failures.append(check_name)
             if missing_cost_nm_ids:
@@ -4655,6 +4867,7 @@ def _source_anomaly_preflight_conn(
     manifest_reports = [
         _unmatched_doprinato_manifest_report(),
         _unmatched_doprinato_manifest_report_v2(),
+        _unmatched_doprinato_manifest_report_v3(),
     ]
     manifest_report = manifest_reports[0]
     matched_absorptions = [
@@ -4670,9 +4883,7 @@ def _source_anomaly_preflight_conn(
             str(report["policy"]): str(report["manifest_fingerprint"])
             for report in manifest_reports
         },
-        "approved_row_count": sum(
-            int(report["row_count"]) for report in manifest_reports
-        ),
+        "approved_row_count": len(manifest_entries),
         "approved_supply_count": len(
             {
                 str(entry["expected"]["supply_id"])
@@ -4801,7 +5012,27 @@ def _postcutover_manifest_matches(operation: Mapping[str, Any]) -> bool:
         ),
         "evidence_fingerprint": str(operation.get("evidence_fingerprint") or ""),
     }
-    return actual == expected
+    expected_identity = {key: expected.get(key) for key in actual}
+    return actual == expected_identity
+
+
+def _postcutover_manifest_allows_baseline_cost_reference(
+    operation: Mapping[str, Any],
+) -> bool:
+    """Permit one exact operation to use the complete canonical baseline costs.
+
+    This is not a generic missing-cost exemption: the full operation/source/date
+    and both immutable line-set fingerprints must match the manifest first.
+    """
+
+    operation_id = str(operation.get("operation_id") or "")
+    expected = POSTCUTOVER_NORMALIZATION_MANIFEST.get(operation_id) or {}
+    return bool(
+        _postcutover_manifest_matches(operation)
+        and expected.get(
+            "allow_baseline_cost_reference_without_legacy_supply_cost_rows"
+        )
+    )
 
 
 def _doprinato_fact_fingerprint_payload(
@@ -4951,8 +5182,51 @@ def _unmatched_doprinato_manifest_report_v2() -> dict[str, Any]:
     }
 
 
+def _unmatched_doprinato_manifest_report_v3() -> dict[str, Any]:
+    """Report the exact amendment while preserving V1/V2 fingerprints."""
+
+    rows = [
+        dict(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V3[key])
+        for key in sorted(UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V3)
+    ]
+    payload = {
+        "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V3,
+        "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V3,
+        "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON_V3,
+        "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V3,
+        "supersedes_exact_identities": sorted(
+            f"{supply_id}:{nm_id}"
+            for supply_id, nm_id in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V3
+            if supply_id in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST
+        ),
+        "rows": rows,
+    }
+    recognized = sum(
+        _decimal(row["quantity"])
+        * _decimal(row["recognized_reference_unit_cost_rub"])
+        for row in rows
+    )
+    paid = sum(
+        _decimal(row["quantity"])
+        * _decimal(row["paid_reference_unit_cost_rub"])
+        for row in rows
+    )
+    return {
+        **payload,
+        "manifest_fingerprint": "sha256:" + _stable_hash(payload),
+        "row_count": len(rows),
+        "supply_count": len({str(row["supply_id"]) for row in rows}),
+        "sku_count": len({int(row["nm_id"]) for row in rows}),
+        "unit_count": _text(
+            sum((_decimal(row["quantity"]) for row in rows), ZERO)
+        ),
+        "recognized_reference_exposure_rub": _text(recognized),
+        "paid_reference_exposure_rub": _text(paid),
+    }
+
+
 def _unmatched_doprinato_manifest_entries() -> list[dict[str, Any]]:
-    """Return both exact approvals with policy-specific provenance."""
+    """Return the active exact entries with policy-specific provenance."""
 
     entries = [
         {
@@ -4963,6 +5237,8 @@ def _unmatched_doprinato_manifest_entries() -> list[dict[str, Any]]:
             "expected": expected,
         }
         for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.values()
+        if (str(expected["supply_id"]), int(expected["nm_id"]))
+        not in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V3
     ]
     entries.extend(
         {
@@ -4973,6 +5249,16 @@ def _unmatched_doprinato_manifest_entries() -> list[dict[str, Any]]:
             "expected": expected,
         }
         for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V2.values()
+    )
+    entries.extend(
+        {
+            "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V3,
+            "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON_V3,
+            "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V3,
+            "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V3,
+            "expected": expected,
+        }
+        for expected in UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V3.values()
     )
     return sorted(
         entries,
@@ -4989,6 +5275,17 @@ def _unmatched_doprinato_manifest_entry(
 ) -> dict[str, Any] | None:
     """Resolve only one fully specified supply/SKU manifest identity."""
 
+    v3 = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST_V3.get(
+        (str(supply_id), int(nm_id))
+    )
+    if v3 is not None:
+        return {
+            "policy": UNMATCHED_DOPRINATO_ABSORPTION_POLICY_V3,
+            "reason": UNMATCHED_DOPRINATO_ABSORPTION_REASON_V3,
+            "approval_date": UNMATCHED_DOPRINATO_ABSORPTION_APPROVAL_DATE_V3,
+            "diagnostic_fingerprint": UNMATCHED_DOPRINATO_DIAGNOSTIC_FINGERPRINT_V3,
+            "expected": v3,
+        }
     v1 = UNMATCHED_DOPRINATO_ABSORPTION_MANIFEST.get(str(supply_id))
     if v1 is not None and int(v1["nm_id"]) == int(nm_id):
         return {
@@ -5510,6 +5807,272 @@ def _json_safe_physical(value: Mapping[int, Mapping[str, Decimal]]) -> dict[str,
 
 def _safe_ratio(numerator: Decimal, denominator: Decimal) -> Decimal:
     return numerator / denominator if denominator > ZERO else ZERO
+
+
+def _historical_terminal_supplier_shipment(row: Mapping[str, Any]) -> bool:
+    """Exclude an audited terminal legacy shipment from supplier WIP only.
+
+    The signal deliberately does not create an FF receipt, FF cost layer, or
+    canonical movement.  Existing authoritative FF/WB evidence remains the
+    sole source for downstream quantity and capital.
+    """
+
+    try:
+        value = row["historical_status_exception"]
+    except (IndexError, KeyError):
+        value = ""
+    return (
+        str(value or "")
+        == HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE
+    )
+
+
+def _exact_supplier_expense_allocations(
+    conn: sqlite3.Connection,
+    *,
+    shipment_id: str,
+    expenses: Iterable[sqlite3.Row],
+    product_lines: Iterable[sqlite3.Row],
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Adopt the one approved legacy cost-payment group as canonical capital."""
+
+    expected = AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY
+    document_id = str(expected["document_id"])
+    document = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_supplier_financial_documents "
+        "WHERE document_id=? AND supplier_order_id=?",
+        (document_id, shipment_id),
+    ).fetchone()
+    exact_expenses = [
+        expense
+        for expense in expenses
+        if str(expense["financial_document_id"] or "") == document_id
+    ]
+    if document is None or str(document["parse_status"] or "") != "confirmed":
+        return {}
+    if shipment_id != str(expected["shipment_id"]) or len(exact_expenses) != 1:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_identity_drift",
+            {"document_id": document_id, "shipment_id": shipment_id},
+        )
+    expense = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines "
+        "WHERE line_id=? AND financial_document_id=? AND supplier_order_id=?",
+        (expected["expense_line_id"], document_id, shipment_id),
+    ).fetchone()
+    if document is None or expense is None:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_evidence_missing",
+            {"document_id": document_id, "expense_line_id": expected["expense_line_id"]},
+        )
+    expense_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_financial_expense_lines "
+            "WHERE financial_document_id=?",
+            (document_id,),
+        ).fetchone()[0]
+    )
+    if expense_count != 1:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_line_drift",
+            {"document_id": document_id, "expense_line_count": expense_count},
+        )
+    document_checks = {
+        "document_type": expected["document_type"],
+        "document_number": expected["document_number"],
+        "document_date": expected["document_date"],
+        "currency": expected["currency"],
+        "file_sha256": expected["file_sha256"],
+    }
+    for field, value in document_checks.items():
+        if str(document[field] or "") != str(value):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_document_drift",
+                {"document_id": document_id, "field": field},
+            )
+    if _decimal(document["total_amount_rub"]) != _decimal(
+        expected["total_amount_rub"]
+    ):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_document_drift",
+            {"document_id": document_id, "field": "total_amount_rub"},
+        )
+    expense_checks = {
+        "category": expected["expense_category"],
+        "stage": expected["expense_stage"],
+        "currency": expected["currency"],
+    }
+    for field, value in expense_checks.items():
+        if str(expense[field] or "") != str(value):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_line_drift",
+                {"expense_line_id": expected["expense_line_id"], "field": field},
+            )
+    expense_amount = _decimal(expense["amount_rub"])
+    if expense_amount != _decimal(expected["expense_amount_rub"]):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_line_drift",
+            {"expense_line_id": expected["expense_line_id"], "field": "amount_rub"},
+        )
+
+    lines = sorted(
+        product_lines,
+        key=lambda line: (int(line["sort_order"] or 0), str(line["line_id"] or "")),
+    )
+    if len(lines) != int(expected["event_count"]):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_product_line_drift",
+            {"document_id": document_id, "count": len(lines)},
+        )
+    product_values: list[tuple[int, Decimal]] = []
+    seen_nm_ids: set[int] = set()
+    for line in lines:
+        nm_id = int(line["internal_nm_id"] or 0)
+        quantity = _decimal(line["qty"])
+        amount = _decimal(line["amount"])
+        if amount <= ZERO:
+            amount = quantity * _decimal(line["unit_price"])
+        if (
+            nm_id <= 0
+            or nm_id in seen_nm_ids
+            or quantity <= ZERO
+            or amount <= ZERO
+            or str(line["match_status"] or "")
+            not in {"matched", "matched_by_barcode", "matched_by_compatibility"}
+        ):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_product_line_drift",
+                {"document_id": document_id, "nm_id": nm_id},
+            )
+        seen_nm_ids.add(nm_id)
+        product_values.append((nm_id, amount))
+    total_value = sum((amount for _, amount in product_values), ZERO)
+    remaining = expense_amount
+    expected_by_ordinal: dict[int, tuple[int, str]] = {}
+    for ordinal, (nm_id, amount) in enumerate(product_values, start=1):
+        allocated = (
+            remaining
+            if ordinal == len(product_values)
+            else expense_amount * amount / total_value
+        )
+        remaining -= allocated
+        expected_by_ordinal[ordinal] = (nm_id, _text(allocated))
+
+    prefix = f"cost_payment:financial_expense:{document_id}:"
+    events = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_own_capital_events "
+        "WHERE substr(event_id,1,?)=? ORDER BY event_id",
+        (len(prefix), prefix),
+    ).fetchall()
+    if len(events) != int(expected["event_count"]):
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_event_count_drift",
+            {"document_id": document_id, "count": len(events)},
+        )
+    result: dict[tuple[str, int], dict[str, Any]] = {}
+    stored_total = ZERO
+    for event in events:
+        event_id = str(event["event_id"] or "")
+        try:
+            ordinal = int(event_id.rsplit(":", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_event_identity_drift",
+                {"document_id": document_id, "event_id": event_id},
+            ) from exc
+        expected_item = expected_by_ordinal.get(ordinal)
+        if expected_item is None:
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_event_identity_drift",
+                {"document_id": document_id, "event_id": event_id},
+            )
+        nm_id, capital_text = expected_item
+        exact_event_id = f"{prefix}{nm_id}:{ordinal}"
+        checks = {
+            "event_id": exact_event_id,
+            "event_type": "cost_payment",
+            "effective_date": expected["document_date"],
+            "shipment_id": shipment_id,
+            "stage_from": "",
+            "stage_to": expected["event_stage"],
+            "cost_layer_id": f"expense:financial_expense:{document_id}:{nm_id}:{ordinal}",
+            "evidence_hash": expected["event_evidence_hash"],
+        }
+        for field, value in checks.items():
+            if str(event[field] or "") != str(value):
+                raise CanonicalCostBlocked(
+                    "exact_supplier_expense_event_identity_drift",
+                    {"document_id": document_id, "event_id": event_id, "field": field},
+                )
+        if (
+            int(event["nm_id"] or 0) != nm_id
+            or _decimal(event["quantity"]) != ZERO
+            or _decimal(event["confirmed_quantity"]) != ZERO
+            or _text(_decimal(event["capital_rub"])) != capital_text
+        ):
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_event_accounting_drift",
+                {"document_id": document_id, "event_id": event_id},
+            )
+        key = (document_id, nm_id)
+        if key in result:
+            raise CanonicalCostBlocked(
+                "exact_supplier_expense_duplicate_nm",
+                {"document_id": document_id, "nm_id": nm_id},
+            )
+        stored_total += _decimal(event["capital_rub"])
+        result[key] = {
+            "event_id": event_id,
+            "effective_date": str(event["effective_date"]),
+            "capital_rub": capital_text,
+            "evidence_hash": str(event["evidence_hash"]),
+        }
+    tolerance = Decimal("0.000001") * Decimal(len(events))
+    if abs(expense_amount - stored_total) > tolerance or set(seen_nm_ids) != {
+        nm_id for _, nm_id in result
+    }:
+        raise CanonicalCostBlocked(
+            "exact_supplier_expense_conservation_drift",
+            {"document_id": document_id},
+        )
+    return result
+
+
+def _exact_supplier_expense_allocations_for_shipment(
+    conn: sqlite3.Connection,
+    *,
+    shipment_id: str,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    expected = AUTHORIZED_FINANCIAL_DOCUMENT_CONFIRMATION_IDENTITY
+    if shipment_id != str(expected["shipment_id"]):
+        return {}
+    expenses = conn.execute(
+        """
+        SELECT expense.line_id,expense.financial_document_id,expense.category,
+               expense.amount_rub,document.document_type,document.document_date,
+               document.parse_status,document.file_sha256
+        FROM sheet_vitrina_v1_supplier_financial_expense_lines expense
+        JOIN sheet_vitrina_v1_supplier_financial_documents document
+          ON document.document_id=expense.financial_document_id
+        WHERE expense.supplier_order_id=? AND expense.financial_document_id=?
+          AND COALESCE(expense.amount_rub,0)>0 AND document.parse_status='confirmed'
+        ORDER BY document.document_date,document.document_id,expense.sort_order
+        """,
+        (shipment_id, expected["document_id"]),
+    ).fetchall()
+    if not expenses:
+        return {}
+    product_lines = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines "
+        "WHERE shipment_id=? AND line_type='product' ORDER BY sort_order",
+        (shipment_id,),
+    ).fetchall()
+    return _exact_supplier_expense_allocations(
+        conn,
+        shipment_id=shipment_id,
+        expenses=expenses,
+        product_lines=product_lines,
+    )
 
 
 def _decimal(value: Any) -> Decimal:

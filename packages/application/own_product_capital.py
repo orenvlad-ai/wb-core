@@ -30,6 +30,9 @@ from packages.application.sheet_vitrina_v1_own_product_capital import (
     OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY,
     own_stage_metric_key,
 )
+from packages.application.supplier_shipment_status import (
+    HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+)
 from packages.contracts.supplier_financial_documents import (
     FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
     FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED,
@@ -707,6 +710,13 @@ class OwnProductCapitalBlock:
                 )
                 continue
             header = dict(detail.get("header") or {})
+            if (
+                str(header.get("historical_status_exception") or "")
+                == HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE
+            ):
+                # Existing audit evidence is preserved, but a terminal legacy
+                # signal never materializes a new production/FF capital event.
+                continue
             product_lines = [
                 {
                     "line_id": line.get("line_id"),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 import sys
@@ -17,7 +19,11 @@ from packages.application.supplier_invoice_parser import (  # noqa: E402
     normalize_barcode_value,
     parse_supplier_invoice_xlsx,
 )
-from packages.application.supplier_shipments import _apply_nomenclature_matches  # noqa: E402
+from packages.application.supplier_shipments import (  # noqa: E402
+    _apply_nomenclature_matches,
+    _assert_atomic_supplier_product_matching,
+    _bind_source_owned_line_identity,
+)
 
 
 PRIMARY_BARCODE = "0123456789012"
@@ -31,6 +37,8 @@ def main() -> None:
     _assert_conflict_and_rejection_paths()
     _assert_lossless_barcode_values()
     _assert_barcode_only_matching()
+    _assert_source_identity_and_atomic_numbers()
+    _assert_synthetic_34_of_34_mapping()
     _assert_metadata_totals_and_extras()
     print("supplier_invoice_parser_smoke: OK")
 
@@ -131,6 +139,12 @@ def _assert_lossless_barcode_values() -> None:
             raise
     else:
         raise AssertionError("scientific-notation text must be rejected instead of guessed")
+    for unsafe_value in (2**53 + 1, -12345678, "123.0", "ABC123"):
+        try:
+            normalize_barcode_value(unsafe_value)
+        except ValueError:
+            continue
+        raise AssertionError(f"unsafe or ambiguous barcode must be rejected: {unsafe_value!r}")
 
 
 def _assert_barcode_only_matching() -> None:
@@ -187,6 +201,103 @@ def _assert_barcode_only_matching() -> None:
     if ambiguous.get("match_status") != "ambiguous" or ambiguous.get("internal_nm_id") is not None:
         raise AssertionError(f"duplicate active barcode owners must be ambiguous: {ambiguous}")
 
+    missing_nmid = _apply_nomenclature_matches(
+        [product_lines[0]],
+        [_nomenclature_item("nom-missing-nmid", None, PRIMARY_BARCODE, [])],
+    )[0]
+    if (
+        missing_nmid.get("match_status") != "unmatched"
+        or missing_nmid.get("internal_nm_id") is not None
+        or missing_nmid.get("match_evidence", {}).get("reason") != "barcode_owner_missing_nmid"
+    ):
+        raise AssertionError(f"barcode owner without nmID must stay explicit and unmatched: {missing_nmid}")
+    for rejected in (unknown, missing, ambiguous, missing_nmid):
+        try:
+            _assert_atomic_supplier_product_matching([rejected])
+        except ValueError:
+            continue
+        raise AssertionError(f"unresolved barcode identity must reject the whole save: {rejected}")
+
+
+def _assert_source_identity_and_atomic_numbers() -> None:
+    parsed = parse_supplier_invoice_xlsx(_build_invoice_fixture(), filename="source-owned.xlsx")
+    swapped = deepcopy(parsed)
+    first_raw = deepcopy(swapped["lines"][0]["raw"])
+    swapped["lines"][0]["raw"] = deepcopy(swapped["lines"][1]["raw"])
+    swapped["lines"][1]["raw"] = first_raw
+    try:
+        _bind_source_owned_line_identity(
+            swapped,
+            trusted_payload=parsed,
+            context="source identity smoke",
+        )
+    except ValueError as exc:
+        if "identity/order" not in str(exc):
+            raise
+    else:
+        raise AssertionError("client must not reassign source invoice row identities")
+
+    product_lines = [dict(line) for line in parsed["lines"] if line["line_type"] == "product"]
+    matched = _apply_nomenclature_matches(
+        product_lines,
+        [
+            _nomenclature_item("atomic-a", 1001, PRIMARY_BARCODE, []),
+            _nomenclature_item("atomic-b", 1002, SECONDARY_BARCODE, []),
+            _nomenclature_item("atomic-c", 1003, THIRD_BARCODE, []),
+        ],
+    )
+    for field, invalid_value in (("qty", float("nan")), ("unit_price", 0), ("amount", -1)):
+        invalid_lines = deepcopy(matched)
+        invalid_lines[0][field] = invalid_value
+        try:
+            _assert_atomic_supplier_product_matching(invalid_lines)
+        except ValueError:
+            continue
+        raise AssertionError(f"atomic save must reject invalid {field}")
+
+
+def _assert_synthetic_34_of_34_mapping() -> None:
+    categories = ["No Frame Clean"] * 10 + ["No Frame Anti-spy"] * 12 + ["No Frame Matte"] * 12
+    barcodes = [f"3{index:012d}" for index in range(1, 35)]
+    parsed = parse_supplier_invoice_xlsx(
+        _build_34_row_invoice_fixture(barcodes),
+        filename="synthetic-26GN583-structure.xlsx",
+    )
+    diagnostics = parsed.get("diagnostics") or {}
+    products = [dict(line) for line in parsed.get("lines") or [] if line.get("line_type") == "product"]
+    if (
+        diagnostics.get("worksheet") != "PI"
+        or diagnostics.get("header_row") != 6
+        or diagnostics.get("barcode_column", {}).get("method") != "header_alias"
+        or diagnostics.get("barcode_column", {}).get("column_letter") != "D"
+        or len(products) != 34
+        or len({line.get("barcode") for line in products}) != 34
+    ):
+        raise AssertionError(f"synthetic 26GN583 structure changed: {diagnostics}, products={len(products)}")
+    nomenclature = []
+    for index, (barcode, category) in enumerate(zip(barcodes, categories, strict=True), start=1):
+        item = _nomenclature_item(
+            f"synthetic-{index}",
+            900000000 + index,
+            barcode if index % 2 else "9999999999999",
+            [] if index % 2 else [barcode],
+        )
+        item["nomenclature_name"] = f"{category} synthetic {index:02d}"
+        nomenclature.append(item)
+    matched = _apply_nomenclature_matches(products, nomenclature)
+    matched_categories = Counter(
+        str(line.get("internal_name") or "").rsplit(" synthetic ", 1)[0]
+        for line in matched
+    )
+    if (
+        len(matched) != 34
+        or any(line.get("match_status") != "matched_by_barcode" for line in matched)
+        or len({line.get("internal_nm_id") for line in matched}) != 34
+        or matched_categories
+        != Counter({"No Frame Clean": 10, "No Frame Anti-spy": 12, "No Frame Matte": 12})
+    ):
+        raise AssertionError(f"synthetic barcode mapping must close 34/34 exactly: {matched_categories}")
+
 
 def _assert_metadata_totals_and_extras() -> None:
     payload = parse_supplier_invoice_xlsx(_build_invoice_fixture(), filename="PI-test 26GN390 (14.5.2026).xlsx")
@@ -230,7 +341,7 @@ def _assert_parse_error(workbook_bytes: bytes, expected: str) -> None:
 
 def _nomenclature_item(
     item_id: str,
-    nm_id: int,
+    nm_id: int | None,
     barcode: str,
     barcodes: list[str],
     *,
@@ -251,6 +362,36 @@ def _nomenclature_item(
         "aliases": ["also wrong"],
         "compatible_model_keys": ["iphone_99"],
     }
+
+
+def _build_34_row_invoice_fixture(barcodes: list[str]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "PI"
+    sheet.append(["Invoice No:", "SYNTHETIC-34"])
+    sheet.append(["Invoice Date:", "2026-07-13"])
+    sheet.append(["Contract No.", "SYNTHETIC-CONTRACT"])
+    sheet.append(["Date of Contract", "2026-06-08"])
+    sheet.append(["Supplier:", "Sanitized Supplier"])
+    sheet.append(
+        [
+            "NO.",
+            "MODELS / （型号）",
+            "NAME & SPECIFICATION / （品名规格）",
+            "Braocde\n(条形码）",
+            "QTY (PCS) / （数量）",
+            "U.PRICE / （单价） (RMB/PCS)",
+            "AMOUNT / （总价） (RMB)",
+            "备注",
+        ]
+    )
+    for index, barcode in enumerate(barcodes, start=1):
+        marker = "高清膜 smk" if index <= 10 else "防窥膜 (Anti-Spy)" if index <= 22 else "磨砂膜 (Matte)"
+        sheet.append([index, f"Synthetic Model {index:02d}", marker, barcode, 1, 1, 1, ""])
+    sheet.append(["（总值）Total:", "", "", "", "", "", 34, ""])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def _build_invoice_fixture(

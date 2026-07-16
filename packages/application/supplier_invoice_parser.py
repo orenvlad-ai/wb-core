@@ -962,13 +962,20 @@ def normalize_barcode_value(value: Any) -> str:
     if isinstance(value, bool):
         raise ValueError("boolean barcode value is invalid")
     if isinstance(value, int):
+        if value < 0 or value > MAX_EXACT_FLOAT_INTEGER:
+            raise ValueError("numeric barcode cannot be restored losslessly")
         return str(value)
     if isinstance(value, Decimal):
-        if not value.is_finite() or value != value.to_integral_value():
+        if (
+            not value.is_finite()
+            or value < 0
+            or value > MAX_EXACT_FLOAT_INTEGER
+            or value != value.to_integral_value()
+        ):
             raise ValueError("numeric barcode is not an exact integer")
         return format(value, "f").split(".", 1)[0]
     if isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer() or abs(value) > MAX_EXACT_FLOAT_INTEGER:
+        if not math.isfinite(value) or not value.is_integer() or value < 0 or value > MAX_EXACT_FLOAT_INTEGER:
             raise ValueError("numeric barcode cannot be restored losslessly")
         return str(int(value))
     if not isinstance(value, str):
@@ -981,6 +988,8 @@ def normalize_barcode_value(value: Any) -> str:
         return ""
     if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+", text):
         raise ValueError("scientific-notation barcode text is not accepted")
+    if not text.isascii() or not text.isdigit():
+        raise ValueError("barcode text must contain ASCII digits only")
     return text
 
 

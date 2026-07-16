@@ -25,6 +25,7 @@ from packages.application.sku_management import (
     SkuManagementError,
     calculate_depletion_forecast,
     choose_target_price_configuration,
+    select_nearest_supplier_inbound,
     _select_observed_buyer_price,
 )
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
@@ -142,6 +143,7 @@ class EmptySalesHistory:
 
 def main() -> None:
     _forecast_checks()
+    _supplier_inbound_projection_checks()
     _price_configuration_checks()
     _wb_supply_double_count_check()
     with TemporaryDirectory(prefix="sku-management-smoke-") as tmp:
@@ -303,6 +305,100 @@ def _price_configuration_checks() -> None:
         raise AssertionError("calculated buyer price must never substitute missing public confirmation")
 
 
+def _supplier_inbound_projection_checks() -> None:
+    settings = ForecastSettings(factory_to_ff_lead_days=5, ff_to_wb_lead_days=3)
+    details = {
+        "later": {
+            "header": {
+                "invoice_no": "INV-200",
+                "order_status": "in_transit",
+                "actual_shipment_date": "2026-07-15",
+                "shipment_date": "2026-07-10",
+            },
+            "lines": [
+                {"line_type": "product", "match_status": "matched_by_barcode", "internal_nm_id": NM_ID, "qty": 20},
+                {"line_type": "product", "match_status": "matched_by_compatibility", "internal_nm_id": NM_ID, "qty": 5},
+                {"line_type": "extra", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 999},
+            ],
+        },
+        "first-b": {
+            "header": {"invoice_no": "INV-B", "order_status": "production", "actual_shipment_date": "invalid", "shipment_date": "2026-07-14"},
+            "lines": [{"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 12}],
+        },
+        "first-a": {
+            "header": {"invoice_no": "INV-A", "order_status": "production", "shipment_date": "2026-07-14"},
+            "lines": [{"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 11}],
+        },
+        "untrusted": {
+            "header": {"invoice_no": "INV-UNTRUSTED", "order_status": "production", "shipment_date": "2026-07-13"},
+            "lines": [
+                {"line_type": "product", "match_status": "unmatched", "internal_nm_id": NM_ID, "qty": 100},
+                {"line_type": "product", "match_status": "ambiguous", "internal_nm_id": NM_ID, "qty": 100},
+                {"line_type": "product", "match_status": "matched", "manual_override": True, "internal_nm_id": NM_ID, "qty": 100},
+                {"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 0},
+                {"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": -5},
+            ],
+        },
+        "accepted": {
+            "header": {
+                "invoice_no": "INV-ACCEPTED",
+                "order_status": "in_transit",
+                "shipment_date": "2026-07-13",
+                "actual_ff_acceptance_date": "2026-07-14",
+            },
+            "lines": [{"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 500}],
+        },
+        "cancelled": {
+            "header": {"invoice_no": "INV-CANCELLED", "order_status": "cancelled", "shipment_date": "2026-07-13"},
+            "lines": [{"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 500}],
+        },
+        "overdue": {
+            "header": {"invoice_no": "INV-OVERDUE", "order_status": "production", "shipment_date": "2026-06-01"},
+            "lines": [{"line_type": "product", "match_status": "matched", "internal_nm_id": NM_ID, "qty": 30}],
+        },
+    }
+    runtime = SimpleNamespace(
+        list_supplier_shipments=lambda: [{"shipment_id": shipment_id} for shipment_id in details],
+        load_supplier_shipment=lambda shipment_id: details[shipment_id],
+    )
+    block = SkuManagementBlock(
+        runtime=runtime,
+        runtime_dir=Path("."),
+        prices_block=object(),
+        ads_block=object(),
+        now_factory=lambda: NOW,
+    )
+    result = {NM_ID: {"real_inbounds": [], "supplier_inbounds": [], "warnings": []}}
+    block._append_supplier_inbounds(result, settings=settings)
+    supplier = result[NM_ID]["supplier_inbounds"]
+    later = next(item for item in supplier if item["invoice_no"] == "INV-200")
+    if later["quantity"] != 25 or later["arrival_date"] != "2026-07-23" or later["date_source"] != "actual_shipment_date":
+        raise AssertionError(f"supplier lines/date-source projection mismatch: {later}")
+    timeline_later = next(
+        item for item in result[NM_ID]["real_inbounds"] if item.source_id == "later:" + str(NM_ID)
+    )
+    if timeline_later.arrival_date != later["arrival_date"] or timeline_later.quantity != later["quantity"]:
+        raise AssertionError("nearest-inbound projection must reuse the exact forecast timeline evidence")
+    nearest = select_nearest_supplier_inbound(supplier, as_of_date="2026-07-13")
+    if nearest is None or nearest["invoice_no"] != "INV-A" or nearest["arrival_date"] != "2026-07-22":
+        raise AssertionError(f"nearest invoice/tie-break mismatch: {nearest}")
+    planned_fallback = next(item for item in supplier if item["invoice_no"] == "INV-B")
+    if planned_fallback["date_source"] != "planned_shipment_date" or planned_fallback["arrival_date"] != "2026-07-22":
+        raise AssertionError("invalid/non-applicable actual date must fall back to the valid planned forecast date")
+    admitted = {item["invoice_no"] for item in supplier}
+    forbidden = {"INV-UNTRUSTED", "INV-ACCEPTED", "INV-CANCELLED"}
+    if admitted & forbidden:
+        raise AssertionError(f"untrusted/accepted/cancelled rows leaked into projection: {admitted & forbidden}")
+    overdue_only = select_nearest_supplier_inbound(
+        [item for item in supplier if item["invoice_no"] == "INV-OVERDUE"],
+        as_of_date="2026-07-13",
+    )
+    if overdue_only is not None:
+        raise AssertionError("overdue inbound must not be presented as the nearest future shipment")
+    if select_nearest_supplier_inbound([], as_of_date="2026-07-13") is not None:
+        raise AssertionError("absence of a registered future invoice must remain empty")
+
+
 def _wb_supply_double_count_check() -> None:
     record = {
         "supply_id": "supply-1",
@@ -342,9 +438,16 @@ def _settings_and_table(block) -> None:
     settings = block.get_settings(user_key="operator")
     if settings["forecast"]["sales_avg_period_days"] != 14 or settings["canonical_store"] != "server_runtime_user_config":
         raise AssertionError(settings)
-    saved = block.save_settings(user_key="operator", payload={"base_revision": 0, "forecast": {**settings["forecast"], "sales_avg_period_days": 30}, "table": {"visible_columns": ["product", "risk"], "column_order": ["risk", "product"], "column_widths": {"product": 190}, "filters": {"risk": "high"}, "sort": [{"key": "deficit_date", "direction": "asc"}]}})
+    saved = block.save_settings(user_key="operator", payload={"base_revision": 0, "forecast": {**settings["forecast"], "sales_avg_period_days": 30}, "table": {"visible_columns": ["risk", "first_problem_district"], "column_order": ["first_problem_district", "risk", "product"], "column_widths": {"product": 190, "first_problem_district": 160}, "filters": {"search": "SKU", "risk": "high", "coverage_min": 100}, "sort": [{"key": "first_problem_district", "direction": "asc"}, {"key": "deficit_date", "direction": "asc"}]}})
     if saved["forecast"]["sales_avg_period_days"] != 30 or saved["table"]["column_widths"]["product"] != 190:
         raise AssertionError(saved)
+    if saved["table"]["filters"] != {"search": "SKU"}:
+        raise AssertionError("retired filters must be removed from persisted active state")
+    if saved["table"]["visible_columns"] != ["product", "risk"]:
+        raise AssertionError("mandatory product must survive migration while retired columns are removed")
+    serialized_table = json.dumps(saved["table"], sort_keys=True)
+    if "first_problem_district" in serialized_table:
+        raise AssertionError("retired presentation column must be removed from preferences")
     table = block.build_table(user_key="operator")
     if not table["rows"] or table["meta"]["writes_enabled"] is not True:
         raise AssertionError(table)

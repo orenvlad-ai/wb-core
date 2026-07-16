@@ -2758,6 +2758,33 @@
       font-weight: 500;
     }
 
+    .shipment-registry-status-badge {
+      display: inline-flex;
+      max-width: 100%;
+      margin-top: 6px;
+      padding: 3px 7px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.12);
+      color: var(--muted-strong);
+      font-size: 10px;
+      font-weight: 750;
+      line-height: 1.25;
+      white-space: normal;
+    }
+
+    .shipment-registry-status-badge.is-in-transit {
+      border-color: rgba(56, 189, 248, 0.38);
+      background: rgba(56, 189, 248, 0.12);
+      color: #7dd3fc;
+    }
+
+    .shipment-registry-status-badge.is-accepted-ff {
+      border-color: rgba(52, 211, 153, 0.38);
+      background: rgba(52, 211, 153, 0.12);
+      color: #6ee7b7;
+    }
+
     .shipment-registry-select {
       display: inline-flex;
       align-items: center;
@@ -9608,7 +9635,8 @@
             columns.map((column) => [
               "<th scope=\"col\">",
               "<button class=\"shipment-registry-column-link\" type=\"button\" data-shipment-registry-detail=\"" + escapeHtml(String(column.shipment_id || "")) + "\">" + escapeHtml(registryDisplayValue(column.title || column.shipment_id)) + "</button>",
-              "<span class=\"shipment-registry-column-sub\">" + escapeHtml(registryDisplayValue(column.subtitle || column.order_status)) + "</span>",
+              "<span class=\"shipment-registry-column-sub\">" + escapeHtml(registryDisplayValue(column.subtitle)) + "</span>",
+              "<span class=\"shipment-registry-status-badge " + (column.order_status === "accepted_ff" ? "is-accepted-ff" : column.order_status === "in_transit" ? "is-in-transit" : "is-production") + "\" title=\"" + escapeHtml(column.order_status_tooltip || "Статус вычислен из фактических дат") + "\">" + escapeHtml(registryDisplayValue(column.order_status_display || column.order_status_label || column.order_status)) + "</span>",
               "<label class=\"shipment-registry-select\">",
               "<input type=\"checkbox\" data-shipment-registry-select=\"" + escapeHtml(String(column.shipment_id || "")) + "\"" + (shipmentRegistrySelectedShipmentId === String(column.shipment_id || "") ? " checked" : "") + ">",
               "<span>Сравнить</span>",

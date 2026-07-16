@@ -21,6 +21,7 @@ from packages.application.registry_upload_bundle_v1 import (
     load_registry_upload_bundle_v1_from_path,
     parse_registry_upload_bundle_v1_payload,
 )
+from packages.application.supplier_shipment_status import apply_derived_supplier_status
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     effective_source_temporal_policies,
@@ -3744,6 +3745,7 @@ class RegistryUploadDbBackedRuntime:
                     shipment_date,
                     actual_shipment_date,
                     actual_ff_acceptance_date,
+                    historical_status_exception,
                     order_status,
                     expenses_complete,
                     invoice_no,
@@ -3768,12 +3770,13 @@ class RegistryUploadDbBackedRuntime:
                     warnings_json,
                     errors_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     shipment_date = excluded.shipment_date,
                     actual_shipment_date = excluded.actual_shipment_date,
                     actual_ff_acceptance_date = excluded.actual_ff_acceptance_date,
+                    historical_status_exception = excluded.historical_status_exception,
                     order_status = excluded.order_status,
                     expenses_complete = excluded.expenses_complete,
                     invoice_no = excluded.invoice_no,
@@ -3805,6 +3808,7 @@ class RegistryUploadDbBackedRuntime:
                     header.get("shipment_date"),
                     header.get("actual_shipment_date") or None,
                     header.get("actual_ff_acceptance_date") or None,
+                    header.get("historical_status_exception") or "",
                     header.get("order_status") or ORDER_STATUS_DEFAULT,
                     1 if bool(header.get("expenses_complete")) else 0,
                     header.get("invoice_no") or "",
@@ -3921,6 +3925,7 @@ class RegistryUploadDbBackedRuntime:
                        shipment_date,
                        actual_shipment_date,
                        actual_ff_acceptance_date,
+                       historical_status_exception,
                        order_status,
                        expenses_complete,
                        invoice_no,
@@ -6790,7 +6795,7 @@ def _deserialize_temporal_source_payload(payload_json: str) -> Any:
 
 
 def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    return apply_derived_supplier_status({
         "shipment_id": row["shipment_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -6798,6 +6803,7 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "planned_shipment_date": row["shipment_date"],
         "actual_shipment_date": row["actual_shipment_date"] or "",
         "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
+        "historical_status_exception": row["historical_status_exception"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
         "expenses_complete": bool(row["expenses_complete"]),
         "invoice_no": row["invoice_no"] or "",
@@ -6823,11 +6829,11 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source_file_sha256": row["source_file_sha256"] or "",
         "source_file_path": row["source_file_path"] or "",
         "invoice_document_id": row["invoice_document_id"] or "",
-    }
+    })
 
 
 def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    return apply_derived_supplier_status({
         "shipment_id": row["shipment_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -6835,6 +6841,7 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "planned_shipment_date": row["shipment_date"],
         "actual_shipment_date": row["actual_shipment_date"] or "",
         "actual_ff_acceptance_date": row["actual_ff_acceptance_date"] or "",
+        "historical_status_exception": row["historical_status_exception"] or "",
         "order_status": row["order_status"] or ORDER_STATUS_DEFAULT,
         "expenses_complete": bool(row["expenses_complete"]),
         "invoice_no": row["invoice_no"] or "",
@@ -6865,7 +6872,7 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "parser_version": row["parser_version"] or "",
         "warnings": _loads_json_list(row["warnings_json"]),
         "errors": _loads_json_list(row["errors_json"]),
-    }
+    })
 
 
 def _supplier_shipment_line_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -8208,6 +8215,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             shipment_date TEXT NOT NULL,
             actual_shipment_date TEXT,
             actual_ff_acceptance_date TEXT,
+            historical_status_exception TEXT NOT NULL DEFAULT '',
             order_status TEXT NOT NULL DEFAULT 'production',
             expenses_complete INTEGER NOT NULL DEFAULT 0,
             invoice_no TEXT,
@@ -8242,6 +8250,52 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_shipments_by_date
         ON sheet_vitrina_v1_supplier_shipments(shipment_date DESC, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_historical_status_events (
+            event_id TEXT PRIMARY KEY,
+            shipment_id TEXT NOT NULL,
+            exception_code TEXT NOT NULL,
+            action TEXT NOT NULL,
+            previous_exception TEXT NOT NULL DEFAULT '',
+            new_exception TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            evidence_fingerprint TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            apply_fingerprint TEXT NOT NULL,
+            reverses_event_id TEXT,
+            reversible INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX IF NOT EXISTS supplier_historical_status_events_by_shipment
+        ON sheet_vitrina_v1_supplier_shipment_historical_status_events(
+            shipment_id, created_at DESC, event_id DESC
+        );
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_publication_chain_jobs (
+            chain_job_id TEXT PRIMARY KEY,
+            chain_fingerprint TEXT NOT NULL,
+            supplier_fingerprint TEXT NOT NULL,
+            publication_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            report_json TEXT NOT NULL DEFAULT '{}',
+            error_message TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS supplier_publication_chain_jobs_by_status
+        ON sheet_vitrina_v1_supplier_publication_chain_jobs(
+            status, updated_at DESC, chain_job_id DESC
+        );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_trade_documents (
             document_id TEXT PRIMARY KEY,
@@ -8794,6 +8848,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         table_name="sheet_vitrina_v1_supplier_shipments",
         column_name="actual_ff_acceptance_date",
         column_sql="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table_name="sheet_vitrina_v1_supplier_shipments",
+        column_name="historical_status_exception",
+        column_sql="TEXT NOT NULL DEFAULT ''",
     )
     _ensure_column(
         conn,

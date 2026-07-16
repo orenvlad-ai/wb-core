@@ -24,6 +24,10 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.supplier_shipment_factual_correction import (
+    SupplierShipmentFactualCorrectionError,
+)
+from packages.business_time import current_business_date_iso
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import (
     SheetVitrinaV1FeedbacksAutoComplaintsError,
 )
@@ -114,6 +118,11 @@ DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH = "/v1/sheet-vitrina-v1/prices/spp-te
 DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/history"
 DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PREFIX = "/v1/sheet-vitrina-v1/prices/spp-test/history/"
 DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/schedule"
+DEFAULT_WB_BUYER_SESSION_CHECK_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/check"
+DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status"
+DEFAULT_WB_BUYER_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start"
+DEFAULT_WB_BUYER_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop"
+DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip"
 DEFAULT_SKU_MANAGEMENT_PATH = "/v1/sheet-vitrina-v1/sku-management"
 DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/settings"
 DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/price/preview"
@@ -261,6 +270,7 @@ DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipment
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_COMPARE_QUOTE_PATH = f"{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}/compare-quote"
+DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT = "factual-date-correction"
 DEFAULT_SUPPLIER_ORDER_DOCUMENTS_SEGMENT = "documents"
 DEFAULT_SUPPLIER_FINANCIAL_DOCUMENTS_SEGMENT = "financial-documents"
 DEFAULT_CNY_ACCOUNT_PATH = "/v1/sheet-vitrina-v1/supply/cny-account"
@@ -1225,6 +1235,42 @@ def _build_handler(
                     HTTPStatus.ACCEPTED,
                     _with_sheet_job_urls(job_payload, sheet_job_path),
                 )
+                return
+
+            if parsed.path == DEFAULT_WB_BUYER_RECOVERY_START_PATH:
+                try:
+                    payload = _load_optional_request_payload(self)
+                    replace = _resolve_replace_requested(payload)
+                    result = entrypoint.handle_wb_buyer_session_recovery_start_request(
+                        launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+                        replace=replace,
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "buyer session recovery start failed"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_WB_BUYER_RECOVERY_STOP_PATH:
+                try:
+                    result = entrypoint.handle_wb_buyer_session_recovery_stop_request(
+                        launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+                    )
+                except Exception:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "buyer session recovery stop failed"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH:
@@ -2215,6 +2261,93 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_BUYER_SESSION_CHECK_PATH:
+                try:
+                    payload = entrypoint.handle_wb_buyer_session_check_request()
+                except Exception:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.OK,
+                        {
+                            "contract_name": "wb_buyer_session_status_v1",
+                            "status": "probe_error",
+                            "status_label": "Ошибка проверки",
+                            "status_tone": "danger",
+                            "valid": False,
+                            "reason": "buyer_session_probe_failed",
+                            "action": "Установить сессию",
+                        },
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH:
+                try:
+                    run_id = _resolve_single_query_param(parsed.query, "run_id")
+                    with_probe = _resolve_query_bool_default_true(parsed.query, "probe")
+                    payload = entrypoint.handle_wb_buyer_session_recovery_status_request(
+                        launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+                        run_id=run_id or None,
+                        with_probe=with_probe,
+                    )
+                except Exception:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.OK,
+                        {
+                            "contract_name": "wb_buyer_session_recovery_v1",
+                            "status": "error",
+                            "status_label": "Ошибка",
+                            "status_tone": "danger",
+                            "running": False,
+                            "reason": "buyer_recovery_status_failed",
+                            "session": {"status": "probe_error", "valid": False},
+                        },
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH:
+                try:
+                    status_payload = entrypoint.handle_wb_buyer_session_recovery_status_request(
+                        launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+                        run_id=None,
+                        with_probe=False,
+                    )
+                    if not bool(status_payload.get("can_download_launcher") or status_payload.get("launcher_ready")):
+                        _write_json_response(
+                            self,
+                            HTTPStatus.CONFLICT,
+                            {
+                                "error": "buyer recovery launcher is not ready",
+                                "status": status_payload.get("status"),
+                                "reason": status_payload.get("reason"),
+                            },
+                        )
+                        return
+                    request_origin = _request_origin(self)
+                    archive_bytes, filename = entrypoint.handle_wb_buyer_session_recovery_launcher_request(
+                        public_status_url=f"{request_origin}{DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH}",
+                        public_operator_url=f"{request_origin}{sheet_operator_ui_path}",
+                    )
+                except RuntimeError:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "buyer recovery launcher is not ready"})
+                    return
+                except Exception:
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "buyer recovery launcher failed"})
+                    return
+                _write_binary_response(
+                    self,
+                    HTTPStatus.OK,
+                    archive_bytes,
+                    content_type="application/zip",
+                    filename=filename,
+                    as_attachment=True,
+                )
                 return
 
             if parsed.path == DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH:
@@ -3474,6 +3607,23 @@ def _build_handler(
                 )
                 return
 
+            if _is_supplier_factual_date_correction_path(parsed.path):
+                try:
+                    shipment_id = _resolve_supplier_shipment_id_from_factual_correction_path(parsed.path)
+                    payload = entrypoint.handle_supplier_shipment_factual_correction_request(shipment_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"supplier factual correction status failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if _is_supplier_shipment_detail_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
@@ -3936,9 +4086,20 @@ def _build_handler(
                         if _is_supplier_order_status_only_payload(payload):
                             result = entrypoint.handle_supplier_shipments_order_status_patch_request(shipment_id, payload)
                         else:
-                            result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
+                            result = entrypoint.handle_supplier_shipments_patch_request(
+                                shipment_id,
+                                payload,
+                                actor=_current_web_user_config_key(self),
+                            )
                     else:
-                        result = entrypoint.handle_supplier_shipments_patch_request(shipment_id, payload)
+                        result = entrypoint.handle_supplier_shipments_patch_request(
+                            shipment_id,
+                            payload,
+                            actor=_current_web_user_config_key(self),
+                        )
+                except SupplierShipmentFactualCorrectionError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -3949,7 +4110,12 @@ def _build_handler(
                         {"error": f"supplier shipment patch failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                response_status = (
+                    HTTPStatus.ACCEPTED
+                    if str(result.get("status") or "") == "accepted"
+                    else HTTPStatus.OK
+                )
+                _write_json_response(self, response_status, result)
                 return
 
             if _is_nomenclature_item_path(parsed.path):
@@ -4662,6 +4828,18 @@ def _is_supplier_shipment_detail_path(path: str) -> bool:
     return bool(suffix) and "/" not in suffix and suffix != "parse"
 
 
+def _is_supplier_factual_date_correction_path(path: str) -> bool:
+    if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
+        return False
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    parts = suffix.split("/")
+    return (
+        len(parts) == 2
+        and bool(parts[0])
+        and parts[1] == DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT
+    )
+
+
 def _is_supplier_shipment_invoice_path(path: str) -> bool:
     if not path.startswith(DEFAULT_SUPPLIER_SHIPMENTS_PATH + "/"):
         return False
@@ -4902,6 +5080,13 @@ def _resolve_supplier_shipment_id_from_detail_path(path: str) -> str:
     if not _is_supplier_shipment_detail_path(path):
         raise ValueError(f"unsupported supplier shipment detail path: {path}")
     return path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+
+
+def _resolve_supplier_shipment_id_from_factual_correction_path(path: str) -> str:
+    if not _is_supplier_factual_date_correction_path(path):
+        raise ValueError(f"unsupported supplier factual correction path: {path}")
+    suffix = path[len(DEFAULT_SUPPLIER_SHIPMENTS_PATH) + 1 :]
+    return suffix.split("/", 1)[0]
 
 
 def _resolve_supplier_shipment_id_from_invoice_path(path: str) -> str:
@@ -6829,6 +7014,8 @@ def _render_sheet_vitrina_supplier_ui(
         "can_recheck_prices": bool(can_recheck_prices),
         "can_manage_documents": bool(can_manage_documents),
         "can_manage_financial_documents": bool(can_manage_financial_documents),
+        "business_today": current_business_date_iso(),
+        "factual_date_correction_segment": DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT,
     }
     price_check_button_html = (
         '<button id="priceCheckButton" type="button" hidden>Проверить цены</button>'
@@ -6933,6 +7120,11 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "prices_spp_test_restore_path": DEFAULT_SHEET_PRICES_SPP_TEST_RESTORE_PATH,
         "prices_spp_test_history_path": DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH,
         "prices_spp_test_schedule_path": DEFAULT_SHEET_PRICES_SPP_TEST_SCHEDULE_PATH,
+        "wb_buyer_session_check_path": DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
+        "wb_buyer_recovery_status_path": DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
+        "wb_buyer_recovery_start_path": DEFAULT_WB_BUYER_RECOVERY_START_PATH,
+        "wb_buyer_recovery_stop_path": DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+        "wb_buyer_recovery_launcher_path": DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
         "sku_management_path": DEFAULT_SKU_MANAGEMENT_PATH,
         "sku_management_settings_path": DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH,
         "sku_management_price_preview_path": DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH,

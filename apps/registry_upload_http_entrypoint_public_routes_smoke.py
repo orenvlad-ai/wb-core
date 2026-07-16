@@ -63,6 +63,11 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-selected",
         "/v1/sheet-vitrina-v1/feedbacks/complaints/submit-job",
         "/v1/sheet-vitrina-v1/prices/",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/check",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip",
         "/v1/sheet-vitrina-v1/supply/factory-order/",
         "/v1/sheet-vitrina-v1/supply/wb-regional/",
         "/v1/sheet-vitrina-v1/supply/wb-supplies",
@@ -136,6 +141,15 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include feedbacks complaints submit-selected exactly once")
     if rendered.count("location = /v1/sheet-vitrina-v1/feedbacks/complaints/submit-job {") != 1:
         raise AssertionError("rendered nginx block must include feedbacks complaints submit job exactly once")
+    for buyer_path in (
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/check",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop",
+        "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip",
+    ):
+        if rendered.count(f"location = {buyer_path} {{") != 1:
+            raise AssertionError(f"rendered nginx block must include buyer-session route exactly once: {buyer_path}")
     if rendered.count("location = /login {") != 1 or rendered.count("location = /logout {") != 1:
         raise AssertionError("rendered nginx block must include WebCore auth routes exactly once")
     if rendered.count("location = /.well-known/oauth-protected-resource {") != 1:

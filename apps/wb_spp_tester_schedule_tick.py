@@ -1,4 +1,8 @@
-"""Run the idempotent due-check for the daily WB SPP tester schedule."""
+"""Run the idempotent daily SPP due-check with authenticated-buyer preflight.
+
+The shared application block records an invalid buyer session as a no-write
+scheduled skip and never falls back to the anonymous control price.
+"""
 
 from __future__ import annotations
 
