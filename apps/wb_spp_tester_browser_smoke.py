@@ -84,6 +84,46 @@ def main() -> None:
                 for field in ("authenticated_buyer_price", "anonymous_buyer_price", "authenticated_spp_proxy", "anonymous_spp_proxy", "payment_context"):
                     if field not in detail_text:
                         raise AssertionError(f"expanded history is missing buyer evidence {field}: {detail_text}")
+                if not page.locator("[data-spp-test-restore]").evaluate("node => node.hidden"):
+                    raise AssertionError("restored terminal job must not keep emergency restore visible")
+                if server.spp_block.status({})["active_job"] is not None:
+                    raise AssertionError("restored terminal UI fixture must not expose a false active job")
+                page.close()
+
+            with _LocalSppUiServer(
+                spp_test_enabled=True,
+                prices_write_enabled=True,
+                seed_manual_restore_required=True,
+            ) as server:
+                page = browser.new_page(viewport={"width": 1440, "height": 940})
+                page.goto(f"{server.base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
+                page.locator('[data-unified-tab-button="prices"]').click()
+                page.locator('[data-prices-subtab="spp-test"]').click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-spp-test-state]')?.innerText.includes('нужен restore')",
+                    timeout=7000,
+                )
+                restore_button = page.locator("[data-spp-test-restore]")
+                if restore_button.evaluate("node => node.hidden") or restore_button.is_disabled():
+                    raise AssertionError("active/unrestored job must expose enabled emergency restore")
+                panel_text = page.locator('[data-prices-subpanel="spp-test"]').inner_text()
+                if "Runtime lock" not in panel_text or "stale; нужен restore" not in panel_text:
+                    raise AssertionError(f"stale active lock state must be explicit in UI: {panel_text}")
+                restore_button.click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-spp-test-state]')?.innerText.includes('baseline восстановлен')",
+                    timeout=7000,
+                )
+                page.wait_for_function(
+                    "() => document.querySelector('[data-spp-test-restore]')?.hidden === true",
+                    timeout=7000,
+                )
+                restored_status = server.spp_block.status({})
+                if restored_status["active_job"] is not None or restored_status["job"]["result_status"] != "inconclusive":
+                    raise AssertionError(f"UI restore must clear active lock without fake manual result: {restored_status}")
+                restored_panel_text = page.locator('[data-prices-subpanel="spp-test"]').inner_text()
+                if "lock cleared" not in restored_panel_text and "cleared after seller baseline proof" not in restored_panel_text:
+                    raise AssertionError(f"reconciled/cleared lock state must stay visible: {restored_panel_text}")
                 page.close()
 
             with _LocalSppUiServer(spp_test_enabled=False, prices_write_enabled=True) as server:
@@ -175,7 +215,14 @@ def _prepare_spp_page(page, base_url: str) -> None:
 
 
 class _LocalSppUiServer:
-    def __init__(self, *, spp_test_enabled: bool, prices_write_enabled: bool, buyer_session_status: str = "valid") -> None:
+    def __init__(
+        self,
+        *,
+        spp_test_enabled: bool,
+        prices_write_enabled: bool,
+        buyer_session_status: str = "valid",
+        seed_manual_restore_required: bool = False,
+    ) -> None:
         self.tmp: TemporaryDirectory[str] | None = None
         self.server = None
         self.thread: threading.Thread | None = None
@@ -184,6 +231,8 @@ class _LocalSppUiServer:
         self.spp_test_enabled = spp_test_enabled
         self.prices_write_enabled = prices_write_enabled
         self.buyer_session_status = buyer_session_status
+        self.seed_manual_restore_required = seed_manual_restore_required
+        self.spp_block: WbSppTesterBlock | None = None
 
     def __enter__(self) -> "_LocalSppUiServer":
         self.tmp = TemporaryDirectory(prefix="wb-spp-browser-")
@@ -206,6 +255,7 @@ class _LocalSppUiServer:
             ),
             cadence_config=WbSppTesterCadenceConfig(run_async=False),
         )
+        self.spp_block = spp_block
         if self.spp_test_enabled and self.prices_write_enabled and self.buyer_session_status == "valid":
             spp_block.start(
                 {
@@ -220,6 +270,40 @@ class _LocalSppUiServer:
                 },
                 actor="browser_smoke",
             )
+        if self.seed_manual_restore_required:
+            baseline = spp_block.build_baseline({"nmID": PRIMARY_NM})["baseline"]
+            spp_prices_source.upload_task([{"nmID": PRIMARY_NM, "price": 1500, "discount": 10}])
+            manual_job = {
+                "job_id": "zz_ui_manual_restore_job",
+                "created_at": "2026-07-07T07:00:00Z",
+                "updated_at": "2026-07-07T07:00:00Z",
+                "finished_at": "",
+                "actor": "browser_smoke",
+                "trigger_source": "manual",
+                "status": "cooldown",
+                "result_status": "",
+                "nmID": PRIMARY_NM,
+                "input": {
+                    "range_min_discounted": 700,
+                    "range_max_discounted": 900,
+                    "precision_rub": 2,
+                    "max_measurements": 3,
+                    "mode": "safe_slow",
+                    "restore_baseline": True,
+                },
+                "baseline": baseline,
+                "plan": {},
+                "measurements": [{"actual_wb_discounted_price": spp_prices_source.discounted_price}],
+                "thresholds": [],
+                "timeline": [],
+                "restore": {"required": True, "restored": False, "proof": None, "steps": []},
+                "lifecycle_diagnostics": {"classification": "live", "phase": "cooldown"},
+                "manual_restore_required": False,
+                "warnings": [],
+                "error": "",
+            }
+            spp_block._save_job(manual_job)
+            spp_block._write_current_job(manual_job)
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,

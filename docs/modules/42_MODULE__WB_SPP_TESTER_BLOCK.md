@@ -47,7 +47,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Production SPP tester now requires a separate persistent authenticated buyer session, uses authenticated buyer price as primary test truth and anonymous price only as a control, exposes safe human-login recovery, fails closed without fallback on session loss, records buyer/payment/destination context, and keeps exact seller restore independent from later buyer-price availability."
+update_note: "Production SPP tester now finalizes restart-interrupted and emergency-restored jobs from fresh seller tuple plus quarantine proof, removes the active current-job pointer after that proof, keeps the latest terminal job visible from canonical history, and treats authenticated/anonymous buyer reads as non-blocking restore diagnostics."
 ---
 
 # 1. Идентификатор и статус
@@ -98,9 +98,9 @@ Runtime state is bounded under:
 
 The buyer-session files live below the hosted runtime state root, outside Git and separately from Seller Portal storage. Directory mode is `0700`; storage/key/fingerprint/probe/recovery files are `0600`; state is saved atomically. `fingerprint.key` is runtime-random and the stored identity is only an HMAC-SHA256 fingerprint, never a phone/email/name/account id. The first accepted authenticated account binds that fingerprint; a different later account is `wrong_account`. `buyer_session.lock` excludes session recovery from browser measurement. Seller storage state and Seller recovery locks are never read or reused.
 
-`current_job.json` stores active/last job id, status, heartbeat, runner identity and TTL diagnostics. `jobs/*.json` and `audit.jsonl` remain the canonical history/evidence; schedule support does not add a DB or a parallel job journal. `schedule.json` stores the single daily business schedule and at-most-once claim state. `execution.lock` is an OS-level cross-process lock shared by manual threads, the systemd runner and emergency restore.
+`current_job.json` stores only an active or seller-unrestored job id, status, heartbeat, runner identity and TTL diagnostics. It is removed only after a fresh exact seller tuple plus quarantine-absent proof. `jobs/*.json` and `audit.jsonl` remain the canonical history/evidence, and status returns the newest canonical job when there is no current pointer; schedule support does not add a DB or a parallel job journal. `schedule.json` stores the single daily business schedule and at-most-once claim state. `execution.lock` is an OS-level cross-process lock shared by manual threads, the systemd runner and emergency restore.
 
-An active or unrestored job blocks another start. TTL alone never unlocks or declares a restore. A live lock holder is reported as live; an active status without a lock holder is reconciled by a fresh WB price/discount/discountedPrice readback and quarantine read. Exact seller-tuple proof moves it to `interrupted_restored`; a mismatch, quarantine or seller readback error moves it to `manual_restore_required`. Authenticated/anonymous buyer captures at restore are diagnostic only: their later failure cannot invalidate an exact seller restore. This also closes jobs interrupted by deploy/restart while a daemon worker was sleeping.
+An active or unrestored job blocks another start. TTL alone never unlocks or declares a restore. A live lock holder is reported as live; an active status without a lock holder is reconciled by a fresh WB price/discount/discountedPrice readback and quarantine read. Exact seller-tuple proof moves it to `interrupted_restored`, normalizes a transient `manual_restore_required` result to `inconclusive`, clears `current_job.json` and keeps the terminal job available as latest/history evidence. A mismatch, quarantine or seller readback error moves it to `manual_restore_required` and preserves the pointer. Authenticated/anonymous buyer captures at restore are diagnostic only: exceptions, session loss, 429 or unavailable public price cannot invalidate an exact seller restore. This also closes jobs interrupted by deploy/restart while a daemon worker was sleeping.
 
 The browser is not source of truth. It renders server baseline, plan, job, measurements, thresholds and restore proof.
 
@@ -164,7 +164,7 @@ A point is high confidence only when:
 
 Ambiguous payment context is recorded explicitly and cannot be silently normalized into a single factual price. Stale/ambiguous evidence is kept in the table/journal but excluded from threshold detection.
 
-WB Prices 429 stores endpoint/status/safe headers/body summary/retry hint in audit, respects `Retry-After` when present, otherwise uses a minimum cooldown, probes read-only after cooldown and stops probing after repeated rate limits so restore can run.
+WB Prices 429 stores endpoint/status/safe headers/body summary/retry hint in audit, respects `Retry-After` when present, otherwise uses a minimum cooldown, probes read-only after bounded early cooldowns and stops immediately on the third repeated rate limit so restore can run instead of entering another cooldown.
 
 # 7. Restore
 
@@ -184,6 +184,8 @@ Final proof requires:
 If proof fails or quarantine appears, status becomes `manual_restore_required` and no further probing is performed.
 
 Exact restore proof uses equality at kopeck precision for `discountedPrice`, exact integer `price` and `discount`, plus absent quarantine. Authenticated/anonymous buyer reads may be attached as diagnostics, but neither is part of seller restore success. A prior proof is not trusted blindly by an emergency restore or orphan reconciliation: current live seller evidence is read again.
+
+Emergency restore is idempotent. If a fresh preflight already equals the baseline and quarantine is absent, no upload is made: the job is finalized, a stale/manual-only result is normalized to `inconclusive`, and the matching `current_job.json` pointer is removed. Repeated calls re-read seller truth and remain safe. A non-baseline job uses the normal bridge/final upload path and clears the pointer only after final seller proof.
 
 # 8. History
 
@@ -208,7 +210,7 @@ Late-run policy is bounded: a due run may start at most 15 minutes late. A later
 
 # 10. UI
 
-The upper block continues to show the current/last job. A compact `Покупательская сессия` block shows safe status, last check and exactly `Проверить сессию` / `Установить сессию`; the recovery launcher is downloaded only after an explicit operator action. Invalid state blocks plan/start and enabled schedule save with `Покупательская сессия недействительна — Установить сессию`. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job. Compact rows show time, SKU/nmID, manual/automatic/unknown source, status and duration; details expose range, baseline, both buyer-price contours, discount/context/session evidence, thresholds, warnings/errors, restore proof and lifecycle diagnostics.
+The upper block continues to show the current/last job while `active_job` is reserved for a truly active/unrestored pointer. A compact `Покупательская сессия` block shows safe status, last check and exactly `Проверить сессию` / `Установить сессию`; the recovery launcher is downloaded only after an explicit operator action. Invalid state blocks plan/start and enabled schedule save with `Покупательская сессия недействительна — Установить сессию`. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job. Compact rows show time, SKU/nmID, manual/automatic/unknown source, status and duration; details expose range, baseline, both buyer-price contours, discount/context/session evidence, thresholds, warnings/errors, restore proof and lifecycle diagnostics. The current panel explicitly distinguishes live/restoring, stale-unrestored, stale-reconciled/lock-cleared and terminal restored states; emergency restore stays visible only for an active/unrestored job.
 
 Manual UI remains intentionally small:
 - SKU selector from current prices/active registry rows;
@@ -230,7 +232,7 @@ Targeted smokes:
 - `python3 apps/wb_spp_tester_smoke.py`
 - `python3 apps/wb_spp_tester_browser_smoke.py`
 
-These cover buyer session missing/valid/wrong-account/expired states, restart-persistent fingerprint, atomic save and modes, settled post-login validation, full recovery process-group cleanup, per-read destination override without module 35 mutation, invalid-context no-fallback behavior, price/payment/destination parsing, ambiguous context, secret/path sanitization, legacy history compatibility, cursor pagination/detail traversal safety, interrupted/stale reconciliation, unrestored blocking, cross-process contention, session loss after a completed measurement, schedule save/enable/disable, session-invalid scheduled skip, `next_run_at`, no immediate start, at-most-once/restart, late skip, safety skip, mandatory exact seller restore, 429/timeout/stale/quarantine, UI history expansion and deploy/systemd wiring.
+These cover buyer session missing/valid/wrong-account/expired states, restart-persistent fingerprint, atomic save and modes, settled post-login validation, full recovery process-group cleanup, per-read destination override without module 35 mutation, invalid-context no-fallback behavior, price/payment/destination parsing, ambiguous context, secret/path sanitization, legacy history compatibility, cursor pagination/detail traversal safety, interrupted/stale reconciliation with current-pointer clearing, already-baseline idempotent finalization, non-baseline orphan restore, buyer/public diagnostic failure after seller proof, unrestored blocking, cross-process contention, session loss after a completed measurement, schedule save/enable/disable, session-invalid scheduled skip, `next_run_at`, no immediate start, at-most-once/restart, late skip, safety skip, mandatory bridge/final exact seller restore, bounded repeated 429/timeout/stale/quarantine, emergency-button visibility, false-active cleanup, UI history expansion and deploy/systemd wiring.
 
 Regression smokes:
 - `python3 apps/wb_prices_management_smoke.py`

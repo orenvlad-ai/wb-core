@@ -17328,7 +17328,7 @@
       if (!WEB_VITRINA_CONFIG.prices_spp_test_restore_path || state.prices.sppTest.restoring) {
         return;
       }
-      const job = state.prices.sppTest.job || state.prices.sppTest.activeJob || {};
+      const job = state.prices.sppTest.activeJob || state.prices.sppTest.job || {};
       state.prices.sppTest.restoring = true;
       state.prices.sppTest.error = "";
       renderSppTest();
@@ -17344,6 +17344,8 @@
           throw new Error(payload && payload.error ? payload.error : "SPP restore route returned " + response.status);
         }
         state.prices.sppTest.job = payload.job || state.prices.sppTest.job;
+        state.prices.sppTest.activeJob = payload.active_job || null;
+        await loadSppTestStatus({silent: true});
       } catch (error) {
         state.prices.sppTest.error = String(error && error.message ? error.message : error);
       } finally {
@@ -17486,9 +17488,11 @@
       if (!sppTestRestoreButton) {
         return;
       }
-      const job = state.prices.sppTest.job || state.prices.sppTest.activeJob || {};
+      const job = state.prices.sppTest.activeJob || state.prices.sppTest.job || {};
       const status = String(job.status || "");
-      const visible = ["planning", "measuring", "cooldown", "restoring", "failed", "manual_restore_required"].indexOf(status) !== -1;
+      const restore = job.restore || {};
+      const visible = ["planning", "measuring", "cooldown", "restoring", "manual_restore_required"].indexOf(status) !== -1
+        || (status === "failed" && restore.restored !== true);
       sppTestRestoreButton.hidden = !visible;
       sppTestRestoreButton.disabled = state.prices.sppTest.restoring || !visible;
       sppTestRestoreButton.textContent = state.prices.sppTest.restoring ? "Restore…" : "Восстановить baseline";
@@ -17518,6 +17522,7 @@
         sppTestFact("WB uploads", requestBudget.wb_uploads || "—"),
         sppTestFact("Public reads", requestBudget.public_reads || "—"),
         sppTestFact("Restore", "staged baseline proof"),
+        sppTestFact("Runtime lock", sppRuntimeLockLabel(job, state.prices.sppTest.activeJob)),
         sppTestFact("Риск", warnings || "live test"),
         "</div>",
         jobLine,
@@ -17631,6 +17636,23 @@
       if (normalized === "failed") return "ошибка";
       if (normalized === "no_job") return "нет active job";
       return normalized || "—";
+    }
+
+    function sppRuntimeLockLabel(job, activeJob) {
+      const current = activeJob || {};
+      const lifecycle = (job && job.lifecycle_diagnostics) || {};
+      const classification = String(lifecycle.classification || "");
+      if (current.job_id) {
+        if (classification === "stale_orphan_unrestored") return "stale; нужен restore";
+        return "active";
+      }
+      if (classification === "stale_orphan_restored_confirmed" || classification === "terminal_restored_reconciled") {
+        return "stale reconciled; lock cleared";
+      }
+      if (job && job.restore && job.restore.restored === true) {
+        return "cleared after seller baseline proof";
+      }
+      return "нет active lock";
     }
 
     function sppResultLabel(value) {

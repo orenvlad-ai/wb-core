@@ -54,7 +54,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Prices table semantics are unchanged. `Цены -> Проверка СПП` now reconciles interrupted jobs using fresh live restore proof, exposes bounded expandable history from canonical job files, and supports one consented daily `Автопроверка` schedule through the same WB Prices adapter, shared cross-process lock and mandatory restore path."
+update_note: "Prices table semantics are unchanged. `Цены -> Проверка СПП` now closes interrupted/emergency-restored jobs from fresh seller-tuple plus quarantine proof, clears the active current-job pointer only after that proof, keeps latest terminal history visible, and never lets later buyer-price diagnostics invalidate seller restore."
 ---
 
 # 1. Идентификатор и статус
@@ -164,9 +164,9 @@ SPP tester route:
 - uses WB readback `discountedPrice` as actual seller price truth;
 - polls public anonymous buyer price slowly and excludes low-confidence/stale/429 points from threshold detection;
 - writes upload/readback/public/quarantine events to JSONL audit;
-- allows only one active/unrestored SPP test job at a time through runtime `current_job.json` lock/heartbeat.
+- allows only one active/unrestored SPP test job at a time through runtime `current_job.json` pointer/heartbeat and removes that pointer after fresh exact seller baseline proof;
 - shares one OS-level execution lock across manual jobs, scheduled jobs and emergency restore;
-- reconciles an orphan only through fresh exact WB tuple + quarantine + public buyer/SPP evidence; TTL expiry alone never unlocks it;
+- reconciles an orphan only through fresh exact WB seller tuple + quarantine evidence; authenticated/anonymous buyer evidence is diagnostic only and TTL expiry alone never unlocks it;
 - persists `trigger_source=manual|schedule` for new jobs while legacy source stays unknown;
 - uses the same baseline/write/readback/restore path for daily scheduled jobs and never starts one merely because the schedule was saved.
 
@@ -175,7 +175,7 @@ Restore:
 - uses direct restore only for small moves;
 - splits large downward discounted restore moves through bridge steps;
 - requires upload success, WB readback and quarantine absence for bridge/final steps;
-- final proof requires WB price/discount/discountedPrice equal baseline, quarantine absent and public buyer price/SPP captured;
+- final proof requires only WB price/discount/discountedPrice equal baseline and quarantine absent; authenticated/public buyer price and SPP capture is non-blocking diagnostic evidence;
 - failed restore or quarantine yields `manual_restore_required` and keeps emergency restore visible.
 
 # 6. Status Readback
