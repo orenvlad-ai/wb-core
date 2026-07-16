@@ -37,6 +37,7 @@ from packages.application.supplier_invoice_parser import (
 )
 from packages.application.supplier_financial_documents import build_financial_summary
 from packages.application.supplier_shipment_status import (
+    resolve_supplier_shipment_deadline,
     supplier_business_today,
     validate_supplier_factual_dates,
 )
@@ -167,6 +168,53 @@ CONTRACT_PDF_OCR_STRATEGIES: tuple[dict[str, Any], ...] = (
 )
 _TESSERACT_LANGUAGES_CACHE: list[str] | None = None
 
+_SUPPLIER_SAFE_WRITE_ROOT_FIELDS = frozenset(
+    {
+        "upload_id",
+        "shipment_date",
+        "actual_shipment_date",
+        "actual_ff_acceptance_date",
+        "payload",
+    }
+)
+_SUPPLIER_SAFE_EDIT_PAYLOAD_FIELDS = frozenset(
+    {
+        "shipment_date",
+        "actual_shipment_date",
+        "actual_ff_acceptance_date",
+        "metadata",
+        "lines",
+        "warnings",
+        "errors",
+    }
+)
+_SUPPLIER_SAFE_METADATA_FIELDS = frozenset(
+    {
+        "invoice_no",
+        "invoice_date",
+        "contract_no",
+        "contract_date",
+        "currency",
+        "declared_invoice_total",
+    }
+)
+_SUPPLIER_SAFE_LINE_WRITE_FIELDS = frozenset(
+    {
+        "line_id",
+        "source_row_token",
+        "line_type",
+        "sort_order",
+        "source_no",
+        "barcode",
+        "model_raw",
+        "qty",
+        "unit_price",
+        "amount",
+        "currency",
+        "comment",
+    }
+)
+
 
 class NomenclatureBarcodeSource(Protocol):
     def fetch_barcodes_by_nm_ids(self, nm_ids: list[int]) -> Mapping[int, Any]:
@@ -195,6 +243,18 @@ class SupplierShipmentsBlock:
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
             "status": "ok",
             "shipments": [self._with_approx_cost_fields(self._with_document_fields(_with_invoice_download_path(row))) for row in rows],
+        }
+
+    def list_shipments_supplier_safe(self) -> dict[str, Any]:
+        business_today = supplier_business_today(timestamp=self.timestamp_factory())
+        return {
+            "contract_name": "sheet_vitrina_v1_supplier_shipments_supplier_safe_v1",
+            "status": "ok",
+            "business_today": business_today,
+            "shipments": [
+                _supplier_safe_header_projection(row, business_today=business_today)
+                for row in self.runtime.list_supplier_shipments()
+            ],
         }
 
     def parse_upload(
@@ -259,6 +319,20 @@ class SupplierShipmentsBlock:
             }
         )
         return payload
+
+    def parse_upload_supplier_safe(
+        self,
+        workbook_bytes: bytes,
+        *,
+        uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        parsed = self.parse_upload(
+            workbook_bytes,
+            uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,
+        )
+        return _supplier_safe_parse_projection(parsed)
 
     def create_shipment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if "historical_status_exception" in payload:
@@ -376,6 +450,22 @@ class SupplierShipmentsBlock:
         )
         return self.get_shipment(shipment_id)
 
+    def create_shipment_supplier_safe(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        sanitized = _sanitize_supplier_write_payload(payload, require_upload_id=True)
+        created = self.create_shipment(sanitized)
+        return _supplier_safe_detail_projection(
+            created,
+            business_today=supplier_business_today(timestamp=self.timestamp_factory()),
+        )
+
+    def sanitize_supplier_write_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        require_upload_id: bool = False,
+    ) -> dict[str, Any]:
+        return _sanitize_supplier_write_payload(payload, require_upload_id=require_upload_id)
+
     def get_shipment(self, shipment_id: str) -> dict[str, Any]:
         self.migrate_existing_supplier_shipments_into_trade_documents()
         detail = self.runtime.load_supplier_shipment(shipment_id)
@@ -393,6 +483,16 @@ class SupplierShipmentsBlock:
             item for item in payload["lines"] if item.get("line_type") == LINE_TYPE_EXTRA
         ]
         return self._with_approx_cost_fields(self._with_document_fields(payload))
+
+    def get_shipment_supplier_safe(self, shipment_id: str) -> dict[str, Any]:
+        detail = self.runtime.load_supplier_shipment(shipment_id)
+        if detail is None:
+            raise ValueError(f"supplier shipment not found: {shipment_id}")
+        payload = _detail_payload(detail)
+        return _supplier_safe_detail_projection(
+            payload,
+            business_today=supplier_business_today(timestamp=self.timestamp_factory()),
+        )
 
     def update_shipment(
         self,
@@ -538,6 +638,18 @@ class SupplierShipmentsBlock:
                 self.unlink_shipment_contract(shipment_id)
         return self.get_shipment(shipment_id)
 
+    def update_shipment_supplier_safe(
+        self,
+        shipment_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        sanitized = _sanitize_supplier_write_payload(payload, require_upload_id=False)
+        updated = self.update_shipment(shipment_id, sanitized)
+        return _supplier_safe_detail_projection(
+            updated,
+            business_today=supplier_business_today(timestamp=self.timestamp_factory()),
+        )
+
     def update_order_status(self, shipment_id: str, order_status: Any) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
@@ -585,6 +697,11 @@ class SupplierShipmentsBlock:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = dict(existing["header"])
         edited_payload = _resolve_edited_payload(payload, fallback=_detail_payload(existing))
+        edited_payload = _bind_source_owned_line_identity(
+            edited_payload,
+            trusted_payload=_detail_payload(existing),
+            context=f"saved supplier shipment {shipment_id}",
+        )
         shipment_date = _validate_iso_date(
             str(
                 payload.get("shipment_date")
@@ -2305,6 +2422,193 @@ class SupplierShipmentsBlock:
             self.runtime.save_nomenclature_item(updated)
 
 
+def _sanitize_supplier_write_payload(
+    payload: Mapping[str, Any],
+    *,
+    require_upload_id: bool,
+) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("supplier shipment payload must be a JSON object")
+    unsupported_root = sorted(set(payload) - _SUPPLIER_SAFE_WRITE_ROOT_FIELDS)
+    if unsupported_root:
+        raise ValueError("unsupported supplier shipment fields: " + ", ".join(unsupported_root))
+    if require_upload_id and not str(payload.get("upload_id") or "").strip():
+        raise ValueError("upload_id is required")
+    raw_edited = payload.get("payload")
+    if raw_edited is not None and not isinstance(raw_edited, Mapping):
+        raise ValueError("supplier shipment payload field must be a JSON object")
+    edited = dict(raw_edited or {})
+    unsupported_edited = sorted(set(edited) - _SUPPLIER_SAFE_EDIT_PAYLOAD_FIELDS)
+    if unsupported_edited:
+        raise ValueError("unsupported supplier edited fields: " + ", ".join(unsupported_edited))
+
+    metadata = edited.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, Mapping):
+            raise ValueError("supplier shipment metadata must be a JSON object")
+        unsupported_metadata = sorted(set(metadata) - _SUPPLIER_SAFE_METADATA_FIELDS)
+        if unsupported_metadata:
+            raise ValueError("unsupported supplier metadata fields: " + ", ".join(unsupported_metadata))
+
+    lines = edited.get("lines")
+    if lines is not None:
+        if not isinstance(lines, list):
+            raise ValueError("supplier shipment lines must be a list")
+        for index, line in enumerate(lines, start=1):
+            if not isinstance(line, Mapping):
+                raise ValueError("supplier shipment lines must be JSON objects")
+            unsupported_line = sorted(set(line) - _SUPPLIER_SAFE_LINE_WRITE_FIELDS)
+            if unsupported_line:
+                raise ValueError(
+                    f"unsupported supplier line #{index} fields: " + ", ".join(unsupported_line)
+                )
+
+    sanitized: dict[str, Any] = {}
+    for field in ("upload_id", "shipment_date", "actual_shipment_date", "actual_ff_acceptance_date"):
+        if field in payload:
+            sanitized[field] = deepcopy(payload[field])
+    if raw_edited is not None:
+        sanitized["payload"] = deepcopy(edited)
+    return sanitized
+
+
+def _supplier_safe_parse_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = _supplier_safe_metadata_projection(payload.get("metadata"))
+    lines = [
+        _supplier_safe_line_projection(item)
+        for item in payload.get("lines") or []
+        if isinstance(item, Mapping)
+    ]
+    return {
+        "contract_name": "sheet_vitrina_v1_supplier_invoice_parse_supplier_safe_v1",
+        "status": "ok",
+        "upload_id": str(payload.get("upload_id") or ""),
+        "metadata": metadata,
+        "lines": lines,
+        "product_lines": [item for item in lines if item.get("line_type") == LINE_TYPE_PRODUCT],
+        "extra_lines": [item for item in lines if item.get("line_type") == LINE_TYPE_EXTRA],
+        "summary": _supplier_safe_summary_projection(payload.get("summary")),
+        "match_status": str(payload.get("match_status") or _shipment_match_status(lines, checksum_error=False)),
+        "warnings": _supplier_safe_messages(payload.get("warnings")),
+        "errors": _supplier_safe_messages(payload.get("errors")),
+    }
+
+
+def _supplier_safe_detail_projection(
+    payload: Mapping[str, Any],
+    *,
+    business_today: str,
+) -> dict[str, Any]:
+    projected = _supplier_safe_header_projection(payload, business_today=business_today)
+    lines = [
+        _supplier_safe_line_projection(item)
+        for item in payload.get("lines") or []
+        if isinstance(item, Mapping)
+    ]
+    projected.update(
+        {
+            "contract_name": "sheet_vitrina_v1_supplier_shipment_supplier_safe_v1",
+            "metadata": _supplier_safe_metadata_projection(payload.get("metadata") or payload),
+            "summary": _supplier_safe_summary_projection(payload.get("summary") or payload),
+            "lines": lines,
+            "product_lines": [item for item in lines if item.get("line_type") == LINE_TYPE_PRODUCT],
+            "extra_lines": [item for item in lines if item.get("line_type") == LINE_TYPE_EXTRA],
+            "warnings": _supplier_safe_messages(payload.get("warnings")),
+            "errors": _supplier_safe_messages(payload.get("errors")),
+        }
+    )
+    return projected
+
+
+def _supplier_safe_header_projection(
+    payload: Mapping[str, Any],
+    *,
+    business_today: str,
+) -> dict[str, Any]:
+    shipment_date = str(payload.get("shipment_date") or payload.get("planned_shipment_date") or "")
+    actual_shipment_date = str(payload.get("actual_shipment_date") or "")
+    actual_ff_acceptance_date = str(payload.get("actual_ff_acceptance_date") or "")
+    deadline = resolve_supplier_shipment_deadline(
+        planned_shipment_date=shipment_date,
+        actual_shipment_date=actual_shipment_date,
+        actual_ff_acceptance_date=actual_ff_acceptance_date,
+        business_today=business_today,
+        historical_status_exception=payload.get("historical_status_exception"),
+    )
+    return {
+        "shipment_id": str(payload.get("shipment_id") or ""),
+        "shipment_date": shipment_date,
+        "planned_shipment_date": shipment_date,
+        "actual_shipment_date": actual_shipment_date,
+        "actual_ff_acceptance_date": actual_ff_acceptance_date,
+        "order_status": str(payload.get("order_status") or ORDER_STATUS_DEFAULT),
+        "order_status_label": str(payload.get("order_status_label") or ""),
+        "order_status_display": str(payload.get("order_status_display") or ""),
+        "invoice_no": str(payload.get("invoice_no") or ""),
+        "invoice_date": str(payload.get("invoice_date") or ""),
+        "contract_no": str(payload.get("contract_no") or ""),
+        "contract_date": str(payload.get("contract_date") or ""),
+        "currency": str(payload.get("currency") or ""),
+        "product_qty_total": payload.get("product_qty_total"),
+        "product_amount_total": payload.get("product_amount_total"),
+        "extras_amount_total": payload.get("extras_amount_total"),
+        "invoice_amount_total": payload.get("invoice_amount_total"),
+        "declared_invoice_total": payload.get("declared_invoice_total"),
+        "match_status": str(payload.get("match_status") or ""),
+        "deadline": deadline.to_dict(),
+    }
+
+
+def _supplier_safe_metadata_projection(raw: Any) -> dict[str, Any]:
+    payload = raw if isinstance(raw, Mapping) else {}
+    return {
+        "invoice_no": str(payload.get("invoice_no") or ""),
+        "invoice_date": str(payload.get("invoice_date") or ""),
+        "contract_no": str(payload.get("contract_no") or ""),
+        "contract_date": str(payload.get("contract_date") or ""),
+        "currency": str(payload.get("currency") or ""),
+        "declared_invoice_total": payload.get("declared_invoice_total"),
+    }
+
+
+def _supplier_safe_summary_projection(raw: Any) -> dict[str, Any]:
+    payload = raw if isinstance(raw, Mapping) else {}
+    return {
+        "product_qty_total": payload.get("product_qty_total"),
+        "product_amount_total": payload.get("product_amount_total"),
+        "extras_amount_total": payload.get("extras_amount_total"),
+        "invoice_amount_total": payload.get("invoice_amount_total"),
+        "declared_invoice_total": payload.get("declared_invoice_total"),
+        "checksum_error": bool(payload.get("checksum_error")),
+    }
+
+
+def _supplier_safe_line_projection(raw: Mapping[str, Any]) -> dict[str, Any]:
+    raw_payload = raw.get("raw") if isinstance(raw.get("raw"), Mapping) else {}
+    worksheet_row = raw_payload.get("worksheet_row")
+    return {
+        "line_id": str(raw.get("line_id") or ""),
+        "source_row_token": str(worksheet_row or raw.get("source_row_token") or ""),
+        "line_type": str(raw.get("line_type") or LINE_TYPE_PRODUCT),
+        "sort_order": raw.get("sort_order"),
+        "source_no": str(raw.get("source_no") or ""),
+        "barcode": str(raw.get("barcode") or ""),
+        "model_raw": str(raw.get("model_raw") or ""),
+        "nm_id": raw.get("internal_nm_id"),
+        "nomenclature_name": str(raw.get("internal_name") or ""),
+        "qty": raw.get("qty"),
+        "unit_price": raw.get("unit_price"),
+        "amount": raw.get("amount"),
+        "currency": str(raw.get("currency") or ""),
+        "comment": str(raw.get("comment") or ""),
+        "match_status": str(raw.get("match_status") or ""),
+    }
+
+
+def _supplier_safe_messages(raw: Any) -> list[str]:
+    return [str(item)[:500] for item in raw if isinstance(item, str)] if isinstance(raw, list) else []
+
+
 def _resolve_edited_payload(payload: Mapping[str, Any], *, fallback: Mapping[str, Any]) -> dict[str, Any]:
     raw = payload.get("payload")
     if raw is None:
@@ -2382,6 +2686,26 @@ def _bind_source_owned_line_identity(
             "model_normalized",
             "source_product_type",
             "source_match_key",
+            "nomenclature_item_id",
+            "product_type",
+            "group_key",
+            "group_label",
+            "match_key",
+            "internal_sku",
+            "internal_nm_id",
+            "internal_name",
+            "match_status",
+            "manual_override",
+            "match_evidence",
+            "model_diagnostic",
+            "invoice_price_yuan_snapshot",
+            "reference_purchase_price_yuan_snapshot",
+            "price_conformity_status",
+            "price_conformity_checked_at",
+            "price_conformity_check_mode",
+            "price_conformity_reason",
+            "price_conformity_actor",
+            "price_conformity_context",
         ):
             bound_line[source_owned_field] = deepcopy(trusted_line.get(source_owned_field))
         bound_line["raw"] = deepcopy(dict(trusted_line.get("raw") or {}))
@@ -2398,6 +2722,9 @@ def _source_line_identity_key(line: Mapping[str, Any]) -> tuple[str, str] | None
     line_id = str(line.get("line_id") or "").strip()
     if line_id:
         return "line_id", line_id
+    source_row_token = str(line.get("source_row_token") or "").strip()
+    if source_row_token:
+        return "worksheet_row", source_row_token
     raw_payload = line.get("raw") if isinstance(line.get("raw"), Mapping) else {}
     worksheet_row = _optional_int(raw_payload.get("worksheet_row"))
     if worksheet_row is not None:

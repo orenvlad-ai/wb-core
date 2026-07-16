@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from packages.application.supplier_shipment_status import (  # noqa: E402
     HISTORICAL_STATUS_EXCEPTION_LEGACY_FF_ACCEPTED_WITHOUT_DATE,
+    resolve_supplier_shipment_deadline,
     resolve_supplier_shipment_status,
     validate_supplier_factual_dates,
 )
@@ -138,8 +139,62 @@ def main() -> int:
     )
     _equal(legacy.order_status, "production", "future/invalid legacy evidence ignored")
     _assert(len(legacy.warnings) == 3, "legacy diagnostics include both dates and cache mismatch")
+    _deadline("2026-07-25", "green", "11 дней")
+    _deadline("2026-07-24", "green", "10 дней")
+    _deadline("2026-07-23", "yellow", "9 дней")
+    _deadline("2026-07-19", "yellow", "5 дней")
+    _deadline("2026-07-15", "yellow", "1 день")
+    _deadline("2026-07-14", "yellow", "Сегодня")
+    _deadline("2026-07-13", "red", "Просрочка 1 день")
+    _deadline("2026-07-11", "red", "Просрочка 3 дня")
+    _deadline("2026-07-03", "red", "Просрочка 11 дней")
+    for value, expected in (
+        (1, "1 день"),
+        (2, "2 дня"),
+        (4, "4 дня"),
+        (5, "5 дней"),
+        (11, "11 дней"),
+        (14, "14 дней"),
+        (21, "21 день"),
+        (22, "22 дня"),
+        (25, "25 дней"),
+    ):
+        result = resolve_supplier_shipment_deadline(
+            planned_shipment_date=f"2026-08-{value:02d}",
+            actual_shipment_date="",
+            actual_ff_acceptance_date="",
+            business_today="2026-07-31",
+        )
+        _assert(expected in result.display_ru, f"Russian plural for {value}")
+    shipped = resolve_supplier_shipment_deadline(
+        planned_shipment_date="2026-07-01",
+        actual_shipment_date="2026-07-10",
+        actual_ff_acceptance_date="",
+        business_today=TODAY,
+    )
+    _equal(shipped.state, "shipped", "occurred shipment stops countdown")
+    _equal(shipped.display_ru, "Отгружено", "shipped display")
+    missing = resolve_supplier_shipment_deadline(
+        planned_shipment_date="",
+        actual_shipment_date="",
+        actual_ff_acceptance_date="",
+        business_today=TODAY,
+    )
+    _equal(missing.state, "missing", "missing planned date")
+    _equal(missing.display, "—", "missing deadline display")
     print("supplier_shipment_status_smoke: ok")
     return 0
+
+
+def _deadline(planned: str, tone: str, ru_text: str) -> None:
+    result = resolve_supplier_shipment_deadline(
+        planned_shipment_date=planned,
+        actual_shipment_date="",
+        actual_ff_acceptance_date="",
+        business_today=TODAY,
+    )
+    _equal(result.tone, tone, f"deadline tone for {planned}")
+    _equal(result.display_ru, ru_text, f"deadline text for {planned}")
 
 
 def _rejects(callback, expected: str) -> None:

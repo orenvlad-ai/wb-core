@@ -50,6 +50,8 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 def main() -> None:
     owner_password = "owner-password-not-secret"
+    operator_password = "operator-password-not-secret"
+    supply_password = "supply-password-not-secret"
     supplier_password = "supplier-password-not-secret"
     supplier_invoice_bytes = _build_invoice_fixture()
     with TemporaryDirectory(prefix="supplier-auth-smoke-") as tmp:
@@ -76,6 +78,24 @@ def main() -> None:
                     "comment": "",
                     "created_at": "2026-05-30T08:00:00Z",
                     "updated_at": "2026-05-30T08:00:00Z",
+                }
+            )
+        for user_id, username, password, role, sections in (
+            ("usr_internal_operator", "internal_operator", operator_password, "operator", None),
+            ("usr_supply_staff", "supply_staff", supply_password, "supply_operator", ["supply"]),
+        ):
+            runtime.save_sheet_vitrina_user(
+                {
+                    "user_id": user_id,
+                    "username": username,
+                    "display_name": username,
+                    "role": role,
+                    "allowed_sections": sections,
+                    "manage_users": False,
+                    "password_hash": _password_hash(password),
+                    "is_active": True,
+                    "created_at": "2026-07-16T08:00:00Z",
+                    "updated_at": "2026-07-16T08:00:00Z",
                 }
             )
         config = RegistryUploadHttpEntrypointConfig(
@@ -155,28 +175,42 @@ def main() -> None:
                 if supplier_page_code != 200 or "Реестр заказов" not in supplier_page:
                         raise AssertionError("supplier role must access supplier page")
                 if (
-                    '"can_delete_shipments": false' not in supplier_page
-                    or '"can_edit_order_status": false' not in supplier_page
-                    or '"can_recheck_prices": false' not in supplier_page
+                    '"surface": "supplier"' not in supplier_page
+                    or '"can_delete_order": false' not in supplier_page
+                    or '"can_view_documents": false' not in supplier_page
+                    or '"can_view_internal_costs": false' not in supplier_page
+                    or '"can_price_check": false' not in supplier_page
                 ):
-                        raise AssertionError("supplier page must not render operator-only shipment controls for supplier role")
-                if '<button id="priceCheckButton"' in supplier_page or ">Проверить цены<" in supplier_page:
-                        raise AssertionError("supplier page must not include manual price recheck button markup")
-                if "价格匹配 / Price check / Соответствие цены" not in supplier_page:
-                        raise AssertionError("supplier page must expose multilingual price conformity column header")
+                        raise AssertionError("supplier page must receive explicit safe role capabilities")
+                forbidden_supplier_markup = (
+                    "approxYuanRateInput",
+                    "financialDocumentsPanel",
+                    "priceCheckButton",
+                    "Скачать invoice",
+                    "Скачать контракт",
+                    "Ориент. себестоимость",
+                    "Точная себестоимость",
+                    "Соответствие цены",
+                    "Комиссия банка",
+                    "Курс CNY",
+                    ">Документы<",
+                )
+                if any(token in supplier_page for token in forbidden_supplier_markup):
+                        raise AssertionError("supplier page must not generate internal cost/document controls")
                 if "计划出货日期 / Planned shipment date / Плановая дата отгрузки" not in supplier_page:
                         raise AssertionError("supplier page must expose planned shipment date label")
+                if "距出货日期 / Time to shipment / Срок до отгрузки" not in supplier_page:
+                        raise AssertionError("supplier page must expose deadline immediately after planned date")
                 if "实际出货日期 / Actual shipment date / Фактическая дата отгрузки" not in supplier_page:
                         raise AssertionError("supplier page must expose actual shipment date label")
-                if "实际入仓日期 / Actual ФФ acceptance date / Фактическая дата приёмки на ФФ" not in supplier_page:
+                if "实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ" not in supplier_page:
                         raise AssertionError("supplier page must expose actual FF acceptance date label")
-                if "预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥" not in supplier_page:
-                        raise AssertionError("supplier page must expose approximate yuan rate label")
-                if "预估成本 / Est. cost / Ориент. себестоимость, ₽/шт" not in supplier_page:
-                        raise AssertionError("supplier page must expose approximate landed cost column")
+                if 'colspan="10"' not in supplier_page or 'colspan="18"' in supplier_page:
+                        raise AssertionError("supplier loading/empty/error states must use the 10-column table width")
                 supplier_api_code, supplier_api_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supplier_api_code != 200 or supplier_api_payload.get("shipments") != []:
                         raise AssertionError("supplier role must access supplier shipment APIs")
+                _assert_supplier_safe_payload(supplier_api_payload)
                 parse_code, parse_payload = _opener_post_multipart(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH}",
@@ -185,20 +219,22 @@ def main() -> None:
                     )
                 if parse_code != 200 or not parse_payload.get("upload_id"):
                         raise AssertionError(f"supplier role must parse supplier invoices, got {parse_code} {parse_payload}")
+                _assert_supplier_safe_payload(parse_payload)
                 create_code, create_payload = _opener_post_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
-                        {
-                            "upload_id": parse_payload["upload_id"],
-                            "shipment_date": "2026-05-14",
-                            "actual_shipment_date": "2026-05-16",
-                            "payload": parse_payload,
-                        },
+                        _supplier_write_body(
+                            parse_payload,
+                            upload_id=str(parse_payload["upload_id"]),
+                            shipment_date="2026-05-14",
+                            actual_shipment_date="2026-05-16",
+                        ),
                     )
                 if create_code != 200 or not create_payload.get("shipment_id"):
                         raise AssertionError(f"supplier role must create supplier shipments, got {create_code} {create_payload}")
                 if create_payload.get("order_status") != "in_transit":
                         raise AssertionError("supplier create status must derive from factual shipment date")
+                _assert_supplier_safe_payload(create_payload)
                 if (
                     create_payload.get("planned_shipment_date") != "2026-05-14"
                     or create_payload.get("actual_shipment_date") != "2026-05-16"
@@ -209,6 +245,7 @@ def main() -> None:
                 detail_code, detail_payload = _opener_json(supplier, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
                 if detail_code != 200 or detail_payload.get("shipment_id") != shipment_id:
                         raise AssertionError("supplier role must read supplier shipment detail")
+                _assert_supplier_safe_payload(detail_payload)
                 if detail_payload.get("actual_ff_acceptance_date") != "":
                         raise AssertionError("supplier role detail must keep blank actual FF acceptance date until saved")
                 supplier_price_check_code, supplier_price_check_payload = _opener_post_json(
@@ -230,17 +267,48 @@ def main() -> None:
                     or operator_price_checked_line.get("price_conformity_context", {}).get("source") != "supplier_auth_smoke"
                 ):
                         raise AssertionError(f"operator role must manually recheck supplier shipment prices, got {operator_price_check_code} {operator_price_check_payload}")
-                detail_payload = operator_price_check_payload
-                patched_payload = json.loads(json.dumps(detail_payload, ensure_ascii=False))
+                if "reference_purchase_price_yuan_snapshot" not in operator_price_checked_line:
+                        raise AssertionError("operator detail must preserve the full internal price read model")
+                sensitive_patch_code, sensitive_patch_payload = _opener_patch_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                        {"approx_yuan_rate": 12.5},
+                    )
+                if sensitive_patch_code != 400 or "unsupported" not in sensitive_patch_payload.get("error", ""):
+                        raise AssertionError("supplier PATCH must reject internal CNY rate assignment")
+                sensitive_line_payload = _supplier_write_body(detail_payload, shipment_date="2026-05-14")
+                sensitive_line_payload["payload"]["lines"][0]["reference_purchase_price_yuan_snapshot"] = 0.01
+                sensitive_line_code, sensitive_line_response = _opener_patch_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                        sensitive_line_payload,
+                    )
+                if sensitive_line_code != 400 or "unsupported" not in sensitive_line_response.get("error", ""):
+                        raise AssertionError("supplier PATCH must reject nested internal reference prices")
+                sensitive_create_code, sensitive_create_payload = _opener_post_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                        {
+                            **_supplier_write_body(
+                                parse_payload,
+                                upload_id=str(parse_payload["upload_id"]),
+                                shipment_date="2026-05-14",
+                            ),
+                            "financial_summary": {"total": 1},
+                        },
+                    )
+                if sensitive_create_code != 400 or "unsupported" not in sensitive_create_payload.get("error", ""):
+                        raise AssertionError("supplier create must reject unknown financial mass assignment")
                 patch_code, patch_payload = _opener_patch_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
-                        {
-                            "shipment_date": "2026-05-15",
-                            "actual_shipment_date": "2026-05-16",
-                            "actual_ff_acceptance_date": "2026-05-30",
-                            "payload": patched_payload,
-                        },
+                        _supplier_write_body(
+                            detail_payload,
+                            shipment_date="2026-05-15",
+                            actual_shipment_date="2026-05-16",
+                            actual_ff_acceptance_date="2026-05-30",
+                            comment_suffix=" supplier-confirmed",
+                        ),
                     )
                 if (
                     patch_code != 200
@@ -250,6 +318,7 @@ def main() -> None:
                     or patch_payload.get("order_status") != "accepted_ff"
                 ):
                         raise AssertionError(f"supplier role must edit supplier shipments, got {patch_code} {patch_payload}")
+                _assert_supplier_safe_payload(patch_payload)
                 correction_code, correction_payload = _opener_patch_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
@@ -266,6 +335,70 @@ def main() -> None:
                     )
                 if detail_code != 200 or patch_payload.get("actual_shipment_date") != "2026-05-17":
                         raise AssertionError(f"supplier factual correction readback failed: {patch_payload}")
+                _assert_supplier_safe_payload(patch_payload)
+                supplier_list_code, supplier_list_payload = _opener_json(
+                        supplier,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                    )
+                if supplier_list_code != 200 or not supplier_list_payload.get("shipments"):
+                        raise AssertionError("supplier list readback must include the saved order")
+                _assert_supplier_safe_payload(supplier_list_payload)
+
+                invoice_path = f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/invoice"
+                protected_document_paths = (
+                    invoice_path,
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/contract",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents/archive.zip",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents/logistics-package.zip",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/financial-documents",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/financial-documents/known-document",
+                    f"{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/financial-documents/known-document/file",
+                )
+                for protected_path in protected_document_paths:
+                    code, payload = _opener_json(supplier, f"{base_url}{protected_path}")
+                    if code != 403 or payload.get("error") != "forbidden":
+                        raise AssertionError(f"supplier direct document access must be 403: {protected_path} -> {code} {payload}")
+                operator_invoice_code = _opener_status(operator, f"{base_url}{invoice_path}")
+                if operator_invoice_code != 200:
+                        raise AssertionError("admin must retain direct invoice download")
+                operator_documents_code, operator_documents_payload = _opener_json(
+                        operator,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/documents",
+                    )
+                if operator_documents_code != 200 or "documents" not in operator_documents_payload:
+                        raise AssertionError("admin must retain order document workflow")
+                operator_financial_code, operator_financial_payload = _opener_json(
+                        operator,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/financial-documents",
+                    )
+                if operator_financial_code != 200 or "documents" not in operator_financial_payload:
+                        raise AssertionError("admin must retain financial document workflow")
+
+                for username, password, expected_role in (
+                    ("internal_operator", operator_password, "operator"),
+                    ("supply_staff", supply_password, "supply_operator"),
+                ):
+                    internal = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(CookieJar()))
+                    _login(internal, base_url, username, password, DEFAULT_SHEET_SUPPLIER_UI_PATH)
+                    internal_list_code, internal_list = _opener_json(
+                        internal,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
+                    )
+                    internal_detail_code, internal_detail = _opener_json(
+                        internal,
+                        f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                    )
+                    if (
+                        internal_list_code != 200
+                        or internal_detail_code != 200
+                        or "approx_yuan_rate" not in internal_detail
+                        or "invoice_download_path" not in internal_detail
+                        or "reference_purchase_price_yuan_snapshot" not in internal_detail.get("product_lines", [{}])[0]
+                    ):
+                        raise AssertionError(f"{expected_role} must retain the full internal shipment read model")
+                    if _opener_status(internal, f"{base_url}{invoice_path}") != 200:
+                        raise AssertionError(f"{expected_role} must retain invoice download")
                 supplier_status_code, supplier_status_payload = _opener_patch_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
@@ -524,6 +657,125 @@ def _request_text(
 class _NoRedirectHandler(urllib_request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         return None
+
+
+_SUPPLIER_FORBIDDEN_KEY_FRAGMENTS = (
+    "approx_yuan_rate",
+    "landed_cost",
+    "cny_",
+    "financial",
+    "expense",
+    "purchase_price",
+    "price_conformity",
+    "document_id",
+    "download_path",
+    "file_path",
+    "filename",
+    "storage_key",
+    "source_file",
+    "sha256",
+    "internal_sku",
+    "nomenclature_item_id",
+    "contract_candidates",
+    "parser_version",
+)
+
+
+def _assert_supplier_safe_payload(payload: object, *, path: str = "$") -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = str(key).lower()
+            if normalized == "raw" or any(fragment in normalized for fragment in _SUPPLIER_FORBIDDEN_KEY_FRAGMENTS):
+                raise AssertionError(f"supplier-safe payload exposes forbidden key at {path}.{key}")
+            _assert_supplier_safe_payload(value, path=f"{path}.{key}")
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            _assert_supplier_safe_payload(value, path=f"{path}[{index}]")
+
+
+def _supplier_write_body(
+    payload: dict[str, object],
+    *,
+    upload_id: str = "",
+    shipment_date: str = "",
+    actual_shipment_date: str | None = None,
+    actual_ff_acceptance_date: str | None = None,
+    comment_suffix: str = "",
+) -> dict[str, object]:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    raw_lines = payload.get("lines") if isinstance(payload.get("lines"), list) else []
+    lines: list[dict[str, object]] = []
+    allowed_line_fields = (
+        "line_id",
+        "source_row_token",
+        "line_type",
+        "sort_order",
+        "source_no",
+        "barcode",
+        "model_raw",
+        "qty",
+        "unit_price",
+        "amount",
+        "currency",
+        "comment",
+    )
+    for index, raw_line in enumerate(raw_lines):
+        if not isinstance(raw_line, dict):
+            continue
+        line = {field: raw_line.get(field) for field in allowed_line_fields}
+        if comment_suffix and index == 0:
+            line["comment"] = str(line.get("comment") or "") + comment_suffix
+        lines.append(line)
+    planned = shipment_date or str(payload.get("shipment_date") or "")
+    actual_shipment = (
+        str(payload.get("actual_shipment_date") or "")
+        if actual_shipment_date is None
+        else actual_shipment_date
+    )
+    actual_acceptance = (
+        str(payload.get("actual_ff_acceptance_date") or "")
+        if actual_ff_acceptance_date is None
+        else actual_ff_acceptance_date
+    )
+    edited = {
+        "shipment_date": planned,
+        "actual_shipment_date": actual_shipment,
+        "actual_ff_acceptance_date": actual_acceptance,
+        "metadata": {
+            field: metadata.get(field)
+            for field in (
+                "invoice_no",
+                "invoice_date",
+                "contract_no",
+                "contract_date",
+                "currency",
+                "declared_invoice_total",
+            )
+        },
+        "lines": lines,
+        "warnings": list(payload.get("warnings") or []) if isinstance(payload.get("warnings"), list) else [],
+        "errors": list(payload.get("errors") or []) if isinstance(payload.get("errors"), list) else [],
+    }
+    body: dict[str, object] = {
+        "shipment_date": planned,
+        "actual_shipment_date": actual_shipment,
+        "actual_ff_acceptance_date": actual_acceptance,
+        "payload": edited,
+    }
+    if upload_id:
+        body["upload_id"] = upload_id
+    return body
+
+
+def _opener_status(opener: urllib_request.OpenerDirector, url: str) -> int:
+    request = urllib_request.Request(url, headers={"Accept": "application/octet-stream"}, method="GET")
+    try:
+        with opener.open(request, timeout=5) as response:
+            response.read()
+            return response.status
+    except urllib_error.HTTPError as exc:
+        exc.read()
+        return exc.code
 
 
 def _password_hash(password: str) -> str:

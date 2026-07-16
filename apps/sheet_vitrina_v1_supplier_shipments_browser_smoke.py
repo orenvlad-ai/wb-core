@@ -137,11 +137,11 @@ def main() -> None:
         first_list_seen = threading.Event()
         first_list_release = threading.Event()
 
-        def _delayed_first_list_request():
+        def _delayed_first_list_request(*, supplier_safe: bool = False):
             if not first_list_seen.is_set():
                 first_list_seen.set()
                 first_list_release.wait(timeout=5)
-            return original_list_supplier_shipments()
+            return original_list_supplier_shipments(supplier_safe=supplier_safe)
 
         entrypoint.handle_supplier_shipments_list_request = _delayed_first_list_request
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
@@ -802,51 +802,80 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             expect(page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+            expect(page.locator("#financialDocumentsPanel")).to_have_count(0)
+            expect(page.locator("#documentInvoiceDownloadLink")).to_have_count(0)
+            expect(page.locator("#contractDownloadLink")).to_have_count(0)
+            expect(page.locator("#approxYuanRateInput")).to_have_count(0)
+            expect(page.get_by_text("Документы", exact=True)).to_have_count(0)
+            expect(page.get_by_text("Ориент. себестоимость", exact=False)).to_have_count(0)
+            expect(page.get_by_text("Точная себестоимость", exact=False)).to_have_count(0)
+            expect(page.get_by_text("Соответствие цены", exact=False)).to_have_count(0)
+            headers = page.locator("#supplierRegistryTable thead th").all_inner_texts()
+            if len(headers) != 10:
+                raise AssertionError(f"supplier registry must have exactly 10 visible columns, got {headers}")
+            if "Плановая дата отгрузки" not in headers[0] or "Срок до отгрузки" not in headers[1]:
+                raise AssertionError(f"deadline must immediately follow planned shipment date, got {headers[:2]}")
+            if any(not value.strip() for value in headers):
+                raise AssertionError(f"supplier registry must not contain empty headers: {headers}")
+            expect(page.locator("#shipmentRows tr[data-registry-state='loaded_empty'] td")).to_have_attribute("colspan", "10")
 
             page.get_by_role("button", name="新增订单 / Add order / Добавить заказ").click()
+            expect(page.locator("#uploadPanel")).to_be_visible()
+            page.locator("#invoiceFileInput").set_input_files(str(invoice_path))
             expect(page.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки")).to_be_visible()
             expect(page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_be_visible()
-            expect(page.get_by_label("实际入仓日期 / Actual ФФ acceptance date / Фактическая дата приёмки на ФФ")).to_be_visible()
-            expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_be_visible()
-            expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_have_value("")
-            expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
-            page.locator("#invoiceFileInput").set_input_files(str(invoice_path))
-            expect(page.locator("#productLines input[data-source-model]").first).to_be_visible()
-            expect(page.locator("#productLines [data-authoritative-group]").first).to_contain_text("No Frame Clean")
-            expect(page.locator("#productLines select[data-line-field='product_type']")).to_have_count(0)
-            expect(page.locator("#productLines input[data-authoritative-match-key]").first).to_have_attribute("readonly", "")
-            expect(page.locator("#productLines .price-conformity")).to_have_count(3)
+            expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_be_visible()
+            expect(page.locator("#productLines tr").first).to_be_visible(timeout=5000)
+            expect(page.locator("#productLines")).to_contain_text("1111111111111")
+            expect(page.locator("#productLines")).to_contain_text("210183919")
+            expect(page.locator("#productLines input[data-line-field='qty']").first).to_be_visible()
+            expect(page.locator("#productLines input[data-comment]").first).to_be_visible()
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
             page.get_by_label("计划出货日期 / Planned shipment date / Плановая дата отгрузки").fill("2026-05-14")
             page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки").fill("2026-05-16")
+            page.locator("#productLines input[data-comment]").first.fill("supplier browser edit")
             expect(page.get_by_role("button", name="保存 / Save / Сохранить")).to_be_enabled()
             page.get_by_role("button", name="保存 / Save / Сохранить").click()
             expect(page.get_by_text("订单已保存 / Order saved / Заказ сохранён.")).to_be_visible(timeout=5000)
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
-            expect(page.locator(".registry-wrap thead")).to_contain_text("预估成本 / Est. cost / Ориент. себестоимость, ₽/шт")
-            expect(page.locator("#shipmentRows tr[data-row]").first).to_contain_text("—")
-            shipment_id = page.locator("#shipmentRows tr[data-row]").first.get_attribute("data-row") or ""
+            expect(page.locator("#shipmentRows tr[data-shipment-id]").first).to_contain_text("Отгружено")
+            shipment_id = page.locator("#shipmentRows tr[data-shipment-id]").first.get_attribute("data-shipment-id") or ""
             if not shipment_id:
-                raise AssertionError("supplier browser smoke must create a shipment row before price-check probe")
+                raise AssertionError("supplier browser smoke must create a shipment row")
             page.get_by_role("button", name="关闭 / Close / Закрыть").click()
             expect(page.locator("#shipmentCard")).to_be_hidden()
-            page.locator("#shipmentRows tr[data-row]").first.click()
+            page.locator("#shipmentRows tr[data-shipment-id]").first.click()
             expect(page.locator("#shipmentCard")).to_be_visible()
             expect(page.get_by_label("实际出货日期 / Actual shipment date / Фактическая дата отгрузки")).to_have_value("2026-05-16")
-            expect(page.get_by_label("实际入仓日期 / Actual ФФ acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("")
-            expect(page.get_by_label("预估人民币汇率 / Estimated CNY rate / Примерный курс юаня, ₽/¥")).to_have_value("")
-            expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
+            expect(page.get_by_label("实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ")).to_have_value("")
+            expect(page.locator("#productLines input[data-comment]").first).to_have_value("supplier browser edit")
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
             page.reload(wait_until="domcontentloaded")
             expect(page.locator("h1", has_text="订单登记表 / Order registry / Реестр заказов")).to_be_visible()
-            expect(page.locator("#shipmentRows tr[data-row]")).to_have_count(1)
-            page.locator("#shipmentRows tr[data-row]").first.click()
+            expect(page.locator("#shipmentRows tr[data-shipment-id]")).to_have_count(1)
+            page.locator("#shipmentRows tr[data-shipment-id]").first.click()
             expect(page.locator("#shipmentCard")).to_be_visible()
-            expect(page.get_by_text("价格匹配 / Price check / Соответствие цены")).to_be_visible()
             expect(page.locator("#priceCheckButton")).to_have_count(0)
             expect(page.get_by_role("button", name="Проверить цены")).to_have_count(0)
+            network_probe = page.evaluate(
+                """async ({shipmentsPath, shipmentId}) => {
+                    const listResponse = await fetch(shipmentsPath, {headers: {Accept: "application/json"}});
+                    const detailResponse = await fetch(shipmentsPath + "/" + encodeURIComponent(shipmentId), {headers: {Accept: "application/json"}});
+                    return {
+                      listStatus: listResponse.status,
+                      detailStatus: detailResponse.status,
+                      list: await listResponse.json(),
+                      detail: await detailResponse.json()
+                    };
+                }""",
+                {"shipmentsPath": DEFAULT_SUPPLIER_SHIPMENTS_PATH, "shipmentId": shipment_id},
+            )
+            if network_probe.get("listStatus") != 200 or network_probe.get("detailStatus") != 200:
+                raise AssertionError(f"supplier network projection probe failed: {network_probe}")
+            _assert_supplier_network_payload_safe(network_probe.get("list"))
+            _assert_supplier_network_payload_safe(network_probe.get("detail"))
             price_check_probe = page.evaluate(
                 """async ({shipmentsPath, shipmentId}) => {
                     const response = await fetch(shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/price-check", {
@@ -876,6 +905,18 @@ def _assert_supplier_role_browser_ui(browser, tmp_path: Path, invoice_path: Path
             )
             if documents_probe.get("status") != 403 or documents_probe.get("payload", {}).get("error") != "forbidden":
                 raise AssertionError(f"supplier must not call operator documents route, got {documents_probe}")
+            invoice_probe = page.evaluate(
+                """async ({shipmentsPath, shipmentId}) => {
+                    const response = await fetch(shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/invoice", {
+                        method: "GET",
+                        headers: {"Accept": "application/json"}
+                    });
+                    return {status: response.status, payload: await response.json()};
+                }""",
+                {"shipmentsPath": DEFAULT_SUPPLIER_SHIPMENTS_PATH, "shipmentId": shipment_id},
+            )
+            if invoice_probe.get("status") != 403 or invoice_probe.get("payload", {}).get("error") != "forbidden":
+                raise AssertionError(f"supplier must not download its stored invoice file, got {invoice_probe}")
         finally:
             if context is not None:
                 context.close()
@@ -1302,6 +1343,38 @@ def _password_hash(password: str) -> str:
 
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _assert_supplier_network_payload_safe(payload: object, *, path: str = "$") -> None:
+    forbidden_fragments = (
+        "approx_yuan_rate",
+        "landed_cost",
+        "cny_",
+        "financial",
+        "expense",
+        "purchase_price",
+        "price_conformity",
+        "document_id",
+        "download_path",
+        "file_path",
+        "filename",
+        "storage_key",
+        "source_file",
+        "sha256",
+        "internal_sku",
+        "nomenclature_item_id",
+        "contract_candidates",
+        "parser_version",
+    )
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = str(key).lower()
+            if normalized == "raw" or any(fragment in normalized for fragment in forbidden_fragments):
+                raise AssertionError(f"supplier network payload exposes forbidden key at {path}.{key}")
+            _assert_supplier_network_payload_safe(value, path=f"{path}.{key}")
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            _assert_supplier_network_payload_safe(value, path=f"{path}[{index}]")
 
 
 @contextmanager

@@ -475,26 +475,71 @@ def main() -> None:
                 )
                 if parse_code != 200 or not parse_payload.get("upload_id"):
                     raise AssertionError(f"supplier parse failed: {parse_code} {parse_payload}")
+                safe_line_fields = {
+                    "line_id",
+                    "source_row_token",
+                    "line_type",
+                    "sort_order",
+                    "source_no",
+                    "barcode",
+                    "model_raw",
+                    "qty",
+                    "unit_price",
+                    "amount",
+                    "currency",
+                    "comment",
+                }
+                safe_lines = [
+                    {key: value for key, value in line.items() if key in safe_line_fields}
+                    for line in parse_payload.get("lines", [])
+                    if isinstance(line, dict)
+                ]
                 create_code, create_payload = _opener_post_json(
                     supplier,
                     f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}",
-                    {"upload_id": parse_payload["upload_id"], "shipment_date": "2026-05-14", "payload": parse_payload},
+                    {
+                        "upload_id": parse_payload["upload_id"],
+                        "shipment_date": "2026-05-14",
+                        "payload": {
+                            "shipment_date": "2026-05-14",
+                            "metadata": parse_payload.get("metadata", {}),
+                            "lines": safe_lines,
+                            "warnings": parse_payload.get("warnings", []),
+                            "errors": parse_payload.get("errors", []),
+                        },
+                    },
                 )
                 shipment_id = str(create_payload.get("shipment_id") or "")
-                if (
-                    create_code != 200
-                    or not shipment_id
-                    or not create_payload.get("invoice_document_id")
-                    or create_payload.get("contract_document_id") != contract_id
-                    or not create_payload.get("contract_download_path")
+                if create_code != 200 or not shipment_id:
+                    raise AssertionError(f"supplier shipment create failed: {create_code} {create_payload}")
+                if any(
+                    key in create_payload
+                    for key in ("invoice_document_id", "contract_document_id", "invoice_download_path", "contract_download_path")
                 ):
-                    raise AssertionError(f"supplier shipment must auto-create/link documents, got {create_code} {create_payload}")
+                    raise AssertionError(f"supplier response must not expose linked document metadata: {create_payload}")
+                operator_detail_code, operator_detail = _opener_json(
+                    operator,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
+                )
+                if (
+                    operator_detail_code != 200
+                    or not operator_detail.get("invoice_document_id")
+                    or operator_detail.get("contract_document_id") != contract_id
+                    or not operator_detail.get("contract_download_path")
+                ):
+                    raise AssertionError(f"internal shipment must auto-create/link documents, got {operator_detail_code} {operator_detail}")
                 supplier_contract_code, supplier_contract_bytes, _ = _opener_bytes(
                     supplier,
-                    f"{base_url}{create_payload.get('contract_download_path')}",
+                    f"{base_url}{operator_detail.get('contract_download_path')}",
                 )
-                if supplier_contract_code != 200 or supplier_contract_bytes != contract_bytes:
-                    raise AssertionError("supplier role must download shipment-linked contract")
+                if supplier_contract_code != 403:
+                    raise AssertionError("supplier role must not download shipment-linked contract")
+                operator_contract_code, operator_contract_bytes, _ = _opener_bytes(
+                    operator,
+                    f"{base_url}{operator_detail.get('contract_download_path')}",
+                )
+                if operator_contract_code != 200 or operator_contract_bytes != contract_bytes:
+                    raise AssertionError("internal role must retain shipment-linked contract download")
 
                 legacy_file = runtime_dir / "supplier_invoices" / "files" / "sup_legacy_doc" / "legacy.xlsx"
                 legacy_file.parent.mkdir(parents=True, exist_ok=True)
