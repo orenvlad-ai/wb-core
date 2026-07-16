@@ -2123,7 +2123,9 @@ class RegistryUploadHttpEntrypoint:
     def handle_wb_regional_planning_options_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_regional_supply_planning_block.build_options(payload)
 
-    def handle_supplier_shipments_list_request(self) -> dict[str, Any]:
+    def handle_supplier_shipments_list_request(self, *, supplier_safe: bool = False) -> dict[str, Any]:
+        if supplier_safe:
+            return self.supplier_shipments_block.list_shipments_supplier_safe()
         return self.supplier_shipments_block.list_shipments()
 
     def handle_supplier_shipments_parse_request(
@@ -2132,20 +2134,46 @@ class RegistryUploadHttpEntrypoint:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        supplier_safe: bool = False,
     ) -> dict[str, Any]:
+        if supplier_safe:
+            return self.supplier_shipments_block.parse_upload_supplier_safe(
+                workbook_bytes,
+                uploaded_filename=uploaded_filename,
+                uploaded_content_type=uploaded_content_type,
+            )
         return self.supplier_shipments_block.parse_upload(
             workbook_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
         )
 
-    def handle_supplier_shipments_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def handle_supplier_shipments_create_request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        supplier_safe: bool = False,
+    ) -> dict[str, Any]:
+        if supplier_safe:
+            return self.supplier_shipments_block.create_shipment_supplier_safe(payload)
         return self.supplier_shipments_block.create_shipment(payload)
 
-    def handle_supplier_shipments_detail_request(self, shipment_id: str) -> dict[str, Any]:
-        detail = self.supplier_shipments_block.get_shipment(shipment_id)
+    def handle_supplier_shipments_detail_request(
+        self,
+        shipment_id: str,
+        *,
+        supplier_safe: bool = False,
+    ) -> dict[str, Any]:
+        detail = (
+            self.supplier_shipments_block.get_shipment_supplier_safe(shipment_id)
+            if supplier_safe
+            else self.supplier_shipments_block.get_shipment(shipment_id)
+        )
+        correction = self.supplier_shipment_factual_correction_block.latest_for_shipment(shipment_id)
         detail["factual_date_correction"] = (
-            self.supplier_shipment_factual_correction_block.latest_for_shipment(shipment_id)
+            _supplier_safe_factual_correction_projection(correction)
+            if supplier_safe
+            else correction
         )
         return detail
 
@@ -2155,7 +2183,10 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
         *,
         actor: str = "operator",
+        supplier_safe: bool = False,
     ) -> dict[str, Any]:
+        if supplier_safe:
+            payload = self.supplier_shipments_block.sanitize_supplier_write_payload(payload)
         if self.supplier_shipments_block.factual_date_change_required(shipment_id, payload):
             if self.supplier_shipments_block.factual_date_correction_has_other_changes(
                 shipment_id,
@@ -2174,14 +2205,18 @@ class RegistryUploadHttpEntrypoint:
                 actor=actor or "operator",
             )
             if correction.get("status") == "zero_change":
-                return self.handle_supplier_shipments_detail_request(shipment_id)
+                return self.handle_supplier_shipments_detail_request(
+                    shipment_id,
+                    supplier_safe=supplier_safe,
+                )
             if correction.get("deduplicated"):
-                return {
+                response = {
                     "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
                     "status": "accepted",
                     "correction": correction,
                     "job": None,
                 }
+                return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
             correction_id = str(correction["correction_id"])
             job = self.operator_jobs.start(
                 operation="supplier_factual_date_correction",
@@ -2190,22 +2225,27 @@ class RegistryUploadHttpEntrypoint:
                     emit,
                 ),
             )
-            return {
+            response = {
                 "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
                 "status": "accepted",
                 "correction": correction,
                 "job": job,
             }
+            return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
+        if supplier_safe:
+            return self.supplier_shipments_block.update_shipment_supplier_safe(shipment_id, payload)
         return self.supplier_shipments_block.update_shipment(shipment_id, payload)
 
     def handle_supplier_shipment_factual_correction_request(
         self,
         shipment_id: str,
+        *,
+        supplier_safe: bool = False,
     ) -> dict[str, Any]:
         correction = self.supplier_shipment_factual_correction_block.latest_for_shipment(shipment_id)
         if correction is None:
             raise ValueError(f"supplier factual correction not found: {shipment_id}")
-        return correction
+        return _supplier_safe_factual_correction_projection(correction) if supplier_safe else correction
 
     def handle_supplier_shipments_order_status_patch_request(
         self,
@@ -4247,6 +4287,27 @@ class RegistryUploadHttpEntrypoint:
             "stock_report_active_sku_count": len(active_skus),
             "stock_report_active_sku_source": "current_registry_config_v2",
         }
+
+
+def _supplier_safe_factual_correction_projection(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    return {
+        "active": bool(raw.get("active")),
+        "status": str(raw.get("status") or ""),
+        "progress_text": str(raw.get("progress_text") or "")[:500],
+        "error_message": str(raw.get("error_message") or "")[:500],
+    }
+
+
+def _supplier_safe_factual_correction_accepted_projection(
+    raw: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_supplier_safe_v1",
+        "status": str(raw.get("status") or "accepted"),
+        "correction": _supplier_safe_factual_correction_projection(raw.get("correction")),
+    }
 
 
 def _build_seller_portal_recovery_payload(

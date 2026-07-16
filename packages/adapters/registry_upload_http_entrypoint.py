@@ -291,6 +291,7 @@ DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
 SUPPLIER_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_supplier.html"
+SUPPLIER_SAFE_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_supplier_safe.html"
 SETTINGS_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_settings.html"
 
 
@@ -1374,6 +1375,7 @@ def _build_handler(
                         upload_payload["workbook_bytes"],
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        supplier_safe=_current_web_user_is_supplier(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -1382,7 +1384,13 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.UNPROCESSABLE_ENTITY,
-                        {"error": f"supplier invoice parse failed: {exc}"},
+                        {
+                            "error": (
+                                "supplier invoice parse failed"
+                                if _current_web_user_is_supplier(self)
+                                else f"supplier invoice parse failed: {exc}"
+                            )
+                        },
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -1554,7 +1562,10 @@ def _build_handler(
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_supplier_shipments_create_request(payload)
+                    result = entrypoint.handle_supplier_shipments_create_request(
+                        payload,
+                        supplier_safe=_current_web_user_is_supplier(self),
+                    )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -1562,7 +1573,13 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"supplier shipment create failed: {exc}"},
+                        {
+                            "error": (
+                                "supplier shipment create failed"
+                                if _current_web_user_is_supplier(self)
+                                else f"supplier shipment create failed: {exc}"
+                            )
+                        },
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
@@ -2047,6 +2064,7 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SHEET_SUPPLIER_UI_PATH:
                 role = _current_web_user_role(self)
+                is_supplier_role = role == WEB_AUTH_ROLE_SUPPLIER
                 has_supply_access = role != WEB_AUTH_ROLE_SUPPLIER and (
                     WEB_AUTH_SECTION_SUPPLY in _current_web_user_allowed_sections(self)
                 )
@@ -2057,7 +2075,9 @@ def _build_handler(
                 _write_html_response(
                     self,
                     HTTPStatus.OK,
-                    _render_sheet_vitrina_supplier_ui(
+                    _render_sheet_vitrina_supplier_safe_ui()
+                    if is_supplier_role
+                    else _render_sheet_vitrina_supplier_ui(
                         can_delete_shipments=has_supply_access,
                         can_edit_order_status=is_operator_embedded,
                         can_recheck_prices=is_operator_embedded,
@@ -2973,12 +2993,20 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
                 try:
-                    payload = entrypoint.handle_supplier_shipments_list_request()
+                    payload = entrypoint.handle_supplier_shipments_list_request(
+                        supplier_safe=_current_web_user_is_supplier(self),
+                    )
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"supplier shipments list failed: {exc}"},
+                        {
+                            "error": (
+                                "supplier shipments list failed"
+                                if _current_web_user_is_supplier(self)
+                                else f"supplier shipments list failed: {exc}"
+                            )
+                        },
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3558,6 +3586,8 @@ def _build_handler(
                 return
 
             if _is_supplier_shipment_invoice_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_invoice_path(parsed.path)
                     workbook_bytes, filename, content_type = entrypoint.handle_supplier_shipments_invoice_request(
@@ -3584,6 +3614,8 @@ def _build_handler(
                 return
 
             if _is_supplier_shipment_contract_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
                     file_bytes, filename, content_type = entrypoint.handle_supplier_shipments_contract_request(shipment_id)
@@ -3610,7 +3642,10 @@ def _build_handler(
             if _is_supplier_factual_date_correction_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_factual_correction_path(parsed.path)
-                    payload = entrypoint.handle_supplier_shipment_factual_correction_request(shipment_id)
+                    payload = entrypoint.handle_supplier_shipment_factual_correction_request(
+                        shipment_id,
+                        supplier_safe=_current_web_user_is_supplier(self),
+                    )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -3618,7 +3653,13 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"supplier factual correction status failed: {exc}"},
+                        {
+                            "error": (
+                                "supplier factual correction status failed"
+                                if _current_web_user_is_supplier(self)
+                                else f"supplier factual correction status failed: {exc}"
+                            )
+                        },
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -3627,7 +3668,10 @@ def _build_handler(
             if _is_supplier_shipment_detail_path(parsed.path):
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
-                    payload = entrypoint.handle_supplier_shipments_detail_request(shipment_id)
+                    payload = entrypoint.handle_supplier_shipments_detail_request(
+                        shipment_id,
+                        supplier_safe=_current_web_user_is_supplier(self),
+                    )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -3635,7 +3679,13 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"supplier shipment detail failed: {exc}"},
+                        {
+                            "error": (
+                                "supplier shipment detail failed"
+                                if _current_web_user_is_supplier(self)
+                                else f"supplier shipment detail failed: {exc}"
+                            )
+                        },
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -4090,12 +4140,14 @@ def _build_handler(
                                 shipment_id,
                                 payload,
                                 actor=_current_web_user_config_key(self),
+                                supplier_safe=_current_web_user_is_supplier(self),
                             )
                     else:
                         result = entrypoint.handle_supplier_shipments_patch_request(
                             shipment_id,
                             payload,
                             actor=_current_web_user_config_key(self),
+                            supplier_safe=_current_web_user_is_supplier(self),
                         )
                 except SupplierShipmentFactualCorrectionError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
@@ -4107,7 +4159,13 @@ def _build_handler(
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"supplier shipment patch failed: {exc}"},
+                        {
+                            "error": (
+                                "supplier shipment patch failed"
+                                if _current_web_user_is_supplier(self)
+                                else f"supplier shipment patch failed: {exc}"
+                            )
+                        },
                     )
                     return
                 response_status = (
@@ -5430,6 +5488,10 @@ def _current_web_user_role(handler: BaseHTTPRequestHandler) -> str:
         return WEB_AUTH_ROLE_ADMIN
     user = _authenticated_web_user(handler, config) or {}
     return str(user.get("role") or "").strip() or WEB_AUTH_ROLE_ADMIN
+
+
+def _current_web_user_is_supplier(handler: BaseHTTPRequestHandler) -> bool:
+    return _current_web_user_role(handler) == WEB_AUTH_ROLE_SUPPLIER
 
 
 def _current_web_user_actor(handler: BaseHTTPRequestHandler) -> str:
@@ -7003,6 +7065,7 @@ def _render_sheet_vitrina_supplier_ui(
 ) -> str:
     config_payload = {
         "page_title": "Реестр заказов",
+        "surface": "internal",
         "embedded": str(embedded or ""),
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
@@ -7014,6 +7077,12 @@ def _render_sheet_vitrina_supplier_ui(
         "can_recheck_prices": bool(can_recheck_prices),
         "can_manage_documents": bool(can_manage_documents),
         "can_manage_financial_documents": bool(can_manage_financial_documents),
+        "can_create_order": True,
+        "can_edit_composition": True,
+        "can_delete_order": bool(can_delete_shipments),
+        "can_view_documents": bool(can_manage_documents or can_manage_financial_documents),
+        "can_view_internal_costs": True,
+        "can_price_check": bool(can_recheck_prices),
         "business_today": current_business_date_iso(),
         "factual_date_correction_segment": DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT,
     }
@@ -7029,6 +7098,29 @@ def _render_sheet_vitrina_supplier_ui(
             json.dumps(config_payload, ensure_ascii=False),
         )
         .replace("__SHEET_VITRINA_V1_PRICE_CHECK_BUTTON_HTML__", price_check_button_html)
+    )
+
+
+def _render_sheet_vitrina_supplier_safe_ui() -> str:
+    config_payload = {
+        "page_title": "订单登记表 / Order registry / Реестр заказов",
+        "surface": "supplier",
+        "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
+        "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
+        "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
+        "business_today": current_business_date_iso(),
+        "factual_date_correction_segment": DEFAULT_SUPPLIER_FACTUAL_DATE_CORRECTION_SEGMENT,
+        "can_create_order": True,
+        "can_edit_composition": True,
+        "can_delete_order": False,
+        "can_view_documents": False,
+        "can_view_internal_costs": False,
+        "can_price_check": False,
+    }
+    template = SUPPLIER_SAFE_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return template.replace(
+        "__SHEET_VITRINA_V1_SUPPLIER_SAFE_CONFIG_JSON__",
+        json.dumps(config_payload, ensure_ascii=False),
     )
 
 

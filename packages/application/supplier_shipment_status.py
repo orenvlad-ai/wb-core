@@ -42,6 +42,21 @@ class SupplierShipmentStatusResolution:
         return payload
 
 
+@dataclass(frozen=True)
+class SupplierShipmentDeadlineResolution:
+    state: str
+    tone: str
+    days_until: int | None
+    display: str
+    display_zh: str
+    display_en: str
+    display_ru: str
+    business_today: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def supplier_business_today(*, timestamp: str | None = None, now: datetime | None = None) -> str:
     if timestamp:
         return business_date_from_timestamp(timestamp)
@@ -134,6 +149,135 @@ def resolve_supplier_shipment_status(
         business_today=today,
         warnings=tuple(warnings),
     )
+
+
+def resolve_supplier_shipment_deadline(
+    *,
+    planned_shipment_date: Any,
+    actual_shipment_date: Any,
+    actual_ff_acceptance_date: Any,
+    business_today: str | None = None,
+    historical_status_exception: Any = "",
+) -> SupplierShipmentDeadlineResolution:
+    """Build the supplier-facing deadline badge from server-owned business time."""
+
+    today = _strict_iso_date(business_today or current_business_date_iso(), "business_today")
+    status = resolve_supplier_shipment_status(
+        actual_shipment_date=actual_shipment_date,
+        actual_ff_acceptance_date=actual_ff_acceptance_date,
+        business_today=today,
+        historical_status_exception=historical_status_exception,
+    )
+    if status.order_status in {ORDER_STATUS_IN_TRANSIT, ORDER_STATUS_ACCEPTED_FF}:
+        return _deadline_resolution(
+            state="shipped",
+            tone="success",
+            days_until=None,
+            zh="已出货",
+            en="Shipped",
+            ru="Отгружено",
+            business_today=today,
+        )
+
+    planned = str(planned_shipment_date or "").strip()
+    try:
+        planned_date = date.fromisoformat(planned)
+    except ValueError:
+        planned_date = None
+    if planned_date is None or planned_date.isoformat() != planned:
+        return _deadline_resolution(
+            state="missing",
+            tone="neutral",
+            days_until=None,
+            zh="—",
+            en="—",
+            ru="—",
+            business_today=today,
+        )
+
+    days_until = (planned_date - date.fromisoformat(today)).days
+    if days_until >= 10:
+        return _deadline_resolution(
+            state="safe",
+            tone="green",
+            days_until=days_until,
+            zh=f"{days_until} 天",
+            en=_english_days(days_until),
+            ru=_russian_days(days_until),
+            business_today=today,
+        )
+    if days_until > 0:
+        return _deadline_resolution(
+            state="warning",
+            tone="yellow",
+            days_until=days_until,
+            zh=f"{days_until} 天",
+            en=_english_days(days_until),
+            ru=_russian_days(days_until),
+            business_today=today,
+        )
+    if days_until == 0:
+        return _deadline_resolution(
+            state="today",
+            tone="yellow",
+            days_until=0,
+            zh="今天",
+            en="Today",
+            ru="Сегодня",
+            business_today=today,
+        )
+
+    overdue_days = abs(days_until)
+    return _deadline_resolution(
+        state="overdue",
+        tone="red",
+        days_until=days_until,
+        zh=f"逾期 {overdue_days} 天",
+        en=f"Overdue by {_english_days(overdue_days)}",
+        ru=f"Просрочка {_russian_days(overdue_days)}",
+        business_today=today,
+    )
+
+
+def _deadline_resolution(
+    *,
+    state: str,
+    tone: str,
+    days_until: int | None,
+    zh: str,
+    en: str,
+    ru: str,
+    business_today: str,
+) -> SupplierShipmentDeadlineResolution:
+    return SupplierShipmentDeadlineResolution(
+        state=state,
+        tone=tone,
+        days_until=days_until,
+        display=f"{zh} / {en} / {ru}" if zh != "—" else "—",
+        display_zh=zh,
+        display_en=en,
+        display_ru=ru,
+        business_today=business_today,
+    )
+
+
+def _english_days(value: int) -> str:
+    return f"{value} {'day' if value == 1 else 'days'}"
+
+
+def _russian_days(value: int) -> str:
+    absolute = abs(int(value))
+    last_two = absolute % 100
+    last = absolute % 10
+    if 11 <= last_two <= 14:
+        suffix = "дней"
+    elif last == 1:
+        suffix = "день"
+    elif last in {2, 3, 4}:
+        suffix = "дня"
+    else:
+        suffix = "дней"
+    return f"{absolute} {suffix}"
 
 
 def validate_supplier_factual_dates(

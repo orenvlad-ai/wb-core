@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>订单登记表 / Order registry / Реестр заказов</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #172033;
+      --muted: #657086;
+      --line: #dce2ec;
+      --accent: #335eea;
+      --accent-dark: #2447bd;
+      --success: #16794b;
+      --success-bg: #e7f7ee;
+      --warning: #8a5a00;
+      --warning-bg: #fff3cf;
+      --danger: #b42318;
+      --danger-bg: #feeceb;
+      --neutral-bg: #eef1f6;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, Arial, sans-serif; }
+    button, input { font: inherit; }
+    button, .button-link {
+      min-height: 36px; border: 0; border-radius: 7px; padding: 8px 13px;
+      background: var(--accent); color: #fff; font-weight: 750; cursor: pointer; text-decoration: none;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    button:hover, .button-link:hover { background: var(--accent-dark); }
+    button.secondary, .button-link.secondary { background: #e9edf5; color: #25324a; }
+    button:disabled { opacity: .55; cursor: default; }
+    [hidden] { display: none !important; }
+    main { width: min(1760px, 100%); margin: 0 auto; padding: 18px; }
+    .topbar { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .topbar h1 { margin: 0; font-size: clamp(20px, 2vw, 28px); }
+    .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 24px rgba(29, 43, 75, .05); }
+    .registry { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 11px; text-align: left; vertical-align: middle; white-space: nowrap; }
+    th { position: sticky; top: 0; z-index: 1; background: #253250; color: #fff; font-size: 12px; }
+    tbody tr[data-shipment-id] { cursor: pointer; }
+    tbody tr[data-shipment-id]:hover td { background: #f2f6ff; }
+    .message { min-height: 22px; margin: 8px 2px; color: var(--muted); }
+    .message.error { color: var(--danger); }
+    .message.success { color: var(--success); }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 800; white-space: normal; }
+    .badge.green, .badge.success { color: var(--success); background: var(--success-bg); }
+    .badge.yellow { color: var(--warning); background: var(--warning-bg); }
+    .badge.red { color: var(--danger); background: var(--danger-bg); }
+    .badge.neutral { color: #586174; background: var(--neutral-bg); }
+    .card { margin-top: 16px; padding: 16px; }
+    .card-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .card-head h2 { margin: 0; font-size: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    input { width: 100%; min-height: 38px; border: 1px solid #cbd3df; border-radius: 7px; padding: 7px 9px; color: var(--text); background: #fff; }
+    input[readonly] { background: #f3f5f8; color: #4f5a6d; }
+    .deadline-field { display: grid; align-content: end; gap: 5px; }
+    .deadline-field > span:first-child { color: var(--muted); font-size: 12px; font-weight: 700; }
+    h3 { margin: 18px 0 8px; font-size: 16px; }
+    .line-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; }
+    .line-table th { position: static; background: #edf1f7; color: #29354b; }
+    .line-table td { white-space: normal; }
+    .line-table input { min-width: 94px; }
+    .line-table input[data-comment] { min-width: 180px; }
+    .totals { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; margin-top: 12px; }
+    .total { min-width: 170px; padding: 9px 11px; border-radius: 8px; background: #f2f5fa; }
+    .total span { display: block; color: var(--muted); font-size: 11px; }
+    .total strong { display: block; margin-top: 3px; }
+    .upload { margin-top: 14px; padding: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .upload input { width: auto; }
+    @media (max-width: 980px) { .grid { grid-template-columns: repeat(2, minmax(160px, 1fr)); } }
+    @media (max-width: 620px) { main { padding: 10px; } .topbar, .card-head { align-items: flex-start; flex-direction: column; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <h1>订单登记表 / Order registry / Реестр заказов</h1>
+      <div class="actions">
+        <button id="addShipmentButton" type="button">新增订单 / Add order / Добавить заказ</button>
+        <a id="logoutLink" class="button-link secondary" href="/logout">退出 / Sign out / Выйти</a>
+      </div>
+    </header>
+
+    <div id="registryMessage" class="message" role="status"></div>
+    <section class="panel registry" aria-label="订单登记表 / Order registry / Реестр заказов">
+      <table id="supplierRegistryTable">
+        <thead>
+          <tr>
+            <th>计划出货日期 / Planned shipment date / Плановая дата отгрузки</th>
+            <th>距出货日期 / Time to shipment / Срок до отгрузки</th>
+            <th>实际出货日期 / Actual shipment date / Фактическая дата отгрузки</th>
+            <th>实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ</th>
+            <th>发票编号 / Invoice No / Номер invoice</th>
+            <th>发票日期 / Invoice date / Дата invoice</th>
+            <th>商品数量 / Product qty / Кол-во товаров</th>
+            <th>匹配 / Matching / Матчинг</th>
+            <th>订单状态 / Order status / Статус заказа</th>
+            <th>操作 / Action / Действие</th>
+          </tr>
+        </thead>
+        <tbody id="shipmentRows">
+          <tr data-registry-state="loading"><td colspan="10">读取订单 / Loading orders / Загрузка заказов…</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="uploadPanel" class="panel upload" hidden>
+      <strong>上传 XLSX invoice / Upload XLSX invoice / Загрузите XLSX invoice</strong>
+      <input id="invoiceFileInput" type="file" accept=".xlsx">
+      <span id="selectedFileLabel"></span>
+    </section>
+
+    <section id="shipmentCard" class="panel card" hidden>
+      <div class="card-head">
+        <h2 id="cardTitle">订单 / Order / Заказ</h2>
+        <div class="actions">
+          <button id="saveShipmentButton" type="button">保存 / Save / Сохранить</button>
+          <button id="closeShipmentButton" class="secondary" type="button">关闭 / Close / Закрыть</button>
+        </div>
+      </div>
+      <div id="cardMessage" class="message" role="status"></div>
+      <div class="grid">
+        <label>计划出货日期 / Planned shipment date / Плановая дата отгрузки
+          <input id="shipmentDateInput" type="date" required>
+        </label>
+        <div class="deadline-field">
+          <span>距出货日期 / Time to shipment / Срок до отгрузки</span>
+          <span id="cardDeadline" class="badge neutral">—</span>
+        </div>
+        <label>实际出货日期 / Actual shipment date / Фактическая дата отгрузки
+          <input id="actualShipmentDateInput" type="date">
+        </label>
+        <label>实际入仓日期 / Actual FF acceptance date / Фактическая дата приёмки на ФФ
+          <input id="actualFfAcceptanceDateInput" type="date">
+        </label>
+        <label>发票编号 / Invoice No / Номер invoice
+          <input id="invoiceNoInput" type="text">
+        </label>
+        <label>发票日期 / Invoice date / Дата invoice
+          <input id="invoiceDateInput" type="date">
+        </label>
+        <label>币种 / Currency / Валюта invoice
+          <input id="currencyInput" type="text">
+        </label>
+        <label>合同编号 / Contract No / Номер контракта
+          <input id="contractNoInput" type="text">
+        </label>
+        <label>合同日期 / Contract date / Дата контракта
+          <input id="contractDateInput" type="date">
+        </label>
+      </div>
+
+      <h3>商品 / Products / Товары</h3>
+      <div class="line-table">
+        <table>
+          <thead><tr>
+            <th>发票型号 / Invoice model / Модель из invoice</th>
+            <th>条形码 / Barcode / Штрихкод</th>
+            <th>平台ID / nmId / nmId</th>
+            <th>我方品名 / Our item name / Номенклатура</th>
+            <th>数量 / Qty / Количество</th>
+            <th>单价 / Unit price / Цена invoice</th>
+            <th>金额 / Amount / Сумма invoice</th>
+            <th>备注 / Comment / Комментарий</th>
+            <th>匹配 / Matching / Матчинг</th>
+          </tr></thead>
+          <tbody id="productLines"></tbody>
+        </table>
+      </div>
+
+      <h3>其他项目 / Extras / Прочие позиции invoice</h3>
+      <div class="line-table">
+        <table>
+          <thead><tr>
+            <th>行号 / Line / Строка</th>
+            <th>项目 / Item / Позиция</th>
+            <th>数量 / Qty / Количество</th>
+            <th>单价 / Unit price / Цена</th>
+            <th>金额 / Amount / Сумма</th>
+            <th>备注 / Comment / Комментарий</th>
+          </tr></thead>
+          <tbody id="extraLines"></tbody>
+        </table>
+      </div>
+
+      <div class="totals">
+        <div class="total"><span>商品数量 / Product qty / Кол-во товаров</span><strong id="totalQty">—</strong></div>
+        <div class="total"><span>商品金额 / Product amount / Сумма товаров invoice</span><strong id="totalProducts">—</strong></div>
+        <div class="total"><span>其他项目 / Extras / Прочие позиции invoice</span><strong id="totalExtras">—</strong></div>
+        <div class="total"><span>发票总额 / Invoice total / Итого invoice</span><strong id="totalInvoice">—</strong></div>
+      </div>
+    </section>
+  </main>
+
+  <script id="sheet-vitrina-v1-supplier-safe-config" type="application/json">__SHEET_VITRINA_V1_SUPPLIER_SAFE_CONFIG_JSON__</script>
+  <script>
+    (() => {
+      "use strict";
+      const config = JSON.parse(document.getElementById("sheet-vitrina-v1-supplier-safe-config").textContent);
+      const shipmentsPath = config.supplier_shipments_path;
+      const parsePath = config.supplier_shipments_parse_path;
+      const rowsNode = document.getElementById("shipmentRows");
+      const registryMessage = document.getElementById("registryMessage");
+      const cardMessage = document.getElementById("cardMessage");
+      const card = document.getElementById("shipmentCard");
+      const uploadPanel = document.getElementById("uploadPanel");
+      const fileInput = document.getElementById("invoiceFileInput");
+      const addButton = document.getElementById("addShipmentButton");
+      const saveButton = document.getElementById("saveShipmentButton");
+      const closeButton = document.getElementById("closeShipmentButton");
+      const fields = {
+        shipmentDate: document.getElementById("shipmentDateInput"),
+        actualShipmentDate: document.getElementById("actualShipmentDateInput"),
+        actualFfAcceptanceDate: document.getElementById("actualFfAcceptanceDateInput"),
+        invoiceNo: document.getElementById("invoiceNoInput"),
+        invoiceDate: document.getElementById("invoiceDateInput"),
+        currency: document.getElementById("currencyInput"),
+        contractNo: document.getElementById("contractNoInput"),
+        contractDate: document.getElementById("contractDateInput")
+      };
+      let current = null;
+      let uploadId = "";
+      let isNew = false;
+      let saving = false;
+
+      document.getElementById("logoutLink").href = config.logout_path;
+
+      function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[char]);
+      }
+
+      function setMessage(node, message, tone = "") {
+        node.textContent = message || "";
+        node.className = "message" + (tone ? " " + tone : "");
+      }
+
+      async function fetchJson(url, options = {}) {
+        const response = await fetch(url, options);
+        const contentType = response.headers.get("content-type") || "";
+        const payload = contentType.includes("application/json") ? await response.json() : null;
+        if (!response.ok) throw new Error((payload && payload.error) || ("HTTP " + response.status));
+        return payload;
+      }
+
+      function formatNumber(value) {
+        if (value === null || value === undefined || value === "") return "—";
+        const number = Number(value);
+        return Number.isFinite(number) ? new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 4 }).format(number) : "—";
+      }
+
+      function deadlineMarkup(deadline) {
+        const value = deadline || {};
+        const tone = ["green", "yellow", "red", "success"].includes(value.tone) ? value.tone : "neutral";
+        return '<span class="badge ' + tone + '">' + escapeHtml(value.display || "—") + '</span>';
+      }
+
+      function statusText(row) {
+        return row.order_status_display || row.order_status_label || row.order_status || "—";
+      }
+
+      function matchText(value) {
+        return value === "all_matched" ? "OK" : "检查 / Check / Проверить";
+      }
+
+      function setRegistryState(state, message) {
+        rowsNode.innerHTML = '<tr data-registry-state="' + state + '"><td colspan="10">' + escapeHtml(message) + '</td></tr>';
+      }
+
+      async function loadRegistry() {
+        setRegistryState("loading", "读取订单 / Loading orders / Загрузка заказов…");
+        setMessage(registryMessage, "");
+        try {
+          const payload = await fetchJson(shipmentsPath, { headers: { Accept: "application/json" } });
+          const shipments = Array.isArray(payload.shipments) ? payload.shipments : [];
+          if (!shipments.length) {
+            setRegistryState("loaded_empty", "暂无订单 / No orders yet / Заказов пока нет.");
+            return;
+          }
+          rowsNode.innerHTML = shipments.map((row) => [
+            '<tr data-shipment-id="' + escapeHtml(row.shipment_id) + '">',
+            '<td>' + escapeHtml(row.planned_shipment_date || "—") + '</td>',
+            '<td>' + deadlineMarkup(row.deadline) + '</td>',
+            '<td>' + escapeHtml(row.actual_shipment_date || "—") + '</td>',
+            '<td>' + escapeHtml(row.actual_ff_acceptance_date || "—") + '</td>',
+            '<td>' + escapeHtml(row.invoice_no || "—") + '</td>',
+            '<td>' + escapeHtml(row.invoice_date || "—") + '</td>',
+            '<td>' + escapeHtml(formatNumber(row.product_qty_total)) + '</td>',
+            '<td><span class="badge ' + (row.match_status === "all_matched" ? "success" : "yellow") + '">' + escapeHtml(matchText(row.match_status)) + '</span></td>',
+            '<td>' + escapeHtml(statusText(row)) + '</td>',
+            '<td><button class="secondary" type="button" data-open-shipment="' + escapeHtml(row.shipment_id) + '">打开 / Open / Открыть</button></td>',
+            '</tr>'
+          ].join("")).join("");
+          rowsNode.querySelectorAll("[data-shipment-id]").forEach((row) => row.addEventListener("click", (event) => {
+            const id = row.getAttribute("data-shipment-id");
+            if (event.target.closest("button") || id) openShipment(id);
+          }));
+        } catch (error) {
+          setRegistryState("error", "加载失败 / Load failed / Ошибка загрузки: " + error.message);
+        }
+      }
+
+      async function openShipment(shipmentId) {
+        try {
+          current = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), { headers: { Accept: "application/json" } });
+          uploadId = "";
+          isNew = false;
+          renderCard();
+          if (current.factual_date_correction && current.factual_date_correction.active) await pollCorrection(shipmentId, current.factual_date_correction);
+        } catch (error) {
+          setMessage(registryMessage, error.message, "error");
+        }
+      }
+
+      function fillValue(node, value) { node.value = value || ""; }
+
+      function renderCard() {
+        if (!current) return;
+        const meta = current.metadata || {};
+        fillValue(fields.shipmentDate, current.shipment_date);
+        fillValue(fields.actualShipmentDate, current.actual_shipment_date);
+        fillValue(fields.actualFfAcceptanceDate, current.actual_ff_acceptance_date);
+        fillValue(fields.invoiceNo, meta.invoice_no || current.invoice_no);
+        fillValue(fields.invoiceDate, meta.invoice_date || current.invoice_date);
+        fillValue(fields.currency, meta.currency || current.currency);
+        fillValue(fields.contractNo, meta.contract_no || current.contract_no);
+        fillValue(fields.contractDate, meta.contract_date || current.contract_date);
+        const deadline = current.deadline || {};
+        document.getElementById("cardDeadline").outerHTML = deadlineMarkup(deadline).replace("<span ", '<span id="cardDeadline" ');
+        document.getElementById("cardTitle").textContent = (current.invoice_no || meta.invoice_no || "订单 / Order / Заказ") + (current.shipment_id ? " · " + current.shipment_id : "");
+        renderLines();
+        renderTotals();
+        uploadPanel.hidden = !isNew;
+        card.hidden = false;
+        setMessage(cardMessage, "");
+        card.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+
+      function renderLines() {
+        const lines = Array.isArray(current.lines) ? current.lines : [];
+        const productRows = [];
+        const extraRows = [];
+        lines.forEach((line, index) => {
+          if (line.line_type === "extra") {
+            extraRows.push('<tr data-line-index="' + index + '"><td>' + escapeHtml(line.source_no || line.source_row_token || index + 1) + '</td><td>' + escapeHtml(line.model_raw || "—") + '</td>' + numberInput(index, "qty", line.qty) + numberInput(index, "unit_price", line.unit_price) + numberInput(index, "amount", line.amount) + textInput(index, "comment", line.comment) + '</tr>');
+          } else {
+            productRows.push('<tr data-line-index="' + index + '"><td>' + escapeHtml(line.model_raw || "—") + '</td><td>' + escapeHtml(line.barcode || "—") + '</td><td>' + escapeHtml(line.nm_id || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td>' + numberInput(index, "qty", line.qty) + numberInput(index, "unit_price", line.unit_price) + numberInput(index, "amount", line.amount) + textInput(index, "comment", line.comment) + '<td><span class="badge ' + (line.match_status === "matched_by_barcode" ? "success" : "yellow") + '">' + escapeHtml(line.match_status || "—") + '</span></td></tr>');
+          }
+        });
+        document.getElementById("productLines").innerHTML = productRows.join("") || '<tr><td colspan="9">未识别商品 / No product lines / Товарные строки не распознаны.</td></tr>';
+        document.getElementById("extraLines").innerHTML = extraRows.join("") || '<tr><td colspan="6">无 / None / Нет</td></tr>';
+        card.querySelectorAll("[data-line-field]").forEach((input) => input.addEventListener("input", () => {
+          syncLineInputs();
+          renderTotals();
+        }));
+      }
+
+      function numberInput(index, field, value) {
+        return '<td><input type="number" step="0.0001" min="0" data-line-field="' + field + '" data-line-index="' + index + '" value="' + escapeHtml(value ?? "") + '"></td>';
+      }
+
+      function textInput(index, field, value) {
+        return '<td><input type="text" data-comment data-line-field="' + field + '" data-line-index="' + index + '" value="' + escapeHtml(value || "") + '"></td>';
+      }
+
+      function syncLineInputs() {
+        card.querySelectorAll("[data-line-field]").forEach((input) => {
+          const index = Number(input.dataset.lineIndex);
+          const field = input.dataset.lineField;
+          if (!current.lines[index]) return;
+          current.lines[index][field] = field === "comment" ? input.value : (input.value === "" ? null : Number(input.value));
+        });
+      }
+
+      function renderTotals() {
+        syncLineInputs();
+        const lines = Array.isArray(current.lines) ? current.lines : [];
+        const products = lines.filter((line) => line.line_type !== "extra");
+        const extras = lines.filter((line) => line.line_type === "extra");
+        const sum = (items, field) => items.reduce((total, line) => total + (Number(line[field]) || 0), 0);
+        document.getElementById("totalQty").textContent = formatNumber(sum(products, "qty"));
+        document.getElementById("totalProducts").textContent = formatNumber(sum(products, "amount"));
+        document.getElementById("totalExtras").textContent = formatNumber(sum(extras, "amount"));
+        document.getElementById("totalInvoice").textContent = formatNumber(sum(lines, "amount"));
+        saveButton.disabled = saving || !fields.shipmentDate.value || !products.length;
+      }
+
+      function safeLineForWrite(line) {
+        return {
+          line_id: line.line_id || "",
+          source_row_token: line.source_row_token || "",
+          line_type: line.line_type || "product",
+          sort_order: line.sort_order,
+          source_no: line.source_no || "",
+          barcode: line.barcode || "",
+          model_raw: line.model_raw || "",
+          qty: line.qty,
+          unit_price: line.unit_price,
+          amount: line.amount,
+          currency: line.currency || fields.currency.value.trim(),
+          comment: line.comment || ""
+        };
+      }
+
+      function buildRequestBody() {
+        syncLineInputs();
+        const edited = {
+          shipment_date: fields.shipmentDate.value,
+          actual_shipment_date: fields.actualShipmentDate.value,
+          actual_ff_acceptance_date: fields.actualFfAcceptanceDate.value,
+          metadata: {
+            invoice_no: fields.invoiceNo.value.trim(),
+            invoice_date: fields.invoiceDate.value,
+            contract_no: fields.contractNo.value.trim(),
+            contract_date: fields.contractDate.value,
+            currency: fields.currency.value.trim(),
+            declared_invoice_total: current.metadata && current.metadata.declared_invoice_total
+          },
+          lines: (current.lines || []).map(safeLineForWrite),
+          warnings: Array.isArray(current.warnings) ? current.warnings : [],
+          errors: Array.isArray(current.errors) ? current.errors : []
+        };
+        const body = {
+          shipment_date: edited.shipment_date,
+          actual_shipment_date: edited.actual_shipment_date,
+          actual_ff_acceptance_date: edited.actual_ff_acceptance_date,
+          payload: edited
+        };
+        if (isNew) body.upload_id = uploadId;
+        return body;
+      }
+
+      async function saveCurrent() {
+        if (saving) return;
+        saving = true;
+        renderTotals();
+        setMessage(cardMessage, "保存中 / Saving / Сохраняем…");
+        try {
+          const body = buildRequestBody();
+          const shipmentId = current.shipment_id || "";
+          const response = await fetchJson(isNew ? shipmentsPath : shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+            method: isNew ? "POST" : "PATCH",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify(body)
+          });
+          if (response.status === "accepted" && response.correction) {
+            await pollCorrection(shipmentId, response.correction);
+            return;
+          }
+          current = response;
+          isNew = false;
+          uploadId = "";
+          renderCard();
+          await loadRegistry();
+          setMessage(cardMessage, "订单已保存 / Order saved / Заказ сохранён.", "success");
+        } catch (error) {
+          setMessage(cardMessage, error.message, "error");
+        } finally {
+          saving = false;
+          renderTotals();
+        }
+      }
+
+      async function pollCorrection(shipmentId, initial) {
+        let correction = initial || {};
+        saving = true;
+        for (let attempt = 0; attempt < 2400; attempt += 1) {
+          setMessage(cardMessage, correction.progress_text || "Сохраняем фактическую дату…");
+          if (correction.status === "success") {
+            current = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), { headers: { Accept: "application/json" } });
+            saving = false;
+            renderCard();
+            await loadRegistry();
+            setMessage(cardMessage, "Изменение сохранено и проверено.", "success");
+            return;
+          }
+          if (correction.status === "error") {
+            saving = false;
+            throw new Error(correction.error_message || "Не удалось сохранить фактическую дату.");
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          correction = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId) + "/" + (config.factual_date_correction_segment || "factual-date-correction"), { headers: { Accept: "application/json" } });
+        }
+        saving = false;
+        throw new Error("Операция всё ещё выполняется. Откройте заказ повторно.");
+      }
+
+      addButton.addEventListener("click", () => {
+        current = null;
+        uploadId = "";
+        isNew = true;
+        card.hidden = true;
+        uploadPanel.hidden = false;
+        fileInput.value = "";
+        document.getElementById("selectedFileLabel").textContent = "";
+      });
+
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        document.getElementById("selectedFileLabel").textContent = file.name;
+        const form = new FormData();
+        form.append("file", file);
+        setMessage(registryMessage, "解析 invoice / Parsing invoice / Разбираем invoice…");
+        try {
+          current = await fetchJson(parsePath, { method: "POST", headers: { Accept: "application/json" }, body: form });
+          uploadId = current.upload_id || "";
+          isNew = true;
+          current.shipment_date = "";
+          current.actual_shipment_date = "";
+          current.actual_ff_acceptance_date = "";
+          current.deadline = { tone: "neutral", display: "—" };
+          renderCard();
+          setMessage(registryMessage, "Invoice parsed.", "success");
+        } catch (error) {
+          setMessage(registryMessage, error.message, "error");
+        }
+      });
+
+      saveButton.addEventListener("click", saveCurrent);
+      closeButton.addEventListener("click", () => { card.hidden = true; current = null; uploadId = ""; isNew = false; });
+      loadRegistry();
+    })();
+  </script>
+</body>
+</html>
