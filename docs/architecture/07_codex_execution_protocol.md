@@ -166,6 +166,30 @@ STANDARD-вызов только читает GitHub. LOOP-вызов также
 
 Review только списка файлов не считается semantic review.
 
+## Production UI Verification
+
+Production UI-проверка доказывает фактический browser render и не заменяется HTTP/service evidence. HTTP `200`, успешный `curl`, наличие HTML, совпадение route tokens или canonical `public-probe` остаются полезными transport/content checks, но сами по себе не подтверждают, что пользовательская surface загрузилась и отрисовалась без client-side failure.
+
+Surface policy:
+
+- в Codex CLI по умолчанию сразу использовать локальный Python/Node Playwright с установленным Chrome/Chromium в новом изолированном непостоянном browser context; встроенный Browser в CLI недоступен и не является preflight-попыткой;
+- в ChatGPT web/desktop встроенный Browser можно использовать, если он доступен; независимо от поверхности применяется один evidence contract;
+- по умолчанию не подключать пользовательский Chrome profile, `user_data_dir`, cookies, storage state или сохранённые credentials; авторизованный context допустим только при explicit scope и безопасно доступной авторизации;
+- не выполнять click, form fill, keyboard input, refresh/save/submit/delete/run-now или другие business mutations, если они прямо не входят в bounded UI Flow;
+- browser package/binary можно установить только когда это необходимо и разрешено текущим permission contour; отсутствие Playwright/Chrome/Chromium или требуемой авторизации является точным blocker, а не основанием подменить UI Flow HTTP-probe.
+
+Минимальное production UI evidence включает:
+
+1. requested URL, final URL и document response/redirect chain;
+2. отсутствие `5xx` у navigation и загруженных ресурсов;
+3. ожидание `DOMContentLoaded`, видимый фактический render и непустые `document.title`/`body`;
+4. собранные `pageerror`, явные fatal-error surface matches и существенные console errors; безвредные ошибки вроде missing favicon можно классифицировать отдельно, но не скрывать;
+5. локальный screenshot фактической final surface и его визуальную проверку.
+
+Screenshot и временный test harness не коммитятся без отдельного explicit scope. Для LOOP exact command `/wb-core loop accept-ui <PR>` допустима только после успешного browser evidence. При любой реальной UI-проблеме либо недоступной обязательной авторизации `release:awaiting-ui` сохраняется fail-closed; recovery PR создаётся только для исправления доказанного product/runtime defect, а не из-за ограничения локальной browser surface.
+
+Проверенный reference flow — [PR #616](https://github.com/orenvlad-ai/wb-core/pull/616): изолированный CLI Playwright/Chrome подтвердил защищённый operator route через ожидаемый redirect на отрендеренную login surface, после чего exact UI acceptance перевёл LOOP в `release:production`, а post-accept worker подтвердил пустую очередь.
+
 ## Независимое Подтверждение Результата
 
 Отчёт Codex или другого агента не является доказательством сам по себе. Перед подтверждением проверь применимое:

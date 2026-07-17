@@ -52,6 +52,12 @@
 
 После deploy задача переходит в `release:awaiting-ui`, блокируя несвязанные production releases. Codex продолжает ту же сессию и выполняет UI Flow. При ошибке создаётся recovery PR с теми же `task:loop + scope:live-runtime` и выданной Release Train точной `loop:root-<PR>` связью; после нового ack и deploy gate переносится на recovery. После успешного UI Flow Codex оставляет на активном PR точную команду `/wb-core loop accept-ui <PR>`. Только UI acceptance переводит всю Loop-цепочку в `release:production` и продолжает очередь.
 
+## Production UI-проверки
+
+HTTP `200`, успешный `curl`, наличие HTML и HTTP-only public probe не являются полноценной UI-проверкой. В Codex CLI сразу используй Playwright с новым изолированным непостоянным context локального Chrome/Chromium; встроенный Browser в CLI недоступен, поэтому не трать попытки на его запуск. В ChatGPT web/desktop встроенный Browser допустим, если доступен, при том же evidence contract.
+
+UI evidence обязано включать requested/final URL и document response/redirect chain, отсутствие `5xx`, `DOMContentLoaded` и фактический видимый render, непустые title/body, отсутствие `pageerror` и явной fatal-error surface, существенные console errors и визуально проверенный screenshot. По умолчанию не используй пользовательский browser profile, cookies или credentials; не выполняй клики, ввод и business mutations вне explicit scope. Для LOOP отправляй `accept-ui` только после успешной проверки. Если Playwright/Chromium или необходимая авторизация недоступны, сохраняй `release:awaiting-ui` fail-closed. Полный контракт и проверенный пример PR #616: [execution protocol](docs/architecture/07_codex_execution_protocol.md) и [GitHub Release Train](docs/architecture/11_github_release_train.md).
+
 ## GOAL mode
 
 Change-задачу формулируй через проверяемый конечный результат. Зафиксируй цель, ожидаемый проверяемый итог, bounded scope, существенные ограничения, acceptance criteria, closure criteria и применимый execution-контур. Routine-шаги из этого файла и authoritative docs не нужно копировать в каждый prompt.
