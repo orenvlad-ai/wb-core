@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+import shlex
 import sys
 from typing import Any
 
@@ -22,6 +24,7 @@ from packages.application.warehouse_stocks import WarehouseStocksBlock  # noqa: 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", required=True)
+    parser.add_argument("--env-file", default="", help="optional dotenv file loaded without shell evaluation")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     dry_run = subparsers.add_parser("dry-run", help="read sources and build an exact plan")
@@ -34,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("readback", help="read stored cutover documents and reconciliation")
 
+    diagnostic = subparsers.add_parser(
+        "diagnose-discrepancy",
+        help="read bounded WB acceptance-discrepancy evidence without mutation",
+    )
+    diagnostic.add_argument("--nm-id", action="append", type=int, required=True)
+
     rollback = subparsers.add_parser("rollback", help="remove only this opening cutover")
     rollback.add_argument("--fingerprint", required=True)
     rollback.add_argument("--backup-dir", required=True)
@@ -41,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    env_file = str(args.env_file or "").strip()
+    if env_file:
+        _load_env_file(Path(env_file))
     runtime_dir = Path(str(args.runtime_dir)).resolve()
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
     block = WarehouseStocksBlock(runtime=runtime)
@@ -65,6 +77,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "readback":
         return block.readback()
+    if args.command == "diagnose-discrepancy":
+        return block.diagnose_wb_acceptance_discrepancy(nm_ids=args.nm_id)
     if args.command == "rollback":
         return block.rollback_opening_cutover(
             confirm_fingerprint=str(args.fingerprint),
@@ -75,6 +89,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
+
+
+def _load_env_file(path: Path) -> None:
+    """Load simple dotenv assignments as data, never as executable shell."""
+
+    if not path.is_file():
+        raise ValueError(f"environment file does not exist: {path}")
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if not key.isidentifier():
+            continue
+        lexer = shlex.shlex(raw_value, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            value = " ".join(lexer)
+        except ValueError as exc:
+            raise ValueError(f"invalid value for environment key {key}") from exc
+        os.environ[key] = value
 
 
 def main() -> int:

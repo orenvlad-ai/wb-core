@@ -37,6 +37,8 @@ There is no mutable warehouse balance table. Initial balance is the sum of poste
 
 Apply creates an integrity-checked coherent SQLite backup before `BEGIN IMMEDIATE`. Local sources are re-digested after dry-run and once more through the same connection under the acquired write lock immediately before insertion. Cutover/header/line insertion plus reconciliation is one transaction; injected/real failure leaves no partial documents and the same exact plan can then resume without duplicates when source evidence is unchanged.
 
+If dry-run reports a negative WB acceptance discrepancy, use only `warehouse-opening-diagnostic --nm-id <reported nmID>` for bounded read-only evidence. The command parses the hosted dotenv file without shell evaluation and reports sanitized ordinary-final/doprinato goods rows and exact sent/accepted/doprinato arithmetic. It does not sync, backfill or modify the WB cache and does not weaken the negative-balance gate.
+
 ## Recovery
 
 If apply fails before commit, rebuild a new plan only after diagnosing the changed/invalid source. Do not reuse a stale fingerprint.

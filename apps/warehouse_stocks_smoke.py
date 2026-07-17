@@ -280,6 +280,46 @@ def main() -> None:
         _assert(zero_document["sku_count"] == 0 and zero_document["total_quantity"] == "0", "zero warehouse document")
 
         negative_runtime = _seed_runtime(root / "runtime-negative", doprinato_quantity=4)
+        negative_diagnostic = _block(negative_runtime).diagnose_wb_acceptance_discrepancy(
+            nm_ids=[101]
+        )
+        _assert(negative_diagnostic["status"] == "diagnostic", "bounded discrepancy diagnostic status")
+        _assert(negative_diagnostic["negative_count"] == 1, "bounded diagnostic finds negative SKU")
+        diagnostic_row = negative_diagnostic["rows"][0]
+        _assert(
+            (
+                diagnostic_row["sent_quantity"],
+                diagnostic_row["accepted_quantity"],
+                diagnostic_row["doprinato_quantity"],
+                diagnostic_row["discrepancy_quantity"],
+            )
+            == (10, 8, 4, -2),
+            "bounded diagnostic uses exact discrepancy arithmetic",
+        )
+        _assert(len(diagnostic_row["source_records"]) == 2, "bounded diagnostic has both source records")
+        diagnostic_records = {
+            item["role"]: item for item in diagnostic_row["source_records"]
+        }
+        _assert(
+            (
+                diagnostic_records["ordinary_final_acceptance"]["sent_quantity"],
+                diagnostic_records["ordinary_final_acceptance"]["accepted_quantity"],
+                diagnostic_records["ordinary_final_acceptance"]["doprinato_quantity"],
+                diagnostic_records["ordinary_final_acceptance"]["discrepancy_contribution"],
+            )
+            == ("10", "8", "0", "2"),
+            "bounded diagnostic ordinary row arithmetic",
+        )
+        _assert(
+            (
+                diagnostic_records["doprinato"]["sent_quantity"],
+                diagnostic_records["doprinato"]["accepted_quantity"],
+                diagnostic_records["doprinato"]["doprinato_quantity"],
+                diagnostic_records["doprinato"]["discrepancy_contribution"],
+            )
+            == ("0", "0", "4", "-4"),
+            "bounded diagnostic doprinato row arithmetic",
+        )
         try:
             _block(negative_runtime).build_opening_plan()
             raise AssertionError("negative discrepancy did not fail closed")
