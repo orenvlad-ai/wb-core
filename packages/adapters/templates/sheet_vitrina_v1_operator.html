@@ -3078,6 +3078,41 @@
       text-align: center;
     }
 
+    .cny-account-action-cell {
+      min-width: 132px;
+    }
+
+    .cny-delete-button {
+      min-height: 30px;
+      border: 1px solid rgba(220, 38, 38, 0.28);
+      border-radius: 8px;
+      padding: 5px 10px;
+      background: #fff;
+      color: #b91c1c;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .cny-delete-button:hover:not(:disabled) {
+      background: #fef2f2;
+    }
+
+    .cny-delete-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.58;
+    }
+
+    .cny-delete-hint {
+      display: block;
+      margin-top: 4px;
+      max-width: 170px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
     .wb-supplies-header {
       display: flex;
       align-items: flex-start;
@@ -4701,10 +4736,11 @@
                     <th>Заказ</th>
                     <th>Статус</th>
                     <th>Файл</th>
+                    <th>Действия</th>
                   </tr>
                 </thead>
                 <tbody id="cnyConversionsBody">
-                  <tr><td class="cny-account-empty" colspan="10">Загрузите документы конвертации или задайте opening balance.</td></tr>
+                  <tr><td class="cny-account-empty" colspan="11">Загрузите документы конвертации или задайте opening balance.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -5547,6 +5583,7 @@
       let cnyAccountUploading = false;
       let cnyAccountReplayLoading = false;
       let cnyAccountOpeningSaving = false;
+      const cnyAccountDeletingDocumentIds = new Set();
       let fulfillmentServicesInitialized = false;
       let fulfillmentServicesLoading = false;
       let fulfillmentServicesUploading = false;
@@ -10044,17 +10081,26 @@
       }
 
       function updateCnyAccountBusyState() {
+        const deleteBusy = cnyAccountDeletingDocumentIds.size > 0;
         if (cnyAccountUploadButton) {
-          cnyAccountUploadButton.disabled = cnyAccountLoading || cnyAccountUploading;
+          cnyAccountUploadButton.disabled = cnyAccountLoading || cnyAccountUploading || deleteBusy;
           cnyAccountUploadButton.textContent = cnyAccountUploading ? "Загружаем..." : "Загрузить PDF";
         }
         if (cnyAccountReplayButton) {
-          cnyAccountReplayButton.disabled = cnyAccountLoading || cnyAccountReplayLoading;
+          cnyAccountReplayButton.disabled = cnyAccountLoading || cnyAccountReplayLoading || deleteBusy;
           cnyAccountReplayButton.textContent = cnyAccountReplayLoading ? "Пересчитываем..." : "Пересчитать ledger";
         }
         if (cnyOpeningSaveButton) {
-          cnyOpeningSaveButton.disabled = cnyAccountLoading || cnyAccountOpeningSaving;
+          cnyOpeningSaveButton.disabled = cnyAccountLoading || cnyAccountOpeningSaving || deleteBusy;
           cnyOpeningSaveButton.textContent = cnyAccountOpeningSaving ? "Сохраняем..." : "Сохранить opening";
+        }
+        if (cnyConversionsBody) {
+          cnyConversionsBody.querySelectorAll("[data-cny-delete-document]").forEach((button) => {
+            const buttonDocumentId = String(button.getAttribute("data-cny-delete-document") || "");
+            const isDeleting = cnyAccountDeletingDocumentIds.has(buttonDocumentId);
+            button.disabled = deleteBusy;
+            button.textContent = isDeleting ? "Удаляем..." : "Удалить";
+          });
         }
       }
 
@@ -10070,7 +10116,7 @@
         if (!config.cny_account_path) {
           setCnyAccountMessage("Route CNY account не настроен.", "error");
           renderCnyAccount(null);
-          return;
+          return false;
         }
         cnyAccountLoading = true;
         updateCnyAccountBusyState();
@@ -10099,12 +10145,16 @@
           } else if (!(options && options.preserveMessage)) {
             setCnyAccountMessage("", "");
           }
+          return true;
         } catch (error) {
-          renderCnyAccount(null);
+          if (!(options && options.preserveDataOnError)) {
+            renderCnyAccount(null);
+          }
           setCnyAccountMessage(
             "Не удалось прочитать CNY ledger: " + (error instanceof Error ? error.message : String(error)),
             "error"
           );
+          return false;
         } finally {
           cnyAccountLoading = false;
           updateCnyAccountBusyState();
@@ -10141,7 +10191,7 @@
           return;
         }
         if (!documents.length) {
-          cnyConversionsBody.innerHTML = "<tr><td class=\"cny-account-empty\" colspan=\"10\">Загрузите документы конвертации или задайте opening balance.</td></tr>";
+          cnyConversionsBody.innerHTML = "<tr><td class=\"cny-account-empty\" colspan=\"11\">Загрузите документы конвертации или задайте opening balance.</td></tr>";
           return;
         }
         const conversionOps = new Map();
@@ -10159,6 +10209,16 @@
           const fileCell = document.download_path
             ? "<a href=\"" + escapeHtml(document.download_path) + "\" target=\"_blank\" rel=\"noopener\">" + escapeHtml(fileName || "PDF") + "</a>"
             : escapeHtml(fileName || "—");
+          const documentId = String(document.document_id || "");
+          const deleteLabel = String(fileName || documentNumber || documentId || "CNY PDF");
+          const sourceOwned = Boolean(String(document.linked_financial_document_id || "").trim());
+          const isDeleting = cnyAccountDeletingDocumentIds.has(documentId);
+          const actionCell = sourceOwned
+            ? [
+                "<button class=\"cny-delete-button\" type=\"button\" disabled title=\"Удалите исходный документ в карточке заказа\" aria-label=\"Прямое удаление недоступно: удалите исходный документ в карточке заказа\">Удалить</button>",
+                "<span class=\"cny-delete-hint\">Через карточку заказа</span>"
+              ].join("")
+            : "<button class=\"cny-delete-button\" type=\"button\" data-cny-delete-document=\"" + escapeHtml(documentId) + "\" data-cny-delete-label=\"" + escapeHtml(deleteLabel) + "\"" + (isDeleting ? " disabled" : "") + ">" + (isDeleting ? "Удаляем..." : "Удалить") + "</button>";
           return [
             "<tr>",
             "<td>" + escapeHtml(formatCnyDateTime(document.operation_datetime || document.operation_date || payload.order_date)) + "</td>",
@@ -10171,9 +10231,71 @@
             "<td>" + escapeHtml(valueOrDash(sourceOrderId)) + "</td>",
             "<td>" + escapeHtml(cnyStatusLabel(document.status || operation.status)) + "</td>",
             "<td>" + fileCell + "</td>",
+            "<td class=\"cny-account-action-cell\">" + actionCell + "</td>",
             "</tr>"
           ].join("");
         }).join("");
+      }
+
+      async function handleCnyConversionDelete(event) {
+        const button = event.target.closest("[data-cny-delete-document]");
+        if (!button || !cnyConversionsBody || !cnyConversionsBody.contains(button)) {
+          return;
+        }
+        const documentId = String(button.getAttribute("data-cny-delete-document") || "").trim();
+        if (!documentId || cnyAccountDeletingDocumentIds.size > 0) {
+          return;
+        }
+        const documentLabel = String(button.getAttribute("data-cny-delete-label") || documentId);
+        const confirmed = window.confirm(
+          "Удалить документ «" + documentLabel + "»?\n\n" +
+          "Документ будет удалён. Остаток CNY, рублёвая стоимость остатка, средний курс и последующие операции ledger будут пересчитаны"
+        );
+        if (!confirmed || cnyAccountDeletingDocumentIds.has(documentId)) {
+          return;
+        }
+        cnyAccountDeletingDocumentIds.add(documentId);
+        updateCnyAccountBusyState();
+        setCnyAccountMessage("Удаляем документ и пересчитываем CNY ledger...", "");
+        try {
+          const response = await fetch(
+            config.cny_account_documents_path + "/" + encodeURIComponent(documentId),
+            { method: "DELETE", headers: { "Accept": "application/json" } }
+          );
+          const payload = await readJson(response);
+          if (!response.ok) {
+            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          }
+          if (payload.deleted !== true) {
+            throw new Error("backend не подтвердил удаление canonical CNY document");
+          }
+          const reloaded = await loadCnyAccount({ preserveMessage: true, preserveDataOnError: true });
+          if (!reloaded) {
+            setCnyAccountMessage(
+              "Документ «" + documentLabel + "» удалён и ledger пересчитан, но серверный read model не удалось загрузить заново.",
+              "warning"
+            );
+            return;
+          }
+          if (supplierShipmentsFrame) {
+            const supplierFrameSource = String(supplierShipmentsFrame.getAttribute("src") || "");
+            if (supplierFrameSource) {
+              supplierShipmentsFrame.setAttribute("src", supplierFrameSource);
+            }
+          }
+          setCnyAccountMessage(
+            "Документ «" + documentLabel + "» удалён. CNY ledger и связанные расчётные показатели пересчитаны.",
+            "success"
+          );
+        } catch (error) {
+          setCnyAccountMessage(
+            "Не удалось удалить CNY документ: " + (error instanceof Error ? error.message : String(error)),
+            "error"
+          );
+        } finally {
+          cnyAccountDeletingDocumentIds.delete(documentId);
+          updateCnyAccountBusyState();
+        }
       }
 
       function renderCnyLedgerOperations(operations) {
@@ -13231,6 +13353,9 @@
       }
       if (cnyOpeningSaveButton) {
         cnyOpeningSaveButton.addEventListener("click", saveCnyOpeningBalance);
+      }
+      if (cnyConversionsBody) {
+        cnyConversionsBody.addEventListener("click", handleCnyConversionDelete);
       }
 
       downloadStockFfTemplateButton.addEventListener("click", () => downloadBinary(

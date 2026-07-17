@@ -40,6 +40,7 @@ PROBE_SYSTEM_CA_FILE_CANDIDATES = (
 
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_COST_PRICE_UPLOAD_PATH,
+    DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
     DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
@@ -2050,7 +2051,12 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Скачать все рекомендации",
             "Сводка по федеральным округам",
             "Рекомендовано / к поставке",
+            "Счёт CNY",
+            "Конвертации RUB → CNY",
+            "data-cny-delete-document",
+            "Документ будет удалён. Остаток CNY, рублёвая стоимость остатка, средний курс",
             DEFAULT_FACTORY_ORDER_STATUS_PATH,
+            DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH,
             DEFAULT_WB_REGIONAL_STATUS_PATH,
             DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
             'data-supply-section-button="regional"',
