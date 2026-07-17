@@ -490,6 +490,8 @@ If any of these steps are unavailable or unsafe, execution must return incomplet
 
 Loopback/runtime probe validates the hosted process behind the reverse proxy or equivalent publish layer.
 
+HTTP probe boundary: canonical `loopback-probe`, `public-probe` and `deploy-and-verify` доказывают transport, auth-aware route/content shape и service health, но HTTP `200`, `curl` или наличие HTML не являются полноценной production UI-проверкой. Когда acceptance требует UI evidence, дополнительно применяется browser contract из [`07_codex_execution_protocol.md`](07_codex_execution_protocol.md): фактический Playwright/Browser render, DOM/final URL, отсутствие `5xx`/`pageerror`/fatal surface, классификация существенных console errors и визуально проверенный screenshot. Этот UI Flow по умолчанию использует изолированный context без пользовательского profile/cookies/credentials и не выполняет clicks, input или business mutations вне explicit scope.
+
 Canonical `loopback-probe`, `public-probe` and `deploy-and-verify` are auth-aware and fast by default:
 - when production WebCore app-level auth is configured, the runner may create a short-lived same-origin session cookie from the hosted runtime env file and use it only in memory for probe requests; the cookie, password hash and session secret must not be printed in JSON, logs, PR text or handoff;
 - unauthenticated browser/curl reads may return login redirect or auth error after auth hardening, but the canonical runner must verify the authenticated operator surface with sanitized auth metadata only;

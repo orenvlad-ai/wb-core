@@ -87,6 +87,8 @@ Workflow принимает command только от `OWNER`, `MEMBER` или `
 
 Если production UI Flow не принят, исчезновение Codex не открывает очередь: `release:awaiting-ui` остаётся durable fail-closed state.
 
+UI Flow следует production UI contract из [`07_codex_execution_protocol.md`](07_codex_execution_protocol.md). HTTP `200`, `curl`, наличие HTML или только canonical public probe недостаточны: требуется фактический browser render с DOM/final URL, отсутствием `5xx`/`pageerror`/fatal surface, классификацией существенных console errors и визуально проверенным screenshot. В Codex CLI сразу используется Playwright с новым изолированным Chrome/Chromium context; встроенный Browser в CLI недоступен. В ChatGPT web/desktop встроенный Browser допустим, если доступен. Пользовательский profile/cookies/credentials и любые clicks/input/business mutations запрещены по умолчанию. Если Playwright/Chromium или необходимая авторизация недоступны, gate остаётся fail-closed.
+
 При успешном UI Flow активная Codex-сессия оставляет точную GitHub-native command на текущей итерации:
 
 ```bash
@@ -142,13 +144,8 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 
 `pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP commands проходят exact parsing и association checks. Production SSH material доступен только job с GitHub Environment `production`; required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Release Train не выполняет WB writes, backfill или production business mutation.
 
-## Bounded LOOP Canary
+## Проверенный LOOP Canary
 
-Первый canary после rollout должен быть отдельным business-no-op live/runtime PR без production data mutation. После targeted checks, semantic review и docs sync безопасный запуск выполняется так:
+[PR #616](https://github.com/orenvlad-ai/wb-core/pull/616) является проверенным reference flow новой LOOP-инфраструктуры: отдельный business-no-op documentation PR прошёл `task:loop + scope:live-runtime + release:ready`, exact-head acknowledgement, merge, canonical deploy, `release:awaiting-ui`, read-only CLI Playwright/Chrome verification, exact `accept-ui`, terminal `release:production` и post-accept empty-queue dispatch. GitHub PR, comments, labels и workflow runs остаются durable evidence; временный repository marker после этого доказательства не нужен.
 
-```bash
-gh pr edit <CANARY_PR> --add-label task:loop --add-label scope:live-runtime --add-label release:ready && \
-python3 apps/github_release_train_wait.py <CANARY_PR>
-```
-
-Команда остановится кодом `3` только после verified deploy и `release:awaiting-ui`; затем Codex выполняет заранее заданный UI Flow. Canary закрывается exact `accept-ui` command только при фактическом UI success. В рамках repo-only изменения Release Train сам canary не запускается.
+Новые canary/LOOP задачи повторяют тот же контракт: waiter останавливается кодом `3` на `release:awaiting-ui`, Codex выполняет production UI verification и оставляет exact `accept-ui` только при фактическом UI success. HTTP-only evidence не открывает gate.
