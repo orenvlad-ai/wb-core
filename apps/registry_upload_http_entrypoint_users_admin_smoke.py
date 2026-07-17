@@ -169,6 +169,7 @@ def main() -> None:
                     "prices",
                     "sku_management",
                     "research",
+                    "instructions",
                     "settings",
                 ]:
                     raise AssertionError(f"users API must expose available sections: {users_payload}")
@@ -637,7 +638,7 @@ def _assert_users_access_picker_browser(
             if not create_popover.is_visible():
                 raise AssertionError("create user access picker must open on click")
             create_labels = create_popover.inner_text()
-            for label in ("Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Настройки", "Управление пользователями"):
+            for label in ("Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Инструкции", "Настройки", "Управление пользователями"):
                 if label not in create_labels:
                     raise AssertionError(f"create user access picker must include {label}")
             create_picker.locator('[data-section-checkbox][value="vitrina"]').uncheck()

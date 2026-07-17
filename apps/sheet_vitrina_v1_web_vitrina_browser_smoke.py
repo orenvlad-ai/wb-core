@@ -844,8 +844,8 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
     shell_actions = page.locator(".shell-actions").evaluate(
         "node => Array.from(node.querySelectorAll('button, a')).map(item => (item.textContent || '').trim())"
     )
-    if shell_actions != ["Настройки", "Выйти"]:
-        raise AssertionError(f"operator route must expose settings next to logout, got {shell_actions}")
+    if shell_actions != ["Инструкции", "Настройки", "Выйти"]:
+        raise AssertionError(f"operator route must expose instructions and settings next to logout, got {shell_actions}")
     active_tabs = [item["id"] for item in tabs if item["active"]]
     if active_tabs != ["vitrina"]:
         raise AssertionError(f"operator route must default to the vitrina tab, got {tabs}")
@@ -2788,8 +2788,8 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
     )
     if payload["unified_tabs"] != ["Витрина", "Поставки", "Отчёты", "Отзывы", "Реклама", "Цены", "Управление SKU", "Исследования"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
-    if payload["shell_actions"] != ["Настройки", "Выйти"]:
-        raise AssertionError(f"web-vitrina must expose Settings next to logout, got {payload}")
+    if payload["shell_actions"] != ["Инструкции", "Настройки", "Выйти"]:
+        raise AssertionError(f"web-vitrina must expose Instructions and Settings next to logout, got {payload}")
     if payload["active_unified_tab"] != "Витрина" or payload["update_tab_count"] != 0:
         raise AssertionError(f"web-vitrina must default to Vitrina and omit update-data tab, got {payload}")
     if payload["retry_button_count"] != 0:

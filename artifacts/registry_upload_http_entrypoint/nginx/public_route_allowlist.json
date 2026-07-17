@@ -247,6 +247,12 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_instructions_page",
+      "match": "exact",
+      "path": "/sheet-vitrina-v1/instructions",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_load_archived",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/load",

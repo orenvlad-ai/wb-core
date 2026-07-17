@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–46`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–47`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -52,6 +52,7 @@ source_basis:
   - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
   - "docs/modules/46_MODULE__SKU_MANAGEMENT_BLOCK.md"
+  - "docs/modules/47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -103,8 +104,9 @@ related_docs:
   - "44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
   - "46_MODULE__SKU_MANAGEMENT_BLOCK.md"
+  - "47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён through module 46: `Управление SKU` owns the calculation-only deficit forecast, guarded price/bid action workflow and confirmed action-event history; Google Sheets/GAS is no longer an active runtime/update/write/load/verify target."
+update_note: "Обновлён through module 47: `Инструкции` is a protected repo-owned operator knowledge base with a separate server-owned `instructions` capability; it is neither a CMS nor a public/document-download surface."
 ---
 
 # 1. Назначение индекса
@@ -121,7 +123,7 @@ update_note: "Обновлён through module 46: `Управление SKU` own
 
 # 1.1 Текущий Checkpoint Main
 
-Канонический индекс охватывает modules `01–46`. Modules `40` и `45` являются совместимыми read-side surfaces единого canonical cost engine: recognized projection обслуживает WB cost/P&L, paid projection — товарный капитал, а physical quantities имеют общие authoritative sources. Module `46` добавляет operator action/read-model contour поверх существующих stock, supply, prices, ads, SPP и metric truths, не создавая параллельные источники.
+Канонический индекс охватывает modules `01–47`. Modules `40` и `45` являются совместимыми read-side surfaces единого canonical cost engine: recognized projection обслуживает WB cost/P&L, paid projection — товарный капитал, а physical quantities имеют общие authoritative sources. Module `46` добавляет operator action/read-model contour поверх существующих stock, supply, prices, ads, SPP и metric truths, не создавая параллельные источники. Module `47` добавляет защищённую внутреннюю базу знаний без нового runtime content truth.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -155,6 +157,7 @@ update_note: "Обновлён through module 46: `Управление SKU` own
 - `wb_spp_tester_block` как bounded operator-инструмент `Цены -> Проверка СПП`: one-nmID safe-slow live SPP-proxy tester over user-specified discounted-price range, separate `WB_SPP_TEST_ENABLED` guard plus `WB_PRICES_WRITE_ENABLED`, runtime `current_job/jobs/audit`, stale/429 handling, high-confidence threshold detection and staged baseline restore with proof.
 - `webcore_data_mcp_block` как repo-implemented/live-gated read-only MCP gateway: standalone HTTP MCP server over SQLite `mode=ro` + `PRAGMA query_only=ON`, allowlisted business tools and separate `webcore.ops.read` diagnostics tools with `readOnlyHint: true`, OAuth 2.1/PKCE connector auth, bounded universal persisted `DATA_VITRINA` metric projections by key/Russian label/date/SKU, fixed-unit sanitized ops health/log/refresh/snapshot/deploy summaries, redaction/audit/limits, no arbitrary SQL/shell/SSH/sync/backfill/refresh/load/raw files/secrets and explicit revenue metric ambiguity handling.
 - `fulfillment_services_block` как server-owned operator supply contour: PNG-derived XLSX template, protected upload/list/detail/PDF routes, SQLite upload/line persistence, stable PDF-виза payment validation and approved-only `Поставки -> Wildberries` overlay without changing WB official evidence, 1C cost truth, ЕБД metric truth or final товарная себестоимость.
+- `operator_instructions_knowledge_base` как системный protected knowledge-base contour: Git-tracked structured content, web-native `Инструкции` shell surface, server-owned `instructions` capability in `Настройки -> Пользователи`, no CMS/public/DOCX download path and no supplier access by default.
 - `canonical_cost_engine` как active derived component/replay boundary с cutover `2026-07-01`: one baseline, recognized/paid projections, supplier/FF/WB authoritative quantities, provenance-aware FF operation business-date resolver без WB `created_at` fallback, exhaustive read-only source-anomaly preflight, fingerprinted `CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1` (strict pre-cutover 3/5/20-unit boundary), immutable FF-debit snapshots, derived underaccepted layers и guarded dry-run/apply runner.
 
 Главный незакрытый gap текущей линии:
@@ -251,6 +254,8 @@ update_note: "Обновлён through module 46: `Управление SKU` own
 | `43_MODULE__FF_STOCK_LEDGER_BLOCK.md` | `ff_stock_ledger_block` | `web/operator/supply/runtime-ledger` | Server-owned `ФФ -> Остатки ФФ`: manual receipt/writeoff preview-confirm documents, computed balances, supplier auto receipts, guarded idempotent WB auto writeoffs, cumulative status-4 acceptance evidence, audit trail and calculation source without Google Sheets/GAS or WB mutations |
 | `44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md` | `wb_finance_weekly_report_block` | `web/operator/reports/official-api` | Official WB Finance weekly raw/report/aggregate contour, all report types, per-operation COST_PRICE → Our WB Cost cutover, quality-aware coverage, guarded fingerprinted atomic stale-week recalculation and Europe/Moscow schedule |
 | `45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md` | `own_product_capital_block` | `web/operator/runtime-capital-read-side` | Paid-capital projection over the same canonical components/quantities: five physical stages, paid-equivalent and coverage/confirmation ratios, derived underaccepted SKU/TOTAL metrics; legacy event/state rows are audit-only |
+| `46_MODULE__SKU_MANAGEMENT_BLOCK.md` | `sku_management_block` | `web/operator/sku-actions` | Calculation-only deficit forecast, guarded one-row price/bid operator action workflow and confirmed action-event history without a parallel metric/source-of-truth contour |
+| `47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md` | `operator_instructions_knowledge_base` | `web/operator/knowledge-base` | Protected repo-owned web-native instructions with server-owned `instructions` access, a structured supply-management reference and no CMS/public document-download surface |
 
 # 5. Как эта папка используется дальше
 

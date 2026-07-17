@@ -24,6 +24,12 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.application.operator_instructions import (
+    InstructionBlock,
+    OperatorInstruction,
+    get_operator_instruction,
+    list_operator_instructions,
+)
 from packages.application.supplier_shipment_factual_correction import (
     SupplierShipmentFactualCorrectionError,
 )
@@ -171,6 +177,7 @@ WEB_AUTH_SECTION_ADS = "ads"
 WEB_AUTH_SECTION_PRICES = "prices"
 WEB_AUTH_SECTION_SKU_MANAGEMENT = "sku_management"
 WEB_AUTH_SECTION_RESEARCH = "research"
+WEB_AUTH_SECTION_INSTRUCTIONS = "instructions"
 WEB_AUTH_SECTION_SETTINGS = "settings"
 WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_VITRINA, "label": "Витрина"},
@@ -181,6 +188,7 @@ WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_PRICES, "label": "Цены"},
     {"section_id": WEB_AUTH_SECTION_SKU_MANAGEMENT, "label": "Управление SKU"},
     {"section_id": WEB_AUTH_SECTION_RESEARCH, "label": "Исследования"},
+    {"section_id": WEB_AUTH_SECTION_INSTRUCTIONS, "label": "Инструкции"},
     {"section_id": WEB_AUTH_SECTION_SETTINGS, "label": "Настройки"},
 )
 WEB_AUTH_SECTION_IDS = tuple(str(section["section_id"]) for section in WEB_AUTH_SECTION_DEFINITIONS)
@@ -193,6 +201,7 @@ WEB_AUTH_UNIFIED_TAB_SECTIONS = {
     "prices": WEB_AUTH_SECTION_PRICES,
     "sku-management": WEB_AUTH_SECTION_SKU_MANAGEMENT,
     "research": WEB_AUTH_SECTION_RESEARCH,
+    "instructions": WEB_AUTH_SECTION_INSTRUCTIONS,
     "settings": WEB_AUTH_SECTION_SETTINGS,
 }
 SERVICE_USER_USERNAME_PREFIXES = (
@@ -280,6 +289,7 @@ DEFAULT_CNY_ACCOUNT_LEDGER_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/ledger"
 DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/opening-balance"
 DEFAULT_CNY_ACCOUNT_REPLAY_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/replay"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
+DEFAULT_INSTRUCTIONS_UI_PATH = "/sheet-vitrina-v1/instructions"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
 DEFAULT_NOMENCLATURE_IMPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
@@ -293,6 +303,7 @@ WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "
 SUPPLIER_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_supplier.html"
 SUPPLIER_SAFE_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_supplier_safe.html"
 SETTINGS_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_settings.html"
+INSTRUCTIONS_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_instructions.html"
 
 
 def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypointConfig:
@@ -2110,6 +2121,45 @@ def _build_handler(
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
                         active_tab="settings",
+                        role=_current_web_user_role(self),
+                        allowed_sections=_current_web_user_allowed_sections(self),
+                    ),
+                )
+                return
+
+            if parsed.path == DEFAULT_INSTRUCTIONS_UI_PATH:
+                try:
+                    instruction = _resolve_operator_instruction_from_query(parsed.query)
+                except ValueError as exc:
+                    _write_html_response(
+                        self,
+                        HTTPStatus.BAD_REQUEST,
+                        _render_instruction_error_page("Некорректный идентификатор инструкции.", str(exc)),
+                    )
+                    return
+                if instruction is None:
+                    _write_html_response(
+                        self,
+                        HTTPStatus.NOT_FOUND,
+                        _render_instruction_error_page("Инструкция не найдена.", "Выберите опубликованную инструкцию из списка."),
+                    )
+                    return
+                if _resolve_single_query_param(parsed.query, "embedded") == "1":
+                    _write_html_response(
+                        self,
+                        HTTPStatus.OK,
+                        _render_sheet_vitrina_instructions_ui(instruction),
+                    )
+                    return
+                _write_html_response(
+                    self,
+                    HTTPStatus.OK,
+                    _render_sheet_vitrina_web_vitrina_ui(
+                        read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        operator_path=sheet_operator_ui_path,
+                        refresh_path=sheet_refresh_path,
+                        job_path=sheet_job_path,
+                        active_tab="instructions",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
                     ),
@@ -6044,8 +6094,13 @@ def _available_section_records() -> list[dict[str, str]]:
 
 def _default_allowed_sections_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip()
-    if normalized in {WEB_AUTH_ROLE_ADMIN, WEB_AUTH_ROLE_OPERATOR}:
+    if normalized == WEB_AUTH_ROLE_ADMIN:
         return list(WEB_AUTH_SECTION_IDS)
+    if normalized == WEB_AUTH_ROLE_OPERATOR:
+        # Instructions are a separately granted capability.  Keeping them out
+        # of the operator fallback also prevents historical users with a
+        # role-only/default record from receiving the new section implicitly.
+        return [section_id for section_id in WEB_AUTH_SECTION_IDS if section_id != WEB_AUTH_SECTION_INSTRUCTIONS]
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
         return [WEB_AUTH_SECTION_SUPPLY]
     return []
@@ -6533,12 +6588,7 @@ def _allowed_unified_tabs_for_sections(allowed_sections: Sequence[str]) -> list[
 
 
 def _allowed_unified_tabs_for_role(role: str) -> list[str]:
-    normalized = str(role or "").strip()
-    if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
-        return ["factory-order"]
-    if _role_has_full_operator_access(normalized):
-        return ["vitrina", "factory-order", "reports", "feedbacks", "ads", "prices", "sku-management", "research", "settings"]
-    return []
+    return _allowed_unified_tabs_for_sections(_default_allowed_sections_for_role(role))
 
 
 def _default_unified_tab_for_role(role: str) -> str:
@@ -6583,6 +6633,8 @@ def _required_section_for_path(path: str) -> str:
         return WEB_AUTH_SECTION_REPORTS
     if normalized == DEFAULT_SETTINGS_UI_PATH:
         return WEB_AUTH_SECTION_SETTINGS
+    if normalized == DEFAULT_INSTRUCTIONS_UI_PATH:
+        return WEB_AUTH_SECTION_INSTRUCTIONS
     if (
         normalized == DEFAULT_NOMENCLATURE_PATH
         or normalized.startswith(DEFAULT_NOMENCLATURE_PATH + "/")
@@ -6661,6 +6713,8 @@ def _allowed_roles_for_path(path: str) -> set[str]:
     if normalized == DEFAULT_SETTINGS_USERS_PATH or normalized.startswith(DEFAULT_SETTINGS_USERS_PATH + "/"):
         return {WEB_AUTH_ROLE_ADMIN}
     if normalized == DEFAULT_SETTINGS_UI_PATH:
+        return full_operator_roles
+    if normalized == DEFAULT_INSTRUCTIONS_UI_PATH:
         return full_operator_roles
     if normalized == DEFAULT_SHEET_SUPPLIER_UI_PATH:
         return full_operator_roles | {WEB_AUTH_ROLE_SUPPLIER}
@@ -7149,6 +7203,110 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
     )
 
 
+def _resolve_operator_instruction_from_query(query: str) -> OperatorInstruction | None:
+    params = urllib_parse.parse_qs(query or "", keep_blank_values=True)
+    values = params.get("instruction") or []
+    if len(values) > 1:
+        raise ValueError("instruction must be provided at most once")
+    return get_operator_instruction(values[0] if values else "")
+
+
+def _render_sheet_vitrina_instructions_ui(instruction: OperatorInstruction) -> str:
+    instruction_list = "".join(
+        (
+            '<a class="instruction-link" href="'
+            + html.escape(
+                DEFAULT_INSTRUCTIONS_UI_PATH
+                + "?"
+                + urllib_parse.urlencode({"embedded": "1", "instruction": item.instruction_id}),
+                quote=True,
+            )
+            + '"'
+            + (' aria-current="page"' if item.instruction_id == instruction.instruction_id else "")
+            + ">"
+            + html.escape(item.title)
+            + "</a>"
+        )
+        for item in list_operator_instructions()
+    )
+    topic_nav = "".join(
+        '<a class="topic-link" href="#'
+        + html.escape(section.anchor, quote=True)
+        + '" aria-current="false">'
+        + html.escape(section.title)
+        + "</a>"
+        for section in instruction.sections
+    )
+    sections_html = "".join(
+        '<section class="instruction-section" id="'
+        + html.escape(section.anchor, quote=True)
+        + '"><h2>'
+        + html.escape(section.title)
+        + "</h2>"
+        + (
+            '<p class="section-lead">' + html.escape(section.lead) + "</p>"
+            if section.lead
+            else ""
+        )
+        + "".join(_render_operator_instruction_block(block) for block in section.blocks)
+        + "</section>"
+        for section in instruction.sections
+    )
+    template = INSTRUCTIONS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return (
+        template.replace("__INSTRUCTION_LIST__", instruction_list)
+        .replace("__TOPIC_NAV__", topic_nav)
+        .replace("__INSTRUCTION_TITLE__", html.escape(instruction.title))
+        .replace("__INSTRUCTION_SUMMARY__", html.escape(instruction.summary))
+        .replace("__INSTRUCTION_CONTENT__", sections_html)
+    )
+
+
+def _render_operator_instruction_block(block: InstructionBlock) -> str:
+    title = html.escape(block.title)
+    text = html.escape(block.text)
+    if block.kind == "subheading":
+        return '<div class="block subheading"><h3>' + title + "</h3><p>" + text + "</p></div>"
+    if block.kind in {"numbered", "checklist"}:
+        class_name = "action-list checklist" if block.kind == "checklist" else "action-list"
+        heading = "<h3>" + title + "</h3>" if title else ""
+        items = "".join("<li>" + html.escape(item) + "</li>" for item in block.items)
+        return '<div class="block">' + heading + '<ul class="' + class_name + '">' + items + "</ul></div>"
+    if block.kind in {"important", "not_responsibility", "escalation"}:
+        class_name = {
+            "important": "callout-important",
+            "not_responsibility": "callout-boundary",
+            "escalation": "callout-escalation",
+        }[block.kind]
+        heading = "<h3>" + title + "</h3>" if title else ""
+        body = "<p>" + text + "</p>" if block.text else ""
+        if block.items:
+            body += '<ul class="action-list checklist">' + "".join(
+                "<li>" + html.escape(item) + "</li>" for item in block.items
+            ) + "</ul>"
+        return '<aside class="block callout ' + class_name + '">' + heading + body + "</aside>"
+    if block.kind == "table":
+        headings = "".join("<th scope=\"col\">" + html.escape(item) + "</th>" for item in block.headers)
+        rows = "".join(
+            "<tr>" + "".join("<td>" + html.escape(cell) + "</td>" for cell in row) + "</tr>"
+            for row in block.rows
+        )
+        return '<div class="block instructions-table-wrap"><table><thead><tr>' + headings + "</tr></thead><tbody>" + rows + "</tbody></table></div>"
+    raise ValueError(f"unsupported operator instruction block kind: {block.kind}")
+
+
+def _render_instruction_error_page(title: str, detail: str) -> str:
+    return (
+        "<!doctype html><meta charset=\"utf-8\"><title>"
+        + html.escape(title)
+        + "</title><main><h1>"
+        + html.escape(title)
+        + "</h1><p>"
+        + html.escape(detail)
+        + "</p></main>"
+    )
+
+
 def _render_sheet_vitrina_web_vitrina_ui(
     *,
     read_path: str,
@@ -7225,6 +7383,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "sku_management_bid_commit_path": DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH,
         "sku_management_history_path": DEFAULT_SKU_MANAGEMENT_HISTORY_PATH,
         "settings_path": DEFAULT_SETTINGS_UI_PATH,
+        "instructions_path": DEFAULT_INSTRUCTIONS_UI_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,

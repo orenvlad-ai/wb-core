@@ -9020,6 +9020,7 @@ _SHEET_VITRINA_USER_SECTION_IDS = (
     "prices",
     "sku_management",
     "research",
+    "instructions",
     "settings",
 )
 
@@ -9077,8 +9078,12 @@ def _normalize_sheet_vitrina_user_sections(value: Any, *, role: str = "") -> lis
 
 def _default_sheet_vitrina_sections_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip()
-    if normalized in {"admin", "operator"}:
+    if normalized == "admin":
         return list(_SHEET_VITRINA_USER_SECTION_IDS)
+    if normalized == "operator":
+        # New knowledge-base access is intentionally opt-in for non-admin
+        # users, including historical role-only records.
+        return [section_id for section_id in _SHEET_VITRINA_USER_SECTION_IDS if section_id != "instructions"]
     if normalized == "supply_operator":
         return ["supply"]
     return []

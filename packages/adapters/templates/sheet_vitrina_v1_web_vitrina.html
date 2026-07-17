@@ -4897,6 +4897,7 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="research" role="tab" aria-selected="false">Исследования</button>
       </nav>
       <div class="shell-actions">
+        <button class="shell-logout-link" type="button" data-unified-tab-button="instructions" hidden disabled aria-selected="false" aria-disabled="true">Инструкции</button>
         <button class="shell-logout-link" type="button" data-unified-tab-button="settings" hidden disabled aria-selected="false" aria-disabled="true">Настройки</button>
         <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
       </div>
@@ -5851,6 +5852,9 @@
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="settings" hidden>
       <iframe class="operator-embed-frame settings-embed-frame" title="Настройки" data-settings-embed-frame scrolling="auto"></iframe>
     </section>
+    <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="instructions" hidden>
+      <iframe class="operator-embed-frame" title="Инструкции" data-instructions-embed-frame data-operator-embed-frame="instructions" scrolling="auto"></iframe>
+    </section>
   </main>
 
   <div class="ads-modal-backdrop operator-modal-backdrop" data-ads-modal hidden>
@@ -5895,6 +5899,7 @@
     const unifiedTabPanels = Array.from(document.querySelectorAll("[data-unified-tab-panel]"));
     const operatorEmbedFrames = Array.from(document.querySelectorAll("[data-operator-embed-frame]"));
     const settingsEmbedFrame = document.querySelector("[data-settings-embed-frame]");
+    const instructionsEmbedFrame = document.querySelector("[data-instructions-embed-frame]");
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
     const globalProgressNode = document.querySelector("[data-global-progress]");
@@ -6280,9 +6285,10 @@
     const SKU_MANAGEMENT_DEFAULT_COLUMNS = SKU_MANAGEMENT_COLUMNS.map(function(item){ return item.id; });
     const SKU_MANAGEMENT_MANDATORY_COLUMNS = ["product"];
     const RESEARCH_UNIFIED_TAB = "research";
+    const INSTRUCTIONS_UNIFIED_TAB = "instructions";
     const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, INSTRUCTIONS_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
     const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
     const ALLOWED_UNIFIED_TABS = new Set(
       CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
@@ -7590,6 +7596,9 @@
       if (activeTab === SETTINGS_UNIFIED_TAB) {
         ensureSettingsEmbed();
       }
+      if (activeTab === INSTRUCTIONS_UNIFIED_TAB) {
+        ensureInstructionsEmbed();
+      }
       if (!options || options.persist !== false) {
         const url = new URL(window.location.href);
         if (activeTab === defaultAllowedUnifiedTab()) {
@@ -7656,6 +7665,19 @@
       const url = new URL(WEB_VITRINA_CONFIG.settings_path || "/sheet-vitrina-v1/settings", window.location.origin);
       url.searchParams.set("embedded", "1");
       settingsEmbedFrame.setAttribute("src", url.toString());
+    }
+
+    function ensureInstructionsEmbed() {
+      if (!instructionsEmbedFrame || instructionsEmbedFrame.getAttribute("src")) {
+        return;
+      }
+      const url = new URL(WEB_VITRINA_CONFIG.instructions_path || "/sheet-vitrina-v1/instructions", window.location.origin);
+      const selectedInstruction = new URL(window.location.href).searchParams.get("instruction");
+      url.searchParams.set("embedded", "1");
+      if (selectedInstruction) {
+        url.searchParams.set("instruction", selectedInstruction);
+      }
+      instructionsEmbedFrame.setAttribute("src", url.toString());
     }
 
     function handleOperatorEmbedMessage(event) {

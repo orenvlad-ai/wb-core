@@ -468,6 +468,8 @@ def main() -> None:
                 raise AssertionError("status after seeded snapshot must be publicly readable")
             if route_map["web_vitrina_page"]["http_status"] != 200:
                 raise AssertionError("web-vitrina page route must be publicly readable")
+            if route_map["instructions_page"]["http_status"] != 200:
+                raise AssertionError("instructions page route must be readable for the authorized probe")
             if route_map["web_vitrina_read"]["http_status"] != 200:
                 raise AssertionError("web-vitrina read route with seeded snapshot must be publicly readable")
             if route_map["web_vitrina_page_composition"]["http_status"] != 200:
@@ -524,6 +526,8 @@ def main() -> None:
                 raise AssertionError("own-product-capital status loopback route must stay 200")
             if loopback_routes["web_vitrina_read"]["http_status"] != 200:
                 raise AssertionError("web-vitrina read route with seeded snapshot must stay 200")
+            if loopback_routes["instructions_page"]["http_status"] != 200:
+                raise AssertionError("instructions page route must stay 200 for the authorized loopback probe")
             if loopback_routes["operator_reports"]["http_status"] != 200:
                 raise AssertionError("operator reports embedded panel must stay 200")
             if loopback_routes["web_vitrina_page_composition"]["http_status"] != 200:
@@ -571,6 +575,7 @@ def main() -> None:
             print("archived_target_guard: ok -> real deploy/apply-nginx refused")
             print("archived_target_override_guard: ok -> explicit env override recognized without remote mutation")
             print(f"public_probe_web_vitrina_page: ok -> {route_map['web_vitrina_page']['http_status']}")
+            print(f"public_probe_instructions_page: ok -> {route_map['instructions_page']['http_status']}")
             print(f"public_probe_operator_reports: ok -> {route_map['operator_reports']['http_status']}")
             print(f"public_probe_web_vitrina_read: ok -> {route_map['web_vitrina_read']['http_status']}")
             print(
