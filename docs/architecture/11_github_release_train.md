@@ -2,106 +2,153 @@
 
 ## Назначение
 
-GitHub Release Train — repo-owned очередь для параллельно подготовленных change-задач. Она не создаёт отдельную базу задач: durable state хранится в GitHub PR, labels, checks, comments и workflow runs.
+GitHub Release Train — repo-owned сериализованная очередь для независимо подготовленных STANDARD и LOOP change-задач. Durable state хранится только в GitHub PR, labels, checks, comments и workflow runs. Очередь владеет критической секцией `sync -> baseline -> merge -> deploy -> verify`, но не заменяет task-level targeted checks, semantic review и docs sync.
 
-Цель контура:
+Класс задачи и execution contour независимы. PR обязан иметь ровно одну task label и ровно одну scope label:
 
-- разрешить независимым Codex-задачам работать параллельно в отдельных branch/worktree;
-- сделать каждый незавершённый change видимым как PR;
-- сериализовать только критическую секцию `sync -> CI -> merge -> deploy -> verify`;
-- не забывать готовые PR и не группировать их в непрозрачный общий merge;
-- остановить дальнейшие production releases после первого неуспешного deploy/verify.
+- `task:standard` или `task:loop`;
+- `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`.
+
+`task:loop` совместим только с `scope:live-runtime`. Диагностические задачи строго read-only и в Release Train не входят.
 
 ## Repo-Owned Артефакты
 
-- `.github/workflows/baseline-ci.yml` — обязательный машинный baseline check с именем `baseline`;
-- `.github/workflows/release-train.yml` — один сериализованный queue worker;
+- `.github/workflows/baseline-ci.yml` — обязательный check `baseline`;
+- `.github/workflows/release-train.yml` — один repository-wide queue worker и GitHub-native LOOP command handler;
 - `apps/github_release_train.py` — GitHub API/state-machine runner;
-- `apps/github_release_train_smoke.py` — deterministic contract smoke;
-- `.github/pull_request_template.md` — минимальный PR closure checklist.
+- `apps/github_release_train_wait.py` — bounded CLI waiter для Codex;
+- `apps/github_release_train_smoke.py` — deterministic state-machine smoke;
+- `.github/pull_request_template.md` — PR closure checklist.
 
-Release Train не заменяет targeted checks и semantic review конкретной задачи. Метка `release:ready` означает, что task owner уже выполнил применимые targeted checks, прочитал полный semantic diff, исправил findings, синхронизировал authoritative docs и готов отвечать за acceptance criteria.
+## Eligibility И Labels
 
-## Явная Постановка В Очередь
+Queue eligibility требует одновременно:
 
-Ни один существующий или новый PR не обнаруживается как готовый неявно. Queue eligibility требует одновременно:
-
-- open PR в `main`;
+- open non-draft PR в `main`;
 - same-repository head branch;
-- PR не draft;
-- метку `release:ready`;
-- ровно одну execution-contour метку:
-  - `scope:repo-only`;
-  - `scope:live-runtime`;
-  - `scope:production-mutation`.
+- `release:ready`;
+- ровно одну известную `task:*` label;
+- ровно одну известную `scope:*` label;
+- отсутствие `release:blocked` и `release:halted`.
 
-`scope:production-mutation` никогда не выполняется автоматически: runner переводит такой PR в `release:blocked` и требует отдельный exact human gate по production-mutation protocol.
+Основные state labels:
 
-PR с `release:blocked` не выбирается. `release:halted` на любом PR, включая уже merged PR, является глобальным production stop и блокирует выбор следующего change до bounded recovery и явного удаления halt state.
+- `release:ready` — task owner закончил pre-release proof и явно поставил PR в очередь;
+- `release:running` — worker выполняет sync/baseline/release;
+- `release:awaiting-agent` — LOOP прошёл sync/baseline и ждёт exact-head acknowledgement активной Codex-сессии;
+- `release:awaiting-ui` — LOOP merge задеплоен и ждёт production UI Flow/acceptance;
+- `release:blocked` — PR-specific failure до merge;
+- `release:done` — terminal success STANDARD `repo-only` без deploy;
+- `release:production` — terminal success STANDARD live/runtime или принятой LOOP-цепочки;
+- `release:halted` — failure после merge; вся очередь остановлена.
 
-## State Model
+Промежуточные `release:ready`, `release:running`, `release:awaiting-agent` и `release:awaiting-ui` не являются closure.
 
-- `release:ready` — проверенный PR ожидает queue worker;
-- `release:running` — worker выполняет финальную синхронизацию/выпуск; `release:ready` сохраняется до terminal outcome, чтобы interrupted run можно было безопасно повторить;
-- `release:blocked` — PR-specific conflict, missing check/secret или другой blocker до merge;
-- `release:done` — `repo-only` PR смёржен, deploy не применялся;
-- `release:production` — exact merge SHA задеплоен и production verify успешен;
-- `release:halted` — PR смёржен, но deploy/verify не доказан; вся очередь остановлена.
+## STANDARD Flow
 
-Workflow сам создаёт и поддерживает эти labels и три `scope:*` labels через GitHub API. GitHub Project может отображать те же labels как board, но не является дополнительным source of truth и не требуется для работы очереди.
+STANDARD PR проходит существующую последовательность без agent acknowledgement:
 
-## Последовательность Выпуска
+1. worker выбирает старейший eligible PR;
+2. синхронизирует branch с current `main`;
+3. явно dispatch-ит `baseline-ci.yml` и ждёт новый successful `baseline` на final head SHA;
+4. повторно проверяет exact head/base/task/scope/mergeability;
+5. squash-merges только проверенный head;
+6. `scope:repo-only` получает `release:done` без deploy;
+7. `scope:live-runtime` checkout-ит exact merge SHA, вызывает canonical `deploy-and-verify` и получает `release:production`;
+8. worker best-effort удаляет feature branch и dispatch-ит следующий queue run.
 
-Workflow имеет repository-wide concurrency group `wb-core-production-release` с pending queue. Каждый run выбирает старейший eligible PR и обрабатывает ровно один change:
+`scope:production-mutation` никогда не выпускается автоматически и до merge получает `release:blocked` с требованием отдельного human-gated production-mutation protocol.
 
-1. читает state только из GitHub;
-2. проверяет draft/base/head/scope gates;
-3. для `scope:live-runtime` до merge проверяет наличие production secrets;
-4. синхронизирует branch с текущим `main`, если PR отстал;
-5. явно dispatch-ит `baseline-ci.yml` на финальной head branch и ожидает успешный check `baseline` на финальном head SHA; это не зависит от implicit workflow recursion после update-branch через `GITHUB_TOKEN`;
-6. до live merge доказывает SSH connectivity к canonical EU target;
-7. повторно проверяет, что `main` не ушёл вперёд, и squash-merges ровно проверенный head SHA;
-8. checkout-ит exact merge SHA;
-9. для `scope:live-runtime` запускает canonical `deploy-and-verify`;
-10. записывает terminal label/comment, best-effort удаляет merged feature branch и явно dispatch-ит следующий queue run.
+## LOOP Pre-Deploy Handshake
 
-PR-specific failure до merge не изменяет `main` или production и переводит только этот PR в `release:blocked`. Failure после merge переводит PR в `release:halted`; последующие queued runs fail closed до recovery. Release Train не выполняет semantic conflict resolution: конфликт возвращается task owner исходного PR.
+LOOP нельзя merge/deploy автоматически только потому, что он стал первым в очереди. Первый worker pass выполняет sync и baseline, затем ставит `release:awaiting-agent` и прекращает release. Это состояние является глобальным fail-closed gate: пока активная сессия не подтвердит готовность, остальные PR ждут и production не меняется.
 
-Явный dispatch следующего run обязателен: merge, выполненный стандартным `GITHUB_TOKEN`, не создаёт новый push-triggered workflow. `workflow_dispatch` является поддерживаемым исключением и безопасно ставит следующий run в ту же concurrency queue.
+Repo-owned waiter:
 
-## Baseline CI Boundary
+```bash
+python3 apps/github_release_train_wait.py <PR>
+```
 
-`baseline-ci.yml` запускается на каждом PR в `main` и выполняет:
+Увидев `release:awaiting-agent`, waiter публикует на этом PR единственную bounded GitHub mutation — точный comment:
 
-- `python3 -m compileall -q apps packages`;
-- `git diff --check` относительно base branch;
-- `python3 apps/github_release_train_smoke.py`.
+```text
+/wb-core loop ack-agent <PR> head <EXACT_40_CHAR_HEAD_SHA>
+```
 
-Это минимальный постоянный merge gate, а не полный универсальный test suite. Task owner обязан дополнительно выполнить релевантные smoke/browser/live checks по изменённому модулю и перечислить фактически выполненные команды в PR.
+Workflow принимает command только от `OWNER`, `MEMBER` или `COLLABORATOR`, проверяет номер PR, open/non-draft state, `task:loop + scope:live-runtime`, recovery linkage и текущее exact head. Принятый ack кодируется одноразовой label `loop:ack-<HEAD_SHA>`, возвращает PR в `release:ready` и dispatch-ит worker.
 
-## Security Boundary
+На втором pass baseline снова доказывается для того же head. Ack удаляется непосредственно перед merge API call. Изменение head на любом этапе делает старую label невалидной; worker снова ставит `release:awaiting-agent`. Каждый recovery PR имеет другой PR/head identity и требует собственного acknowledgement.
 
-- `pull_request_target` используется только как label event; workflow всегда checkout-ит trusted `main` и не запускает PR code до merge.
-- Production SSH material доступен только job с GitHub Environment `production`.
-- Required secrets: `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`.
-- SSH использует exact active EU target metadata, `BatchMode`, `IdentitiesOnly` и strict known-host verification.
-- Secret values не печатаются, не попадают в Git, PR, comments или artifacts и удаляются с runner после job.
-- Перед merge live PR проверяет SSH connectivity; deploy выполняется только после merge из clean exact merge SHA.
-- Workflow не выполняет WB writes, data backfill или production business mutation. Deploy сам по себе не расширяет application mutation authority.
+`--no-ack-agent` оставляет waiter полностью read-only. STANDARD waiter никогда не публикует comments.
 
-## Activation И Operator Flow
+## Exclusive Production UI Gate
 
-После merge этих артефактов push-to-main run создаёт labels. Для реального live release администратор один раз добавляет два secrets в GitHub Environment `production` и проверяет первый bounded canary PR.
+После успешного LOOP merge, canonical deploy и production verify worker не ставит terminal success и не dispatch-ит следующий release. Он создаёт deterministic chain label `loop:root-<ROOT_PR>`, ставит текущей итерации `release:awaiting-ui` и завершает job. Push-triggered или повторный queue run видит gate и не выбирает несвязанный PR.
 
-Первый activation canary должен быть business-no-op change без production data mutation. Его terminal `release:production` подтверждает environment secret binding, strict SSH, exact merge, canonical deploy и production verify до постановки рабочих live PR в очередь.
+Если production UI Flow не принят, исчезновение Codex не открывает очередь: `release:awaiting-ui` остаётся durable fail-closed state.
 
-Обычный task owner:
+При успешном UI Flow активная Codex-сессия оставляет точную GitHub-native command на текущей итерации:
 
-1. создаёт отдельную branch/worktree от актуального `origin/main`;
-2. реализует change, делает targeted checks/review/docs sync и открывает PR;
-3. добавляет ровно одну `scope:*` label;
-4. после полного pre-release proof добавляет `release:ready`;
-5. наблюдает workflow до `release:done`, `release:production`, `release:blocked` или `release:halted`;
-6. при blocker исправляет тот же PR, снимает `release:blocked` и только затем снова ставит `release:ready`.
+```bash
+gh pr comment <ACTIVE_LOOP_PR> --body "/wb-core loop accept-ui <ACTIVE_LOOP_PR>"
+```
 
-Открытый PR или только `release:ready` не являются closure. Task остаётся незавершённой до terminal state применимого execution-контура.
+Handler проверяет write association, активный gate и deterministic chain. Он идемпотентно переводит все merged PR этой chain в `release:production` и dispatch-ит следующий queue run. Повторная acceptance не меняет terminal state и не вызывает повторный merge/deploy.
+
+## Recovery PR
+
+Во время `release:awaiting-ui` разрешён только recovery текущей LOOP-цепочки. Связь не извлекается из title/body/free text: recovery PR обязан иметь exact dynamic label `loop:root-<ROOT_PR>`, уже созданную worker для активной chain, а также `task:loop + scope:live-runtime + release:ready`.
+
+Пример постановки recovery в очередь:
+
+```bash
+gh pr edit <RECOVERY_PR> \
+  --add-label task:loop \
+  --add-label scope:live-runtime \
+  --add-label loop:root-<ROOT_PR> \
+  --add-label release:ready
+python3 apps/github_release_train_wait.py <RECOVERY_PR>
+```
+
+Несвязанные STANDARD, LOOP и production-mutation PR сохраняют `release:ready`, но не выбираются. Recovery проходит новый baseline и новый exact-head acknowledgement. После его deploy `release:awaiting-ui` снимается с прежней итерации и ставится recovery PR; root label не меняется. Повторный transfer command лечит допустимый duplicate-gate partial state в пользу новой итерации, а неоднозначные roots оставляют очередь fail-closed.
+
+## CLI Waiter Contract
+
+`apps/github_release_train_wait.py` получает номер PR, выводит только изменения `class/scope/state/head` и использует GitHub CLI auth/repository context, если env не задан.
+
+- STANDARD ждёт `release:done` для `scope:repo-only` или `release:production` для `scope:live-runtime`;
+- LOOP автоматически выполняет exact-head ack на `release:awaiting-agent` и продолжает polling;
+- LOOP возвращает код `3` на `release:awaiting-ui`, чтобы Codex выполнил UI Flow;
+- повторный запуск после acceptance ждёт `release:production`;
+- `release:blocked`/`release:halted` возвращают код `2`;
+- timeout возвращает `124`, `Ctrl-C` — `130`;
+- `--timeout-seconds` и `--poll-seconds` задают bounded polling; polling не содержит AI-цикла.
+
+## Failures И Idempotency
+
+- invalid/missing task class или scope — `release:blocked` до merge;
+- semantic/update conflict, failed baseline, missing production secret или SSH preflight failure — `release:blocked`;
+- deploy/verify/UI-gate publication failure после merge — `release:halted`;
+- любой существующий `release:halted` глобально блокирует выбор следующего PR;
+- `release:awaiting-agent` блокирует всю очередь до exact ack;
+- `release:awaiting-ui` допускает только exact-linked recovery;
+- repeated label/push/dispatch events не выбирают PR без `release:ready` и не повторяют terminal merge/deploy;
+- repeated ack проверяет тот же PR/head, а consumed/stale ack не может разрешить новый merge;
+- repeated UI acceptance сохраняет terminal labels и лишь безопасно пере-dispatch-ит serialized worker.
+
+## Baseline И Security Boundary
+
+`baseline-ci.yml` выполняет `compileall`, `git diff --check` и `apps/github_release_train_smoke.py`. Task owner дополнительно выполняет применимые targeted checks и перечисляет их в PR.
+
+`pull_request_target` и `issue_comment` всегда checkout-ят trusted `main`; PR code до merge не исполняется этим trigger. LOOP commands проходят exact parsing и association checks. Production SSH material доступен только job с GitHub Environment `production`; required secrets остаются `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS`. Live deploy выполняется только canonical repo-owned runner из clean exact merge SHA. Release Train не выполняет WB writes, backfill или production business mutation.
+
+## Bounded LOOP Canary
+
+Первый canary после rollout должен быть отдельным business-no-op live/runtime PR без production data mutation. После targeted checks, semantic review и docs sync безопасный запуск выполняется так:
+
+```bash
+gh pr edit <CANARY_PR> --add-label task:loop --add-label scope:live-runtime --add-label release:ready && \
+python3 apps/github_release_train_wait.py <CANARY_PR>
+```
+
+Команда остановится кодом `3` только после verified deploy и `release:awaiting-ui`; затем Codex выполняет заранее заданный UI Flow. Canary закрывается exact `accept-ui` command только при фактическом UI success. В рамках repo-only изменения Release Train сам canary не запускается.
