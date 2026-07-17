@@ -234,6 +234,7 @@ class HttpBackedStocksSource:
             "data": {
                 "rows": rows,
                 "requested_snapshot_date": requested_snapshot_date,
+                "fetched_at": snapshot_dt.isoformat().replace("+00:00", "Z"),
             },
         }
 

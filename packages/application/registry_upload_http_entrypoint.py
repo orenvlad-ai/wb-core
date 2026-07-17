@@ -126,6 +126,7 @@ from packages.application.web_vitrina_view_model import build_web_vitrina_view_m
 from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.application.wb_regional_supply_planning import WbRegionalSupplyPlanningBlock
 from packages.application.wb_supplies import WbSuppliesBlock
+from packages.application.warehouse_stocks import WarehouseStocksBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -817,6 +818,13 @@ class RegistryUploadHttpEntrypoint:
         )
         self.ff_stock_ledger_block = FfStockLedgerBlock(
             runtime=self.runtime,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.warehouse_stocks_block = WarehouseStocksBlock(
+            runtime=self.runtime,
+            stocks_block=self.factory_order_supply_block.stocks_block,
+            ff_stock_ledger_block=self.ff_stock_ledger_block,
+            now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
         )
         self.our_wb_cost_block = OurWbCostBlock(
@@ -2740,6 +2748,12 @@ class RegistryUploadHttpEntrypoint:
         upload_id: str,
     ) -> tuple[bytes, str, str]:
         return self.fulfillment_services_block.download_pdf(upload_id)
+
+    def handle_warehouses_overview_request(self) -> dict[str, Any]:
+        return self.warehouse_stocks_block.overview()
+
+    def handle_warehouse_detail_request(self, warehouse_key: str) -> dict[str, Any]:
+        return self.warehouse_stocks_block.warehouse_detail(warehouse_key)
 
     def handle_ff_stock_status_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         query = dict(params or {})

@@ -188,6 +188,11 @@ class StocksBlock:
     def __init__(self, source: StocksSource) -> None:
         self._source = source
 
+    def fetch_payload(self, request: StocksRequest) -> Mapping[str, Any]:
+        """Fetch one canonical source payload without changing its adapter semantics."""
+
+        return self._source.fetch(request)
+
     def execute(self, request: StocksRequest) -> StocksEnvelope:
-        payload = self._source.fetch(request)
+        payload = self.fetch_payload(request)
         return transform_legacy_payload(payload)

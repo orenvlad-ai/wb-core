@@ -3,8 +3,8 @@ title: "Модуль: ff_stock_ledger_block"
 doc_id: "WB-CORE-MODULE-43-FF-STOCK-LEDGER-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для server-owned `ФФ -> Остатки ФФ`: количественный ledger, Excel preview/confirm ручных документов, автооприходование supplier shipments, автосписание WB supplies и расчётный источник `Остатки ФФ`."
-scope: "Operator supply contour for current ФФ quantity balances only: runtime SQLite operation headers/lines/previews, original manual Excel storage, protected HTTP routes, operator UI registry/journal, idempotent supplier/WB auto movements, and factory-order/WB regional stock_ff source. FIFO, партии, себестоимость, бухгалтерский склад, 1C writes, WB mutations and Google Sheets/GAS are out of scope."
+purpose: "Зафиксировать canonical contract server-owned FF quantity ledger: единый пользовательский остаток в `Остатки / Склады -> Склад FF`, Excel preview/confirm ручных документов, автооприходование supplier shipments, автосписание WB supplies и расчётный источник `Остатки ФФ`."
+scope: "Operator supply contour for FF quantity operations plus the reused balance source for the unified warehouse screen: runtime SQLite operation headers/lines/previews, original manual Excel storage, protected legacy HTTP routes, operator operation journal, idempotent supplier/WB auto movements, and factory-order/WB regional stock_ff source. FIFO, партии, себестоимость, бухгалтерский склад, 1C writes, WB mutations and Google Sheets/GAS are out of scope."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
@@ -47,9 +47,11 @@ update_note: "`Остатки ФФ` are computed from an append-only quantity le
 
 # 1. Contract
 
-`Поставки` exposes top-level section `ФФ` with two inner subsections:
+`Поставки` exposes top-level section `ФФ` with operational subsections:
 - `Услуги ФФ` for the existing fulfillment service upload/payment-validation contour.
-- `Остатки ФФ` for current quantity balances by SKU.
+- `Операции остатков ФФ` for manual receipt/writeoff and the existing ledger journal.
+
+The old `Остатки ФФ` navigation item is a compatibility transition to `Остатки / Склады -> Склад FF`. The new screen reads this same ledger and does not own a second FF calculation or balance table.
 
 `Остатки ФФ` is not an editable snapshot table. Current balance is computed from ledger lines:
 - manual receipt documents add quantity;
@@ -61,14 +63,13 @@ Negative balances can still exist from explicit manual documents or older incide
 
 # 2. Operator UI
 
-The `Остатки ФФ` subsection shows:
-- current balance registry for active nomenclature SKU;
+The unified `Остатки / Склады -> Склад FF` screen shows the only user-facing current balance registry for active, non-hidden nomenclature SKU and the warehouse opening document. The `Поставки -> ФФ -> Операции остатков ФФ` subsection keeps:
 - operation journal;
-- current balances XLSX export;
+- current-balance XLSX export;
 - manual `Оприходовать`;
 - manual `Списать`.
 
-The registry row fields are barcode when available, `nmId`, SKU/name/comment from active nomenclature, SKU group when available, current ФФ balance and negative-balance warning.
+The legacy protected status/export endpoints remain compatible for integrations and operational tooling. They are not a second source of truth.
 
 The operation journal shows operation datetime, operation type, source type, linked source object label/id, actor when available, SKU count, total quantity, warnings and source-file link for manual Excel documents. Auto operations link to their source object by label/id and do not have a file. When diagnostics are present, the object cell may also show technical identifiers such as `source_key`, WB `cache_key` or repair reversal ids so archived incidents remain auditable without a physical delete.
 

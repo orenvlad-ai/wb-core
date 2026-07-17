@@ -15,6 +15,7 @@ related_modules:
   - "packages/contracts/stocks_block.py"
   - "packages/adapters/stocks_block.py"
   - "packages/application/stocks_block.py"
+  - "packages/application/warehouse_stocks.py"
 related_tables: []
 related_endpoints:
   - "POST /api/analytics/v1/stocks-report/wb-warehouses"
@@ -57,6 +58,7 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
   - Seller Analytics CSV chain `POST /api/v2/nm-report/downloads` + `GET /api/v2/nm-report/downloads` + `GET /api/v2/nm-report/downloads/file/{downloadId}` with `reportType=STOCK_HISTORY_DAILY_CSV`.
 - Current canonical runtime secret path для official stocks adapter: `WB_API_TOKEN`.
 - Current `wb-warehouses` endpoint остаётся live inventory source для factory/WB supply flows и bounded metadata bridge `OfficeName -> regionName` при historical CSV normalization.
+- The same current adapter is the only `Склад WB` opening-snapshot source. Its raw payload now includes exact UTC `data.fetched_at`; the warehouse cutover stores that timestamp, requested/covered nmID counts, payload digest and per-warehouse raw rows. This reuse does not switch `sheet_vitrina_v1` back from the historical closed-day semantics described below.
 - В bounded `sheet_vitrina_v1` contour `stocks` теперь классифицируется как WB API date/period-capable source:
   - `stocks[yesterday_closed]` materialize-ит authoritative exact-date snapshot из `STOCK_HISTORY_DAILY_CSV`;
   - success payload для exact-date closed day сохраняется в `temporal_source_snapshots[source_key=stocks]` и читается runtime-first;

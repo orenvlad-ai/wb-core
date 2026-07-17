@@ -60,6 +60,8 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /logout`
 - `POST /logout`
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
+- `GET /v1/sheet-vitrina-v1/warehouses`
+- `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`
 - `GET /v1/sheet-vitrina-v1/seller-portal-session/check`
 - `GET /v1/sheet-vitrina-v1/seller-portal-recovery/status`
 - `POST /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start`
@@ -135,6 +137,15 @@ Contract keeps runtime truth inside hosted WebCore and does not move supplier/or
 
 Canonical runner:
 - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
+
+The same runner owns the only production path for the bounded six-warehouse opening initialization after deploy:
+- `warehouse-opening-dry-run --output <absolute local plan.json>` reads primary sources and fresh official WB stock without inserting opening rows;
+- `warehouse-opening-apply --plan-file <same plan.json> --fingerprint <exact sha256:...>` pins the active EU target/runtime, creates a coherent integrity-checked backup under `/opt/wb-core-runtime/backups/warehouse-opening` and applies the exact plan atomically;
+- `warehouse-opening-readback` proves the stored six-document reconciliation;
+- `warehouse-opening-rollback --fingerprint <exact stored sha256:...>` is the bounded recovery path and removes only the new warehouse cutover through FK cascade after another backup.
+- `warehouse-ui-flow --evidence-dir <absolute path outside repo>` is the read-only post-deploy acceptance path: it derives a short-lived signed owner session from the hosted env without logging the secret, opens a fresh local Playwright context, reconciles visible totals/rows for all six warehouses with protected detail APIs, reconciles immutable opening documents with production readback, compares the current FF projection with the legacy canonical FF API, verifies the legacy FF transition and writes screenshots plus a sanitized JSON report outside Git.
+
+Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. Detailed sources/non-target invariants are fixed in `docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` and `migration/102_warehouse_opening_snapshot.md`.
 
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`
@@ -481,7 +492,7 @@ Current deploy contract note:
   - restart runtime;
   - only after that run loopback/public verification.
 - nginx public route publishing is idempotent: the runner removes prior `WB-CORE MANAGED PUBLIC ROUTES` block, prior `WB-CORE MANAGED TLS` block and matching legacy/manual locations from the configured server config, rewrites the target `server_name` directive to the target's explicit `nginx_public_routes.server_names` when provided, then inserts generated TLS and route blocks from target/manifest truth. New public routes for this contour must be added to that manifest and verified through the deploy runner; manual live nginx edits are not the completion path.
-- The allowlist intentionally uses exact locations plus narrow route-family prefixes such as `/v1/sheet-vitrina-v1/supply/factory-order/`, `/v1/sheet-vitrina-v1/supply/wb-regional/` and `/v1/sheet-vitrina-v1/research/`; broad catch-all publication is not part of the current contract.
+- The allowlist intentionally uses exact locations plus narrow route-family prefixes such as `/v1/sheet-vitrina-v1/warehouses/`, `/v1/sheet-vitrina-v1/supply/factory-order/`, `/v1/sheet-vitrina-v1/supply/wb-regional/` and `/v1/sheet-vitrina-v1/research/`; broad catch-all publication is not part of the current contract.
 
 If deploy / publish / restart / probe / required verify steps are safe and available, Codex обязана выполнить их в том же bounded execution. `clasp` is part of this list only for archived Apps Script guard changes.
 If any of these steps are unavailable or unsafe, execution must return incomplete with an exact blocker instead of a vague ops-gap.
@@ -618,7 +629,7 @@ If the task introduces or changes temporal closed-day retry behavior for `sheet_
 - verify the repo-owned timer/service artifacts are installed on host as `wb-core-sheet-vitrina-closure-retry.service` / `.timer`;
 - verify at least one affected `as_of_date` where a strict closed-day-capable source either transitions to `success` after retry or stays in a truthful retry/exhausted/blocker state without fake closed values in the visible slot.
 
-The current active public probe target is `https://api.selleros.pro`. Live/public closure for website/operator tasks must verify the HTTPS production domain routes, including `GET /sheet-vitrina-v1/vitrina`, authorized `GET /sheet-vitrina-v1/instructions`, `GET /sheet-vitrina-v1/operator`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/web-vitrina`, and `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
+The current active public probe target is `https://api.selleros.pro`. Live/public closure for website/operator tasks must verify the HTTPS production domain routes, including `GET /sheet-vitrina-v1/vitrina`, authorized `GET /sheet-vitrina-v1/instructions`, `GET /sheet-vitrina-v1/operator`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/web-vitrina`, `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`, `GET /v1/sheet-vitrina-v1/warehouses`, and one `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
 
 Live/public verify that creates temporary runtime users must prefer temp/local runtime state. If a hosted verify must create a live runtime user, it must use an unmistakable service/test prefix or marker, run cleanup in a finally-style path, and verify that the default admin users list does not expose those rows. Archived/inactive service rows such as `codex_live_*`, `codex_debug_*`, `smoke_*` or `test_*` are not user-facing users and must be hidden by the default users API/UI even when cleanup cannot hard-delete an historical row; any bounded live cleanup for those prefixes must not touch env principals or real manual users.
 

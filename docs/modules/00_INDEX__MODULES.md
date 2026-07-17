@@ -4,7 +4,7 @@ doc_id: "WB-CORE-MODULE-00-INDEX"
 doc_type: "index"
 status: "active"
 purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–47`."
+scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–48`."
 source_basis:
   - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
   - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
@@ -53,6 +53,7 @@ source_basis:
   - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
   - "docs/modules/46_MODULE__SKU_MANAGEMENT_BLOCK.md"
   - "docs/modules/47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
+  - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
 related_modules: []
 related_tables: []
 related_endpoints: []
@@ -105,8 +106,9 @@ related_docs:
   - "45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
   - "46_MODULE__SKU_MANAGEMENT_BLOCK.md"
   - "47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
+  - "48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён through module 47: `Инструкции` is a protected repo-owned operator knowledge base with a separate server-owned `instructions` capability; it is neither a CMS nor a public/document-download surface."
+update_note: "Обновлён through module 48: `Остатки / Склады` is the protected six-warehouse quantity contour with guarded opening documents, primary-source provenance and no economic-calculation side effects."
 ---
 
 # 1. Назначение индекса
@@ -123,7 +125,7 @@ update_note: "Обновлён through module 47: `Инструкции` is a pr
 
 # 1.1 Текущий Checkpoint Main
 
-Канонический индекс охватывает modules `01–47`. Modules `40` и `45` являются совместимыми read-side surfaces единого canonical cost engine: recognized projection обслуживает WB cost/P&L, paid projection — товарный капитал, а physical quantities имеют общие authoritative sources. Module `46` добавляет operator action/read-model contour поверх существующих stock, supply, prices, ads, SPP и metric truths, не создавая параллельные источники. Module `47` добавляет защищённую внутреннюю базу знаний без нового runtime content truth.
+Канонический индекс охватывает modules `01–48`. Modules `40` и `45` являются совместимыми read-side surfaces единого canonical cost engine: recognized projection обслуживает WB cost/P&L, paid projection — товарный капитал, а physical quantities имеют общие authoritative sources. Module `46` добавляет operator action/read-model contour поверх существующих stock, supply, prices, ads, SPP и metric truths, не создавая параллельные источники. Module `47` добавляет защищённую внутреннюю базу знаний без нового runtime content truth. Module `48` добавляет отдельный quantity-only warehouse read/cutover contour и не подключает его к economic projections.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -256,6 +258,7 @@ update_note: "Обновлён through module 47: `Инструкции` is a pr
 | `45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md` | `own_product_capital_block` | `web/operator/runtime-capital-read-side` | Paid-capital projection over the same canonical components/quantities: five physical stages, paid-equivalent and coverage/confirmation ratios, derived underaccepted SKU/TOTAL metrics; legacy event/state rows are audit-only |
 | `46_MODULE__SKU_MANAGEMENT_BLOCK.md` | `sku_management_block` | `web/operator/sku-actions` | Calculation-only deficit forecast, guarded one-row price/bid operator action workflow and confirmed action-event history without a parallel metric/source-of-truth contour |
 | `47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md` | `operator_instructions_knowledge_base` | `web/operator/knowledge-base` | Protected repo-owned web-native instructions with server-owned `instructions` access, a structured supply-management reference and no CMS/public document-download surface |
+| `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_stocks_block` | `web/operator/supply/runtime-ledger` | Unified six-warehouse quantity read model and one guarded atomic opening cutover with primary-source provenance, NULL economics and no effect on web-vitrina/Proxy 3/canonical cost calculations |
 
 # 5. Как эта папка используется дальше
 

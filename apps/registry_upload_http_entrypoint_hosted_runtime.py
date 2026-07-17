@@ -77,6 +77,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_WB_REGIONAL_RECOMMENDATIONS_ZIP_PATH,
     DEFAULT_WB_REGIONAL_STATUS_PATH,
     DEFAULT_WB_SUPPLIES_PATH,
+    DEFAULT_WAREHOUSES_PATH,
 )
 
 
@@ -501,6 +502,20 @@ def collect_public_surface(
             name="web_vitrina_page",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="warehouses_overview",
+            method="GET",
+            url=f"{base_url}{DEFAULT_WAREHOUSES_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="warehouse_ff",
+            method="GET",
+            url=f"{base_url}{DEFAULT_WAREHOUSES_PATH}/ff",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -1676,6 +1691,159 @@ def run_apply_nginx_routes_command(args: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 1
 
 
+def run_warehouse_opening_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.warehouse_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action == "apply" else None
+    payload = _run_remote_warehouse_opening_action(
+        target,
+        action=action,
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+    )
+    if action == "dry-run" and str(getattr(args, "output", "") or "").strip():
+        output_path = Path(str(args.output)).resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": runtime_dir,
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_warehouse_opening_action(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    plan_path: Path | None = None,
+    fingerprint: str = "",
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"warehouse-opening-{action}")
+    if action in {"apply", "rollback"}:
+        _ensure_target_allows_mutation(
+            target,
+            action=f"warehouse-opening-{action}",
+            dry_run=False,
+        )
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("warehouse opening runner requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("warehouse opening runner requires the hosted environment file")
+
+    runner_args = [
+        "python3",
+        "apps/warehouse_opening_snapshot.py",
+        "--runtime-dir",
+        runtime_dir,
+        action,
+    ]
+    stdin_text: str | None = None
+    if action == "apply":
+        if plan_path is None:
+            raise ValueError("warehouse opening apply requires a plan path")
+        stdin_text = plan_path.read_text(encoding="utf-8")
+        parsed_plan = json.loads(stdin_text)
+        if not isinstance(parsed_plan, dict):
+            raise ValueError("warehouse opening plan must be a JSON object")
+        if str(parsed_plan.get("plan_fingerprint") or "") != fingerprint:
+            raise ValueError("warehouse opening plan and --fingerprint do not match")
+        runner_args.extend(
+            [
+                "--plan-file",
+                "/dev/stdin",
+                "--fingerprint",
+                fingerprint,
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-opening",
+            ]
+        )
+    elif action == "rollback":
+        runner_args.extend(
+            [
+                "--fingerprint",
+                fingerprint,
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-opening",
+            ]
+        )
+
+    shell_command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            "set -a",
+            f". {shlex.quote(target.environment_file)}",
+            "set +a",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        input=stdin_text,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"warehouse opening {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("warehouse opening runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("warehouse opening runner returned a non-object JSON payload")
+    return payload
+
+
+def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    _ensure_active_hosted_runtime_target(target, action="warehouse-ui-flow")
+    auth_cookie = _build_probe_auth_cookie(target, timeout_seconds=float(args.timeout_seconds))
+    if not auth_cookie:
+        raise RuntimeError("warehouse UI flow requires safely available production app-session auth")
+    evidence_dir = Path(str(args.evidence_dir)).resolve()
+    try:
+        evidence_dir.relative_to(ROOT.resolve())
+    except ValueError:
+        pass
+    else:
+        raise ValueError("warehouse UI evidence must be stored outside the repository")
+    readback = _run_remote_warehouse_opening_action(target, action="readback")
+    from apps.warehouse_stocks_production_ui_flow import run_warehouse_ui_flow
+
+    result = run_warehouse_ui_flow(
+        base_url=target.public_base_url,
+        auth_cookie=auth_cookie,
+        expected_readback=readback,
+        evidence_dir=evidence_dir,
+        headless=not bool(args.headed),
+    )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "public_base_url": target.public_base_url,
+            "auth": _probe_auth_summary(auth_cookie),
+            "readback_cutover_id": str((readback.get("cutover") or {}).get("cutover_id") or ""),
+            "result": result,
+        }
+    )
+    return 0
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Repo-owned deploy/probe contract for hosted registry upload runtime.",
@@ -1719,6 +1887,55 @@ def build_arg_parser() -> argparse.ArgumentParser:
     deploy_and_verify.add_argument("--dry-run", action="store_true", help="Print deploy commands without executing.")
     deploy_and_verify.add_argument("--allow-dirty", action="store_true", help="Allow deploy from dirty checkout.")
     deploy_and_verify.set_defaults(handler=run_deploy_and_verify_command)
+
+    warehouse_dry_run = subparsers.add_parser(
+        "warehouse-opening-dry-run",
+        help="Build the exact six-warehouse plan on the active hosted runtime.",
+    )
+    warehouse_dry_run.add_argument("--output", default="", help="Optional local JSON plan path.")
+    warehouse_dry_run.set_defaults(
+        handler=run_warehouse_opening_command,
+        warehouse_action="dry-run",
+    )
+
+    warehouse_apply = subparsers.add_parser(
+        "warehouse-opening-apply",
+        help="Apply an exact reviewed warehouse plan with backup and fingerprint gate.",
+    )
+    warehouse_apply.add_argument("--plan-file", required=True)
+    warehouse_apply.add_argument("--fingerprint", required=True)
+    warehouse_apply.set_defaults(
+        handler=run_warehouse_opening_command,
+        warehouse_action="apply",
+    )
+
+    warehouse_readback = subparsers.add_parser(
+        "warehouse-opening-readback",
+        help="Read back the opening cutover and reconciliation from the active runtime.",
+    )
+    warehouse_readback.set_defaults(
+        handler=run_warehouse_opening_command,
+        warehouse_action="readback",
+    )
+
+    warehouse_rollback = subparsers.add_parser(
+        "warehouse-opening-rollback",
+        help="Rollback only the opening cutover after exact fingerprint confirmation.",
+    )
+    warehouse_rollback.add_argument("--fingerprint", required=True)
+    warehouse_rollback.set_defaults(
+        handler=run_warehouse_opening_command,
+        warehouse_action="rollback",
+    )
+
+    warehouse_ui_flow = subparsers.add_parser(
+        "warehouse-ui-flow",
+        help="Run the authorized read-only production Playwright flow for all six warehouses.",
+    )
+    warehouse_ui_flow.add_argument("--evidence-dir", required=True)
+    warehouse_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
+    warehouse_ui_flow.add_argument("--headed", action="store_true")
+    warehouse_ui_flow.set_defaults(handler=run_warehouse_ui_flow_command)
 
     return parser
 
@@ -1983,6 +2200,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Проверить сессию",
             'data-unified-tab-button="vitrina"',
             'data-unified-tab-button="factory-order"',
+            'data-unified-tab-button="warehouses"',
             'data-unified-tab-button="reports"',
             'data-unified-tab-button="feedbacks"',
             'data-operator-embed-frame="factory-order"',
@@ -2122,6 +2340,9 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Проверить сессию",
             "Установить сессию",
             "Отзывы",
+            "Остатки / Склады",
+            'data-unified-tab-panel="warehouses"',
+            DEFAULT_WAREHOUSES_PATH,
             "Загрузить отзывы",
             "AI-промпт разбора",
             "AI-разбор отзывов",
@@ -2511,6 +2732,31 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         if evaluation["ok"] and payload.get("contract_name") != "sheet_vitrina_v1_wb_supplies":
             evaluation["ok"] = False
             evaluation["detail"] = f"expected sheet_vitrina_v1_wb_supplies contract, got {payload.get('contract_name')!r}"
+        return evaluation
+
+    if route == "warehouses_overview":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=["contract_name", "contract_version", "status", "warehouses"],
+        )
+        if evaluation["ok"] and (
+            payload.get("contract_name") != "sheet_vitrina_v1_warehouses"
+            or len(payload.get("warehouses") or []) != 6
+        ):
+            evaluation["ok"] = False
+            evaluation["detail"] = "expected the canonical six-warehouse overview contract"
+        return evaluation
+
+    if route == "warehouse_ff":
+        evaluation["ok"], evaluation["detail"] = _validate_json_result(
+            status,
+            payload,
+            success_keys=["contract_name", "contract_version", "status", "warehouse", "balances", "documents"],
+        )
+        if evaluation["ok"] and str((payload.get("warehouse") or {}).get("warehouse_key") or "") != "ff":
+            evaluation["ok"] = False
+            evaluation["detail"] = "expected canonical FF warehouse detail"
         return evaluation
 
     if route == "load_route":
@@ -2974,6 +3220,8 @@ results = [
     _collect("operator_reports", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"] + "?embedded_tab=reports"),
     _collect("operator_factory_order", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"] + "?embedded_tab=factory-order"),
     _collect("web_vitrina_page", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_UI_PATH!r}),
+    _collect("warehouses_overview", "GET", PAYLOAD["base_url"] + {DEFAULT_WAREHOUSES_PATH!r}),
+    _collect("warehouse_ff", "GET", PAYLOAD["base_url"] + {DEFAULT_WAREHOUSES_PATH!r} + "/ff"),
     _collect("instructions_page", "GET", PAYLOAD["base_url"] + {DEFAULT_INSTRUCTIONS_UI_PATH!r}),
     _collect("load_route", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/load"),
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),

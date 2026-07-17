@@ -4881,6 +4881,43 @@
         justify-content: flex-start;
       }
     }
+    .warehouse-panel { display: grid; gap: 14px; }
+    .warehouse-switcher { display: flex; gap: 8px; flex-wrap: wrap; }
+    .warehouse-switch {
+      appearance: none; border: 1px solid var(--border); border-radius: 7px;
+      background: var(--panel-bg); color: var(--muted); padding: 8px 11px;
+      font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+    }
+    .warehouse-switch:hover, .warehouse-switch.is-active {
+      border-color: var(--accent-border); background: var(--accent-soft); color: var(--text);
+    }
+    .warehouse-card {
+      background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 18px;
+    }
+    .warehouse-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+    .warehouse-title { margin: 0; font-size: 24px; line-height: 1.2; }
+    .warehouse-meta { margin: 6px 0 0; color: var(--muted); font-size: 13px; max-width: 980px; }
+    .warehouse-status { display: inline-flex; padding: 5px 9px; border-radius: 999px; background: #fff7df; color: #745600; font-size: 12px; font-weight: 700; }
+    .warehouse-summary { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; }
+    .warehouse-summary-item { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-subtle); }
+    .warehouse-summary-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+    .warehouse-summary-value { display: block; font-size: 21px; font-weight: 750; }
+    .warehouse-section-title { margin: 0 0 10px; font-size: 17px; }
+    .warehouse-table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    .warehouse-table { width: 100%; border-collapse: collapse; min-width: 900px; font-size: 13px; }
+    .warehouse-table th, .warehouse-table td { border-bottom: 1px solid var(--border); padding: 9px 10px; text-align: left; vertical-align: top; }
+    .warehouse-table th { background: var(--panel-subtle); color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .warehouse-table tbody tr:last-child td { border-bottom: 0; }
+    .warehouse-number { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .warehouse-balance-warning { display: block; margin-top: 4px; color: var(--warning-text); font-size: 11px; font-weight: 700; white-space: normal; }
+    .warehouse-source-details summary { color: var(--accent); cursor: pointer; font-weight: 650; }
+    .warehouse-source-details pre { max-width: 680px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; color: var(--muted); }
+    .warehouse-empty { margin: 0; padding: 18px; color: var(--muted); text-align: center; }
+    .warehouse-document-lines { margin: 8px 0 0; min-width: 620px; }
+    @media (max-width: 780px) {
+      .warehouse-summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+    }
   </style>
 </head>
 <body>
@@ -4889,6 +4926,7 @@
       <nav class="unified-tab-strip" role="tablist" aria-label="Разделы sheet_vitrina_v1">
         <button class="unified-tab-button is-active" type="button" data-unified-tab-button="vitrina" role="tab" aria-selected="true">Витрина</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="factory-order" role="tab" aria-selected="false">Поставки</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="warehouses" role="tab" aria-selected="false">Остатки / Склады</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="ads" role="tab" aria-selected="false">Реклама</button>
@@ -5152,6 +5190,53 @@
 
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="factory-order" hidden>
       <iframe class="operator-embed-frame" title="Поставки" data-operator-embed-frame="factory-order" scrolling="no"></iframe>
+    </section>
+
+    <section class="unified-tab-panel warehouse-panel" data-unified-tab-panel="warehouses" data-warehouses-panel hidden>
+      <nav class="warehouse-switcher" aria-label="Склады" data-warehouse-switcher>
+        <button class="warehouse-switch" type="button" data-warehouse-key="production">На производстве</button>
+        <button class="warehouse-switch" type="button" data-warehouse-key="china_to_ff">В пути: Китай → FF</button>
+        <button class="warehouse-switch" type="button" data-warehouse-key="ff">Склад FF</button>
+        <button class="warehouse-switch" type="button" data-warehouse-key="ff_to_wb">В пути: FF → WB</button>
+        <button class="warehouse-switch" type="button" data-warehouse-key="wb">Склад WB</button>
+        <button class="warehouse-switch" type="button" data-warehouse-key="wb_acceptance_discrepancy">Расхождения приёмки WB</button>
+      </nav>
+
+      <section class="warehouse-card" aria-live="polite">
+        <div class="warehouse-head">
+          <div>
+            <h1 class="warehouse-title" data-warehouse-title>Остатки / Склады</h1>
+            <p class="warehouse-meta" data-warehouse-meta>Загрузка зафиксированного остатка…</p>
+          </div>
+          <span class="warehouse-status" data-warehouse-status>Загрузка…</span>
+        </div>
+        <div class="warehouse-summary" data-warehouse-summary>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Уникальных SKU</span><span class="warehouse-summary-value">—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Всего единиц</span><span class="warehouse-summary-value">—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Товарный капитал</span><span class="warehouse-summary-value">—</span></div>
+          <div class="warehouse-summary-item"><span class="warehouse-summary-label">Средневзвешенная себестоимость</span><span class="warehouse-summary-value">—</span></div>
+        </div>
+      </section>
+
+      <section class="warehouse-card">
+        <h2 class="warehouse-section-title">Остатки по SKU</h2>
+        <div class="warehouse-table-wrap">
+          <table class="warehouse-table">
+            <thead><tr><th>SKU / артикул</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Средняя себестоимость</th><th>Товарный капитал</th><th>Источник / основание</th></tr></thead>
+            <tbody data-warehouse-balances><tr><td colspan="7"><p class="warehouse-empty">Загрузка…</p></td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="warehouse-card">
+        <h2 class="warehouse-section-title">Реестр документов</h2>
+        <div class="warehouse-table-wrap">
+          <table class="warehouse-table">
+            <thead><tr><th>Номер</th><th>Дата и время</th><th>Тип</th><th>Склад</th><th>Отправитель → получатель</th><th>Документ / источник-основание</th><th>SKU</th><th>Количество</th><th>Себестоимость</th><th>Товарный капитал</th><th>Статус</th><th>Состав</th></tr></thead>
+            <tbody data-warehouse-documents><tr><td colspan="12"><p class="warehouse-empty">Загрузка…</p></td></tr></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="reports" hidden>
@@ -5900,6 +5985,14 @@
     const operatorEmbedFrames = Array.from(document.querySelectorAll("[data-operator-embed-frame]"));
     const settingsEmbedFrame = document.querySelector("[data-settings-embed-frame]");
     const instructionsEmbedFrame = document.querySelector("[data-instructions-embed-frame]");
+    const warehousesPanelNode = document.querySelector("[data-warehouses-panel]");
+    const warehouseSwitcherNode = document.querySelector("[data-warehouse-switcher]");
+    const warehouseTitleNode = document.querySelector("[data-warehouse-title]");
+    const warehouseMetaNode = document.querySelector("[data-warehouse-meta]");
+    const warehouseStatusNode = document.querySelector("[data-warehouse-status]");
+    const warehouseSummaryNode = document.querySelector("[data-warehouse-summary]");
+    const warehouseBalancesNode = document.querySelector("[data-warehouse-balances]");
+    const warehouseDocumentsNode = document.querySelector("[data-warehouse-documents]");
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
     const globalProgressNode = document.querySelector("[data-global-progress]");
@@ -6140,6 +6233,9 @@
       "row_last_updated_at"
     ]);
     const DEFAULT_UNIFIED_TAB = "vitrina";
+    const WAREHOUSES_UNIFIED_TAB = "warehouses";
+    const DEFAULT_WAREHOUSE_KEY = "production";
+    const VALID_WAREHOUSE_KEYS = new Set(["production", "china_to_ff", "ff", "ff_to_wb", "wb", "wb_acceptance_discrepancy"]);
     const FEEDBACKS_UNIFIED_TAB = "feedbacks";
     const ADS_UNIFIED_TAB = "ads";
     const PRICES_UNIFIED_TAB = "prices";
@@ -6288,7 +6384,7 @@
     const INSTRUCTIONS_UNIFIED_TAB = "instructions";
     const SETTINGS_UNIFIED_TAB = "settings";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, INSTRUCTIONS_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", WAREHOUSES_UNIFIED_TAB, "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, INSTRUCTIONS_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
     const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
     const ALLOWED_UNIFIED_TABS = new Set(
       CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
@@ -6341,6 +6437,14 @@
       actionSequence: 0,
       page: {
         lastRenderedAt: null
+      },
+      warehouses: {
+        activeKey: warehouseInitialKey(),
+        loadedKey: "",
+        loading: false,
+        requestSequence: 0,
+        payload: null,
+        error: ""
       },
       tableSnapshot: {
         displayedRequestKey: "",
@@ -6823,6 +6927,13 @@
         activateUnifiedTab(button.getAttribute("data-unified-tab-button") || DEFAULT_UNIFIED_TAB);
       });
     });
+    if (warehouseSwitcherNode) {
+      warehouseSwitcherNode.addEventListener("click", function(event) {
+        const button = event.target.closest("[data-warehouse-key]");
+        if (!button) return;
+        activateWarehouse(button.getAttribute("data-warehouse-key"));
+      });
+    }
     window.addEventListener("message", handleOperatorEmbedMessage);
 
     if (researchPanelNode) {
@@ -7578,6 +7689,9 @@
       if (EMBEDDED_UNIFIED_TABS.has(activeTab)) {
         ensureOperatorEmbed(activeTab);
       }
+      if (activeTab === WAREHOUSES_UNIFIED_TAB) {
+        activateWarehouse(state.warehouses.activeKey || warehouseInitialKey(), {persist: false});
+      }
       if (activeTab === RESEARCH_UNIFIED_TAB) {
         ensureResearchOptionsLoaded();
       }
@@ -7646,6 +7760,177 @@
       }
     }
 
+    function normalizeWarehouseKey(value) {
+      const normalized = String(value || "").trim();
+      return VALID_WAREHOUSE_KEYS.has(normalized) ? normalized : DEFAULT_WAREHOUSE_KEY;
+    }
+
+    function warehouseInitialKey() {
+      return normalizeWarehouseKey(new URL(window.location.href).searchParams.get("warehouse"));
+    }
+
+    function activateWarehouse(warehouseKey, options) {
+      const key = normalizeWarehouseKey(warehouseKey);
+      state.warehouses.activeKey = key;
+      if (warehouseSwitcherNode) {
+        warehouseSwitcherNode.querySelectorAll("[data-warehouse-key]").forEach(function(button) {
+          const selected = button.getAttribute("data-warehouse-key") === key;
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-current", selected ? "page" : "false");
+        });
+      }
+      if (!options || options.persist !== false) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("tab", WAREHOUSES_UNIFIED_TAB);
+        url.searchParams.set("warehouse", key);
+        url.hash = "";
+        window.history.replaceState({}, "", url.toString());
+      }
+      ensureWarehouseLoaded(key, options);
+      return key;
+    }
+
+    function ensureWarehouseLoaded(warehouseKey, options) {
+      const key = normalizeWarehouseKey(warehouseKey);
+      if ((!options || options.force !== true) && state.warehouses.loadedKey === key && state.warehouses.payload) {
+        renderWarehousePayload(state.warehouses.payload);
+        return;
+      }
+      loadWarehouse(key);
+    }
+
+    async function loadWarehouse(warehouseKey) {
+      const key = normalizeWarehouseKey(warehouseKey);
+      const sequence = ++state.warehouses.requestSequence;
+      state.warehouses.loading = true;
+      state.warehouses.error = "";
+      renderWarehouseLoading(key);
+      try {
+        const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
+        const response = await fetch(basePath + "/" + encodeURIComponent(key), {headers: {Accept: "application/json"}});
+        const payload = await response.json().catch(function() { return {}; });
+        if (!response.ok) {
+          throw new Error(String(payload.error || ("HTTP " + response.status)));
+        }
+        if (sequence !== state.warehouses.requestSequence || key !== state.warehouses.activeKey) {
+          return;
+        }
+        state.warehouses.loadedKey = key;
+        state.warehouses.payload = payload;
+        renderWarehousePayload(payload);
+      } catch (error) {
+        if (sequence !== state.warehouses.requestSequence) {
+          return;
+        }
+        state.warehouses.error = String(error && error.message ? error.message : error);
+        renderWarehouseError(state.warehouses.error);
+      } finally {
+        if (sequence === state.warehouses.requestSequence) {
+          state.warehouses.loading = false;
+        }
+      }
+    }
+
+    function renderWarehouseLoading(key) {
+      if (warehouseTitleNode) {
+        const button = warehouseSwitcherNode && warehouseSwitcherNode.querySelector('[data-warehouse-key="' + key + '"]');
+        warehouseTitleNode.textContent = button ? button.textContent : "Остатки / Склады";
+      }
+      if (warehouseMetaNode) warehouseMetaNode.textContent = "Загрузка зафиксированного остатка…";
+      if (warehouseStatusNode) warehouseStatusNode.textContent = "Загрузка…";
+      if (warehouseBalancesNode) warehouseBalancesNode.innerHTML = '<tr><td colspan="7"><p class="warehouse-empty">Загрузка…</p></td></tr>';
+      if (warehouseDocumentsNode) warehouseDocumentsNode.innerHTML = '<tr><td colspan="12"><p class="warehouse-empty">Загрузка…</p></td></tr>';
+    }
+
+    function renderWarehouseError(message) {
+      if (warehouseMetaNode) warehouseMetaNode.textContent = "Данные склада не загружены.";
+      if (warehouseStatusNode) warehouseStatusNode.textContent = "Ошибка";
+      const body = '<tr><td colspan="12"><p class="warehouse-empty">' + escapeHtml(message) + '</p></td></tr>';
+      if (warehouseBalancesNode) warehouseBalancesNode.innerHTML = body.replace('colspan="12"', 'colspan="7"');
+      if (warehouseDocumentsNode) warehouseDocumentsNode.innerHTML = body;
+    }
+
+    function warehouseNumber(value) {
+      const number = Number(value);
+      return Number.isFinite(number) ? new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 3}).format(number) : "—";
+    }
+
+    function warehouseMoney(value) {
+      if (value === null || value === undefined || value === "") return "—";
+      const number = Number(value);
+      return Number.isFinite(number) ? new Intl.NumberFormat("ru-RU", {style: "currency", currency: "RUB", maximumFractionDigits: 2}).format(number) : "—";
+    }
+
+    function warehouseDate(value) {
+      const raw = String(value || "");
+      const parsed = new Date(raw);
+      return raw && !Number.isNaN(parsed.getTime())
+        ? new Intl.DateTimeFormat("ru-RU", {dateStyle: "medium", timeStyle: "medium"}).format(parsed)
+        : (raw || "—");
+    }
+
+    function warehouseEvidenceDetails(value, label) {
+      return '<details class="warehouse-source-details"><summary>' + escapeHtml(label || "Показать") + '</summary><pre>' +
+        escapeHtml(JSON.stringify(value || {}, null, 2)) + '</pre></details>';
+    }
+
+    function renderWarehousePayload(payload) {
+      const warehouse = (payload && payload.warehouse) || {};
+      const balances = Array.isArray(payload && payload.balances) ? payload.balances : [];
+      const documents = Array.isArray(payload && payload.documents) ? payload.documents : [];
+      const initialized = String((payload && payload.status) || "") === "ready" && documents.length > 0;
+      if (warehouseTitleNode) warehouseTitleNode.textContent = String(warehouse.warehouse_name || "Остатки / Склады");
+      if (warehouseMetaNode) {
+        warehouseMetaNode.textContent = "Актуальность: " + warehouseDate(warehouse.updated_at) + " · Источник: " + String(warehouse.source_basis || "—");
+      }
+      if (warehouseStatusNode) warehouseStatusNode.textContent = String(warehouse.status_label || "Начальные остатки ещё не зафиксированы");
+      if (warehouseSummaryNode) {
+        warehouseSummaryNode.innerHTML = [
+          ["Уникальных SKU", warehouseNumber(warehouse.sku_count)],
+          ["Всего единиц", warehouseNumber(warehouse.total_quantity)],
+          ["Товарный капитал", warehouseMoney(warehouse.total_capital_rub)],
+          ["Средневзвешенная себестоимость", warehouseMoney(warehouse.average_unit_cost_rub)]
+        ].map(function(item) {
+          return '<div class="warehouse-summary-item"><span class="warehouse-summary-label">' + escapeHtml(item[0]) + '</span><span class="warehouse-summary-value">' + escapeHtml(item[1]) + '</span></div>';
+        }).join("");
+      }
+      if (warehouseBalancesNode) {
+        warehouseBalancesNode.innerHTML = balances.length ? balances.map(function(line) {
+          const identity = String(line.barcode || "") + (line.barcode ? " / " : "") + String(line.nm_id || "");
+          return '<tr data-warehouse-balance-row="' + escapeHtml(line.line_id || "") + '">' +
+            '<td>' + escapeHtml(line.sku || "—") + '</td>' +
+            '<td>' + escapeHtml(line.nomenclature_name || "—") + '</td>' +
+            '<td>' + escapeHtml(identity || "—") + '</td>' +
+            '<td class="warehouse-number">' + escapeHtml(warehouseNumber(line.quantity)) +
+              (line.warning ? '<span class="warehouse-balance-warning">' + escapeHtml(line.warning) + '</span>' : '') + '</td>' +
+            '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td>' +
+            '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td>' +
+            '<td>' + warehouseEvidenceDetails(line.provenance, "Раскрыть основание") + '</td></tr>';
+        }).join("") : '<tr><td colspan="7"><p class="warehouse-empty">' +
+          (initialized ? 'На зафиксированном срезе остаток равен нулю.' : 'Начальные остатки ещё не зафиксированы.') +
+          '</p></td></tr>';
+      }
+      if (warehouseDocumentsNode) {
+        warehouseDocumentsNode.innerHTML = documents.length ? documents.map(renderWarehouseDocumentRow).join("") : '<tr><td colspan="12"><p class="warehouse-empty">Документы начальных остатков ещё не зафиксированы.</p></td></tr>';
+      }
+    }
+
+    function renderWarehouseDocumentRow(documentRow) {
+      const lines = Array.isArray(documentRow.lines) ? documentRow.lines : [];
+      const movement = String(documentRow.warehouse_from_key || "—") + " → " + String(documentRow.warehouse_to_key || documentRow.warehouse_key || "—");
+      const lineTable = '<table class="warehouse-table warehouse-document-lines"><thead><tr><th>SKU</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Себестоимость</th><th>Капитал</th><th>Provenance</th></tr></thead><tbody>' +
+        (lines.length ? lines.map(function(line) {
+          return '<tr><td>' + escapeHtml(line.sku || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td><td>' + escapeHtml((line.barcode ? line.barcode + " / " : "") + String(line.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(line.quantity)) + '</td><td>' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td><td>' + warehouseEvidenceDetails(line.provenance, "Основание") + '</td></tr>';
+        }).join("") : '<tr><td colspan="7">Документ проведён с нулевым остатком.</td></tr>') + '</tbody></table>';
+      return '<tr data-warehouse-document-id="' + escapeHtml(documentRow.document_id || "") + '">' +
+        '<td>' + escapeHtml(documentRow.document_number || "—") + '</td><td>' + escapeHtml(warehouseDate(documentRow.occurred_at)) + '</td>' +
+        '<td>' + escapeHtml(documentRow.document_type_label || "—") + '</td><td>' + escapeHtml(documentRow.warehouse_name || "—") + '</td>' +
+        '<td>' + escapeHtml(movement) + '</td><td>' + escapeHtml(documentRow.source_basis || "—") + '</td>' +
+        '<td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.sku_count)) + '</td><td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.total_quantity)) + '</td>' +
+        '<td>' + escapeHtml(warehouseMoney(documentRow.total_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(documentRow.total_capital_rub)) + '</td><td>' + escapeHtml(documentRow.status_label || "—") + '</td>' +
+        '<td><details class="warehouse-source-details"><summary>Открыть (' + escapeHtml(String(lines.length)) + ')</summary>' + lineTable + '</details></td></tr>';
+    }
+
     function ensureOperatorEmbed(tabName) {
       const frame = operatorEmbedFrames.find(function(candidate) {
         return candidate.getAttribute("data-operator-embed-frame") === tabName;
@@ -7685,6 +7970,11 @@
         return;
       }
       const payload = event.data || {};
+      if (payload && payload.type === "sheet_vitrina_v1_open_warehouses") {
+        activateUnifiedTab(WAREHOUSES_UNIFIED_TAB);
+        activateWarehouse(payload.warehouse || DEFAULT_WAREHOUSE_KEY);
+        return;
+      }
       if (payload && payload.type === "sheet_vitrina_v1_operator_embed_pointerdown") {
         closeAllFloatingControls({skipEmbedded: true});
         return;
