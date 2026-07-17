@@ -6,6 +6,8 @@
 
 <!-- Укажите bounded scope, запреты и один execution-контур. -->
 
+- [ ] `task:standard`
+- [ ] `task:loop` — только вместе с `scope:live-runtime`
 - [ ] `scope:repo-only`
 - [ ] `scope:live-runtime`
 - [ ] `scope:production-mutation` — автоматический выпуск запрещён до human gate
@@ -22,4 +24,4 @@
 
 ## Release
 
-Метка `release:ready` ставится только после завершения проверок и ровно с одной `scope:*` меткой. Draft PR, production mutation и PR без успешного `baseline` в автоматический выпуск не допускаются.
+Метка `release:ready` ставится только после завершения проверок, ровно с одной `task:*` и ровно одной `scope:*` меткой. Draft PR, production mutation и PR без успешного `baseline` в автоматический выпуск не допускаются. LOOP дополнительно проходит exact-head `release:awaiting-agent` и после deploy остаётся на `release:awaiting-ui` до production UI acceptance.

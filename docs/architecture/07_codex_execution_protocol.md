@@ -10,7 +10,19 @@ Codex ведёт задачу автономно до проверяемого �
 
 Без явной пользовательской границы нельзя завершать задачу на плане, гипотезе, незакоммиченном diff, только локальных проверках или открытом PR. Допустимый незавершённый финал — точный внешний blocker, который нельзя устранить текущими правами или доступными repo-owned средствами.
 
-Отдельные classification fields, prompt footer templates, старые project packs и обязательная служебная строка о режиме выполнения не требуются.
+Старые project packs, prompt footer templates и прежние служебные mode-строки не требуются. Единственное обязательное поле новой задачи — одна начальная строка класса из корневого `AGENTS.md`.
+
+## Task Class И Execution Contour
+
+Task class и execution contour ортогональны:
+
+- `ДИАГНОСТИКА` задаёт строго read-only orchestration и никогда не создаёт branch/PR;
+- `СТАНДАРТ` задаёт полный применимый closure через отдельный PR и GitHub Release Train;
+- `LOOP` задаёт итерационный live/runtime closure с pre-deploy agent handshake и обязательным production UI acceptance.
+
+Execution contour (`read-only`, `repo-only`, `live/runtime`, `production data mutation/backfill`, `archived GAS guard`) описывает техническую границу. `СТАНДАРТ` получает GitHub label `task:standard`, `LOOP` — `task:loop`; диагностическая задача не входит в Release Train. Отсутствующий, неизвестный или неоднозначный класс запрещает mutations до уточнения пользователя.
+
+`LOOP` обычно запускается через `/goal`. Если формальный Goal Mode не активирован, Codex всё равно ведёт ту же сессию через handshake, deploy, UI Flow, recovery iterations и terminal acceptance, не завершая её на промежуточном label.
 
 ## Кураторский Протокол
 
@@ -122,12 +134,20 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 Если PR явно поставлен в repo-owned GitHub Release Train, Codex не передаёт ответственность очереди и не завершает task на метке `release:ready`. Task owner обязан:
 
 - использовать отдельную branch/worktree и отдельный PR для каждого независимого change;
+- добавить ровно одну task label: `task:standard` или `task:loop`;
 - добавить ровно одну label `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`;
 - ставить `release:ready` только после targeted checks, semantic review, fixes/recheck и docs sync;
-- наблюдать workflow до `release:done`/`release:production` либо исправить `release:blocked`/`release:halted`;
+- для STANDARD наблюдать workflow до `release:done`/`release:production` либо исправить `release:blocked`/`release:halted`;
+- для LOOP подтвердить exact-head `release:awaiting-agent`, продолжить на `release:awaiting-ui`, выполнить production UI Flow и закрыть gate GitHub-native acceptance-командой;
 - не разрешать Release Train автоматически выполнять production data mutation/backfill.
 
 Release Train сериализует только финальную критическую секцию и не выполняет semantic conflict resolution. Полный контракт: [`11_github_release_train.md`](11_github_release_train.md).
+
+Codex CLI наблюдает очередь без AI polling loop:
+
+`python3 apps/github_release_train_wait.py <PR>`
+
+STANDARD-вызов только читает GitHub. LOOP-вызов также выполняет единственную bounded mutation: при `release:awaiting-agent` публикует exact command `/wb-core loop ack-agent <PR> head <HEAD_SHA>`, после чего продолжает polling. Код `3` означает handoff на UI Flow (`release:awaiting-ui`), `2` — `release:blocked`/`release:halted`, `124` — timeout, `130` — interrupt. Опция `--no-ack-agent` делает LOOP-вызов полностью read-only.
 
 Явное ограничение пользователя имеет приоритет: «только ветка», «до commit», «до draft PR», «без merge», «без deploy», «без production mutations» или другая точная граница. Тогда Codex останавливается ровно на ней, подтверждает достигнутое состояние и не считает отсутствие дальнейшего closure ошибкой. Ограничение closure не расширяет authority для иных mutations.
 

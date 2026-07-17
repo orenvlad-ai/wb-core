@@ -4,6 +4,9 @@ on:
   pull_request_target:
     types:
       - labeled
+  issue_comment:
+    types:
+      - created
   push:
     branches:
       - main
@@ -22,19 +25,52 @@ permissions:
   pull-requests: write
 
 jobs:
+  loop_command:
+    name: Handle LOOP acknowledgement or UI acceptance
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/wb-core loop ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LOOP_COMMAND: ${{ github.event.comment.body }}
+      LOOP_ACTOR: ${{ github.event.comment.user.login }}
+      LOOP_ASSOCIATION: ${{ github.event.comment.author_association }}
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply exact LOOP command
+        run: >-
+          python3 apps/github_release_train.py handle-comment
+          --pr "${{ github.event.issue.number }}"
+          --command "$LOOP_COMMAND"
+          --actor "$LOOP_ACTOR"
+          --association "$LOOP_ASSOCIATION"
+
   select:
     name: Select queued PR
     if: >-
-      github.event_name != 'pull_request_target' ||
-      github.event.label.name == 'release:ready'
+      github.event_name != 'issue_comment' &&
+      (github.event_name != 'pull_request_target' ||
+      github.event.label.name == 'release:ready')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
+      status: ${{ steps.select.outputs.status }}
       found: ${{ steps.select.outputs.found }}
       halted: ${{ steps.select.outputs.halted }}
+      gate_conflict: ${{ steps.select.outputs.gate_conflict }}
       halted_pr_number: ${{ steps.select.outputs.halted_pr_number }}
       pr_number: ${{ steps.select.outputs.pr_number }}
       scope: ${{ steps.select.outputs.scope }}
+      task_class: ${{ steps.select.outputs.task_class }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -58,9 +94,18 @@ jobs:
           echo "Release Train is halted by PR #${{ steps.select.outputs.halted_pr_number }}."
           exit 1
 
+      - name: Refuse conflicting exclusive gates
+        if: steps.select.outputs.gate_conflict == 'true'
+        run: |
+          echo "Release Train found conflicting exclusive LOOP gates."
+          exit 1
+
       - name: Report empty queue
-        if: steps.select.outputs.found != 'true' && steps.select.outputs.halted != 'true'
-        run: echo "No release:ready pull requests."
+        if: >-
+          steps.select.outputs.found != 'true' &&
+          steps.select.outputs.halted != 'true' &&
+          steps.select.outputs.gate_conflict != 'true'
+        run: echo "Release Train is idle in state ${{ steps.select.outputs.status }}."
 
   prepare:
     name: Prepare queued PR
@@ -72,6 +117,9 @@ jobs:
       head_sha: ${{ steps.prepare.outputs.head_sha }}
       head_ref: ${{ steps.prepare.outputs.head_ref }}
       scope: ${{ steps.prepare.outputs.scope }}
+      task_class: ${{ steps.prepare.outputs.task_class }}
+      loop_root: ${{ steps.prepare.outputs.loop_root }}
+      agent_acknowledged: ${{ steps.prepare.outputs.agent_acknowledged }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -84,18 +132,79 @@ jobs:
 
       - name: Prepare PR against current main
         id: prepare
+        continue-on-error: true
         run: >-
           python3 apps/github_release_train.py prepare
           --pr "${{ needs.select.outputs.pr_number }}"
           --check-name baseline
           --output-path "$GITHUB_OUTPUT"
 
+      - name: Mark unexpected prepare failure
+        if: steps.prepare.outcome == 'failure'
+        run: >-
+          python3 apps/github_release_train.py transition
+          --pr "${{ needs.select.outputs.pr_number }}"
+          --state release:blocked
+
+      - name: Continue queue after prepare blocker
+        if: steps.prepare.outcome == 'failure'
+        run: python3 apps/github_release_train.py dispatch-next
+
+      - name: Fail prepare job after durable blocker
+        if: steps.prepare.outcome == 'failure'
+        run: exit 1
+
+  await_loop_agent:
+    name: Wait for active LOOP agent
+    needs:
+      - select
+      - prepare
+    if: >-
+      needs.prepare.outputs.task_class == 'task:loop' &&
+      needs.prepare.outputs.agent_acknowledged != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Open exact-head acknowledgement gate
+        id: request_agent
+        continue-on-error: true
+        run: >-
+          python3 apps/github_release_train.py request-agent
+          --pr "${{ needs.select.outputs.pr_number }}"
+          --expected-head-sha "${{ needs.prepare.outputs.head_sha }}"
+
+      - name: Mark handshake blocker
+        if: steps.request_agent.outcome == 'failure'
+        run: >-
+          python3 apps/github_release_train.py transition
+          --pr "${{ needs.select.outputs.pr_number }}"
+          --state release:blocked
+
+      - name: Dispatch after handshake blocker
+        if: steps.request_agent.outcome == 'failure'
+        run: python3 apps/github_release_train.py dispatch-next
+
+      - name: Fail handshake job after durable blocker
+        if: steps.request_agent.outcome == 'failure'
+        run: exit 1
+
   release_repo_only:
     name: Merge repo-only PR
     needs:
       - select
       - prepare
-    if: needs.prepare.outputs.scope == 'scope:repo-only'
+    if: >-
+      needs.prepare.outputs.scope == 'scope:repo-only' &&
+      needs.prepare.outputs.task_class == 'task:standard'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -116,9 +225,12 @@ jobs:
           --expected-head-sha "${{ needs.prepare.outputs.head_sha }}"
           --head-ref "${{ needs.prepare.outputs.head_ref }}"
           --scope "${{ needs.prepare.outputs.scope }}"
+          --task-class "${{ needs.prepare.outputs.task_class }}"
+          --loop-root "${{ needs.prepare.outputs.loop_root }}"
           --output-path "$GITHUB_OUTPUT"
 
       - name: Mark repo-only completion
+        if: steps.merge.outputs.skip_release != 'true'
         run: >-
           python3 apps/github_release_train.py transition
           --pr "${{ needs.select.outputs.pr_number }}"
@@ -126,6 +238,7 @@ jobs:
           --comment "Release Train смёржил repo-only PR как \`${{ steps.merge.outputs.merge_sha }}\`; deploy не применялся."
 
       - name: Delete merged feature branch
+        if: always() && steps.merge.outputs.merge_sha != ''
         continue-on-error: true
         run: >-
           python3 apps/github_release_train.py cleanup-branch
@@ -139,6 +252,7 @@ jobs:
           --state release:blocked
 
       - name: Continue release queue
+        if: always()
         run: python3 apps/github_release_train.py dispatch-next
 
   release_live:
@@ -146,7 +260,10 @@ jobs:
     needs:
       - select
       - prepare
-    if: needs.prepare.outputs.scope == 'scope:live-runtime'
+    if: >-
+      needs.prepare.outputs.scope == 'scope:live-runtime' &&
+      (needs.prepare.outputs.task_class == 'task:standard' ||
+      needs.prepare.outputs.agent_acknowledged == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     environment: production
@@ -197,9 +314,12 @@ jobs:
           --expected-head-sha "${{ needs.prepare.outputs.head_sha }}"
           --head-ref "${{ needs.prepare.outputs.head_ref }}"
           --scope "${{ needs.prepare.outputs.scope }}"
+          --task-class "${{ needs.prepare.outputs.task_class }}"
+          --loop-root "${{ needs.prepare.outputs.loop_root }}"
           --output-path "$GITHUB_OUTPUT"
 
       - name: Checkout exact merge SHA
+        if: steps.merge.outputs.skip_release != 'true'
         uses: actions/checkout@v5
         with:
           ref: ${{ steps.merge.outputs.merge_sha }}
@@ -207,22 +327,35 @@ jobs:
           persist-credentials: false
 
       - name: Install deploy-runner dependencies
+        if: steps.merge.outputs.skip_release != 'true'
         run: >-
           python3 -m pip install --disable-pip-version-check
           openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
           pypdf==6.4.1 reportlab==4.4.5
 
       - name: Deploy and verify exact merge SHA
+        if: steps.merge.outputs.skip_release != 'true'
         run: python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify
 
       - name: Mark production completion
+        if: >-
+          steps.merge.outputs.skip_release != 'true' &&
+          needs.prepare.outputs.task_class == 'task:standard'
         run: >-
           python3 apps/github_release_train.py transition
           --pr "${{ needs.select.outputs.pr_number }}"
           --state release:production
           --comment "Release Train задеплоил и проверил production merge SHA \`${{ steps.merge.outputs.merge_sha }}\`."
 
+      - name: Open production UI gate for LOOP
+        if: needs.prepare.outputs.task_class == 'task:loop'
+        run: >-
+          python3 apps/github_release_train.py await-ui
+          --pr "${{ needs.select.outputs.pr_number }}"
+          --merge-sha "${{ steps.merge.outputs.merge_sha }}"
+
       - name: Delete merged feature branch
+        if: always() && steps.merge.outputs.merge_sha != ''
         continue-on-error: true
         run: >-
           python3 apps/github_release_train.py cleanup-branch
@@ -236,7 +369,10 @@ jobs:
           --state release:blocked
 
       - name: Halt queue after merged release failure
-        if: failure() && steps.merge.outputs.merge_sha != ''
+        if: >-
+          failure() &&
+          steps.merge.outputs.merge_sha != '' &&
+          steps.merge.outputs.skip_release != 'true'
         run: >-
           python3 apps/github_release_train.py transition
           --pr "${{ needs.select.outputs.pr_number }}"
@@ -250,4 +386,8 @@ jobs:
           rm -f "$RUNNER_TEMP/wb-core-release-key" "$RUNNER_TEMP/wb-core-known-hosts" "$HOME/.ssh/config"
 
       - name: Continue release queue
+        if: >-
+          always() &&
+          ((success() && needs.prepare.outputs.task_class == 'task:standard') ||
+          (failure() && steps.merge.outputs.merge_sha == ''))
         run: python3 apps/github_release_train.py dispatch-next
