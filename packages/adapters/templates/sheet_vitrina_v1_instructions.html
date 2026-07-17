@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Инструкции · WebCore</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page-bg: #0f1115;
+      --panel: #17191f;
+      --panel-subtle: #1f222a;
+      --border: #2b3038;
+      --border-strong: #3a414d;
+      --text: #f4f4f5;
+      --muted: #a6afbb;
+      --accent: #a78bfa;
+      --accent-soft: rgba(139, 92, 246, .16);
+      --important-bg: rgba(245, 158, 11, .11);
+      --important-border: rgba(245, 158, 11, .44);
+      --boundary-bg: rgba(148, 163, 184, .10);
+      --boundary-border: rgba(148, 163, 184, .32);
+      --escalation-bg: rgba(248, 113, 113, .10);
+      --escalation-border: rgba(248, 113, 113, .38);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--page-bg); color: var(--text); }
+    a { color: inherit; }
+    :focus-visible { outline: 3px solid rgba(167, 139, 250, .9); outline-offset: 3px; }
+
+    .knowledge-base { max-width: 1220px; margin: 0 auto; padding: 28px 24px 48px; }
+    .knowledge-layout { display: grid; grid-template-columns: minmax(220px, 250px) minmax(0, 760px); justify-content: space-between; gap: 40px; align-items: start; }
+    .knowledge-sidebar { position: sticky; top: 18px; display: grid; gap: 22px; min-width: 0; }
+    .knowledge-sidebar h1, .knowledge-sidebar h2 { margin: 0; }
+    .knowledge-sidebar h1 { font-size: 24px; line-height: 1.2; }
+    .knowledge-sidebar h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .knowledge-sidebar p { margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .instruction-list, .topic-nav { display: grid; gap: 4px; }
+    .instruction-link, .topic-link { display: block; border-radius: 7px; padding: 8px 10px; color: var(--muted); font-size: 14px; line-height: 1.35; text-decoration: none; overflow-wrap: anywhere; }
+    .instruction-link:hover, .topic-link:hover { background: var(--accent-soft); color: var(--text); }
+    .instruction-link[aria-current="page"], .topic-link[aria-current="true"] { background: var(--accent-soft); color: var(--text); font-weight: 700; }
+    .instruction-link[aria-current="page"] { border-left: 3px solid var(--accent); padding-left: 7px; }
+    .topic-link { padding-left: 13px; font-size: 13px; }
+    .topics-mobile { display: none; }
+
+    article { min-width: 0; }
+    .article-header { padding: 4px 0 28px; border-bottom: 1px solid var(--border); }
+    .article-header h1 { margin: 0; font-size: clamp(27px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025em; }
+    .article-header p { max-width: 660px; margin: 12px 0 0; color: var(--muted); font-size: 16px; line-height: 1.55; }
+    .instruction-section { padding: 32px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 18px; }
+    .instruction-section:last-child { border-bottom: 0; }
+    .instruction-section > h2 { margin: 0; font-size: 22px; line-height: 1.28; }
+    .section-lead { max-width: 700px; margin: 10px 0 0; color: var(--muted); font-size: 15px; line-height: 1.6; }
+    .block { margin-top: 18px; }
+    .subheading h3, .block h3 { margin: 0 0 7px; font-size: 16px; line-height: 1.4; }
+    .block p { max-width: 720px; margin: 0; color: var(--text); font-size: 15px; line-height: 1.62; }
+    .subheading p { color: var(--muted); }
+    .action-list { margin: 0; padding-left: 23px; display: grid; gap: 8px; font-size: 15px; line-height: 1.55; }
+    .checklist { list-style: none; padding-left: 0; gap: 9px; }
+    .checklist li { position: relative; padding-left: 27px; }
+    .checklist li::before { content: ""; position: absolute; left: 1px; top: .42em; width: 12px; height: 7px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(-45deg); }
+    .callout { border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; padding: 14px 16px; }
+    .callout h3 { margin-bottom: 5px; }
+    .callout-important { background: var(--important-bg); border-color: var(--important-border); }
+    .callout-boundary { background: var(--boundary-bg); border-color: var(--boundary-border); }
+    .callout-escalation { background: var(--escalation-bg); border-color: var(--escalation-border); }
+    .instructions-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.48; }
+    th, td { min-width: 150px; padding: 11px 12px; vertical-align: top; text-align: left; border-bottom: 1px solid var(--border); }
+    th { background: var(--panel-subtle); color: var(--muted); font-size: 12px; }
+    tr:last-child td { border-bottom: 0; }
+
+    @media (max-width: 800px) {
+      .knowledge-base { padding: 20px 16px 36px; }
+      .knowledge-layout { display: block; }
+      .knowledge-sidebar { position: static; gap: 14px; margin-bottom: 24px; }
+      .knowledge-sidebar > .topic-nav, .knowledge-sidebar > .topic-label { display: none; }
+      .topics-mobile { display: block; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+      .topics-mobile summary { cursor: pointer; padding: 11px 12px; font-size: 14px; font-weight: 700; }
+      .topics-mobile .topic-nav { padding: 0 7px 8px; }
+      .article-header { padding-top: 0; }
+      .instruction-section { padding: 26px 0; }
+    }
+
+    @media print {
+      :root { color-scheme: light; }
+      body { background: #fff; color: #111; }
+      .knowledge-base { max-width: none; padding: 0; }
+      .knowledge-layout { display: block; }
+      .knowledge-sidebar { position: static; }
+      .instruction-list, .topic-nav, .topics-mobile { display: none; }
+      .instruction-section { break-inside: avoid; border-color: #ddd; }
+      .callout { background: #fafafa; border-color: #aaa; }
+      th { background: #f0f0f0; color: #333; }
+    }
+  </style>
+</head>
+<body>
+  <main class="knowledge-base">
+    <div class="knowledge-layout">
+      <aside class="knowledge-sidebar" aria-label="Навигация по инструкциям">
+        <div>
+          <h1>Инструкции</h1>
+          <p>Внутренняя база знаний WebCore.</p>
+        </div>
+        <nav class="instruction-list" aria-label="Список инструкций">__INSTRUCTION_LIST__</nav>
+        <h2 class="topic-label">Темы</h2>
+        <nav class="topic-nav" aria-label="Темы инструкции">__TOPIC_NAV__</nav>
+        <details class="topics-mobile">
+          <summary>Темы инструкции</summary>
+          <nav class="topic-nav" aria-label="Темы инструкции на мобильном устройстве">__TOPIC_NAV__</nav>
+        </details>
+      </aside>
+      <article aria-labelledby="instruction-title">
+        <header class="article-header">
+          <h1 id="instruction-title">__INSTRUCTION_TITLE__</h1>
+          <p>__INSTRUCTION_SUMMARY__</p>
+        </header>
+        __INSTRUCTION_CONTENT__
+      </article>
+    </div>
+  </main>
+  <script>
+    (() => {
+      const topicLinks = Array.from(document.querySelectorAll(".topic-link"));
+      const sections = topicLinks.map((link) => document.getElementById(link.getAttribute("href").slice(1))).filter(Boolean);
+      const setCurrent = (id) => topicLinks.forEach((link) => link.setAttribute("aria-current", link.getAttribute("href") === "#" + id ? "true" : "false"));
+      const fromHash = () => {
+        const id = decodeURIComponent(String(window.location.hash || "").replace(/^#/, ""));
+        if (sections.some((section) => section.id === id)) setCurrent(id);
+      };
+      window.addEventListener("hashchange", fromHash);
+      topicLinks.forEach((link) => link.addEventListener("click", () => setCurrent(link.getAttribute("href").slice(1))));
+      if ("IntersectionObserver" in window && sections.length) {
+        const observer = new IntersectionObserver((entries) => {
+          const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+          if (visible) setCurrent(visible.target.id);
+        }, {rootMargin: "-18% 0px -68% 0px", threshold: 0});
+        sections.forEach((section) => observer.observe(section));
+      }
+      fromHash();
+      const postHeight = () => {
+        if (window.parent === window) return;
+        window.parent.postMessage({type: "sheet_vitrina_v1_operator_embed_height", tab: "instructions", height: document.documentElement.scrollHeight}, window.location.origin);
+      };
+      if ("ResizeObserver" in window) new ResizeObserver(postHeight).observe(document.body);
+      window.addEventListener("load", postHeight);
+      window.addEventListener("resize", postHeight);
+      postHeight();
+    })();
+  </script>
+</body>
+</html>

@@ -45,6 +45,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_STATUS_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FACTORY_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_INBOUND_FF_TO_WB_PATH,
+    DEFAULT_INSTRUCTIONS_UI_PATH,
     DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
     DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH,
     DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
@@ -500,6 +501,13 @@ def collect_public_surface(
             name="web_vitrina_page",
             method="GET",
             url=f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}",
+            timeout_seconds=timeout_seconds,
+            auth_cookie=auth_cookie,
+        ),
+        _collect_http_probe(
+            name="instructions_page",
+            method="GET",
+            url=f"{base_url}{DEFAULT_INSTRUCTIONS_UI_PATH}",
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
         ),
@@ -2153,6 +2161,15 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         )
         return evaluation
 
+    if route == "instructions_page":
+        evaluation["ok"] = status == 200 and "text/html" in content_type
+        evaluation["detail"] = (
+            "operator instructions page ok"
+            if evaluation["ok"]
+            else "expected 200 text/html for authorized operator instructions"
+        )
+        return evaluation
+
     if route == "supplier_page":
         body = str(result.get("body_excerpt", ""))
         tokens = [
@@ -2957,6 +2974,7 @@ results = [
     _collect("operator_reports", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"] + "?embedded_tab=reports"),
     _collect("operator_factory_order", "GET", PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_OPERATOR_UI_PATH"] + "?embedded_tab=factory-order"),
     _collect("web_vitrina_page", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_UI_PATH!r}),
+    _collect("instructions_page", "GET", PAYLOAD["base_url"] + {DEFAULT_INSTRUCTIONS_UI_PATH!r}),
     _collect("load_route", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/load"),
     _collect("job", "GET", PAYLOAD["base_url"] + "/v1/sheet-vitrina-v1/job?job_id=hosted_runtime_probe"),
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),

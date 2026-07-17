@@ -99,6 +99,7 @@ def main() -> None:
         "/v1/sheet-vitrina-v1/settings/users/",
         "/sheet-vitrina-v1/supplier",
         "/sheet-vitrina-v1/settings",
+        "/sheet-vitrina-v1/instructions",
         "/login",
         "/logout",
         "/.well-known/oauth-protected-resource",
@@ -236,6 +237,8 @@ def main() -> None:
         raise AssertionError("rendered nginx block must include settings user item API exactly once")
     if rendered.count("location = /sheet-vitrina-v1/settings {") != 1:
         raise AssertionError("rendered nginx block must include settings page exactly once")
+    if rendered.count("location = /sheet-vitrina-v1/instructions {") != 1:
+        raise AssertionError("rendered nginx block must include instructions page exactly once")
     if "client_max_body_size 32m;" not in rendered:
         raise AssertionError("rendered nginx block must raise body limit for supplier invoice uploads")
     if rendered.count("location = /v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start {") != 1:
