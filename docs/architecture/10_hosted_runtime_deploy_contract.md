@@ -142,6 +142,7 @@ The same runner owns the only production path for the bounded six-warehouse open
 - `warehouse-opening-dry-run --output <absolute local plan.json>` reads primary sources and fresh official WB stock without inserting opening rows;
 - `warehouse-opening-apply --plan-file <same plan.json> --fingerprint <exact sha256:...>` pins the active EU target/runtime, creates a coherent integrity-checked backup under `/opt/wb-core-runtime/backups/warehouse-opening` and applies the exact plan atomically;
 - `warehouse-opening-readback` proves the stored six-document reconciliation;
+- `warehouse-opening-diagnostic --nm-id <positive-nmID>` reads only selected WB discrepancy evidence and never mutates/refetches the WB cache; hosted dotenv values are parsed as data inside Python, not sourced by a shell;
 - `warehouse-opening-rollback --fingerprint <exact stored sha256:...>` is the bounded recovery path and removes only the new warehouse cutover through FK cascade after another backup.
 - `warehouse-ui-flow --evidence-dir <absolute path outside repo>` is the read-only post-deploy acceptance path: it derives a short-lived signed owner session from the hosted env without logging the secret, opens a fresh local Playwright context, reconciles visible totals/rows for all six warehouses with protected detail APIs, reconciles immutable opening documents with production readback, compares the current FF projection with the legacy canonical FF API, verifies the legacy FF transition and writes screenshots plus a sanitized JSON report outside Git.
 

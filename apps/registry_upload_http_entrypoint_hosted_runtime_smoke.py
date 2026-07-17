@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
+import apps.warehouse_opening_snapshot as warehouse_opening_snapshot  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
@@ -67,6 +68,44 @@ def main() -> None:
     opening_args = hosted_runtime.build_arg_parser().parse_args(["warehouse-opening-readback"])
     if opening_args.handler is not hosted_runtime.run_warehouse_opening_command:
         raise AssertionError("hosted runner must expose canonical warehouse opening commands")
+    diagnostic_args = hosted_runtime.build_arg_parser().parse_args(
+        ["warehouse-opening-diagnostic", "--nm-id", "180330785"]
+    )
+    if (
+        diagnostic_args.handler is not hosted_runtime.run_warehouse_opening_command
+        or diagnostic_args.warehouse_action != "diagnose-discrepancy"
+        or diagnostic_args.nm_id != [180330785]
+    ):
+        raise AssertionError("hosted runner must expose bounded warehouse discrepancy diagnostics")
+    with TemporaryDirectory(prefix="warehouse-env-loader-smoke-") as env_temp_dir:
+        env_path = Path(env_temp_dir) / "runtime.env"
+        env_path.write_text(
+            "WAREHOUSE_OPENING_ENV_SMOKE_NAME=Влад Сагитов\n"
+            "WAREHOUSE_OPENING_ENV_SMOKE_COMPANY='Acme Technology' # comment\n"
+            "WAREHOUSE_OPENING_ENV_SMOKE_LITERAL=$(must_not_execute)\n",
+            encoding="utf-8",
+        )
+        previous_name = os.environ.get("WAREHOUSE_OPENING_ENV_SMOKE_NAME")
+        previous_company = os.environ.get("WAREHOUSE_OPENING_ENV_SMOKE_COMPANY")
+        previous_literal = os.environ.get("WAREHOUSE_OPENING_ENV_SMOKE_LITERAL")
+        try:
+            warehouse_opening_snapshot._load_env_file(env_path)
+            if os.environ.get("WAREHOUSE_OPENING_ENV_SMOKE_NAME") != "Влад Сагитов":
+                raise AssertionError("warehouse env loader must preserve unquoted spaces as data")
+            if os.environ.get("WAREHOUSE_OPENING_ENV_SMOKE_COMPANY") != "Acme Technology":
+                raise AssertionError("warehouse env loader must parse quoted values without shell evaluation")
+            if os.environ.get("WAREHOUSE_OPENING_ENV_SMOKE_LITERAL") != "$(must_not_execute)":
+                raise AssertionError("warehouse env loader must keep shell syntax as literal data")
+        finally:
+            for key, previous in (
+                ("WAREHOUSE_OPENING_ENV_SMOKE_NAME", previous_name),
+                ("WAREHOUSE_OPENING_ENV_SMOKE_COMPANY", previous_company),
+                ("WAREHOUSE_OPENING_ENV_SMOKE_LITERAL", previous_literal),
+            ):
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
     complete_payload = json.dumps({"rows": ["x" * 256] * 4096}, separators=(",", ":")).encode("utf-8")
     body, truncated, bytes_read = hosted_runtime._read_probe_response_body(
         _ShortReadResponse(complete_payload, chunk_size=64 * 1024)

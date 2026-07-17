@@ -476,6 +476,89 @@ class WarehouseStocksBlock:
             "reconciliation": _readback_reconciliation(documents),
         }
 
+    def diagnose_wb_acceptance_discrepancy(
+        self,
+        *,
+        nm_ids: Iterable[int],
+    ) -> dict[str, Any]:
+        """Return bounded read-only evidence for selected WB discrepancy SKU."""
+
+        requested_nm_ids = {
+            nm_id
+            for raw_nm_id in nm_ids
+            if (nm_id := _positive_int_or_none(raw_nm_id)) is not None
+        }
+        if not requested_nm_ids:
+            raise WarehouseOpeningSnapshotError("at least one positive diagnostic nmID is required")
+        captured_at = self.timestamp_factory()
+        local = self._read_local_source_snapshot(cutover_at=captured_at)
+        aggregates: dict[int, dict[str, Any]] = {
+            nm_id: {
+                "sent_quantity": Decimal("0"),
+                "accepted_quantity": Decimal("0"),
+                "doprinato_quantity": Decimal("0"),
+                "source_records": [],
+            }
+            for nm_id in requested_nm_ids
+        }
+        for raw_record in local.get("wb_supplies") or []:
+            record = _normalized_wb_record(raw_record)
+            if int(record.get("status_id") or 0) != WB_FINAL_ACCEPTED_STATUS_ID:
+                continue
+            for good in _validated_wb_goods(record):
+                nm_id = int(good["nm_id"])
+                if nm_id not in requested_nm_ids:
+                    continue
+                aggregate = aggregates[nm_id]
+                components = _wb_acceptance_components(record, good)
+                aggregate["sent_quantity"] += components["sent"]
+                aggregate["accepted_quantity"] += components["accepted"]
+                aggregate["doprinato_quantity"] += components["doprinato"]
+                aggregate["source_records"].append(
+                    {
+                        **_wb_goods_provenance(
+                            record,
+                            good,
+                            quantity_field=str(components["quantity_field"]),
+                        ),
+                        "role": str(components["role"]),
+                        "sent_quantity": _decimal_text(components["sent"]),
+                        "accepted_quantity": _decimal_text(components["accepted"]),
+                        "doprinato_quantity": _decimal_text(components["doprinato"]),
+                        "discrepancy_contribution": _decimal_text(components["contribution"]),
+                    }
+                )
+        rows = []
+        for nm_id in sorted(aggregates):
+            aggregate = aggregates[nm_id]
+            discrepancy = (
+                aggregate["sent_quantity"]
+                - aggregate["accepted_quantity"]
+                - aggregate["doprinato_quantity"]
+            )
+            rows.append(
+                {
+                    "nm_id": nm_id,
+                    "sent_quantity": _public_decimal(aggregate["sent_quantity"]),
+                    "accepted_quantity": _public_decimal(aggregate["accepted_quantity"]),
+                    "doprinato_quantity": _public_decimal(aggregate["doprinato_quantity"]),
+                    "discrepancy_quantity": _public_decimal(discrepancy),
+                    "negative": discrepancy < 0,
+                    "source_records": aggregate["source_records"],
+                }
+            )
+        return {
+            "contract_name": CONTRACT_NAME,
+            "contract_version": CONTRACT_VERSION,
+            "status": "diagnostic",
+            "captured_at": captured_at,
+            "requested_nm_ids": sorted(requested_nm_ids),
+            "local_source_digest": local["source_digest"],
+            "source_watermark": local["watermarks"]["wb_supplies_cache"],
+            "negative_count": sum(1 for row in rows if row["negative"]),
+            "rows": rows,
+        }
+
     def _ensure_source_schema(self) -> None:
         # Existing runtime owns all source tables; this call only runs its idempotent schema guard.
         self.runtime.list_nomenclature_items(active_only=False)
@@ -866,28 +949,24 @@ class WarehouseStocksBlock:
                 continue
             for good in goods:
                 nm_id = int(good["nm_id"])
+                components = _wb_acceptance_components(record, good)
                 if is_doprinato:
-                    accepted = _optional_decimal(good.get("accepted_quantity"))
-                    accepted_source = "acceptedQuantity"
-                    if accepted is None or accepted == 0:
-                        accepted = _required_nonnegative_decimal(good.get("quantity"), "WB doprinato quantity")
-                        accepted_source = "quantity_fallback_existing_canonical_rule"
-                    if accepted < 0:
-                        raise WarehouseOpeningSnapshotError("WB doprinato accepted quantity is negative")
                     bucket = discrepancy_doprinato.setdefault(
                         nm_id,
                         {"quantity": Decimal("0"), "provenance": [], "display": _display_for_nm(nm_id, nomenclature_all, fallback=good)},
                     )
-                    bucket["quantity"] += accepted
+                    bucket["quantity"] += components["doprinato"]
                     bucket["provenance"].append(
                         {
-                            **_wb_goods_provenance(record, good, quantity_field=accepted_source),
-                            "accepted_quantity": _decimal_text(accepted),
+                            **_wb_goods_provenance(
+                                record,
+                                good,
+                                quantity_field=str(components["quantity_field"]),
+                            ),
+                            "accepted_quantity": _decimal_text(components["doprinato"]),
                         }
                     )
                 else:
-                    sent = _required_nonnegative_decimal(good.get("quantity"), "WB sent quantity")
-                    accepted = _required_nonnegative_decimal(good.get("accepted_quantity"), "WB accepted quantity")
                     bucket = discrepancy_regular.setdefault(
                         nm_id,
                         {
@@ -897,14 +976,18 @@ class WarehouseStocksBlock:
                             "display": _display_for_nm(nm_id, nomenclature_all, fallback=good),
                         },
                     )
-                    bucket["sent"] += sent
-                    bucket["accepted"] += accepted
+                    bucket["sent"] += components["sent"]
+                    bucket["accepted"] += components["accepted"]
                     bucket["provenance"].append(
                         {
-                            **_wb_goods_provenance(record, good, quantity_field="quantity/acceptedQuantity"),
-                            "sent_quantity": _decimal_text(sent),
-                            "accepted_quantity": _decimal_text(accepted),
-                            "source_discrepancy": _decimal_text(sent - accepted),
+                            **_wb_goods_provenance(
+                                record,
+                                good,
+                                quantity_field=str(components["quantity_field"]),
+                            ),
+                            "sent_quantity": _decimal_text(components["sent"]),
+                            "accepted_quantity": _decimal_text(components["accepted"]),
+                            "source_discrepancy": _decimal_text(components["contribution"]),
                         }
                     )
 
@@ -1519,6 +1602,44 @@ def _wb_goods_provenance(
 
 def _is_doprinato(record: Mapping[str, Any]) -> bool:
     return int(record.get("virtual_type_id") or 0) == 5 or str(record.get("type_label") or "").strip() == "Допринято"
+
+
+def _wb_acceptance_components(
+    record: Mapping[str, Any],
+    good: Mapping[str, Any],
+) -> dict[str, Any]:
+    if _is_doprinato(record):
+        doprinato = _optional_decimal(good.get("accepted_quantity"))
+        quantity_field = "acceptedQuantity"
+        if doprinato is None or doprinato == 0:
+            doprinato = _required_nonnegative_decimal(
+                good.get("quantity"),
+                "WB doprinato quantity",
+            )
+            quantity_field = "quantity_fallback_existing_canonical_rule"
+        if doprinato < 0:
+            raise WarehouseOpeningSnapshotError("WB doprinato accepted quantity is negative")
+        return {
+            "role": "doprinato",
+            "sent": Decimal("0"),
+            "accepted": Decimal("0"),
+            "doprinato": doprinato,
+            "contribution": -doprinato,
+            "quantity_field": quantity_field,
+        }
+    sent = _required_nonnegative_decimal(good.get("quantity"), "WB sent quantity")
+    accepted = _required_nonnegative_decimal(
+        good.get("accepted_quantity"),
+        "WB accepted quantity",
+    )
+    return {
+        "role": "ordinary_final_acceptance",
+        "sent": sent,
+        "accepted": accepted,
+        "doprinato": Decimal("0"),
+        "contribution": sent - accepted,
+        "quantity_field": "quantity/acceptedQuantity",
+    }
 
 
 def _nomenclature_index(rows: Iterable[Mapping[str, Any]]) -> dict[int, dict[str, Any]]:

@@ -1701,6 +1701,7 @@ def run_warehouse_opening_command(args: argparse.Namespace) -> int:
         action=action,
         plan_path=plan_path,
         fingerprint=str(getattr(args, "fingerprint", "") or ""),
+        diagnostic_nm_ids=tuple(getattr(args, "nm_id", ()) or ()),
     )
     if action == "dry-run" and str(getattr(args, "output", "") or "").strip():
         output_path = Path(str(args.output)).resolve()
@@ -1725,6 +1726,7 @@ def _run_remote_warehouse_opening_action(
     action: str,
     plan_path: Path | None = None,
     fingerprint: str = "",
+    diagnostic_nm_ids: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(target, action=f"warehouse-opening-{action}")
     if action in {"apply", "rollback"}:
@@ -1744,6 +1746,8 @@ def _run_remote_warehouse_opening_action(
         "apps/warehouse_opening_snapshot.py",
         "--runtime-dir",
         runtime_dir,
+        "--env-file",
+        target.environment_file,
         action,
     ]
     stdin_text: str | None = None
@@ -1775,13 +1779,17 @@ def _run_remote_warehouse_opening_action(
                 "/opt/wb-core-runtime/backups/warehouse-opening",
             ]
         )
+    elif action == "diagnose-discrepancy":
+        if not diagnostic_nm_ids:
+            raise ValueError("warehouse discrepancy diagnostic requires at least one nmID")
+        for nm_id in diagnostic_nm_ids:
+            if int(nm_id) <= 0:
+                raise ValueError("warehouse discrepancy diagnostic nmID must be positive")
+            runner_args.extend(["--nm-id", str(int(nm_id))])
 
     shell_command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
-            "set -a",
-            f". {shlex.quote(target.environment_file)}",
-            "set +a",
             " ".join(shlex.quote(item) for item in runner_args),
         ]
     )
@@ -1916,6 +1924,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     warehouse_readback.set_defaults(
         handler=run_warehouse_opening_command,
         warehouse_action="readback",
+    )
+
+    warehouse_diagnostic = subparsers.add_parser(
+        "warehouse-opening-diagnostic",
+        help="Read bounded WB discrepancy evidence on the active runtime without mutation.",
+    )
+    warehouse_diagnostic.add_argument("--nm-id", action="append", type=int, required=True)
+    warehouse_diagnostic.set_defaults(
+        handler=run_warehouse_opening_command,
+        warehouse_action="diagnose-discrepancy",
     )
 
     warehouse_rollback = subparsers.add_parser(
