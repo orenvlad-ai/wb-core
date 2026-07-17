@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import json
 from pathlib import Path
 import socket
@@ -134,6 +134,7 @@ def main() -> None:
     _assert_application_ledger_replay()
     _assert_same_day_date_only_financial_priority()
     _assert_blocked_states()
+    _assert_http_delete_replays_and_removes_owned_file()
     _assert_http_routes_and_order_integration()
 
 
@@ -513,6 +514,118 @@ def _assert_blocked_states() -> None:
             raise AssertionError(f"insufficient balance order status changed: {header}")
 
 
+def _assert_http_delete_replays_and_removes_owned_file() -> None:
+    clock = Clock()
+    with TemporaryDirectory(prefix="cny-ledger-http-delete-") as tmp:
+        runtime_dir = Path(tmp) / "runtime"
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        config = RegistryUploadHttpEntrypointConfig(
+            host="127.0.0.1",
+            port=_reserve_free_port(),
+            upload_path=DEFAULT_UPLOAD_PATH,
+            sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,
+            sheet_refresh_path="/v1/sheet-vitrina-v1/refresh",
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,
+            sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
+            runtime_dir=runtime_dir,
+        )
+        entrypoint = RegistryUploadHttpEntrypoint(
+            runtime_dir=runtime_dir,
+            runtime=runtime,
+            activated_at_factory=lambda: "2026-05-12T08:00:00Z",
+            now_factory=lambda: HTTP_NOW,
+        )
+        entrypoint.cny_ledger_block.timestamp_factory = clock
+        entrypoint.cny_ledger_block.pdf_text_extractor = _fixture_text_extractor
+        server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{config.port}"
+            opening_status, _ = _post_json(
+                f"{base_url}{DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH}",
+                {"operation_date": "2026-05-01", "cny_amount": "100", "rub_value": "1000"},
+            )
+            if opening_status != 200:
+                raise AssertionError(f"delete fixture opening balance failed: HTTP {opening_status}")
+
+            uploaded: list[dict[str, object]] = []
+            for index in (1, 2):
+                upload_status, upload_payload = _post_multipart(
+                    f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}",
+                    f"direct-conversion-pdf-{index}".encode("utf-8"),
+                    filename=f"direct-conversion-{index}.pdf",
+                )
+                if upload_status != 200 or upload_payload.get("document_type") != CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE:
+                    raise AssertionError(f"delete fixture conversion {index} failed: {upload_status} {upload_payload}")
+                uploaded.append(upload_payload)
+
+            before_status, before = _get_json(f"{base_url}{DEFAULT_CNY_ACCOUNT_PATH}")
+            if before_status != 200 or len(before.get("conversions") or []) != 2:
+                raise AssertionError(f"delete preflight must expose two conversions: {before_status} {before}")
+            before_summary = dict(before.get("summary") or {})
+            deleted_document = uploaded[0]
+            deleted_document_id = str(deleted_document.get("document_id") or "")
+            stored_file_path = str(deleted_document.get("stored_file_path") or "")
+            owned_file = runtime_dir / stored_file_path
+            if not deleted_document_id or not stored_file_path or not owned_file.is_file():
+                raise AssertionError(f"delete preflight must persist an owned runtime file: {deleted_document}")
+
+            delete_status, deleted = _delete_json(
+                f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}/{deleted_document_id}"
+            )
+            replay = dict(deleted.get("replay") or {})
+            if (
+                delete_status != 200
+                or deleted.get("deleted") is not True
+                or deleted.get("document_id") != deleted_document_id
+                or replay.get("reason") != "document_delete"
+            ):
+                raise AssertionError(f"CNY account HTTP delete contract changed: {delete_status} {deleted}")
+
+            after_status, after = _get_json(f"{base_url}{DEFAULT_CNY_ACCOUNT_PATH}")
+            if after_status != 200:
+                raise AssertionError(f"CNY account reload after delete failed: {after_status} {after}")
+            remaining_conversions = list(after.get("conversions") or [])
+            remaining_documents = list(after.get("documents") or [])
+            remaining_operations = list(after.get("ledger_operations") or [])
+            if len(remaining_conversions) != 1 or any(
+                str(item.get("document_id") or "") == deleted_document_id for item in remaining_documents
+            ):
+                raise AssertionError(f"deleted canonical document remained in CNY read model: {after}")
+            if any(str(item.get("source_document_id") or "") == deleted_document_id for item in remaining_operations):
+                raise AssertionError(f"deleted document ledger operations remained after replay: {remaining_operations}")
+
+            remaining = remaining_conversions[0]
+            expected_balance_cny = Decimal("100") + _dec(remaining.get("cny_amount"))
+            expected_balance_rub = Decimal("1000") + _dec(remaining.get("rub_amount"))
+            expected_average_rate = (expected_balance_rub / expected_balance_cny).quantize(
+                Decimal("0.000001"), rounding=ROUND_HALF_UP
+            )
+            after_summary = dict(after.get("summary") or {})
+            if (
+                _dec(after_summary.get("balance_cny")) != expected_balance_cny
+                or _dec(after_summary.get("balance_rub_value")) != expected_balance_rub
+                or _dec(after_summary.get("average_rate")) != expected_average_rate
+            ):
+                raise AssertionError(
+                    "delete replay balance/rate changed: "
+                    f"expected=({expected_balance_cny}, {expected_balance_rub}, {expected_average_rate}) "
+                    f"actual={after_summary}"
+                )
+            if (
+                _dec(before_summary.get("balance_cny")) == _dec(after_summary.get("balance_cny"))
+                or _dec(before_summary.get("average_rate")) == _dec(after_summary.get("average_rate"))
+            ):
+                raise AssertionError(f"delete fixture must prove balance and average-rate recalculation: {before_summary} -> {after_summary}")
+            if owned_file.exists() or runtime.load_cny_document(deleted_document_id) is not None:
+                raise AssertionError("HTTP delete must remove both canonical document and its owned runtime file")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+
 def _assert_http_routes_and_order_integration() -> None:
     clock = Clock()
     with TemporaryDirectory(prefix="cny-ledger-http-") as tmp:
@@ -633,6 +746,29 @@ def _assert_http_routes_and_order_integration() -> None:
             ]
             if len(cny_fee_documents) != 3:
                 raise AssertionError(f"CNY fee import must create three CNY ledger documents: {cny_fee_documents}")
+            guarded_document = cny_fee_documents[0]
+            guarded_document_id = str(guarded_document.get("document_id") or "")
+            guarded_file = runtime_dir / str(guarded_document.get("stored_file_path") or "")
+            guarded_documents_before = runtime.list_cny_documents()
+            guarded_operations_before = runtime.list_cny_ledger_operations()
+            guarded_delete_status, guarded_delete = _delete_json(
+                f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}/{guarded_document_id}"
+            )
+            if (
+                guarded_delete_status != 404
+                or "delete the source document instead" not in str(guarded_delete.get("error") or "")
+            ):
+                raise AssertionError(
+                    "source-owned supplier financial CNY document must reject direct account delete: "
+                    f"{guarded_delete_status} {guarded_delete}"
+                )
+            if (
+                runtime.list_cny_documents() != guarded_documents_before
+                or runtime.list_cny_ledger_operations() != guarded_operations_before
+                or runtime.load_cny_document(guarded_document_id) is None
+                or not guarded_file.is_file()
+            ):
+                raise AssertionError("source-owned delete guard must leave canonical document, ledger, and source file unchanged")
             duplicate_confirm_status, duplicate_confirm = _post_json(
                 f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
                 {},
