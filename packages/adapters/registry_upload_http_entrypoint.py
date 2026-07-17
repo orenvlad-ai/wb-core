@@ -50,6 +50,7 @@ from packages.application.wb_prices_management import WbPricesManagementError
 from packages.application.sku_management import SkuManagementError
 from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.wb_supplies import WbSuppliesBlockError
+from packages.application.warehouse_stocks import WarehouseOpeningSnapshotError
 from packages.application.sheet_vitrina_v1_load_bridge import LegacyGoogleSheetsContourArchivedError
 from packages.application.sheet_vitrina_v1_load_bridge import legacy_google_sheets_archive_context
 from packages.application.demand_estimation import parse_sales_avg_period_days
@@ -195,6 +196,7 @@ WEB_AUTH_SECTION_IDS = tuple(str(section["section_id"]) for section in WEB_AUTH_
 WEB_AUTH_UNIFIED_TAB_SECTIONS = {
     "vitrina": WEB_AUTH_SECTION_VITRINA,
     "factory-order": WEB_AUTH_SECTION_SUPPLY,
+    "warehouses": WEB_AUTH_SECTION_SUPPLY,
     "reports": WEB_AUTH_SECTION_REPORTS,
     "feedbacks": WEB_AUTH_SECTION_FEEDBACKS,
     "ads": WEB_AUTH_SECTION_ADS,
@@ -275,6 +277,8 @@ DEFAULT_FF_STOCKS_EXPORT_PATH = f"{DEFAULT_FF_STOCKS_PATH}/export.xlsx"
 DEFAULT_FF_STOCKS_PREVIEW_PATH = f"{DEFAULT_FF_STOCKS_PATH}/preview"
 DEFAULT_FF_STOCKS_CONFIRM_PATH = f"{DEFAULT_FF_STOCKS_PATH}/confirm"
 DEFAULT_FF_STOCKS_OPERATIONS_PATH = f"{DEFAULT_FF_STOCKS_PATH}/operations"
+DEFAULT_WAREHOUSES_PATH = "/v1/sheet-vitrina-v1/warehouses"
+DEFAULT_WAREHOUSES_PREFIX = f"{DEFAULT_WAREHOUSES_PATH}/"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -429,7 +433,7 @@ def _build_handler(
 
                 try:
                     result = entrypoint.handle_bundle_payload(payload)
-                except Exception as exc:  # pragma: no cover - bounded fallback
+                except Exception:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -3290,6 +3294,37 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"Fulfillment uploads list failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WAREHOUSES_PATH or parsed.path.startswith(DEFAULT_WAREHOUSES_PREFIX):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    if parsed.path == DEFAULT_WAREHOUSES_PATH:
+                        payload = entrypoint.handle_warehouses_overview_request()
+                    else:
+                        warehouse_key = urllib_parse.unquote(
+                            parsed.path[len(DEFAULT_WAREHOUSES_PREFIX) :]
+                        ).strip()
+                        if not warehouse_key or "/" in warehouse_key:
+                            raise WarehouseOpeningSnapshotError("invalid warehouse path")
+                        payload = entrypoint.handle_warehouse_detail_request(warehouse_key)
+                except WarehouseOpeningSnapshotError as exc:
+                    status = HTTPStatus.NOT_FOUND if str(exc).startswith("unknown warehouse:") else HTTPStatus.BAD_REQUEST
+                    _write_json_response(
+                        self,
+                        status,
+                        {"error": str(exc), "contract_name": "sheet_vitrina_v1_warehouses"},
+                    )
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": "Остатки / Склады failed"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -6657,6 +6692,8 @@ def _required_section_for_path(path: str) -> str:
         return WEB_AUTH_SECTION_SKU_MANAGEMENT
     if normalized.startswith("/v1/sheet-vitrina-v1/research/"):
         return WEB_AUTH_SECTION_RESEARCH
+    if normalized == DEFAULT_WAREHOUSES_PATH or normalized.startswith(DEFAULT_WAREHOUSES_PREFIX):
+        return WEB_AUTH_SECTION_SUPPLY
     if normalized.startswith("/v1/sheet-vitrina-v1/supply/"):
         return WEB_AUTH_SECTION_SUPPLY
     return ""
@@ -7333,6 +7370,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "initial_tab": initial_tab,
         "read_path": read_path,
         "operator_path": operator_path,
+        "warehouses_path": DEFAULT_WAREHOUSES_PATH,
         "refresh_path": refresh_path,
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         "auto_schedules_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,

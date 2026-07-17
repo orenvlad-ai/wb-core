@@ -41,6 +41,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
     DEFAULT_SUPPLIER_SHIPMENTS_PATH,
     DEFAULT_UPLOAD_PATH,
+    DEFAULT_WAREHOUSES_PATH,
     build_registry_upload_http_server,
 )
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
@@ -143,6 +144,39 @@ def main() -> None:
                 )
                 if operator_shell_code != 200 or "Поставки" not in operator_shell or "От поставщика" not in operator_shell:
                     raise AssertionError("operator must keep full operator shell and supplier module entry")
+                operator_warehouse_shell_code, _, operator_warehouse_shell = _opener_text(
+                    operator,
+                    f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}?tab=warehouses&warehouse=ff",
+                )
+                if (
+                    operator_warehouse_shell_code != 200
+                    or 'data-unified-tab-button="warehouses"' not in operator_warehouse_shell
+                    or 'data-unified-tab-panel="warehouses"' not in operator_warehouse_shell
+                    or operator_warehouse_shell.count('<button class="warehouse-switch"') != 6
+                ):
+                    raise AssertionError("operator warehouse shell must expose one common six-warehouse component")
+                warehouse_code, warehouse_payload = _opener_json(
+                    operator,
+                    f"{base_url}{DEFAULT_WAREHOUSES_PATH}",
+                )
+                if (
+                    warehouse_code != 200
+                    or warehouse_payload.get("status") != "not_initialized"
+                    or len(warehouse_payload.get("warehouses") or []) != 6
+                ):
+                    raise AssertionError("operator must access the canonical six-warehouse overview")
+                warehouse_ff_code, warehouse_ff_payload = _opener_json(
+                    operator,
+                    f"{base_url}{DEFAULT_WAREHOUSES_PATH}/ff",
+                )
+                if warehouse_ff_code != 200 or (warehouse_ff_payload.get("warehouse") or {}).get("warehouse_key") != "ff":
+                    raise AssertionError("operator must access FF through the new warehouse route")
+                legacy_ff_code, legacy_ff_payload = _opener_json(
+                    operator,
+                    f"{base_url}{DEFAULT_FF_STOCKS_PATH}",
+                )
+                if legacy_ff_code != 200 or "registry" not in legacy_ff_payload:
+                    raise AssertionError("legacy FF API route must remain compatible")
                 operator_supplier_code, _, operator_supplier = _opener_text(operator, f"{base_url}{DEFAULT_SHEET_SUPPLIER_UI_PATH}")
                 if operator_supplier_code != 200 or "Реестр заказов" not in operator_supplier:
                     raise AssertionError("operator role must access supplier-only module page")
@@ -399,6 +433,12 @@ def main() -> None:
                         raise AssertionError(f"{expected_role} must retain the full internal shipment read model")
                     if _opener_status(internal, f"{base_url}{invoice_path}") != 200:
                         raise AssertionError(f"{expected_role} must retain invoice download")
+                    internal_warehouse_code, internal_warehouse = _opener_json(
+                        internal,
+                        f"{base_url}{DEFAULT_WAREHOUSES_PATH}/production",
+                    )
+                    if internal_warehouse_code != 200 or "warehouse" not in internal_warehouse:
+                        raise AssertionError(f"{expected_role} must access warehouse read APIs")
                 supplier_status_code, supplier_status_payload = _opener_patch_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
@@ -428,6 +468,12 @@ def main() -> None:
                 )
                 if forbidden_ff_stock_code != 403 or forbidden_ff_stock_payload.get("error") != "forbidden":
                         raise AssertionError("supplier role must not access ФФ stock ledger API")
+                forbidden_warehouse_code, forbidden_warehouse_payload = _opener_json(
+                    supplier,
+                    f"{base_url}{DEFAULT_WAREHOUSES_PATH}/ff",
+                )
+                if forbidden_warehouse_code != 403 or forbidden_warehouse_payload.get("error") != "forbidden":
+                        raise AssertionError("supplier role must not access warehouse balances or provenance")
                 forbidden_ff_export_code, _, _ = _opener_text(
                         supplier,
                         f"{base_url}{DEFAULT_FF_STOCKS_EXPORT_PATH}",

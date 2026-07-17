@@ -16,6 +16,7 @@ related_modules:
   - "packages/adapters/seller_portal_transit_costs.py"
   - "packages/application/fulfillment_services.py"
   - "packages/application/ff_stock_ledger.py"
+  - "packages/application/warehouse_stocks.py"
   - "packages/application/wb_supplies.py"
   - "packages/application/registry_upload_db_backed_runtime.py"
   - "packages/application/registry_upload_http_entrypoint.py"
@@ -585,6 +586,8 @@ This module does not implement:
 - AI logic.
 
 # 12. Own capital movement consumer
+
+The warehouse opening consumer is separate from the cost-engine movement consumer. `warehouse_stocks_block` reads persisted `raw_goods` only: ordinary status `3` (`Отгрузка разрешена`) and its later proven non-final physical stages `4/6` form `В пути: FF → WB`, while planned `2` and final `5` are excluded from that opening warehouse; ordinary final status `5` sent/accepted evidence plus final `Допринято` forms the per-SKU acceptance-discrepancy opening buffer. It stores a one-time immutable quantity snapshot with source row/hash/timestamps and never updates this module's cache, triggers WB sync, or creates FF/cost/capital operations.
 
 Module 45 consumes normalized WB goods/accepted evidence without changing this module's read-only WB boundary. Unknown nmID may remain upstream/cache evidence but atomically blocks FF writeoff, cost allocation and capital movement until authoritative nomenclature exists.
 

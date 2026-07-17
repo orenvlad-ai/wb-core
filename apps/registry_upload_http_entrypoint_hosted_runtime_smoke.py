@@ -59,6 +59,14 @@ class _ShortReadResponse:
 
 
 def main() -> None:
+    ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
+        ["warehouse-ui-flow", "--evidence-dir", "/tmp/wb-core-warehouse-ui-smoke"]
+    )
+    if ui_flow_args.handler is not hosted_runtime.run_warehouse_ui_flow_command:
+        raise AssertionError("hosted runner must expose canonical warehouse-ui-flow command")
+    opening_args = hosted_runtime.build_arg_parser().parse_args(["warehouse-opening-readback"])
+    if opening_args.handler is not hosted_runtime.run_warehouse_opening_command:
+        raise AssertionError("hosted runner must expose canonical warehouse opening commands")
     complete_payload = json.dumps({"rows": ["x" * 256] * 4096}, separators=(",", ":")).encode("utf-8")
     body, truncated, bytes_read = hosted_runtime._read_probe_response_body(
         _ShortReadResponse(complete_payload, chunk_size=64 * 1024)

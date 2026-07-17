@@ -181,6 +181,18 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_warehouses",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/warehouses",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_warehouse_items",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/warehouses/",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_research",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/research/",
