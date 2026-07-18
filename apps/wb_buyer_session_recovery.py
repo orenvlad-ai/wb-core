@@ -631,11 +631,26 @@ def _click_saved_account(surface: Mapping[str, Any]) -> bool:
 
 
 def _settle_after_login_action(config: BuyerRecoveryConfig, page: Any) -> None:
+    stable_url = ""
+    stable_count = 0
     try:
         page.wait_for_load_state("domcontentloaded", timeout=min(15_000, config.session.navigation_timeout_ms))
     except Exception:
         pass
-    page.wait_for_timeout(max(1_000, int(config.session.settle_timeout_ms)))
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(10_000, config.session.navigation_timeout_ms))
+    except Exception:
+        pass
+    deadline = time.monotonic() + max(1.0, config.session.settle_timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        current_url = str(getattr(page, "url", "") or "")
+        if current_url == stable_url and current_url:
+            stable_count += 1
+        else:
+            stable_url, stable_count = current_url, 1
+        if stable_count >= 3:
+            break
+        page.wait_for_timeout(500)
 
 
 def _safe_body_text(page: Any) -> str:
