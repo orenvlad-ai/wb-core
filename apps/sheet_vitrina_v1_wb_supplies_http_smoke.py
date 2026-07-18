@@ -60,6 +60,10 @@ class FakeWbSuppliesSource:
         self.list_calls: list[dict[str, object]] = []
         self.detail_http_errors: dict[str, int] = {}
         self.goods_http_errors: dict[str, int] = {}
+        self.detail_http_failures_remaining: dict[str, int] = {}
+        self.goods_http_failures_remaining: dict[str, int] = {}
+        self.detail_calls: dict[str, int] = {}
+        self.goods_calls: dict[str, int] = {}
         self.warehouse_rows = [
             {"ID": 507, "name": "Коледино"},
             {"ID": 777, "name": "Электросталь"},
@@ -267,12 +271,20 @@ class FakeWbSuppliesSource:
 
     def fetch_supply_details(self, supply_id, *, is_preorder_id=False):
         key = str(supply_id)
+        self.detail_calls[key] = self.detail_calls.get(key, 0) + 1
+        if self.detail_http_failures_remaining.get(key, 0) > 0:
+            self.detail_http_failures_remaining[key] -= 1
+            raise WbSuppliesHttpStatusError(429, "{}")
         if key in self.detail_http_errors:
             raise WbSuppliesHttpStatusError(self.detail_http_errors[key], "{}")
         return self.details[key]
 
     def fetch_supply_goods(self, supply_id, *, limit=1000, offset=0, is_preorder_id=False):
         key = str(supply_id)
+        self.goods_calls[key] = self.goods_calls.get(key, 0) + 1
+        if self.goods_http_failures_remaining.get(key, 0) > 0:
+            self.goods_http_failures_remaining[key] -= 1
+            raise WbSuppliesHttpStatusError(503, "{}")
         if key in self.goods_http_errors:
             raise WbSuppliesHttpStatusError(self.goods_http_errors[key], "{}")
         if key == "1004":
@@ -414,6 +426,27 @@ def main() -> None:
                 or duplicate_sync.get("failed_enrich") != 1
             ):
                 raise AssertionError(f"second incremental sync must refresh active and recent historical rows, got {duplicate_sync}")
+
+            fake_source.list_rows[4]["updatedDate"] = "2026-06-09T14:30:00+03:00"
+            detail_calls_before = fake_source.detail_calls.get("1003", 0)
+            goods_calls_before = fake_source.goods_calls.get("1003", 0)
+            fake_source.detail_http_failures_remaining["1003"] = 2
+            fake_source.goods_http_failures_remaining["1003"] = 2
+            transient_status, transient_payload = _post_json(
+                f"{base_url}{DEFAULT_WB_SUPPLIES_SYNC_PATH}",
+                {"limit": 100, "offset": 0, "enrich_details": True},
+            )
+            transient_sync = transient_payload.get("sync", {})
+            if (
+                transient_status != 200
+                or transient_sync.get("failed_enrich") != 1
+                or fake_source.detail_calls.get("1003", 0) - detail_calls_before != 3
+                or fake_source.goods_calls.get("1003", 0) - goods_calls_before != 3
+            ):
+                raise AssertionError(
+                    "detail/goods transient retry must recover without adding a failed enrichment: "
+                    f"{transient_status} {transient_payload}"
+                )
 
             fake_source.list_rows[4]["updatedDate"] = "2026-06-09T15:00:00+03:00"
             fake_source.goods_http_errors = {"1003": 429}

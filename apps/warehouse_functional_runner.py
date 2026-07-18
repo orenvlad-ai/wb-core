@@ -226,6 +226,7 @@ def _refresh_official_supply_state(
         "active_reconciliation_complete": bool(sync.get("active_reconciliation_complete")),
         "partial_status_slices": bool(sync.get("partial_status_slices")),
         "failed_enrich": int(sync.get("failed_enrich") or 0),
+        "enrichment_failures": list(sync.get("enrichment_failures") or []),
         "warnings": list(sync.get("warnings") or []),
         "record_ff_movements": record_ff_movements,
         "ff_stock_debits": dict(sync.get("ff_stock_debits") or {}),

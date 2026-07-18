@@ -561,6 +561,7 @@ class WbSuppliesBlock:
             "accepted_qty_changed_rows": sync_result["accepted_qty_changed_rows"],
             "enriched": sync_result["enriched"],
             "failed_enrich": sync_result["failed_enrich"],
+            "enrichment_failures": sync_result["enrichment_failures"][:20],
             "deleted_active_rows": len(deleted_active_keys),
             "deleted_active_keys": deleted_active_keys[:50],
             "skipped_historical_absent": skipped_historical_absent,
@@ -1420,6 +1421,7 @@ class WbSuppliesBlock:
             "enriched": 0,
             "failed_enrich": 0,
         }
+        enrichment_failures: list[dict[str, Any]] = []
         for raw_row in raw_rows:
             cache_key = _stable_cache_key(raw_row)
             lookup_id, is_preorder_id = _resolve_upstream_lookup_id(raw_row)
@@ -1488,6 +1490,14 @@ class WbSuppliesBlock:
                     counters["enriched_active_rows"] += 1
             if failed_enrich:
                 counters["failed_enrich"] += 1
+                enrichment_failures.append(
+                    {
+                        "cache_key": cache_key,
+                        "lookup_id": lookup_id,
+                        "status_id": raw_status_id,
+                        "warnings": list(row_warnings[:4]),
+                    }
+                )
             normalized = _normalize_supply_row(
                 raw_list=raw_row,
                 raw_detail=raw_detail if isinstance(raw_detail, Mapping) else None,
@@ -1512,7 +1522,12 @@ class WbSuppliesBlock:
             if not is_new and _numbers_differ(existing_normalized.get("accepted_quantity"), normalized.get("accepted_quantity")):
                 counters["accepted_qty_changed_rows"] += 1
             rows_to_upsert.append(normalized)
-        return {"rows": rows_to_upsert, "touched_cache_keys": [str(row.get("cache_key") or "") for row in rows_to_upsert], **counters}
+        return {
+            "rows": rows_to_upsert,
+            "touched_cache_keys": [str(row.get("cache_key") or "") for row in rows_to_upsert],
+            "enrichment_failures": enrichment_failures,
+            **counters,
+        }
 
     def _fetch_warehouses(self, warnings: list[str]) -> list[Mapping[str, Any]]:
         try:
@@ -1590,7 +1605,9 @@ class WbSuppliesBlock:
         warnings: list[str],
     ) -> Mapping[str, Any] | None:
         try:
-            return self.source.fetch_supply_details(lookup_id, is_preorder_id=is_preorder_id)
+            return _fetch_supply_enrichment_with_retry(
+                lambda: self.source.fetch_supply_details(lookup_id, is_preorder_id=is_preorder_id)
+            )
         except WbSuppliesHttpStatusError as exc:
             if exc.status_code in {401, 403}:
                 raise
@@ -1611,7 +1628,14 @@ class WbSuppliesBlock:
         warnings: list[str],
     ) -> list[Mapping[str, Any]] | None:
         try:
-            return self.source.fetch_supply_goods(lookup_id, limit=1000, offset=0, is_preorder_id=is_preorder_id)
+            return _fetch_supply_enrichment_with_retry(
+                lambda: self.source.fetch_supply_goods(
+                    lookup_id,
+                    limit=1000,
+                    offset=0,
+                    is_preorder_id=is_preorder_id,
+                )
+            )
         except WbSuppliesHttpStatusError as exc:
             if exc.status_code in {401, 403}:
                 raise
@@ -1672,10 +1696,51 @@ def validate_functional_supply_sync(sync: Mapping[str, Any]) -> None:
     if int(sync.get("failed_enrich") or 0) > 0:
         blockers.append("supply_detail_or_goods_enrichment_failed")
     if blockers:
+        failure_summary = _functional_enrichment_failure_summary(sync)
         raise WbSuppliesBlockError(
-            "official WB supply refresh is incomplete: " + ",".join(blockers),
+            "official WB supply refresh is incomplete: "
+            + ",".join(blockers)
+            + ("; enrichment_failures=" + failure_summary if failure_summary else ""),
             http_status=503,
         )
+
+
+def _fetch_supply_enrichment_with_retry(fetcher: Callable[[], Any]) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            return fetcher()
+        except WbSuppliesHttpStatusError as exc:
+            last_error = exc
+            if exc.status_code != 429 and exc.status_code < 500:
+                raise
+        except WbSuppliesTransportError as exc:
+            last_error = exc
+        if attempt < 2:
+            time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise WbSuppliesBlockError("WB supply enrichment fetch failed", http_status=502)
+
+
+def _functional_enrichment_failure_summary(sync: Mapping[str, Any]) -> str:
+    failures = sync.get("enrichment_failures")
+    if not isinstance(failures, list):
+        return ""
+    result: list[str] = []
+    for raw_item in failures[:5]:
+        if not isinstance(raw_item, Mapping):
+            continue
+        lookup_id = str(raw_item.get("lookup_id") or raw_item.get("cache_key") or "unknown")[:80]
+        raw_warnings = raw_item.get("warnings")
+        warnings = raw_warnings if isinstance(raw_warnings, list) else []
+        safe_warnings = [
+            " ".join(str(item).split())[:240]
+            for item in warnings[:2]
+            if str(item).strip()
+        ]
+        result.append(lookup_id + ("[" + " | ".join(safe_warnings) + "]" if safe_warnings else ""))
+    return "; ".join(result)
 
 
 def _normalize_sync_request(payload: Mapping[str, Any]) -> dict[str, Any]:
