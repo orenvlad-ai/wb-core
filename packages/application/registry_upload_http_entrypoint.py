@@ -1348,8 +1348,13 @@ class RegistryUploadHttpEntrypoint:
             launcher_download_path=launcher_download_path,
         )
 
-    def handle_wb_buyer_session_recovery_stop_request(self, *, launcher_download_path: str) -> dict[str, Any]:
-        return self.buyer_session_recovery.stop(launcher_download_path=launcher_download_path)
+    def handle_wb_buyer_session_recovery_stop_request(
+        self,
+        *,
+        launcher_download_path: str,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.buyer_session_recovery.stop(launcher_download_path=launcher_download_path, run_id=run_id)
 
     def handle_wb_buyer_session_recovery_launcher_request(
         self,

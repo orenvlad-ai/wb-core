@@ -21,10 +21,15 @@ if str(ROOT) not in sys.path:
 
 from apps.wb_buyer_session_recovery import (  # noqa: E402
     BuyerRecoveryConfig,
+    _accept_recovery_candidate,
+    _capture_settled_candidate,
+    _click_saved_account,
+    _inspect_login_surface,
     _open_secure_log,
-    _probe_recovery_candidate,
     _spawn,
     _terminate,
+    _terminate_process_group,
+    _write_supervisor_identity,
     _write_status,
     build_macos_launcher_archive,
     stop_recovery,
@@ -91,11 +96,22 @@ def _run_session_and_security_smoke() -> None:
         if restarted["status"] != "valid" or restarted["session_fingerprint"] != valid["session_fingerprint"]:
             raise AssertionError("fingerprint must survive process restart")
 
+        state_payload = json.loads(config.storage_state_path.read_text(encoding="utf-8"))
+        state_payload["cookies"][0]["value"] = "rotated-auth-token"
+        config.storage_state_path.write_text(json.dumps(state_payload), encoding="utf-8")
+        rotated = WbBuyerSessionAdapter(
+            config=config,
+            browser_probe=lambda _path: {"status": "valid", "identity_material": {"userId": "raw-account-id", "session": "rotated"}},
+        ).check_session()
+        if rotated["status"] != "valid" or rotated["session_fingerprint"] != valid["session_fingerprint"]:
+            raise AssertionError("auth/session token rotation for the same stable user must not become wrong_account")
+
+        bound_fingerprint = valid_adapter.stored_fingerprint()
         wrong = WbBuyerSessionAdapter(
             config=config,
             browser_probe=lambda _path: {"status": "valid", "identity_material": {"user_id": "other-account"}},
         ).check_session()
-        if wrong["status"] != "wrong_account":
+        if wrong["status"] != "wrong_account" or valid_adapter.stored_fingerprint() != bound_fingerprint:
             raise AssertionError(f"wrong account must be detected: {wrong}")
         expired = WbBuyerSessionAdapter(
             config=config,
@@ -127,6 +143,40 @@ def _run_session_and_security_smoke() -> None:
         valid_adapter.persist_storage_state_atomically(candidate)
         if stat.S_IMODE(config.storage_state_path.stat().st_mode) != 0o600:
             raise AssertionError("atomic buyer storage save must preserve 0600")
+
+    _run_fingerprint_migration_smoke()
+
+
+def _run_fingerprint_migration_smoke() -> None:
+    with TemporaryDirectory(prefix="wb-buyer-fingerprint-migration-") as tmp:
+        state_dir = Path(tmp)
+        config = WbBuyerSessionConfig(state_dir=state_dir, storage_state_path=state_dir / "storage_state.json")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        config.storage_state_path.write_text(
+            json.dumps({"cookies": [], "origins": [{"origin": "https://www.wildberries.ru", "localStorage": [{"name": "profile", "value": json.dumps({"phone": "private-phone", "user_id": "stable-user"})}]}]}),
+            encoding="utf-8",
+        )
+        adapter = WbBuyerSessionAdapter(config=config)
+        legacy = adapter._fingerprint({"user_id": "stable-user"})
+        config.fingerprint_record_path.write_text(
+            json.dumps({"version": "wb-buyer-account-hmac-sha256-v1", "fingerprint": legacy, "created_at": "2026-07-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        migrated = adapter.prepare_fingerprint_migration()
+        record = json.loads(config.fingerprint_record_path.read_text(encoding="utf-8"))
+        if migrated.get("status") != "ready" or not migrated.get("migrated") or "v2-stable-identity" not in record.get("version", ""):
+            raise AssertionError(f"provable legacy stable identity must migrate safely: {migrated} {record}")
+        if "private-phone" in json.dumps(record):
+            raise AssertionError("fingerprint migration record must not persist raw identity")
+
+        record_before = dict(record)
+        record_before["version"] = "wb-buyer-account-hmac-sha256-v1"
+        record_before["fingerprint"] = adapter._fingerprint({"cookies": [["wildberries.ru", "auth", "rotating-secret"]]})
+        config.fingerprint_record_path.write_text(json.dumps(record_before), encoding="utf-8")
+        unproven = adapter.prepare_fingerprint_migration()
+        after = json.loads(config.fingerprint_record_path.read_text(encoding="utf-8"))
+        if unproven.get("status") != "migration_required" or after.get("fingerprint") != record_before["fingerprint"]:
+            raise AssertionError("unprovable token-derived fingerprint must fail closed without rebinding")
 
 
 def _run_price_extraction_smoke() -> None:
@@ -229,27 +279,34 @@ def _run_launcher_smoke() -> None:
         session = WbBuyerSessionConfig(state_dir=state_dir, storage_state_path=state_dir / "storage_state.json")
         config = BuyerRecoveryConfig(session=session, ssh_destination="wb-core-eu-root")
         state_dir.mkdir(parents=True, exist_ok=True)
+        supervisor = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", "wb_buyer_session_recovery.py", "supervise"],
+            start_new_session=True,
+        )
         _write_status(
             config,
             {
                 "run_id": "buyer-recovery-test",
-                "status": "awaiting_login",
-                "reason": "buyer_login_window_ready",
+                "status": "awaiting_human",
+                "reason": "buyer_sms_required",
                 "started_at": "2026-07-14T00:00:00+00:00",
                 "session": {"status": "missing", "valid": False},
             },
         )
-        config.pid_path.write_text(str(os.getpid()), encoding="utf-8")
+        _write_supervisor_identity(config, pid=supervisor.pid, run_id="buyer-recovery-test")
         secure_log_path = state_dir / "recovery-test.log"
         with _open_secure_log(secure_log_path) as log_handle:
             log_handle.write(b"safe-status-only\n")
         if stat.S_IMODE(secure_log_path.stat().st_mode) != 0o600:
             raise AssertionError("buyer recovery log files must be forced to 0600")
-        archive, filename = build_macos_launcher_archive(
-            config,
-            public_status_url="https://api.selleros.pro/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status",
-            public_operator_url="https://api.selleros.pro/sheet-vitrina-v1/vitrina",
-        )
+        try:
+            archive, filename = build_macos_launcher_archive(
+                config,
+                public_status_url="https://api.selleros.pro/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status",
+                public_operator_url="https://api.selleros.pro/sheet-vitrina-v1/vitrina",
+            )
+        finally:
+            _terminate_process_group(supervisor.pid)
         if not filename.endswith(".zip"):
             raise AssertionError("buyer launcher must be a zip")
         with zipfile.ZipFile(BytesIO(archive)) as zip_file:
@@ -257,8 +314,10 @@ def _run_launcher_smoke() -> None:
         lowered = body.lower()
         if "127.0.0.1:46090" not in body or "ssh -o exitonforwardfailure" not in lowered:
             raise AssertionError("buyer launcher must use the localhost SSH tunnel pattern")
-        if "MAX_POLLS=" not in body or "MISSING_POLLS" not in body or "trap cleanup EXIT" not in body:
-            raise AssertionError("buyer launcher must have bounded lifecycle and tunnel cleanup")
+        if "MAX_POLLS=" not in body or "WB_BUYER_RECOVERY_FINAL=" not in body or "trap cleanup EXIT" not in body:
+            raise AssertionError("buyer launcher must have bounded terminal-status lifecycle and tunnel cleanup")
+        if "status --run-id" not in body or "close_novnc" not in body or "MISSING_POLLS" in body:
+            raise AssertionError("buyer launcher must close by exact recovery status, not only by disappearing port")
         if "storage_state" in lowered or "raw-cookie" in lowered or "authorization" in lowered or "otp" in lowered:
             raise AssertionError("buyer launcher must not contain persistent credentials or storage state")
 
@@ -268,16 +327,26 @@ def _run_recovery_lifecycle_smoke() -> None:
         url = "https://www.wildberries.ru/lk"
 
         def __init__(self) -> None:
-            self.waits: list[int] = []
+            self.events: list[str] = []
+            self.wb_recovery_surface = {"state": "authenticated", "reason": "buyer_visible_account_opened"}
 
         def wait_for_timeout(self, milliseconds: int) -> None:
-            self.waits.append(milliseconds)
+            self.events.append(f"wait:{milliseconds}")
+
+    class FakeContext:
+        def __init__(self, events: list[str]) -> None:
+            self.events = events
+
+        def storage_state(self, *, path: str) -> None:
+            self.events.append("snapshot")
+            Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
 
     class FakeAdapter:
         def __init__(self, result: Mapping[str, Any]) -> None:
             self.result = dict(result)
 
         def check_session(self, **_kwargs: Any) -> dict[str, Any]:
+            page.events.append("probe")
             return dict(self.result)
 
     with TemporaryDirectory(prefix="wb-buyer-recovery-lifecycle-") as tmp:
@@ -285,17 +354,56 @@ def _run_recovery_lifecycle_smoke() -> None:
         session = WbBuyerSessionConfig(state_dir=state_dir, storage_state_path=state_dir / "storage_state.json")
         config = BuyerRecoveryConfig(session=session, poll_sec=0.75)
         state_dir.mkdir(parents=True, exist_ok=True)
-        config.candidate_path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
         page = FakePage()
         fresh = FakeAdapter({"status": "valid", "valid": True, "account_confirmed": True})
-        recovered = _probe_recovery_candidate(
+        recovered = _capture_settled_candidate(
             config,
             FakeAdapter({"status": "login_redirect", "valid": False}),
+            FakeContext(page.events),
             page,
             fresh_adapter_factory=lambda **_kwargs: fresh,
         )
-        if recovered.get("status") != "valid" or page.waits != [750]:
-            raise AssertionError("post-login candidate must receive one settled fresh validation")
+        if recovered.get("status") != "valid" or page.events != ["wait:8000", "snapshot", "probe"]:
+            raise AssertionError(f"candidate must be captured after settle and then independently probed: {page.events}")
+
+        if _inspect_login_surface(page).get("state") != "authenticated":
+            raise AssertionError("visible authenticated /lk surface must be classified")
+        page.wb_recovery_surface = {"state": "human", "reason": "buyer_sms_required"}
+        if _inspect_login_surface(page).get("reason") != "buyer_sms_required":
+            raise AssertionError("SMS surface must stay awaiting_human")
+        clicked: list[bool] = []
+        class FakeButton:
+            def click(self, **_kwargs: Any) -> None:
+                clicked.append(True)
+        if not _click_saved_account({"candidate": FakeButton()}) or clicked != [True]:
+            raise AssertionError("one saved account login action must be clicked automatically")
+
+        config.session.storage_state_path.write_text("old-canonical-state", encoding="utf-8")
+        config.candidate_path.write_text("new-candidate-state", encoding="utf-8")
+        _write_status(config, {"run_id": "rollback", "status": "saving_session", "reason": "buyer_session_saving"})
+        class FailedFinalProbeAdapter:
+            def persist_storage_state_atomically(self, candidate_path: Path) -> None:
+                config.session.storage_state_path.write_text(candidate_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+            def check_session(self, **_kwargs: Any) -> Mapping[str, Any]:
+                return {"status": "expired", "valid": False, "reason": "buyer_login_required"}
+        failed = _accept_recovery_candidate(
+            config,
+            FailedFinalProbeAdapter(),  # type: ignore[arg-type]
+            {"status": "valid", "valid": True},
+        )
+        if failed != 1 or config.session.storage_state_path.read_text(encoding="utf-8") != "old-canonical-state":
+            raise AssertionError("failed final probe must atomically restore the prior canonical storage state")
+
+        config.session.storage_state_path.unlink()
+        config.candidate_path.write_text("first-candidate-state", encoding="utf-8")
+        failed_without_prior = _accept_recovery_candidate(
+            config,
+            FailedFinalProbeAdapter(),  # type: ignore[arg-type]
+            {"status": "valid", "valid": True},
+        )
+        if failed_without_prior != 1 or config.session.storage_state_path.exists():
+            raise AssertionError("failed first binding must not leave an unvalidated canonical storage state")
 
         child_log = state_dir / "spawn-child.log"
         child = _spawn([sys.executable, "-c", "import time; time.sleep(30)"], child_log)
@@ -314,7 +422,10 @@ def _run_recovery_lifecycle_smoke() -> None:
             f"open({str(child_pid_path)!r},'w').write(str(p.pid));"
             "time.sleep(60)"
         )
-        parent = subprocess.Popen([sys.executable, "-c", parent_code], start_new_session=True)
+        parent = subprocess.Popen(
+            [sys.executable, "-c", parent_code, "wb_buyer_session_recovery.py", "supervise"],
+            start_new_session=True,
+        )
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not child_pid_path.exists():
             time.sleep(0.05)
@@ -322,13 +433,13 @@ def _run_recovery_lifecycle_smoke() -> None:
             parent.kill()
             raise AssertionError("stop lifecycle fixture did not start")
         nested_pid = int(child_pid_path.read_text(encoding="utf-8"))
-        config.pid_path.write_text(str(parent.pid), encoding="utf-8")
+        _write_supervisor_identity(config, pid=parent.pid, run_id="lifecycle")
         config.candidate_path.write_text("candidate-secret", encoding="utf-8")
         _write_status(
             config,
-            {"run_id": "lifecycle", "status": "awaiting_login", "reason": "buyer_login_window_ready"},
+            {"run_id": "lifecycle", "status": "awaiting_human", "reason": "buyer_sms_required"},
         )
-        stop_recovery(config)
+        stop_recovery(config, requested_run_id="lifecycle")
         parent.wait(timeout=5)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and Path(f"/proc/{nested_pid}").exists():

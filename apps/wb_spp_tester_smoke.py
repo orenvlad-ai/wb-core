@@ -241,11 +241,14 @@ class FakeBuyerSource:
         session_status: str = "valid",
         stale: bool = False,
         raise_on_price: bool = False,
+        auto_recovery_status: str = "",
     ) -> None:
         self.prices = prices
         self.session_status = session_status
         self.stale = stale
         self.raise_on_price = raise_on_price
+        self.auto_recovery_status = auto_recovery_status
+        self.ensure_calls = 0
         self.reads = 0
 
     def check_session(self) -> Mapping[str, Any]:
@@ -259,6 +262,21 @@ class FakeBuyerSource:
             "session_fingerprint": "a" * 64 if self.session_status == "valid" else "",
             "account_confirmed": self.session_status == "valid",
         }
+
+    def ensure_session(self, *, auto_recover: bool = True) -> Mapping[str, Any]:
+        self.ensure_calls += 1
+        if auto_recover and self.auto_recovery_status == "valid":
+            self.session_status = "valid"
+        if auto_recover and self.auto_recovery_status == "action_required":
+            return {
+                "status": "action_required",
+                "status_label": "Нужно действие человека",
+                "valid": False,
+                "reason": "buyer_sms_required",
+                "action": "Введите SMS-код",
+                "recovery": {"run_id": "buyer-recovery-action", "status": "awaiting_human", "running": True},
+            }
+        return self.check_session()
 
     def fetch_authenticated_buyer_price(self, nm_id: int) -> Mapping[str, Any]:
         self.reads += 1
@@ -316,36 +334,49 @@ class SessionLossBuyerSource(FakeBuyerSource):
 
 
 class FakeBuyerRecoveryController:
-    def __init__(self) -> None:
+    def __init__(self, *, auto_complete: bool = False, on_complete: Any = None) -> None:
         self.running = False
+        self.start_calls = 0
+        self.launcher_calls = 0
+        self.auto_complete = auto_complete
+        self.on_complete = on_complete
+        self.status = "stopped"
 
     def read_status(self, *, launcher_download_path: str, run_id: str | None = None, with_probe: bool = True) -> Mapping[str, Any]:
         return self._payload(launcher_download_path)
 
     def start(self, *, replace: bool, launcher_download_path: str) -> Mapping[str, Any]:
-        self.running = True
+        self.start_calls += 1
+        self.running = not self.auto_complete
+        self.status = "awaiting_human" if self.running else "completed"
+        if self.auto_complete and callable(self.on_complete):
+            self.on_complete()
         return self._payload(launcher_download_path)
 
-    def stop(self, *, launcher_download_path: str) -> Mapping[str, Any]:
+    def stop(self, *, launcher_download_path: str, run_id: str | None = None) -> Mapping[str, Any]:
+        del run_id
         self.running = False
+        self.status = "stopped"
         return self._payload(launcher_download_path)
 
     def build_launcher_archive(self, *, public_status_url: str, public_operator_url: str) -> tuple[bytes, str]:
+        self.launcher_calls += 1
         return b"safe-launcher", "wb-buyer-session-test.zip"
 
     def _payload(self, launcher_download_path: str) -> Mapping[str, Any]:
         return {
             "contract_name": "wb_buyer_session_recovery_v1",
             "run_id": "buyer-recovery-test",
-            "status": "awaiting_login" if self.running else "stopped",
-            "status_label": "Нужно войти" if self.running else "Остановлена",
+            "status": self.status,
+            "stage": self.status,
+            "status_label": "Ждём действие человека" if self.running else ("Установлена" if self.status == "completed" else "Остановлена"),
             "status_tone": "warning" if self.running else "neutral",
             "running": self.running,
             "run_is_final": not self.running,
             "launcher_ready": self.running,
             "can_download_launcher": self.running,
             "launcher_download_path": launcher_download_path if self.running else "",
-            "session": {"status": "missing", "valid": False},
+            "session": {"status": "valid" if self.status == "completed" else "missing", "valid": self.status == "completed"},
         }
 
 
@@ -472,12 +503,25 @@ def _run_backend_unit_smokes() -> None:
         try:
             invalid_session_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")
         except WbSppTesterError as exc:
-            if exc.payload.get("reason") != "buyer_session_invalid" or exc.payload.get("action") != "Установить сессию":
+            if exc.payload.get("reason") != "buyer_session_invalid" or not exc.payload.get("action"):
                 raise
         else:
             raise AssertionError("missing buyer session must block before all seller writes")
         if invalid_session_source.upload_payloads:
             raise AssertionError("missing buyer session must not fall back to anonymous or write a seller price")
+
+        recovered_prices = FakeSppPricesSource()
+        recovered_buyer = FakeBuyerSource(recovered_prices, session_status="expired", auto_recovery_status="valid")
+        recovered_block = _build_block(
+            runtime,
+            runtime_dir / "buyer_auto_recovered",
+            recovered_prices,
+            FakePublicSource(recovered_prices),
+            buyer_source=recovered_buyer,
+        )
+        recovered_job = recovered_block.start(_start_payload(700, 900, max_measurements=3), actor="smoke")["job"]
+        if recovered_buyer.ensure_calls != 1 or not recovered_job["restore"]["restored"] or not recovered_prices.upload_payloads:
+            raise AssertionError("manual SPP preflight must auto-recover a recoverable buyer session before writes")
 
         loss_prices = FakeSppPricesSource()
         loss_buyer = SessionLossBuyerSource(loss_prices)
@@ -528,6 +572,39 @@ def _run_backend_unit_smokes() -> None:
             raise AssertionError(f"scheduled invalid session must produce observable skip: {tick}")
         if schedule_prices.upload_payloads:
             raise AssertionError("scheduled invalid session must not write seller prices")
+
+        action_prices = FakeSppPricesSource()
+        action_buyer = FakeBuyerSource(action_prices, auto_recovery_status="action_required")
+        action_clock = MutableClock(NOW)
+        action_block = _build_block(
+            runtime,
+            runtime_dir / "buyer_schedule_action_required",
+            action_prices,
+            FakePublicSource(action_prices),
+            clock=action_clock,
+            buyer_source=action_buyer,
+        )
+        action_schedule = action_block.save_schedule(
+            {
+                "enabled": True,
+                "nmID": PRIMARY_NM,
+                "range_min_discounted": 700,
+                "range_max_discounted": 900,
+                "precision_rub": 2,
+                "max_measurements": 3,
+                "local_time_hhmm": "12:01",
+                "timezone": "Asia/Yekaterinburg",
+                "future_live_price_changes_confirmed": True,
+            },
+            actor="smoke",
+        )["schedule"]
+        action_buyer.session_status = "expired"
+        action_clock.value = datetime.fromisoformat(action_schedule["next_run_at"]) + timedelta(minutes=1)
+        action_tick = action_block.run_due_schedule_tick()
+        if action_tick["status"] != "skipped" or action_tick["job"]["result_status"] != "action_required":
+            raise AssertionError(f"scheduled SMS preflight must create action_required: {action_tick}")
+        if action_prices.upload_payloads:
+            raise AssertionError("scheduled action_required must happen before every seller write")
 
         stale_source = FakeSppPricesSource()
         stale_block = _build_block(runtime, runtime_dir / "stale", stale_source, FakePublicSource(stale_source, stale=True))
@@ -970,7 +1047,7 @@ def _run_http_smoke() -> None:
             if status != 200 or not recovery_start.get("launcher_ready"):
                 raise AssertionError(f"buyer recovery start route failed: {status} {recovery_start}")
             status, recovery_status = _get_json(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH}?probe=false")
-            if status != 200 or recovery_status.get("status") != "awaiting_login":
+            if status != 200 or recovery_status.get("status") != "awaiting_human":
                 raise AssertionError(f"buyer recovery status route failed: {status} {recovery_status}")
             with request.urlopen(f"{base_url}{DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH}", timeout=10) as response:
                 if response.status != 200 or response.read() != b"safe-launcher":

@@ -1256,7 +1256,7 @@ def _build_handler(
             if parsed.path == DEFAULT_WB_BUYER_RECOVERY_START_PATH:
                 try:
                     payload = _load_optional_request_payload(self)
-                    replace = _resolve_replace_requested(payload)
+                    replace = _resolve_replace_requested(payload, default=False)
                     result = entrypoint.handle_wb_buyer_session_recovery_start_request(
                         launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
                         replace=replace,
@@ -1276,9 +1276,17 @@ def _build_handler(
 
             if parsed.path == DEFAULT_WB_BUYER_RECOVERY_STOP_PATH:
                 try:
+                    payload = _load_optional_request_payload(self)
+                    raw_run_id = payload.get("run_id")
+                    if raw_run_id is not None and not isinstance(raw_run_id, str):
+                        raise ValueError("run_id must be a string when provided")
                     result = entrypoint.handle_wb_buyer_session_recovery_stop_request(
                         launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+                        run_id=str(raw_run_id or "") or None,
                     )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
                 except Exception:
                     _write_json_response(
                         self,
@@ -4907,9 +4915,9 @@ def _resolve_auto_trigger_source(payload: Mapping[str, Any]) -> str:
     return raw.strip()[:80]
 
 
-def _resolve_replace_requested(payload: Mapping[str, Any]) -> bool:
+def _resolve_replace_requested(payload: Mapping[str, Any], *, default: bool = True) -> bool:
     if "replace" not in payload:
-        return True
+        return bool(default)
     raw = payload["replace"]
     if not isinstance(raw, bool):
         raise ValueError("replace must be boolean when provided")

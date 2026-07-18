@@ -13,6 +13,9 @@ WB_BUYER_SESSION_BLOCKING_STATUSES = {
     "wrong_account",
     "login_redirect",
     "security_challenge",
+    "migration_required",
+    "action_required",
+    "recovery_pending",
     "probe_error",
     "recovery_running",
 }

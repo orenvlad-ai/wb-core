@@ -16886,7 +16886,7 @@
       if (!state.prices.loaded && !state.prices.loading) {
         loadPricesGoods({force: false});
       } else if (state.prices.activeSubtab === "spp-test") {
-        ensureSppTestReady();
+        ensureSppTestReady({refreshBuyerSession: true});
       }
     }
 
@@ -16923,7 +16923,7 @@
         state.prices.loading = false;
         renderPricesTable();
         if (state.prices.activeSubtab === "spp-test") {
-          renderSppTest();
+          ensureSppTestReady({refreshBuyerSession: true});
         }
       }
     }
@@ -16960,11 +16960,11 @@
         return;
       }
       if (event.target.closest("[data-wb-buyer-session-check]")) {
-        loadWbBuyerSession({force: true});
+        loadWbBuyerSession({force: true, autoRecover: true});
         return;
       }
       if (event.target.closest("[data-wb-buyer-session-install]")) {
-        startWbBuyerRecovery();
+        startWbBuyerRecovery({replace: false});
         return;
       }
       if (event.target.closest("[data-spp-test-start]")) {
@@ -16998,7 +16998,7 @@
       state.prices.activeSubtab = normalized;
       syncPricesSubtabs();
       if (normalized === "spp-test") {
-        ensureSppTestReady();
+        ensureSppTestReady({refreshBuyerSession: true});
       }
     }
 
@@ -17013,11 +17013,12 @@
       });
     }
 
-    function ensureSppTestReady() {
+    function ensureSppTestReady(options) {
       renderSppTestSelector();
       renderSppTest();
-      if (!state.prices.sppTest.buyerSessionLoaded) {
-        loadWbBuyerSession({force: false});
+      if ((!state.prices.sppTest.buyerSessionLoaded || (options && options.refreshBuyerSession))
+          && !state.prices.sppTest.buyerSessionLoading) {
+        resumeWbBuyerSessionLifecycle();
       }
       loadSppTestStatus({silent: true});
       if (!state.prices.sppTest.scheduleLoaded) {
@@ -17026,6 +17027,42 @@
       if (!state.prices.sppTest.historyLoaded) {
         loadSppHistory({reset: true});
       }
+    }
+
+    async function resumeWbBuyerSessionLifecycle() {
+      if (state.prices.sppTest.buyerRecoveryStarting || state.prices.sppTest.buyerSessionLoading) {
+        return;
+      }
+      if (!WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path) {
+        return loadWbBuyerSession({force: false, autoRecover: true});
+      }
+      state.prices.sppTest.buyerRecoveryStarting = true;
+      state.prices.sppTest.buyerSessionNote = "Восстанавливаем lifecycle текущей сессии…";
+      renderWbBuyerSession();
+      try {
+        const url = new URL(WEB_VITRINA_CONFIG.wb_buyer_recovery_status_path, window.location.origin);
+        url.searchParams.set("probe", "false");
+        const response = await fetch(url.toString(), {credentials: "same-origin"});
+        const payload = await readJsonResponse(response, "non-json response from buyer recovery status route");
+        if (!response.ok) throw new Error(payload && payload.error ? payload.error : "buyer recovery status returned " + response.status);
+        state.prices.sppTest.buyerRecovery = payload || null;
+        state.prices.sppTest.buyerRecoveryLauncherDownloaded = false;
+        if (payload && payload.running) {
+          state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload);
+          if (payload.launcher_ready) downloadWbBuyerRecoveryLauncher();
+          pollWbBuyerRecovery(false);
+          return;
+        }
+        if (payload && payload.status === "completed") {
+          state.prices.sppTest.buyerSession = payload.session || null;
+        }
+      } catch (error) {
+        state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
+      } finally {
+        state.prices.sppTest.buyerRecoveryStarting = false;
+        renderWbBuyerSession();
+      }
+      return loadWbBuyerSession({force: true, autoRecover: true});
     }
 
     async function loadWbBuyerSession(options) {
@@ -17043,9 +17080,11 @@
         }
         state.prices.sppTest.buyerSession = payload || null;
         state.prices.sppTest.buyerSessionLoaded = true;
-        state.prices.sppTest.buyerSessionNote = payload && payload.valid ? "Сессия подтверждена." : "Установить сессию перед запуском проверки.";
+        state.prices.sppTest.buyerSessionNote = payload && payload.valid ? "Сессия подтверждена." : "Сессия недействительна. Запускаем безопасное автовосстановление…";
         if (payload && payload.valid && state.prices.sppTest.selectedNmId) {
-          loadSppTestBaseline();
+          loadSppBaseline(state.prices.sppTest.selectedNmId);
+        } else if (payload && !payload.valid && (!options || options.autoRecover !== false)) {
+          window.setTimeout(function() { startWbBuyerRecovery({replace: false}); }, 0);
         }
       } catch (error) {
         state.prices.sppTest.buyerSession = {status: "probe_error", valid: false, status_label: "Ошибка проверки"};
@@ -17058,30 +17097,28 @@
       }
     }
 
-    async function startWbBuyerRecovery() {
+    async function startWbBuyerRecovery(options) {
       if (!WEB_VITRINA_CONFIG.wb_buyer_recovery_start_path || state.prices.sppTest.buyerRecoveryStarting) {
         return;
       }
       state.prices.sppTest.buyerRecoveryStarting = true;
       state.prices.sppTest.buyerRecoveryLauncherDownloaded = false;
       state.prices.sppTest.buyerSessionError = "";
-      state.prices.sppTest.buyerSessionNote = "Запускаем защищённое окно входа…";
+      state.prices.sppTest.buyerSessionNote = "Запускаем автоматическое восстановление…";
       renderWbBuyerSession();
       try {
         const response = await fetch(WEB_VITRINA_CONFIG.wb_buyer_recovery_start_path, {
           method: "POST",
           credentials: "same-origin",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({replace: true})
+          body: JSON.stringify({replace: !!(options && options.replace)})
         });
         const payload = await readJsonResponse(response, "non-json response from buyer recovery start route");
         if (!response.ok) {
           throw new Error(payload && payload.error ? payload.error : "buyer recovery start returned " + response.status);
         }
         state.prices.sppTest.buyerRecovery = payload || null;
-        state.prices.sppTest.buyerSessionNote = payload && payload.launcher_ready
-          ? "Launcher готов. Откройте загруженный файл и войдите в Wildberries."
-          : "Окно входа готовится…";
+        state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload || {});
         if (payload && payload.launcher_ready) downloadWbBuyerRecoveryLauncher();
         pollWbBuyerRecovery(true);
       } catch (error) {
@@ -17117,7 +17154,10 @@
             state.prices.sppTest.buyerSessionNote = "Покупательская сессия установлена.";
             loadWbBuyerSession({force: true});
           } else if (payload && payload.running) {
+            state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload);
             pollWbBuyerRecovery(false);
+          } else if (payload && payload.run_is_final) {
+            state.prices.sppTest.buyerSessionNote = wbBuyerRecoveryMessage(payload);
           }
         } catch (error) {
           state.prices.sppTest.buyerSessionError = String(error && error.message ? error.message : error);
@@ -17126,6 +17166,21 @@
           renderSppTest();
         }
       }, force ? 1200 : 2500);
+    }
+
+    function wbBuyerRecoveryMessage(payload) {
+      const status = String((payload && (payload.stage || payload.status)) || "");
+      if (status === "checking_session" || status === "starting") return "Проверяем покупательскую сессию…";
+      if (status === "automatic_login") return "Выполняем автоматический вход через сохранённый аккаунт…";
+      if (status === "stabilizing_session") return "Ждём стабилизации авторизации…";
+      if (status === "saving_session") return "Сохраняем подтверждённую сессию…";
+      if (status === "validating_session") return "Проверяем сохранённую сессию независимым probe…";
+      if (status === "awaiting_human") return String(payload.human_action || "Завершите вход в защищённом окне Wildberries.");
+      if (status === "completed") return "Покупательская сессия действует.";
+      if (status === "migration_required") return "Нельзя безопасно подтвердить прежнюю привязку аккаунта. Требуется ручная проверка.";
+      if (status === "timeout") return "Автовосстановление завершилось по timeout. Можно безопасно повторить.";
+      if (status === "error") return "Автовосстановление завершилось контролируемой ошибкой.";
+      return "Проверяем состояние восстановления…";
     }
 
     function downloadWbBuyerRecoveryLauncher() {
@@ -17146,7 +17201,7 @@
       link.click();
       link.remove();
       state.prices.sppTest.buyerRecoveryLauncherDownloaded = true;
-      state.prices.sppTest.buyerSessionNote = "Launcher скачан. Откройте его и войдите в Wildberries.";
+      state.prices.sppTest.buyerSessionNote = String(recovery.human_action || "Откройте скачанный защищённый launcher и завершите вход в Wildberries.");
       renderWbBuyerSession();
     }
 
@@ -17154,10 +17209,14 @@
       const session = state.prices.sppTest.buyerSession || {};
       const recovery = state.prices.sppTest.buyerRecovery || {};
       const status = String(session.status || "");
-      const label = state.prices.sppTest.buyerSessionLoading ? "Проверка…" : (session.status_label || (status === "valid" ? "Действует" : "Не проверена"));
+      const recoveryStatus = String(recovery.stage || recovery.status || "");
+      const recoveryActive = !!recovery.running || ["saving_session", "validating_session"].includes(recoveryStatus);
+      const label = state.prices.sppTest.buyerSessionLoading
+        ? "Проверяем сессию"
+        : (recoveryActive ? wbBuyerRecoveryStatusLabel(recovery) : (session.status_label || (status === "valid" ? "Действует" : "Не проверена")));
       if (wbBuyerSessionStateNode) {
         wbBuyerSessionStateNode.textContent = label;
-        wbBuyerSessionStateNode.className = "prices-badge " + (status === "valid" ? "success" : (recovery.running ? "warning" : "error"));
+        wbBuyerSessionStateNode.className = "prices-badge " + (status === "valid" && !recoveryActive ? "success" : (recoveryActive ? "warning" : "error"));
       }
       if (wbBuyerSessionMetaNode) {
         wbBuyerSessionMetaNode.innerHTML = [
@@ -17172,6 +17231,23 @@
       }
       if (wbBuyerSessionNoteNode) wbBuyerSessionNoteNode.textContent = state.prices.sppTest.buyerSessionNote || "";
       if (wbBuyerSessionErrorNode) wbBuyerSessionErrorNode.textContent = state.prices.sppTest.buyerSessionError || "";
+    }
+
+    function wbBuyerRecoveryStatusLabel(payload) {
+      const status = String((payload && (payload.stage || payload.status)) || "");
+      if (status === "checking_session" || status === "starting") return "Проверяем сессию";
+      if (status === "automatic_login") return "Выполняем автоматический вход";
+      if (status === "stabilizing_session") return "Стабилизируем авторизацию";
+      if (status === "saving_session") return "Сохраняем сессию";
+      if (status === "validating_session") return "Проверяем сохранённую сессию";
+      if (status === "awaiting_human") {
+        return String(payload.reason || "") === "buyer_account_fingerprint_mismatch" ? "Другой аккаунт" : "Ждём SMS/действие";
+      }
+      if (status === "completed") return "Действует";
+      if (status === "migration_required") return "Нужно подтверждение аккаунта";
+      if (status === "timeout") return "Recovery timeout";
+      if (status === "error") return "Ошибка recovery";
+      return String(payload.status_label || "Восстановление");
     }
 
     function renderSppTestSelector() {
