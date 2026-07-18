@@ -269,6 +269,39 @@ def run_warehouse_ui_flow(
             timeout=60_000,
         )
         _assert("tab=warehouses" in page.url and "warehouse=ff" in page.url, "legacy FF transition")
+        legacy_ff_expected = next(
+            item for item in warehouse_evidence if item.get("warehouse_key") == "ff"
+        )
+        legacy_ff_document = page.locator(
+            f'[data-warehouse-document-id="{legacy_ff_expected["document_id"]}"]'
+        )
+        legacy_ff_document.wait_for(timeout=60_000)
+        legacy_summary_values = page.locator(
+            "[data-warehouse-summary] .warehouse-summary-value"
+        ).all_inner_texts()
+        _assert(len(legacy_summary_values) == 4, "legacy FF transition: four loaded summary values")
+        _assert(
+            _visible_decimal(legacy_summary_values[0])
+            == Decimal(str(legacy_ff_expected["sku_count"])),
+            "legacy FF transition: loaded SKU count",
+        )
+        _assert(
+            _visible_decimal(legacy_summary_values[1])
+            == Decimal(str(legacy_ff_expected["total_quantity"])),
+            "legacy FF transition: loaded total quantity",
+        )
+        _assert(legacy_summary_values[2].strip() == "—", "legacy FF transition: capital dash")
+        _assert(legacy_summary_values[3].strip() == "—", "legacy FF transition: cost dash")
+        _assert(
+            "Количество зафиксировано, стоимость не задана"
+            in page.locator("[data-warehouse-status]").inner_text(),
+            "legacy FF transition: loaded quantity-only status",
+        )
+        _assert(
+            page.locator("[data-warehouse-balance-row]").count()
+            == int(legacy_ff_expected["balance_rows"]),
+            "legacy FF transition: loaded balance rows",
+        )
         legacy_screenshot = evidence_dir / "warehouse_legacy_ff_transition.png"
         page.screenshot(path=str(legacy_screenshot), full_page=False)
         screenshots.append(str(legacy_screenshot))
@@ -301,6 +334,14 @@ def run_warehouse_ui_flow(
         "cutover": dict(expected_readback.get("cutover") or {}),
         "warehouses": warehouse_evidence,
         "legacy_ff_transition": True,
+        "legacy_ff_reconciliation": {
+            "document_id": str(legacy_ff_expected["document_id"]),
+            "sku_count": int(legacy_ff_expected["sku_count"]),
+            "total_quantity": str(legacy_ff_expected["total_quantity"]),
+            "balance_rows": int(legacy_ff_expected["balance_rows"]),
+            "economics_are_dashes": True,
+            "loaded_before_screenshot": True,
+        },
         "server_errors": server_errors,
         "unexpected_server_errors": unexpected_server_errors,
         "page_errors": page_errors,

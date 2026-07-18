@@ -72,6 +72,23 @@ def main() -> None:
                     ),
                 )
                 _assert(result.get("status") == "ok", "browser flow status")
+                legacy_ff = result.get("legacy_ff_reconciliation") or {}
+                ff_evidence = next(
+                    item for item in result.get("warehouses") or [] if item.get("warehouse_key") == "ff"
+                )
+                _assert(result.get("legacy_ff_transition") is True, "legacy FF transition status")
+                _assert(legacy_ff.get("loaded_before_screenshot") is True, "legacy FF loaded evidence")
+                _assert(legacy_ff.get("document_id") == ff_evidence.get("document_id"), "legacy FF document")
+                _assert(legacy_ff.get("sku_count") == ff_evidence.get("sku_count"), "legacy FF SKU count")
+                _assert(
+                    legacy_ff.get("total_quantity") == ff_evidence.get("total_quantity"),
+                    "legacy FF total quantity",
+                )
+                _assert(
+                    legacy_ff.get("balance_rows") == ff_evidence.get("balance_rows"),
+                    "legacy FF balance rows",
+                )
+                _assert(legacy_ff.get("economics_are_dashes") is True, "legacy FF NULL economics")
             finally:
                 server.shutdown()
                 server.server_close()
