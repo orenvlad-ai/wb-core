@@ -459,7 +459,12 @@ def _capture_settled_candidate(
 ) -> dict[str, Any]:
     del adapter
     page.wait_for_timeout(max(1_000, int(config.session.settle_timeout_ms)))
-    context.storage_state(path=str(config.candidate_path))
+    try:
+        context.storage_state(path=str(config.candidate_path), indexed_db=True)
+    except TypeError:
+        # Older Playwright runtimes do not expose indexed_db; retain the
+        # cookie/localStorage snapshot rather than failing recovery outright.
+        context.storage_state(path=str(config.candidate_path))
     os.chmod(config.candidate_path, 0o600)
     return fresh_adapter_factory(config=config.session).check_session(
         storage_state_path=config.candidate_path,
