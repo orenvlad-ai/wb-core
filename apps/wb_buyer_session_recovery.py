@@ -567,20 +567,32 @@ def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
         "этим аккаунтом",
         "продолжить как",
         "войти как",
+        "аккаунт",
+        "профиль",
     )
     body_has_account_marker = any(marker in body.lower() for marker in account_markers)
     for index in range(count):
         item = locator.nth(index)
         try:
             text = " ".join(str(item.inner_text(timeout=500) or "").split()).lower()
+            aria_label = " ".join(str(item.get_attribute("aria-label") or "").split()).lower()
+            title = " ".join(str(item.get_attribute("title") or "").split()).lower()
+            action_text = " ".join(value for value in (text, aria_label, title) if value)
             visible = bool(item.is_visible())
             enabled = bool(item.is_enabled())
         except Exception:
             continue
-        is_saved_account_action = (
-            text in {"войти", "войти под этим аккаунтом"}
-            and (text != "войти" or body_has_account_marker)
-        ) or any(marker in text for marker in ("войти под этим аккаунтом", "продолжить как", "войти как"))
+        is_saved_account_action = action_text in {"войти", "продолжить", "далее"} or any(
+            marker in action_text
+            for marker in (
+                "войти под этим аккаунтом",
+                "продолжить как",
+                "войти как",
+                "войти через аккаунт",
+            )
+        )
+        if action_text in {"продолжить", "далее"} and not body_has_account_marker:
+            is_saved_account_action = False
         if visible and enabled and is_saved_account_action:
             result.append(item)
     return result

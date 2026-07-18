@@ -391,6 +391,9 @@ def _run_recovery_lifecycle_smoke() -> None:
             def is_enabled(self) -> bool:
                 return True
 
+            def get_attribute(self, name: str) -> str:
+                return self.text if name == "aria-label" else ""
+
         class FakeLoginLocator:
             def __init__(self, items: list[FakeLoginButton]) -> None:
                 self.items = items
