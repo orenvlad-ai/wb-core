@@ -22,6 +22,9 @@ from packages.business_time import business_date_iso
 from packages.contracts.stocks_block import StocksRequest
 
 
+WB_OTHER_WAREHOUSE_NAME = "остальные"
+
+
 class StocksSource(Protocol):
     """Источник snapshot-данных для application-слоя."""
 
@@ -325,7 +328,7 @@ class HttpBackedStocksSource:
         offset = 0
         page_offsets: list[int] = []
         full_page_digests: set[str] = set()
-        row_identities: set[tuple[int, int, int]] = set()
+        row_identities: set[tuple[int, int, int, str, str]] = set()
         requested_set = set(requested_nm_ids)
         seller_key = _seller_cache_key(base_url=base_url, token=token)
         while True:
@@ -372,7 +375,7 @@ class HttpBackedStocksSource:
         item: Mapping[str, Any],
         *,
         requested_nm_ids: set[int],
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, str, str]:
         nm_id = item.get("nmId")
         chrt_id = item.get("chrtId")
         warehouse_id = item.get("warehouseId")
@@ -382,7 +385,16 @@ class HttpBackedStocksSource:
             raise RuntimeError(f"official stocks request returned unexpected nmId {nm_id}")
         if not isinstance(chrt_id, int) or isinstance(chrt_id, bool) or chrt_id <= 0:
             raise RuntimeError(f"official stocks request returned invalid chrtId for nmId {nm_id}")
-        if not isinstance(warehouse_id, int) or isinstance(warehouse_id, bool) or warehouse_id <= 0:
+        warehouse_name = str(item.get("warehouseName") or "").strip()
+        region_name = str(item.get("regionName") or "").strip()
+        warehouse_id_is_integer = isinstance(warehouse_id, int) and not isinstance(warehouse_id, bool)
+        is_other_bucket = (
+            warehouse_id_is_integer
+            and warehouse_id == 0
+            and warehouse_name.casefold() == WB_OTHER_WAREHOUSE_NAME
+            and bool(region_name)
+        )
+        if not warehouse_id_is_integer or warehouse_id < 0 or (warehouse_id == 0 and not is_other_bucket):
             row_digest = hashlib.sha256(
                 json.dumps(
                     item,
@@ -429,7 +441,9 @@ class HttpBackedStocksSource:
                 raise RuntimeError(
                     f"official stocks request returned invalid {field} for nmId {nm_id}"
                 )
-        return nm_id, chrt_id, warehouse_id
+        if is_other_bucket:
+            return nm_id, chrt_id, warehouse_id, warehouse_name.casefold(), region_name.casefold()
+        return nm_id, chrt_id, warehouse_id, "", ""
 
     def _post_inventory_page_with_retry(
         self,
