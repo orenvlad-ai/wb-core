@@ -29,20 +29,22 @@ Queue eligibility требует одновременно:
 - `release:ready`;
 - ровно одну известную `task:*` label;
 - ровно одну известную `scope:*` label;
-- отсутствие `release:blocked` и `release:halted`.
+- отсутствие `release:blocked`, `release:halted` и `release:superseded`.
 
 Основные state labels:
 
 - `release:ready` — task owner закончил pre-release proof и явно поставил PR в очередь;
 - `release:running` — worker выполняет sync/baseline/release;
 - `release:awaiting-agent` — LOOP прошёл sync/baseline и ждёт exact-head acknowledgement активной Codex-сессии;
+- `release:needs-resume` — non-exclusive overlay на `release:awaiting-agent`: сохранённого владельца нужно возобновить, но gate остаётся fail-closed;
 - `release:awaiting-ui` — LOOP merge задеплоен и ждёт production UI Flow/acceptance;
 - `release:blocked` — PR-specific failure до merge;
 - `release:done` — terminal success STANDARD `repo-only` без deploy;
 - `release:production` — terminal success STANDARD live/runtime или принятой LOOP-цепочки;
 - `release:halted` — failure после merge; вся очередь остановлена.
+- `release:superseded` — terminal audit state незамёрженной LOOP-итерации, однозначно заменённой завершённой production recovery-chain; root/task/scope/history сохраняются, активные queue/failure labels снимаются.
 
-Промежуточные `release:ready`, `release:running`, `release:awaiting-agent` и `release:awaiting-ui` не являются closure.
+Промежуточные `release:ready`, `release:running`, `release:awaiting-agent`, `release:needs-resume` и `release:awaiting-ui` не являются closure. `release:superseded` не является success исходной итерации, но исключает доказанно заменённый PR из активной очереди.
 
 ## STANDARD Flow
 
@@ -81,6 +83,10 @@ Workflow принимает command только от `OWNER`, `MEMBER` или `
 
 `--no-ack-agent` оставляет waiter полностью read-only. STANDARD waiter никогда не публикует comments.
 
+Чужой exclusive gate означает только waiting. Ни количество одинаковых polls/goal-turns, ни длительность не переводят его в `release:blocked` и не разрешают снимать, обходить или перехватывать gate. Task owner продолжает waiter до своей очереди; при исчерпании текущего goal-turn создаётся следующий goal на продолжение ожидания, а не terminal handoff открытого PR.
+
+Workflow запускает queue observation каждые пять минут. Если `release:awaiting-agent` остаётся без ack дольше `WB_CORE_RELEASE_NEEDS_RESUME_AFTER_MINUTES` (default `30`), worker идемпотентно добавляет `release:needs-resume` и ровно один marker-comment для актуальной пары PR/exact head. Comment фиксирует, что ack/skip не выполнялись, и даёт команды `codex resume` и `python3 apps/github_release_train_wait.py <PR>`. Следующая задача не выбирается. Exact-head ack возобновлённого владельца автоматически снимает `release:needs-resume`; любое дальнейшее release transition также очищает overlay. Изменившийся head требует нового exact marker/ack и не наследует старое разрешение.
+
 ## Exclusive Production UI Gate
 
 После успешного LOOP merge, canonical deploy и production verify worker не ставит terminal success и не dispatch-ит следующий release. Он создаёт deterministic chain label `loop:root-<ROOT_PR>`, ставит текущей итерации `release:awaiting-ui` и завершает job. Push-triggered или повторный queue run видит gate и не выбирает несвязанный PR.
@@ -95,7 +101,9 @@ UI Flow следует production UI contract из [`07_codex_execution_protocol
 gh pr comment <ACTIVE_LOOP_PR> --body "/wb-core loop accept-ui <ACTIVE_LOOP_PR>"
 ```
 
-Handler проверяет write association, активный gate и deterministic chain. Он идемпотентно переводит все merged PR этой chain в `release:production` и dispatch-ит следующий queue run. Повторная acceptance не меняет terminal state и не вызывает повторный merge/deploy.
+Handler проверяет write association, активный gate и deterministic chain. Он идемпотентно переводит все merged PR этой chain в `release:production`, нормализует доказанно заменённые unmerged predecessors и dispatch-ит следующий queue run. Повторная acceptance не меняет terminal state и не вызывает повторный merge/deploy.
+
+Superseded proof механический и root-bounded: кандидат обязан иметь тот же exact `loop:root-<ROOT_PR>`, `task:loop + scope:live-runtime`, оставаться unmerged и иметь PR number меньше принятой production-итерации. Тогда handler ставит `release:superseded`, снимает `release:ready/running/awaiting-*/blocked/halted`, `release:needs-resume` и stale `loop:ack-*`, сохраняет root/task/scope и оставляет audit comment. PR другой root или более новая/неоднозначная запись не меняется. Автоматическое закрытие не выполняется: label normalization достаточно и сохраняет историю.
 
 ## Recovery PR
 
@@ -116,15 +124,16 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 
 ## CLI Waiter Contract
 
-`apps/github_release_train_wait.py` получает номер PR, выводит только изменения `class/scope/state/head` и использует GitHub CLI auth/repository context, если env не задан.
+`apps/github_release_train_wait.py` получает номер PR, выводит только изменения `class/scope/state/head/queue/gate` и использует GitHub CLI auth/repository context, если env не задан.
 
 - STANDARD ждёт `release:done` для `scope:repo-only` или `release:production` для `scope:live-runtime`;
-- LOOP автоматически выполняет exact-head ack на `release:awaiting-agent` и продолжает polling;
+- чужой exclusive gate выводится как normal `wait-foreign-gate`; waiter продолжает polling без terminal timeout и никогда не называет это blocked;
+- LOOP заново читает actual head, автоматически выполняет exact-head ack только на собственном `release:awaiting-agent` и продолжает polling через merge/deploy;
 - LOOP возвращает код `3` на `release:awaiting-ui`, чтобы Codex выполнил UI Flow;
 - повторный запуск после acceptance ждёт `release:production`;
-- `release:blocked`/`release:halted` возвращают код `2`;
-- timeout возвращает `124`, `Ctrl-C` — `130`;
-- `--timeout-seconds` и `--poll-seconds` задают bounded polling; polling не содержит AI-цикла.
+- собственный `release:blocked`, global `release:halted` и conflicting durable gates возвращают код `2` с точной причиной;
+- `Ctrl-C` возвращает `130`;
+- `--poll-seconds` задаёт bounded polling interval, `--status-seconds` и backward-compatible `--timeout-seconds` — только heartbeat; elapsed time не является terminal condition, polling не содержит AI-цикла.
 
 ## Failures И Idempotency
 
@@ -132,11 +141,16 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 - semantic/update conflict, failed baseline, missing production secret или SSH preflight failure — `release:blocked`;
 - deploy/verify/UI-gate publication failure после merge — `release:halted`;
 - любой существующий `release:halted` глобально блокирует выбор следующего PR;
-- `release:awaiting-agent` блокирует всю очередь до exact ack;
+- `release:awaiting-agent` блокирует всю очередь до exact ack; `release:needs-resume` только делает потерю владельца видимой и ничего не разрешает;
 - `release:awaiting-ui` допускает только exact-linked recovery;
+- успешно принятая recovery-chain переводит merged members в `release:production`, а только доказанные unmerged predecessors того же root — в `release:superseded`; другой root не мутируется;
 - repeated label/push/dispatch events не выбирают PR без `release:ready` и не повторяют terminal merge/deploy;
 - repeated ack проверяет тот же PR/head, а consumed/stale ack не может разрешить новый merge;
 - repeated UI acceptance сохраняет terminal labels и лишь безопасно пере-dispatch-ит serialized worker.
+
+## Канонический Мониторинг
+
+[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+is%3Aopen+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%22) использует `is:open`, явно исключает `release:superseded` и через comma-OR label qualifier показывает только активную очередь/gates плюс отдельный resume overlay. PR-specific failures исследуются по их точной ссылке/comment и после доказанной замены не возвращаются в этот view.
 
 ## Baseline И Security Boundary
 

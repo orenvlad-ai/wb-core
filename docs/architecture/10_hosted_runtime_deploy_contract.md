@@ -222,7 +222,7 @@ Repo-owned [GitHub Release Train](11_github_release_train.md) является o
 
 `python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify`
 
-LOOP PR использует тот же единственный deploy command, но после final sync/baseline сначала обязан остановиться на `release:awaiting-agent`. Exact-head acknowledgement одноразово потребляется перед merge. После успешного deploy/verify LOOP получает `release:awaiting-ui`, а не terminal success; несвязанные releases ждут UI acceptance либо exact-linked recovery. Ни agent handshake, ни UI gate не меняют canonical deploy implementation или target.
+LOOP PR использует тот же единственный deploy command, но после final sync/baseline сначала обязан остановиться на `release:awaiting-agent`. Exact-head acknowledgement одноразово потребляется перед merge. Потерянный владелец может получить только fail-closed overlay `release:needs-resume`; auto-ack, skip и перехват gate запрещены, а время ожидания не является deploy blocker. После успешного deploy/verify LOOP получает `release:awaiting-ui`, а не terminal success; несвязанные releases ждут UI acceptance либо exact-linked recovery. Ни agent handshake, ни UI gate не меняют canonical deploy implementation или target.
 
 Production failure после merge ставит global `release:halted` и блокирует следующие releases. `scope:repo-only` не вызывает deploy. `scope:production-mutation` автоматически не выполняется. GitHub Environment secrets `WB_CORE_DEPLOY_SSH_KEY` и `WB_CORE_DEPLOY_KNOWN_HOSTS` остаются вне Git; отсутствие любого из них блокирует live PR до merge.
 

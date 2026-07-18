@@ -139,6 +139,7 @@ Ad-hoc SQL, произвольные SSH-команды, незафиксиро�
 - ставить `release:ready` только после targeted checks, semantic review, fixes/recheck и docs sync;
 - для STANDARD наблюдать workflow до `release:done`/`release:production` либо исправить `release:blocked`/`release:halted`;
 - для LOOP подтвердить exact-head `release:awaiting-agent`, продолжить на `release:awaiting-ui`, выполнить production UI Flow и закрыть gate GitHub-native acceptance-командой;
+- считать gate другой LOOP-цепочки штатным waiting независимо от числа polls, goal-turns и продолжительности: не называть его blocker, не снимать/обходить/перехватывать и не завершать task handoff-сообщением;
 - не разрешать Release Train автоматически выполнять production data mutation/backfill.
 
 Release Train сериализует только финальную критическую секцию и не выполняет semantic conflict resolution. Полный контракт: [`11_github_release_train.md`](11_github_release_train.md).
@@ -147,7 +148,9 @@ Codex CLI наблюдает очередь без AI polling loop:
 
 `python3 apps/github_release_train_wait.py <PR>`
 
-STANDARD-вызов только читает GitHub. LOOP-вызов также выполняет единственную bounded mutation: при `release:awaiting-agent` публикует exact command `/wb-core loop ack-agent <PR> head <HEAD_SHA>`, после чего продолжает polling. Код `3` означает handoff на UI Flow (`release:awaiting-ui`), `2` — `release:blocked`/`release:halted`, `124` — timeout, `130` — interrupt. Опция `--no-ack-agent` делает LOOP-вызов полностью read-only.
+STANDARD-вызов только читает GitHub. LOOP-вызов также выполняет единственную bounded mutation: при собственном `release:awaiting-agent` заново читает actual exact head, публикует command `/wb-core loop ack-agent <PR> head <HEAD_SHA>` и продолжает polling через merge/deploy. Чужой `release:awaiting-agent` или `release:awaiting-ui` выводится как `wait-foreign-gate` и не имеет terminal timeout: `--status-seconds` и совместимый alias `--timeout-seconds` задают только heartbeat. Код `3` означает возврат той же сессии на UI Flow собственного PR, `2` — собственный `release:blocked`, global `release:halted` или конфликт durable gates, `130` — interrupt. Опция `--no-ack-agent` делает LOOP-вызов полностью read-only.
+
+Нормальное ожидание очереди не превращается во внешний blocker после N одинаковых наблюдений или goal-turns. Если продукт завершает текущий goal-turn до terminal state, Codex создаёт следующий goal с тем же bounded outcome — продолжить waiter до своей очереди — и не отдаёт открытый PR handoff-сообщением. Если владельца всё же потеряли, scheduled worker после настраиваемого порога оставляет fail-closed `release:awaiting-agent + release:needs-resume`; сохранённая CLI-сессия возобновляется через `codex resume`, затем запускает точную waiter-команду из PR comment. Ack не автоматизируется и чужой gate не снимается.
 
 Явное ограничение пользователя имеет приоритет: «только ветка», «до commit», «до draft PR», «без merge», «без deploy», «без production mutations» или другая точная граница. Тогда Codex останавливается ровно на ней, подтверждает достигнутое состояние и не считает отсутствие дальнейшего closure ошибкой. Ограничение closure не расширяет authority для иных mutations.
 
