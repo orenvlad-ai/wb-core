@@ -109,7 +109,7 @@ Emergency rebuild использует только persisted local sources, с�
 Repo-owned `wb-core-warehouse-functional-sync.timer` запускает bounded runner каждый час:
 
 1. refresh official statuses/goods активных и recently completed WB supplies;
-2. проверить complete active/recent status slices и enrichment; partial slice/failed enrichment блокирует pipeline до любого нового FF debit и publication;
+2. проверить complete active/recent status slices и enrichment; detail/goods transport, 429 and 5xx use bounded retries, while partial slice or retry-exhausted/persistent enrichment failure blocks the pipeline before any new FF debit/publication and returns bounded supply-specific diagnostics;
 3. только после complete validation провести idempotent FF debit и bounded-материализовать supply-specific downstream components без legacy daily/global rebuild;
 4. fetch uncached complete official stock snapshot;
 5. compute FF→WB, discrepancies, unmatched, WB snapshot and targeted/daily cost states из coherent capture;

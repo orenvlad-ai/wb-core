@@ -266,7 +266,7 @@ Algorithm:
 - never hard-delete accepted/historical statuses `5/6` just because they are absent from a latest refresh window;
 - old historical rows absent from the bounded recent `5/6` slice are not retried by ordinary refresh; request `enrich=missing_critical` to run that bounded enrichment lane explicitly.
 
-Sync response diagnostics include `fetched_recent_historical_statuses`, `recent_historical_status_ids`, `forced_status_refresh_rows`, `refreshed_recent_historical_rows`, `accepted_qty_changed_rows`, `partial_status_slices` and the existing new/changed/unchanged/enriched/delete counters.
+Sync response diagnostics include `fetched_recent_historical_statuses`, `recent_historical_status_ids`, `forced_status_refresh_rows`, `refreshed_recent_historical_rows`, `accepted_qty_changed_rows`, `partial_status_slices`, bounded `enrichment_failures` with supply identity/status/sanitized warnings and the existing new/changed/unchanged/enriched/delete counters. Detail/goods enrichment retries transient transport, 429 and 5xx failures three times with bounded backoff; 401/403 and other persistent 4xx remain immediate failures. Functional cutover/hourly validation stays fail-closed after retry exhaustion and includes the bounded supply-specific evidence in its operator error.
 
 `POST /v1/sheet-vitrina-v1/supply/wb-supplies/backfill`
 

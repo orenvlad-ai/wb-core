@@ -697,7 +697,6 @@ def _test_supply_refresh_completeness_gate() -> None:
     for patch in (
         {"active_reconciliation_complete": False},
         {"partial_status_slices": True},
-        {"failed_enrich": 1},
     ):
         try:
             validate_functional_supply_sync({**complete, **patch})
@@ -705,6 +704,26 @@ def _test_supply_refresh_completeness_gate() -> None:
             pass
         else:
             raise AssertionError(f"partial official supply refresh must fail closed: {patch}")
+    try:
+        validate_functional_supply_sync(
+            {
+                **complete,
+                "failed_enrich": 1,
+                "enrichment_failures": [
+                    {
+                        "lookup_id": "40422317",
+                        "warnings": ["goods fetch failed for 40422317: status 429"],
+                    }
+                ],
+            }
+        )
+    except RuntimeError as exc:
+        _assert(
+            "40422317[goods fetch failed for 40422317: status 429]" in str(exc),
+            "functional supply gate exposes bounded supply-specific enrichment evidence",
+        )
+    else:
+        raise AssertionError("failed official enrichment must fail closed with diagnostics")
 
 
 def _test_guarded_publication() -> None:
