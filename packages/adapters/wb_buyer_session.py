@@ -310,7 +310,12 @@ class WbBuyerSessionAdapter:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            # Reuse the isolated recovery display when available.  WB can
+            # present a login redirect to a headless probe even though the
+            # headed recovery context is visibly authenticated; the probe
+            # remains independent while matching the browser surface that
+            # established the candidate state.
+            browser = playwright.chromium.launch(headless=not bool(os.environ.get("DISPLAY")))
             try:
                 context = browser.new_context(storage_state=str(path), locale="ru-RU")
                 page = context.new_page()
