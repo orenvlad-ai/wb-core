@@ -29,6 +29,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 PROBE_BODY_LIMIT_BYTES = 768 * 1024
+WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
+WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
 PROBE_SYSTEM_CA_FILE_CANDIDATES = (
     "/etc/ssl/cert.pem",
     "/private/etc/ssl/cert.pem",
@@ -1799,7 +1801,7 @@ def _run_remote_warehouse_opening_action(
         text=True,
         capture_output=True,
         cwd=ROOT,
-        timeout=300.0,
+        timeout=_warehouse_opening_timeout_seconds(action),
         check=False,
     )
     if result.returncode != 0:
@@ -1814,6 +1816,12 @@ def _run_remote_warehouse_opening_action(
     if not isinstance(payload, dict):
         raise RuntimeError("warehouse opening runner returned a non-object JSON payload")
     return payload
+
+
+def _warehouse_opening_timeout_seconds(action: str) -> float:
+    if action in {"apply", "rollback"}:
+        return WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS
+    return WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS
 
 
 def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:

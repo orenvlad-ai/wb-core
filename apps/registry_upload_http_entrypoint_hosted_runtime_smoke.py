@@ -9,6 +9,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import time
+from unittest import mock
 from urllib import request as urllib_request
 
 
@@ -60,6 +61,39 @@ class _ShortReadResponse:
 
 
 def main() -> None:
+    if hosted_runtime._warehouse_opening_timeout_seconds("dry-run") != 300.0:
+        raise AssertionError("warehouse opening dry-run must retain the bounded read timeout")
+    if hosted_runtime._warehouse_opening_timeout_seconds("readback") != 300.0:
+        raise AssertionError("warehouse opening readback must retain the bounded read timeout")
+    if hosted_runtime._warehouse_opening_timeout_seconds("diagnose-discrepancy") != 300.0:
+        raise AssertionError("warehouse opening diagnostic must retain the bounded read timeout")
+    if hosted_runtime._warehouse_opening_timeout_seconds("apply") != 1800.0:
+        raise AssertionError("warehouse opening apply must allow the coherent production backup to finish")
+    if hosted_runtime._warehouse_opening_timeout_seconds("rollback") != 1800.0:
+        raise AssertionError("warehouse opening rollback must allow the coherent recovery backup to finish")
+    active_target = hosted_runtime.load_hosted_runtime_target(hosted_runtime.DEFAULT_TARGET_FILE)
+    with TemporaryDirectory(prefix="warehouse-hosted-timeout-smoke-") as opening_temp_dir:
+        plan_path = Path(opening_temp_dir) / "plan.json"
+        plan_path.write_text('{"plan_fingerprint":"sha256:timeout-smoke"}\n', encoding="utf-8")
+        for action, expected_timeout in (("readback", 300.0), ("apply", 1800.0), ("rollback", 1800.0)):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='{"ok":true}',
+                stderr="",
+            )
+            with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
+                hosted_runtime._run_remote_warehouse_opening_action(
+                    active_target,
+                    action=action,
+                    plan_path=plan_path if action == "apply" else None,
+                    fingerprint="sha256:timeout-smoke" if action in {"apply", "rollback"} else "",
+                )
+            actual_timeout = run_mock.call_args.kwargs.get("timeout")
+            if actual_timeout != expected_timeout:
+                raise AssertionError(
+                    f"warehouse opening {action} subprocess timeout must be {expected_timeout}, got {actual_timeout}"
+                )
     ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["warehouse-ui-flow", "--evidence-dir", "/tmp/wb-core-warehouse-ui-smoke"]
     )
