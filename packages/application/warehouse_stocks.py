@@ -32,6 +32,7 @@ from packages.contracts.supplier_shipments import (
 
 CONTRACT_NAME = "sheet_vitrina_v1_warehouses"
 CONTRACT_VERSION = "v1"
+OPENING_ALGORITHM_VERSION = "warehouse_opening_v2_zero_discrepancy"
 OPENING_CUTOVER_ID = "warehouse_opening_v1"
 OPENING_DOCUMENT_TYPE = "opening_balance"
 OPENING_DOCUMENT_TYPE_LABEL = "Ввод начальных остатков"
@@ -80,7 +81,7 @@ WAREHOUSES: tuple[dict[str, Any], ...] = (
         "name": "Расхождения приёмки WB",
         "document_id": "whdoc_opening_v1_wb_acceptance_discrepancy",
         "document_number": "ВНО-000006",
-        "source": "Финально принятые WB-поставки: отправлено − принято − доприёмки, по SKU",
+        "source": "Управленческая граница начала складского учёта: ноль на момент cutover",
     },
 )
 WAREHOUSE_BY_KEY = {str(item["key"]): item for item in WAREHOUSES}
@@ -491,7 +492,7 @@ class WarehouseStocksBlock:
         if not requested_nm_ids:
             raise WarehouseOpeningSnapshotError("at least one positive diagnostic nmID is required")
         captured_at = self.timestamp_factory()
-        local = self._read_local_source_snapshot(cutover_at=captured_at)
+        diagnostic_wb_supplies = self._read_wb_discrepancy_source_rows()
         aggregates: dict[int, dict[str, Any]] = {
             nm_id: {
                 "sent_quantity": Decimal("0"),
@@ -501,7 +502,8 @@ class WarehouseStocksBlock:
             }
             for nm_id in requested_nm_ids
         }
-        for raw_record in local.get("wb_supplies") or []:
+        diagnostic_source_records: list[dict[str, Any]] = []
+        for raw_record in diagnostic_wb_supplies:
             record = _normalized_wb_record(raw_record)
             if int(record.get("status_id") or 0) != WB_FINAL_ACCEPTED_STATUS_ID:
                 continue
@@ -514,20 +516,20 @@ class WarehouseStocksBlock:
                 aggregate["sent_quantity"] += components["sent"]
                 aggregate["accepted_quantity"] += components["accepted"]
                 aggregate["doprinato_quantity"] += components["doprinato"]
-                aggregate["source_records"].append(
-                    {
-                        **_wb_goods_provenance(
-                            record,
-                            good,
-                            quantity_field=str(components["quantity_field"]),
-                        ),
-                        "role": str(components["role"]),
-                        "sent_quantity": _decimal_text(components["sent"]),
-                        "accepted_quantity": _decimal_text(components["accepted"]),
-                        "doprinato_quantity": _decimal_text(components["doprinato"]),
-                        "discrepancy_contribution": _decimal_text(components["contribution"]),
-                    }
-                )
+                source_record = {
+                    **_wb_goods_provenance(
+                        record,
+                        good,
+                        quantity_field=str(components["quantity_field"]),
+                    ),
+                    "role": str(components["role"]),
+                    "sent_quantity": _decimal_text(components["sent"]),
+                    "accepted_quantity": _decimal_text(components["accepted"]),
+                    "doprinato_quantity": _decimal_text(components["doprinato"]),
+                    "discrepancy_contribution": _decimal_text(components["contribution"]),
+                }
+                aggregate["source_records"].append(source_record)
+                diagnostic_source_records.append({"nm_id": nm_id, **source_record})
         rows = []
         for nm_id in sorted(aggregates):
             aggregate = aggregates[nm_id]
@@ -553,11 +555,37 @@ class WarehouseStocksBlock:
             "status": "diagnostic",
             "captured_at": captured_at,
             "requested_nm_ids": sorted(requested_nm_ids),
-            "local_source_digest": local["source_digest"],
-            "source_watermark": local["watermarks"]["wb_supplies_cache"],
+            "diagnostic_source_digest": "sha256:"
+            + hashlib.sha256(_json_dumps(diagnostic_source_records).encode("utf-8")).hexdigest(),
+            "source_watermark": {
+                "captured_at": captured_at,
+                "selected_source_record_count": len(diagnostic_source_records),
+                "wb_supplies_cache": _watermark(
+                    diagnostic_wb_supplies,
+                    "last_list_synced_at",
+                    fallback_key="synced_at",
+                ),
+            },
             "negative_count": sum(1 for row in rows if row["negative"]),
             "rows": rows,
         }
+
+    def _read_wb_discrepancy_source_rows(self) -> list[dict[str, Any]]:
+        """Read only historical final WB rows for the optional bounded diagnostic."""
+
+        with _connect(self.runtime.db_path) as conn:
+            return _query_dicts(
+                conn,
+                """SELECT supply_id, cache_key, wb_supply_id, preorder_id,
+                          normalized_row_json, raw_goods_json, raw_goods_hash,
+                          status_id, source_created_at, supply_date, fact_date,
+                          updated_date, synced_at, last_list_synced_at,
+                          last_enriched_at, enrichment_status
+                   FROM sheet_vitrina_v1_wb_supplies
+                   WHERE status_id = ?
+                   ORDER BY supply_id""",
+                (WB_FINAL_ACCEPTED_STATUS_ID,),
+            )
 
     def _ensure_source_schema(self) -> None:
         # Existing runtime owns all source tables; this call only runs its idempotent schema guard.
@@ -667,7 +695,6 @@ class WarehouseStocksBlock:
             "sheet_vitrina_v1_ff_stock_operations",
             "sheet_vitrina_v1_ff_stock_operation_lines",
             "sheet_vitrina_v1_wb_supplies",
-            "sheet_vitrina_v1_wb_supplies_sync_state",
             "sheet_vitrina_v1_nomenclature_items",
         }
         missing = sorted(required - tables)
@@ -715,21 +742,17 @@ class WarehouseStocksBlock:
                    FROM sheet_vitrina_v1_ff_stock_operation_lines
                    ORDER BY operation_id, line_no""",
             ),
-            "wb_supplies": _query_dicts(
+            "opening_wb_supplies": _query_dicts(
                 conn,
                 """SELECT supply_id, cache_key, wb_supply_id, preorder_id,
                           normalized_row_json, raw_goods_json, raw_goods_hash,
                           status_id, source_created_at, supply_date, fact_date,
                           updated_date, synced_at, last_list_synced_at,
                           last_enriched_at, enrichment_status
-                   FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id""",
-            ),
-            "wb_sync_state": _query_dicts(
-                conn,
-                """SELECT last_synced_at, last_successful_sync_at, last_error,
-                          latest_synced_count, backfill_complete,
-                          latest_window_synced_at, last_mode
-                   FROM sheet_vitrina_v1_wb_supplies_sync_state WHERE slot = 1""",
+                   FROM sheet_vitrina_v1_wb_supplies
+                   WHERE status_id IN (?, ?, ?)
+                   ORDER BY supply_id""",
+                tuple(sorted(WB_POST_SHIPMENT_GATE_STATUS_IDS)),
             ),
             "nomenclature": _query_dicts(
                 conn,
@@ -739,8 +762,12 @@ class WarehouseStocksBlock:
                    FROM sheet_vitrina_v1_nomenclature_items ORDER BY item_id""",
             ),
         }
-        digest_payload = {key: value for key, value in snapshot.items()}
-        source_digest = "sha256:" + hashlib.sha256(_json_dumps(digest_payload).encode("utf-8")).hexdigest()
+        snapshot["opening_wb_supplies"] = [
+            row
+            for row in snapshot["opening_wb_supplies"]
+            if _is_opening_wb_transit_source_row(row)
+        ]
+        source_digest = "sha256:" + hashlib.sha256(_json_dumps(snapshot).encode("utf-8")).hexdigest()
         return {
             **snapshot,
             "source_digest": source_digest,
@@ -753,8 +780,12 @@ class WarehouseStocksBlock:
                 ),
                 "ff_ledger": _watermark(snapshot["ff_operations"], "created_at"),
                 "wb_supplies_cache": {
-                    **_watermark(snapshot["wb_supplies"], "last_list_synced_at", fallback_key="synced_at"),
-                    "sync_state": snapshot["wb_sync_state"][0] if snapshot["wb_sync_state"] else {},
+                    **_watermark(
+                        snapshot["opening_wb_supplies"],
+                        "last_list_synced_at",
+                        fallback_key="synced_at",
+                    ),
+                    "selection": "persisted ordinary status_id IN (3,4,6)",
                 },
                 "nomenclature": _watermark(snapshot["nomenclature"], "updated_at"),
             },
@@ -922,9 +953,7 @@ class WarehouseStocksBlock:
                 },
             )
 
-        discrepancy_regular: dict[int, dict[str, Any]] = {}
-        discrepancy_doprinato: dict[int, dict[str, Any]] = {}
-        for raw_record in local.get("wb_supplies") or []:
+        for raw_record in local.get("opening_wb_supplies") or []:
             record = _normalized_wb_record(raw_record)
             status_id = int(record.get("status_id") or 0)
             is_doprinato = _is_doprinato(record)
@@ -945,86 +974,6 @@ class WarehouseStocksBlock:
                             "sent_quantity": _decimal_text(quantity),
                         },
                     )
-            if status_id != WB_FINAL_ACCEPTED_STATUS_ID:
-                continue
-            for good in goods:
-                nm_id = int(good["nm_id"])
-                components = _wb_acceptance_components(record, good)
-                if is_doprinato:
-                    bucket = discrepancy_doprinato.setdefault(
-                        nm_id,
-                        {"quantity": Decimal("0"), "provenance": [], "display": _display_for_nm(nm_id, nomenclature_all, fallback=good)},
-                    )
-                    bucket["quantity"] += components["doprinato"]
-                    bucket["provenance"].append(
-                        {
-                            **_wb_goods_provenance(
-                                record,
-                                good,
-                                quantity_field=str(components["quantity_field"]),
-                            ),
-                            "accepted_quantity": _decimal_text(components["doprinato"]),
-                        }
-                    )
-                else:
-                    bucket = discrepancy_regular.setdefault(
-                        nm_id,
-                        {
-                            "sent": Decimal("0"),
-                            "accepted": Decimal("0"),
-                            "provenance": [],
-                            "display": _display_for_nm(nm_id, nomenclature_all, fallback=good),
-                        },
-                    )
-                    bucket["sent"] += components["sent"]
-                    bucket["accepted"] += components["accepted"]
-                    bucket["provenance"].append(
-                        {
-                            **_wb_goods_provenance(
-                                record,
-                                good,
-                                quantity_field=str(components["quantity_field"]),
-                            ),
-                            "sent_quantity": _decimal_text(components["sent"]),
-                            "accepted_quantity": _decimal_text(components["accepted"]),
-                            "source_discrepancy": _decimal_text(components["contribution"]),
-                        }
-                    )
-
-        for nm_id in sorted(set(discrepancy_regular) | set(discrepancy_doprinato)):
-            regular = discrepancy_regular.get(
-                nm_id,
-                {"sent": Decimal("0"), "accepted": Decimal("0"), "provenance": [], "display": _display_for_nm(nm_id, nomenclature_all)},
-            )
-            doprinato = discrepancy_doprinato.get(
-                nm_id,
-                {"quantity": Decimal("0"), "provenance": [], "display": regular["display"]},
-            )
-            quantity = regular["sent"] - regular["accepted"] - doprinato["quantity"]
-            if quantity < 0:
-                raise WarehouseOpeningSnapshotError(
-                    "negative WB acceptance discrepancy for nmID "
-                    f"{nm_id}: sent={_decimal_text(regular['sent'])}, "
-                    f"accepted={_decimal_text(regular['accepted'])}, "
-                    f"doprinato={_decimal_text(doprinato['quantity'])}"
-                )
-            if quantity == 0:
-                continue
-            _add_quantity(
-                buckets["wb_acceptance_discrepancy"],
-                nm_id=nm_id,
-                quantity=quantity,
-                display=regular["display"] or doprinato["display"],
-                provenance={
-                    "source_type": "wb_acceptance_discrepancy_by_sku",
-                    "sent_quantity": _decimal_text(regular["sent"]),
-                    "accepted_quantity": _decimal_text(regular["accepted"]),
-                    "doprinato_quantity": _decimal_text(doprinato["quantity"]),
-                    "final_quantity": _decimal_text(quantity),
-                    "final_supply_lines": regular["provenance"],
-                    "doprinato_lines": doprinato["provenance"],
-                },
-            )
 
         wb_rows = list(((wb_snapshot_payload.get("data") or {}).get("rows") or []))
         wb_rows_by_nm: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -1112,9 +1061,13 @@ class WarehouseStocksBlock:
                     "local_source_digest": local["source_digest"],
                 },
                 "wb_acceptance_discrepancy": {
-                    "wb_supplies_cache": local["watermarks"]["wb_supplies_cache"],
-                    "nomenclature": local["watermarks"]["nomenclature"],
-                    "local_source_digest": local["source_digest"],
+                    "opening_policy": "zero_at_cutover",
+                    "cutover_at": cutover_at,
+                    "algorithm_version": OPENING_ALGORITHM_VERSION,
+                    "historical_backfill": False,
+                    "historical_wb_acceptance_evaluated": False,
+                    "cost_defined": False,
+                    "capital_defined": False,
                 },
             }
         }
@@ -1169,6 +1122,7 @@ def _ensure_warehouse_schema(conn: sqlite3.Connection) -> None:
             warehouse_to_key TEXT,
             source_basis TEXT NOT NULL,
             source_watermark_json TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,
             sku_count INTEGER NOT NULL,
             total_quantity TEXT NOT NULL,
             average_unit_cost_rub REAL,
@@ -1203,6 +1157,15 @@ def _ensure_warehouse_schema(conn: sqlite3.Connection) -> None:
         ON sheet_vitrina_v1_warehouse_document_lines(document_id, line_no);
         """
     )
+    document_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(sheet_vitrina_v1_warehouse_documents)").fetchall()
+    }
+    if "provenance_json" not in document_columns:
+        conn.execute(
+            "ALTER TABLE sheet_vitrina_v1_warehouse_documents "
+            "ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'"
+        )
 
 
 def _insert_document(conn: sqlite3.Connection, document: Mapping[str, Any], *, cutover_id: str) -> None:
@@ -1212,10 +1175,10 @@ def _insert_document(conn: sqlite3.Connection, document: Mapping[str, Any], *, c
             document_id, document_number, cutover_id, document_type,
             document_type_label, occurred_at, warehouse_key, warehouse_name,
             warehouse_from_key, warehouse_to_key, source_basis,
-            source_watermark_json, sku_count, total_quantity,
+            source_watermark_json, provenance_json, sku_count, total_quantity,
             average_unit_cost_rub, total_cost_rub, total_capital_rub,
             status, status_label, created_at, updated_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(document["document_id"]),
@@ -1230,6 +1193,7 @@ def _insert_document(conn: sqlite3.Connection, document: Mapping[str, Any], *, c
             document.get("warehouse_to_key"),
             str(document["source_basis"]),
             _json_dumps(document.get("source_watermark") or {}),
+            _json_dumps(document.get("provenance") or {}),
             int(document["sku_count"]),
             str(document["total_quantity"]),
             document.get("average_unit_cost_rub"),
@@ -1367,6 +1331,7 @@ def _document_from_row(
         "warehouse_to_key": row["warehouse_to_key"],
         "source_basis": str(row["source_basis"]),
         "source_watermark": _json_loads(row["source_watermark_json"], {}),
+        "provenance": _json_loads(row["provenance_json"], {}),
         "sku_count": int(row["sku_count"]),
         "total_quantity": _public_decimal(row["total_quantity"]),
         "average_unit_cost_rub": row["average_unit_cost_rub"],
@@ -1459,6 +1424,27 @@ def _build_document(
             }
         )
     total = sum((_decimal(line["quantity"]) for line in lines), Decimal("0"))
+    document_provenance: dict[str, Any] = {
+        "basis_type": "primary_source_current_snapshot",
+        "opening_policy": "current_state_at_cutover",
+        "cutover_at": cutover_at,
+        "algorithm_version": OPENING_ALGORITHM_VERSION,
+        "historical_backfill": False,
+        "cost_defined": False,
+        "capital_defined": False,
+    }
+    if str(definition["key"]) == "wb_acceptance_discrepancy":
+        document_provenance = {
+            "basis_type": "management_warehouse_accounting_boundary",
+            "opening_policy": "zero_at_cutover",
+            "cutover_at": cutover_at,
+            "algorithm_version": OPENING_ALGORITHM_VERSION,
+            "historical_backfill": False,
+            "historical_acceptance_reconstruction": False,
+            "historical_wb_acceptance_evaluated": False,
+            "cost_defined": False,
+            "capital_defined": False,
+        }
     return {
         "document_id": str(definition["document_id"]),
         "document_number": str(definition["document_number"]),
@@ -1471,6 +1457,7 @@ def _build_document(
         "warehouse_to_key": str(definition["key"]),
         "source_basis": str(definition["source"]),
         "source_watermark": {},
+        "provenance": document_provenance,
         "sku_count": len(lines),
         "total_quantity": _decimal_text(total),
         "average_unit_cost_rub": None,
@@ -1544,6 +1531,16 @@ def _normalized_wb_record(raw_record: Mapping[str, Any]) -> dict[str, Any]:
         "last_enriched_at": str(raw_record.get("last_enriched_at") or normalized.get("last_enriched_at") or ""),
         "last_list_synced_at": str(raw_record.get("last_list_synced_at") or normalized.get("last_list_synced_at") or ""),
     }
+
+
+def _is_opening_wb_transit_source_row(raw_record: Mapping[str, Any]) -> bool:
+    """Select only current material FF→WB source rows for the opening fingerprint."""
+
+    record = _normalized_wb_record(raw_record)
+    return (
+        int(record.get("status_id") or 0) in WB_POST_SHIPMENT_GATE_STATUS_IDS
+        and not _is_doprinato(record)
+    )
 
 
 def _validated_wb_goods(record: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1716,6 +1713,15 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
             raise WarehouseOpeningSnapshotError(f"document {document_id} does not share cutover_at")
         if not isinstance(document.get("source_watermark"), Mapping) or not document.get("source_watermark"):
             raise WarehouseOpeningSnapshotError(f"document {document_id} source watermark is required")
+        provenance = document.get("provenance")
+        if not isinstance(provenance, Mapping) or not provenance:
+            raise WarehouseOpeningSnapshotError(f"document {document_id} provenance is required")
+        if str(provenance.get("cutover_at") or "") != cutover_at:
+            raise WarehouseOpeningSnapshotError(f"document {document_id} provenance does not share cutover_at")
+        if str(provenance.get("algorithm_version") or "") != OPENING_ALGORITHM_VERSION:
+            raise WarehouseOpeningSnapshotError(f"document {document_id} algorithm version is invalid")
+        if provenance.get("cost_defined") is not False or provenance.get("capital_defined") is not False:
+            raise WarehouseOpeningSnapshotError(f"document {document_id} nullable economics provenance is invalid")
         if document.get("average_unit_cost_rub") is not None or document.get("total_cost_rub") is not None or document.get("total_capital_rub") is not None:
             raise WarehouseOpeningSnapshotError("opening document cost and capital must be NULL")
         lines = list(document.get("lines") or [])
@@ -1724,6 +1730,26 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
         total = sum((_decimal(item.get("quantity")) for item in lines), Decimal("0"))
         if total != _decimal(document.get("total_quantity")):
             raise WarehouseOpeningSnapshotError(f"document {document_id} total quantity does not match lines")
+        if str(definition["key"]) == "wb_acceptance_discrepancy":
+            expected_policy = {
+                "basis_type": "management_warehouse_accounting_boundary",
+                "opening_policy": "zero_at_cutover",
+                "cutover_at": cutover_at,
+                "algorithm_version": OPENING_ALGORITHM_VERSION,
+                "historical_backfill": False,
+                "historical_acceptance_reconstruction": False,
+                "historical_wb_acceptance_evaluated": False,
+                "cost_defined": False,
+                "capital_defined": False,
+            }
+            if dict(provenance) != expected_policy:
+                raise WarehouseOpeningSnapshotError(
+                    "WB acceptance discrepancy opening provenance must be zero_at_cutover"
+                )
+            if lines or int(document.get("sku_count") or 0) != 0 or total != 0:
+                raise WarehouseOpeningSnapshotError(
+                    "WB acceptance discrepancy opening must be zero with no SKU lines"
+                )
         seen_nm_ids: set[int] = set()
         seen_line_ids: set[str] = set()
         for line_no, line in enumerate(lines, start=1):

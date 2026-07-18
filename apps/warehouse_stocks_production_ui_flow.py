@@ -142,6 +142,25 @@ def run_warehouse_ui_flow(
                 == Decimal(str(expected.get("total_quantity") or 0)),
                 f"{warehouse_name}: opening document/readback quantity",
             )
+            _assert(
+                dict(detail_documents[0].get("provenance") or {})
+                == dict(expected.get("provenance") or {}),
+                f"{warehouse_name}: document provenance/readback",
+            )
+            if warehouse_key == "wb_acceptance_discrepancy":
+                discrepancy_provenance = dict(detail_documents[0].get("provenance") or {})
+                _assert(detail_balances == [], "Расхождения приёмки WB: no opening SKU rows")
+                _assert(
+                    int(detail_summary.get("sku_count") or 0) == 0
+                    and Decimal(str(detail_summary.get("total_quantity") or 0)) == 0,
+                    "Расхождения приёмки WB: visible opening balance is exactly zero",
+                )
+                _assert(
+                    discrepancy_provenance.get("opening_policy") == "zero_at_cutover"
+                    and discrepancy_provenance.get("historical_backfill") is False
+                    and discrepancy_provenance.get("historical_wb_acceptance_evaluated") is False,
+                    "Расхождения приёмки WB: zero_at_cutover provenance",
+                )
 
             summary_values = page.locator("[data-warehouse-summary] .warehouse-summary-value").all_inner_texts()
             _assert(len(summary_values) == 4, f"{warehouse_name}: four summary values")
@@ -205,6 +224,16 @@ def run_warehouse_ui_flow(
             _assert(str(expected.get("document_number") or "") in document_text, f"{warehouse_name}: document number")
             _assert("Ввод начальных остатков" in document_text, f"{warehouse_name}: document type")
             _assert(document_text.count("—") >= 2, f"{warehouse_name}: document economics are dashes")
+            document_provenance = document_row.locator(".warehouse-document-provenance details")
+            _assert(document_provenance.count() == 1, f"{warehouse_name}: document provenance control")
+            document_provenance.click()
+            document_provenance_text = document_row.locator(".warehouse-document-provenance pre").inner_text()
+            _assert(bool(document_provenance_text.strip()), f"{warehouse_name}: document provenance payload")
+            if warehouse_key == "wb_acceptance_discrepancy":
+                _assert(
+                    '"opening_policy": "zero_at_cutover"' in document_provenance_text,
+                    "Расхождения приёмки WB: visible zero_at_cutover policy",
+                )
             if expected_lines:
                 document_row.locator(".warehouse-document-lines details").first.click()
                 _assert(
@@ -225,6 +254,7 @@ def run_warehouse_ui_flow(
                     "opening_total_quantity": str(expected.get("total_quantity") or 0),
                     "balance_rows": balance_count,
                     "document_lines": len(expected_lines),
+                    "document_provenance": dict(expected.get("provenance") or {}),
                     "top_screenshot": str(top_screenshot),
                     "document_screenshot": str(document_screenshot),
                 }

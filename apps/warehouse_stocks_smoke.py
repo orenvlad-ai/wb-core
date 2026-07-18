@@ -29,8 +29,10 @@ SNAPSHOT_DATE = "2026-07-18"
 
 
 class _FakeStocksSource:
+    def __init__(self, quantities: dict[int, int] | None = None) -> None:
+        self.quantities = quantities or {101: 12, 102: 0, 103: 3}
+
     def fetch(self, request):
-        quantities = {101: 12, 102: 0, 103: 3}
         return {
             "snapshot_date": SNAPSHOT_DATE,
             "requested_nm_ids": list(request.nm_ids),
@@ -42,7 +44,7 @@ class _FakeStocksSource:
                         "snapshot_date": SNAPSHOT_DATE,
                         "snapshot_ts": "2026-07-18 08:00:00",
                         "nmId": nm_id,
-                        "stockCount": quantities[nm_id],
+                        "stockCount": self.quantities[nm_id],
                         "warehouseName": "Коледино",
                         "regionName": "Центральный",
                     }
@@ -50,6 +52,11 @@ class _FakeStocksSource:
                 ],
             },
         }
+
+
+class _FailingStocksSource:
+    def fetch(self, request):
+        raise RuntimeError("injected official WB stock source failure")
 
 
 def main() -> None:
@@ -67,7 +74,7 @@ def main() -> None:
             "ff": (2, 21),
             "ff_to_wb": (3, 9),
             "wb": (2, 15),
-            "wb_acceptance_discrepancy": (2, 2),
+            "wb_acceptance_discrepancy": (0, 0),
         }
         for document in plan["documents"]:
             key = document["warehouse_key"]
@@ -103,9 +110,29 @@ def main() -> None:
             _assert(contribution == int(line["quantity"]), "FF to WB provenance quantity sum")
         discrepancy = _document(plan, "wb_acceptance_discrepancy")
         _assert(
-            "quantity_fallback_existing_canonical_rule" in json.dumps(discrepancy, ensure_ascii=False),
-            "zero acceptedQuantity uses canonical doprinato quantity fallback",
+            discrepancy["lines"] == []
+            and discrepancy["average_unit_cost_rub"] is None
+            and discrepancy["total_capital_rub"] is None,
+            "discrepancy opening is a zero quantity-only document",
         )
+        _assert(
+            discrepancy["provenance"]
+            == {
+                "basis_type": "management_warehouse_accounting_boundary",
+                "opening_policy": "zero_at_cutover",
+                "cutover_at": NOW,
+                "algorithm_version": "warehouse_opening_v2_zero_discrepancy",
+                "historical_backfill": False,
+                "historical_acceptance_reconstruction": False,
+                "historical_wb_acceptance_evaluated": False,
+                "cost_defined": False,
+                "capital_defined": False,
+            },
+            "discrepancy document policy provenance",
+        )
+        repeated_plan = block.build_opening_plan()
+        _assert(repeated_plan["plan_fingerprint"] == plan["plan_fingerprint"], "repeated dry-run fingerprint")
+        _assert(repeated_plan["documents"] == plan["documents"], "repeated dry-run documents")
         canonical_ff = {
             int(item["nm_id"]): int(item["quantity"])
             for item in FfStockLedgerBlock(runtime=runtime).current_balance_rows()
@@ -124,6 +151,9 @@ def main() -> None:
         _assert(applied["reconciliation"]["document_count"] == 6, "six stored documents")
         _assert(applied["reconciliation"]["all_costs_null"], "stored costs NULL")
         _assert(applied["reconciliation"]["document_line_balance_equal"], "document balances equal")
+        applied_discrepancy = _document(applied, "wb_acceptance_discrepancy")
+        _assert(applied_discrepancy["lines"] == [], "stored discrepancy has no SKU lines")
+        _assert(applied_discrepancy["provenance"] == discrepancy["provenance"], "stored document provenance")
         again = block.apply_opening_plan(
             plan,
             confirm_fingerprint=fingerprint,
@@ -320,11 +350,11 @@ def main() -> None:
             == ("0", "0", "4", "-4"),
             "bounded diagnostic doprinato row arithmetic",
         )
-        try:
-            _block(negative_runtime).build_opening_plan()
-            raise AssertionError("negative discrepancy did not fail closed")
-        except WarehouseOpeningSnapshotError as exc:
-            _assert("negative WB acceptance discrepancy" in str(exc), "negative discrepancy diagnostic")
+        negative_opening = _block(negative_runtime).build_opening_plan()
+        _assert(
+            _document(negative_opening, "wb_acceptance_discrepancy")["total_quantity"] == "0",
+            "negative historical diagnostic does not affect opening",
+        )
 
         missing_doprinato_runtime = _seed_runtime(root / "runtime-doprinato-missing")
         with sqlite3.connect(missing_doprinato_runtime.db_path) as conn:
@@ -341,9 +371,140 @@ def main() -> None:
             conn.commit()
         missing_doprinato_plan = _block(missing_doprinato_runtime).build_opening_plan()
         _assert(
-            int(_document(missing_doprinato_plan, "wb_acceptance_discrepancy")["total_quantity"]) == 2,
-            "missing acceptedQuantity uses canonical doprinato quantity fallback",
+            int(_document(missing_doprinato_plan, "wb_acceptance_discrepancy")["total_quantity"]) == 0,
+            "historical doprinato evidence is not evaluated by opening",
         )
+
+        historical_116_runtime = _seed_runtime(root / "runtime-historical-116", doprinato_quantity=116)
+        historical_116_plan = _block(historical_116_runtime).build_opening_plan()
+        _assert(
+            _document(historical_116_plan, "wb_acceptance_discrepancy")["lines"] == [],
+            "historical doprinato 116 does not enter opening",
+        )
+
+        no_ordinary_runtime = _seed_runtime(root / "runtime-no-ordinary-acceptance", doprinato_quantity=116)
+        with sqlite3.connect(no_ordinary_runtime.db_path) as conn:
+            conn.execute("DELETE FROM sheet_vitrina_v1_wb_supplies WHERE supply_id='wb-accepted'")
+            conn.commit()
+        no_ordinary_plan = _block(no_ordinary_runtime).build_opening_plan()
+        _assert(
+            _document(no_ordinary_plan, "wb_acceptance_discrepancy")["total_quantity"] == "0",
+            "missing ordinary acceptance does not block opening",
+        )
+
+        fingerprint_base_runtime = _seed_runtime(root / "runtime-fingerprint-base")
+        fingerprint_base = _block(fingerprint_base_runtime).build_opening_plan()
+        fingerprint_history_runtime = _seed_runtime(root / "runtime-fingerprint-history")
+        with sqlite3.connect(fingerprint_history_runtime.db_path) as conn:
+            historical_supply_ids = ("15210560", "15263901", "15351678", "15471955")
+            historical_quantities = (10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 6)
+            historical_rows = [
+                _wb_row(
+                    supply_id,
+                    5,
+                    [
+                        {"nmID": 180330785, "quantity": quantity, "acceptedQuantity": quantity}
+                        for quantity in historical_quantities[index * 3 : (index + 1) * 3]
+                    ],
+                    doprinato=True,
+                )
+                for index, supply_id in enumerate(historical_supply_ids)
+            ]
+            conn.executemany(
+                """INSERT INTO sheet_vitrina_v1_wb_supplies(
+                       supply_id,cache_key,wb_supply_id,preorder_id,normalized_row_json,
+                       raw_goods_json,raw_goods_hash,status_id,source_created_at,supply_date,
+                       updated_date,synced_at,last_list_synced_at,last_enriched_at,enrichment_status
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                historical_rows,
+            )
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_wb_supplies
+                   SET normalized_row_json='{"status_id":"malformed-history"}'
+                   WHERE supply_id='15210560'"""
+            )
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_wb_supplies_sync_state
+                   SET last_synced_at='2026-07-18T09:00:00Z',
+                       last_successful_sync_at='2026-07-18T09:00:00Z',
+                       last_error='history-only refresh',
+                       latest_synced_count=latest_synced_count+4,
+                       backfill_complete=0,
+                       latest_window_synced_at='2026-07-18T09:00:00Z',
+                       last_mode='history-only'
+                   WHERE slot=1"""
+            )
+            conn.commit()
+        fingerprint_history = _block(fingerprint_history_runtime).build_opening_plan()
+        _assert(
+            fingerprint_history["plan_fingerprint"] == fingerprint_base["plan_fingerprint"],
+            "historical 12 WB lines / 116 units do not enter opening fingerprint",
+        )
+
+        fingerprint_material_runtime = _seed_runtime(root / "runtime-fingerprint-material")
+        with sqlite3.connect(fingerprint_material_runtime.db_path) as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_wb_supplies
+                   SET raw_goods_json='[{"nmID":101,"quantity":7,"acceptedQuantity":0}]',
+                       raw_goods_hash='hash:wb-transit-3:changed'
+                   WHERE supply_id='wb-transit-3'"""
+            )
+            conn.commit()
+        fingerprint_material = _block(fingerprint_material_runtime).build_opening_plan()
+        _assert(
+            fingerprint_material["plan_fingerprint"] != fingerprint_base["plan_fingerprint"],
+            "material status-3 WB row changes opening fingerprint",
+        )
+
+        negative_wb_runtime = _seed_runtime(root / "runtime-negative-material")
+        try:
+            _block(
+                negative_wb_runtime,
+                stocks_source=_FakeStocksSource({101: -1, 102: 0, 103: 3}),
+            ).build_opening_plan()
+            raise AssertionError("negative material WB stock did not fail closed")
+        except WarehouseOpeningSnapshotError as exc:
+            _assert("negative current stock" in str(exc), "negative material source blocks cutover")
+
+        failed_source_runtime = _seed_runtime(root / "runtime-failed-source")
+        try:
+            _block(failed_source_runtime, stocks_source=_FailingStocksSource()).build_opening_plan()
+            raise AssertionError("real source failure did not fail dry-run")
+        except RuntimeError as exc:
+            _assert("official WB stock source failure" in str(exc), "real source error surfaced")
+        _assert(
+            len(failed_source_runtime.list_nomenclature_items(active_only=False)) == 3,
+            "non-target runtime remains readable",
+        )
+        _assert(
+            WarehouseStocksBlock(
+                runtime=failed_source_runtime,
+                stocks_block=StocksBlock(_FakeStocksSource()),
+                timestamp_factory=lambda: NOW,
+                now_factory=lambda: datetime(2026, 7, 18, 8, tzinfo=timezone.utc),
+                wb_nomenclature_provider=lambda: failed_source_runtime.list_nomenclature_items(active_only=True),
+            ).readback()["status"]
+            == "not_initialized",
+            "real source failure creates no partial opening",
+        )
+
+        schema_upgrade_runtime = _seed_runtime(root / "runtime-schema-upgrade")
+        schema_upgrade_block = _block(schema_upgrade_runtime)
+        _assert(schema_upgrade_block.readback()["status"] == "not_initialized", "warehouse schema created")
+        with sqlite3.connect(schema_upgrade_runtime.db_path) as conn:
+            conn.execute(
+                "ALTER TABLE sheet_vitrina_v1_warehouse_documents DROP COLUMN provenance_json"
+            )
+            conn.commit()
+        _assert(schema_upgrade_block.readback()["status"] == "not_initialized", "warehouse schema upgraded")
+        with sqlite3.connect(schema_upgrade_runtime.db_path) as conn:
+            columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(sheet_vitrina_v1_warehouse_documents)"
+                ).fetchall()
+            }
+        _assert("provenance_json" in columns, "document provenance schema upgrade")
 
         invalid_fact_runtime = _seed_runtime(root / "runtime-invalid-supplier-fact")
         with sqlite3.connect(invalid_fact_runtime.db_path) as conn:
@@ -374,10 +535,14 @@ def main() -> None:
     print("warehouse stocks smoke: ok")
 
 
-def _block(runtime: RegistryUploadDbBackedRuntime) -> WarehouseStocksBlock:
+def _block(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    stocks_source: _FakeStocksSource | _FailingStocksSource | None = None,
+) -> WarehouseStocksBlock:
     return WarehouseStocksBlock(
         runtime=runtime,
-        stocks_block=StocksBlock(_FakeStocksSource()),
+        stocks_block=StocksBlock(stocks_source or _FakeStocksSource()),
         now_factory=lambda: datetime(2026, 7, 18, 8, tzinfo=timezone.utc),
         timestamp_factory=lambda: NOW,
         wb_nomenclature_provider=lambda: runtime.list_nomenclature_items(active_only=True),
