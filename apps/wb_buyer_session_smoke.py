@@ -339,7 +339,9 @@ def _run_recovery_lifecycle_smoke() -> None:
         def __init__(self, events: list[str]) -> None:
             self.events = events
 
-        def storage_state(self, *, path: str) -> None:
+        def storage_state(self, *, path: str, indexed_db: bool = False) -> None:
+            if not indexed_db:
+                raise AssertionError("candidate capture must require IndexedDB support")
             self.events.append("snapshot")
             Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
 

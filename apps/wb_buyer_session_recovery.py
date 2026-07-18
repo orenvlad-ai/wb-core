@@ -17,6 +17,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Mapping
 from urllib import parse as urllib_parse
@@ -366,14 +367,17 @@ def _capture_login(
     os.environ["DISPLAY"] = config.display
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=False)
+            profile_dir = Path(tempfile.mkdtemp(prefix="buyer-recovery-profile-", dir=str(config.session.state_dir)))
+            browser = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=False,
+                viewport={"width": 1500, "height": 820},
+                locale="ru-RU",
+            )
             try:
-                context_args: dict[str, Any] = {"locale": "ru-RU", "viewport": {"width": 1500, "height": 820}}
-                if config.session.storage_state_path.exists():
-                    context_args["storage_state"] = str(config.session.storage_state_path)
-                context = browser.new_context(**context_args)
-                page = context.new_page()
-                page.goto(config.session.buyer_url, wait_until="domcontentloaded")
+                _hydrate_persistent_context_from_storage_state(browser, config.session.storage_state_path)
+                page = browser.pages[0] if browser.pages else browser.new_page()
+                page.goto(config.session.buyer_url, wait_until="domcontentloaded", timeout=60_000)
                 _write_status(
                     config,
                     {
@@ -491,6 +495,30 @@ def _capture_login(
             os.environ["DISPLAY"] = old_display
 
 
+def _hydrate_persistent_context_from_storage_state(context: Any, storage_state_path: Path) -> None:
+    if not storage_state_path.exists():
+        return
+    try:
+        payload = json.loads(storage_state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, Mapping):
+        return
+    cookies = [item for item in (payload.get("cookies") or []) if isinstance(item, Mapping)]
+    if cookies:
+        context.add_cookies(cookies)
+    for origin_payload in (payload.get("origins") or []):
+        if not isinstance(origin_payload, Mapping):
+            continue
+        origin = str(origin_payload.get("origin") or "").strip()
+        items = [item for item in (origin_payload.get("localStorage") or []) if isinstance(item, Mapping)]
+        if not origin or not items:
+            continue
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(origin, wait_until="domcontentloaded", timeout=30_000)
+        page.evaluate("""items => items.forEach(item => window.localStorage.setItem(item.name, item.value))""", items)
+
+
 def _capture_settled_candidate(
     config: BuyerRecoveryConfig,
     adapter: WbBuyerSessionAdapter,
@@ -501,12 +529,7 @@ def _capture_settled_candidate(
 ) -> dict[str, Any]:
     del adapter
     page.wait_for_timeout(max(1_000, int(config.session.settle_timeout_ms)))
-    try:
-        context.storage_state(path=str(config.candidate_path), indexed_db=True)
-    except TypeError:
-        # Older Playwright runtimes do not expose indexed_db; retain the
-        # cookie/localStorage snapshot rather than failing recovery outright.
-        context.storage_state(path=str(config.candidate_path))
+    context.storage_state(path=str(config.candidate_path), indexed_db=True)
     os.chmod(config.candidate_path, 0o600)
     return fresh_adapter_factory(config=config.session).check_session(
         storage_state_path=config.candidate_path,
