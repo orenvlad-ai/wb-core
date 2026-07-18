@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import ssl
 import subprocess
 import sys
 import time
@@ -49,6 +50,25 @@ from apps.github_release_train import (  # noqa: E402
 EXIT_BLOCKED = 2
 EXIT_AWAITING_UI = 3
 EXIT_INTERRUPTED = 130
+
+
+def _ensure_ca_bundle() -> None:
+    """Use a verified platform CA bundle when framework Python has none configured."""
+
+    if os.environ.get("SSL_CERT_FILE", "").strip():
+        return
+    if ssl.get_default_verify_paths().cafile:
+        return
+    candidates = (
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/opt/homebrew/etc/ca-certificates/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+    )
+    for candidate in candidates:
+        if Path(candidate).is_file():
+            os.environ["SSL_CERT_FILE"] = candidate
+            return
 
 
 def evaluate_release(
@@ -232,6 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
+        _ensure_ca_bundle()
         api = GitHubApi(
             repository=_repository(args.repository),
             token=_token(),
