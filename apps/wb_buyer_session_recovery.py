@@ -603,7 +603,7 @@ def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
     # icon/link without accessible text.  Only accept this fallback when the
     # login surface advertises an account and there is exactly one visible
     # enabled control; human markers are handled before this function.
-    if not result and body_has_account_marker:
+    if not result:
         visible_controls: list[Any] = []
         for index in range(count):
             item = locator.nth(index)
