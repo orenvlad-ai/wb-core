@@ -383,7 +383,24 @@ class HttpBackedStocksSource:
         if not isinstance(chrt_id, int) or isinstance(chrt_id, bool) or chrt_id <= 0:
             raise RuntimeError(f"official stocks request returned invalid chrtId for nmId {nm_id}")
         if not isinstance(warehouse_id, int) or isinstance(warehouse_id, bool) or warehouse_id <= 0:
-            raise RuntimeError(f"official stocks request returned invalid warehouseId for nmId {nm_id}")
+            row_digest = hashlib.sha256(
+                json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            diagnostic_value = repr(warehouse_id)
+            if len(diagnostic_value) > 80:
+                diagnostic_value = f"{diagnostic_value[:77]}..."
+            raise RuntimeError(
+                "official stocks request returned invalid warehouseId "
+                f"for nmId {nm_id} "
+                f"(present={str('warehouseId' in item).lower()}, "
+                f"type={type(warehouse_id).__name__}, value={diagnostic_value}, "
+                f"row_digest={row_digest})"
+            )
         for field in ("quantity", "inWayToClient", "inWayFromClient"):
             value = item.get(field)
             if (

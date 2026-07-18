@@ -191,8 +191,15 @@ def _check_repeated_full_page_is_incomplete() -> None:
 def _check_invalid_or_duplicate_rows_fail_closed() -> None:
     invalid = _stock_item(101, 1011, 1, "Центральный", 1)
     invalid.pop("inWayFromClient")
+    invalid_warehouse = _stock_item(101, 1011, 1, "Центральный", 1)
+    invalid_warehouse["warehouseId"] = None
     for items, expected in (
         ([invalid], "invalid inWayFromClient"),
+        (
+            [invalid_warehouse],
+            "invalid warehouseId for nmId 101 "
+            "(present=true, type=NoneType, value=None, row_digest=",
+        ),
         (
             [
                 _stock_item(101, 1011, 1, "Центральный", 1),
