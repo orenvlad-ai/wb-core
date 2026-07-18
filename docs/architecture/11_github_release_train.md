@@ -150,7 +150,7 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 
 ## Канонический Мониторинг
 
-[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+is%3Aopen+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aawaiting-ui%2Crelease%3Aneeds-resume%22) использует `is:open`, явно исключает `release:superseded` и через comma-OR label qualifier показывает только активную очередь/gates плюс отдельный resume overlay. PR-specific failures исследуются по их точной ссылке/comment и после доказанной замены не возвращаются в этот view.
+[Основной мониторинг исполняемых/ожидающих PR](https://github.com/orenvlad-ai/wb-core/pulls?q=is%3Apr+is%3Aopen+-label%3Arelease%3Asuperseded+label%3A%22release%3Aready%2Crelease%3Arunning%2Crelease%3Aawaiting-agent%2Crelease%3Aneeds-resume%22) использует `is:open`, явно исключает `release:superseded` и через comma-OR label qualifier показывает только открытую активную очередь плюс отдельный resume overlay. Уже merged `release:awaiting-ui` gate не может входить в `is:open` view и наблюдается на текущем chain PR/workflow. PR-specific failures исследуются по их точной ссылке/comment и после доказанной замены не возвращаются в этот view.
 
 ## Baseline И Security Boundary
 
