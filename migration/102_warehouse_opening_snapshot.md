@@ -18,7 +18,7 @@ Schema creation for these new tables is part of deploy/startup/read-model initia
 
 `sheet_vitrina_v1_warehouse_cutovers` owns the stable `warehouse_opening_v1` identity, common logical timestamp, posted status, JSON source watermarks, unique exact plan fingerprint and sanitized apply audit.
 
-`sheet_vitrina_v1_warehouse_documents` owns stable ids/numbers, one row per canonical warehouse/type/cutover, nullable movement endpoints, source basis/watermark, exact text quantity, nullable economics and quantity-only status.
+`sheet_vitrina_v1_warehouse_documents` owns stable ids/numbers, one row per canonical warehouse/type/cutover, nullable movement endpoints, source basis/watermark, document-level JSON provenance, exact text quantity, nullable economics and quantity-only status.
 
 `sheet_vitrina_v1_warehouse_document_lines` owns stable line id, document FK, canonical nmID/display identity, exact text quantity, nullable economics and JSON source-record provenance. `UNIQUE(document_id,nm_id)` prevents duplicate SKU balance rows; FK cascade makes the bounded rollback complete.
 
@@ -29,7 +29,7 @@ There is no mutable warehouse balance table. Initial balance is the sum of poste
 1. Merge/deploy the reviewed release commit through GitHub Release Train.
 2. Confirm deploy SHA/runtime/service/public probes.
 3. Run `warehouse-opening-dry-run --output <absolute local JSON>` through `apps/registry_upload_http_entrypoint_hosted_runtime.py`.
-4. Review all six document totals, line provenance, local source digest and WB API `fetched_at`/coverage/digest. Any untraceable line, missing composition, incomplete WB coverage or negative WB acceptance discrepancy is a blocker.
+4. Review all six document totals, document/line provenance, local material-source digest and WB API `fetched_at`/coverage/digest. Any untraceable material line, missing material composition, incomplete WB coverage or negative quantity in a material opening source is a blocker. The discrepancy document must show `sku_count=0`, `total_quantity=0`, no lines and `opening_policy=zero_at_cutover`.
 5. Apply the unmodified JSON with its exact `sha256:` fingerprint through `warehouse-opening-apply`. The wrapper pins active EU target/runtime/backup paths.
 6. Read back through `warehouse-opening-readback`; require six unique documents/warehouses, one cutover, exact line/header totals and all costs/capital NULL.
 7. Re-run apply with the same plan if an idempotency proof is required; it must report `idempotent=true` and create no rows/backup.
@@ -37,7 +37,7 @@ There is no mutable warehouse balance table. Initial balance is the sum of poste
 
 Apply creates an integrity-checked coherent SQLite backup before `BEGIN IMMEDIATE`. Local sources are re-digested after dry-run and once more through the same connection under the acquired write lock immediately before insertion. Cutover/header/line insertion plus reconciliation is one transaction; injected/real failure leaves no partial documents and the same exact plan can then resume without duplicates when source evidence is unchanged.
 
-If dry-run reports a negative WB acceptance discrepancy, use only `warehouse-opening-diagnostic --nm-id <reported nmID>` for bounded read-only evidence. The command parses the hosted dotenv file without shell evaluation and reports sanitized ordinary-final/doprinato goods rows and exact sent/accepted/doprinato arithmetic. It does not sync, backfill or modify the WB cache and does not weaken the negative-balance gate.
+`warehouse-opening-diagnostic --nm-id <nmID>` remains an optional bounded read-only investigation tool for historical ordinary-final/doprinato arithmetic. It parses the hosted dotenv file without shell evaluation and reports sanitized selected-SKU rows and a diagnostic-only digest. It never participates in dry-run/apply, never enters the opening fingerprint, does not sync/backfill/mutate the WB cache and cannot block the `zero_at_cutover` discrepancy opening.
 
 ## Recovery
 

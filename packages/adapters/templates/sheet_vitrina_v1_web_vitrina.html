@@ -7918,6 +7918,7 @@
     function renderWarehouseDocumentRow(documentRow) {
       const lines = Array.isArray(documentRow.lines) ? documentRow.lines : [];
       const movement = String(documentRow.warehouse_from_key || "—") + " → " + String(documentRow.warehouse_to_key || documentRow.warehouse_key || "—");
+      const documentProvenance = '<div class="warehouse-document-provenance">' + warehouseEvidenceDetails(documentRow.provenance, "Основание документа") + '</div>';
       const lineTable = '<table class="warehouse-table warehouse-document-lines"><thead><tr><th>SKU</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Себестоимость</th><th>Капитал</th><th>Provenance</th></tr></thead><tbody>' +
         (lines.length ? lines.map(function(line) {
           return '<tr><td>' + escapeHtml(line.sku || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td><td>' + escapeHtml((line.barcode ? line.barcode + " / " : "") + String(line.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(line.quantity)) + '</td><td>' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td><td>' + warehouseEvidenceDetails(line.provenance, "Основание") + '</td></tr>';
@@ -7928,7 +7929,7 @@
         '<td>' + escapeHtml(movement) + '</td><td>' + escapeHtml(documentRow.source_basis || "—") + '</td>' +
         '<td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.sku_count)) + '</td><td class="warehouse-number">' + escapeHtml(warehouseNumber(documentRow.total_quantity)) + '</td>' +
         '<td>' + escapeHtml(warehouseMoney(documentRow.total_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(documentRow.total_capital_rub)) + '</td><td>' + escapeHtml(documentRow.status_label || "—") + '</td>' +
-        '<td><details class="warehouse-source-details"><summary>Открыть (' + escapeHtml(String(lines.length)) + ')</summary>' + lineTable + '</details></td></tr>';
+        '<td><details class="warehouse-source-details"><summary>Открыть (' + escapeHtml(String(lines.length)) + ')</summary>' + documentProvenance + lineTable + '</details></td></tr>';
     }
 
     function ensureOperatorEmbed(tabName) {
