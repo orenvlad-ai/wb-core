@@ -168,8 +168,8 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
             try:
                 session = adapter.check_session()
                 break
-            except RuntimeError as exc:
-                if "lock" not in str(exc).lower():
+            except (RuntimeError, BlockingIOError) as exc:
+                if isinstance(exc, RuntimeError) and "lock" not in str(exc).lower():
                     raise
                 if attempt == 44:
                     lock_contention = True
