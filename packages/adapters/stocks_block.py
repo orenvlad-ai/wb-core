@@ -394,11 +394,28 @@ class HttpBackedStocksSource:
             diagnostic_value = repr(warehouse_id)
             if len(diagnostic_value) > 80:
                 diagnostic_value = f"{diagnostic_value[:77]}..."
+            diagnostic_context = json.dumps(
+                {
+                    field: item.get(field)
+                    for field in (
+                        "warehouseName",
+                        "regionName",
+                        "quantity",
+                        "inWayToClient",
+                        "inWayFromClient",
+                    )
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(diagnostic_context) > 240:
+                diagnostic_context = f"{diagnostic_context[:237]}..."
             raise RuntimeError(
                 "official stocks request returned invalid warehouseId "
                 f"for nmId {nm_id} "
                 f"(present={str('warehouseId' in item).lower()}, "
                 f"type={type(warehouse_id).__name__}, value={diagnostic_value}, "
+                f"context={diagnostic_context}, "
                 f"row_digest={row_digest})"
             )
         for field in ("quantity", "inWayToClient", "inWayFromClient"):

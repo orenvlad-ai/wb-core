@@ -198,7 +198,9 @@ def _check_invalid_or_duplicate_rows_fail_closed() -> None:
         (
             [invalid_warehouse],
             "invalid warehouseId for nmId 101 "
-            "(present=true, type=NoneType, value=None, row_digest=",
+            "(present=true, type=NoneType, value=None, "
+            'context={"warehouseName":"Склад 1","regionName":"Центральный",'
+            '"quantity":1,"inWayToClient":0,"inWayFromClient":0}, row_digest=',
         ),
         (
             [
