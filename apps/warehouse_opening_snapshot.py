@@ -66,8 +66,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             result = {**result, "plan_file": str(target)}
         return result
     if args.command == "apply":
-        plan_path = Path(str(args.plan_file)).resolve()
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan_file = str(args.plan_file or "").strip()
+        if plan_file in {"-", "/dev/stdin"}:
+            plan_text = sys.stdin.read()
+        else:
+            plan_text = Path(plan_file).resolve().read_text(encoding="utf-8")
+        plan = json.loads(plan_text)
         if not isinstance(plan, dict):
             raise ValueError("plan-file must contain a JSON object")
         return block.apply_opening_plan(

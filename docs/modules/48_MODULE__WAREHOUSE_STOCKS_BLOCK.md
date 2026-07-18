@@ -124,7 +124,7 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
   warehouse-ui-flow --evidence-dir /absolute/outside-repo/warehouse-ui-evidence
 ```
 
-The wrapper pins the current active target, app dir, runtime dir and backup dir. The opening runner parses the hosted dotenv file as data inside Python, without shell evaluation, loads secrets only into the remote process environment for the WB API call and never prints them. `warehouse-opening-diagnostic` is optional/read-only and requires explicit positive nmIDs; it returns only selected-SKU aggregates, sanitized final-supply goods provenance, a diagnostic-only digest and cache watermark and never refreshes or mutates the WB cache. It is not a cutover prerequisite or gate. The UI command builds a short-lived signed owner cookie without logging it, opens a fresh local Playwright context and reconciles all six visible warehouse totals/rows with their protected detail API, every opening document with production readback and the current FF rows with the legacy canonical FF API. It verifies expanded line/document provenance, the visible zero discrepancy balance, NULL-cost dashes, the old FF transition and absence of unexpected `5xx`, `pageerror` and console errors; screenshots and its sanitized report must stay outside Git. Direct production SQL, arbitrary SSH mutation, server-only scripts and bypassing the fingerprint/backup gates are not valid paths.
+The wrapper pins the current active target, app dir, runtime dir and backup dir. For apply it streams the exact reviewed JSON plan to `/dev/stdin`; the opening runner consumes that stream exactly once without resolving the ephemeral pipe symlink. The runner parses the hosted dotenv file as data inside Python, without shell evaluation, loads secrets only into the remote process environment for the WB API call and never prints them. `warehouse-opening-diagnostic` is optional/read-only and requires explicit positive nmIDs; it returns only selected-SKU aggregates, sanitized final-supply goods provenance, a diagnostic-only digest and cache watermark and never refreshes or mutates the WB cache. It is not a cutover prerequisite or gate. The UI command builds a short-lived signed owner cookie without logging it, opens a fresh local Playwright context and reconciles all six visible warehouse totals/rows with their protected detail API, every opening document with production readback and the current FF rows with the legacy canonical FF API. It verifies expanded line/document provenance, the visible zero discrepancy balance, NULL-cost dashes, the old FF transition and absence of unexpected `5xx`, `pageerror` and console errors; screenshots and its sanitized report must stay outside Git. Direct production SQL, arbitrary SSH mutation, server-only scripts and bypassing the fingerprint/backup gates are not valid paths.
 
 Rollback is recovery-only:
 
@@ -155,6 +155,7 @@ These tables are not referenced by web-vitrina materialization, canonical cost e
 Targeted checks:
 
 - `python3 apps/warehouse_stocks_smoke.py`
+- `python3 apps/warehouse_opening_snapshot_runner_smoke.py`
 - `python3 apps/registry_upload_http_entrypoint_supplier_auth_smoke.py`
 - `python3 apps/warehouse_stocks_browser_smoke.py`
 
