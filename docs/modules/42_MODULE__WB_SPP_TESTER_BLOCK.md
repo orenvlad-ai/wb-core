@@ -47,7 +47,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Buyer authorization now checks and resumes automatically on `Цены -> Проверка СПП`, performs bounded one-saved-account login without noVNC, captures candidate state only after settle, binds stable account identity through HMAC-only v2 migration, escalates only real human steps, and shares the same no-write auto-recovery preflight with manual/scheduled SPP starts."
+update_note: "Buyer authorization now checks and resumes automatically on `Цены -> Проверка СПП`, performs bounded one-saved-account login without noVNC, captures candidate state only after settle, uses a navigation-bounded independent post-login probe with controlled terminal failure, binds stable account identity through HMAC-only v2 migration, escalates only real human steps, and shares the same no-write auto-recovery preflight with manual/scheduled SPP starts."
 ---
 
 # 1. Идентификатор и статус
@@ -234,7 +234,7 @@ Targeted smokes:
 - `python3 apps/wb_spp_tester_smoke.py`
 - `python3 apps/wb_spp_tester_browser_smoke.py`
 
-These cover valid-session no-recovery, one-saved-account automatic click, auth-token rotation for the same stable account, post-settle candidate capture, HMAC-only v1 migration, unprovable migration fail-closed, SMS `awaiting_human`, wrong-account blocking without fingerprint replacement, reload attachment without duplicate start, exact terminal launcher/tunnel lifecycle, prior-state rollback after failed final probe, full recovery process-group cleanup, manual/scheduled auto-recovery, scheduled `action_required` before writes, secret/path sanitization, per-read destination override without module 35 mutation, price/payment/destination parsing, legacy history compatibility, interrupted/stale reconciliation, session loss and mandatory restore, bounded 429/timeout/stale/quarantine, UI history and deploy/systemd wiring.
+These cover valid-session no-recovery, one-saved-account automatic click (including saved-account button variants), auth-token rotation for the same stable account, post-settle candidate capture, navigation-bounded independent post-login probing with controlled terminal failure, HMAC-only v1 migration, unprovable migration fail-closed, SMS `awaiting_human`, wrong-account blocking without fingerprint replacement, reload attachment without duplicate start, exact terminal launcher/tunnel lifecycle, prior-state rollback after failed final probe, full recovery process-group cleanup, manual/scheduled auto-recovery, scheduled `action_required` before writes, secret/path sanitization, per-read destination override without module 35 mutation, price/payment/destination parsing, legacy history compatibility, interrupted/stale reconciliation, session loss and mandatory restore, bounded 429/timeout/stale/quarantine, UI history and deploy/systemd wiring.
 
 Regression smokes:
 - `python3 apps/wb_prices_management_smoke.py`

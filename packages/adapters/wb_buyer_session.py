@@ -315,6 +315,7 @@ class WbBuyerSessionAdapter:
                 context = browser.new_context(storage_state=str(path), locale="ru-RU")
                 page = context.new_page()
                 page.set_default_timeout(self.config.navigation_timeout_ms)
+                page.set_default_navigation_timeout(self.config.navigation_timeout_ms)
                 identity_candidates: list[Mapping[str, Any]] = []
 
                 def capture_identity(response: Any) -> None:

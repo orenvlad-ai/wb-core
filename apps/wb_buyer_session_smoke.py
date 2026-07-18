@@ -378,6 +378,41 @@ def _run_recovery_lifecycle_smoke() -> None:
         if not _click_saved_account({"candidate": FakeButton()}) or clicked != [True]:
             raise AssertionError("one saved account login action must be clicked automatically")
 
+        class FakeLoginButton:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def inner_text(self, **_kwargs: Any) -> str:
+                return self.text
+
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+        class FakeLoginLocator:
+            def __init__(self, items: list[FakeLoginButton]) -> None:
+                self.items = items
+
+            def count(self) -> int:
+                return len(self.items)
+
+            def nth(self, index: int) -> FakeLoginButton:
+                return self.items[index]
+
+        class FakeLoginPage:
+            def __init__(self, items: list[FakeLoginButton]) -> None:
+                self.items = items
+
+            def locator(self, _selector: str) -> FakeLoginLocator:
+                return FakeLoginLocator(self.items)
+
+        saved_page = FakeLoginPage([FakeLoginButton("Войти под этим аккаунтом")])
+        saved_surface = _inspect_login_surface(saved_page)  # type: ignore[arg-type]
+        if saved_surface.get("state") != "automatic_login":
+            raise AssertionError("a single saved-account Войти control must be classified for auto-login")
+
         config.session.storage_state_path.write_text("old-canonical-state", encoding="utf-8")
         config.candidate_path.write_text("new-candidate-state", encoding="utf-8")
         _write_status(config, {"run_id": "rollback", "status": "saving_session", "reason": "buyer_session_saving"})
