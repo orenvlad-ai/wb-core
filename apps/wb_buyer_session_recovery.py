@@ -582,7 +582,9 @@ def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
             enabled = bool(item.is_enabled())
         except Exception:
             continue
-        is_saved_account_action = action_text in {"войти", "продолжить", "далее"} or any(
+        is_saved_account_action = action_text in {"войти", "продолжить", "далее"} or (
+            body_has_account_marker and any(token in action_text for token in ("войти", "продолж", "далее", "аккаунт"))
+        ) or any(
             marker in action_text
             for marker in (
                 "войти под этим аккаунтом",
