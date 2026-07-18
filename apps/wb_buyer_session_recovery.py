@@ -336,6 +336,7 @@ def _capture_login(
                 last_session: Mapping[str, Any] = {}
                 automatic_login_attempted = False
                 human_window_started = False
+                candidate_probe_attempts = 0
                 while time.monotonic() < deadline:
                     surface = _inspect_login_surface(page)
                     if surface.get("state") == "authenticated":
@@ -353,6 +354,7 @@ def _capture_login(
                         result = _accept_recovery_candidate(config, adapter, candidate)
                         if result is not None:
                             return result
+                        candidate_probe_attempts += 1
                         if candidate.get("status") == "wrong_account":
                             surface = {"state": "human", "reason": "buyer_account_fingerprint_mismatch"}
                         elif candidate.get("status") == "migration_required":
@@ -362,6 +364,18 @@ def _capture_login(
                                     **_read_status(config.status_path),
                                     "status": "migration_required",
                                     "reason": "buyer_fingerprint_migration_unproven",
+                                    "finished_at": _now_text(),
+                                    "session": candidate,
+                                },
+                            )
+                            return 1
+                        elif candidate_probe_attempts >= 2:
+                            _write_status(
+                                config,
+                                {
+                                    **_read_status(config.status_path),
+                                    "status": "error",
+                                    "reason": "buyer_session_post_login_probe_failed",
                                     "finished_at": _now_text(),
                                     "session": candidate,
                                 },
@@ -528,7 +542,7 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
         return {"state": "human", "reason": "buyer_captcha_required"}
     if any(marker in body for marker in ("подтвердите вход", "подтверждение безопасности", "это вы")):
         return {"state": "human", "reason": "buyer_security_confirmation_required"}
-    candidates = _saved_account_login_candidates(page)
+    candidates = _saved_account_login_candidates(page, body=body)
     if len(candidates) == 1:
         return {"state": "automatic_login", "reason": "buyer_saved_account_available", "candidate": candidates[0]}
     if len(candidates) > 1 or any(marker in body for marker in ("выберите аккаунт", "другой аккаунт")):
@@ -540,14 +554,21 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
     return {"state": "human", "reason": "buyer_human_action_required"}
 
 
-def _saved_account_login_candidates(page: Any) -> list[Any]:
+def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
     result: list[Any] = []
     try:
         locator = page.locator("button, [role='button']")
         count = min(int(locator.count()), 100)
     except Exception:
         return result
-    allowed = {"войти", "войти под этим аккаунтом"}
+    account_markers = (
+        "сохранённый аккаунт",
+        "сохраненный аккаунт",
+        "этим аккаунтом",
+        "продолжить как",
+        "войти как",
+    )
+    body_has_account_marker = any(marker in body.lower() for marker in account_markers)
     for index in range(count):
         item = locator.nth(index)
         try:
@@ -556,7 +577,11 @@ def _saved_account_login_candidates(page: Any) -> list[Any]:
             enabled = bool(item.is_enabled())
         except Exception:
             continue
-        if visible and enabled and text in allowed:
+        is_saved_account_action = (
+            text in {"войти", "войти под этим аккаунтом"}
+            and (text != "войти" or body_has_account_marker)
+        ) or any(marker in text for marker in ("войти под этим аккаунтом", "продолжить как", "войти как"))
+        if visible and enabled and is_saved_account_action:
             result.append(item)
     return result
 
