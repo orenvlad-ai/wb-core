@@ -557,7 +557,7 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
 def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
     result: list[Any] = []
     try:
-        locator = page.locator("button, [role='button'], input[type='submit'], input[type='button']")
+        locator = page.locator("button, [role='button'], input[type='submit'], input[type='button'], a[href]")
         count = min(int(locator.count()), 100)
     except Exception:
         return result
@@ -599,6 +599,21 @@ def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
             is_saved_account_action = False
         if visible and enabled and is_saved_account_action:
             result.append(item)
+    # WB has shipped saved-account cards whose continuation control is an
+    # icon/link without accessible text.  Only accept this fallback when the
+    # login surface advertises an account and there is exactly one visible
+    # enabled control; human markers are handled before this function.
+    if not result and body_has_account_marker:
+        visible_controls: list[Any] = []
+        for index in range(count):
+            item = locator.nth(index)
+            try:
+                if item.is_visible() and item.is_enabled():
+                    visible_controls.append(item)
+            except Exception:
+                continue
+        if len(visible_controls) == 1:
+            result.append(visible_controls[0])
     return result
 
 
