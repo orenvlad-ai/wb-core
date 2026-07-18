@@ -51,12 +51,10 @@ ACTIVE_STATUSES = {
     "starting",
     "checking_session",
     "automatic_login",
-    "stabilizing_session",
     "awaiting_human",
-    "saving_session",
     "validating_session",
 }
-FINAL_STATUSES = {"completed", "migration_required", "stopped", "timeout", "error"}
+FINAL_STATUSES = {"completed", "stopped", "timeout", "error"}
 
 
 @dataclass(frozen=True)
@@ -82,10 +80,6 @@ class BuyerRecoveryConfig:
     @property
     def start_lock_path(self) -> Path:
         return self.session.state_dir / "recovery_start.lock"
-
-    @property
-    def candidate_path(self) -> Path:
-        return self.session.state_dir / "candidate_storage_state.json"
 
     @property
     def supervisor_log_path(self) -> Path:
@@ -221,11 +215,13 @@ def stop_recovery(
         if pid and _supervisor_identity_matches(config, identity, current_run_id):
             _terminate_process_group(pid)
         config.pid_path.unlink(missing_ok=True)
-        config.candidate_path.unlink(missing_ok=True)
+        lock_owner = _read_status(config.session.lock_owner_path)
+        if str(lock_owner.get("run_id") or "") == current_run_id:
+            config.session.lock_owner_path.unlink(missing_ok=True)
         if str(payload.get("status") or "") not in FINAL_STATUSES:
             payload.update({"status": "stopped", "reason": "buyer_recovery_stopped", "finished_at": _now_text()})
             _write_status(config, payload)
-    return read_recovery_status(config, with_probe=True)
+    return read_recovery_status(config, with_probe=False)
 
 
 def read_recovery_status(
@@ -280,7 +276,10 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
             blocking=True,
             timeout_seconds=config.lock_wait_sec,
             poll_seconds=min(0.25, max(0.02, config.poll_sec)),
+            owner_run_id=run_id,
+            owner_operation="buyer_recovery_supervisor",
         ):
+            _ensure_commands(config)
             _write_status(
                 config,
                 {
@@ -289,37 +288,19 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
                     "reason": "buyer_recovery_checking_session",
                 },
             )
-            session = adapter.check_session(acquire_lock=False)
-            if session.get("status") == "valid":
+            xvfb = _spawn(["Xvfb", config.display, "-screen", "0", "1600x900x24", "-nolisten", "tcp"], config.xvfb_log_path)
+            processes.append(xvfb)
+            _wait_display(config.display)
+            openbox_path = shutil.which("openbox")
+            if openbox_path:
+                processes.append(_spawn([openbox_path], config.openbox_log_path, env={"DISPLAY": config.display}))
+            result = _capture_login(config, adapter, processes)
+            if result == 0:
+                settled = _read_status(config.status_path)
                 completion = {
-                    "reason": "buyer_session_already_valid",
-                    "session": session,
+                    "reason": "buyer_persistent_profile_validated",
+                    "session": settled.get("session") if isinstance(settled.get("session"), Mapping) else {},
                 }
-                result = 0
-            else:
-                _ensure_commands(config)
-                _write_status(
-                    config,
-                    {
-                        **_read_status(config.status_path),
-                        "status": "starting",
-                        "reason": "buyer_visual_session_starting",
-                        "session": session,
-                    },
-                )
-                xvfb = _spawn(["Xvfb", config.display, "-screen", "0", "1600x900x24", "-nolisten", "tcp"], config.xvfb_log_path)
-                processes.append(xvfb)
-                _wait_display(config.display)
-                openbox_path = shutil.which("openbox")
-                if openbox_path:
-                    processes.append(_spawn([openbox_path], config.openbox_log_path, env={"DISPLAY": config.display}))
-                result = _capture_login(config, adapter, processes)
-                if result == 0:
-                    settled = _read_status(config.status_path)
-                    completion = {
-                        "reason": "buyer_session_saved_and_validated",
-                        "session": settled.get("session") if isinstance(settled.get("session"), Mapping) else {},
-                    }
         if completion is not None:
             _write_status(
                 config,
@@ -349,7 +330,6 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
     finally:
         for process in reversed(processes):
             _terminate(process)
-        config.candidate_path.unlink(missing_ok=True)
         if _supervisor_identity_matches(config, _read_supervisor_identity(config), run_id):
             config.pid_path.unlink(missing_ok=True)
 
@@ -360,20 +340,16 @@ def _capture_login(
     processes: list[subprocess.Popen[Any]],
 ) -> int:
     deadline = time.monotonic() + config.timeout_sec
-    env = os.environ.copy()
-    env["DISPLAY"] = config.display
     old_display = os.environ.get("DISPLAY")
     os.environ["DISPLAY"] = config.display
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=False)
+            context = _launch_persistent_context(playwright, config)
             try:
-                context_args: dict[str, Any] = {"locale": "ru-RU", "viewport": {"width": 1500, "height": 820}}
-                if config.session.storage_state_path.exists():
-                    context_args["storage_state"] = str(config.session.storage_state_path)
-                context = browser.new_context(**context_args)
-                page = context.new_page()
+                adapter.migrate_legacy_storage_state(context)
+                page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
                 page.goto(config.session.buyer_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(max(500, int(config.session.settle_timeout_ms)))
                 _write_status(
                     config,
                     {
@@ -386,57 +362,43 @@ def _capture_login(
                 last_session: Mapping[str, Any] = {}
                 automatic_login_attempted = False
                 human_window_started = False
-                candidate_probe_attempts = 0
+                proof_attempts = 0
+                unknown_attempts = 0
                 while time.monotonic() < deadline:
                     surface = _inspect_login_surface(page)
+                    if surface.get("state") != "unknown":
+                        unknown_attempts = 0
                     if surface.get("state") == "authenticated":
-                        # Human completion can arrive through an async WB
-                        # redirect just like the saved-account click.  Apply
-                        # the same bounded DOM/network-idle settle before
-                        # taking candidate storage state.
                         _settle_after_login_action(config, page)
-                        _write_status(
-                            config,
-                            {
-                                **_read_status(config.status_path),
-                                "status": "stabilizing_session",
-                                "reason": "buyer_session_stabilizing",
-                                "session": last_session,
-                            },
+                        operation = adapter.probe_persistent_context(
+                            context,
+                            nm_id=config.session.validation_nm_id,
+                            page=page,
                         )
-                        candidate = _capture_settled_candidate(config, adapter, context, page)
-                        last_session = candidate
-                        result = _accept_recovery_candidate(config, adapter, candidate)
-                        if result is not None:
-                            return result
-                        candidate_probe_attempts += 1
-                        if candidate.get("status") == "wrong_account":
+                        proof = adapter.validate_persistent_proof(operation, require_price=True)
+                        last_session = proof.get("session") if isinstance(proof.get("session"), Mapping) else {}
+                        if proof.get("valid"):
+                            context.close()
+                            context = None
+                            return _verify_persistent_profile(playwright, config, adapter)
+                        proof_attempts += 1
+                        if last_session.get("status") == "wrong_account":
+                            page.goto(config.session.buyer_url, wait_until="domcontentloaded")
                             surface = {"state": "human", "reason": "buyer_account_fingerprint_mismatch"}
-                        elif candidate.get("status") == "migration_required":
-                            _write_status(
-                                config,
-                                {
-                                    **_read_status(config.status_path),
-                                    "status": "migration_required",
-                                    "reason": "buyer_fingerprint_migration_unproven",
-                                    "finished_at": _now_text(),
-                                    "session": candidate,
-                                },
-                            )
-                            return 1
-                        elif candidate_probe_attempts >= 2:
+                        elif proof_attempts >= 2:
                             _write_status(
                                 config,
                                 {
                                     **_read_status(config.status_path),
                                     "status": "error",
-                                    "reason": "buyer_session_post_login_probe_failed",
+                                    "reason": str(proof.get("reason") or "buyer_persistent_profile_proof_failed"),
                                     "finished_at": _now_text(),
-                                    "session": candidate,
+                                    "session": last_session,
                                 },
                             )
                             return 1
                         else:
+                            page.goto(config.session.buyer_url, wait_until="domcontentloaded")
                             page.wait_for_timeout(max(500, int(config.poll_sec * 1000)))
                             continue
 
@@ -454,22 +416,37 @@ def _capture_login(
                         if _click_saved_account(surface):
                             _settle_after_login_action(config, page)
                             continue
-                        surface = {"state": "human", "reason": "buyer_saved_account_login_unavailable"}
+                        surface = {"state": "unknown", "reason": "buyer_saved_account_login_unavailable"}
 
                     if surface.get("state") == "automatic_login":
-                        surface = {"state": "human", "reason": "buyer_saved_account_login_not_completed"}
-                    if not human_window_started:
-                        _start_human_window(config, processes)
-                        human_window_started = True
-                    _write_status(
-                        config,
-                        {
-                            **_read_status(config.status_path),
-                            "status": "awaiting_human",
-                            "reason": str(surface.get("reason") or "buyer_human_action_required"),
-                            "session": last_session,
-                        },
-                    )
+                        surface = {"state": "unknown", "reason": "buyer_saved_account_login_not_completed"}
+                    if surface.get("state") == "human":
+                        if not human_window_started:
+                            _start_human_window(config, processes)
+                            human_window_started = True
+                        _write_status(
+                            config,
+                            {
+                                **_read_status(config.status_path),
+                                "status": "awaiting_human",
+                                "reason": str(surface.get("reason") or "buyer_human_action_required"),
+                                "session": last_session,
+                            },
+                        )
+                    else:
+                        unknown_attempts += 1
+                        if unknown_attempts >= 3:
+                            _write_status(
+                                config,
+                                {
+                                    **_read_status(config.status_path),
+                                    "status": "error",
+                                    "reason": str(surface.get("reason") or "buyer_login_surface_unrecognized"),
+                                    "finished_at": _now_text(),
+                                    "session": last_session,
+                                },
+                            )
+                            return 1
                     page.wait_for_timeout(max(500, int(config.poll_sec * 1000)))
                 _write_status(
                     config,
@@ -483,7 +460,9 @@ def _capture_login(
                 )
                 return 1
             finally:
-                browser.close()
+                if context is not None:
+                    context.close()
+                os.chmod(config.session.persistent_profile_dir, 0o700)
     finally:
         if old_display is None:
             os.environ.pop("DISPLAY", None)
@@ -491,96 +470,69 @@ def _capture_login(
             os.environ["DISPLAY"] = old_display
 
 
-def _capture_settled_candidate(
-    config: BuyerRecoveryConfig,
-    adapter: WbBuyerSessionAdapter,
-    context: Any,
-    page: Any,
-    *,
-    fresh_adapter_factory: Any = WbBuyerSessionAdapter,
-) -> dict[str, Any]:
-    del adapter
-    page.wait_for_timeout(max(1_000, int(config.session.settle_timeout_ms)))
-    try:
-        context.storage_state(path=str(config.candidate_path), indexed_db=True)
-    except TypeError:
-        # Older Playwright runtimes do not expose indexed_db; retain the
-        # cookie/localStorage snapshot rather than failing recovery outright.
-        context.storage_state(path=str(config.candidate_path))
-    os.chmod(config.candidate_path, 0o600)
-    return fresh_adapter_factory(config=config.session).check_session(
-        storage_state_path=config.candidate_path,
-        persist_fingerprint=False,
-        acquire_lock=False,
+def _launch_persistent_context(playwright: Any, config: BuyerRecoveryConfig) -> Any:
+    config.session.persistent_profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(config.session.persistent_profile_dir, 0o700)
+    return playwright.chromium.launch_persistent_context(
+        user_data_dir=str(config.session.persistent_profile_dir),
+        headless=False,
+        locale="ru-RU",
+        viewport={"width": 1500, "height": 820},
     )
 
 
-def _accept_recovery_candidate(
+def _verify_persistent_profile(
+    playwright: Any,
     config: BuyerRecoveryConfig,
     adapter: WbBuyerSessionAdapter,
-    candidate: Mapping[str, Any],
-) -> int | None:
-    if candidate.get("status") != "valid":
-        return None
+) -> int:
     _write_status(
         config,
-        {**_read_status(config.status_path), "status": "saving_session", "reason": "buyer_session_saving", "session": candidate},
+        {
+            **_read_status(config.status_path),
+            "status": "validating_session",
+            "reason": "buyer_persistent_profile_restarting",
+        },
     )
-    rollback_path = config.session.state_dir / f"storage_state.rollback.{uuid4().hex}.json"
-    had_canonical_state = config.session.storage_state_path.exists()
-    if had_canonical_state:
-        shutil.copy2(config.session.storage_state_path, rollback_path)
-        os.chmod(rollback_path, 0o600)
+    second_context = _launch_persistent_context(playwright, config)
     try:
-        adapter.persist_storage_state_atomically(config.candidate_path)
-    except Exception:
-        _restore_canonical_storage(config, rollback_path, had_canonical_state=had_canonical_state)
-        raise
-    _write_status(
-        config,
-        {**_read_status(config.status_path), "status": "validating_session", "reason": "buyer_session_validating", "session": candidate},
-    )
-    try:
-        validated = adapter.check_session(persist_fingerprint=True, acquire_lock=False)
-    except Exception:
-        validated = {
-            "status": "probe_error",
-            "valid": False,
-            "reason": "buyer_session_post_save_validation_failed",
-        }
-    if validated.get("status") != "valid":
-        _restore_canonical_storage(config, rollback_path, had_canonical_state=had_canonical_state)
+        page = second_context.pages[0] if getattr(second_context, "pages", None) else second_context.new_page()
+        operation = adapter.probe_persistent_context(
+            second_context,
+            nm_id=config.session.validation_nm_id,
+            page=page,
+        )
+        proof = adapter.validate_persistent_proof(operation, require_price=True)
+    finally:
+        second_context.close()
+        os.chmod(config.session.persistent_profile_dir, 0o700)
+    session = proof.get("session") if isinstance(proof.get("session"), Mapping) else {}
+    if not proof.get("valid"):
         _write_status(
             config,
             {
                 **_read_status(config.status_path),
                 "status": "error",
-                "reason": str(validated.get("reason") or "buyer_session_post_save_validation_failed"),
+                "reason": str(proof.get("reason") or "buyer_persistent_profile_restart_validation_failed"),
                 "finished_at": _now_text(),
-                "session": validated,
+                "session": session,
             },
         )
         return 1
-    rollback_path.unlink(missing_ok=True)
     _write_status(
         config,
-        {**_read_status(config.status_path), "status": "validating_session", "reason": "buyer_session_saved_and_validated", "session": validated},
+        {
+            **_read_status(config.status_path),
+            "status": "validating_session",
+            "reason": "buyer_persistent_profile_restart_validated",
+            "session": session,
+            "authenticated_price_read": {
+                "status": "ok",
+                "nm_id": config.session.validation_nm_id,
+            },
+        },
     )
     return 0
-
-
-def _restore_canonical_storage(
-    config: BuyerRecoveryConfig,
-    rollback_path: Path,
-    *,
-    had_canonical_state: bool,
-) -> None:
-    if rollback_path.exists():
-        rollback_path.replace(config.session.storage_state_path)
-        os.chmod(config.session.storage_state_path, 0o600)
-        return
-    if not had_canonical_state:
-        config.session.storage_state_path.unlink(missing_ok=True)
 
 
 def _inspect_login_surface(page: Any) -> dict[str, Any]:
@@ -588,9 +540,9 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
     if isinstance(injected, Mapping):
         return dict(injected)
     body = _safe_body_text(page).lower()
-    if any(marker in body for marker in ("код из смс", "введите код", "код подтверждения", "отправили код")):
+    if any(marker in body for marker in ("код из смс", "введите код", "код подтверждения", "отправили код", "sms code", "verification code", "otp")):
         return {"state": "human", "reason": "buyer_sms_required"}
-    if any(marker in body for marker in ("введите номер телефона", "номер телефона", "получить код")):
+    if any(marker in body for marker in ("введите номер телефона", "номер телефона", "получить код", "phone number")):
         return {"state": "human", "reason": "buyer_phone_required"}
     if any(marker in body for marker in ("подтвердите, что вы не робот", "капча", "captcha", "data-site-key")):
         return {"state": "human", "reason": "buyer_captcha_required"}
@@ -605,7 +557,7 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
         marker in body for marker in ("войти или зарегистрироваться", "войдите в аккаунт", "получить код")
     ):
         return {"state": "authenticated", "reason": "buyer_visible_account_opened"}
-    return {"state": "human", "reason": "buyer_human_action_required"}
+    return {"state": "unknown", "reason": "buyer_login_surface_unrecognized"}
 
 
 def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
@@ -817,7 +769,7 @@ def _launcher_script(
             '  if ! kill -0 "${SSH_PID}" >/dev/null 2>&1; then FINAL_STATUS="tunnel_error"; break; fi',
             '  STATUS_JSON=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_DESTINATION}" python3 "${REMOTE_APP}" status --run-id "${RUN_ID}" 2>/dev/null || true)',
             '  RUN_STATUS=$(printf "%s" "${STATUS_JSON}" | /usr/bin/python3 -c \'import json,sys; data=json.load(sys.stdin); print(data.get("status", ""))\' 2>/dev/null || true)',
-            '  case "${RUN_STATUS}" in completed|migration_required|stopped|timeout|error) FINAL_STATUS="${RUN_STATUS}"; break ;; esac',
+            '  case "${RUN_STATUS}" in completed|stopped|timeout|error) FINAL_STATUS="${RUN_STATUS}"; break ;; esac',
             '  sleep 3',
             'done',
             'if [[ -z "${FINAL_STATUS}" ]]; then FINAL_STATUS="timeout"; fi',

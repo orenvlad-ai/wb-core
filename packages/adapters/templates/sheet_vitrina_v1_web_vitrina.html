@@ -17295,12 +17295,9 @@
       const status = String((payload && (payload.stage || payload.status)) || "");
       if (status === "checking_session" || status === "starting") return "Проверяем покупательскую сессию…";
       if (status === "automatic_login") return "Выполняем автоматический вход через сохранённый аккаунт…";
-      if (status === "stabilizing_session") return "Ждём стабилизации авторизации…";
-      if (status === "saving_session") return "Сохраняем подтверждённую сессию…";
-      if (status === "validating_session") return "Проверяем сохранённую сессию независимым probe…";
+      if (status === "validating_session") return "Проверяем авторизацию и цену после перезапуска Chromium…";
       if (status === "awaiting_human") return String(payload.human_action || "Завершите вход в защищённом окне Wildberries.");
       if (status === "completed") return "Покупательская сессия действует.";
-      if (status === "migration_required") return "Нельзя безопасно подтвердить прежнюю привязку аккаунта. Требуется ручная проверка.";
       if (status === "timeout") return "Автовосстановление завершилось по timeout. Можно безопасно повторить.";
       if (status === "error") return "Автовосстановление завершилось контролируемой ошибкой.";
       return "Проверяем состояние восстановления…";
@@ -17333,7 +17330,7 @@
       const recovery = state.prices.sppTest.buyerRecovery || {};
       const status = String(session.status || "");
       const recoveryStatus = String(recovery.stage || recovery.status || "");
-      const recoveryActive = !!recovery.running || ["saving_session", "validating_session"].includes(recoveryStatus);
+      const recoveryActive = !!recovery.running || recoveryStatus === "validating_session";
       const label = state.prices.sppTest.buyerSessionLoading
         ? "Проверяем сессию"
         : (recoveryActive ? wbBuyerRecoveryStatusLabel(recovery) : (session.status_label || (status === "valid" ? "Действует" : "Не проверена")));
@@ -17360,14 +17357,11 @@
       const status = String((payload && (payload.stage || payload.status)) || "");
       if (status === "checking_session" || status === "starting") return "Проверяем сессию";
       if (status === "automatic_login") return "Выполняем автоматический вход";
-      if (status === "stabilizing_session") return "Стабилизируем авторизацию";
-      if (status === "saving_session") return "Сохраняем сессию";
-      if (status === "validating_session") return "Проверяем сохранённую сессию";
+      if (status === "validating_session") return "Проверяем профиль после перезапуска";
       if (status === "awaiting_human") {
         return String(payload.reason || "") === "buyer_account_fingerprint_mismatch" ? "Другой аккаунт" : "Ждём SMS/действие";
       }
       if (status === "completed") return "Действует";
-      if (status === "migration_required") return "Нужно подтверждение аккаунта";
       if (status === "timeout") return "Recovery timeout";
       if (status === "error") return "Ошибка recovery";
       return String(payload.status_label || "Восстановление");
