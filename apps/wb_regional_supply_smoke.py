@@ -23,16 +23,20 @@ from packages.application.factory_order_sales_history import persist_sales_histo
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
 from packages.application.wb_supply_overlay import build_warehouse_district_mapping
-from packages.application.wb_regional_supply import WbRegionalSupplyBlock
+from packages.application.wb_regional_supply import WbRegionalSupplyBlock, _allocate_boxes
 from packages.contracts.factory_order_supply import DATASET_STOCK_FF
 from packages.contracts.sales_funnel_history_block import SalesFunnelHistoryItem, SalesFunnelHistorySuccess
 from packages.contracts.stocks_block import StocksEnvelope, StocksItem, StocksSuccess
 from packages.contracts.wb_regional_supply import (
-    DISTRICT_CENTRAL,
     DISTRICT_FAR_SIBERIA,
-    DISTRICT_KEYS,
     DISTRICT_NORTHWEST,
     DISTRICT_SOUTH_CAUCASUS,
+)
+from packages.contracts.wb_supply_planning_zones import (
+    PLANNING_ZONE_CENTRAL_EAST,
+    PLANNING_ZONE_CENTRAL_NORTH,
+    PLANNING_ZONE_CENTRAL_SOUTH,
+    SUPPLY_PLANNING_ZONE_KEYS,
 )
 
 INPUT_BUNDLE_FIXTURE = (
@@ -65,6 +69,9 @@ class FakeStocksBlock:
                     stock_ru_ural=0.0,
                     stock_ru_south_caucasus=0.0,
                     stock_ru_far_siberia=0.0,
+                    stock_ru_central_north=central,
+                    stock_ru_central_east=500.0 if nm_id == MAIN_NM_ID else 0.0,
+                    stock_ru_central_south=500.0 if nm_id == MAIN_NM_ID else 0.0,
                 )
             )
         return SimpleNamespace(result=SimpleNamespace(kind="success", items=items))
@@ -76,6 +83,7 @@ class NoopSalesHistoryBlock:
 
 
 def main() -> None:
+    _check_planning_zone_deficit_allocation()
     bundle = json.loads(INPUT_BUNDLE_FIXTURE.read_text(encoding="utf-8"))
     with TemporaryDirectory(prefix="wb-regional-supply-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
@@ -121,10 +129,31 @@ def main() -> None:
             raise AssertionError("factory status must expose the shared stock_ff filename")
         if regional_status.shared_datasets["stock_ff"].uploaded_filename != "shared-stock-ff.xlsx":
             raise AssertionError("regional status must reuse the shared stock_ff state")
-        if len(regional_status.district_options) != 6:
+        if len(regional_status.district_options) != 8:
             raise AssertionError("regional status must expose district options for the operator selector")
         if DISTRICT_FAR_SIBERIA not in regional_status.default_included_district_keys:
             raise AssertionError("regional status default district selection must include far/siberia")
+
+        legacy_payload = {
+            "status": "success",
+            "calculation_id": "legacy-central-result",
+            "calculated_at": "2026-04-17T09:00:00Z",
+            "report_date": "2026-04-17",
+            "summary": {"total_qty": 50, "estimated_weight": 0.0, "estimated_volume": 0.0},
+            "districts": [{"district_key": "central", "total_qty": 50, "rows": []}],
+        }
+        runtime.save_wb_regional_supply_result_state(
+            calculated_at="2026-04-17T09:00:00Z",
+            payload=legacy_payload,
+        )
+        legacy_status = regional_block.build_status()
+        legacy_migration = legacy_status.migration_status or {}
+        if legacy_status.status != "recalculation_required" or legacy_status.last_result is not None:
+            raise AssertionError(f"legacy result must be read fail-closed until recalculation: {legacy_status}")
+        if (legacy_migration.get("legacy_snapshot") or {}).get("district_keys") != ["central"]:
+            raise AssertionError(f"legacy calculation metadata must remain readable: {legacy_migration}")
+        if runtime.load_wb_regional_supply_result_state() != legacy_payload:
+            raise AssertionError("lazy migration status must not destroy or rewrite the legacy payload")
 
         result = regional_block.calculate(
             {
@@ -161,22 +190,22 @@ def main() -> None:
             raise AssertionError("result diagnostics must expose requested valid depletion day count")
         if result.settings.included_district_keys != regional_status.default_included_district_keys:
             raise AssertionError("old payload without included_district_keys must default to all districts")
-        if result.settings.lead_time_to_region_days_by_district != {key: 2 for key in DISTRICT_KEYS}:
+        if result.settings.lead_time_to_region_days_by_district != {key: 2 for key in SUPPLY_PLANNING_ZONE_KEYS}:
             raise AssertionError("legacy scalar lead_time_to_region_days must expand to every district")
         if result.diagnostics.get("district_selection_mode") != "all_districts":
             raise AssertionError("default district selection must be all_districts")
         if legacy_alias_result.summary.total_qty != result.summary.total_qty:
             raise AssertionError("legacy supply_horizon_days alias must keep the same WB regional math")
         districts = {item.district_key: item for item in result.districts}
-        if districts["central"].total_qty != 50 or districts["central"].deficit_qty != 100:
-            raise AssertionError("central district must keep one box allocated and truthful deficit")
+        if districts[PLANNING_ZONE_CENTRAL_NORTH].total_qty != 50 or districts[PLANNING_ZONE_CENTRAL_NORTH].deficit_qty != 100:
+            raise AssertionError("central north zone must keep one box allocated and truthful deficit")
         if districts["northwest"].total_qty != 50 or districts["northwest"].deficit_qty != 100:
             raise AssertionError("northwest district must keep one box allocated and truthful deficit")
         if sum(item.total_qty for item in result.districts) != result.summary.total_qty:
             raise AssertionError("summary total must equal the sum of district totals")
         if sum(item.deficit_qty for item in result.districts) != 200:
             raise AssertionError("deficit totals must equal full recommendation minus allocated supply")
-        central_main_row = next(row for row in districts["central"].rows if row.nm_id == MAIN_NM_ID)
+        central_main_row = next(row for row in districts[PLANNING_ZONE_CENTRAL_NORTH].rows if row.nm_id == MAIN_NM_ID)
         if not central_main_row.demand_diagnostics:
             raise AssertionError("district row must carry regional demand diagnostics")
         if central_main_row.demand_diagnostics.get("regional_demand_method") != "full_clean_days":
@@ -208,19 +237,19 @@ def main() -> None:
         if legacy_loaded_status.last_result is None:
             raise AssertionError("legacy saved regional result must load without falling")
         legacy_loaded_map = legacy_loaded_status.last_result.settings.lead_time_to_region_days_by_district
-        if legacy_loaded_map != {key: 2 for key in DISTRICT_KEYS}:
+        if legacy_loaded_map != {key: 2 for key in SUPPLY_PLANNING_ZONE_KEYS}:
             raise AssertionError(f"legacy saved result must restore lead-time map from scalar, got {legacy_loaded_map}")
         legacy_loaded_central = next(
             row
             for district in legacy_loaded_status.last_result.districts
-            if district.district_key == DISTRICT_CENTRAL
+            if district.district_key == PLANNING_ZONE_CENTRAL_NORTH
             for row in district.rows
             if row.nm_id == MAIN_NM_ID
         )
         if legacy_loaded_central.lead_time_to_region_days != 2:
             raise AssertionError("legacy saved row without lead-time must use scalar fallback on status load")
 
-        mixed_lead_times = {key: 2 for key in DISTRICT_KEYS}
+        mixed_lead_times = {key: 2 for key in SUPPLY_PLANNING_ZONE_KEYS}
         mixed_lead_times[DISTRICT_NORTHWEST] = 10
         mixed_lead_time_result = regional_block.calculate(
             {
@@ -230,11 +259,11 @@ def main() -> None:
                 "safety_days": 1,
                 "order_batch_qty": 50,
                 "report_date_override": "2026-04-18",
-                "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST],
+                "included_district_keys": [PLANNING_ZONE_CENTRAL_NORTH, DISTRICT_NORTHWEST],
             }
         )
         mixed_districts = {item.district_key: item for item in mixed_lead_time_result.districts}
-        mixed_central_row = next(row for row in mixed_districts[DISTRICT_CENTRAL].rows if row.nm_id == MAIN_NM_ID)
+        mixed_central_row = next(row for row in mixed_districts[PLANNING_ZONE_CENTRAL_NORTH].rows if row.nm_id == MAIN_NM_ID)
         mixed_northwest_row = next(row for row in mixed_districts[DISTRICT_NORTHWEST].rows if row.nm_id == MAIN_NM_ID)
         expected_central_eta = max(
             mixed_central_row.current_stock
@@ -303,7 +332,8 @@ def main() -> None:
             quantity=50.0,
             supply_date="2026-04-20",
             warehouse_name="Коледино",
-            district_key=DISTRICT_CENTRAL,
+            district_key="central",
+            warehouse_id=507,
         )
         regional_overlay_result = regional_block.calculate(
             {
@@ -322,12 +352,12 @@ def main() -> None:
         if overlay_stock.get("by_nm_id", {}).get(str(MAIN_NM_ID), {}).get("effective_stock_ff") != 70.0:
             raise AssertionError(f"regional selected supply must reduce available FF pool, got {overlay_stock}")
         added_by_district = overlay_regional.get("added_qty_by_district", {})
-        if added_by_district.get(DISTRICT_CENTRAL) != 50.0:
+        if added_by_district.get(PLANNING_ZONE_CENTRAL_SOUTH) != 50.0:
             raise AssertionError(f"regional selected supply must add qty to mapped district, got {overlay_regional}")
-        if any(float(qty or 0) for key, qty in added_by_district.items() if key != DISTRICT_CENTRAL):
+        if any(float(qty or 0) for key, qty in added_by_district.items() if key != PLANNING_ZONE_CENTRAL_SOUTH):
             raise AssertionError(f"selected central supply must not be spread to other districts, got {added_by_district}")
         overlay_districts = {item.district_key: item for item in regional_overlay_result.districts}
-        overlay_central_row = next(row for row in overlay_districts[DISTRICT_CENTRAL].rows if row.nm_id == MAIN_NM_ID)
+        overlay_central_row = next(row for row in overlay_districts[PLANNING_ZONE_CENTRAL_SOUTH].rows if row.nm_id == MAIN_NM_ID)
         overlay_northwest_row = next(row for row in overlay_districts[DISTRICT_NORTHWEST].rows if row.nm_id == MAIN_NM_ID)
         if overlay_central_row.demand_diagnostics.get("selected_wb_supply_qty") != 50.0:
             raise AssertionError("central row diagnostics must expose selected WB qty")
@@ -339,7 +369,15 @@ def main() -> None:
         if not audit_rows or audit_rows[0].get("calculation_id") != regional_overlay_result.calculation_id:
             raise AssertionError(f"latest regional audit row must track the last calculation, got {audit_rows}")
         latest_audit = audit_rows[0]
-        if latest_audit.get("central_total_qty") != overlay_districts[DISTRICT_CENTRAL].total_qty:
+        central_planning_total = sum(
+            overlay_districts[key].total_qty
+            for key in (
+                PLANNING_ZONE_CENTRAL_NORTH,
+                PLANNING_ZONE_CENTRAL_EAST,
+                PLANNING_ZONE_CENTRAL_SOUTH,
+            )
+        )
+        if latest_audit.get("central_total_qty") != central_planning_total:
             raise AssertionError(f"regional audit must expose central aggregate totals, got {latest_audit}")
         if latest_audit.get("settings", {}).get("selected_wb_supply_ids_count") != 1:
             raise AssertionError(f"regional audit must store selected supply count, got {latest_audit}")
@@ -353,7 +391,8 @@ def main() -> None:
             quantity=50.0,
             supply_date="2026-04-20",
             warehouse_name="Коледино",
-            district_key=DISTRICT_CENTRAL,
+            district_key="central",
+            warehouse_id=507,
             status_id=2,
             status_label="Запланировано",
         )
@@ -364,7 +403,8 @@ def main() -> None:
             quantity=50.0,
             supply_date="2026-04-20",
             warehouse_name="Коледино",
-            district_key=DISTRICT_CENTRAL,
+            district_key="central",
+            warehouse_id=507,
             status_id=5,
             status_label="Принято",
         )
@@ -399,6 +439,7 @@ def main() -> None:
             supply_date="2026-04-20",
             warehouse_name="Электросталь",
             district_key="unmapped",
+            warehouse_id=120762,
         )
         regional_block.wb_supply_district_mapping_provider = lambda: build_warehouse_district_mapping(
             warehouse_rows=runtime.list_wb_supplies_warehouses(),
@@ -419,9 +460,9 @@ def main() -> None:
         provider_overlay = provider_overlay_result.wb_supply_overlay or {}
         provider_regional = provider_overlay.get("wb_regional", {})
         provider_added_by_district = provider_regional.get("added_qty_by_district", {})
-        if provider_added_by_district.get(DISTRICT_CENTRAL) != 25.0:
-            raise AssertionError(f"provider mapping must map stale-unmapped warehouse to central, got {provider_regional}")
-        if any(float(qty or 0) for key, qty in provider_added_by_district.items() if key != DISTRICT_CENTRAL):
+        if provider_added_by_district.get(PLANNING_ZONE_CENTRAL_EAST) != 25.0:
+            raise AssertionError(f"provider mapping must map historical Elektrostal to central east, got {provider_regional}")
+        if any(float(qty or 0) for key, qty in provider_added_by_district.items() if key != PLANNING_ZONE_CENTRAL_EAST):
             raise AssertionError(f"provider-mapped central supply must not affect other districts, got {provider_added_by_district}")
 
         _seed_wb_regional_overlay_fixture(
@@ -431,7 +472,7 @@ def main() -> None:
             quantity=30.0,
             supply_date="2026-04-20",
             warehouse_name="Краснодар (Тихорецкая)",
-            district_key=DISTRICT_CENTRAL,
+            district_key="central",
             actual_warehouse_name="Обухово",
             transit_warehouse_name="Обухово",
         )
@@ -456,7 +497,14 @@ def main() -> None:
         routed_added_by_district = routed_regional.get("added_qty_by_district", {})
         if routed_added_by_district.get(DISTRICT_SOUTH_CAUCASUS) != 30.0:
             raise AssertionError(f"planned Краснодар warehouse must add qty to south_caucasus, got {routed_regional}")
-        if routed_added_by_district.get(DISTRICT_CENTRAL) != 0.0:
+        if any(
+            routed_added_by_district.get(key) != 0.0
+            for key in (
+                PLANNING_ZONE_CENTRAL_NORTH,
+                PLANNING_ZONE_CENTRAL_EAST,
+                PLANNING_ZONE_CENTRAL_SOUTH,
+            )
+        ):
             raise AssertionError(f"actual/transit Обухово must not leak qty into central, got {routed_regional}")
         routed_selected = (routed_overlay.get("selected_supplies") or [{}])[0]
         if (
@@ -501,16 +549,16 @@ def main() -> None:
                 "safety_days": 1,
                 "order_batch_qty": 50,
                 "report_date_override": "2026-04-18",
-                "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST],
+                "included_district_keys": [PLANNING_ZONE_CENTRAL_NORTH, DISTRICT_NORTHWEST],
             }
         )
         selected_diagnostics = selected_result.diagnostics or {}
-        if selected_diagnostics.get("included_district_keys") != [DISTRICT_CENTRAL, DISTRICT_NORTHWEST]:
+        if selected_diagnostics.get("included_district_keys") != [PLANNING_ZONE_CENTRAL_NORTH, DISTRICT_NORTHWEST]:
             raise AssertionError(f"selected district diagnostics not exposed: {selected_diagnostics}")
         if DISTRICT_FAR_SIBERIA not in selected_diagnostics.get("excluded_district_keys", []):
             raise AssertionError("selected district diagnostics must include excluded far/siberia")
         selected_district_keys = [item.district_key for item in selected_result.districts]
-        if selected_district_keys != [DISTRICT_CENTRAL, DISTRICT_NORTHWEST]:
+        if selected_district_keys != [PLANNING_ZONE_CENTRAL_NORTH, DISTRICT_NORTHWEST]:
             raise AssertionError(f"selected result must expose included districts only, got {selected_district_keys}")
 
         try:
@@ -531,20 +579,20 @@ def main() -> None:
         else:
             raise AssertionError("empty selected districts must be rejected")
 
-        central_workbook, central_filename = regional_block.download_district_recommendation("central")
+        central_workbook, central_filename = regional_block.download_district_recommendation(PLANNING_ZONE_CENTRAL_NORTH)
         central_rows = read_first_sheet_rows(central_workbook)
-        if central_filename != "wb_regional_central_fo.xlsx" or not _is_ascii(central_filename):
+        if central_filename != "wb_regional_central_north_fo.xlsx" or not _is_ascii(central_filename):
             raise AssertionError(f"central district filename must be stable ASCII, got {central_filename!r}")
-        if central_rows[0][:2] != ["Федеральный округ", "Центральный федеральный округ"]:
-            raise AssertionError("district workbook must start with district identification")
+        if central_rows[0][:2] != ["Федеральный округ", "ЦФО Север"]:
+            raise AssertionError("planning-zone workbook must start with direction identification")
         if central_rows[2] != ["nmId", "SKU", "Количество к поставке", "Дефицит"]:
             raise AssertionError("district workbook must keep compact Russian headers with deficit")
         load_workbook(BytesIO(central_workbook), data_only=True)
         central_allocated_sum = sum(int(row[2]) for row in central_rows[3:] if len(row) >= 3 and str(row[2]).strip())
         central_deficit_sum = sum(int(row[3]) for row in central_rows[3:] if len(row) >= 4 and str(row[3]).strip())
-        if central_allocated_sum != districts["central"].total_qty:
+        if central_allocated_sum != districts[PLANNING_ZONE_CENTRAL_NORTH].total_qty:
             raise AssertionError("district workbook sum must equal district total in summary")
-        if central_deficit_sum != districts["central"].deficit_qty:
+        if central_deficit_sum != districts[PLANNING_ZONE_CENTRAL_NORTH].deficit_qty:
             raise AssertionError("district workbook deficit sum must equal district deficit in summary")
 
         try:
@@ -560,7 +608,7 @@ def main() -> None:
             raise AssertionError(f"ZIP filename must be stable ASCII with report date, got {archive_filename!r}")
         with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
             archive_names = sorted(archive.namelist())
-            if archive_names != ["wb_regional_central_fo.xlsx", "wb_regional_northwest_fo.xlsx"]:
+            if archive_names != ["wb_regional_central_north_fo.xlsx", "wb_regional_northwest_fo.xlsx"]:
                 raise AssertionError(f"ZIP must contain only included district XLSX files, got {archive_names}")
             for name in archive_names:
                 if not _is_ascii(name):
@@ -594,7 +642,7 @@ def main() -> None:
                 "safety_days": 1,
                 "order_batch_qty": 50,
                 "report_date_override": "2026-04-18",
-                "included_district_keys": [DISTRICT_CENTRAL, DISTRICT_NORTHWEST, "south_caucasus"],
+                "included_district_keys": [PLANNING_ZONE_CENTRAL_NORTH, DISTRICT_NORTHWEST, "south_caucasus"],
             }
         )
         seed_diagnostics = seed_result.diagnostics or {}
@@ -624,7 +672,7 @@ def main() -> None:
 
         print(f"shared_stock_ff_reuse: ok -> {regional_status.shared_datasets['stock_ff'].uploaded_filename}")
         print(f"regional_total_qty: ok -> {result.summary.total_qty}")
-        print(f"central_deficit: ok -> {districts['central'].deficit_qty}")
+        print(f"central_north_deficit: ok -> {districts[PLANNING_ZONE_CENTRAL_NORTH].deficit_qty}")
         print(f"northwest_deficit: ok -> {districts['northwest'].deficit_qty}")
         print(f"regional_lead_times: ok -> central {mixed_central_row.lead_time_to_region_days}, northwest {mixed_northwest_row.lead_time_to_region_days}")
         print(f"seed_floor: ok -> {seed_diagnostics.get('seed_allocated_qty_total')}")
@@ -632,6 +680,44 @@ def main() -> None:
         print(f"district_xlsx_sum: ok -> {central_allocated_sum}")
         print(f"district_xlsx_deficit_sum: ok -> {central_deficit_sum}")
         print(f"recommendations_zip: ok -> {archive_names}")
+
+
+def _check_planning_zone_deficit_allocation() -> None:
+    kwargs = {
+        "full_recommendation_by_key": {
+            PLANNING_ZONE_CENTRAL_NORTH: 300,
+            PLANNING_ZONE_CENTRAL_EAST: 100,
+            PLANNING_ZONE_CENTRAL_SOUTH: 0,
+        },
+        "raw_recommendation_by_key": {
+            PLANNING_ZONE_CENTRAL_NORTH: 260.0,
+            PLANNING_ZONE_CENTRAL_EAST: 90.0,
+            PLANNING_ZONE_CENTRAL_SOUTH: 0.0,
+        },
+        "district_daily_demand_by_key": {
+            PLANNING_ZONE_CENTRAL_NORTH: 20.0,
+            PLANNING_ZONE_CENTRAL_EAST: 10.0,
+            PLANNING_ZONE_CENTRAL_SOUTH: 0.0,
+        },
+        "projected_stock_by_key": {
+            PLANNING_ZONE_CENTRAL_NORTH: 0.0,
+            PLANNING_ZONE_CENTRAL_EAST: 0.0,
+            PLANNING_ZONE_CENTRAL_SOUTH: 500.0,
+        },
+        "available_stock_ff": 200.0,
+        "order_batch_qty": 50,
+    }
+    first = _allocate_boxes(**kwargs)
+    second = _allocate_boxes(**kwargs)
+    if first != {
+        PLANNING_ZONE_CENTRAL_NORTH: 150,
+        PLANNING_ZONE_CENTRAL_EAST: 50,
+        PLANNING_ZONE_CENTRAL_SOUTH: 0,
+    }:
+        raise AssertionError(f"zones must be allocated by deficits, not equal thirds: {first}")
+    if second != first or sum(first.values()) > 200 or any(value % 50 for value in first.values()):
+        raise AssertionError(f"planning-zone allocation must be bounded and deterministic: {first}, {second}")
+    print(f"planning_zone_deficit_allocation: ok -> {first}")
 
 
 def _seed_wb_regional_overlay_fixture(
@@ -643,11 +729,13 @@ def _seed_wb_regional_overlay_fixture(
     supply_date: str,
     warehouse_name: str,
     district_key: str,
+    warehouse_id: int | str | None = None,
     actual_warehouse_name: str = "",
     transit_warehouse_name: str = "",
     status_id: int = 3,
     status_label: str = "Отгрузка разрешена",
 ) -> None:
+    effective_warehouse_id = str(warehouse_id or supply_id)
     warehouse_display = (
         f"{warehouse_name} → {transit_warehouse_name}"
         if transit_warehouse_name and transit_warehouse_name != warehouse_name
@@ -663,11 +751,11 @@ def _seed_wb_regional_overlay_fixture(
                 "number_label": supply_id,
                 "status_id": status_id,
                 "status_label": status_label,
-                "warehouse_id": supply_id,
+                "warehouse_id": effective_warehouse_id,
                 "warehouse_name": warehouse_name,
-                "planned_warehouse_id": supply_id,
+                "planned_warehouse_id": effective_warehouse_id,
                 "planned_warehouse_name": warehouse_name,
-                "target_warehouse_id": supply_id,
+                "target_warehouse_id": effective_warehouse_id,
                 "target_warehouse_name": warehouse_name,
                 "actual_warehouse_id": ("actual-" + supply_id) if actual_warehouse_name else "",
                 "actual_warehouse_name": actual_warehouse_name,
@@ -677,7 +765,7 @@ def _seed_wb_regional_overlay_fixture(
                 "warehouse_to_name": transit_warehouse_name,
                 "warehouse_actual_name": actual_warehouse_name,
                 "warehouse_display": warehouse_display,
-                "district_source_warehouse_id": supply_id,
+                "district_source_warehouse_id": effective_warehouse_id,
                 "district_source_warehouse_name": warehouse_name,
                 "district_source_warehouse_role": "planned",
                 "district_source_warehouse_evidence": "fixture.warehouse_name",
@@ -695,7 +783,7 @@ def _seed_wb_regional_overlay_fixture(
                 "raw_package": [],
             }
         ],
-        warehouses=[{"warehouse_id": supply_id, "warehouse_name": warehouse_name}],
+        warehouses=[{"warehouse_id": effective_warehouse_id, "warehouse_name": warehouse_name}],
         synced_at=ACTIVATED_AT,
     )
 
@@ -776,6 +864,9 @@ def _seed_runtime_stock_history(
                     stock_ru_ural=ural,
                     stock_ru_south_caucasus=south,
                     stock_ru_far_siberia=far,
+                    stock_ru_central_north=central,
+                    stock_ru_central_east=500.0 if nm_id == MAIN_NM_ID or all_active_signal else 0.0,
+                    stock_ru_central_south=500.0 if nm_id == MAIN_NM_ID or all_active_signal else 0.0,
                 )
             )
         runtime.save_temporal_source_snapshot(

@@ -1,0 +1,108 @@
+{
+  "barcodes": ["4600000000001", "4600000000002"],
+  "acceptance_options": {
+    "requestId": "wb-fixture-request-20260719",
+    "result": [
+      {
+        "barcode": "4600000000001",
+        "warehouses": [
+          {"warehouseID": 301806, "canBox": true},
+          {"warehouseID": 301981, "canBox": true},
+          {"warehouseID": 301760, "canBox": true},
+          {"warehouseID": 120762, "canBox": true},
+          {"warehouseID": 301809, "canBox": true},
+          {"warehouseID": 507, "canBox": true},
+          {"warehouseID": 206348, "canBox": true},
+          {"warehouseID": 301808, "canBox": true},
+          {"warehouseID": 910001, "canBox": true},
+          {"warehouseID": 910002, "canBox": true},
+          {"warehouseID": 910003, "canBox": true},
+          {"warehouseID": 910004, "canBox": true},
+          {"warehouseID": 910005, "canBox": true},
+          {"warehouseID": 910006, "canBox": true},
+          {"warehouseID": 910007, "canBox": false},
+          {"warehouseID": 910008, "canBox": true},
+          {"warehouseID": 910009, "canBox": true}
+        ]
+      },
+      {
+        "barcode": "4600000000002",
+        "warehouses": [
+          {"warehouseID": 301806, "canBox": true},
+          {"warehouseID": 301981, "canBox": true},
+          {"warehouseID": 301760, "canBox": true},
+          {"warehouseID": 120762, "canBox": true},
+          {"warehouseID": 301809, "canBox": true},
+          {"warehouseID": 507, "canBox": true},
+          {"warehouseID": 206348, "canBox": true},
+          {"warehouseID": 301808, "canBox": true},
+          {"warehouseID": 910001, "canBox": true},
+          {"warehouseID": 910002, "canBox": true},
+          {"warehouseID": 910003, "canBox": true},
+          {"warehouseID": 910004, "canBox": true},
+          {"warehouseID": 910005, "canBox": true},
+          {"warehouseID": 910007, "canBox": false},
+          {"warehouseID": 910008, "canBox": true},
+          {"warehouseID": 910009, "canBox": true}
+        ]
+      }
+    ]
+  },
+  "warehouse_probes": {
+    "301806": {
+      "requestId": "wb-fixture-probe-301806",
+      "result": [
+        {"barcode": "4600000000001", "warehouses": [{"warehouseID": 301806, "canBox": true}]},
+        {"barcode": "4600000000002", "warehouses": [{"warehouseID": 301806, "canBox": true}]}
+      ]
+    }
+  },
+  "warehouses": [
+    {"ID": 301806, "name": "Тверь", "isActive": true},
+    {"ID": 301981, "name": "Владимир Воршинское", "isActive": true},
+    {"ID": 301760, "name": "Рязань (Тюшевское)", "isActive": true},
+    {"ID": 120762, "name": "Электросталь", "isActive": true},
+    {"ID": 301809, "name": "Котовск", "isActive": true},
+    {"ID": 507, "name": "Коледино", "isActive": true},
+    {"ID": 206348, "name": "Тула", "isActive": true},
+    {"ID": 301808, "name": "Воронеж", "isActive": true},
+    {"ID": 910001, "name": "Электросталь: Питание", "isActive": true},
+    {"ID": 910002, "name": "Коледино: Горючее", "isActive": true},
+    {"ID": 910003, "name": "Коледино: Шины", "isActive": true},
+    {"ID": 910004, "name": "СЦ Тверь", "isActive": true},
+    {"ID": 910005, "name": "Подольск СГТ", "isActive": true},
+    {"ID": 910006, "name": "Новый склад ЦФО", "isActive": true},
+    {"ID": 910007, "name": "Новый склад canBox false", "isActive": true},
+    {"ID": 910008, "name": "Новый неактивный склад", "isActive": false},
+    {"ID": 910009, "name": "Новый активный неклассифицированный склад", "isActive": true}
+  ],
+  "coefficients": [
+    {"warehouseID": 301806, "warehouseName": "Тверь", "date": "2026-07-20T00:00:00Z", "coefficient": 1, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 301981, "warehouseName": "Владимир Воршинское", "date": "2026-07-20T00:00:00Z", "coefficient": 1, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 301760, "warehouseName": "Рязань (Тюшевское)", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 2, "isSortingCenter": false},
+    {"warehouseID": 120762, "warehouseName": "Электросталь", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 301809, "warehouseName": "Котовск", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 507, "warehouseName": "Коледино", "date": "2026-07-18T00:00:00Z", "coefficient": 0, "allowUnload": false, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 507, "warehouseName": "Коледино", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 5, "isSortingCenter": false},
+    {"warehouseID": 507, "warehouseName": "Коледино", "date": "2026-07-20T00:00:00Z", "coefficient": 1, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 507, "warehouseName": "Коледино", "date": "2026-07-20T11:30:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 2, "isSortingCenter": false},
+    {"warehouseID": 507, "warehouseName": "Коледино", "date": "2026-07-21T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 2, "isSortingCenter": false},
+    {"warehouseID": 507, "warehouseName": "Коледино", "date": "2026-07-22T00:00:00Z", "coefficient": 1, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 507, "warehouseName": "Коледино", "date": "2026-07-23T00:00:00Z", "coefficient": 2, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 206348, "warehouseName": "Тула", "date": "2026-07-19T00:00:00Z", "coefficient": 1, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 301808, "warehouseName": "Воронеж", "date": "2026-07-21T00:00:00Z", "coefficient": 1, "allowUnload": true, "boxTypeID": 2, "isSortingCenter": false},
+    {"warehouseID": 910001, "warehouseName": "Электросталь: Питание", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 910002, "warehouseName": "Коледино: Горючее", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 910003, "warehouseName": "Коледино: Шины", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false},
+    {"warehouseID": 910004, "warehouseName": "СЦ Тверь", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": true},
+    {"warehouseID": 910005, "warehouseName": "Подольск СГТ", "date": "2026-07-19T00:00:00Z", "coefficient": 0, "allowUnload": true, "boxTypeID": 1, "isSortingCenter": false}
+  ],
+  "box_tariffs": [
+    {"warehouseName": "Тверь", "boxDeliveryCoefExpr": "105%", "boxStorageCoefExpr": "100%"},
+    {"warehouseName": "Владимир Воршинское", "boxDeliveryCoefExpr": "107%", "boxStorageCoefExpr": "101%"},
+    {"warehouseName": "Рязань (Тюшевское)", "boxDeliveryCoefExpr": "110%", "boxStorageCoefExpr": "102%"},
+    {"warehouseName": "Коледино", "boxDeliveryCoefExpr": "110%", "boxStorageCoefExpr": "105%"},
+    {"warehouseName": "Тула", "boxDeliveryCoefExpr": "112%", "boxStorageCoefExpr": "106%"},
+    {"warehouseName": "Воронеж", "boxDeliveryCoefExpr": "115%", "boxStorageCoefExpr": "107%"}
+  ]
+}

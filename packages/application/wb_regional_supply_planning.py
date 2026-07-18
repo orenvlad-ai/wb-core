@@ -16,7 +16,6 @@ from packages.adapters.wb_supplies import (
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.wb_supply_overlay import (
-    DISTRICT_SHORT_LABELS_RU,
     DISTRICT_UNMAPPED,
     augment_supply_row_with_district,
     build_warehouse_district_mapping,
@@ -24,6 +23,7 @@ from packages.application.wb_supply_overlay import (
 from packages.business_time import current_business_date_iso
 from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU
 from packages.contracts.wb_regional_supply_planning import (
+    BOX_TYPE_IDS,
     CONTRACT_NAME,
     CONTRACT_VERSION,
     PACKAGE_TYPE_BOX,
@@ -40,22 +40,29 @@ from packages.contracts.wb_regional_supply_planning import (
     WAREHOUSE_SCOPE_SAME_DISTRICT,
     WAREHOUSE_SCOPE_UNMAPPED,
 )
+from packages.contracts.wb_supply_planning_zones import (
+    CENTRAL_STORAGE_WAREHOUSES,
+    CENTRAL_STORAGE_WAREHOUSES_BY_ID,
+    SUPPLY_PLANNING_ZONE_KEYS,
+    SUPPLY_PLANNING_ZONE_LABELS_RU,
+    SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU,
+    WAREHOUSE_REGISTRY_VERSION,
+    normalize_exact_warehouse_name,
+    resolve_central_storage_warehouse,
+    warehouse_name_exclusion_codes,
+)
 
 
 MAX_PLANNING_OPTIONS = 300
 MAX_MAJOR_WAREHOUSE_PROBE_CALLS = 4
 
 MAJOR_WAREHOUSE_PROBES_BY_DISTRICT = {
-    "central": [
-        "Коледино",
-        "Электросталь",
-        "Обухово",
-        "Подольск",
-        "Тула",
-        "Голицыно СГТ",
-        "Софьино СГТ",
-        "Радумля СГТ",
-    ],
+    zone_key: [
+        item.canonical_name
+        for item in CENTRAL_STORAGE_WAREHOUSES
+        if item.planning_zone_key == zone_key
+    ]
+    for zone_key in SUPPLY_PLANNING_ZONE_KEYS
 }
 
 
@@ -105,8 +112,8 @@ class WbRegionalSupplyPlanningBlock:
     def build_options(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _parse_request(payload or {})
         district_key = request["district_key"]
-        if district_key not in DISTRICT_KEYS:
-            raise ValueError(f"Неизвестный расчётный округ: {district_key}")
+        if district_key not in SUPPLY_PLANNING_ZONE_KEYS:
+            raise ValueError(f"Неизвестное направление расчёта поставки: {district_key}")
 
         last_result = self.runtime.load_wb_regional_supply_result_state()
         base_payload = self._base_payload(request=request, last_result=last_result)
@@ -164,7 +171,11 @@ class WbRegionalSupplyPlanningBlock:
                 **base_payload,
                 "status": STATUS_EMPTY,
                 "calculation_id": calculation_id,
-                "district_name_ru": str(district.get("district_name_ru") or DISTRICT_LABELS_RU[district_key]),
+                "district_name_ru": str(
+                    district.get("planning_zone_label")
+                    or district.get("district_name_ru")
+                    or SUPPLY_PLANNING_ZONE_LABELS_RU[district_key]
+                ),
                 "summary": {
                     **base_payload["summary"],
                     "planned_product_count": 0,
@@ -177,7 +188,13 @@ class WbRegionalSupplyPlanningBlock:
         payload_without_options = {
             **base_payload,
             "calculation_id": calculation_id,
-            "district_name_ru": str(district.get("district_name_ru") or DISTRICT_LABELS_RU[district_key]),
+            "district_name_ru": str(
+                district.get("planning_zone_label")
+                or district.get("district_name_ru")
+                or SUPPLY_PLANNING_ZONE_LABELS_RU[district_key]
+            ),
+            "planning_zone_key": district_key,
+            "planning_zone_label": SUPPLY_PLANNING_ZONE_LABELS_RU[district_key],
             "products": products,
             "barcode_summary": barcode_summary,
             "summary": {
@@ -271,6 +288,15 @@ class WbRegionalSupplyPlanningBlock:
         warnings.extend(acceptance_warnings)
         enrichment = self._fetch_enrichment(warnings=warnings)
         raw_option_rows = _extract_acceptance_option_rows(acceptance_payload)
+        warehouse_specific_probe_result = _fetch_missing_major_warehouse_probes(
+            source=self.source,
+            district_key=district_key,
+            request_products=request_products,
+            raw_option_rows=raw_option_rows,
+            warehouses=list(enrichment.get("warehouses") or []),
+            warnings=warnings,
+        )
+        raw_option_rows.extend(list(warehouse_specific_probe_result.get("raw_rows") or []))
         if not raw_option_rows:
             return {
                 **payload_without_options,
@@ -288,14 +314,6 @@ class WbRegionalSupplyPlanningBlock:
                 },
             }
 
-        warehouse_specific_probes = _fetch_missing_major_warehouse_probes(
-            source=self.source,
-            district_key=district_key,
-            request_products=request_products,
-            raw_option_rows=raw_option_rows,
-            warehouses=list(enrichment.get("warehouses") or []),
-            warnings=warnings,
-        )
         planning_result = _build_options(
             raw_option_rows=raw_option_rows,
             acceptance_payload=acceptance_payload,
@@ -307,12 +325,32 @@ class WbRegionalSupplyPlanningBlock:
             date_filter=request["date"],
             enrichment=enrichment,
             warnings=warnings,
-            warehouse_specific_probes=warehouse_specific_probes,
+            warehouse_specific_probes=dict(
+                warehouse_specific_probe_result.get("diagnostics") or {}
+            ),
         )
         options = list(planning_result.get("options") or [])
         status = STATUS_READY if options else STATUS_NO_OPTIONS
+        available_option_count = int(
+            dict(planning_result.get("summary") or {}).get("available_option_count") or 0
+        )
         if not options:
             warnings.append("После фильтров не осталось доступных вариантов WB.")
+        response_blockers: list[dict[str, Any]] = []
+        if not options:
+            response_blockers = list(acceptance_blockers) or [
+                {
+                    "code": "no_eligible_storage_warehouse",
+                    "message": "Нет доступного склада хранения для всех обязательных ШК.",
+                }
+            ]
+        elif available_option_count <= 0:
+            response_blockers = [
+                {
+                    "code": "no_available_date",
+                    "message": "Для разрешённых складов хранения нет доступной даты коробочной поставки.",
+                }
+            ]
         return {
             **payload_without_options,
             "status": status,
@@ -320,7 +358,7 @@ class WbRegionalSupplyPlanningBlock:
             "major_warehouse_diagnostics": list(planning_result.get("major_warehouse_diagnostics") or []),
             "diagnostics": dict(planning_result.get("diagnostics") or {}),
             "warnings": warnings,
-            "blockers": [] if options else acceptance_blockers,
+            "blockers": response_blockers,
             "summary": {
                 **payload_without_options["summary"],
                 **dict(planning_result.get("summary") or {}),
@@ -365,7 +403,9 @@ class WbRegionalSupplyPlanningBlock:
             "calculation_id": str((last_result or {}).get("calculation_id") or ""),
             "calculated_at": str((last_result or {}).get("calculated_at") or ""),
             "district_key": district_key,
-            "district_name_ru": DISTRICT_LABELS_RU.get(district_key, ""),
+            "district_name_ru": SUPPLY_PLANNING_ZONE_LABELS_RU.get(district_key, ""),
+            "planning_zone_key": district_key,
+            "planning_zone_label": SUPPLY_PLANNING_ZONE_LABELS_RU.get(district_key, ""),
             "package_type": str(request.get("package_type") or PACKAGE_TYPE_BOX),
             "filters": {
                 "warehouse_id": request.get("warehouse_id") or "",
@@ -399,6 +439,7 @@ class WbRegionalSupplyPlanningBlock:
                 "barcode_source": "sheet_vitrina_v1_nomenclature_items",
                 "wb_api_read_only": True,
                 "no_wb_mutations": True,
+                "warehouse_registry_version": WAREHOUSE_REGISTRY_VERSION,
             },
         }
 
@@ -433,6 +474,16 @@ class WbRegionalSupplyPlanningBlock:
                 "barcode_status": barcode_status,
                 "barcode_ready": bool(primary_barcode),
                 "barcode_evidence": item.get("barcode_evidence") if isinstance(item.get("barcode_evidence"), Mapping) else {},
+                "stock_demand_diagnostics": {
+                    "target_stock": float(row.get("target_stock_after_arrival") or 0.0),
+                    "current_stock": float(row.get("current_stock") or 0.0),
+                    "in_transit_qty": float(row.get("in_transit_qty") or 0.0),
+                    "average_depletion": float(row.get("district_daily_demand") or 0.0),
+                    "full_deficit": int(row.get("full_recommendation_qty") or 0),
+                    "allocated_qty": int(row.get("allocated_qty") or 0),
+                    "unfulfilled_deficit": int(row.get("deficit_qty") or 0),
+                    "allocation_reason": str(row.get("allocation_reason") or ""),
+                },
             }
             products.append(product)
             summary["total"] += 1
@@ -522,189 +573,370 @@ def _build_options(
     warnings: list[str],
     warehouse_specific_probes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    flat_rows = _flatten_acceptance_option_rows(raw_option_rows)
-    base_rows = [_normalize_acceptance_option_row(row) for row in flat_rows]
-    base_rows = [row for row in base_rows if row.get("warehouse_id") or row.get("warehouse_name")]
-    warehouse_name_by_id = _warehouse_name_by_id(enrichment.get("warehouses") or [])
-    base_rows = [_fill_acceptance_warehouse_name(row, warehouse_name_by_id) for row in base_rows]
-    if not include_transit:
-        base_rows = [row for row in base_rows if row.get("route_type") != ROUTE_TRANSIT]
-    base_rows = _dedupe_acceptance_option_rows(base_rows)
+    """Build the manager view from WB evidence after fail-closed filtering."""
 
-    fake_supply_rows = [
-        {
-            "warehouse_id": row.get("warehouse_id") or "",
-            "warehouse_name": row.get("warehouse_name") or "",
-        }
-        for row in base_rows
+    flat_rows = _flatten_acceptance_option_rows(raw_option_rows)
+    normalized_rows = [_normalize_acceptance_option_row(row) for row in flat_rows]
+    normalized_rows = [
+        row for row in normalized_rows if row.get("warehouse_id") or row.get("warehouse_name")
     ]
-    mapping = build_warehouse_district_mapping(
-        warehouse_rows=list(enrichment.get("warehouses") or []),
-        supply_rows=fake_supply_rows,
-        office_rows=list(enrichment.get("offices") or []),
-        tariff_rows=list(enrichment.get("box_tariffs") or []),
-    )
-    box_tariff_by_name = _tariff_by_warehouse_name(enrichment.get("box_tariffs") or [])
+    warehouse_name_by_id = _warehouse_name_by_id(list(enrichment.get("warehouses") or []))
+    normalized_rows = [
+        _fill_acceptance_warehouse_name(row, warehouse_name_by_id) for row in normalized_rows
+    ]
+    normalized_rows = _dedupe_acceptance_option_rows(normalized_rows)
+    grouped_rows = _group_acceptance_rows_by_warehouse(normalized_rows)
+
+    catalog_by_id = {
+        _warehouse_key(_first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id")): row
+        for row in list(enrichment.get("warehouses") or [])
+        if _warehouse_key(_first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id"))
+    }
+    coefficient_rows = list(enrichment.get("coefficients") or [])
+    coefficients_by_warehouse = _coefficient_rows_by_warehouse(coefficient_rows)
+    box_tariff_by_name = _tariff_by_warehouse_name(list(enrichment.get("box_tariffs") or []))
     transit_tariff_rows = list(enrichment.get("transit_tariffs") or [])
-    coefficients = _coefficient_rows_by_warehouse(enrichment.get("coefficients") or [])
     product_barcodes = {
         str(item.get("barcode") or "").strip()
         for item in products
         if str(item.get("barcode") or "").strip()
     }
-    grouped_rows = _group_acceptance_rows_by_warehouse(base_rows)
-    options: list[dict[str, Any]] = []
-    for group in grouped_rows:
-        district_row = augment_supply_row_with_district(
+    generic_mapping = build_warehouse_district_mapping(
+        warehouse_rows=list(enrichment.get("warehouses") or []),
+        supply_rows=[
             {
-                "warehouse_id": group.get("warehouse_id") or "",
-                "warehouse_name": group.get("warehouse_name") or "",
-                "district_source_warehouse_id": group.get("warehouse_id") or "",
-                "district_source_warehouse_name": group.get("warehouse_name") or "",
-                "district_source_warehouse_role": "acceptance_option",
-                "district_source_warehouse_evidence": "acceptance_options.warehouseName",
-            },
-            mapping,
+                "warehouse_id": row.get("warehouse_id") or "",
+                "warehouse_name": row.get("warehouse_name") or "",
+            }
+            for row in normalized_rows
+        ],
+        office_rows=list(enrichment.get("offices") or []),
+        tariff_rows=list(enrichment.get("box_tariffs") or []),
+    )
+
+    manager_options: list[dict[str, Any]] = []
+    exclusion_diagnostics: list[dict[str, Any]] = []
+    exclusion_counts: dict[str, int] = {}
+    for group in grouped_rows:
+        warehouse_id = str(group.get("warehouse_id") or "").strip()
+        warehouse_lookup_key = _warehouse_key(warehouse_id)
+        upstream_name = str(group.get("warehouse_name") or "").strip()
+        catalog_row = catalog_by_id.get(warehouse_lookup_key)
+        catalog_name = (
+            _first_string(catalog_row, "warehouseName", "warehouse_name", "name")
+            if isinstance(catalog_row, Mapping)
+            else ""
         )
-        warehouse_district_key = str(district_row.get("district_key") or DISTRICT_UNMAPPED)
-        warehouse_scope = _warehouse_scope(warehouse_district_key, district_key)
-        if only_same_district and warehouse_scope != WAREHOUSE_SCOPE_SAME_DISTRICT:
-            continue
-        dates = _warehouse_acceptance_dates(group, coefficients, date_filter=date_filter)
-        if date_filter and not dates:
-            continue
-        best_date = _best_date_entry(dates)
-        box_tariff = box_tariff_by_name.get(_normalize_name(group.get("warehouse_name")))
-        transit_routes = _transit_tariffs_for_destination(group.get("warehouse_name"), transit_tariff_rows)
-        best_transit = _best_transit_tariff(transit_routes)
-        tariff_value = _known_tariff_value(box_tariff, best_transit)
+        warehouse_name = catalog_name or upstream_name
+        registry_item, classification_source = resolve_central_storage_warehouse(
+            warehouse_id=warehouse_id,
+            warehouse_name=warehouse_name,
+            historical=False,
+        )
+        is_central_zone = district_key.startswith("central_")
+        if registry_item is not None:
+            planning_zone_key = registry_item.planning_zone_key
+            planning_zone_label = registry_item.planning_zone_label
+            warehouse_role = registry_item.role
+            canonical_name = registry_item.canonical_name
+            recommendation_enabled = registry_item.recommendation_enabled
+            blocked_reason = registry_item.blocked_reason or ""
+            is_storage_warehouse = registry_item.storage_kind == "storage"
+        else:
+            mapped = augment_supply_row_with_district(
+                {"warehouse_id": warehouse_id, "warehouse_name": warehouse_name},
+                generic_mapping,
+            )
+            planning_zone_key = str(mapped.get("district_key") or DISTRICT_UNMAPPED)
+            planning_zone_label = DISTRICT_LABELS_RU.get(planning_zone_key, "")
+            warehouse_role = "other"
+            canonical_name = warehouse_name
+            recommendation_enabled = not is_central_zone
+            blocked_reason = ""
+            is_storage_warehouse = not is_central_zone
+
+        coefficient_matches = coefficients_by_warehouse.get(warehouse_lookup_key) or coefficients_by_warehouse.get(
+            _normalize_name(warehouse_name)
+        ) or []
+        catalog_active = (
+            _first_bool(catalog_row, "isActive", "is_active", "active")
+            if isinstance(catalog_row, Mapping)
+            else None
+        )
+        is_sorting_center = bool(
+            any(
+                (
+                    _first_bool(row, "isSortingCenter", "is_sorting_center") is True
+                    or dict(row.get("raw_flags") or {}).get("isSortingCenter") is True
+                )
+                for row in coefficient_matches
+            )
+            or (
+                isinstance(catalog_row, Mapping)
+                and _first_bool(catalog_row, "isSortingCenter", "is_sorting_center") is True
+            )
+            or "sorting_center_name" in warehouse_name_exclusion_codes(warehouse_name)
+        )
+        name_exclusion_codes = list(warehouse_name_exclusion_codes(warehouse_name))
+        accepts_all_barcodes = _barcode_coverage(group, product_barcodes).get(
+            "accepts_all_barcodes", False
+        )
         barcode_coverage = _barcode_coverage(group, product_barcodes)
+        package_supported = all(
+            bool(
+                barcode_rows := [
+                    row
+                    for row in list(group.get("raw_rows") or [])
+                    if str(row.get("barcode") or "").strip() == barcode
+                ]
+            )
+            and all(
+                dict(row.get("raw_flags") or {}).get("canBox") is True
+                for row in barcode_rows
+            )
+            for barcode in product_barcodes
+        ) if product_barcodes else False
         route_type = ROUTE_TRANSIT if group.get("route_type") == ROUTE_TRANSIT else ROUTE_DIRECT
+
+        exclusion_codes: list[str] = []
+        if not warehouse_id:
+            exclusion_codes.append("warehouse_id_missing")
+        if is_central_zone and registry_item is None:
+            exclusion_codes.append("warehouse_unclassified")
+        if planning_zone_key != district_key:
+            exclusion_codes.append("outside_selected_planning_zone")
+        if not recommendation_enabled:
+            exclusion_codes.append("recommendation_disabled")
+        if blocked_reason:
+            exclusion_codes.append("warehouse_blocked")
+        if not is_storage_warehouse:
+            exclusion_codes.append("not_storage_warehouse")
+        if is_sorting_center and "sorting_center" not in exclusion_codes:
+            exclusion_codes.append("sorting_center")
+        exclusion_codes.extend(name_exclusion_codes)
+        if catalog_row is None:
+            exclusion_codes.append("warehouse_catalog_missing")
+        elif catalog_active is not True:
+            exclusion_codes.append("warehouse_inactive")
+        if not accepts_all_barcodes:
+            exclusion_codes.append("partial_barcode_coverage")
+        if not package_supported:
+            exclusion_codes.append("box_not_supported")
+        if route_type == ROUTE_TRANSIT and not include_transit:
+            exclusion_codes.append("transit_route_not_allowed")
+        exclusion_codes = list(dict.fromkeys(exclusion_codes))
+
+        if exclusion_codes:
+            for code in exclusion_codes:
+                exclusion_counts[code] = exclusion_counts.get(code, 0) + 1
+            exclusion_diagnostics.append(
+                {
+                    "warehouse_id": warehouse_id,
+                    "warehouse_name": warehouse_name,
+                    "planning_zone_key": planning_zone_key,
+                    "classification_source": classification_source,
+                    "exclusion_reasons": exclusion_codes,
+                    "barcode_coverage": barcode_coverage,
+                    "package_supported": package_supported,
+                    "catalog_active": catalog_active,
+                    "is_sorting_center": is_sorting_center,
+                }
+            )
+            continue
+
+        dates = _warehouse_acceptance_dates(group, coefficients_by_warehouse, date_filter=date_filter)
+        available_dates = [item for item in dates if item.get("is_available")]
+        free_dates = [item for item in dates if item.get("is_free_date")]
+        first_available = available_dates[0] if available_dates else {}
+        first_free = free_dates[0] if free_dates else {}
+        display_name = canonical_name or warehouse_name
+        box_tariff = box_tariff_by_name.get(_normalize_name(display_name)) or box_tariff_by_name.get(
+            _normalize_name(warehouse_name)
+        )
+        transit_routes = (
+            _transit_tariffs_for_destination(display_name, transit_tariff_rows)
+            if include_transit
+            else []
+        )
+        best_transit = _best_transit_tariff(transit_routes)
+        blocker_codes = [] if available_dates else ["no_available_date"]
+        ranking_evidence = {
+            "has_available_date": bool(available_dates),
+            "warehouse_role": warehouse_role,
+            "role_rank": {"primary": 0, "reserve": 1, "far_reserve": 2, "other": 3}.get(
+                warehouse_role, 4
+            ),
+            "first_available_date": first_available.get("date") or "",
+            "first_free_date": first_free.get("date") or "",
+            "catalog_active": catalog_active is True,
+            "accepts_all_barcodes": bool(accepts_all_barcodes),
+            "package_supported": bool(package_supported),
+            "direct_destination": route_type == ROUTE_DIRECT,
+        }
         option = {
             "option_id": _stable_hash(
-                {
-                    "warehouse_id": group.get("warehouse_id"),
-                    "warehouse_name": group.get("warehouse_name"),
-                    "route_type": route_type,
-                }
+                {"warehouse_id": warehouse_id, "planning_zone_key": planning_zone_key}
             )[:16],
             "option_kind": "warehouse_group",
-            "warehouse_group_key": group.get("group_key") or "",
             "rank": 0,
             "recommendation": "",
             "recommendation_explanation": "",
-            "date": best_date.get("date") or "",
-            "best_date": best_date,
-            "dates": dates,
-            "date_count": len(dates),
-            "good_date_count": sum(1 for item in dates if item.get("is_good_date")),
-            "free_date_count": sum(1 for item in dates if item.get("is_free_date")),
-            "warehouse_id": group.get("warehouse_id") or "",
-            "warehouse_name": group.get("warehouse_name") or "",
-            "warehouse_district_key": warehouse_district_key,
-            "warehouse_district_label_ru": DISTRICT_LABELS_RU.get(warehouse_district_key, ""),
-            "warehouse_district_short_label_ru": DISTRICT_SHORT_LABELS_RU.get(warehouse_district_key, ""),
-            "warehouse_scope": warehouse_scope,
-            "route_type": route_type,
-            "transit_warehouse_id": group.get("transit_warehouse_id") or "",
-            "transit_warehouse_name": group.get("transit_warehouse_name") or "",
-            "coefficient": best_date.get("coefficient"),
-            "coefficient_display": _format_number(best_date.get("coefficient")),
-            "min_coefficient": _best_numeric_coefficient(dates),
-            "allow_unload": best_date.get("allow_unload"),
-            "dropoff_allowed": group.get("dropoff_allowed"),
-            "pickup_allowed": group.get("pickup_allowed"),
-            "package_type": package_type,
-            "raw_flags": group.get("raw_flags") or {},
+            "planning_zone_key": planning_zone_key,
+            "planning_zone_label": planning_zone_label,
+            "district_key": planning_zone_key,
+            "district_name_ru": planning_zone_label,
+            "warehouse_id": warehouse_id,
+            "warehouse_name": display_name,
+            "warehouse_role": warehouse_role,
+            "warehouse_scope": WAREHOUSE_SCOPE_SAME_DISTRICT,
+            "classification_source": classification_source,
+            "warehouse_registry_version": WAREHOUSE_REGISTRY_VERSION,
+            "accepts_all_barcodes": bool(accepts_all_barcodes),
             "barcode_coverage": barcode_coverage,
-            "accepts_all_barcodes": bool(barcode_coverage.get("accepts_all_barcodes")),
-            "is_sgt": _is_sgt_warehouse(group.get("warehouse_name")),
-            "is_major_expected": _is_major_expected_warehouse(district_key, group.get("warehouse_name")),
-            "tariff_evidence": _tariff_evidence(box_tariff, best_transit),
+            "package_type": package_type,
+            "package_supported": bool(package_supported),
+            "is_storage_warehouse": bool(is_storage_warehouse),
+            "is_sorting_center": bool(is_sorting_center),
+            "recommendation_enabled": bool(recommendation_enabled),
+            "dates": dates,
+            "date": first_available.get("date") or "",
+            "first_available_date": first_available.get("date") or "",
+            "first_free_date": first_free.get("date") or "",
+            "unique_available_date_count": len(available_dates),
+            "unique_free_date_count": len(free_dates),
+            "date_count": len(dates),
+            "good_date_count": len(available_dates),
+            "free_date_count": len(free_dates),
+            "coefficient": first_available.get("coefficient"),
+            "coefficient_display": _format_number(first_available.get("coefficient")),
+            "allow_unload": first_available.get("allow_unload"),
+            "route_type": route_type,
+            "direct_destination": route_type == ROUTE_DIRECT,
+            "transit_warehouse_id": "",
+            "transit_warehouse_name": "",
             "box_tariff": _compact_box_tariff_row(box_tariff),
+            "tariff_evidence": _tariff_evidence(box_tariff, best_transit),
+            "known_tariff_value": _known_tariff_value(box_tariff, best_transit),
             "transit_route_count": len(transit_routes),
             "best_transit_route": _compact_transit_tariff_row(best_transit),
-            "transit_routes": [_compact_transit_tariff_row(item) for item in transit_routes[:20]],
-            "known_tariff_value": tariff_value,
-            "warnings": _group_option_warnings(
-                group=group,
-                dates=dates,
-                warehouse_scope=warehouse_scope,
-                box_tariff=box_tariff,
-                transit_routes=transit_routes,
-                barcode_coverage=barcode_coverage,
+            "blocker_codes": blocker_codes,
+            "exclusion_reasons": [],
+            "ranking_evidence": ranking_evidence,
+            "status": "available" if available_dates else "no_available_date",
+            "warnings": (
+                []
+                if available_dates
+                else ["WB не вернул доступную дату коробочной поставки в официальном горизонте."]
             ),
+            "stock_demand_diagnostics": {
+                "products": [
+                    {
+                        "nm_id": item.get("nm_id"),
+                        **dict(item.get("stock_demand_diagnostics") or {}),
+                    }
+                    for item in products
+                ],
+                "allocated_qty_total": sum(
+                    int(item.get("quantity") or 0) for item in products
+                ),
+            },
             "evidence": {
-                "acceptance_option": {
-                    "source": "acceptance_options",
-                    "raw_row_count": group.get("raw_row_count") or 0,
-                    "barcode_coverage_source": "acceptance_options.result[].warehouses[]",
-                    "coefficient_source": "acceptance_coefficients" if dates else "",
-                },
-                "district_mapping_source": district_row.get("district_mapping_source") or "",
-                "district_mapping_evidence": district_row.get("district_mapping_evidence") or "",
-                "district_mapping_confidence": district_row.get("district_mapping_confidence") or "",
-                "cost_kind": "raw_tariff_evidence_only",
-                "full_cost_calculated": False,
+                "acceptance_options": "all_required_barcodes",
+                "warehouse_catalog": "exact_warehouse_id",
+                "classification": classification_source,
+                "coefficient_contract": "boxTypeID in {1,2}; coefficient in {0,1}; allowUnload=true",
             },
         }
-        option["_rank_tuple"] = _rank_tuple(option)
+        option["_rank_tuple"] = (
+            0 if available_dates else 1,
+            ranking_evidence["role_rank"],
+            first_available.get("date") or "9999-99-99",
+            first_free.get("date") or "9999-99-99",
+            float(option["known_tariff_value"])
+            if isinstance(option.get("known_tariff_value"), (int, float))
+            else 999_999.0,
+            int(warehouse_id) if warehouse_id.isdigit() else 999_999_999,
+        )
         option["operator_handoff"] = _operator_handoff(
             option=option,
             district_key=district_key,
             products=products,
             acceptance_payload=acceptance_payload,
         )
-        options.append(option)
-    options.sort(key=lambda item: item["_rank_tuple"])
-    grouped_warehouse_count = len(options)
-    visible_options = list(options)
-    if grouped_warehouse_count > MAX_PLANNING_OPTIONS:
-        warnings.append(
-            f"WB вернул {grouped_warehouse_count} складов после группировки; в UI показаны первые {MAX_PLANNING_OPTIONS} по ранжированию."
-        )
-        visible_options = visible_options[:MAX_PLANNING_OPTIONS]
+        manager_options.append(option)
+
+    manager_options.sort(key=lambda item: item["_rank_tuple"])
+    visible_options = manager_options[:MAX_PLANNING_OPTIONS]
     for index, option in enumerate(visible_options, start=1):
         option["rank"] = index
-        option["recommendation"] = "Рекомендуемый вариант" if index == 1 else f"Вариант #{index}"
-        option["recommendation_explanation"] = _recommendation_explanation(option)
+        option["recommendation"] = (
+            "Рекомендуемый склад"
+            if index == 1 and option.get("status") == "available"
+            else f"Альтернатива #{index}"
+        )
+        option["recommendation_explanation"] = (
+            f"{option.get('planning_zone_label')}; роль {option.get('warehouse_role')}; "
+            + (
+                f"ближайшая дата {option.get('first_available_date')}"
+                if option.get("first_available_date")
+                else "нет доступной даты"
+            )
+        )
         option.pop("_rank_tuple", None)
-    major_diagnostics = _major_warehouse_diagnostics(
-        district_key=district_key,
-        base_rows=base_rows,
-        all_options=options,
-        visible_options=visible_options,
-        warehouses=list(enrichment.get("warehouses") or []),
-        box_tariffs=list(enrichment.get("box_tariffs") or []),
-        coefficients=list(enrichment.get("coefficients") or []),
-        offices=list(enrichment.get("offices") or []),
-        mapping=mapping,
-        product_barcode_count=len(product_barcodes),
-        warehouse_specific_probes=warehouse_specific_probes or {},
-    )
-    sgt_count = sum(1 for item in options if item.get("is_sgt"))
+    if len(manager_options) > MAX_PLANNING_OPTIONS:
+        warnings.append(
+            f"После строгой фильтрации осталось {len(manager_options)} складов; показаны первые {MAX_PLANNING_OPTIONS}."
+        )
+
+    probe_diagnostics = [
+        dict(value)
+        for value in dict(warehouse_specific_probes or {}).values()
+        if isinstance(value, Mapping)
+    ]
+    available_option_count = sum(1 for item in visible_options if item.get("status") == "available")
     return {
         "options": visible_options,
-        "major_warehouse_diagnostics": major_diagnostics,
+        "major_warehouse_diagnostics": probe_diagnostics,
         "raw_flat_row_count": len(flat_rows),
-        "grouped_warehouse_count": grouped_warehouse_count,
+        "grouped_warehouse_count": len(grouped_rows),
         "summary": {
             "raw_acceptance_result_count": len(raw_option_rows),
             "raw_acceptance_flat_row_count": len(flat_rows),
-            "grouped_warehouse_count": grouped_warehouse_count,
+            "grouped_warehouse_count": len(grouped_rows),
             "visible_grouped_warehouse_count": len(visible_options),
-            "accepts_all_barcode_option_count": sum(1 for item in visible_options if item.get("accepts_all_barcodes")),
-            "sgt_option_count": sgt_count,
-            "non_sgt_option_count": grouped_warehouse_count - sgt_count,
-            "major_warehouse_diagnostic_count": len(major_diagnostics),
+            "option_count": len(visible_options),
+            "available_option_count": available_option_count,
+            "excluded_option_count": len(exclusion_diagnostics),
+            "accepts_all_barcode_option_count": len(visible_options),
+            "sorting_center_excluded_count": sum(
+                count
+                for code, count in exclusion_counts.items()
+                if code in {"sorting_center", "sorting_center_name"}
+            ),
+            "specialized_excluded_count": sum(
+                count
+                for code, count in exclusion_counts.items()
+                if code in {"specialized_food", "specialized_fuel", "specialized_tires"}
+            ),
+            "sgt_excluded_count": exclusion_counts.get("sgt_warehouse", 0),
+            "partial_excluded_count": exclusion_counts.get("partial_barcode_coverage", 0),
+            "can_box_false_excluded_count": exclusion_counts.get("box_not_supported", 0),
+            "inactive_excluded_count": exclusion_counts.get("warehouse_inactive", 0),
+            "blocked_excluded_count": exclusion_counts.get("warehouse_blocked", 0),
+            "unmapped_excluded_count": exclusion_counts.get("warehouse_unclassified", 0),
         },
         "diagnostics": {
-            "raw_acceptance_result_count": len(raw_option_rows),
-            "raw_acceptance_flat_row_count": len(flat_rows),
-            "grouped_warehouse_count": grouped_warehouse_count,
-            "cap_applied_after_grouping": True,
-            "max_planning_options": MAX_PLANNING_OPTIONS,
-            "major_warehouses": major_diagnostics,
+            "request_id": str(acceptance_payload.get("requestId") or ""),
+            "requested_barcode_count": len(product_barcodes),
+            "raw_option_count": len(flat_rows),
+            "grouped_warehouse_count": len(grouped_rows),
+            "exclusion_reason_counts": exclusion_counts,
+            "excluded_options": exclusion_diagnostics,
+            "warehouse_registry_version": WAREHOUSE_REGISTRY_VERSION,
+            "warehouse_registry_entry_count": len(CENTRAL_STORAGE_WAREHOUSES),
+            "box_type_ids": list(BOX_TYPE_IDS),
+            "coefficient_horizon_days": 14,
+            "manager_view_fail_closed": True,
         },
     }
 
@@ -718,76 +950,88 @@ def _fetch_missing_major_warehouse_probes(
     warehouses: list[Mapping[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
-    expected_names = MAJOR_WAREHOUSE_PROBES_BY_DISTRICT.get(district_key, [])
-    if not expected_names:
-        return {}
-    warehouse_name_by_id = _warehouse_name_by_id(warehouses)
-    acceptance_rows = [
-        _fill_acceptance_warehouse_name(_normalize_acceptance_option_row(row), warehouse_name_by_id)
-        for row in _flatten_acceptance_option_rows(raw_option_rows)
+    expected = [
+        item
+        for item in CENTRAL_STORAGE_WAREHOUSES
+        if item.planning_zone_key == district_key and item.recommendation_enabled
     ]
-    result: dict[str, Any] = {}
+    if not expected:
+        return {"raw_rows": [], "diagnostics": {}}
+    general_ids = {
+        _warehouse_key(_first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id"))
+        for row in _flatten_acceptance_option_rows(raw_option_rows)
+    }
+    catalog_by_id = {
+        _warehouse_key(_first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id")): row
+        for row in warehouses
+        if _warehouse_key(_first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id"))
+    }
+    diagnostics: dict[str, Any] = {}
+    probed_raw_rows: list[Mapping[str, Any]] = []
     probe_calls = 0
-    for expected in expected_names:
-        if any(_warehouse_name_matches(row.get("warehouse_name"), expected) for row in acceptance_rows):
+    for registry_item in expected:
+        warehouse_id = str(registry_item.warehouse_id)
+        warehouse_lookup_key = _warehouse_key(warehouse_id)
+        catalog_row = catalog_by_id.get(warehouse_lookup_key)
+        base_diagnostic = {
+            "warehouse_id": registry_item.warehouse_id,
+            "expected_warehouse_name": registry_item.canonical_name,
+            "planning_zone_key": registry_item.planning_zone_key,
+            "found_in_catalog": catalog_row is not None,
+            "catalog_active": (
+                _first_bool(catalog_row, "isActive", "is_active", "active")
+                if isinstance(catalog_row, Mapping)
+                else None
+            ),
+        }
+        if warehouse_lookup_key in general_ids:
+            diagnostics[registry_item.canonical_name] = {
+                **base_diagnostic,
+                "status": "returned_by_general_acceptance_options",
+                "probe_called": False,
+            }
             continue
-        candidates = [
-            row
-            for row in warehouses
-            if _warehouse_name_matches(_first_string(row, "warehouseName", "warehouse_name", "name"), expected)
-        ]
-        probes: list[dict[str, Any]] = []
-        for candidate in candidates[:2]:
-            if probe_calls >= MAX_MAJOR_WAREHOUSE_PROBE_CALLS:
-                break
-            warehouse_id = _first_string(candidate, "warehouseID", "warehouseId", "warehouse_id", "ID", "id")
-            if not warehouse_id:
-                continue
-            probe_calls += 1
-            try:
-                payload = source.fetch_acceptance_options(products=request_products, warehouse_id=warehouse_id)
-                flat_rows = [
-                    _fill_acceptance_warehouse_name(_normalize_acceptance_option_row(row), warehouse_name_by_id)
-                    for row in _flatten_acceptance_option_rows(_extract_acceptance_option_rows(payload))
-                ]
-                matching = [row for row in flat_rows if _warehouse_name_matches(row.get("warehouse_name"), expected)]
-                probes.append(
-                    {
-                        "warehouse_id": warehouse_id,
-                        "warehouse_name": _first_string(candidate, "warehouseName", "warehouse_name", "name"),
-                        "status": "ok",
-                        "http_status": 200,
-                        "top_result_count": len(_extract_acceptance_option_rows(payload)),
-                        "flat_row_count": len(flat_rows),
-                        "matching_row_count": len(matching),
-                        "matching_barcode_count": len(
-                            {
-                                str(row.get("barcode") or "").strip()
-                                for row in matching
-                                if str(row.get("barcode") or "").strip()
-                            }
-                        ),
-                        "returned_names": sorted({str(row.get("warehouse_name") or "") for row in flat_rows if row.get("warehouse_name")})[:10],
-                    }
+        if probe_calls >= MAX_MAJOR_WAREHOUSE_PROBE_CALLS:
+            diagnostics[registry_item.canonical_name] = {
+                **base_diagnostic,
+                "status": "probe_limit_reached",
+                "probe_called": False,
+            }
+            continue
+        probe_calls += 1
+        try:
+            payload = source.fetch_acceptance_options(
+                products=request_products,
+                warehouse_id=registry_item.warehouse_id,
+            )
+            top_rows = _extract_acceptance_option_rows(payload)
+            probed_raw_rows.extend(top_rows)
+            flat_rows = _flatten_acceptance_option_rows(top_rows)
+            returned_ids = {
+                _warehouse_key(
+                    _first_string(row, "warehouseID", "warehouseId", "warehouse_id", "ID", "id")
                 )
-            except (OfficialApiRuntimeError, WbSuppliesHttpStatusError, WbSuppliesTransportError, OSError, ValueError) as exc:
-                probes.append(
-                    {
-                        "warehouse_id": warehouse_id,
-                        "warehouse_name": _first_string(candidate, "warehouseName", "warehouse_name", "name"),
-                        "status": "error",
-                        "error": _safe_error_message(exc),
-                    }
-                )
-        if probes:
-            result[expected] = {
-                "expected_warehouse_name": expected,
-                "reason": "not_returned_by_general_acceptance_options",
-                "probes": probes,
+                for row in flat_rows
+            }
+            diagnostics[registry_item.canonical_name] = {
+                **base_diagnostic,
+                "status": "ok",
+                "probe_called": True,
+                "http_status": 200,
+                "top_result_count": len(top_rows),
+                "flat_row_count": len(flat_rows),
+                "exact_warehouse_returned": warehouse_lookup_key in returned_ids,
+            }
+        except (OfficialApiRuntimeError, WbSuppliesHttpStatusError, WbSuppliesTransportError, OSError, ValueError) as exc:
+            diagnostics[registry_item.canonical_name] = {
+                **base_diagnostic,
+                "status": "error",
+                "probe_called": True,
+                "error": _safe_error_message(exc),
             }
     if probe_calls >= MAX_MAJOR_WAREHOUSE_PROBE_CALLS:
         warnings.append("Диагностические warehouseID-probes ограничены безопасным лимитом.")
-    return result
+    return {"raw_rows": probed_raw_rows, "diagnostics": diagnostics}
 
 
 def _major_warehouse_diagnostics(
@@ -945,19 +1189,23 @@ def _parse_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     if package_type not in PACKAGE_TYPES:
         raise ValueError(f"package_type пока поддерживается только {PACKAGE_TYPE_BOX}")
     return {
-        "district_key": str(payload.get("district_key") or "").strip().lower(),
+        "district_key": str(
+            payload.get("planning_zone_key") or payload.get("district_key") or ""
+        ).strip().lower(),
         "calculation_id": str(payload.get("calculation_id") or "").strip(),
         "package_type": package_type,
         "warehouse_id": str(payload.get("warehouse_id") or "").strip(),
         "date": str(payload.get("date") or "").strip(),
-        "only_same_district": _as_bool(payload.get("only_same_district"), default=False),
-        "include_transit": _as_bool(payload.get("include_transit"), default=True),
+        "only_same_district": _as_bool(payload.get("only_same_district"), default=True),
+        "include_transit": _as_bool(payload.get("include_transit"), default=False),
     }
 
 
 def _find_district(result: Mapping[str, Any], district_key: str) -> Mapping[str, Any] | None:
     for item in result.get("districts") or []:
-        if isinstance(item, Mapping) and str(item.get("district_key") or "").strip().lower() == district_key:
+        if isinstance(item, Mapping) and str(
+            item.get("planning_zone_key") or item.get("district_key") or ""
+        ).strip().lower() == district_key:
             return item
     return None
 
@@ -1044,6 +1292,7 @@ def _normalize_acceptance_option_row(row: Mapping[str, Any]) -> dict[str, Any]:
                 "boxTypeName",
                 "coefficient",
                 "allowUnload",
+                "isSortingCenter",
             )
             if key in row
         },
@@ -1092,8 +1341,8 @@ def _dedupe_acceptance_option_rows(rows: list[dict[str, Any]]) -> list[dict[str,
         return []
     barcode_values = {str(row.get("barcode") or "").strip() for row in rows if str(row.get("barcode") or "").strip()}
     required_barcode_count = max(1, len(barcode_values))
-    grouped: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
-    grouped_barcodes: dict[tuple[str, str, str, str, str, str], set[str]] = {}
+    grouped: dict[tuple[str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+    grouped_barcodes: dict[tuple[str, str, str, str, str, str, str, str], set[str]] = {}
     for row in rows:
         key = (
             _warehouse_key(row.get("warehouse_id")),
@@ -1102,6 +1351,8 @@ def _dedupe_acceptance_option_rows(rows: list[dict[str, Any]]) -> list[dict[str,
             str(row.get("route_type") or ROUTE_DIRECT),
             _warehouse_key(row.get("transit_warehouse_id")),
             _normalize_name(row.get("transit_warehouse_name")),
+            str(row.get("barcode") or "").strip(),
+            str(dict(row.get("raw_flags") or {}).get("canBox")),
         )
         if key not in grouped:
             grouped[key] = dict(row)
@@ -1209,11 +1460,16 @@ def _warehouse_acceptance_dates(
         _normalize_name(group.get("warehouse_name"))
     ) or []
     rows = matches or list(group.get("raw_rows") or [])
-    result: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    candidates_by_date: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
+        raw_flags = dict(row.get("raw_flags") or {}) if isinstance(row, Mapping) else {}
+        box_type_id = _positive_int(raw_flags.get("boxTypeID", row.get("boxTypeID")))
+        if box_type_id not in BOX_TYPE_IDS:
+            continue
         date_value = _first_string(row, "date", "dt", "day", "supplyDate", "acceptanceDate", "unloadingDate", "availableDate")
         normalized_date = _normalize_date_value(date_value)
+        if not normalized_date:
+            continue
         if date_filter and not _date_matches_filter(normalized_date or date_value, date_filter):
             continue
         coefficient = row.get("coefficient")
@@ -1222,57 +1478,67 @@ def _warehouse_acceptance_dates(
         allow_unload = row.get("allow_unload")
         if allow_unload is None and isinstance(row, Mapping):
             allow_unload = _first_bool(row, "allowUnload", "allow_unload", "canUnload", "can_unload")
-        key = (normalized_date, _format_number(coefficient), str(allow_unload))
-        if key in seen:
-            continue
-        seen.add(key)
         coefficient_value = coefficient if isinstance(coefficient, (int, float)) else _first_nested_number(coefficient)
-        is_free = coefficient_value == 0
-        is_good = bool(allow_unload is True and coefficient_value in (0, 1))
-        result.append(
+        is_available = bool(allow_unload is True and coefficient_value in (0, 1))
+        candidates_by_date.setdefault(normalized_date, []).append(
             {
                 "date": normalized_date,
                 "raw_date": date_value,
                 "coefficient": coefficient_value,
                 "coefficient_display": _format_number(coefficient_value),
                 "allow_unload": allow_unload,
-                "is_free_date": is_free,
-                "is_good_date": is_good,
+                "box_type_id": box_type_id,
+                "package_type": PACKAGE_TYPE_BOX,
+                "is_available": is_available,
+                "is_free_date": bool(is_available and coefficient_value == 0),
+                "is_good_date": is_available,
+                "is_paid_date": bool(is_available and coefficient_value == 1),
                 "status": _date_status(coefficient_value, allow_unload),
                 "source": "acceptance_coefficients" if matches else "acceptance_options",
             }
         )
-    result.sort(key=_date_sort_tuple)
+    result: list[dict[str, Any]] = []
+    for normalized_date in sorted(candidates_by_date):
+        day_rows = candidates_by_date[normalized_date]
+        day_rows.sort(
+            key=lambda item: (
+                0 if item.get("is_available") else 1,
+                _coefficient_sort_rank(item.get("coefficient")),
+                int(item.get("box_type_id") or 999),
+            )
+        )
+        selected = dict(day_rows[0])
+        selected["box_type_ids"] = sorted(
+            {int(item.get("box_type_id")) for item in day_rows if item.get("box_type_id")}
+        )
+        selected["raw_row_count"] = len(day_rows)
+        result.append(selected)
     return result
 
 
 def _best_date_entry(dates: list[Mapping[str, Any]]) -> dict[str, Any]:
     if not dates:
         return {}
-    return dict(dates[0])
+    available = [item for item in dates if item.get("is_available")]
+    return dict((available or dates)[0])
 
 
 def _date_sort_tuple(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    coefficient = row.get("coefficient")
     return (
-        _coefficient_sort_rank(coefficient),
-        0 if row.get("allow_unload") is True else 1 if row.get("allow_unload") is None else 2,
         str(row.get("date") or "9999-99-99"),
+        0 if row.get("is_available") else 1,
+        _coefficient_sort_rank(row.get("coefficient")),
     )
 
 
 def _date_status(coefficient: Any, allow_unload: Any) -> str:
-    if coefficient == -1:
-        return "unavailable"
-    if allow_unload is False:
+    if allow_unload is not True or coefficient not in (0, 1):
         return "unavailable"
     if coefficient == 0:
         return "free"
     if coefficient == 1:
-        return "good"
-    if coefficient is None:
-        return "unknown"
-    return "paid"
+        return "paid"
+    return "unavailable"
 
 
 def _normalize_date_value(value: Any) -> str:
@@ -1323,13 +1589,9 @@ def _is_major_expected_warehouse(district_key: str, warehouse_name: Any) -> bool
 
 
 def _warehouse_name_matches(candidate: Any, expected: Any) -> bool:
-    candidate_name = _normalize_name(candidate)
-    expected_name = _normalize_name(expected)
-    if not candidate_name or not expected_name:
-        return False
-    if candidate_name == expected_name:
-        return True
-    return candidate_name.startswith(expected_name + " ") or candidate_name.startswith(expected_name + ":") or expected_name in candidate_name
+    candidate_name = normalize_exact_warehouse_name(candidate)
+    expected_name = normalize_exact_warehouse_name(expected)
+    return bool(candidate_name and expected_name and candidate_name == expected_name)
 
 
 def _warehouse_name_by_id(rows: list[Mapping[str, Any]]) -> dict[str, str]:
@@ -1760,7 +2022,9 @@ def _operator_handoff(
     return {
         "copy_format": "json",
         "district_key": district_key,
-        "district_name_ru": DISTRICT_LABELS_RU.get(district_key, ""),
+        "district_name_ru": SUPPLY_PLANNING_ZONE_LABELS_RU.get(district_key, ""),
+        "planning_zone_key": district_key,
+        "planning_zone_label": SUPPLY_PLANNING_ZONE_LABELS_RU.get(district_key, ""),
         "date": option.get("date") or "",
         "warehouse_id": option.get("warehouse_id") or "",
         "warehouse_name": option.get("warehouse_name") or "",

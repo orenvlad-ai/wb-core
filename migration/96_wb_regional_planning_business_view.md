@@ -1,5 +1,9 @@
 # 96. WB regional planning business warehouse view
 
+> Superseded for current manager eligibility, date normalization and Central
+> planning zones by [migration 103](103_wb_supply_planning_zones.md).  The v1
+> contract below remains migration evidence only.
+
 `Поставки -> Расчёты -> Подобрать склады WB` changes the operator planning response from raw date rows to grouped warehouse options.
 
 ## Contract changes

@@ -42,12 +42,8 @@ from packages.contracts.factory_order_supply import (
 )
 from packages.contracts.stocks_block import StocksRequest
 from packages.contracts.wb_regional_supply import (
-    DISTRICT_CENTRAL,
     DISTRICT_FAR_SIBERIA,
-    DISTRICT_KEYS,
-    DISTRICT_LABELS_RU,
     DISTRICT_NORTHWEST,
-    DISTRICT_SHORT_LABELS_RU,
     DISTRICT_SOUTH_CAUCASUS,
     DISTRICT_URAL,
     DISTRICT_VOLGA,
@@ -58,21 +54,34 @@ from packages.contracts.wb_regional_supply import (
     WbRegionalSupplyStatus,
     WbRegionalSupplySummary,
 )
+from packages.contracts.wb_supply_planning_zones import (
+    PLANNING_ZONE_CENTRAL_EAST,
+    PLANNING_ZONE_CENTRAL_NORTH,
+    PLANNING_ZONE_CENTRAL_SOUTH,
+    SUPPLY_PLANNING_ZONE_KEYS,
+    SUPPLY_PLANNING_ZONE_LABELS_RU,
+    SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU,
+    SUPPLY_PLANNING_ZONE_TO_STOCK_FIELD,
+)
 
 
 _DISTRICT_SPECS = (
-    (DISTRICT_CENTRAL, DISTRICT_LABELS_RU[DISTRICT_CENTRAL], "stock_ru_central"),
-    (DISTRICT_NORTHWEST, DISTRICT_LABELS_RU[DISTRICT_NORTHWEST], "stock_ru_northwest"),
-    (DISTRICT_VOLGA, DISTRICT_LABELS_RU[DISTRICT_VOLGA], "stock_ru_volga"),
-    (DISTRICT_URAL, DISTRICT_LABELS_RU[DISTRICT_URAL], "stock_ru_ural"),
-    (DISTRICT_SOUTH_CAUCASUS, DISTRICT_LABELS_RU[DISTRICT_SOUTH_CAUCASUS], "stock_ru_south_caucasus"),
-    (DISTRICT_FAR_SIBERIA, DISTRICT_LABELS_RU[DISTRICT_FAR_SIBERIA], "stock_ru_far_siberia"),
+    *(
+        (
+            key,
+            SUPPLY_PLANNING_ZONE_LABELS_RU[key],
+            SUPPLY_PLANNING_ZONE_TO_STOCK_FIELD[key],
+        )
+        for key in SUPPLY_PLANNING_ZONE_KEYS
+    ),
 )
 _DISTRICT_NAME_BY_KEY = {key: name for key, name, _ in _DISTRICT_SPECS}
 _DISTRICT_FIELD_BY_KEY = {key: field_name for key, _, field_name in _DISTRICT_SPECS}
-_DISTRICT_ORDER_INDEX = {key: index for index, key in enumerate(DISTRICT_KEYS)}
+_DISTRICT_ORDER_INDEX = {key: index for index, key in enumerate(SUPPLY_PLANNING_ZONE_KEYS)}
 _DISTRICT_FILENAME_STEMS = {
-    DISTRICT_CENTRAL: "central",
+    PLANNING_ZONE_CENTRAL_NORTH: "central_north",
+    PLANNING_ZONE_CENTRAL_EAST: "central_east",
+    PLANNING_ZONE_CENTRAL_SOUTH: "central_south",
     DISTRICT_NORTHWEST: "northwest",
     DISTRICT_VOLGA: "volga",
     DISTRICT_URAL: "ural",
@@ -129,20 +138,57 @@ class WbRegionalSupplyBlock:
     def build_status(self) -> WbRegionalSupplyStatus:
         active_skus = self._load_active_skus()
         shared_datasets = {DATASET_STOCK_FF: self._load_shared_stock_ff_state()}
+        raw_last_result = self.runtime.load_wb_regional_supply_result_state()
+        legacy_result_available = bool(
+            isinstance(raw_last_result, Mapping)
+            and str(raw_last_result.get("payload_version") or "") != "v2_planning_zones"
+        )
+        legacy_snapshot = (
+            {
+                "source_payload_version": str(raw_last_result.get("payload_version") or "v1_legacy_federal_districts"),
+                "calculation_id": str(raw_last_result.get("calculation_id") or ""),
+                "calculated_at": str(raw_last_result.get("calculated_at") or ""),
+                "report_date": str(raw_last_result.get("report_date") or ""),
+                "district_keys": [
+                    str(item.get("district_key") or "")
+                    for item in list(raw_last_result.get("districts") or [])
+                    if isinstance(item, Mapping)
+                ],
+                "summary": dict(raw_last_result.get("summary") or {}),
+            }
+            if legacy_result_available and isinstance(raw_last_result, Mapping)
+            else None
+        )
         last_result = self._load_last_result()
         onec_stock_ff_state = self.build_onec_stock_ff_check()
         stock_ff_source = last_result.stock_ff_source if last_result is not None else STOCK_FF_SOURCE_MANUAL_EXCEL
         return WbRegionalSupplyStatus(
-            status="ready" if last_result is not None else "idle",
+            status=(
+                "ready"
+                if last_result is not None
+                else "recalculation_required"
+                if legacy_result_available
+                else "idle"
+            ),
             active_sku_count=len(active_skus),
             methodology_note=self.sales_history.build_operator_note(_METHODOLOGY_NOTE),
             stock_ff_source=stock_ff_source,
             district_options=_district_options(),
-            default_included_district_keys=tuple(DISTRICT_KEYS),
+            default_included_district_keys=tuple(SUPPLY_PLANNING_ZONE_KEYS),
             shared_datasets=shared_datasets,
             manual_stock_ff_dataset=shared_datasets[DATASET_STOCK_FF],
             onec_stock_ff_summary=onec_stock_ff_state,
             last_result=last_result,
+            planning_zone_options=_district_options(),
+            migration_status={
+                "legacy_result_available": legacy_result_available,
+                "legacy_result_preserved": legacy_result_available,
+                "recalculation_required": legacy_result_available,
+                "target_payload_version": "v2_planning_zones",
+                "legacy_snapshot": legacy_snapshot,
+                "migration_strategy": "preserve_and_recalculate_from_authoritative_sources",
+                "rollback": "Previous JSON remains in the single-slot state until a successful recalculation replaces it.",
+            },
         )
 
     def calculate(self, settings_input: Mapping[str, Any]) -> WbRegionalSupplyCalculationResult:
@@ -186,6 +232,10 @@ class WbRegionalSupplyBlock:
                 f"{report_date}: " + ", ".join(str(item) for item in missing)
             )
         stock_items = {int(item.nm_id): item for item in getattr(stock_response, "items", [])}
+        stock_planning_reconciliation = dict(
+            getattr(stock_response, "planning_reconciliation", {}) or {}
+        )
+        stock_warehouse_rows = list(getattr(stock_response, "warehouse_rows", []) or [])
         if set(stock_items) != set(nm_ids):
             missing = sorted(set(nm_ids) - set(stock_items))
             raise ValueError(
@@ -214,12 +264,12 @@ class WbRegionalSupplyBlock:
             wb_regional_qty_by_nm_district,
             wb_regional_overlay_diagnostics,
             wb_regional_overlay_warnings,
-        ) = regional_overlay_quantities(overlay=wb_supply_overlay)
+        ) = regional_overlay_quantities(overlay=wb_supply_overlay, planning_zone_mode=True)
         stock_ff_by_nm = {row.nm_id: float(row.stock_ff) for row in effective_stock_ff_rows}
         current_stock_by_nm = {
             nm_id: {
                 district_key: float(getattr(stock_items[nm_id], _DISTRICT_FIELD_BY_KEY[district_key], 0.0) or 0.0)
-                for district_key in DISTRICT_KEYS
+                for district_key in SUPPLY_PLANNING_ZONE_KEYS
             }
             for nm_id in nm_ids
         }
@@ -229,13 +279,16 @@ class WbRegionalSupplyBlock:
             nm_ids=nm_ids,
             requested_valid_day_count=settings.sales_avg_period_days,
             district_field_by_key=_DISTRICT_FIELD_BY_KEY,
+            district_keys=SUPPLY_PLANNING_ZONE_KEYS,
             current_stock_by_nm=current_stock_by_nm,
             included_district_keys=settings.included_district_keys,
             persistent_zero_current_stock_max_qty=max(float(settings.order_batch_qty - 1), 0.0),
             sku_metadata_by_nm=sku_metadata_by_nm,
         )
         result_diagnostics = _build_regional_demand_result_diagnostics(regional_demand_by_nm)
-        district_rows_by_key: dict[str, list[WbRegionalSupplyDistrictRow]] = {key: [] for key in DISTRICT_KEYS}
+        district_rows_by_key: dict[str, list[WbRegionalSupplyDistrictRow]] = {
+            key: [] for key in SUPPLY_PLANNING_ZONE_KEYS
+        }
         seed_candidate_sku_ids: set[int] = set()
         seed_allocated_sku_ids: set[int] = set()
         seed_candidate_sku_district_count = 0
@@ -252,7 +305,7 @@ class WbRegionalSupplyBlock:
             full_recommendation_by_key: dict[str, int] = {}
             raw_recommendation_by_key: dict[str, float] = {}
             row_payloads_by_key: dict[str, dict[str, Any]] = {}
-            for district_key in DISTRICT_KEYS:
+            for district_key in SUPPLY_PLANNING_ZONE_KEYS:
                 current_stock = district_stock_by_key[district_key]
                 district_daily_demand = district_daily_demand_by_key[district_key]
                 district_lead_time_days = int(settings.lead_time_to_region_days_by_district[district_key])
@@ -296,7 +349,7 @@ class WbRegionalSupplyBlock:
                 district_daily_demand_by_key=district_daily_demand_by_key,
                 projected_stock_by_key={
                     district_key: float(row_payloads_by_key[district_key]["projected_stock_on_eta"])
-                    for district_key in DISTRICT_KEYS
+                    for district_key in SUPPLY_PLANNING_ZONE_KEYS
                 },
                 available_stock_ff=float(stock_ff_by_nm.get(nm_id, 0.0)),
                 order_batch_qty=settings.order_batch_qty,
@@ -318,13 +371,13 @@ class WbRegionalSupplyBlock:
                 order_batch_qty=settings.order_batch_qty,
             )
             seed_candidate_keys = [
-                key for key in DISTRICT_KEYS if int(seed_recommendation_by_key.get(key, 0)) > 0
+                key for key in SUPPLY_PLANNING_ZONE_KEYS if int(seed_recommendation_by_key.get(key, 0)) > 0
             ]
             seed_allocated_keys = [
-                key for key in DISTRICT_KEYS if int(seed_allocated_by_key.get(key, 0)) > 0
+                key for key in SUPPLY_PLANNING_ZONE_KEYS if int(seed_allocated_by_key.get(key, 0)) > 0
             ]
             seed_unfulfilled_keys = [
-                key for key in DISTRICT_KEYS if int(seed_unfulfilled_by_key.get(key, 0)) > 0
+                key for key in SUPPLY_PLANNING_ZONE_KEYS if int(seed_unfulfilled_by_key.get(key, 0)) > 0
             ]
             if seed_candidate_keys:
                 seed_candidate_sku_ids.add(int(nm_id))
@@ -362,7 +415,7 @@ class WbRegionalSupplyBlock:
                     },
                     "seed_note": "Это тестовая поставка для сбора будущего сигнала, а не расчётная доля спроса.",
                 }
-            for district_key in DISTRICT_KEYS:
+            for district_key in SUPPLY_PLANNING_ZONE_KEYS:
                 demand_allocated_qty = int(demand_allocated_by_key.get(district_key, 0))
                 seed_qty = int(seed_allocated_by_key.get(district_key, 0))
                 seed_unfulfilled_qty = int(seed_unfulfilled_by_key.get(district_key, 0))
@@ -448,6 +501,9 @@ class WbRegionalSupplyBlock:
                         seed_floor_applied=seed_qty > 0,
                         share_source=share_source,
                         share_confidence=share_confidence,
+                        in_transit_qty=float(
+                            row_payloads_by_key[district_key].get("selected_wb_supply_qty", 0.0)
+                        ),
                     )
                 )
 
@@ -465,10 +521,12 @@ class WbRegionalSupplyBlock:
                 "lead_time_to_region_days": int(settings.lead_time_to_region_days),
                 "lead_time_to_region_days_by_district": {
                     key: int(settings.lead_time_to_region_days_by_district[key])
-                    for key in DISTRICT_KEYS
+                    for key in SUPPLY_PLANNING_ZONE_KEYS
                 },
                 "stock_ff_source_state": dict(ledger_stock_ff_state) if stock_ff_source == STOCK_FF_SOURCE_LEDGER else {},
                 "wb_supply_overlay": wb_regional_overlay_diagnostics,
+                "central_stock_reconciliation": stock_planning_reconciliation,
+                "stock_warehouse_row_count": len(stock_warehouse_rows),
             }
         )
         warnings = [str(item) for item in result_diagnostics.get("warnings", []) if item]
@@ -499,6 +557,8 @@ class WbRegionalSupplyBlock:
                 filename=_district_filename(district_key),
                 rows=district_rows_by_key[district_key],
                 lead_time_to_region_days=int(settings.lead_time_to_region_days_by_district[district_key]),
+                planning_zone_key=district_key,
+                planning_zone_label=_DISTRICT_NAME_BY_KEY[district_key],
             )
             for district_key in settings.included_district_keys
         ]
@@ -542,7 +602,7 @@ class WbRegionalSupplyBlock:
         result = self._load_last_result()
         if result is None:
             raise ValueError("Результат расчёта по федеральным округам ещё не подготовлен")
-        included_keys = set(result.settings.included_district_keys or DISTRICT_KEYS)
+        included_keys = set(result.settings.included_district_keys or SUPPLY_PLANNING_ZONE_KEYS)
         if normalized_key not in included_keys:
             raise ValueError(f"Округ не участвовал в последнем расчёте: {normalized_key}")
         district = next((item for item in result.districts if item.district_key == normalized_key), None)
@@ -554,7 +614,7 @@ class WbRegionalSupplyBlock:
         result = self._load_last_result()
         if result is None:
             raise ValueError("Результат расчёта по федеральным округам ещё не подготовлен")
-        included_keys = tuple(result.settings.included_district_keys or DISTRICT_KEYS)
+        included_keys = tuple(result.settings.included_district_keys or SUPPLY_PLANNING_ZONE_KEYS)
         districts_by_key = {item.district_key: item for item in result.districts}
         included_districts = [
             districts_by_key[key]
@@ -661,6 +721,8 @@ class WbRegionalSupplyBlock:
     def _load_last_result(self) -> WbRegionalSupplyCalculationResult | None:
         payload = self.runtime.load_wb_regional_supply_result_state()
         if not isinstance(payload, Mapping):
+            return None
+        if str(payload.get("payload_version") or "") != "v2_planning_zones":
             return None
         settings_payload = payload.get("settings") or {}
         summary_payload = payload.get("summary") or {}
@@ -783,6 +845,15 @@ class WbRegionalSupplyBlock:
                             seed_floor_applied=bool(row.get("seed_floor_applied", row.get("persistent_zero_seed_applied", False))),
                             share_source=str(row.get("share_source", "") or ""),
                             share_confidence=float(row.get("share_confidence", 0.0) or 0.0),
+                            in_transit_qty=float(
+                                row.get(
+                                    "in_transit_qty",
+                                    dict(row.get("demand_diagnostics") or {}).get(
+                                        "selected_wb_supply_qty", 0.0
+                                    ) if isinstance(row.get("demand_diagnostics"), Mapping) else 0.0,
+                                )
+                                or 0.0
+                            ),
                         )
                         for row in item.get("rows", [])
                         if isinstance(row, Mapping)
@@ -790,6 +861,12 @@ class WbRegionalSupplyBlock:
                     lead_time_to_region_days=settings_lead_time_to_region_days_by_district.get(
                         str(item.get("district_key", "") or "").strip().lower(),
                         settings_lead_time_to_region_days,
+                    ),
+                    planning_zone_key=str(item.get("planning_zone_key") or item.get("district_key") or ""),
+                    planning_zone_label=str(
+                        item.get("planning_zone_label")
+                        or item.get("district_name_ru")
+                        or _DISTRICT_NAME_BY_KEY.get(str(item.get("district_key") or ""), "")
                     ),
                 )
                 for item in districts_payload
@@ -908,7 +985,7 @@ def _parse_selected_wb_supply_ids_from_settings(payload: Mapping[str, Any]) -> t
 
 def _parse_included_district_keys(value: Any) -> tuple[str, ...]:
     if value in ("", None):
-        return tuple(DISTRICT_KEYS)
+        return tuple(SUPPLY_PLANNING_ZONE_KEYS)
     if isinstance(value, str):
         raw_values = [item.strip() for item in value.split(",")]
     elif isinstance(value, (list, tuple)):
@@ -918,11 +995,11 @@ def _parse_included_district_keys(value: Any) -> tuple[str, ...]:
     requested = [item.lower() for item in raw_values if item]
     if not requested:
         raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
-    unknown = sorted({item for item in requested if item not in DISTRICT_KEYS})
+    unknown = sorted({item for item in requested if item not in SUPPLY_PLANNING_ZONE_KEYS})
     if unknown:
         raise ValueError("Неизвестный федеральный округ: " + ", ".join(unknown))
     requested_set = set(requested)
-    included = tuple(key for key in DISTRICT_KEYS if key in requested_set)
+    included = tuple(key for key in SUPPLY_PLANNING_ZONE_KEYS if key in requested_set)
     if not included:
         raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
     return included
@@ -933,9 +1010,11 @@ def _district_options() -> tuple[dict[str, str], ...]:
         {
             "district_key": key,
             "district_name_ru": _DISTRICT_NAME_BY_KEY[key],
-            "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[key],
+            "district_short_label_ru": SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU[key],
+            "planning_zone_key": key,
+            "planning_zone_label": _DISTRICT_NAME_BY_KEY[key],
         }
-        for key in DISTRICT_KEYS
+        for key in SUPPLY_PLANNING_ZONE_KEYS
     )
 
 
@@ -947,23 +1026,23 @@ def _parse_lead_time_to_region_days_by_district(
     if raw_map in ("", None):
         raw_map = payload.get("district_lead_time_days")
     if raw_map in ("", None):
-        return {key: int(scalar_fallback_days) for key in DISTRICT_KEYS}
+        return {key: int(scalar_fallback_days) for key in SUPPLY_PLANNING_ZONE_KEYS}
     if not isinstance(raw_map, Mapping):
         raise ValueError("Доставка по федеральным округам должна быть объектом district_key -> days")
     requested_keys = {str(key or "").strip().lower() for key in raw_map.keys()}
-    unknown = sorted(key for key in requested_keys if key not in DISTRICT_KEYS)
+    unknown = sorted(key for key in requested_keys if key not in SUPPLY_PLANNING_ZONE_KEYS)
     if unknown:
         raise ValueError("Неизвестный федеральный округ в сроках доставки: " + ", ".join(unknown))
-    missing = [key for key in DISTRICT_KEYS if key not in requested_keys]
+    missing = [key for key in SUPPLY_PLANNING_ZONE_KEYS if key not in requested_keys]
     if missing:
         raise ValueError("Не задан срок доставки для федерального округа: " + ", ".join(missing))
     normalized_payload = {str(key or "").strip().lower(): value for key, value in raw_map.items()}
     return {
         key: _parse_positive_int(
             normalized_payload.get(key),
-            f"Доставка до WB для округа {DISTRICT_SHORT_LABELS_RU.get(key, key)}",
+            f"Доставка до WB для направления {SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU.get(key, key)}",
         )
-        for key in DISTRICT_KEYS
+        for key in SUPPLY_PLANNING_ZONE_KEYS
     }
 
 
@@ -975,11 +1054,11 @@ def _coerce_lead_time_map_from_saved_settings(
     if raw_map in ("", None):
         raw_map = settings_payload.get("district_lead_time_days")
     if not isinstance(raw_map, Mapping):
-        return {key: int(scalar_fallback_days) for key in DISTRICT_KEYS}
+        return {key: int(scalar_fallback_days) for key in SUPPLY_PLANNING_ZONE_KEYS}
     normalized_payload = {str(key or "").strip().lower(): value for key, value in raw_map.items()}
     return {
         key: _coerce_positive_int(normalized_payload.get(key), scalar_fallback_days)
-        for key in DISTRICT_KEYS
+        for key in SUPPLY_PLANNING_ZONE_KEYS
     }
 
 
@@ -1143,19 +1222,27 @@ def _allocate_boxes(
     available_stock_ff: float,
     order_batch_qty: int,
 ) -> dict[str, int]:
-    allocated = {key: 0 for key in DISTRICT_KEYS}
-    total_full = sum(max(int(full_recommendation_by_key.get(key, 0)), 0) for key in DISTRICT_KEYS)
+    allocation_keys = tuple(full_recommendation_by_key.keys()) or tuple(SUPPLY_PLANNING_ZONE_KEYS)
+    order_index = {key: index for index, key in enumerate(allocation_keys)}
+    allocated = {key: 0 for key in allocation_keys}
+    total_full = sum(
+        max(int(full_recommendation_by_key.get(key, 0)), 0)
+        for key in allocation_keys
+    )
     ff_allocatable = int(math.floor(max(available_stock_ff, 0.0) / order_batch_qty) * order_batch_qty)
     if ff_allocatable <= 0 or total_full <= 0:
         return allocated
     if ff_allocatable >= total_full:
-        return {key: max(int(full_recommendation_by_key.get(key, 0)), 0) for key in DISTRICT_KEYS}
+        return {
+            key: max(int(full_recommendation_by_key.get(key, 0)), 0)
+            for key in allocation_keys
+        }
 
     remaining = ff_allocatable
     while remaining >= order_batch_qty:
         candidates = [
             key
-            for key in DISTRICT_KEYS
+            for key in allocation_keys
             if allocated[key] < max(int(full_recommendation_by_key.get(key, 0)), 0)
         ]
         if not candidates:
@@ -1174,7 +1261,7 @@ def _allocate_boxes(
                     avg_day=district_daily_demand_by_key.get(key, 0.0),
                 ),
                 float(district_daily_demand_by_key.get(key, 0.0)),
-                -_DISTRICT_ORDER_INDEX[key],
+                -order_index[key],
             ),
         )
         allocated[chosen] += order_batch_qty
@@ -1191,12 +1278,13 @@ def _seed_floor_recommendation_by_key(
     included_district_keys: tuple[str, ...],
     order_batch_qty: int,
 ) -> dict[str, int]:
-    seed = {key: 0 for key in DISTRICT_KEYS}
+    allocation_keys = tuple(district_stock_by_key.keys()) or tuple(SUPPLY_PLANNING_ZONE_KEYS)
+    seed = {key: 0 for key in allocation_keys}
     if float(daily_demand_total) <= 0 or int(order_batch_qty) <= 0:
         return seed
     included = set(included_district_keys)
     seed_reasons = dict(demand_diagnostics.get("seed_reason_by_district") or {})
-    for key in DISTRICT_KEYS:
+    for key in allocation_keys:
         if key not in included or key not in seed_reasons:
             continue
         if float(district_daily_demand_by_key.get(key, 0.0) or 0.0) != 0.0:
@@ -1216,15 +1304,16 @@ def _allocate_seed_boxes(
     available_stock_ff: float,
     order_batch_qty: int,
 ) -> tuple[dict[str, int], dict[str, int]]:
-    allocated = {key: 0 for key in DISTRICT_KEYS}
-    unfulfilled = {key: 0 for key in DISTRICT_KEYS}
+    allocation_keys = tuple(seed_recommendation_by_key.keys()) or tuple(SUPPLY_PLANNING_ZONE_KEYS)
+    allocated = {key: 0 for key in allocation_keys}
+    unfulfilled = {key: 0 for key in allocation_keys}
     if int(order_batch_qty) <= 0:
         return allocated, {
             key: max(int(seed_recommendation_by_key.get(key, 0)), 0)
-            for key in DISTRICT_KEYS
+            for key in allocation_keys
         }
     remaining = int(math.floor(max(float(available_stock_ff), 0.0) / order_batch_qty) * order_batch_qty)
-    for key in DISTRICT_KEYS:
+    for key in allocation_keys:
         requested = max(int(seed_recommendation_by_key.get(key, 0)), 0)
         if requested <= 0:
             continue

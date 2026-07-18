@@ -1,7 +1,7 @@
 """Контракты блока stocks."""
 
-from dataclasses import dataclass
-from typing import Literal, Union
+from dataclasses import dataclass, field
+from typing import Any, Literal, Union
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,24 @@ class StocksItem:
     in_way_to_client: float = 0.0
     in_way_from_client: float = 0.0
     wb_contour_total: float = 0.0
+    stock_ru_central_north: float = 0.0
+    stock_ru_central_east: float = 0.0
+    stock_ru_central_south: float = 0.0
+
+
+@dataclass(frozen=True)
+class StocksWarehouseRow:
+    """Warehouse-granular evidence retained through planning aggregation."""
+
+    nm_id: int
+    warehouse_id: int | None
+    warehouse_name: str
+    region_name: str
+    quantity: float
+    planning_zone_key: str | None
+    classification_status: str
+    classification_source: str
+    exclusion_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -40,6 +58,8 @@ class StocksSuccess:
     count: int
     items: list[StocksItem]
     detail: str = ""
+    warehouse_rows: list[StocksWarehouseRow] = field(default_factory=list)
+    planning_reconciliation: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

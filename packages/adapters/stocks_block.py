@@ -546,7 +546,7 @@ class HttpBackedStocksSource:
                     "snapshot_ts": snapshot_ts,
                     "nmId": nm_id,
                     "chrtId": item.get("chrtId"),
-                    "warehouseId": item.get("warehouseId"),
+                    "warehouseId": _optional_int(item.get("warehouseId")),
                     "warehouseName": str(item.get("warehouseName") or ""),
                     "regionName": str(item.get("regionName") or ""),
                     "stockCount": float(quantity),
@@ -983,6 +983,7 @@ class HistoricalCsvBackedStocksSource:
                         "snapshot_date": snapshot_date,
                         "snapshot_ts": snapshot_ts,
                         "nmId": nm_id,
+                        "warehouseId": None,
                         "warehouseName": office_name,
                         "regionName": region_name,
                         "stockCount": stock_count,
@@ -1113,6 +1114,15 @@ def _parse_csv_nm_id(raw_value: Any) -> int | None:
     try:
         return int(value)
     except ValueError:
+        return None
+
+
+def _optional_int(raw_value: Any) -> int | None:
+    if raw_value in (None, "") or isinstance(raw_value, bool):
+        return None
+    try:
+        return int(str(raw_value).strip())
+    except (TypeError, ValueError):
         return None
 
 

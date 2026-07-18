@@ -53,9 +53,23 @@ def _check_batched_request_shape() -> None:
                 {
                     "data": {
                         "items": [
-                            _stock_item(101, 1011, 1, "Центральный", 7),
+                            _stock_item(
+                                101,
+                                1011,
+                                301806,
+                                "Центральный",
+                                7,
+                                warehouse_name="Тверь",
+                            ),
                             _stock_item(101, 1011, 2, "Уральский", 5),
-                            _stock_item(202, 2021, 1, "Центральный", 4),
+                            _stock_item(
+                                202,
+                                2021,
+                                301981,
+                                "Центральный",
+                                4,
+                                warehouse_name="Владимир Воршинское",
+                            ),
                         ]
                     }
                 },
@@ -81,6 +95,19 @@ def _check_batched_request_shape() -> None:
             raise AssertionError("stocks adapter must send explicit empty chrtIds for nmId-only snapshot")
         if "nmID" in body:
             raise AssertionError("stocks adapter must not use legacy per-nmID request body")
+        warehouse_rows = result["result"].get("warehouse_rows") or []
+        if not any(
+            row.get("warehouse_id") == 301806
+            and row.get("warehouse_name") == "Тверь"
+            and row.get("planning_zone_key") == "central_north"
+            for row in warehouse_rows
+        ):
+            raise AssertionError(f"official stock detail must preserve warehouseId/name: {warehouse_rows}")
+        if not any(
+            item.get("nm_id") == 202 and item.get("stock_ru_central_east") == 4.0
+            for item in result["result"].get("items") or []
+        ):
+            raise AssertionError(f"warehouse stock must aggregate into the planning zone: {result['result']}")
         print("batched-request: ok -> one request carries the whole nmIds set")
 
 
@@ -425,12 +452,14 @@ def _stock_item(
     warehouse_id: int,
     region_name: str,
     quantity: int,
+    *,
+    warehouse_name: str | None = None,
 ) -> dict[str, Any]:
     return {
         "nmId": nm_id,
         "chrtId": chrt_id,
         "warehouseId": warehouse_id,
-        "warehouseName": f"Склад {warehouse_id}",
+        "warehouseName": warehouse_name or f"Склад {warehouse_id}",
         "regionName": region_name,
         "quantity": quantity,
         "inWayToClient": 0,

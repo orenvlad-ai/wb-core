@@ -62,7 +62,11 @@ from packages.contracts.factory_order_supply import (
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
-from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU, DISTRICT_SHORT_LABELS_RU
+from packages.contracts.wb_supply_planning_zones import (
+    SUPPLY_PLANNING_ZONE_KEYS,
+    SUPPLY_PLANNING_ZONE_LABELS_RU,
+    SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -7050,7 +7054,7 @@ def _wb_regional_included_keys_from_result(result_payload: Mapping[str, Any]) ->
         parsed = _parse_wb_regional_included_keys(settings.get("included_district_keys"))
         if parsed:
             return parsed
-    return tuple(DISTRICT_KEYS)
+    return tuple(SUPPLY_PLANNING_ZONE_KEYS)
 
 
 def _parse_wb_regional_included_keys(value: Any) -> tuple[str, ...]:
@@ -7060,8 +7064,8 @@ def _parse_wb_regional_included_keys(value: Any) -> tuple[str, ...]:
         raw_values = [str(item or "").strip().lower() for item in value]
     else:
         return ()
-    requested = {item for item in raw_values if item in DISTRICT_KEYS}
-    return tuple(key for key in DISTRICT_KEYS if key in requested)
+    requested = {item for item in raw_values if item in SUPPLY_PLANNING_ZONE_KEYS}
+    return tuple(key for key in SUPPLY_PLANNING_ZONE_KEYS if key in requested)
 
 
 def _map_dataset_urls(datasets: Any) -> Any:
@@ -7179,12 +7183,12 @@ def _render_sheet_vitrina_operator_ui(
         "wb_regional_district_options": [
             {
                 "district_key": key,
-                "district_name_ru": DISTRICT_LABELS_RU[key],
-                "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[key],
+                "district_name_ru": SUPPLY_PLANNING_ZONE_LABELS_RU[key],
+                "district_short_label_ru": SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU[key],
             }
-            for key in DISTRICT_KEYS
+            for key in SUPPLY_PLANNING_ZONE_KEYS
         ],
-        "wb_regional_default_included_district_keys": list(DISTRICT_KEYS),
+        "wb_regional_default_included_district_keys": list(SUPPLY_PLANNING_ZONE_KEYS),
         "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
         "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
         "wb_supplies_backfill_path": DEFAULT_WB_SUPPLIES_BACKFILL_PATH,

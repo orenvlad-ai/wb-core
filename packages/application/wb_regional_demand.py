@@ -6,6 +6,7 @@ authoritative ``orderCount`` history.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 import re
@@ -15,10 +16,18 @@ from typing import Any, Mapping
 from packages.application.demand_estimation import DEMAND_VALID_DAY_BASELINE_RATIO
 from packages.application.factory_order_sales_history import SALES_HISTORY_SOURCE_KEY
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.contracts.wb_regional_supply import DISTRICT_KEYS
+from packages.contracts.wb_regional_supply import DISTRICT_KEYS as CANONICAL_DISTRICT_KEYS
 
 
 STOCKS_SOURCE_KEY = "stocks"
+_DISTRICT_KEYS_CONTEXT: ContextVar[tuple[str, ...]] = ContextVar(
+    "wb_regional_demand_district_keys",
+    default=tuple(CANONICAL_DISTRICT_KEYS),
+)
+
+
+def _active_district_keys() -> tuple[str, ...]:
+    return _DISTRICT_KEYS_CONTEXT.get()
 
 REGIONAL_SHARE_SOURCE_FULL_CLEAN_DAYS = "full_clean_days"
 REGIONAL_SHARE_SOURCE_PARTIAL_OBSERVATIONS = "partial_district_observations"
@@ -93,6 +102,50 @@ class _SkuSignal:
 
 
 def estimate_wb_regional_demand(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    report_date: date,
+    nm_ids: list[int],
+    requested_valid_day_count: int,
+    district_field_by_key: Mapping[str, str],
+    current_stock_by_nm: Mapping[int, Mapping[str, float]],
+    included_district_keys: list[str] | tuple[str, ...] | None = None,
+    persistent_zero_current_stock_max_qty: float = 0.0,
+    sku_metadata_by_nm: Mapping[int, Mapping[str, Any]] | None = None,
+    district_keys: list[str] | tuple[str, ...] | None = None,
+) -> dict[int, WbRegionalDemandEstimate]:
+    """Estimate demand using an explicit, request-scoped region contract."""
+
+    active_keys = tuple(
+        dict.fromkeys(
+            str(item or "").strip().lower()
+            for item in (district_keys or tuple(district_field_by_key.keys()) or CANONICAL_DISTRICT_KEYS)
+            if str(item or "").strip()
+        )
+    )
+    if not active_keys:
+        raise ValueError("district_keys must not be empty")
+    missing_fields = [key for key in active_keys if key not in district_field_by_key]
+    if missing_fields:
+        raise ValueError("district_field_by_key is incomplete: " + ", ".join(missing_fields))
+    token = _DISTRICT_KEYS_CONTEXT.set(active_keys)
+    try:
+        return _estimate_wb_regional_demand_inner(
+            runtime=runtime,
+            report_date=report_date,
+            nm_ids=nm_ids,
+            requested_valid_day_count=requested_valid_day_count,
+            district_field_by_key=district_field_by_key,
+            current_stock_by_nm=current_stock_by_nm,
+            included_district_keys=included_district_keys,
+            persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
+            sku_metadata_by_nm=sku_metadata_by_nm,
+        )
+    finally:
+        _DISTRICT_KEYS_CONTEXT.reset(token)
+
+
+def _estimate_wb_regional_demand_inner(
     *,
     runtime: RegistryUploadDbBackedRuntime,
     report_date: date,
@@ -188,6 +241,21 @@ def estimate_wb_regional_demand(
 
 
 def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) -> dict[str, Any]:
+    first_estimate = next(iter(estimates.values()), None)
+    diagnostics = first_estimate.diagnostics if first_estimate is not None else {}
+    keys = tuple(
+        str(item)
+        for item in diagnostics.get("all_district_keys", CANONICAL_DISTRICT_KEYS)
+        if str(item)
+    ) or tuple(CANONICAL_DISTRICT_KEYS)
+    token = _DISTRICT_KEYS_CONTEXT.set(keys)
+    try:
+        return _build_result_diagnostics_inner(estimates)
+    finally:
+        _DISTRICT_KEYS_CONTEXT.reset(token)
+
+
+def _build_result_diagnostics_inner(estimates: Mapping[int, WbRegionalDemandEstimate]) -> dict[str, Any]:
     items = list(estimates.values())
     method_counts: dict[str, int] = {}
     share_source_counts: dict[str, int] = {}
@@ -214,7 +282,7 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
         method_counts[method] = method_counts.get(method, 0) + 1
         if bool(diagnostics.get("fallback_used")):
             fallback_sku_ids.append(int(estimate.nm_id))
-        if sum(float(estimate.average_depletion_share_by_district.get(key, 0.0)) for key in DISTRICT_KEYS) > 0:
+        if sum(float(estimate.average_depletion_share_by_district.get(key, 0.0)) for key in _active_district_keys()) > 0:
             primary_sku_ids.add(int(estimate.nm_id))
         selected_full_clean_counts.append(int(diagnostics.get("selected_full_clean_day_count") or 0))
         order_valid_counts.append(int(diagnostics.get("order_count_valid_day_count") or 0))
@@ -224,20 +292,20 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
         for reason, count in dict(diagnostics.get("partial_global_day_reason_counts") or {}).items():
             partial_global_reason_counts[str(reason)] = partial_global_reason_counts.get(str(reason), 0) + int(count)
         for key, count in dict(diagnostics.get("district_zero_zero_no_signal_counts") or {}).items():
-            if str(key) in DISTRICT_KEYS:
+            if str(key) in _active_district_keys():
                 zero_zero_no_signal_by_district[str(key)] = zero_zero_no_signal_by_district.get(str(key), 0) + int(count)
         for key, count in dict(diagnostics.get("district_stockout_risk_counts") or {}).items():
-            if str(key) in DISTRICT_KEYS:
+            if str(key) in _active_district_keys():
                 stockout_risk_by_district[str(key)] = stockout_risk_by_district.get(str(key), 0) + int(count)
         for key, count in dict(diagnostics.get("district_restock_counts") or {}).items():
-            if str(key) in DISTRICT_KEYS:
+            if str(key) in _active_district_keys():
                 restock_by_district[str(key)] = restock_by_district.get(str(key), 0) + int(count)
 
         sources = dict(diagnostics.get("district_share_sources") or {})
         confidences = dict(diagnostics.get("confidence_by_district") or {})
-        included = set(diagnostics.get("included_district_keys") or DISTRICT_KEYS)
+        included = set(diagnostics.get("included_district_keys") or _active_district_keys())
         seed_reasons = dict(diagnostics.get("seed_reason_by_district") or {})
-        for district_key in DISTRICT_KEYS:
+        for district_key in _active_district_keys():
             source = str(sources.get(district_key) or "")
             if district_key not in included:
                 continue
@@ -275,7 +343,7 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
             "regional_share_method_counts": {},
             "method_counts": {},
             "share_source_counts": {},
-            "included_district_keys": list(DISTRICT_KEYS),
+            "included_district_keys": list(_active_district_keys()),
             "excluded_district_keys": [],
             "district_selection_mode": "all_districts",
             "seed_sku_count": 0,
@@ -323,7 +391,7 @@ def build_result_diagnostics(estimates: Mapping[int, WbRegionalDemandEstimate]) 
         "group_prior_sku_district_count": group_prior_sku_district_count,
         "global_prior_sku_district_count": global_prior_sku_district_count,
         "requested_valid_day_count": int(first.get("requested_valid_day_count") or 0),
-        "included_district_keys": list(first.get("included_district_keys") or DISTRICT_KEYS),
+        "included_district_keys": list(first.get("included_district_keys") or _active_district_keys()),
         "excluded_district_keys": list(first.get("excluded_district_keys") or []),
         "district_selection_mode": str(first.get("district_selection_mode") or "all_districts"),
         "min_selected_valid_day_count": min(selected_full_clean_counts) if selected_full_clean_counts else 0,
@@ -392,7 +460,7 @@ def _collect_sku_signal(
     partial_global_day_reason_counts: dict[str, int] = {}
     observation_stats_by_district = {
         key: _DistrictObservationStats()
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     full_clean_inspected_day_count = 0
     initial_window_full_clean_day_count = 0
@@ -465,7 +533,7 @@ def _full_clean_estimate(
     report_date: date,
     persistent_zero_current_stock_max_qty: float,
 ) -> WbRegionalDemandEstimate:
-    shares = {key: 0.0 for key in DISTRICT_KEYS}
+    shares = {key: 0.0 for key in _active_district_keys()}
     for item in signal.full_clean_selected:
         total_depletion = float(item["total_depletion"])
         for key in signal.included_district_keys:
@@ -479,7 +547,7 @@ def _full_clean_estimate(
     )
     district_daily_demand = {
         key: float(daily_demand_total) * float(shares.get(key, 0.0))
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     used_dates = sorted(str(item["date"]) for item in signal.full_clean_selected)
     lookup_depth_days = (report_date - date.fromisoformat(used_dates[0])).days if used_dates else 0
@@ -502,7 +570,7 @@ def _full_clean_estimate(
         shares=shares,
         confidence_by_district={
             key: (1.0 if key in signal.included_district_keys else 0.0)
-            for key in DISTRICT_KEYS
+            for key in _active_district_keys()
         },
         district_share_sources={
             key: (
@@ -510,7 +578,7 @@ def _full_clean_estimate(
                 if key in signal.included_district_keys
                 else REGIONAL_SHARE_SOURCE_EXCLUDED
             )
-            for key in DISTRICT_KEYS
+            for key in _active_district_keys()
         },
         used_dates=used_dates,
         lookup_depth_days=lookup_depth_days,
@@ -544,7 +612,7 @@ def _ladder_estimate(
 ) -> WbRegionalDemandEstimate:
     own_scores = {
         key: signal.observation_stats_by_district[key].score
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     own_confidence = {
         key: min(
@@ -552,18 +620,18 @@ def _ladder_estimate(
             float(signal.observation_stats_by_district[key].observation_count)
             / float(max(signal.requested_valid_day_count, 1)),
         )
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     group_scores = dict(group_prior.get("shares") or {})
     global_scores = dict(global_prior.get("shares") or {})
     group_available = bool(group_scores)
     global_available = bool(global_scores)
-    final_scores = {key: 0.0 for key in DISTRICT_KEYS}
+    final_scores = {key: 0.0 for key in _active_district_keys()}
     district_sources: dict[str, str] = {}
     confidence_by_district: dict[str, float] = {}
     seed_reason_by_district: dict[str, str] = {}
 
-    for key in DISTRICT_KEYS:
+    for key in _active_district_keys():
         if key not in signal.included_district_keys:
             district_sources[key] = REGIONAL_SHARE_SOURCE_EXCLUDED
             confidence_by_district[key] = 0.0
@@ -626,7 +694,7 @@ def _ladder_estimate(
 
     district_daily_demand = {
         key: float(daily_demand_total) * float(shares.get(key, 0.0))
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     used_dates = sorted(snapshot_date for snapshot_date, _ in signal.order_count_samples)
     lookup_depth_days = (report_date - date.fromisoformat(used_dates[0])).days if used_dates else signal.full_clean_inspected_day_count
@@ -686,38 +754,39 @@ def _base_diagnostics(
     seed_reason_by_district: Mapping[str, str],
     persistent_zero_current_stock_max_qty: float,
 ) -> dict[str, Any]:
-    excluded_district_keys = [key for key in DISTRICT_KEYS if key not in set(signal.included_district_keys)]
+    excluded_district_keys = [key for key in _active_district_keys() if key not in set(signal.included_district_keys)]
     observation_counts = {
         key: int(signal.observation_stats_by_district[key].observation_count)
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     positive_depletion_counts = {
         key: int(signal.observation_stats_by_district[key].positive_depletion_count)
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     zero_depletion_counts = {
         key: int(signal.observation_stats_by_district[key].zero_depletion_count)
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     zero_zero_counts = {
         key: int(signal.observation_stats_by_district[key].zero_zero_no_signal_count)
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     stockout_counts = {
         key: int(signal.observation_stats_by_district[key].stockout_risk_count)
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     restock_counts = {
         key: int(signal.observation_stats_by_district[key].restock_count)
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     invalid_counts = {
         key: int(signal.observation_stats_by_district[key].invalid_count)
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     group_keys = _sku_group_keys(signal.metadata)
     return {
         "regional_demand_method": method,
+        "all_district_keys": list(_active_district_keys()),
         "share_estimation_method": method,
         "requested_valid_day_count": int(signal.requested_valid_day_count),
         "selected_valid_day_count": int(signal.full_clean_selected.__len__()),
@@ -744,23 +813,23 @@ def _base_diagnostics(
         "order_count_positive_fallback_used": bool(signal.order_count_positive_fallback_used),
         "average_depletion_share_by_district": {
             key: float(shares.get(key, 0.0))
-            for key in DISTRICT_KEYS
+            for key in _active_district_keys()
         },
         "final_share_by_district": {
             key: float(shares.get(key, 0.0))
-            for key in DISTRICT_KEYS
+            for key in _active_district_keys()
         },
         "district_share_sources": {
             key: str(district_share_sources.get(key) or "")
-            for key in DISTRICT_KEYS
+            for key in _active_district_keys()
         },
         "source_used": {
             key: str(district_share_sources.get(key) or "")
-            for key in DISTRICT_KEYS
+            for key in _active_district_keys()
         },
         "confidence_by_district": {
             key: float(confidence_by_district.get(key, 0.0))
-            for key in DISTRICT_KEYS
+            for key in _active_district_keys()
         },
         "district_observation_counts": observation_counts,
         "district_positive_depletion_counts": positive_depletion_counts,
@@ -776,7 +845,7 @@ def _base_diagnostics(
         "restock_count": int(sum(restock_counts.values())),
         "included_district_keys": list(signal.included_district_keys),
         "excluded_district_keys": excluded_district_keys,
-        "district_selection_mode": "all_districts" if len(signal.included_district_keys) == len(DISTRICT_KEYS) else "selected_districts",
+        "district_selection_mode": "all_districts" if len(signal.included_district_keys) == len(_active_district_keys()) else "selected_districts",
         "total_daily_demand_source": TOTAL_DAILY_DEMAND_SOURCE_ORDER_COUNT,
         "total_demand_source": total_demand_source,
         "daily_demand_total": float(daily_demand_total),
@@ -792,7 +861,7 @@ def _base_diagnostics(
         "seed_reason_by_district": {
             key: str(value)
             for key, value in sorted(dict(seed_reason_by_district).items())
-            if key in DISTRICT_KEYS
+            if key in _active_district_keys()
         },
         "seed_floor_note": (
             "Это тестовая поставка для сбора будущего сигнала, а не расчётная доля спроса."
@@ -1017,7 +1086,7 @@ def _build_prior_candidates(signals: Mapping[int, _SkuSignal]) -> dict[int, dict
         else:
             own_scores = {
                 key: signal.observation_stats_by_district[key].score
-                for key in DISTRICT_KEYS
+                for key in _active_district_keys()
             }
             share = _normalize_shares(own_scores, included_district_keys=signal.included_district_keys)
             confidence = _own_distribution_confidence(signal)
@@ -1037,7 +1106,7 @@ def _build_prior_candidates(signals: Mapping[int, _SkuSignal]) -> dict[int, dict
 
 
 def _full_clean_share(signal: _SkuSignal) -> dict[str, float]:
-    shares = {key: 0.0 for key in DISTRICT_KEYS}
+    shares = {key: 0.0 for key in _active_district_keys()}
     for item in signal.full_clean_selected:
         total_depletion = float(item["total_depletion"])
         if total_depletion <= 0:
@@ -1126,7 +1195,7 @@ def _build_prior_distribution(
             float(dict(item.get("shares") or {}).get(key, 0.0))
             for item in peer_items
         ])
-        for key in DISTRICT_KEYS
+        for key in _active_district_keys()
     }
     normalized = _normalize_shares(shares, included_district_keys=included_district_keys)
     if sum(float(normalized.get(key, 0.0)) for key in included_district_keys) <= 0:
@@ -1217,7 +1286,7 @@ def _stocks_by_nm_id(
         if not isinstance(nm_id, int):
             continue
         row: dict[str, float] = {}
-        for key in DISTRICT_KEYS:
+        for key in _active_district_keys():
             field_name = str(district_field_by_key[key])
             value = getattr(item, field_name, None)
             if _is_number(value):
@@ -1247,7 +1316,7 @@ def _normalize_shares(
     included_district_keys: tuple[str, ...],
 ) -> dict[str, float]:
     total = sum(max(float(shares.get(key, 0.0)), 0.0) for key in included_district_keys)
-    normalized = {key: 0.0 for key in DISTRICT_KEYS}
+    normalized = {key: 0.0 for key in _active_district_keys()}
     if total <= 0:
         return normalized
     for key in included_district_keys:
@@ -1257,15 +1326,15 @@ def _normalize_shares(
 
 def _normalize_included_district_keys(value: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
     if value is None:
-        return tuple(DISTRICT_KEYS)
+        return tuple(_active_district_keys())
     raw_values = list(value)
     if not raw_values:
         raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
     requested = {str(item or "").strip().lower() for item in raw_values}
-    unknown = sorted(item for item in requested if item not in DISTRICT_KEYS)
+    unknown = sorted(item for item in requested if item not in _active_district_keys())
     if unknown:
         raise ValueError("Неизвестный федеральный округ: " + ", ".join(unknown))
-    included = tuple(key for key in DISTRICT_KEYS if key in requested)
+    included = tuple(key for key in _active_district_keys() if key in requested)
     if not included:
         raise ValueError("Выберите хотя бы один округ для расчёта пропорций")
     return included

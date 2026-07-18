@@ -1,5 +1,8 @@
 # 95. WB regional supply planning assistant
 
+> Current storage-only planning-zone contract: [migration 103](103_wb_supply_planning_zones.md).
+> This file documents the original v1 assistant and is retained as migration history.
+
 `Поставки -> Расчёты` gains a bounded read-only assistant for choosing WB warehouses/dates/routes after a regional supply calculation.
 
 ## Scope
