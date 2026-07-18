@@ -1,162 +1,154 @@
 ---
-title: "Модуль: warehouse_stocks_block"
+title: "Модуль: warehouse_functional"
 doc_id: "WB-CORE-MODULE-48-WAREHOUSE-STOCKS-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать единый read-only раздел `Остатки / Склады`, шесть виртуальных количественных складов и guarded cutover из шести системных документов `Ввод начальных остатков`."
-scope: "Unified warehouse UI/API, immutable opening documents and lines with provenance, exact source watermarks, idempotent/atomic initialization and bounded rollback. Costs, future movements, sales writeoffs, economic projections and source-record mutation are out of scope."
+purpose: "Зафиксировать единый production-контур шести складов, себестоимости, товарного капитала, WB snapshot и guarded functional cutover."
+scope: "Canonical warehouse/cost state, Decimal WAC, source provenance, targeted replay, hourly WB sync, UI/API and production cutover."
 source_basis:
-  - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
+  - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
+  - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
 related_modules:
-  - "packages/application/warehouse_stocks.py"
+  - "packages/application/warehouse_functional.py"
+  - "packages/application/calculation_parameters.py"
   - "packages/application/stocks_block.py"
-  - "packages/adapters/stocks_block.py"
   - "packages/application/registry_upload_http_entrypoint.py"
-  - "packages/adapters/registry_upload_http_entrypoint.py"
-  - "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
-  - "packages/adapters/templates/sheet_vitrina_v1_operator.html"
-related_tables:
-  - "sheet_vitrina_v1_warehouse_cutovers"
-  - "sheet_vitrina_v1_warehouse_documents"
-  - "sheet_vitrina_v1_warehouse_document_lines"
+  - "apps/warehouse_functional_runner.py"
 related_endpoints:
   - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}"
-related_runners:
-  - "apps/warehouse_opening_snapshot.py"
-  - "apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-opening-{dry-run,apply,readback,diagnostic,rollback} / warehouse-ui-flow"
-  - "apps/warehouse_stocks_smoke.py"
-  - "apps/warehouse_stocks_browser_smoke.py"
+  - "POST /v1/sheet-vitrina-v1/warehouses/sync"
+  - "POST /v1/sheet-vitrina-v1/warehouses/emergency-rebuild/preview"
+  - "POST /v1/sheet-vitrina-v1/warehouses/emergency-rebuild/apply"
+  - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
+  - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "The six opening balances are quantity-only immutable documents over current primary source evidence. The WB acceptance-discrepancy opening is the explicit management boundary `zero_at_cutover`, independent from historical final acceptances/doprinato. The FF top balance remains a live projection of the existing canonical FF ledger while its opening document stays frozen. Costs/capital are NULL, stored balances do not feed web-vitrina/Proxy 3/canonical cost engine, and apply is available only through an exact dry-run fingerprint plus coherent backup and one SQLite transaction."
+update_note: "`warehouse_opening_v1` сохранён immutable audit. Active truth после guarded apply принадлежит `warehouse_functional_cutover_v1` и versioned functional balances."
 ---
 
-# 1. Warehouse Contract
+# 1. Active warehouse contract
 
-The module exposes exactly six warehouses, in stable order:
+Active state содержит ровно шесть складов:
 
-1. `production` — `На производстве`.
-2. `china_to_ff` — `В пути: Китай → FF`.
-3. `ff` — `Склад FF`.
-4. `ff_to_wb` — `В пути: FF → WB`.
-5. `wb` — `Склад WB`.
+1. `production` — `На производстве`;
+2. `china_to_ff` — `Китай → FF`;
+3. `ff` — `Склад FF`;
+4. `ff_to_wb` — `FF → WB`;
+5. `wb` — `Склад WB`;
 6. `wb_acceptance_discrepancy` — `Расхождения приёмки WB`.
 
-`Китай → FF` is a virtual transit stage from the supplier factory to the single Moscow FF, not a separate Chinese fulfillment site.
+Supplier registry и warehouse projection не смешиваются. Invoice получает один стабильный `supplier_flow_id`; display name строится из invoice, но linkage и replay используют stable id. После смешивания на FF downstream identity принадлежит WB supply. Каждая positive line хранит exact text quantity, capital, WAC, coverage/quality и source provenance. Вычисления используют `Decimal`; UI округляет только display.
 
-The `Остатки / Склады` top-level tab uses one shared screen and one shared render path for every warehouse. The screen shows source/cutover time, unique non-zero SKU, quantity, nullable economics, per-SKU balances/provenance and a document registry. Costs and capital render as `—` and persist as SQL `NULL`; they are never coerced to zero or included in economic calculations.
+`GET .../warehouses` и detail routes сохраняют совместимость route/key, но после functional cutover читают только active functional version. Старые opening tables не суммируются с active balances.
 
-Access is the existing `supply` section boundary: internal admin/operator/supply-operator users may read the API and UI; supplier-only users receive `403`. Payloads contain sanitized business provenance only, never secrets, runtime paths, source blobs or auth material.
+# 2. Physical and cost rules
 
-# 2. Opening Source Rules
+## 2.1 Production and China → FF
 
-Every non-zero line has a canonical `nm_id`, display identity when available and `provenance.source_records[]`.
+Invoice без counted supplier payment имеет zero warehouse quantity. Первый counted payment активирует полный physical invoice composition; следующие payments меняют capital/WAC, но не quantity. `counted` следует CNY ledger contract: `posted` и его детерминированный date-only ordering warning участвуют только при posted parent document; blocked/skipped и needs-review/excluded parent documents не участвуют. Отмена последнего payment через audit archive и targeted replay возвращает quantity к zero.
 
-## 2.1. На производстве
+Supplier payments используют factual weighted RUB cost списанных CNY из CNY ledger. Конверсионная комиссия, уже включённая в RUB value CNY, второй раз не добавляется. CNY transfer fee и direct RUB bank fees имеют отдельную provenance. Supplier capital и bank fees распределяются по invoice value.
 
-Source is the supplier shipment/invoice header and full positive product-line composition. Every product line must carry an authoritative canonical match status from `MATCH_STATUSES_WITH_AUTHORITATIVE_NM_ID` (`matched`, `matched_by_compatibility`, `matched_by_barcode`); an unmatched/ambiguous line blocks the whole cutover even if a stale `internal_nm_id` is present. A shipment is included only when at least one CNY document of type `supplier_cny_payment` has status `posted`, both raw factual-date fields are empty, the existing canonical factual-date resolver derives `production`, persisted status is not inactive/cancelled and no historical accepted-without-date exception is active. Any set China-shipment date excludes the row from production; an invalid/future factual date that cannot form its claimed occurred boundary blocks the cutover instead of being silently reclassified. The amount of the first payment does not scale quantity: the entire invoice composition is included. Provenance carries shipment/invoice/line identity, derived-status source and the posted payment document identity, datetime, natural key and source-file hash.
+Фактическая supplier shipment date переносит тот же quantity/capital layer в `china_to_ff`. Logistics invoice и customs 1010 распределяются по quantity; duty 2010 и import VAT 5010 — по invoice value. Informational/needs-review/failed/duplicate/unmatched/excluded documents не капитализируются.
 
-## 2.2. В пути: Китай → FF
+## 2.2 FF
 
-Source is the same supplier shipment identity and the same authoritative-match-only product-line composition. The existing canonical factual-date resolver must derive `in_transit` from an occurred valid `actual_shipment_date` while no occurred FF acceptance boundary exists. No new per-stage business identifier is created.
+Фактическая FF acceptance создаёт canonical append-only FF ledger receipt. Functional projection не создаёт второй ledger: cutover opening freezes current ledger quantity/cost, а post-cutover receipt/debit replay начинается от opening version. Supplier receipt получает exact source-flow capital; одинаковые SKU смешиваются moving WAC. Ordinary proportional debit сохраняет WAC.
 
-## 2.3. Склад FF
+WB status `Отгрузка разрешена` создаёт один idempotent canonical FF debit полного packed composition. Этот debit фиксирует фактический moving WAC FF в момент движения; downstream supply layer добавляет к нему только validated FF services/storage, transit и paid acceptance, поэтому «последняя supplier-поставка того же SKU» не может стать скрытым cost baseline после смешивания. Дополнительного manual shipment gate нет; `Допринято` не создаёт второй debit. Legacy FF route остаётся совместимым переходом к unified warehouse screen.
 
-Source is the existing append-only FF ledger, exactly `SUM(quantity_delta)` by active, non-hidden nomenclature `nm_id`. The module reads the existing operation/line tables and does not create another FF calculation or modify FF operations. The legacy `GET .../supply/ff-stocks` route and manual receipt/writeoff operation UI remain compatible; the former user-facing current-balance screen transitions to the new `Склад FF` screen.
+## 2.3 FF → WB and discrepancies
 
-The FF opening document freezes the cutover composition like the other five documents, but the balance table and FF summary on every later read are projected again through `FfStockLedgerBlock.current_balance_rows()`. Sanitized contributing operation lines are attached as reconciled provenance; a concurrent mismatch fails the read instead of displaying a mixed snapshot. Later canonical FF operations therefore change the current balance without mutating the opening document. `negative_balance` and `Отрицательный остаток ФФ` remain visible on the unified screen.
+До final acceptance по SKU:
 
-## 2.4. В пути: FF → WB
+`open quantity = max(packed - accepted, 0)`.
 
-Source is persisted official WB FBW Supplies goods composition. Ordinary, traceable supplies in status `3` (`Отгрузка разрешена`) and its proven later non-final physical stages `4` (`Идёт приёмка`) / `6` (`Отгружено на воротах`) contribute their positive `quantity`; this preserves stock after the shipment gate until final acceptance. Planned status `2`, final status `5` and `Допринято` do not. Each source record carries the WB supply/cache identity, exact status, raw goods row index/hash and source sync/enrichment times.
+Final accepted supply обнуляет `ff_to_wb`; positive final difference поступает в pooled discrepancy warehouse по SKU. Accepted part никогда не прибавляется к WB quantity вручную. FF services, storage and transit распределяются по полному packed quantity даже при partial/zero acceptance; accepted quantity хранится отдельно и никогда не подменяет packed denominator. Official transit component имеет приоритет; Seller Portal transit используется только при отсутствии official transit.
 
-## 2.5. Склад WB
+Paid WB acceptance отделена от transit: она капитализируется только на фактически accepted quantity, входит в accepted WB inbound cost и исключена из `ff_to_wb`/discrepancy WAC. `cost_total` не может скрыто превратиться в transit: canonical layer сохраняет pre-acceptance cost и acceptance amount/per-accepted-unit отдельно.
 
-Source is a fresh call through the existing `StocksBlock` and official Seller Analytics warehouse-stock adapter for the enabled canonical `registry_upload_config_v2` nmIDs. The adapter records a UTC `fetched_at`; all current warehouse rows and their snapshot timestamp remain line provenance. Incomplete requested nmID coverage fails closed. Historical sales/movements are not reconstructed.
+Discrepancy WAC содержит все pre-acceptance costs. `Допринято` сопоставляется pooled строго по тому же `nm_id`: `matched=min(doprinato, positive balance)`. Surplus попадает в transitional unmatched audit и не создаёт negative quantity/capital. Targeted replay повторяет match, когда появляется positive balance. Automatic loss writeoff не реализован.
 
-## 2.6. Расхождения приёмки WB
+## 2.4 WB snapshot
 
-The opening balance is always exactly zero at the shared cutover: `sku_count=0`, `total_quantity=0`, no line rows and NULL cost/capital. This is a management boundary for the start of warehouse accounting, not `max(calculated, 0)` and not historical reconstruction. Pre-cutover ordinary final acceptances, underacceptance and `Допринято` are not read, validated, subtracted or fingerprinted by the opening algorithm.
+WB является snapshot warehouse. Единственный quantity source — полный успешный official `/api/analytics/v1/stocks-report/wb-warehouses` response:
 
-The separate bounded `warehouse-opening-diagnostic` may still calculate selected historical SKU as `sent - accepted - doprinato` for read-only investigation. Its diagnostic digest and cache watermark never enter the opening plan, document watermark, fingerprint or apply gate; a historical negative result cannot block this zero opening and creates no business records. Future automated post-cutover acceptance movements and their negative-balance policy are outside this stage.
+`WB contour = quantity + inWayToClient + inWayFromClient`.
 
-# 3. Cutover And Persistence
+Каждый snapshot сохраняет requested IDs, raw rows, page offsets/count, completion flag, digest and `fetched_at`. Requested SKU разбиваются на official batches максимум по 1000 `nmIds`; только успешное завершение всех batches/pages образует один атомарный snapshot. Incomplete coverage, pagination failure, exhausted 429, transport error or invalid payload оставляют last good version; UI показывает freshness/error. True zero допускается только внутри complete response.
 
-The one supported cutover has stable id `warehouse_opening_v1`. It contains exactly six stable documents `whdoc_opening_v1_*`, numbered `ВНО-000001` through `ВНО-000006`, all with one `cutover_at`. A zero warehouse still gets its document with zero lines and zero quantity.
+Periodic WB WAC получает accepted inbound capital, но quantity всегда заменяется official contour snapshot. Каждый hourly apply переигрывает versioned daily WAC от functional cutover: closed days фиксируются отдельными daily rows, current day остаётся provisional, zero-stock SKU retains last valid WAC. Late expense/accepted correction публикует signed event с исходной business date и атомарно перестраивает только derived daily cost history от этой границы; positive pool и cost не могут стать negative/zero. Direct consumers сначала читают эту daily projection, поэтому `Себестоимость WB наша` не имеет независимого baseline.
 
-`sheet_vitrina_v1_warehouse_cutovers` stores the shared timestamp, exact source watermarks, stable plan fingerprint and sanitized apply/backup audit. `sheet_vitrina_v1_warehouse_documents` stores the posted quantity-only headers plus document-level JSON provenance; the discrepancy document pins `basis_type=management_warehouse_accounting_boundary`, `opening_policy=zero_at_cutover`, exact cutover time, algorithm version, no historical backfill/reconstruction and undefined economics. `sheet_vitrina_v1_warehouse_document_lines` stores exact SKU composition and line provenance. Each initial balance is the sum of its posted opening-document lines. There is no second mutable warehouse balance table; the later FF current-balance projection continues to use the pre-existing FF ledger.
+# 3. Frozen historical boundary
 
-The cutover plan contains:
+Новая warehouse history начинается functional cutover timestamp; текущий snapshot не размножается назад. Старые warehouse values остаются audit/empty.
 
-- a coherent read-transaction digest over supplier shipments/lines, posted CNY payments, FF operations/lines, only current ordinary WB transit rows selected by persisted statuses `3/4/6`, and nomenclature; final/history-only WB rows and global history-sync state are not read into the opening snapshot because no opening material source consumes them;
-- exact max timestamps/row counts for local sources;
-- the official WB snapshot date, requested/covered nmID counts, `fetched_at` and payload digest;
-- all six document headers and lines;
-- a canonical `sha256:` plan fingerprint.
+Отдельная разрешённая projection с `2026-07-01` покрывает `our_wb_unit_cost_rub`, Proxy 3 и direct consumers. Opening cost map строится из доказанно выбранной fully calculated FF acceptance около 24.06. Price band для отсутствующего в baseline SKU читается только из active server-side nomenclature `purchase_price_yuan` в coherent cutover capture; конфликтующие active prices одного `nmId` блокируют план. Значение и provenance копируются в frozen map, поэтому будущая правка справочника не меняет opening задним числом:
 
-Apply revalidates the exact fingerprint, re-reads and compares the local source digest, creates an integrity-checked coherent SQLite backup, then inserts the cutover, six headers and all lines under one `BEGIN IMMEDIATE` transaction. Any error rolls the transaction back. A repeated apply with the same stored fingerprint is zero-change idempotent; a different fingerprint fails closed. The rollback command requires the exact stored fingerprint, makes another coherent backup and deletes only this new cutover through FK cascade.
+- direct SKU;
+- weighted same purchase-price band;
+- interpolation;
+- extrapolation/single-band ratio;
+- explicit fallback average при missing price.
 
-Source invoice/payment/shipment/FF/WB/nomenclature rows are read-only throughout this contour.
+Map frozen навсегда и сохраняет quality/provenance. WB opening cost добавляет доказанные downstream costs, включая paid acceptance только для accepted quantity. Historical daily quantity переиспользуется только из persisted daily snapshot evidence; cost переигрывается через frozen map и confirmed post-01.07 inbound layers. Для positive quantity zero/NULL cost запрещён.
 
-# 4. Canonical Production Runner
+# 4. Targeted replay and certification
 
-After the release commit is deployed, use only the hosted runner against the checked-in active EU target:
+Source change/archive/exclusion сбрасывает `Все расходы учтены`, ставит coalesced queue по stable source id/revision/effective date и affected SKU, затем coherent calculation публикует новую version atomically. Physical source rows не удаляются. Failed calculation оставляет last good active version.
+
+`Все расходы учтены` — certification exact source/calculation fingerprint, а не calculation trigger. Provisional calculation остаётся доступным; source revision автоматически снимает certification.
+
+Emergency rebuild использует только persisted local sources, сначала возвращает dry-run/diff/fingerprint и требует explicit confirmation exact plan. External WB/Seller Portal API он не вызывает.
+
+# 5. Hourly WB operational sync
+
+Repo-owned `wb-core-warehouse-functional-sync.timer` запускает bounded runner каждый час:
+
+1. refresh official statuses/goods активных и recently completed WB supplies;
+2. проверить complete active/recent status slices и enrichment; partial slice/failed enrichment блокирует pipeline до любого нового FF debit и publication;
+3. только после complete validation провести idempotent FF debit и bounded-материализовать supply-specific downstream components без legacy daily/global rebuild;
+4. fetch uncached complete official stock snapshot;
+5. compute FF→WB, discrepancies, unmatched, WB snapshot and targeted/daily cost states из coherent capture;
+6. publish one atomic good version.
+
+`wb-core-sheet-vitrina-refresh.timer` больше не вызывает WB supply sync или Seller Portal automation. Global vitrina refresh только читает materialized warehouse/cost state. Manual WB refresh вызывает тот же bounded pipeline.
+
+# 6. Guarded functional cutover
+
+`warehouse_opening_v1` и его шесть documents immutable и не меняются. Active cutover id — `warehouse_functional_cutover_v1`; timestamp берётся в production execution.
+
+Canonical runner default dry-run получает coherent sources + uncached fresh WB snapshot, строит six-stage plan, frozen cost map, historical/daily WB cost projection, source watermarks/digests and invariants. Apply требует exact reviewed fingerprint, повторный uncached official snapshot, optimistic source recheck и совпадение semantic `calculation_digest` по costs/balances/events/documents/invariants, coherent SQLite backup `0600` with `integrity_check=ok`, one `BEGIN IMMEDIATE`, readback and idempotent second apply. Hourly/manual publication также pins `base_active_version_id`; concurrent stale plan отклоняется, а exact already-applied fingerprint остаётся idempotent. Initial Proxy settings version создаётся внутри той же transaction. Primary supplier/CNY/FF/WB records не изменяются.
+
+Hourly timer включается только после successful cutover readback. Rollback сначала disables timer, сохраняет backup и удаляет только functional derived state/initial settings when safe.
+
+Supported production commands:
 
 ```bash
-python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
-  warehouse-opening-dry-run --output /absolute/local/warehouse-opening-plan.json
-
-python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
-  warehouse-opening-apply \
-  --plan-file /absolute/local/warehouse-opening-plan.json \
-  --fingerprint 'sha256:...'
-
-python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
-  warehouse-opening-readback
-
-python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
-  warehouse-opening-diagnostic --nm-id <positive-nmID>
-
-python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
-  warehouse-ui-flow --evidence-dir /absolute/outside-repo/warehouse-ui-evidence
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-dry-run --output /abs/plan.json
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-apply --plan-file /abs/plan.json --fingerprint 'sha256:...'
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-readback
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-economics-dry-run --output /abs/economics-plan.json
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-economics-apply --plan-file /abs/economics-plan.json --fingerprint 'sha256:...'
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-sync
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-functional-enable-hourly
+python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-ui-flow --evidence-dir /abs/outside-repo
 ```
 
-The wrapper pins the current active target, app dir, runtime dir and backup dir. For apply it streams the exact reviewed JSON plan to `/dev/stdin`; the opening runner consumes that stream exactly once without resolving the ephemeral pipe symlink. Read-only opening actions retain a bounded 300-second remote timeout. `apply` and recovery-only `rollback` have a separate bounded 1800-second timeout so the required coherent production SQLite backup, integrity check and digest can finish on the current database size; this changes no fingerprint, backup, transaction or reconciliation gate. The runner parses the hosted dotenv file as data inside Python, without shell evaluation, loads secrets only into the remote process environment for the WB API call and never prints them. `warehouse-opening-diagnostic` is optional/read-only and requires explicit positive nmIDs; it returns only selected-SKU aggregates, sanitized final-supply goods provenance, a diagnostic-only digest and cache watermark and never refreshes or mutates the WB cache. It is not a cutover prerequisite or gate. The UI command builds a short-lived signed owner cookie without logging it, opens a fresh local Playwright context and reconciles all six visible warehouse totals/rows with their protected detail API, every opening document with production readback and the current FF rows with the legacy canonical FF API. It verifies expanded line/document provenance, the visible zero discrepancy balance, NULL-cost dashes and absence of unexpected `5xx`, `pageerror` and console errors. The old FF transition is accepted and screenshotted only after the canonical FF opening document, exact current FF totals/rows and NULL-economics dashes have finished loading, so a transient `Загрузка…` surface cannot produce false-positive evidence. Screenshots and the sanitized report must stay outside Git. Direct production SQL, arbitrary SSH mutation, server-only scripts and bypassing the fingerprint/backup gates are not valid paths.
+# 7. UI and verification
 
-Rollback is recovery-only:
+Navigation is `Остатки → Склады и себестоимость / Отчёт об остатках`. One component renders quantity, WAC, capital, quality/provenance, sync status, SKU and document registry for all stages. Document rows persist their own immutable SKU lines; discrepancy documents distinguish final-acceptance receipt, pooled `Допринято` and non-stock transitional audit. `wb_discrepancy_writeoff` is a reserved disabled type, not an automatic/manual action. WB adds four contour quantities; discrepancy detail adds transitional unmatched registry. Supplier registry exposes production/China stage cost fields. Settings exposes calculation parameters and three-week WB reference.
 
-```bash
-python3 apps/registry_upload_http_entrypoint_hosted_runtime.py \
-  warehouse-opening-rollback --fingerprint 'sha256:...'
-```
+Targeted verification:
 
-# 5. Read/API Invariants
-
-`GET /v1/sheet-vitrina-v1/warehouses` returns six summaries even before initialization. `GET .../warehouses/{warehouse_key}` returns the one stored opening document and balance rows with line provenance. For five warehouses those balance rows equal the frozen opening lines in this stage. For `ff`, after initialization they are the current canonical ledger projection and can diverge from the immutable opening document after later FF operations. Unknown keys return controlled `404`; malformed keys return controlled `400`.
-
-For every stored document:
-
-- `sku_count == len(lines)`;
-- `total_quantity == SUM(lines.quantity)` using exact decimal semantics;
-- document/line cost and capital are `NULL`;
-- status is `quantity_fixed_cost_unset` / `Количество зафиксировано, стоимость не задана`;
-- document and every line share the same cutover through the document FK;
-- document id/number and per-document `nm_id` are unique.
-
-# 6. Explicit Non-Effects
-
-These tables are not referenced by web-vitrina materialization, canonical cost engine, `our_wb_unit_cost_rub`, Proxy 3, Finance/P&L, SKU management, factory-order or regional recommendation calculations. The module does not implement future receipts/issues/transfers, WB sales depletion, returns/writeoffs, FF inventory, historical movement backfill, costs, fees, logistics/customs allocation or late-expense revaluation.
-
-# 7. Verification
-
-Targeted checks:
-
-- `python3 apps/warehouse_stocks_smoke.py`
-- `python3 apps/warehouse_opening_snapshot_runner_smoke.py`
-- `python3 apps/registry_upload_http_entrypoint_supplier_auth_smoke.py`
-- `python3 apps/warehouse_stocks_browser_smoke.py`
-
-The first covers all six source rules, full-invoice activation by first payment, exclusions, WB status gates, historical `Допринято=116`/missing ordinary acceptance non-effects, deterministic zero discrepancy document and provenance, exclusion of historical final rows from the opening fingerprint, negative material-source rejection, FF cutover parity, post-cutover live FF projection with immutable opening lines and negative warning, NULL economics, repeated dry-run/apply idempotency, source failure/drift rejection, injected partial failure rollback, readback and bounded rollback. The optional diagnostic arithmetic remains covered independently. The auth/API smoke covers authorized and forbidden projections plus old/new FF routes. The Playwright smoke opens every warehouse, expands opening document/line provenance, checks the visible zero discrepancy balance and dashes, and validates the old FF UI transition with no warehouse-page `pageerror` or console error.
+- `python3 apps/warehouse_functional_smoke.py`;
+- `python3 apps/stocks_block_smoke.py`;
+- `python3 apps/warehouse_stocks_smoke.py` (immutable legacy opening regression);
+- `python3 apps/our_wb_costs_smoke.py`;
+- `python3 apps/own_product_capital_smoke.py`;
+- `python3 apps/cny_ledger_smoke.py`;
+- `python3 apps/supplier_financial_documents_smoke.py`;
+- production `warehouse-ui-flow` in a fresh Playwright/Chromium context, with screenshots/report outside Git.

@@ -42,6 +42,8 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
     aggregated: dict[int, dict[str, float]] = defaultdict(
         lambda: {
             "stock_total": 0.0,
+            "in_way_to_client": 0.0,
+            "in_way_from_client": 0.0,
             "stock_ru_central": 0.0,
             "stock_ru_northwest": 0.0,
             "stock_ru_volga": 0.0,
@@ -63,6 +65,8 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             latest_ts_by_nm[nm_id] = snapshot_ts
             aggregated[nm_id] = {
                 "stock_total": 0.0,
+                "in_way_to_client": 0.0,
+                "in_way_from_client": 0.0,
                 "stock_ru_central": 0.0,
                 "stock_ru_northwest": 0.0,
                 "stock_ru_volga": 0.0,
@@ -74,7 +78,17 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             continue
 
         stock_count = _require_float(row, "stockCount")
+        in_way_to_client = _optional_float(row, "inWayToClient", default=0.0)
+        in_way_from_client = _optional_float(row, "inWayFromClient", default=0.0)
+        # Network-backed current snapshots reject every negative field at the
+        # adapter boundary.  Preserve legacy/fake negative ``stockCount`` long
+        # enough for the warehouse cutover guard to report its established,
+        # source-specific error; in-way fields have no such legacy contract.
+        if min(in_way_to_client, in_way_from_client) < 0:
+            raise ValueError(f"stocks in-way quantities must be non-negative for nmId {nm_id}")
         aggregated[nm_id]["stock_total"] += stock_count
+        aggregated[nm_id]["in_way_to_client"] += in_way_to_client
+        aggregated[nm_id]["in_way_from_client"] += in_way_from_client
         region_name = _require_str(row, "regionName")
         metric_key = REGION_TO_FIELD.get(_normalize_region_name(region_name))
         if metric_key:
@@ -84,6 +98,12 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
 
     covered_nm_ids = sorted(aggregated.keys())
     missing_nm_ids = sorted(set(requested_nm_ids) - set(covered_nm_ids))
+    missing_are_zero = bool(data.get("pagination_complete")) and bool(data.get("missing_nm_ids_are_zero"))
+    if missing_nm_ids and missing_are_zero:
+        for nm_id in missing_nm_ids:
+            aggregated[nm_id]
+        covered_nm_ids = sorted(aggregated.keys())
+        missing_nm_ids = []
     if missing_nm_ids:
         return StocksEnvelope(
             result=StocksIncomplete(
@@ -106,6 +126,13 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             stock_ru_ural=aggregated[nm_id]["stock_ru_ural"],
             stock_ru_south_caucasus=aggregated[nm_id]["stock_ru_south_caucasus"],
             stock_ru_far_siberia=aggregated[nm_id]["stock_ru_far_siberia"],
+            in_way_to_client=aggregated[nm_id]["in_way_to_client"],
+            in_way_from_client=aggregated[nm_id]["in_way_from_client"],
+            wb_contour_total=(
+                aggregated[nm_id]["stock_total"]
+                + aggregated[nm_id]["in_way_to_client"]
+                + aggregated[nm_id]["in_way_from_client"]
+            ),
         )
         for nm_id in covered_nm_ids
     ]
@@ -171,6 +198,13 @@ def _require_int(payload: Mapping[str, Any], key: str) -> int:
 def _require_float(payload: Mapping[str, Any], key: str) -> float:
     value = payload.get(key)
     if not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be numeric")
+    return float(value)
+
+
+def _optional_float(payload: Mapping[str, Any], key: str, *, default: float) -> float:
+    value = payload.get(key, default)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError(f"{key} must be numeric")
     return float(value)
 

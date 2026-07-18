@@ -7,6 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from io import BytesIO
+import json
 from pathlib import Path
 import re
 import shutil
@@ -19,7 +20,11 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.contracts.cny_ledger import CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+from packages.contracts.cny_ledger import (
+    CNY_DOCUMENT_STATUS_EXCLUDED,
+    CNY_DOCUMENT_STATUS_POSTED,
+    CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+)
 from packages.contracts.supplier_financial_documents import (
     EXPENSE_CATEGORY_BORDER_EXPEDITION,
     EXPENSE_CATEGORY_BROKERAGE,
@@ -588,6 +593,34 @@ class SupplierFinancialDocumentsBlock:
         payload["own_product_capital"] = self._materialize_own_capital_expense_events(
             supplier_order_id
         )
+        changed_cny_documents: list[str] = []
+        target_cny_status = (
+            CNY_DOCUMENT_STATUS_POSTED
+            if str(updated_document.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
+            else CNY_DOCUMENT_STATUS_EXCLUDED
+        )
+        for cny_document in self.runtime.list_cny_documents():
+            if str(cny_document.get("linked_financial_document_id") or "") != document_id:
+                continue
+            if str(cny_document.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
+                continue
+            if str(cny_document.get("status") or "") == target_cny_status:
+                continue
+            saved_cny = self.runtime.save_cny_document(
+                {
+                    **cny_document,
+                    "status": target_cny_status,
+                    "updated_at": self.timestamp_factory(),
+                }
+            )
+            changed_cny_documents.append(str(saved_cny.get("document_id") or ""))
+        payload["cny_documents_status_changed"] = changed_cny_documents
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
+                supplier_order_id,
+                source_id=str(saved.get("document_id") or document_id),
+                source_payload=payload,
+            )
         return payload
 
     def get_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
@@ -752,6 +785,12 @@ class SupplierFinancialDocumentsBlock:
         payload["own_product_capital"] = self._materialize_own_capital_expense_events(
             supplier_order_id
         )
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
+                supplier_order_id,
+                source_id=document_id,
+                source_payload=payload,
+            )
         return payload
 
     def update_document_status(self, supplier_order_id: str, document_id: str, parse_status: str) -> dict[str, Any]:
@@ -759,21 +798,6 @@ class SupplierFinancialDocumentsBlock:
         normalized = str(parse_status or "").strip()
         if normalized not in FINANCIAL_DOCUMENT_PARSE_STATUSES:
             raise ValueError("unsupported financial document parse_status")
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-
-        capital = OwnProductCapitalBlock(
-            runtime=self.runtime,
-            timestamp_factory=self.timestamp_factory,
-        )
-        if (
-            normalized == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED
-            and capital.has_cost_payment_event(
-                f"financial_expense:{document_id}"
-            )
-        ):
-            raise ValueError(
-                "financial expense already created capital events; exclusion requires audited reversal"
-            )
         document = self.runtime.update_supplier_financial_document_status(
             supplier_order_id=supplier_order_id,
             document_id=document_id,
@@ -793,6 +817,12 @@ class SupplierFinancialDocumentsBlock:
         payload["own_product_capital"] = self._materialize_own_capital_expense_events(
             supplier_order_id
         )
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
+                supplier_order_id,
+                source_id=document_id,
+                source_payload=payload,
+            )
         return payload
 
     def delete_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
@@ -803,22 +833,12 @@ class SupplierFinancialDocumentsBlock:
         )
         if document is None:
             raise ValueError(f"financial document not found: {document_id}")
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-
-        capital = OwnProductCapitalBlock(
-            runtime=self.runtime,
-            timestamp_factory=self.timestamp_factory,
-        )
-        if capital.has_cost_payment_event(f"financial_expense:{document_id}"):
-            raise ValueError(
-                "financial expense already created capital events; deletion requires audited reversal"
-            )
-        deleted = self.runtime.delete_supplier_financial_document(
+        archived = self.runtime.update_supplier_financial_document_status(
             supplier_order_id=supplier_order_id,
             document_id=document_id,
+            parse_status=FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED,
+            updated_at=self.timestamp_factory(),
         )
-        if deleted is None:
-            raise ValueError(f"financial document not found: {document_id}")
         if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
             self.runtime.update_supplier_shipment_expenses_complete(
                 shipment_id=supplier_order_id,
@@ -826,24 +846,38 @@ class SupplierFinancialDocumentsBlock:
                 updated_at=self.timestamp_factory(),
             )
             self._reset_own_capital_expense_certification(supplier_order_id)
-        deleted_cny_documents: list[str] = []
-        if hasattr(self.runtime, "list_cny_documents") and hasattr(self.runtime, "delete_cny_document"):
-            for cny_document in self.runtime.list_cny_documents():
-                if str(cny_document.get("linked_financial_document_id") or "").strip() != document_id:
-                    continue
-                deleted_cny = self.runtime.delete_cny_document(str(cny_document.get("document_id") or ""))
-                deleted_cny_documents.append(str(deleted_cny.get("document_id") or cny_document.get("document_id") or ""))
-        file_result = self._delete_owned_document_file(document)
-        return {
+        payload = {
             "contract_name": "sheet_vitrina_v1_supplier_financial_documents",
             "status": "ok",
             "supplier_order_id": supplier_order_id,
             "document_id": document_id,
-            "deleted": True,
-            "cny_documents_deleted": deleted_cny_documents,
-            "file_deleted": bool(file_result.get("file_deleted")),
-            "warnings": _dedupe_strings(_string_list(file_result.get("warnings"))),
+            "deleted": False,
+            "archived": True,
+            "parse_status": FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED,
+            "audit_record_retained": True,
+            "file_deleted": False,
+            "document": self._with_download_path(archived),
         }
+        archived_cny_documents: list[str] = []
+        for cny_document in self.runtime.list_cny_documents():
+            if str(cny_document.get("linked_financial_document_id") or "") != document_id:
+                continue
+            saved_cny = self.runtime.save_cny_document(
+                {
+                    **cny_document,
+                    "status": CNY_DOCUMENT_STATUS_EXCLUDED,
+                    "updated_at": self.timestamp_factory(),
+                }
+            )
+            archived_cny_documents.append(str(saved_cny.get("document_id") or ""))
+        payload["cny_documents_archived"] = archived_cny_documents
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(
+                supplier_order_id,
+                source_id=document_id,
+                source_payload=payload,
+            )
+        return payload
 
     def _reset_own_capital_expense_certification(self, supplier_order_id: str) -> None:
         from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -854,6 +888,48 @@ class SupplierFinancialDocumentsBlock:
         ).set_expenses_certification(
             shipment_id=supplier_order_id,
             expenses_complete=False,
+        )
+
+    def _enqueue_functional_recalculation(
+        self,
+        supplier_order_id: str,
+        *,
+        source_id: str,
+        source_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        from packages.application.warehouse_functional import (
+            enqueue_warehouse_targeted_recalculation,
+        )
+
+        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
+        header = dict(shipment.get("header") or {})
+        nm_ids = [
+            int(line.get("internal_nm_id") or 0)
+            for line in shipment.get("lines") or []
+            if int(line.get("internal_nm_id") or 0) > 0
+        ]
+        revision = "sha256:" + hashlib.sha256(
+            json.dumps(
+                dict(source_payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        effective_date = str(
+            source_payload.get("document_date")
+            or (source_payload.get("document") or {}).get("document_date")
+            or header.get("invoice_date")
+            or self.timestamp_factory()
+        )[:10]
+        return enqueue_warehouse_targeted_recalculation(
+            runtime=self.runtime,
+            stable_source_id=f"supplier_financial_document:{source_id}",
+            source_revision=revision,
+            effective_date=effective_date,
+            affected_nm_ids=nm_ids,
+            requested_at=self.timestamp_factory(),
         )
 
     def _materialize_own_capital_expense_events(
@@ -1155,6 +1231,15 @@ class SupplierFinancialDocumentsBlock:
         )
         expense_lines = self.runtime.list_supplier_financial_expense_lines(normalized_shipment_id)
         summary = build_financial_summary(documents, expense_lines, shipment=detail)
+        try:
+            from packages.application.warehouse_functional import load_supplier_flow_cost_state
+
+            summary["functional_stage_costs"] = load_supplier_flow_cost_state(
+                runtime=self.runtime,
+                shipment_id=normalized_shipment_id,
+            )
+        except Exception:
+            summary["functional_stage_costs"] = {}
         header = dict(detail.get("header") or fallback_header or {})
         if not header.get("shipment_id") and normalized_shipment_id:
             header["shipment_id"] = normalized_shipment_id
@@ -1677,18 +1762,32 @@ def build_financial_summary(
         for line in expense_lines
         if any(str(document.get("document_id") or "") == str(line.get("financial_document_id") or "") for document in active_documents)
     ]
+    cost_documents = [
+        document
+        for document in active_documents
+        if str(document.get("parse_status") or "")
+        in {FINANCIAL_DOCUMENT_PARSE_STATUS_PARSED, FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED}
+    ]
+    cost_document_ids = {str(document.get("document_id") or "") for document in cost_documents}
+    cost_lines = [
+        line
+        for line in active_lines
+        if str(line.get("financial_document_id") or "") in cost_document_ids
+        and str(line.get("status") or EXPENSE_LINE_STATUS_PARSED)
+        in {EXPENSE_LINE_STATUS_PARSED, FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED}
+    ]
     warnings: list[str] = []
     quote_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE]
-    invoice_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE]
-    customs_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION]
+    invoice_docs = [doc for doc in cost_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE]
+    customs_docs = [doc for doc in cost_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION]
     packing_docs = [doc for doc in active_documents if doc.get("document_type") == FINANCIAL_DOCUMENT_TYPE_PACKING_LIST]
     quote_doc = quote_docs[0] if quote_docs else {}
     quote_meta = dict(quote_doc.get("normalized_parse") or {})
     quote_required_complete = bool(quote_meta.get("quote_required_amounts_complete")) if quote_docs else False
     quote_missing_required = _string_list(quote_meta.get("quote_missing_required_amounts"))
     quote_lines = [line for line in active_lines if _line_document_type(line, active_documents) == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_QUOTE]
-    invoice_lines = [line for line in active_lines if _line_document_type(line, active_documents) == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE]
-    customs_lines = [line for line in active_lines if _line_document_type(line, active_documents) == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION]
+    invoice_lines = [line for line in cost_lines if _line_document_type(line, cost_documents) == FINANCIAL_DOCUMENT_TYPE_LOGISTICS_INVOICE]
+    customs_lines = [line for line in cost_lines if _line_document_type(line, cost_documents) == FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION]
 
     quote_logistics_usd = _sum_decimal(
         line.get("amount")
@@ -1712,7 +1811,7 @@ def build_financial_summary(
     customs_total_rub = _sum_decimal(line.get("amount_rub") for line in customs_lines if bool(line.get("included_in_customs_total")))
     customs_without_vat_rub = _sum_required(customs_fee_rub, import_duty_rub)
     delivery_customs_total_rub = _sum_required(invoice_fact_rub, customs_total_rub)
-    factual_supply_expenses_rub = _factual_supply_expenses_rub(active_documents, active_lines)
+    factual_supply_expenses_rub = _factual_supply_expenses_rub(cost_documents, cost_lines)
 
     customs_metas = [dict(doc.get("normalized_parse") or {}) for doc in customs_docs]
     quote_gross_weight = _positive_decimal(quote_meta.get("gross_weight_kg"))
@@ -1799,8 +1898,8 @@ def build_financial_summary(
     )
     exact_cost = _build_exact_cost_summary(
         shipment_header=shipment_header,
-        expense_lines=active_lines,
-        documents=active_documents,
+        expense_lines=cost_lines,
+        documents=cost_documents,
         factual_supply_expenses_rub=factual_supply_expenses_rub,
         total_units=total_units,
     )
@@ -2464,6 +2563,8 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("customs_value_rub", "таможенная стоимость по ДТ, ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "total_customs_value_rub"), "₽")),
                 ("invoice_goods_value_rub_per_unit", "стоимость товара по инвойсу, ₽/шт", lambda item: _registry_money(_invoice_goods_value_rub_per_unit(item), "₽")),
                 ("exact_landed_cost_per_unit_rub", "Точная себестоимость, ₽/шт", lambda item: _exact_landed_cost_cell(item)),
+                ("production_average_cost_rub", "Средняя себестоимость: на производстве", lambda item: _functional_stage_cost_cell(item, "production")),
+                ("china_to_ff_average_cost_rub", "Средняя себестоимость: Китай → FF", lambda item: _functional_stage_cost_cell(item, "china_to_ff")),
             ],
         ),
         (
@@ -2608,6 +2709,18 @@ def _exact_landed_cost_cell(context: Mapping[str, Any]) -> dict[str, Any]:
     cell = _registry_money(_summary_path(context, "per_unit", "exact_landed_cost_per_unit_rub"), "₽")
     if cell.get("value") is not None:
         cell["status"] = "complete" if _expenses_complete(context) else "incomplete"
+    return cell
+
+
+def _functional_stage_cost_cell(context: Mapping[str, Any], stage: str) -> dict[str, Any]:
+    state = _summary_path(context, "functional_stage_costs", stage)
+    if not isinstance(state, Mapping):
+        return _registry_blank()
+    cell = _registry_money(state.get("average_unit_cost_rub"), "₽")
+    if cell.get("value") is not None:
+        cell["status"] = "complete" if bool(state.get("certified")) else "incomplete"
+        cell["quality"] = ",".join(str(item) for item in state.get("quality") or [])
+        cell["note"] = "certified" if bool(state.get("certified")) else "provisional: Все расходы учтены не сертифицированы"
     return cell
 
 

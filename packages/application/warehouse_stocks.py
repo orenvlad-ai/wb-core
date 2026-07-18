@@ -654,6 +654,9 @@ class WarehouseStocksBlock:
             {
                 "nm_id": int(item.nm_id),
                 "quantity": _decimal_text(item.stock_total),
+                "in_way_to_client": _decimal_text(item.in_way_to_client),
+                "in_way_from_client": _decimal_text(item.in_way_from_client),
+                "wb_contour_quantity": _decimal_text(item.wb_contour_total),
             }
             for item in result.items
         ]
@@ -989,7 +992,7 @@ class WarehouseStocksBlock:
         }
         for item in wb_snapshot_payload.get("canonical_items") or []:
             nm_id = int(item["nm_id"])
-            quantity = _decimal(item.get("quantity"))
+            quantity = _decimal(item.get("wb_contour_quantity", item.get("quantity")))
             if quantity < 0:
                 raise WarehouseOpeningSnapshotError(
                     f"WB stock API returned negative current stock for nmID {nm_id}: {_decimal_text(quantity)}"
@@ -1003,6 +1006,8 @@ class WarehouseStocksBlock:
                     "warehouse_name": str(row.get("warehouseName") or ""),
                     "region_name": str(row.get("regionName") or ""),
                     "quantity": _decimal_text(row.get("stockCount")),
+                    "in_way_to_client": _decimal_text(row.get("inWayToClient")),
+                    "in_way_from_client": _decimal_text(row.get("inWayFromClient")),
                 }
                 for row in wb_rows_by_nm.get(nm_id, [])
             ]
@@ -1517,8 +1522,16 @@ def _validated_supplier_product_lines(lines: Iterable[Mapping[str, Any]], shipme
 
 
 def _normalized_wb_record(raw_record: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = _json_loads(raw_record.get("normalized_row_json"), {})
-    raw_goods = _json_loads(raw_record.get("raw_goods_json"), [])
+    normalized = (
+        dict(raw_record.get("normalized") or {})
+        if isinstance(raw_record.get("normalized"), Mapping)
+        else _json_loads(raw_record.get("normalized_row_json"), {})
+    )
+    raw_goods = (
+        list(raw_record.get("raw_goods") or [])
+        if isinstance(raw_record.get("raw_goods"), list)
+        else _json_loads(raw_record.get("raw_goods_json"), [])
+    )
     return {
         **normalized,
         "supply_id": str(raw_record.get("supply_id") or normalized.get("supply_id") or ""),

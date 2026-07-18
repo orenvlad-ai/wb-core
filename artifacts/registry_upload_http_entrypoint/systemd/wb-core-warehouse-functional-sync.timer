@@ -1,0 +1,11 @@
+[Unit]
+Description=WB Core hourly bounded WB warehouse synchronization scheduler
+
+[Timer]
+OnCalendar=*-*-* *:17:00 Europe/Moscow
+AccuracySec=2m
+Persistent=true
+Unit=wb-core-warehouse-functional-sync.service
+
+[Install]
+WantedBy=timers.target

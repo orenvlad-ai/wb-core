@@ -108,7 +108,7 @@ related_docs:
   - "47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
   - "48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
 source_of_truth_level: "navigation_only"
-update_note: "Обновлён through module 48: `Остатки / Склады` is the protected six-warehouse quantity contour with guarded opening documents, primary-source provenance and no economic-calculation side effects."
+update_note: "Обновлён through module 48: active functional contour объединяет шесть складов, Decimal WAC/капитал, WB snapshot, Proxy 3 settings и guarded production cutover."
 ---
 
 # 1. Назначение индекса
@@ -125,7 +125,7 @@ update_note: "Обновлён through module 48: `Остатки / Склады
 
 # 1.1 Текущий Checkpoint Main
 
-Канонический индекс охватывает modules `01–48`. Modules `40` и `45` являются совместимыми read-side surfaces единого canonical cost engine: recognized projection обслуживает WB cost/P&L, paid projection — товарный капитал, а physical quantities имеют общие authoritative sources. Module `46` добавляет operator action/read-model contour поверх существующих stock, supply, prices, ads, SPP и metric truths, не создавая параллельные источники. Module `47` добавляет защищённую внутреннюю базу знаний без нового runtime content truth. Module `48` добавляет отдельный quantity-only warehouse read/cutover contour и не подключает его к economic projections.
+Канонический индекс охватывает modules `01–48`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `46` добавляет operator action/read-model contour без parallel metric truth. Module `47` добавляет защищённую внутреннюю базу знаний. Module `48` владеет active six-stage warehouse/cost state, snapshot WB, targeted replay, hourly sync and guarded functional cutover.
 
 Подтверждённый main-confirmed contour:
 - `sku_display_bundle_block`
@@ -160,7 +160,7 @@ update_note: "Обновлён through module 48: `Остатки / Склады
 - `webcore_data_mcp_block` как repo-implemented/live-gated read-only MCP gateway: standalone HTTP MCP server over SQLite `mode=ro` + `PRAGMA query_only=ON`, allowlisted business tools and separate `webcore.ops.read` diagnostics tools with `readOnlyHint: true`, OAuth 2.1/PKCE connector auth, bounded universal persisted `DATA_VITRINA` metric projections by key/Russian label/date/SKU, fixed-unit sanitized ops health/log/refresh/snapshot/deploy summaries, redaction/audit/limits, no arbitrary SQL/shell/SSH/sync/backfill/refresh/load/raw files/secrets and explicit revenue metric ambiguity handling.
 - `fulfillment_services_block` как server-owned operator supply contour: PNG-derived XLSX template, protected upload/list/detail/PDF routes, SQLite upload/line persistence, stable PDF-виза payment validation and approved-only `Поставки -> Wildberries` overlay without changing WB official evidence, 1C cost truth, ЕБД metric truth or final товарная себестоимость.
 - `operator_instructions_knowledge_base` как системный protected knowledge-base contour: Git-tracked structured content, web-native `Инструкции` shell surface, server-owned `instructions` capability in `Настройки -> Пользователи`, no CMS/public/DOCX download path and no supplier access by default.
-- `canonical_cost_engine` как active derived component/replay boundary с cutover `2026-07-01`: one baseline, recognized/paid projections, supplier/FF/WB authoritative quantities, provenance-aware FF operation business-date resolver без WB `created_at` fallback, exhaustive read-only source-anomaly preflight, fingerprinted `CUTOVER_IMMATERIAL_ANOMALY_POLICY_V1` (strict pre-cutover 3/5/20-unit boundary), immutable FF-debit snapshots, derived underaccepted layers и guarded dry-run/apply runner.
+- legacy `canonical_cost_engine` как immutable migration/audit evidence; active functional engine использует frozen 24.06 cost map только для bounded cost history с `2026-07-01`, а full warehouse history начинается production functional cutover.
 
 Главный незакрытый gap текущей линии:
 - текущий `main` уже содержит server upload line and bounded refresh/read split for website/operator web-vitrina;
@@ -255,10 +255,10 @@ update_note: "Обновлён through module 48: `Остатки / Склады
 | `42_MODULE__WB_SPP_TESTER_BLOCK.md` | `wb_spp_tester_block` | `web/operator/official-api/prices/spp-test` | Bounded `Цены -> Проверка СПП` MVP: one-nmID safe-slow range tester with `WB_SPP_TEST_ENABLED` + `WB_PRICES_WRITE_ENABLED`, runtime lock/audit, stale/429 handling and staged baseline restore |
 | `43_MODULE__FF_STOCK_LEDGER_BLOCK.md` | `ff_stock_ledger_block` | `web/operator/supply/runtime-ledger` | Server-owned `ФФ -> Остатки ФФ`: manual receipt/writeoff preview-confirm documents, computed balances, supplier auto receipts, guarded idempotent WB auto writeoffs, cumulative status-4 acceptance evidence, audit trail and calculation source without Google Sheets/GAS or WB mutations |
 | `44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md` | `wb_finance_weekly_report_block` | `web/operator/reports/official-api` | Official WB Finance weekly raw/report/aggregate contour, all report types, per-operation COST_PRICE → Our WB Cost cutover, quality-aware coverage, guarded fingerprinted atomic stale-week recalculation and Europe/Moscow schedule |
-| `45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md` | `own_product_capital_block` | `web/operator/runtime-capital-read-side` | Paid-capital projection over the same canonical components/quantities: five physical stages, paid-equivalent and coverage/confirmation ratios, derived underaccepted SKU/TOTAL metrics; legacy event/state rows are audit-only |
+| `45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md` | `own_product_capital_block` | `web/operator/runtime-capital-read-side` | Compatibility projection of six mutually exclusive functional stage quantities/capital with ratio-of-aggregates WAC/coverage; paid-equivalent and legacy underaccepted rows are audit-only |
 | `46_MODULE__SKU_MANAGEMENT_BLOCK.md` | `sku_management_block` | `web/operator/sku-actions` | Calculation-only deficit forecast, guarded one-row price/bid operator action workflow and confirmed action-event history without a parallel metric/source-of-truth contour |
 | `47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md` | `operator_instructions_knowledge_base` | `web/operator/knowledge-base` | Protected repo-owned web-native instructions with server-owned `instructions` access, a structured supply-management reference and no CMS/public document-download surface |
-| `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_stocks_block` | `web/operator/supply/runtime-ledger` | Unified six-warehouse quantity read model and one guarded atomic opening cutover with primary-source provenance, NULL economics and no effect on web-vitrina/Proxy 3/canonical cost calculations |
+| `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_functional` | `web/operator/warehouses/runtime-ledger` | Active six-stage Decimal quantity/WAC/capital engine, official WB contour snapshot, discrepancies/unmatched audit, hourly bounded sync, settings-aware Proxy 3 and guarded atomic functional cutover |
 
 # 5. Как эта папка используется дальше
 

@@ -27,6 +27,12 @@ from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurren
 from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnapshotSource
 from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
+from packages.application.calculation_parameters import (
+    CalculationParametersBlock,
+    DEFAULT_PROXY_PARAMETERS,
+    ProxyParameters,
+    calculate_proxy_3,
+)
 from packages.application.fin_report_daily_block import FinReportDailyBlock
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
@@ -943,6 +949,7 @@ class SheetVitrinaV1LivePlanBlock:
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.runtime = runtime
+        self.calculation_parameters_block = CalculationParametersBlock(runtime=runtime)
         self.web_source_block = web_source_block or WebSourceSnapshotBlock(HttpBackedWebSourceSnapshotSource())
         self.seller_funnel_block = seller_funnel_block or SellerFunnelSnapshotBlock(HttpBackedSellerFunnelSnapshotSource())
         self.sales_funnel_history_block = sales_funnel_history_block or SalesFunnelHistoryBlock(HttpBackedSalesFunnelHistorySource())
@@ -1102,6 +1109,7 @@ class SheetVitrinaV1LivePlanBlock:
             metrics_by_key=metrics_by_key,
             formulas_by_id=formulas_by_id,
             live_sources=live_sources,
+            proxy_parameters_resolver=self.calculation_parameters_block.parameters_for_date,
         )
 
         materialize_data_started = _start_refresh_phase(
@@ -2667,11 +2675,13 @@ class _MetricEvaluator:
         metrics_by_key: Mapping[str, MetricV2Item],
         formulas_by_id: Mapping[str, FormulaV2Item],
         live_sources: TemporalLiveSources,
+        proxy_parameters_resolver: Callable[[str], ProxyParameters] | None = None,
     ) -> None:
         self.enabled_config = enabled_config
         self.metrics_by_key = metrics_by_key
         self.formulas_by_id = formulas_by_id
         self.live_sources = live_sources
+        self.proxy_parameters_resolver = proxy_parameters_resolver or (lambda _date: DEFAULT_PROXY_PARAMETERS)
         self.grouped_config = _group_config(enabled_config)
         self.config_by_nm_id = {item.nm_id: item for item in enabled_config}
         self.sku_cache: dict[tuple[str, int, str], float | None] = {}
@@ -2730,16 +2740,23 @@ class _MetricEvaluator:
                     temporal_slot,
                 )
             elif metric.metric_key == OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY:
-                value = self._aggregate_sum(
-                    OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
-                    self.enabled_config,
-                    temporal_slot,
+                aggregate = (
+                    self._aggregate_sum
+                    if self._slot_lookups(temporal_slot).column_date < OUR_WB_COST_OPENING_DATE
+                    else self._aggregate_complete_sum
                 )
+                value = aggregate(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, self.enabled_config, temporal_slot)
             elif metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY:
-                value = _divide_or_zero(
-                    self.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, temporal_slot),
-                    self.resolve_total("total_orderSum", temporal_slot),
-                )
+                if self._slot_lookups(temporal_slot).column_date < OUR_WB_COST_OPENING_DATE:
+                    value = self.resolve_total(ONEC_PROXY_MARGIN_2_PCT_TOTAL_METRIC_KEY, temporal_slot)
+                else:
+                    parameters = self._proxy_parameters(temporal_slot)
+                    total_orders = self._aggregate_complete_sum("orderSum", self.enabled_config, temporal_slot)
+                    expected_revenue = None if total_orders is None else float(total_orders) * float(parameters.buyout_rate)
+                    value = _divide_or_none(
+                        self.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, temporal_slot),
+                        expected_revenue,
+                    )
             elif metric.metric_key == TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY:
                 value = self._aggregate_our_wb_unit_cost(temporal_slot)
             elif metric.metric_key == TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY:
@@ -2866,9 +2883,19 @@ class _MetricEvaluator:
         group_items = self.grouped_config.get(group_name, [])
         if metric.calc_type == "metric":
             if metric.metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY:
-                value = _divide_or_zero(
-                    self._aggregate_sum(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, group_items, temporal_slot),
-                    self._aggregate_sum("orderSum", group_items, temporal_slot),
+                post_opening = self._slot_lookups(temporal_slot).column_date >= OUR_WB_COST_OPENING_DATE
+                aggregate = self._aggregate_complete_sum if post_opening else self._aggregate_sum
+                total_orders = aggregate("orderSum", group_items, temporal_slot)
+                denominator = total_orders
+                if post_opening:
+                    denominator = (
+                        None
+                        if total_orders is None
+                        else float(total_orders) * float(self._proxy_parameters(temporal_slot).buyout_rate)
+                    )
+                value = _divide_or_none(
+                    aggregate(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, group_items, temporal_slot),
+                    denominator,
                 )
             elif metric.metric_key == SEARCH_CTR_AVG_TOTAL_METRIC_KEY:
                 value = self._aggregate_weighted_avg(
@@ -2914,6 +2941,17 @@ class _MetricEvaluator:
         values = [self.resolve_sku(metric_key, item.nm_id, temporal_slot) for item in config_items]
         numeric = [value for value in values if value is not None]
         return float(sum(numeric)) if numeric else None
+
+    def _aggregate_complete_sum(
+        self,
+        metric_key: str,
+        config_items: Iterable[ConfigV2Item],
+        temporal_slot: str,
+    ) -> float | None:
+        values = [self.resolve_sku(metric_key, item.nm_id, temporal_slot) for item in config_items]
+        if not values or any(value is None for value in values):
+            return None
+        return float(sum(value for value in values if value is not None))
 
     def _aggregate_avg(
         self,
@@ -3128,15 +3166,27 @@ class _MetricEvaluator:
             ads_sum = self.resolve_sku("ads_sum", nm_id, temporal_slot)
             if None in {order_sum, order_count, our_wb_unit_cost, ads_sum}:
                 return None
-            return (
-                float(order_sum) * 0.5096
-                - float(order_count) * 0.91 * float(our_wb_unit_cost)
-                - float(ads_sum)
+            calculated = calculate_proxy_3(
+                order_sum=order_sum,
+                order_count=order_count,
+                canonical_wb_wac=our_wb_unit_cost,
+                ads_sum=ads_sum,
+                parameters=self._proxy_parameters(temporal_slot),
             )
+            value = calculated["proxy_profit_3"]
+            return None if value is None else float(value)
         if metric_key == OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY:
-            return _divide_or_zero(
+            if self._slot_lookups(temporal_slot).column_date < OUR_WB_COST_OPENING_DATE:
+                return self.resolve_sku(ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY, nm_id, temporal_slot)
+            order_sum = self.resolve_sku("orderSum", nm_id, temporal_slot)
+            expected_revenue = (
+                None
+                if order_sum is None
+                else float(order_sum) * float(self._proxy_parameters(temporal_slot).buyout_rate)
+            )
+            return _divide_or_none(
                 self.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, nm_id, temporal_slot),
-                self.resolve_sku("orderSum", nm_id, temporal_slot),
+                expected_revenue,
             )
         if metric_key == ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY:
             return _divide_or_zero(
@@ -3242,6 +3292,9 @@ class _MetricEvaluator:
         if lookups is None:
             raise ValueError(f"missing live source lookups for temporal slot: {temporal_slot}")
         return lookups
+
+    def _proxy_parameters(self, temporal_slot: str) -> ProxyParameters:
+        return self.proxy_parameters_resolver(self._slot_lookups(temporal_slot).column_date)
 
 
 BLOCKED_SOURCE_METRIC_KEYS: set[str] = set()

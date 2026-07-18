@@ -55,6 +55,93 @@ def _ratio(numerator: Decimal | None, denominator: Decimal) -> Decimal | None:
     return numerator / denominator * Decimal("100")
 
 
+def _functional_wb_cost_state(
+    conn: sqlite3.Connection,
+    *,
+    as_of_date: str,
+    nm_id: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Return the active functional cost row and whether legacy fallback is forbidden."""
+
+    required = {
+        "sheet_vitrina_v1_warehouse_functional_cutovers",
+        "sheet_vitrina_v1_warehouse_functional_versions",
+        "sheet_vitrina_v1_warehouse_functional_balances",
+        "sheet_vitrina_v1_warehouse_wb_daily_cost",
+    }
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'sheet_vitrina_v1_warehouse_%'"
+        ).fetchall()
+    }
+    if not required.issubset(tables) or as_of_date < OUR_WB_COST_OPENING_DATE:
+        return None, False
+    cutover = conn.execute(
+        """SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers
+           WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""
+    ).fetchone()
+    if cutover is None:
+        return None, False
+    cutover_date = str(cutover["cutover_at"])[:10]
+    row = conn.execute(
+        """SELECT * FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+           WHERE cutover_id='warehouse_functional_cutover_v1'
+             AND as_of_date=? AND nm_id=?""",
+        (as_of_date, nm_id),
+    ).fetchone()
+    if row is not None:
+        quantity = max(_decimal(row["quantity"]), ZERO)
+        quality = str(row["quality"] or "historical_provisional")
+        fallback = quantity if quality == "fallback_average" else ZERO
+        estimated = max(quantity - fallback, ZERO)
+        return {
+            "our_wb_unit_cost_rub": row["wac_rub"],
+            "confirmed_qty": "0",
+            "estimated_qty": _money_text(estimated),
+            "fallback_qty": _money_text(fallback),
+            "confirmed_share_pct": "0",
+            "source_status": quality,
+            "component_status_json": row["provenance_json"],
+            "inputs_hash": row["fingerprint"],
+        }, True
+    if as_of_date < cutover_date:
+        return None, True
+    version = conn.execute(
+        """SELECT version_id,plan_fingerprint FROM sheet_vitrina_v1_warehouse_functional_versions
+           WHERE cutover_id='warehouse_functional_cutover_v1'
+             AND status='good' AND substr(effective_at,1,10)<=?
+           ORDER BY effective_at DESC,created_at DESC LIMIT 1""",
+        (as_of_date,),
+    ).fetchone()
+    if version is None:
+        return None, True
+    row = conn.execute(
+        """SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
+           WHERE version_id=? AND warehouse_key='wb' AND nm_id=?""",
+        (version["version_id"], nm_id),
+    ).fetchone()
+    if row is None:
+        return None, True
+    quantity = max(_decimal(row["quantity"]), ZERO)
+    covered = min(max(_decimal(row["cost_covered_quantity"]), ZERO), quantity)
+    certified = bool(row["certified"])
+    quality = str(row["quality"] or "coverage_gap")
+    fallback = covered if quality == "fallback_average" else ZERO
+    confirmed = covered if certified else ZERO
+    estimated = max(covered - confirmed - fallback, ZERO)
+    return {
+        "our_wb_unit_cost_rub": row["wac_rub"],
+        "confirmed_qty": _money_text(confirmed),
+        "estimated_qty": _money_text(estimated),
+        "fallback_qty": _money_text(fallback),
+        "confirmed_share_pct": _money_text(confirmed / quantity if quantity > ZERO else None),
+        "source_status": quality,
+        "component_status_json": row["provenance_json"],
+        "inputs_hash": str(version["plan_fingerprint"]),
+    }, True
+
+
 def week_bounds(day: date) -> tuple[date, date]:
     start = day - timedelta(days=day.weekday())
     return start, start + timedelta(days=6)
@@ -799,7 +886,7 @@ class WbFinanceWeeklyBlock:
             ).fetchone()
             is not None
         )
-        daily_state_cache: dict[tuple[str, str], sqlite3.Row | None] = {}
+        daily_state_cache: dict[tuple[str, str], Mapping[str, Any] | None] = {}
         cogs = ZERO
         matched_movements: dict[str, dict[str, Any]] = {}
         problems: dict[str, int] = {}
@@ -896,7 +983,7 @@ class WbFinanceWeeklyBlock:
                 else f"{source}|{identity_key}|{operation_date.isoformat()}"
             )
             selected_cost: Decimal | None = None
-            selected_state: sqlite3.Row | None = None
+            selected_state: Mapping[str, Any] | None = None
             quality_shares = (ZERO, ZERO, ZERO)
             missing_reason = ""
             dependency: dict[str, Any] = {
@@ -927,15 +1014,23 @@ class WbFinanceWeeklyBlock:
             else:
                 cache_key = (operation_date.isoformat(), internal_nm)
                 if cache_key not in daily_state_cache:
-                    daily_state_cache[cache_key] = (
-                        conn.execute(
-                            """SELECT * FROM sheet_vitrina_v1_wb_cost_daily_state
-                            WHERE as_of_date=? AND nm_id=?""",
-                            cache_key,
-                        ).fetchone()
-                        if daily_state_available and internal_nm
-                        else None
+                    functional_state, functional_applies = _functional_wb_cost_state(
+                        conn,
+                        as_of_date=cache_key[0],
+                        nm_id=cache_key[1],
                     )
+                    if functional_applies:
+                        daily_state_cache[cache_key] = functional_state
+                    else:
+                        daily_state_cache[cache_key] = (
+                            conn.execute(
+                                """SELECT * FROM sheet_vitrina_v1_wb_cost_daily_state
+                                WHERE as_of_date=? AND nm_id=?""",
+                                cache_key,
+                            ).fetchone()
+                            if daily_state_available and internal_nm
+                            else None
+                        )
                 selected_state = daily_state_cache[cache_key]
                 if selected_state is not None:
                     raw_unit_cost = selected_state["our_wb_unit_cost_rub"]

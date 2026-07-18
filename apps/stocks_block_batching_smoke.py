@@ -29,6 +29,10 @@ def main() -> None:
     os.environ[TOKEN_ENV] = "stocks-batching-smoke-token"
     try:
         _check_batched_request_shape()
+        _check_more_than_one_thousand_ids_are_chunked_atomically()
+        _check_three_quantity_fields()
+        _check_repeated_full_page_is_incomplete()
+        _check_invalid_or_duplicate_rows_fail_closed()
         _check_cached_reuse()
         _check_retry_after_429()
         _check_retry_exhaustion_surfaces_429()
@@ -48,9 +52,9 @@ def _check_batched_request_shape() -> None:
                 {
                     "data": {
                         "items": [
-                            {"nmId": 101, "regionName": "Центральный", "quantity": 7},
-                            {"nmId": 101, "regionName": "Уральский", "quantity": 5},
-                            {"nmId": 202, "regionName": "Центральный", "quantity": 4},
+                            _stock_item(101, 1011, 1, "Центральный", 7),
+                            _stock_item(101, 1011, 2, "Уральский", 5),
+                            _stock_item(202, 2021, 1, "Центральный", 4),
                         ]
                     }
                 },
@@ -79,6 +83,28 @@ def _check_batched_request_shape() -> None:
         print("batched-request: ok -> one request carries the whole nmIds set")
 
 
+def _check_more_than_one_thousand_ids_are_chunked_atomically() -> None:
+    nm_ids = list(range(1, 1002))
+    first_items = [_stock_item(nm_id, nm_id * 10, 1, "Центральный", 1) for nm_id in nm_ids[:1000]]
+    second_items = [_stock_item(nm_ids[-1], nm_ids[-1] * 10, 1, "Центральный", 2)]
+    with _StocksApiStub(
+        [
+            _json_response(200, {"data": {"items": first_items}}),
+            _json_response(200, {"data": {"items": second_items}}),
+        ]
+    ) as stub:
+        result = _execute_request(
+            stub,
+            nm_ids=nm_ids,
+            page_limit=250000,
+            min_request_interval_seconds=0.0,
+        )
+        if result["result"]["kind"] != "success" or result["result"]["count"] != len(nm_ids):
+            raise AssertionError("all chunked nmIds must publish as one successful snapshot")
+        if [len(body.get("nmIds") or []) for body in stub.request_bodies] != [1000, 1]:
+            raise AssertionError("official stock batches must never exceed 1000 nmIds")
+
+
 def _check_cached_reuse() -> None:
     with _StocksApiStub(
         [
@@ -87,8 +113,8 @@ def _check_cached_reuse() -> None:
                 {
                     "data": {
                         "items": [
-                            {"nmId": 101, "regionName": "Центральный", "quantity": 11},
-                            {"nmId": 202, "regionName": "Центральный", "quantity": 12},
+                            _stock_item(101, 1011, 1, "Центральный", 11),
+                            _stock_item(202, 2021, 1, "Центральный", 12),
                         ]
                     }
                 },
@@ -111,6 +137,80 @@ def _check_cached_reuse() -> None:
         print("cache-reuse: ok -> repeated request reuses the shared snapshot")
 
 
+def _check_three_quantity_fields() -> None:
+    with _StocksApiStub(
+        [
+            _json_response(
+                200,
+                {
+                    "data": {
+                        "items": [
+                            {
+                                "nmId": 101,
+                                "chrtId": 1011,
+                                "warehouseId": 1,
+                                "regionName": "Центральный",
+                                "quantity": 7,
+                                "inWayToClient": 3,
+                                "inWayFromClient": 2,
+                            }
+                        ]
+                    }
+                },
+            )
+        ]
+    ) as stub:
+        result = _execute_request(stub, nm_ids=[101], page_limit=250000)
+        item = result["result"]["items"][0]
+        if (
+            item["stock_total"] != 7
+            or item["in_way_to_client"] != 3
+            or item["in_way_from_client"] != 2
+            or item["wb_contour_total"] != 12
+        ):
+            raise AssertionError(f"official WB contour fields were lost: {item}")
+
+
+def _check_repeated_full_page_is_incomplete() -> None:
+    repeated = {
+        "data": {"items": [_stock_item(101, 1011, 1, "Центральный", 1)]}
+    }
+    with _StocksApiStub([_json_response(200, repeated), _json_response(200, repeated)]) as stub:
+        try:
+            _execute_request(stub, nm_ids=[101], page_limit=1)
+        except RuntimeError as exc:
+            if not any(
+                marker in str(exc)
+                for marker in ("repeated a full page", "duplicate size/warehouse")
+            ):
+                raise AssertionError(f"unexpected pagination failure: {exc}") from exc
+        else:
+            raise AssertionError("repeated full official page must not publish a snapshot")
+
+
+def _check_invalid_or_duplicate_rows_fail_closed() -> None:
+    invalid = _stock_item(101, 1011, 1, "Центральный", 1)
+    invalid.pop("inWayFromClient")
+    for items, expected in (
+        ([invalid], "invalid inWayFromClient"),
+        (
+            [
+                _stock_item(101, 1011, 1, "Центральный", 1),
+                _stock_item(101, 1011, 1, "Центральный", 2),
+            ],
+            "duplicate size/warehouse",
+        ),
+    ):
+        with _StocksApiStub([_json_response(200, {"data": {"items": items}})]) as stub:
+            try:
+                _execute_request(stub, nm_ids=[101], page_limit=250000)
+            except RuntimeError as exc:
+                if expected not in str(exc):
+                    raise AssertionError(f"unexpected invalid-payload failure: {exc}") from exc
+            else:
+                raise AssertionError("invalid official payload must not publish a snapshot")
+
+
 def _check_retry_after_429() -> None:
     with _StocksApiStub(
         [
@@ -128,8 +228,8 @@ def _check_retry_after_429() -> None:
                 {
                     "data": {
                         "items": [
-                            {"nmId": 101, "regionName": "Центральный", "quantity": 1},
-                            {"nmId": 202, "regionName": "Центральный", "quantity": 2},
+                            _stock_item(101, 1011, 1, "Центральный", 1),
+                            _stock_item(202, 2021, 1, "Центральный", 2),
                         ]
                     }
                 },
@@ -259,6 +359,25 @@ def _json_response(
         "status": status,
         "headers": {"Content-Type": "application/json", **(headers or {})},
         "body": json.dumps(body, ensure_ascii=False),
+    }
+
+
+def _stock_item(
+    nm_id: int,
+    chrt_id: int,
+    warehouse_id: int,
+    region_name: str,
+    quantity: int,
+) -> dict[str, Any]:
+    return {
+        "nmId": nm_id,
+        "chrtId": chrt_id,
+        "warehouseId": warehouse_id,
+        "warehouseName": f"Склад {warehouse_id}",
+        "regionName": region_name,
+        "quantity": quantity,
+        "inWayToClient": 0,
+        "inWayFromClient": 0,
     }
 
 

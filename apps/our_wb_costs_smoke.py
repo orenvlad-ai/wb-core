@@ -389,7 +389,7 @@ def _assert_wb_quantity_source_status(runtime: RegistryUploadDbBackedRuntime) ->
             str(row["wb_supply_id"]): dict(row)
             for row in conn.execute(
                 """
-                SELECT wb_supply_id, accepted_qty, source_status, component_status_json
+                SELECT wb_supply_id, accepted_qty, qty_denominator, source_status, component_status_json
                 FROM sheet_vitrina_v1_wb_supply_cost_layers
                 WHERE wb_supply_id IN ('receiving_accepted_qty', 'planned_qty_only', 'status6_planned_qty_only')
                   AND nm_id = 497413000
@@ -410,17 +410,19 @@ def _assert_wb_quantity_source_status(runtime: RegistryUploadDbBackedRuntime) ->
         raise AssertionError(f"non-final/planned quantity must not become confirmed, got {rows}")
     if (
         float(receiving["accepted_qty"]) != 7.0
-        or float(planned["accepted_qty"]) != 10.0
-        or float(shipped_planned["accepted_qty"]) != 10.0
+        or float(planned["accepted_qty"]) != 0.0
+        or float(shipped_planned["accepted_qty"]) != 0.0
     ):
-        raise AssertionError(f"quantity values must preserve accepted/planned evidence, got {rows}")
+        raise AssertionError(f"accepted quantity must never fall back to packed quantity, got {rows}")
+    if any(float(item["qty_denominator"]) != 10.0 for item in (receiving, planned, shipped_planned)):
+        raise AssertionError(f"all pre-acceptance expense denominators must use full packed quantity, got {rows}")
     receiving_components = json.loads(str(receiving["component_status_json"]))
     planned_components = json.loads(str(planned["component_status_json"]))
     shipped_planned_components = json.loads(str(shipped_planned["component_status_json"]))
     if receiving_components.get("wb_quantity_final_accepted") is not False:
         raise AssertionError(f"receiving status must not be final accepted, got {receiving_components}")
-    if planned_components.get("wb_quantity_source") != "quantity":
-        raise AssertionError(f"planned fallback source must be explicit, got {planned_components}")
+    if planned_components.get("wb_quantity_source") != "accepted_quantity_missing":
+        raise AssertionError(f"missing accepted quantity must remain explicit, got {planned_components}")
     if shipped_planned_components.get("wb_supply_status_id") != 6:
         raise AssertionError(f"status 6 planned-only evidence must be preserved, got {shipped_planned_components}")
     if shipped_planned_components.get("wb_quantity_final_accepted") is not False:
@@ -1162,7 +1164,7 @@ def _assert_proxy_profit_3_evaluator() -> None:
     if abs(float(after_proxy3 or 0.0) - expected_after) > 0.000001:
         raise AssertionError(f"proxy3 after opening must use our WB cost, got {after_proxy3}")
     after_margin3 = evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "after")
-    _assert_close(float(after_margin3 or 0.0), expected_after / 1000.0, "SKU proxy margin 3")
+    _assert_close(float(after_margin3 or 0.0), expected_after / (1000.0 * 0.91), "SKU proxy margin 3")
     before_margin2 = evaluator.resolve_sku(ONEC_PROXY_MARGIN_2_PCT_METRIC_KEY, 497413000, "before")
     before_margin3 = evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "before")
     if before_margin3 != before_margin2:
@@ -1171,7 +1173,7 @@ def _assert_proxy_profit_3_evaluator() -> None:
     second_after = evaluator.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413001, "after")
     _assert_close(float(total_after or 0.0), float(after_proxy3 or 0.0) + float(second_after or 0.0), "total proxy3")
     total_margin3 = evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "after")
-    expected_total_margin = float(total_after or 0.0) / 1100.0
+    expected_total_margin = float(total_after or 0.0) / (1100.0 * 0.91)
     _assert_close(float(total_margin3 or 0.0), expected_total_margin, "TOTAL proxy margin 3 ratio of aggregates")
     row_average = (
         float(after_margin3 or 0.0)
@@ -1200,10 +1202,10 @@ def _assert_proxy_profit_3_evaluator() -> None:
             source_temporal_policies={},
         ),
     )
-    if zero_evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "zero") != 0.0:
-        raise AssertionError("SKU proxy margin 3 zero denominator must return 0.0")
-    if zero_evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "zero") != 0.0:
-        raise AssertionError("TOTAL proxy margin 3 zero denominator must return 0.0")
+    if zero_evaluator.resolve_sku(OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, 497413000, "zero") is not None:
+        raise AssertionError("SKU proxy margin 3 zero denominator must return null")
+    if zero_evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "zero") is not None:
+        raise AssertionError("TOTAL proxy margin 3 zero denominator must return null")
 
     missing_evaluator = _MetricEvaluator(
         enabled_config=config[:1],
@@ -1227,6 +1229,24 @@ def _assert_proxy_profit_3_evaluator() -> None:
         raise AssertionError("SKU proxy margin 3 missing operand must return None")
     if missing_evaluator.resolve_total(OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, "missing") is not None:
         raise AssertionError("TOTAL proxy margin 3 missing operand must return None")
+
+    partial_lookup = _slot_lookup(column_date="2026-07-02", onec_cost=100.0, our_cost=80.0)
+    partial_lookup.our_wb_cost_lookup.pop(497413001)
+    partial_evaluator = _MetricEvaluator(
+        enabled_config=config,
+        metrics_by_key=metrics_by_key,
+        formulas_by_id={},
+        live_sources=TemporalLiveSources(
+            temporal_slots=[SheetVitrinaV1TemporalSlot(slot_key="partial", slot_label="partial", column_date="2026-07-02")],
+            statuses=[],
+            slot_lookups={"partial": partial_lookup},
+            source_temporal_policies={},
+        ),
+    )
+    if partial_evaluator.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, 497413000, "partial") is None:
+        raise AssertionError("complete SKU proxy 3 must remain calculable")
+    if partial_evaluator.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, "partial") is not None:
+        raise AssertionError("TOTAL proxy 3 must not turn one missing SKU operand into zero")
 
 
 def _metric(metric_key: str) -> MetricV2Item:

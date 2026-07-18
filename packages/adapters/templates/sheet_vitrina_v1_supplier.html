@@ -484,7 +484,7 @@
           <div class="total"><span>发票总额 / Invoice total / Итого invoice</span><strong id="totalInvoice">0</strong></div>
           <div class="total"><span>Курс CNY по счёту</span><strong id="cnyLedgerRate">-</strong></div>
           <div class="total"><span>Валютная стоимость оплаты, RUB</span><strong id="cnyPaymentRubCost">-</strong></div>
-          <div class="total"><span>Комиссии банка, RUB</span><strong id="cnyBankFeeRub">-</strong></div>
+          <div class="total"><span>Комиссии банка, RUB</span><strong id="cnyBankFeeRub" data-bank-fee-total>-</strong></div>
           <div class="total"><span>Статус CNY-расчёта</span><strong id="cnyCalculationStatus">-</strong></div>
           <div class="total" title="по CNY ledger и подтверждённым документам"><span>Себестоимость на единицу товара</span><strong id="exactLandedCostPerUnit">-</strong></div>
         </div>
@@ -613,6 +613,7 @@
                   <th>НДС</th>
                   <th>Флаги</th>
                   <th>Статус</th>
+                  <th>Источник</th>
                 </tr>
               </thead>
               <tbody id="financialExpenseRows"></tbody>
@@ -1564,6 +1565,7 @@
         renderFinancialWarnings();
         renderFinancialDocumentRows();
         renderFinancialSelectedDocument();
+        updateTotalsAndState();
       }
 
       function renderDocumentPackageLinks() {
@@ -1900,7 +1902,7 @@
 
       function renderFinancialExpenseRows(lines) {
         if (!lines.length) {
-          financialExpenseRows.innerHTML = '<tr><td colspan="9">Расходные строки не распознаны.</td></tr>';
+          financialExpenseRows.innerHTML = '<tr><td colspan="10">Расходные строки не распознаны.</td></tr>';
           return;
         }
         financialExpenseRows.innerHTML = lines.map((line) => {
@@ -1909,8 +1911,24 @@
             line.included_in_customs_total ? "customs" : ""
           ].filter(Boolean).join(", ");
           const vat = line.vat_amount_rub != null ? formatAmount(line.vat_amount_rub, "₽") : "-";
+          const raw = line.raw || {};
+          const sourceParts = [];
+          if (raw.source) {
+            sourceParts.push(raw.source);
+          }
+          if (raw.rub_equivalent_status === "direct_rub") {
+            sourceParts.push("прямой RUB");
+          } else if (raw.cny_ledger_operation_id) {
+            sourceParts.push("CNY ledger " + raw.cny_ledger_operation_id);
+            if (raw.cny_ledger_rate) {
+              sourceParts.push("курс " + raw.cny_ledger_rate + " ₽/CNY");
+            }
+          } else if (raw.rub_equivalent_status) {
+            sourceParts.push(raw.rub_equivalent_status);
+          }
+          const source = sourceParts.join(" · ") || "-";
           return [
-            '<tr>',
+            '<tr data-expense-source="' + escapeHtml(raw.source || "") + '" data-expense-currency="' + escapeHtml(line.currency || "") + '">',
             '<td>' + escapeHtml(financialCategoryLabels[line.category] || line.category || "-") + '</td>',
             '<td>' + escapeHtml(line.stage || "-") + '</td>',
             '<td>' + escapeHtml(line.description || "-") + '</td>',
@@ -1920,6 +1938,7 @@
             '<td>' + escapeHtml(vat) + '</td>',
             '<td>' + escapeHtml(flags || "-") + '</td>',
             '<td>' + escapeHtml(line.status || "-") + '</td>',
+            '<td>' + escapeHtml(source) + '</td>',
             '</tr>'
           ].join("");
         }).join("");
@@ -2292,7 +2311,11 @@
         const shipment = currentShipment || {};
         cnyLedgerRate.textContent = shipment.cny_ledger_effective_rate ? formatRate(shipment.cny_ledger_effective_rate) : "-";
         cnyPaymentRubCost.textContent = shipment.cny_payment_currency_rub_cost ? formatAmount(shipment.cny_payment_currency_rub_cost, "RUB") : "-";
-        cnyBankFeeRub.textContent = shipment.cny_bank_fee_rub ? formatAmount(shipment.cny_bank_fee_rub, "RUB") : "-";
+        const exactBankFees = financialSummary && financialSummary.per_unit
+          ? financialSummary.per_unit.exact_bank_fees_rub
+          : null;
+        const bankFeeTotal = exactBankFees == null ? shipment.cny_bank_fee_rub : exactBankFees;
+        cnyBankFeeRub.textContent = bankFeeTotal == null ? "-" : formatAmount(bankFeeTotal, "RUB");
         cnyCalculationStatus.textContent = cnyCalculationStatusLabel(shipment.cny_calculation_status, shipment.cny_calculation_error);
         exactLandedCostPerUnit.textContent = formatRegistryMoney(shipment.exact_landed_cost_per_unit_rub);
         exactLandedCostPerUnit.classList.remove("exact-cost-complete", "exact-cost-incomplete");

@@ -190,7 +190,7 @@
       "name": "sheet_vitrina_warehouse_items",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/warehouses/",
-      "methods": ["GET"]
+      "methods": ["GET", "POST"]
     },
     {
       "name": "sheet_vitrina_research",
@@ -557,6 +557,18 @@
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/settings/users",
       "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_calculation_parameters",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/settings/calculation-parameters",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_calculation_parameters_preview",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/settings/calculation-parameters/preview",
+      "methods": ["POST"]
     },
     {
       "name": "sheet_vitrina_settings_user_items",

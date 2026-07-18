@@ -1796,6 +1796,9 @@ class OwnProductCapitalBlock:
 
     def load_daily_metric_lookup(self, as_of_date: str) -> dict[int, dict[str, Any]]:
         as_of_date = _iso_date(as_of_date, "as_of_date")
+        functional = self._load_functional_daily_metric_lookup(as_of_date)
+        if functional is not None:
+            return functional
         if as_of_date >= "2026-07-01":
             canonical = self._load_canonical_daily_metric_lookup(as_of_date)
             if canonical:
@@ -1866,6 +1869,141 @@ class OwnProductCapitalBlock:
             else:
                 target["presentation_state"] = "confirmed"
             target["presentation_reason"] = "; ".join(sorted(set(target["presentation_reasons"])))
+        return result
+
+    def _load_functional_daily_metric_lookup(
+        self,
+        as_of_date: str,
+    ) -> dict[int, dict[str, Any]] | None:
+        """Read product-capital metrics from the sole post-cutover read model.
+
+        ``None`` means that the functional boundary does not apply to the requested
+        day.  An empty mapping is a valid post-cutover state and must not fall back
+        to either of the legacy capital projections.
+        """
+
+        stage_map = {
+            "production": "PRODUCTION",
+            "china_to_ff": "PRODUCTION_TO_FF",
+            "ff": "FF",
+            "ff_to_wb": "FF_TO_WB",
+            "wb": "WB",
+            "wb_acceptance_discrepancy": "WB_ACCEPTANCE_DISCREPANCY",
+        }
+        with _connect(self.runtime.db_path) as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            required = {
+                "sheet_vitrina_v1_warehouse_functional_cutovers",
+                "sheet_vitrina_v1_warehouse_functional_versions",
+                "sheet_vitrina_v1_warehouse_functional_balances",
+            }
+            if not required.issubset(tables):
+                return None
+            cutover = conn.execute(
+                """SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers
+                   WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""
+            ).fetchone()
+            if cutover is None:
+                return None
+            if as_of_date < str(cutover["cutover_at"])[:10]:
+                # Full warehouse/product-capital history is intentionally not
+                # reconstructed behind the functional boundary.  The separately
+                # authorized 01.07 backfill is limited to WB cost/Proxy read models.
+                return {} if as_of_date >= "2026-07-01" else None
+            version = conn.execute(
+                """SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_versions
+                   WHERE cutover_id='warehouse_functional_cutover_v1'
+                     AND status='good' AND substr(effective_at,1,10)<=?
+                   ORDER BY effective_at DESC,created_at DESC LIMIT 1""",
+                (as_of_date,),
+            ).fetchone()
+            if version is None:
+                return {}
+            rows = conn.execute(
+                """SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
+                   WHERE version_id=? ORDER BY nm_id,warehouse_key""",
+                (version["version_id"],),
+            ).fetchall()
+
+        result: dict[int, dict[str, Any]] = {}
+        for raw in rows:
+            row = dict(raw)
+            public_stage = stage_map.get(str(row["warehouse_key"]))
+            if public_stage is None:
+                continue
+            nm_id = int(row["nm_id"])
+            qty = _decimal(row["quantity"])
+            capital = _decimal(row["capital_rub"])
+            covered = _decimal(row["cost_covered_quantity"])
+            certified = bool(row["certified"])
+            target = result.setdefault(
+                nm_id,
+                {"presentation_reasons": [], "stage_presentation": {}},
+            )
+            target[own_stage_metric_key(public_stage, "qty")] = float(qty)
+            target[own_stage_metric_key(public_stage, "paid_equivalent_qty")] = float(qty)
+            target[own_stage_metric_key(public_stage, "capital_rub")] = float(capital)
+            target[own_stage_metric_key(public_stage, "unit_cost_rub")] = (
+                float(capital / qty) if qty > ZERO else None
+            )
+            target[own_stage_metric_key(public_stage, "cost_coverage_pct")] = (
+                float(covered / qty) if qty > ZERO else None
+            )
+            target[own_stage_metric_key(public_stage, "confirmed_share_pct")] = (
+                1.0 if qty > ZERO and certified else (0.0 if qty > ZERO else None)
+            )
+            target[own_stage_metric_key(public_stage, "confirmed_qty")] = (
+                float(qty) if certified else 0.0
+            )
+            target[own_stage_metric_key(public_stage, "cost_covered_qty")] = float(covered)
+            quality = str(row.get("quality") or "coverage_gap")
+            reasons = [] if certified else [quality]
+            target["presentation_reasons"].extend(reasons)
+            target["stage_presentation"][public_stage] = {
+                "state": "confirmed" if certified or qty <= ZERO else "unconfirmed",
+                "reason": "; ".join(reasons),
+            }
+            # Preserve legacy metric keys as a compatibility projection of the
+            # active positive discrepancy warehouse, never of open FF→WB transit.
+            if public_stage == "WB_ACCEPTANCE_DISCREPANCY":
+                target[OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY] = float(qty)
+                target[OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY] = (
+                    float(capital / qty) if qty > ZERO else None
+                )
+
+        for target in result.values():
+            qty = sum(
+                (_decimal(target.get(own_stage_metric_key(stage, "qty"))) for stage in OWN_PRODUCT_CAPITAL_STAGES),
+                ZERO,
+            )
+            capital = sum(
+                (_decimal(target.get(own_stage_metric_key(stage, "capital_rub"))) for stage in OWN_PRODUCT_CAPITAL_STAGES),
+                ZERO,
+            )
+            confirmed = sum(
+                (_decimal(target.get(own_stage_metric_key(stage, "confirmed_qty"))) for stage in OWN_PRODUCT_CAPITAL_STAGES),
+                ZERO,
+            )
+            target[OWN_TOTAL_QTY_METRIC_KEY] = float(qty)
+            target[OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY] = float(qty)
+            target[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = float(capital)
+            target[OWN_AVG_COST_RUB_METRIC_KEY] = float(capital / qty) if qty > ZERO else None
+            target[OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY] = (
+                float(confirmed / qty) if qty > ZERO else None
+            )
+            target.setdefault(OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY, 0.0)
+            target.setdefault(OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY, None)
+            target["presentation_state"] = (
+                "confirmed" if qty <= ZERO or confirmed >= qty else "unconfirmed"
+            )
+            target["presentation_reason"] = "; ".join(
+                sorted(set(target["presentation_reasons"]))
+            )
         return result
 
     def _load_canonical_daily_metric_lookup(self, as_of_date: str) -> dict[int, dict[str, Any]]:

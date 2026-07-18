@@ -363,9 +363,21 @@ def _assert_application_ledger_replay() -> None:
             raise AssertionError("backdated conversion must change subsequent effective order rate")
         if _dec(order_a_after["cny_payment_currency_rub_cost"]) != Decimal("1057.14"):
             raise AssertionError(f"backdated conversion cost replay changed: {order_a_after}")
+        operation_ids_before_repeat = [
+            str(item.get("operation_id") or "") for item in runtime.list_cny_ledger_operations()
+        ]
+        ledger.replay_ledger(reason="idempotency_probe")
+        operation_ids_after_repeat = [
+            str(item.get("operation_id") or "") for item in runtime.list_cny_ledger_operations()
+        ]
+        if operation_ids_after_repeat != operation_ids_before_repeat:
+            raise AssertionError(
+                "CNY replay must retain deterministic operation identities: "
+                f"{operation_ids_before_repeat} -> {operation_ids_after_repeat}"
+            )
         deleted = ledger.delete_document("conv-backdated")
-        if not deleted.get("deleted"):
-            raise AssertionError(f"delete must report deleted=true: {deleted}")
+        if deleted.get("deleted") is not False or deleted.get("archived") is not True:
+            raise AssertionError(f"delete UI action must archive with audit retained: {deleted}")
         order_a_deleted = runtime.load_supplier_shipment("order-a")["header"]
         if _dec(order_a_deleted["cny_ledger_effective_rate"]) != before_backfill_rate:
             raise AssertionError(f"delete replay must restore order-a effective rate: {order_a_deleted}")
@@ -577,9 +589,10 @@ def _assert_http_delete_replays_and_removes_owned_file() -> None:
             replay = dict(deleted.get("replay") or {})
             if (
                 delete_status != 200
-                or deleted.get("deleted") is not True
+                or deleted.get("deleted") is not False
+                or deleted.get("archived") is not True
                 or deleted.get("document_id") != deleted_document_id
-                or replay.get("reason") != "document_delete"
+                or replay.get("reason") != "document_archive"
             ):
                 raise AssertionError(f"CNY account HTTP delete contract changed: {delete_status} {deleted}")
 
@@ -589,14 +602,16 @@ def _assert_http_delete_replays_and_removes_owned_file() -> None:
             remaining_conversions = list(after.get("conversions") or [])
             remaining_documents = list(after.get("documents") or [])
             remaining_operations = list(after.get("ledger_operations") or [])
-            if len(remaining_conversions) != 1 or any(
-                str(item.get("document_id") or "") == deleted_document_id for item in remaining_documents
+            if len([item for item in remaining_conversions if item.get("status") != "excluded"]) != 1 or not any(
+                str(item.get("document_id") or "") == deleted_document_id
+                and str(item.get("status") or "") == "excluded"
+                for item in remaining_documents
             ):
-                raise AssertionError(f"deleted canonical document remained in CNY read model: {after}")
+                raise AssertionError(f"archived canonical CNY document audit mismatch: {after}")
             if any(str(item.get("source_document_id") or "") == deleted_document_id for item in remaining_operations):
                 raise AssertionError(f"deleted document ledger operations remained after replay: {remaining_operations}")
 
-            remaining = remaining_conversions[0]
+            remaining = next(item for item in remaining_conversions if item.get("status") != "excluded")
             expected_balance_cny = Decimal("100") + _dec(remaining.get("cny_amount"))
             expected_balance_rub = Decimal("1000") + _dec(remaining.get("rub_amount"))
             expected_average_rate = (expected_balance_rub / expected_balance_cny).quantize(
@@ -618,8 +633,9 @@ def _assert_http_delete_replays_and_removes_owned_file() -> None:
                 or _dec(before_summary.get("average_rate")) == _dec(after_summary.get("average_rate"))
             ):
                 raise AssertionError(f"delete fixture must prove balance and average-rate recalculation: {before_summary} -> {after_summary}")
-            if owned_file.exists() or runtime.load_cny_document(deleted_document_id) is not None:
-                raise AssertionError("HTTP delete must remove both canonical document and its owned runtime file")
+            archived_document = runtime.load_cny_document(deleted_document_id)
+            if not owned_file.exists() or str((archived_document or {}).get("status") or "") != "excluded":
+                raise AssertionError("HTTP delete must retain the canonical audit record and owned source file")
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -810,8 +826,9 @@ def _assert_http_routes_and_order_integration() -> None:
             )
             if (
                 delete_statement_status != 200
-                or delete_statement.get("deleted") is not True
-                or len(delete_statement.get("cny_documents_deleted") or []) != 3
+                or delete_statement.get("deleted") is not False
+                or delete_statement.get("archived") is not True
+                or len(delete_statement.get("cny_documents_archived") or []) != 3
                 or not delete_statement.get("cny_replay")
             ):
                 raise AssertionError(f"bank statement delete must cleanup linked CNY fees: {delete_statement_status} {delete_statement}")
@@ -821,8 +838,8 @@ def _assert_http_routes_and_order_integration() -> None:
                 if item.get("document_type") == CNY_DOCUMENT_TYPE_BANK_FEE
                 and item.get("source_order_id") == "http-order"
             ]
-            if remaining_fee_documents:
-                raise AssertionError(f"linked CNY bank fee documents must be removed after source delete: {remaining_fee_documents}")
+            if len(remaining_fee_documents) != 3 or any(item.get("status") != "excluded" for item in remaining_fee_documents):
+                raise AssertionError(f"linked CNY bank fee documents must be archived after source delete: {remaining_fee_documents}")
         finally:
             server.shutdown()
             thread.join(timeout=5)

@@ -2,11 +2,11 @@
 
 ## Status
 
-Active migration contract for the one-time `warehouse_opening_v1` initialization. Module truth is in `docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md`.
+Completed immutable audit contract for the former one-time quantity-only `warehouse_opening_v1` initialization. It is not active warehouse/cost truth and is never altered or summed with `warehouse_functional_cutover_v1`. Active module truth is in `docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md`; active migration is `migration/103_warehouse_functional_cutover.md`.
 
 ## Allowed Mutation
 
-The only production business mutation authorized by this migration is insertion of:
+The historical production business mutation authorized by this completed migration was insertion of:
 
 - one row in `sheet_vitrina_v1_warehouse_cutovers`;
 - exactly six rows in `sheet_vitrina_v1_warehouse_documents`;
@@ -22,9 +22,11 @@ Schema creation for these new tables is part of deploy/startup/read-model initia
 
 `sheet_vitrina_v1_warehouse_document_lines` owns stable line id, document FK, canonical nmID/display identity, exact text quantity, nullable economics and JSON source-record provenance. `UNIQUE(document_id,nm_id)` prevents duplicate SKU balance rows; FK cascade makes the bounded rollback complete.
 
-There is no mutable warehouse balance table. Initial balance is the sum of posted opening-document lines. After cutover, the unified `Склад FF` balance remains the live read projection of the pre-existing canonical FF ledger; later FF operations do not mutate the frozen opening document.
+These rows remain immutable evidence. Their NULL costs/capital and quantity totals are not active balances. The active functional version owns current six-stage quantities/economics; FF still reconciles to the pre-existing append-only ledger.
 
-## Required Execution Sequence
+## Historical Execution Evidence
+
+The following sequence documents how the immutable opening was created; it must not be re-run as an active initialization:
 
 1. Merge/deploy the reviewed release commit through GitHub Release Train.
 2. Confirm deploy SHA/runtime/service/public probes.
@@ -39,12 +41,12 @@ Apply creates an integrity-checked coherent SQLite backup before `BEGIN IMMEDIAT
 
 `warehouse-opening-diagnostic --nm-id <nmID>` remains an optional bounded read-only investigation tool for historical ordinary-final/doprinato arithmetic. It parses the hosted dotenv file without shell evaluation and reports sanitized selected-SKU rows and a diagnostic-only digest. It never participates in dry-run/apply, never enters the opening fingerprint, does not sync/backfill/mutate the WB cache and cannot block the `zero_at_cutover` discrepancy opening.
 
-## Recovery
+## Recovery Boundary
 
 If apply fails before commit, rebuild a new plan only after diagnosing the changed/invalid source. Do not reuse a stale fingerprint.
 
-If a committed cutover must be removed before acceptance, `warehouse-opening-rollback --fingerprint <exact stored fingerprint>` makes a second coherent backup and removes only this cutover/documents/lines. Source records remain untouched. A corrected attempt requires a new reviewed plan; code/UI defects require a recovery PR and normal Release Train/deploy/UI cycle.
+The historical cutover has been accepted and must not be rolled back or edited. Recovery of the active contour uses only the functional repo-owned runner and migration 103; it leaves all migration-102 rows untouched.
 
 ## Non-Scope
 
-No cost/capital backfill, future warehouse movement automation, historical movement reconstruction, WB sales depletion, returns/writeoffs, FF inventory, vitrina/Proxy 3/canonical cost switch, SKU-management change or unrelated production cleanup is authorized here.
+No active cost/capital, movement automation, functional cutover, Proxy settings/backfill or current warehouse mutation is authorized by migration 102.
