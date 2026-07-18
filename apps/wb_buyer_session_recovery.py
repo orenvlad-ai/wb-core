@@ -159,12 +159,16 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
         run_id = f"buyer-recovery-{_now().strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
         adapter = WbBuyerSessionAdapter(config=config.session)
         session: Mapping[str, Any]
-        for attempt in range(3):
+        # The UI preflight and recovery start can overlap while the first
+        # independent probe is still holding the shared session lease.  Wait
+        # for one bounded probe lease (45s), then fail explicitly; never
+        # unlink or steal the lock.
+        for attempt in range(45):
             try:
                 session = adapter.check_session()
                 break
             except RuntimeError as exc:
-                if "lock" not in str(exc).lower() or attempt == 2:
+                if "lock" not in str(exc).lower() or attempt == 44:
                     raise
                 time.sleep(0.5)
         if session.get("status") == "valid":
