@@ -31,6 +31,7 @@ def main() -> None:
         _check_batched_request_shape()
         _check_more_than_one_thousand_ids_are_chunked_atomically()
         _check_three_quantity_fields()
+        _check_zero_other_bucket_is_preserved()
         _check_repeated_full_page_is_incomplete()
         _check_invalid_or_duplicate_rows_fail_closed()
         _check_cached_reuse()
@@ -171,6 +172,37 @@ def _check_three_quantity_fields() -> None:
             raise AssertionError(f"official WB contour fields were lost: {item}")
 
 
+def _check_zero_other_bucket_is_preserved() -> None:
+    other_central = _stock_item(101, 1011, 0, "Центральный", 0)
+    other_central.update(
+        {
+            "warehouseName": "Остальные",
+            "inWayToClient": 242,
+            "inWayFromClient": 9,
+        }
+    )
+    other_ural = _stock_item(101, 1011, 0, "Уральский", 0)
+    other_ural.update(
+        {
+            "warehouseName": "Остальные",
+            "inWayToClient": 3,
+            "inWayFromClient": 1,
+        }
+    )
+    with _StocksApiStub(
+        [_json_response(200, {"data": {"items": [other_central, other_ural]}})]
+    ) as stub:
+        result = _execute_request(stub, nm_ids=[101], page_limit=250000)
+        item = result["result"]["items"][0]
+        if (
+            item["stock_total"] != 0
+            or item["in_way_to_client"] != 245
+            or item["in_way_from_client"] != 10
+            or item["wb_contour_total"] != 255
+        ):
+            raise AssertionError(f"official zero-ID other buckets were lost: {item}")
+
+
 def _check_repeated_full_page_is_incomplete() -> None:
     repeated = {
         "data": {"items": [_stock_item(101, 1011, 1, "Центральный", 1)]}
@@ -193,6 +225,8 @@ def _check_invalid_or_duplicate_rows_fail_closed() -> None:
     invalid.pop("inWayFromClient")
     invalid_warehouse = _stock_item(101, 1011, 1, "Центральный", 1)
     invalid_warehouse["warehouseId"] = None
+    invalid_zero_warehouse = _stock_item(101, 1011, 0, "Центральный", 0)
+    invalid_zero_warehouse["warehouseName"] = "Неизвестный склад"
     for items, expected in (
         ([invalid], "invalid inWayFromClient"),
         (
@@ -201,6 +235,20 @@ def _check_invalid_or_duplicate_rows_fail_closed() -> None:
             "(present=true, type=NoneType, value=None, "
             'context={"warehouseName":"Склад 1","regionName":"Центральный",'
             '"quantity":1,"inWayToClient":0,"inWayFromClient":0}, row_digest=',
+        ),
+        ([invalid_zero_warehouse], "invalid warehouseId for nmId 101"),
+        (
+            [
+                {
+                    **_stock_item(101, 1011, 0, "Центральный", 0),
+                    "warehouseName": "Остальные",
+                },
+                {
+                    **_stock_item(101, 1011, 0, "Центральный", 0),
+                    "warehouseName": "Остальные",
+                },
+            ],
+            "duplicate size/warehouse",
         ),
         (
             [
