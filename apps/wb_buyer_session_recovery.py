@@ -163,13 +163,22 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
         # independent probe is still holding the shared session lease.  Wait
         # for one bounded probe lease (45s), then fail explicitly; never
         # unlink or steal the lock.
+        lock_contention = False
         for attempt in range(45):
             try:
                 session = adapter.check_session()
                 break
             except RuntimeError as exc:
-                if "lock" not in str(exc).lower() or attempt == 44:
+                if "lock" not in str(exc).lower():
                     raise
+                if attempt == 44:
+                    lock_contention = True
+                    session = {
+                        "status": "recovery_running",
+                        "valid": False,
+                        "reason": "buyer_session_lock_busy",
+                    }
+                    break
                 time.sleep(0.5)
         if session.get("status") == "valid":
             payload = {
