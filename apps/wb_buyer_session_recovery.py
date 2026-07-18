@@ -193,7 +193,9 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
             return read_recovery_status(config, with_probe=False)
         try:
             adapter.prepare_fingerprint_migration()
-        except BlockingIOError:
+        except (BlockingIOError, RuntimeError) as exc:
+            if isinstance(exc, RuntimeError) and "lock" not in str(exc).lower():
+                raise
             # The preflight lease may still be held by the immediately
             # preceding check; the supervisor will perform migration under
             # its own verified single-flight lifecycle.
