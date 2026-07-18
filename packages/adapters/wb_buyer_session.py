@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import hmac
-from itertools import combinations
 import json
 import os
 from pathlib import Path
@@ -24,10 +23,9 @@ DEFAULT_BUYER_SESSION_DIR = Path("/opt/wb-core-runtime/state/wb_buyer_session")
 DEFAULT_BUYER_STORAGE_STATE_PATH = DEFAULT_BUYER_SESSION_DIR / "storage_state.json"
 DEFAULT_BUYER_URL = "https://www.wildberries.ru/lk"
 DEFAULT_PRODUCT_URL = "https://www.wildberries.ru/catalog/{nm_id}/detail.aspx"
-LEGACY_FINGERPRINT_VERSION = "wb-buyer-account-hmac-sha256-v1"
 FINGERPRINT_VERSION = "wb-buyer-account-hmac-sha256-v2-stable-identity"
+DEFAULT_VALIDATION_NM_ID = 497416931
 MAX_NETWORK_JSON_BYTES = 2_000_000
-AUTH_NAME_RE = re.compile(r"(?:auth|token|session|user|profile|account|login|validation|wbx)", re.IGNORECASE)
 LOGIN_URL_RE = re.compile(r"/(?:login|security|authorize|auth)(?:[/?#]|$)", re.IGNORECASE)
 CHALLENGE_MARKERS = (
     "__wbaas/challenges/antibot",
@@ -39,9 +37,7 @@ RECOVERY_PROBE_BLOCKING_STATUSES = {
     "starting",
     "checking_session",
     "automatic_login",
-    "stabilizing_session",
     "awaiting_human",
-    "saving_session",
     "validating_session",
 }
 
@@ -58,10 +54,23 @@ class WbBuyerSessionConfig:
     product_url_template: str = DEFAULT_PRODUCT_URL
     navigation_timeout_ms: int = 45_000
     settle_timeout_ms: int = 8_000
+    validation_nm_id: int = DEFAULT_VALIDATION_NM_ID
 
     @property
     def lock_path(self) -> Path:
-        return self.state_dir / "buyer_session.lock"
+        return self.state_dir / "buyer_session_automation.lock"
+
+    @property
+    def lock_owner_path(self) -> Path:
+        return self.state_dir / "buyer_session_automation_owner.json"
+
+    @property
+    def persistent_profile_dir(self) -> Path:
+        return self.state_dir / "chromium_user_data"
+
+    @property
+    def legacy_migration_path(self) -> Path:
+        return self.state_dir / "legacy_storage_state_migration.json"
 
     @property
     def fingerprint_key_path(self) -> Path:
@@ -81,6 +90,9 @@ def load_wb_buyer_session_config_from_env() -> WbBuyerSessionConfig:
     storage_path = Path(
         str(os.environ.get("WB_BUYER_SESSION_STORAGE_STATE_PATH") or (state_dir / "storage_state.json"))
     ).expanduser()
+    validation_nm_id = _env_int("WB_BUYER_SESSION_VALIDATION_NM_ID", DEFAULT_VALIDATION_NM_ID)
+    if validation_nm_id <= 0:
+        validation_nm_id = DEFAULT_VALIDATION_NM_ID
     return WbBuyerSessionConfig(
         state_dir=state_dir,
         storage_state_path=storage_path,
@@ -91,6 +103,7 @@ def load_wb_buyer_session_config_from_env() -> WbBuyerSessionConfig:
         ),
         navigation_timeout_ms=_env_int("WB_BUYER_NAVIGATION_TIMEOUT_MS", 45_000),
         settle_timeout_ms=_env_int("WB_BUYER_SETTLE_TIMEOUT_MS", 8_000),
+        validation_nm_id=validation_nm_id,
     )
 
 
@@ -102,49 +115,51 @@ class WbBuyerSessionAdapter:
         *,
         config: WbBuyerSessionConfig | None = None,
         now_factory: Callable[[], datetime] | None = None,
-        browser_probe: Callable[[Path], Mapping[str, Any]] | None = None,
-        price_probe: Callable[[Path, int], Mapping[str, Any]] | None = None,
+        operation_probe: Callable[[Path, int | None, bool], Mapping[str, Any]] | None = None,
     ) -> None:
         self.config = config or load_wb_buyer_session_config_from_env()
         self.now_factory = now_factory or (lambda: datetime.now(UTC))
-        self.browser_probe = browser_probe
-        self.price_probe = price_probe
+        self.operation_probe = operation_probe
 
     def check_session(
         self,
         *,
-        storage_state_path: Path | None = None,
         persist_fingerprint: bool = True,
         acquire_lock: bool = True,
     ) -> dict[str, Any]:
-        path = storage_state_path or self.config.storage_state_path
         self._ensure_runtime_permissions()
-        if acquire_lock and self._recovery_probe_blocked():
-            result = self._session_result("recovery_running", reason="buyer_recovery_in_progress")
-            if path == self.config.storage_state_path:
-                self._write_probe_metadata(result)
+        joined = self._active_recovery()
+        if acquire_lock and joined:
+            result = self._joined_session_result(joined)
+            self._write_probe_metadata(result)
             return result
-        if not path.exists():
-            result = self._session_result("missing", reason="buyer_storage_state_missing")
-            if path == self.config.storage_state_path:
-                self._write_probe_metadata(result)
-            return result
-        self._enforce_storage_state_permissions(path)
         try:
             if acquire_lock:
-                with self.session_lock(blocking=False):
-                    if self._recovery_probe_blocked():
-                        result = self._session_result("recovery_running", reason="buyer_recovery_in_progress")
+                with self.session_lock(
+                    blocking=False,
+                    owner_run_id=f"buyer-check-{secrets.token_hex(6)}",
+                    owner_operation="session_check",
+                ):
+                    joined = self._active_recovery()
+                    if joined:
+                        result = self._joined_session_result(joined)
                     else:
-                        result = self._probe_and_validate(path, persist_fingerprint=persist_fingerprint)
+                        operation = self._run_persistent_operation(nm_id=None, headless=True)
+                        result = self._validate_authenticated_session(
+                            operation.get("session") if isinstance(operation.get("session"), Mapping) else {},
+                            persist_fingerprint=persist_fingerprint,
+                        )
             else:
-                result = self._probe_and_validate(path, persist_fingerprint=persist_fingerprint)
+                operation = self._run_persistent_operation(nm_id=None, headless=True)
+                result = self._validate_authenticated_session(
+                    operation.get("session") if isinstance(operation.get("session"), Mapping) else {},
+                    persist_fingerprint=persist_fingerprint,
+                )
         except BlockingIOError:
-            result = self._session_result("recovery_running", reason="buyer_session_lock_busy")
+            result = self._joined_session_result(self._active_recovery() or self._lock_owner())
         except Exception:
             result = self._session_result("probe_error", reason="buyer_session_probe_failed")
-        if path == self.config.storage_state_path:
-            self._write_probe_metadata(result)
+        self._write_probe_metadata(result)
         return result
 
     def fetch_authenticated_buyer_price(self, nm_id: int) -> dict[str, Any]:
@@ -152,16 +167,33 @@ class WbBuyerSessionAdapter:
         if normalized_nm_id <= 0:
             return self._price_error(normalized_nm_id, "probe_error", "invalid_nm_id")
         self._ensure_runtime_permissions()
-        if self._recovery_probe_blocked():
-            return self._price_error(normalized_nm_id, "session_recovery_running", "buyer_recovery_in_progress")
-        path = self.config.storage_state_path
-        if not path.exists():
-            return self._price_error(normalized_nm_id, "session_missing", "buyer_storage_state_missing")
+        joined = self._active_recovery()
+        if joined:
+            return self._price_error(
+                normalized_nm_id,
+                "session_recovery_running",
+                "buyer_recovery_in_progress",
+                joined_run_id=str(joined.get("run_id") or ""),
+            )
         try:
-            with self.session_lock(blocking=False):
-                if self._recovery_probe_blocked():
-                    return self._price_error(normalized_nm_id, "session_recovery_running", "buyer_recovery_in_progress")
-                session = self._probe_and_validate(path, persist_fingerprint=True)
+            with self.session_lock(
+                blocking=False,
+                owner_run_id=f"buyer-price-{secrets.token_hex(6)}",
+                owner_operation="authenticated_price_read",
+            ):
+                joined = self._active_recovery()
+                if joined:
+                    return self._price_error(
+                        normalized_nm_id,
+                        "session_recovery_running",
+                        "buyer_recovery_in_progress",
+                        joined_run_id=str(joined.get("run_id") or ""),
+                    )
+                operation = self._run_persistent_operation(nm_id=normalized_nm_id, headless=True)
+                session = self._validate_authenticated_session(
+                    operation.get("session") if isinstance(operation.get("session"), Mapping) else {},
+                    persist_fingerprint=True,
+                )
                 if session.get("status") != "valid":
                     return self._price_error(
                         normalized_nm_id,
@@ -169,13 +201,15 @@ class WbBuyerSessionAdapter:
                         str(session.get("reason") or "buyer_session_invalid"),
                         session=session,
                     )
-                raw = dict(
-                    self.price_probe(path, normalized_nm_id)
-                    if self.price_probe is not None
-                    else self._run_playwright_price_probe(path, normalized_nm_id)
-                )
+                raw = dict(operation.get("price") or {}) if isinstance(operation.get("price"), Mapping) else {}
         except BlockingIOError:
-            return self._price_error(normalized_nm_id, "session_recovery_running", "buyer_session_lock_busy")
+            joined = self._active_recovery() or self._lock_owner()
+            return self._price_error(
+                normalized_nm_id,
+                "session_recovery_running",
+                "buyer_session_automation_busy",
+                joined_run_id=str(joined.get("run_id") or ""),
+            )
         except Exception:
             return self._price_error(normalized_nm_id, "probe_error", "authenticated_price_probe_failed")
 
@@ -202,6 +236,9 @@ class WbBuyerSessionAdapter:
             "source_method": str(raw.get("source_method") or "authenticated_browser_network_json"),
             "source_endpoint": _safe_endpoint(raw.get("source_endpoint")),
             "session_fingerprint": str(session.get("session_fingerprint") or ""),
+            "account_fingerprint_available": bool(session.get("account_confirmed")),
+            "authenticated_session_proof": True,
+            "persistent_profile": True,
             "freshness": {
                 "live_read": True,
                 "http_status": _int_or_none(raw.get("http_status")),
@@ -226,6 +263,8 @@ class WbBuyerSessionAdapter:
         blocking: bool,
         timeout_seconds: float | None = None,
         poll_seconds: float = 0.1,
+        owner_run_id: str = "",
+        owner_operation: str = "buyer_automation",
     ) -> Iterator[None]:
         self._ensure_runtime_permissions()
         handle = self.config.lock_path.open("a+", encoding="utf-8")
@@ -248,63 +287,48 @@ class WbBuyerSessionAdapter:
         except Exception:
             handle.close()
             raise
+        owner = {
+            "run_id": str(owner_run_id or ""),
+            "operation": str(owner_operation or "buyer_automation")[:120],
+            "pid": os.getpid(),
+            "acquired_at": self._now_text(),
+        }
+        _atomic_write_json(self.config.lock_owner_path, owner, mode=0o600)
         try:
             yield
         finally:
+            current_owner = self._lock_owner()
+            if int(current_owner.get("pid") or 0) == os.getpid() and str(current_owner.get("run_id") or "") == owner["run_id"]:
+                self.config.lock_owner_path.unlink(missing_ok=True)
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
-    def _recovery_probe_blocked(self) -> bool:
+    def _active_recovery(self) -> dict[str, Any]:
         try:
             payload = json.loads((self.config.state_dir / "recovery_status.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return False
-        return isinstance(payload, Mapping) and str(payload.get("status") or "") in RECOVERY_PROBE_BLOCKING_STATUSES
+            return {}
+        if isinstance(payload, Mapping) and str(payload.get("status") or "") in RECOVERY_PROBE_BLOCKING_STATUSES:
+            return dict(payload)
+        return {}
 
-    def persist_storage_state_atomically(self, candidate_path: Path) -> None:
-        self._ensure_runtime_permissions()
-        payload = json.loads(candidate_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, Mapping):
-            raise ValueError("buyer storage state must be a JSON object")
-        staged = self.config.state_dir / f"storage_state.staged.{secrets.token_hex(8)}.json"
-        staged.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.chmod(staged, 0o600)
-        staged.replace(self.config.storage_state_path)
-        os.chmod(self.config.storage_state_path, 0o600)
+    def _lock_owner(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.config.lock_owner_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return dict(payload) if isinstance(payload, Mapping) else {}
+
+    def _joined_session_result(self, run: Mapping[str, Any]) -> dict[str, Any]:
+        is_recovery = str(run.get("status") or "") in RECOVERY_PROBE_BLOCKING_STATUSES or str(run.get("operation") or "") == "buyer_recovery_supervisor"
+        return self._session_result(
+            "recovery_running",
+            reason="buyer_recovery_in_progress" if is_recovery else "buyer_session_automation_busy",
+            recovery_run_id=str(run.get("run_id") or ""),
+        )
 
     def stored_fingerprint(self) -> str:
         return str(self._fingerprint_record().get("fingerprint") or "")
-
-    def prepare_fingerprint_migration(self) -> dict[str, Any]:
-        """Migrate a provably bound v1 fingerprint without rebinding an account."""
-
-        record = self._fingerprint_record()
-        expected = str(record.get("fingerprint") or "")
-        version = str(record.get("version") or LEGACY_FINGERPRINT_VERSION)
-        if not expected or version == FINGERPRINT_VERSION:
-            return {
-                "status": "ready",
-                "reason": "buyer_fingerprint_ready",
-                "migrated": False,
-            }
-        anchor = self._legacy_bound_stable_identity(expected)
-        if not anchor:
-            return {
-                "status": "migration_required",
-                "reason": "buyer_fingerprint_migration_unproven",
-                "migrated": False,
-            }
-        fingerprint = self._fingerprint(anchor)
-        self._write_fingerprint_record(
-            fingerprint,
-            created_at=str(record.get("created_at") or ""),
-            migration_state="legacy_binding_proved_from_canonical_state",
-        )
-        return {
-            "status": "ready",
-            "reason": "buyer_fingerprint_migrated",
-            "migrated": True,
-        }
 
     def _fingerprint_record(self) -> dict[str, Any]:
         try:
@@ -313,35 +337,25 @@ class WbBuyerSessionAdapter:
             return {}
         return dict(payload) if isinstance(payload, Mapping) else {}
 
-    def _probe_and_validate(self, path: Path, *, persist_fingerprint: bool) -> dict[str, Any]:
-        raw = dict(self.browser_probe(path) if self.browser_probe is not None else self._run_playwright_session_probe(path))
+    def _validate_authenticated_session(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        persist_fingerprint: bool,
+    ) -> dict[str, Any]:
         status = str(raw.get("status") or "probe_error")
         if status != "valid":
             return self._session_result(status, reason=str(raw.get("reason") or f"buyer_session_{status}"))
-        identity_material = _canonical_account_identity(raw.pop("identity_material", None))
+        identity_material = _canonical_account_identity(raw.get("identity_material"))
         if not identity_material:
-            identity_material = _derive_identity_material(path)
-        if not identity_material:
-            return self._session_result("probe_error", reason="account_fingerprint_source_missing")
+            return self._session_result(
+                "valid",
+                reason="buyer_account_context_missing",
+                account_confirmed=False,
+            )
         fingerprint = self._fingerprint(identity_material)
         record = self._fingerprint_record()
-        expected = str(record.get("fingerprint") or "")
-        version = str(record.get("version") or LEGACY_FINGERPRINT_VERSION)
-        if expected and version != FINGERPRINT_VERSION:
-            if hmac.compare_digest(expected, fingerprint):
-                self._write_fingerprint_record(
-                    fingerprint,
-                    created_at=str(record.get("created_at") or ""),
-                    migration_state="legacy_candidate_direct_match",
-                )
-            else:
-                migration = self.prepare_fingerprint_migration()
-                if migration.get("status") != "ready":
-                    return self._session_result(
-                        "migration_required",
-                        reason="buyer_fingerprint_migration_unproven",
-                    )
-                expected = self.stored_fingerprint()
+        expected = str(record.get("fingerprint") or "") if str(record.get("version") or "") == FINGERPRINT_VERSION else ""
         if expected and not hmac.compare_digest(expected, fingerprint):
             return self._session_result(
                 "wrong_account",
@@ -349,7 +363,12 @@ class WbBuyerSessionAdapter:
                 session_fingerprint=fingerprint,
             )
         if not expected and persist_fingerprint:
-            self._write_fingerprint_record(fingerprint)
+            self._write_fingerprint_record(
+                fingerprint,
+                migration_state="bound_from_authenticated_response"
+                if record
+                else "",
+            )
         return self._session_result(
             "valid",
             reason="buyer_session_valid",
@@ -357,130 +376,186 @@ class WbBuyerSessionAdapter:
             account_confirmed=True,
         )
 
-    def _run_playwright_session_probe(self, path: Path) -> dict[str, Any]:
+    def _run_persistent_operation(self, *, nm_id: int | None, headless: bool) -> dict[str, Any]:
+        profile_dir = self.config.persistent_profile_dir
+        if self.operation_probe is not None:
+            return dict(self.operation_probe(profile_dir, nm_id, headless))
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
-            # Reuse the isolated recovery display when available.  WB can
-            # present a login redirect to a headless probe even though the
-            # headed recovery context is visibly authenticated; the probe
-            # remains independent while matching the browser surface that
-            # established the candidate state.
-            browser = playwright.chromium.launch(headless=not bool(os.environ.get("DISPLAY")))
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                locale="ru-RU",
+                viewport={"width": 1500, "height": 820},
+            )
             try:
-                context = browser.new_context(storage_state=str(path), locale="ru-RU")
-                page = context.new_page()
-                page.set_default_timeout(self.config.navigation_timeout_ms)
-                page.set_default_navigation_timeout(self.config.navigation_timeout_ms)
-                identity_candidates: list[Mapping[str, Any]] = []
-
-                def capture_identity(response: Any) -> None:
-                    try:
-                        url = str(response.url or "")
-                        lowered_url = url.lower()
-                        if response.status != 200 or not any(marker in lowered_url for marker in ("profile", "account", "user", "/lk")):
-                            return
-                        if "json" not in str(response.headers.get("content-type") or "").lower():
-                            return
-                        identity = _extract_account_identity(response.json())
-                        if identity:
-                            identity_candidates.append(identity)
-                    except Exception:
-                        return
-
-                page.on("response", capture_identity)
-                page.goto(self.config.buyer_url, wait_until="domcontentloaded")
-                page.wait_for_timeout(min(self.config.settle_timeout_ms, 8_000))
-                url = str(page.url or "")
-                body = _safe_page_text(page)
-                if LOGIN_URL_RE.search(urllib_parse.urlparse(url).path):
-                    return {"status": "login_redirect", "reason": "buyer_login_redirect"}
-                lowered = body.lower()
-                if any(marker in lowered for marker in CHALLENGE_MARKERS):
-                    return {"status": "security_challenge", "reason": "buyer_security_challenge"}
-                if _looks_logged_out(lowered):
-                    return {"status": "expired", "reason": "buyer_login_required"}
-                identity = _select_stable_account_identity(
-                    list(reversed(identity_candidates)),
-                    _derive_context_identity_material(context),
-                    _derive_identity_material(path),
-                )
-                if not identity:
-                    return {"status": "probe_error", "reason": "buyer_account_context_missing"}
-                return {"status": "valid", "identity_material": identity}
+                self.migrate_legacy_storage_state(context)
+                return self.probe_persistent_context(context, nm_id=nm_id)
             finally:
-                browser.close()
+                context.close()
+                os.chmod(profile_dir, 0o700)
 
-    def _run_playwright_price_probe(self, path: Path, nm_id: int) -> dict[str, Any]:
-        from playwright.sync_api import sync_playwright
+    def migrate_legacy_storage_state(self, context: Any) -> dict[str, Any]:
+        """Best-effort one-time import; the legacy JSON never becomes canonical again."""
 
+        marker = self.config.legacy_migration_path
+        if marker.exists():
+            return {"status": "already_attempted"}
+        payload = _read_legacy_storage_state(self.config.storage_state_path)
+        migrated_cookies = 0
+        migrated_origins = 0
+        status = "legacy_state_absent"
+        if payload:
+            status = "attempted"
+            cookies = _legacy_wb_cookies(payload)
+            if cookies:
+                try:
+                    context.add_cookies(cookies)
+                    migrated_cookies = len(cookies)
+                except Exception:
+                    pass
+            for origin, items in _legacy_wb_local_storage(payload):
+                try:
+                    page = context.new_page()
+                    page.goto(origin, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                    page.evaluate(
+                        "items => { for (const item of items) localStorage.setItem(item.name, item.value); }",
+                        items,
+                    )
+                    page.close()
+                    migrated_origins += 1
+                except Exception:
+                    continue
+        result = {
+            "status": status,
+            "attempted_at": self._now_text(),
+            "cookies_imported": migrated_cookies,
+            "origins_imported": migrated_origins,
+            "canonical_session": "persistent_chromium_profile",
+        }
+        _atomic_write_json(marker, result, mode=0o600)
+        return result
+
+    def probe_persistent_context(
+        self,
+        context: Any,
+        *,
+        nm_id: int | None,
+        page: Any | None = None,
+    ) -> dict[str, Any]:
+        active_page = page or (context.pages[0] if getattr(context, "pages", None) else context.new_page())
+        active_page.set_default_timeout(self.config.navigation_timeout_ms)
+        active_page.set_default_navigation_timeout(self.config.navigation_timeout_ms)
+        session = self._probe_session_in_context(active_page)
+        result: dict[str, Any] = {"session": session, "price": {}}
+        if str(session.get("status") or "") == "valid" and nm_id is not None:
+            result["price"] = self._probe_price_in_context(active_page, int(nm_id))
+        return result
+
+    def validate_persistent_proof(
+        self,
+        operation: Mapping[str, Any],
+        *,
+        require_price: bool,
+    ) -> dict[str, Any]:
+        session = self._validate_authenticated_session(
+            operation.get("session") if isinstance(operation.get("session"), Mapping) else {},
+            persist_fingerprint=True,
+        )
+        price = dict(operation.get("price") or {}) if isinstance(operation.get("price"), Mapping) else {}
+        valid = session.get("status") == "valid" and (not require_price or price.get("status") == "ok")
+        return {
+            "valid": bool(valid),
+            "session": session,
+            "price": price,
+            "reason": (
+                str(session.get("reason") or "buyer_session_invalid")
+                if session.get("status") != "valid"
+                else str(price.get("reason") or "authenticated_price_unavailable")
+                if require_price and price.get("status") != "ok"
+                else "buyer_persistent_profile_authenticated"
+            ),
+        }
+
+    def _probe_session_in_context(self, page: Any) -> dict[str, Any]:
+        identity_candidates: list[Mapping[str, Any]] = []
+
+        def capture_identity(response: Any) -> None:
+            try:
+                parsed = urllib_parse.urlparse(str(response.url or ""))
+                lowered_url = str(response.url or "").lower()
+                if response.status != 200 or not _is_wb_host(parsed.hostname):
+                    return
+                if not any(marker in lowered_url for marker in ("profile", "account", "user", "/lk")):
+                    return
+                if "json" not in str(response.headers.get("content-type") or "").lower():
+                    return
+                identity = _extract_account_identity(response.json())
+                if identity:
+                    identity_candidates.append(identity)
+            except Exception:
+                return
+
+        page.on("response", capture_identity)
+        response = page.goto(self.config.buyer_url, wait_until="domcontentloaded")
+        page.wait_for_timeout(min(self.config.settle_timeout_ms, 8_000))
+        url = str(page.url or "")
+        body = _safe_page_text(page)
+        parsed = urllib_parse.urlparse(url)
+        if LOGIN_URL_RE.search(parsed.path):
+            return {"status": "login_redirect", "reason": "buyer_login_redirect"}
+        lowered = body.lower()
+        if any(marker in lowered for marker in CHALLENGE_MARKERS):
+            return {"status": "security_challenge", "reason": "buyer_security_challenge"}
+        if _looks_logged_out(lowered):
+            return {"status": "expired", "reason": "buyer_login_required"}
+        normalized_path = parsed.path.rstrip("/").lower()
+        if not _is_wb_host(parsed.hostname) or not (normalized_path == "/lk" or normalized_path.startswith("/lk/")):
+            return {"status": "login_redirect", "reason": "buyer_login_redirect"}
+        if response is None or int(getattr(response, "status", 0) or 0) >= 400:
+            return {"status": "probe_error", "reason": "buyer_session_probe_failed"}
+        return {
+            "status": "valid",
+            "reason": "buyer_session_valid",
+            "identity_material": _select_stable_account_identity(list(reversed(identity_candidates))),
+            "authenticated_response_proof": True,
+        }
+
+    def _probe_price_in_context(self, page: Any, nm_id: int) -> dict[str, Any]:
         candidates: list[dict[str, Any]] = []
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+
+        def capture(response: Any) -> None:
             try:
-                context = browser.new_context(storage_state=str(path), locale="ru-RU")
-                page = context.new_page()
-                page.set_default_timeout(self.config.navigation_timeout_ms)
+                content_type = str(response.headers.get("content-type") or "").lower()
+                content_length = _int_or_none(response.headers.get("content-length"))
+                parsed = urllib_parse.urlparse(str(response.url or ""))
+                if response.status != 200 or "json" not in content_type or not _is_wb_host(parsed.hostname):
+                    return
+                if content_length is not None and content_length > MAX_NETWORK_JSON_BYTES:
+                    return
+                extracted = extract_authenticated_price_from_network_payload(response.json(), nm_id=nm_id, response_url=response.url)
+                if extracted.get("status") == "ok":
+                    candidates.append(extracted)
+            except Exception:
+                return
 
-                def capture(response: Any) -> None:
-                    try:
-                        content_type = str(response.headers.get("content-type") or "").lower()
-                        content_length = _int_or_none(response.headers.get("content-length"))
-                        if response.status != 200 or "json" not in content_type:
-                            return
-                        if content_length is not None and content_length > MAX_NETWORK_JSON_BYTES:
-                            return
-                        parsed = urllib_parse.urlparse(str(response.url or ""))
-                        if not _is_wb_host(parsed.hostname):
-                            return
-                        extracted = extract_authenticated_price_from_network_payload(
-                            response.json(),
-                            nm_id=nm_id,
-                            response_url=response.url,
-                        )
-                        if extracted.get("status") == "ok":
-                            candidates.append(extracted)
-                    except Exception:
-                        return
-
-                page.on("response", capture)
-                page.goto(
-                    self.config.product_url_template.format(nm_id=nm_id),
-                    wait_until="domcontentloaded",
-                )
-                page.wait_for_timeout(self.config.settle_timeout_ms)
-                url = str(page.url or "")
-                body = _safe_page_text(page)
-                if LOGIN_URL_RE.search(urllib_parse.urlparse(url).path) or _looks_logged_out(body.lower()):
-                    return {"status": "session_expired", "reason": "buyer_login_required"}
-                if any(marker in body.lower() for marker in CHALLENGE_MARKERS):
-                    return {"status": "security_challenge", "reason": "buyer_security_challenge"}
-                if candidates:
-                    candidates.sort(key=lambda row: int(row.get("source_score") or 0), reverse=True)
-                    result = dict(candidates[0])
-                    result.pop("source_score", None)
-                    result["measured_at"] = self._now_text()
-                    return result
-                dom = _extract_dom_price(page)
-                if dom is not None:
-                    return {
-                        "status": "ok",
-                        "authenticated_buyer_price": dom,
-                        "normal_price": dom,
-                        "wallet_price": None,
-                        "card_price": None,
-                        "club_price": None,
-                        "payment_context": "unknown/mixed",
-                        "destination_context": {},
-                        "source_method": "authenticated_browser_dom_fallback",
-                        "source_endpoint": urllib_parse.urlunparse((urllib_parse.urlparse(url).scheme, urllib_parse.urlparse(url).netloc, urllib_parse.urlparse(url).path, "", "", "")),
-                        "http_status": 200,
-                        "measured_at": self._now_text(),
-                        "diagnostics": {"network_primary_missing": True, "dom_fallback": True},
-                    }
-                return {"status": "price_missing", "reason": "authenticated_network_price_missing"}
-            finally:
-                browser.close()
+        page.on("response", capture)
+        page.goto(self.config.product_url_template.format(nm_id=nm_id), wait_until="domcontentloaded")
+        page.wait_for_timeout(self.config.settle_timeout_ms)
+        url = str(page.url or "")
+        body = _safe_page_text(page)
+        if LOGIN_URL_RE.search(urllib_parse.urlparse(url).path) or _looks_logged_out(body.lower()):
+            return {"status": "session_expired", "reason": "buyer_login_required"}
+        if any(marker in body.lower() for marker in CHALLENGE_MARKERS):
+            return {"status": "security_challenge", "reason": "buyer_security_challenge"}
+        if candidates:
+            candidates.sort(key=lambda row: int(row.get("source_score") or 0), reverse=True)
+            result = dict(candidates[0])
+            result.pop("source_score", None)
+            result["measured_at"] = self._now_text()
+            return result
+        return {"status": "price_missing", "reason": "authenticated_network_price_missing"}
 
     def _fingerprint(self, identity_material: Any) -> str:
         key = self._fingerprint_key()
@@ -520,34 +595,6 @@ class WbBuyerSessionAdapter:
             payload["migration_state"] = migration_state
         _atomic_write_json(self.config.fingerprint_record_path, payload, mode=0o600)
 
-    def _legacy_bound_stable_identity(self, expected: str) -> Mapping[str, Any] | None:
-        legacy = _derive_legacy_identity_material(self.config.storage_state_path)
-        if not isinstance(legacy, Mapping):
-            return None
-        account_fields = legacy.get("account_fields") if isinstance(legacy.get("account_fields"), list) else []
-        matched: list[Mapping[str, Any]] = []
-        legacy_candidates: list[Mapping[str, Any]] = []
-        if account_fields:
-            legacy_candidates.append({"account_fields": sorted(account_fields, key=lambda item: json.dumps(item, sort_keys=True))})
-        for row in account_fields:
-            if not isinstance(row, Mapping):
-                continue
-            items = list(row.items())
-            for size in range(1, len(items) + 1):
-                for subset in combinations(items, size):
-                    legacy_candidates.append(dict(subset))
-        for candidate in legacy_candidates:
-            if not hmac.compare_digest(expected, self._fingerprint(candidate)):
-                continue
-            canonical = _canonical_account_identity(candidate)
-            if canonical:
-                matched.append(canonical)
-        unique = {
-            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")): value
-            for value in matched
-        }
-        return next(iter(unique.values())) if len(unique) == 1 else None
-
     def _write_probe_metadata(self, result: Mapping[str, Any]) -> None:
         payload = {
             "status": str(result.get("status") or "probe_error"),
@@ -561,10 +608,10 @@ class WbBuyerSessionAdapter:
     def _ensure_runtime_permissions(self) -> None:
         self.config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.config.state_dir, 0o700)
-
-    @staticmethod
-    def _enforce_storage_state_permissions(path: Path) -> None:
-        os.chmod(path, 0o600)
+        self.config.persistent_profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.config.persistent_profile_dir, 0o700)
+        if self.config.storage_state_path.exists():
+            os.chmod(self.config.storage_state_path, 0o600)
 
     def _session_result(
         self,
@@ -573,6 +620,7 @@ class WbBuyerSessionAdapter:
         reason: str,
         session_fingerprint: str = "",
         account_confirmed: bool = False,
+        recovery_run_id: str = "",
     ) -> dict[str, Any]:
         return {
             "contract_name": "wb_buyer_session_status_v1",
@@ -582,6 +630,9 @@ class WbBuyerSessionAdapter:
             "checked_at": self._now_text(),
             "session_fingerprint": session_fingerprint,
             "account_confirmed": account_confirmed,
+            "authenticated_session_proof": status == "valid",
+            "persistent_profile": True,
+            "recovery_run_id": recovery_run_id,
         }
 
     def _price_error(
@@ -592,6 +643,7 @@ class WbBuyerSessionAdapter:
         *,
         session: Mapping[str, Any] | None = None,
         diagnostics: Mapping[str, Any] | None = None,
+        joined_run_id: str = "",
     ) -> dict[str, Any]:
         return {
             "status": status,
@@ -608,6 +660,10 @@ class WbBuyerSessionAdapter:
             "source_method": "authenticated_browser_network_json",
             "source_endpoint": "",
             "session_fingerprint": str((session or {}).get("session_fingerprint") or ""),
+            "account_fingerprint_available": bool((session or {}).get("account_confirmed")),
+            "authenticated_session_proof": False,
+            "persistent_profile": True,
+            "recovery_run_id": joined_run_id,
             "freshness": {"live_read": False, "stability": "unavailable"},
             "diagnostics": _safe_diagnostics(diagnostics or {}),
         }
@@ -727,57 +783,60 @@ def _normalize_price(value: Any, *, field: str) -> float | None:
     return round(numeric, 2)
 
 
-def _derive_identity_material(path: Path) -> Mapping[str, Any] | None:
+def _read_legacy_storage_state(path: Path) -> Mapping[str, Any] | None:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return _stable_identity_from_storage_state(state)
+    return state if isinstance(state, Mapping) else None
 
 
-def _derive_legacy_identity_material(path: Path) -> Mapping[str, Any] | None:
-    """Reconstruct only the v1 stable-field shapes for a fail-closed migration."""
-
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(state, Mapping):
-        return None
-    material: dict[str, Any] = {"cookies": [], "storage": [], "account_fields": []}
+def _legacy_wb_cookies(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
     for cookie in state.get("cookies", []) if isinstance(state.get("cookies"), list) else []:
         if not isinstance(cookie, Mapping):
             continue
         domain = str(cookie.get("domain") or "").lower()
-        name = str(cookie.get("name") or "")
+        name = str(cookie.get("name") or "").strip()
         value = str(cookie.get("value") or "")
-        if domain.endswith("wildberries.ru") and value and AUTH_NAME_RE.search(name):
-            material["cookies"].append([domain, name, value])
-    for origin in state.get("origins", []) if isinstance(state.get("origins"), list) else []:
-        if not isinstance(origin, Mapping) or "wildberries.ru" not in str(origin.get("origin") or "").lower():
+        if not name or not value or not _is_wb_host(domain.lstrip(".")):
             continue
+        migrated: dict[str, Any] = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": str(cookie.get("path") or "/"),
+            "httpOnly": bool(cookie.get("httpOnly")),
+            "secure": bool(cookie.get("secure")),
+        }
+        if isinstance(cookie.get("expires"), (int, float)):
+            migrated["expires"] = cookie.get("expires")
+        same_site = str(cookie.get("sameSite") or "")
+        if same_site in {"Strict", "Lax", "None"}:
+            migrated["sameSite"] = same_site
+        result.append(migrated)
+    return result
+
+
+def _legacy_wb_local_storage(state: Mapping[str, Any]) -> list[tuple[str, list[dict[str, str]]]]:
+    result: list[tuple[str, list[dict[str, str]]]] = []
+    for origin in state.get("origins", []) if isinstance(state.get("origins"), list) else []:
+        if not isinstance(origin, Mapping):
+            continue
+        origin_url = str(origin.get("origin") or "")
+        if not _is_wb_host(urllib_parse.urlparse(origin_url).hostname):
+            continue
+        items: list[dict[str, str]] = []
         for item in origin.get("localStorage", []) if isinstance(origin.get("localStorage"), list) else []:
             if not isinstance(item, Mapping):
                 continue
             name = str(item.get("name") or "")
             value = str(item.get("value") or "")
-            if value and AUTH_NAME_RE.search(name):
-                material["storage"].append([str(origin.get("origin") or ""), name, value])
-                parsed_value = _json_or_text(value)
-                identity = _extract_account_identity(parsed_value)
-                if identity:
-                    material["account_fields"].append(identity)
-    if material["account_fields"]:
-        return {"account_fields": sorted(material["account_fields"], key=lambda item: json.dumps(item, sort_keys=True))}
-    return None
-
-
-def _derive_context_identity_material(context: Any) -> Mapping[str, Any] | None:
-    try:
-        state = context.storage_state()
-    except Exception:
-        return None
-    return _stable_identity_from_storage_state(state)
+            if name:
+                items.append({"name": name, "value": value})
+        if items:
+            result.append((origin_url, items))
+    return result
 
 
 IDENTITY_KEY_ALIASES = {
@@ -787,28 +846,8 @@ IDENTITY_KEY_ALIASES = {
     "profile_id": "profile_id",
     "accountid": "account_id",
     "account_id": "account_id",
-    "phone": "phone",
-    "phone_number": "phone",
-    "login": "login",
 }
-IDENTITY_KEY_PRIORITY = ("user_id", "account_id", "profile_id", "phone", "login")
-
-
-def _stable_identity_from_storage_state(state: Any) -> Mapping[str, Any] | None:
-    if not isinstance(state, Mapping):
-        return None
-    candidates: list[Any] = []
-    for origin in state.get("origins", []) if isinstance(state.get("origins"), list) else []:
-        if not isinstance(origin, Mapping) or "wildberries.ru" not in str(origin.get("origin") or "").lower():
-            continue
-        for item in origin.get("localStorage", []) if isinstance(origin.get("localStorage"), list) else []:
-            if not isinstance(item, Mapping):
-                continue
-            name = str(item.get("name") or "")
-            value = str(item.get("value") or "")
-            if value and AUTH_NAME_RE.search(name):
-                candidates.append(_json_or_text(value))
-    return _select_stable_account_identity(candidates)
+IDENTITY_KEY_PRIORITY = ("user_id", "account_id", "profile_id")
 
 
 def _select_stable_account_identity(*values: Any) -> Mapping[str, Any] | None:
@@ -853,15 +892,15 @@ def _extract_account_identity(value: Any, *, depth: int = 0) -> Mapping[str, Any
     return _canonical_account_identity(value)
 
 
-def _json_or_text(value: str) -> Any:
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
-
-
 def _looks_logged_out(lowered_text: str) -> bool:
-    markers = ("войти или зарегистрироваться", "введите номер телефона", "получить код")
+    markers = (
+        "войти или зарегистрироваться",
+        "введите номер телефона",
+        "получить код",
+        "войти под этим аккаунтом",
+        "продолжить как",
+        "войти как",
+    )
     return any(marker in lowered_text for marker in markers)
 
 
@@ -870,27 +909,6 @@ def _safe_page_text(page: Any) -> str:
         return str(page.locator("body").inner_text(timeout=5_000) or "")[:20_000]
     except Exception:
         return ""
-
-
-def _extract_dom_price(page: Any) -> float | None:
-    selectors = (
-        "[data-link*='price'] ins",
-        ".price-block__final-price",
-        ".product-page__price",
-        "ins.price-block__wallet-price",
-    )
-    for selector in selectors:
-        try:
-            text = str(page.locator(selector).first.inner_text(timeout=1_000) or "")
-        except Exception:
-            continue
-        match = re.search(r"([0-9][0-9\s]*)", text.replace("\u00a0", " "))
-        if match:
-            try:
-                return round(float(match.group(1).replace(" ", "")), 2)
-            except ValueError:
-                continue
-    return None
 
 
 def _safe_endpoint(value: Any) -> str:
@@ -927,8 +945,6 @@ def _safe_diagnostics(value: Any) -> dict[str, Any]:
         "card_field",
         "club_field",
         "network_primary",
-        "network_primary_missing",
-        "dom_fallback",
         "region_mismatch",
         "currency_mismatch",
     }

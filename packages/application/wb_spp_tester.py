@@ -2589,7 +2589,15 @@ def _stable_buyer_pair(reads: Sequence[Mapping[str, Any]]) -> tuple[float, float
         return None
     left_fingerprint = str(left_auth.get("session_fingerprint") or "")
     right_fingerprint = str(right_auth.get("session_fingerprint") or "")
-    if not left_fingerprint or left_fingerprint != right_fingerprint:
+    if left_fingerprint or right_fingerprint:
+        if not left_fingerprint or left_fingerprint != right_fingerprint:
+            return None
+    elif not (
+        bool(left_auth.get("authenticated_session_proof"))
+        and bool(right_auth.get("authenticated_session_proof"))
+        and bool(left_auth.get("persistent_profile"))
+        and bool(right_auth.get("persistent_profile"))
+    ):
         return None
     if _destination_signature(left_auth) != _destination_signature(right_auth):
         return None
