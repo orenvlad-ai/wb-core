@@ -158,7 +158,15 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
             stop_recovery(config, requested_run_id=str(current.get("run_id") or ""), acquire_start_lock=False)
         run_id = f"buyer-recovery-{_now().strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
         adapter = WbBuyerSessionAdapter(config=config.session)
-        session = adapter.check_session()
+        session: Mapping[str, Any]
+        for attempt in range(3):
+            try:
+                session = adapter.check_session()
+                break
+            except RuntimeError as exc:
+                if "lock" not in str(exc).lower() or attempt == 2:
+                    raise
+                time.sleep(0.5)
         if session.get("status") == "valid":
             payload = {
                 "run_id": run_id,
