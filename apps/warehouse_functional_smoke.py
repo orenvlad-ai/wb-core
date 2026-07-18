@@ -577,13 +577,35 @@ def _test_external_optimistic_recheck() -> None:
     revision_source = {
         "supply_id": "wb-1",
         "status_id": 4,
-        "normalized_row_json": "{}",
+        "normalized_row_json": json.dumps(
+            {
+                "packed_quantity": 100,
+                "accepted_quantity": 90,
+                "synced_at": "2026-07-18T12:00:00Z",
+                "last_list_synced_at": "2026-07-18T12:00:00Z",
+                "last_enriched_at": "2026-07-18T12:00:00Z",
+            },
+            sort_keys=True,
+        ),
         "raw_goods_hash": "goods",
         "raw_goods_json": "[]",
         "updated_date": "2026-07-18",
         "last_enriched_at": "2026-07-18T12:00:00Z",
     }
-    later_refresh = {**revision_source, "last_enriched_at": "2026-07-18T13:00:00Z"}
+    later_refresh = {
+        **revision_source,
+        "normalized_row_json": json.dumps(
+            {
+                "packed_quantity": 100,
+                "accepted_quantity": 90,
+                "synced_at": "2026-07-18T13:00:00Z",
+                "last_list_synced_at": "2026-07-18T13:00:00Z",
+                "last_enriched_at": "2026-07-18T13:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        "last_enriched_at": "2026-07-18T13:00:00Z",
+    }
     _assert(
         _supply_revision(revision_source) == _supply_revision(later_refresh),
         "volatile enrichment timestamp does not cause false cutover drift",
@@ -592,6 +614,23 @@ def _test_external_optimistic_recheck() -> None:
         _supply_revision(revision_source)
         != _supply_revision({**revision_source, "status_id": 5}),
         "business supply state change invalidates the reviewed plan",
+    )
+    accepted_correction = {
+        **revision_source,
+        "normalized_row_json": json.dumps(
+            {
+                "packed_quantity": 100,
+                "accepted_quantity": 91,
+                "synced_at": "2026-07-18T13:00:00Z",
+                "last_list_synced_at": "2026-07-18T13:00:00Z",
+                "last_enriched_at": "2026-07-18T13:00:00Z",
+            },
+            sort_keys=True,
+        ),
+    }
+    _assert(
+        _supply_revision(revision_source) != _supply_revision(accepted_correction),
+        "accepted quantity correction invalidates the reviewed plan",
     )
 
 
