@@ -47,7 +47,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Buyer recovery now publishes one single-flight run before probe handoff, gates competing UI/status probes, lets the same supervisor bounded-wait for and own the automation lock through candidate validation and atomic save, and verifies the exact production contention scenario through real start/supervisor lifecycle integration coverage."
+update_note: "Buyer session now uses one protected persistent Chromium user_data_dir for checks, recovery, automatic saved-account login and authenticated price reads; snapshot export/import and candidate storage state are non-canonical and forbidden."
 ---
 
 # 1. Идентификатор и статус
@@ -85,20 +85,25 @@ The global module 35 metric `spp_proxy` stays anonymous and unchanged. Only this
 
 Runtime state is bounded under:
 
-- `wb_buyer_session/storage_state.json`
+- `wb_buyer_session/chromium_user_data/`
+- `wb_buyer_session/storage_state.json` (legacy migration input only; retained, never canonical after migration)
+- `wb_buyer_session/legacy_storage_state_migration.json`
 - `wb_buyer_session/fingerprint.key`
 - `wb_buyer_session/account_fingerprint.json`
 - `wb_buyer_session/session_probe.json`
-- `wb_buyer_session/buyer_session.lock`
+- `wb_buyer_session/buyer_session_automation.lock`
+- `wb_buyer_session/buyer_session_automation_owner.json`
 - `sheet_vitrina_v1_prices/spp_tests/current_job.json`
 - `sheet_vitrina_v1_prices/spp_tests/jobs/{job_id}.json`
 - `sheet_vitrina_v1_prices/spp_tests/audit.jsonl`
 - `sheet_vitrina_v1_prices/spp_tests/schedule.json`
 - `sheet_vitrina_v1_prices/spp_tests/execution.lock`
 
-The buyer-session files live below the hosted runtime state root, outside Git and separately from Seller Portal storage. Directory mode is `0700`; storage/key/fingerprint/probe/recovery files are `0600`; state is saved atomically. `fingerprint.key` is runtime-random and the stored identity is only an HMAC-SHA256 fingerprint over one normalized stable account identity (`user_id`/account/profile id, with phone/login only as lower-priority identity evidence), never a token, cookie, phone/email/name/account id. The first accepted authenticated account binds that fingerprint; a different later account is `wrong_account`. V1 migration is allowed only when the existing HMAC can be reproduced from stable identity evidence in the already bound canonical state or from the same post-login candidate; otherwise recovery terminates as `migration_required` without replacing fingerprint or storage. `buyer_session.lock` excludes session recovery from browser measurement. Seller storage state and Seller recovery locks are never read or reused.
+The buyer-session files live below the hosted runtime state root, outside Git and separately from Seller Portal storage. Both the buyer state directory and `chromium_user_data` have mode `0700`; key/fingerprint/probe/recovery/lock metadata files have mode `0600`. The persistent Chromium profile is the only canonical buyer session. Session check, recovery, automatic login and authenticated price reads all use `chromium.launch_persistent_context(user_data_dir=...)`; `browser.new_context(storage_state=...)`, candidate state files, `context.storage_state(...)`, IndexedDB snapshots and validation in a browser importing a snapshot are forbidden. The old `storage_state.json` is not deleted and may be read once only to best-effort add WB cookies/localStorage to the persistent profile; the protected migration marker prevents it from becoming canonical again.
 
-Recovery is single-flight through a dedicated start lock plus one buyer-session automation lock owned by the spawned supervisor. `start_recovery()` publishes `starting` and starts exactly one supervisor without running another independent session probe; while the run is active, UI/status checks return the joined recovery state and cannot start a competing probe. The supervisor bounded-waits for an already running preflight to release `buyer_session.lock`, acquires that same lock before checking the canonical session, and keeps it through browser recovery, candidate capture, independent validation and atomic save. This removes the preflight-release/supervisor-acquire race and publishes `completed` only after the automation lock is released. Supervisor identity is a `run_id + PID + process-group + process-start` tuple; stale/orphan cleanup never kills a merely reused PID and never deletes canonical storage or fingerprint. Candidate state is captured only after the visible page settles, validated by a fresh isolated probe, atomically promoted, and independently checked again; failed final validation restores the prior canonical state.
+`fingerprint.key` is runtime-random. A stable `user_id`/`account_id`/`profile_id` found in a real authenticated WB response is normalized and stored only as an HMAC-SHA256 fingerprint; phone/login text is not accepted as account-id evidence, and a later different stable id is `wrong_account`. `buyer_account_context_missing` means only that fingerprint input was unavailable, not logout or probe failure: a real `/lk` browser proof plus a successful read-only authenticated WB price response keeps read-only SPP available. Fingerprint heuristics never override that browser proof.
+
+Recovery is single-flight through a dedicated start lock plus one automation lock owned continuously by the spawned supervisor. `start_recovery()` publishes `starting` and starts exactly one supervisor; a second start, UI check, status probe or price request joins/reports the current exact `run_id` and must not launch a competing browser context. The supervisor starts headed persistent Chromium on Xvfb, checks the current profile, clicks exactly one safe saved-account continuation control, and starts x11vnc/websockify only for an actual SMS/OTP/phone/CAPTCHA/security/multiple-account challenge. After login it proves `/lk` and a read-only authenticated price response, fully closes that persistent context, starts a second Chromium process with the same `user_data_dir`, and repeats both proofs. Only that restart proof can complete recovery. Supervisor identity is a `run_id + PID + process-group + process-start` tuple; stop and terminal cleanup release the lock and terminate Chromium/Xvfb/openbox/x11vnc/websockify children.
 
 `current_job.json` stores only an active or seller-unrestored job id, status, heartbeat, runner identity and TTL diagnostics. It is removed only after a fresh exact seller tuple plus quarantine-absent proof. `jobs/*.json` and `audit.jsonl` remain the canonical history/evidence, and status returns the newest canonical job when there is no current pointer; schedule support does not add a DB or a parallel job journal. `schedule.json` stores the single daily business schedule and at-most-once claim state. `execution.lock` is an OS-level cross-process lock shared by manual threads, the systemd runner and emergency restore.
 
@@ -115,7 +120,7 @@ Start requires:
 - `editableSizePrice=false`;
 - quarantine absent at baseline;
 - nmID is still present in active server-owned nomenclature;
-- buyer session status is `valid`, its irreversible fingerprint matches the first accepted account, and authenticated buyer price/context is available;
+- buyer session status is `valid` by current authenticated browser proof and authenticated buyer price/context is available; when both reads expose a stable account id its HMAC must match, while absent id data does not block read-only SPP;
 - anonymous buyer-price control is available and is not marked 429/timeout/stale;
 - explicit live-change confirmation;
 - `restore_baseline=true`.
@@ -136,7 +141,7 @@ Inputs:
 
 Measurement conversion keeps current discount and changes only integer `price`. After upload, the runner uses WB readback `discountedPrice`, not target price, as actual seller discounted price.
 
-For every measurement the tester polls an authenticated and anonymous observation pair until it has two consecutive identical values for each source under compatible destination context. The session fingerprint must stay unchanged. The result records:
+For every measurement the tester polls an authenticated and anonymous observation pair until it has two consecutive identical values for each source under compatible destination context. A present stable-account fingerprint must stay unchanged; when WB exposes no stable id, two successful reads from the same locked persistent profile with fresh authenticated-browser proof are sufficient. The result records:
 - seller discounted price;
 - authenticated buyer price as primary;
 - anonymous buyer price as control;
@@ -160,7 +165,7 @@ A point is high confidence only when:
 - upload task succeeds;
 - WB readback matches expected discounted price;
 - authenticated and anonymous buyer prices both reach a two-read stable proof;
-- the authenticated fingerprint remains bound and both observations have compatible destination context;
+- any available authenticated fingerprint remains bound (or both reads carry current persistent-profile browser proof when no stable id is exposed), and both observations have compatible destination context;
 - quarantine is absent;
 - there is no unresolved 429/timeout/stale evidence.
 
@@ -212,7 +217,7 @@ Late-run policy is bounded: a due run may start at most 15 minutes late. A later
 
 # 10. UI
 
-The upper block continues to show the current/last job while `active_job` is reserved for a truly active/unrestored pointer. Opening `Цены -> Проверка СПП` first reads the current recovery status, joins its `run_id` after reload, or checks the buyer session and starts recovery automatically when invalid. The UI distinguishes `checking_session`, `automatic_login`, `stabilizing_session`, `awaiting_human`, `saving_session`, `validating_session`, valid, wrong-account, migration-required, timeout and error states. noVNC/websockify and launcher download are created only for `awaiting_human`; an automatic saved-account login creates no VNC/websockify/SSH contour. After terminal completion the UI rechecks the saved session and unblocks baseline/plan. `Проверить сессию` / `Установить сессию` remain emergency fallbacks. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job.
+The upper block continues to show the current/last job while `active_job` is reserved for a truly active/unrestored pointer. Opening `Цены -> Проверка СПП` first reads the current recovery status, joins its `run_id` after reload, or checks the persistent buyer profile and starts recovery automatically when invalid. The UI distinguishes `checking_session`, `automatic_login`, `awaiting_human`, `validating_session`, valid, wrong-account, timeout and error states. noVNC/websockify and launcher download are created only for a real human challenge in `awaiting_human`; automatic saved-account login creates no VNC/websockify/SSH contour. After terminal completion the UI rechecks the same persistent profile and unblocks baseline/plan. `Проверить сессию` / `Установить сессию` remain emergency fallbacks. Above manual parameters, `Автопроверка` renders persistent schedule controls. Below the current job, `История проверок` renders newest-first expandable rows and lazily loads safe detail per job.
 
 Manual UI remains intentionally small:
 - SKU selector from current prices/active registry rows;
