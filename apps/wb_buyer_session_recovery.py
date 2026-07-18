@@ -33,6 +33,7 @@ from playwright.sync_api import sync_playwright
 from packages.adapters.wb_buyer_session import (  # noqa: E402
     WbBuyerSessionAdapter,
     WbBuyerSessionConfig,
+    WbBuyerSessionLockTimeout,
     load_wb_buyer_session_config_from_env,
 )
 
@@ -43,6 +44,7 @@ DEFAULT_VNC_PORT = 45911
 DEFAULT_WEB_PORT = 46090
 DEFAULT_TIMEOUT_SEC = 1800
 DEFAULT_POLL_SEC = 3.0
+DEFAULT_LOCK_WAIT_SEC = 90.0
 DEFAULT_SSH_DESTINATION = "wb-core-eu-root"
 DEFAULT_NOVNC_WEB_DIR = Path("/usr/share/novnc")
 ACTIVE_STATUSES = {
@@ -65,6 +67,7 @@ class BuyerRecoveryConfig:
     web_port: int = DEFAULT_WEB_PORT
     timeout_sec: int = DEFAULT_TIMEOUT_SEC
     poll_sec: float = DEFAULT_POLL_SEC
+    lock_wait_sec: float = DEFAULT_LOCK_WAIT_SEC
     ssh_destination: str = DEFAULT_SSH_DESTINATION
     novnc_web_dir: Path = DEFAULT_NOVNC_WEB_DIR
 
@@ -118,6 +121,7 @@ def load_recovery_config_from_env() -> BuyerRecoveryConfig:
         web_port=_env_int("WB_BUYER_RECOVERY_WEB_PORT", DEFAULT_WEB_PORT),
         timeout_sec=_env_int("WB_BUYER_RECOVERY_TIMEOUT_SEC", DEFAULT_TIMEOUT_SEC),
         poll_sec=_env_float("WB_BUYER_RECOVERY_POLL_SEC", DEFAULT_POLL_SEC),
+        lock_wait_sec=_env_float("WB_BUYER_RECOVERY_LOCK_WAIT_SEC", DEFAULT_LOCK_WAIT_SEC),
         ssh_destination=str(os.environ.get("WB_BUYER_RECOVERY_SSH_DESTINATION") or DEFAULT_SSH_DESTINATION),
         novnc_web_dir=Path(str(os.environ.get("WB_BUYER_RECOVERY_NOVNC_WEB_DIR") or DEFAULT_NOVNC_WEB_DIR)),
     )
@@ -157,49 +161,6 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
                 return current
             stop_recovery(config, requested_run_id=str(current.get("run_id") or ""), acquire_start_lock=False)
         run_id = f"buyer-recovery-{_now().strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
-        adapter = WbBuyerSessionAdapter(config=config.session)
-        session: Mapping[str, Any]
-        # The UI preflight and recovery start can overlap while the first
-        # independent probe is still holding the shared session lease.  Wait
-        # for one bounded probe lease (45s), then fail explicitly; never
-        # unlink or steal the lock.
-        lock_contention = False
-        for attempt in range(45):
-            try:
-                session = adapter.check_session()
-                break
-            except (RuntimeError, BlockingIOError) as exc:
-                if isinstance(exc, RuntimeError) and "lock" not in str(exc).lower():
-                    raise
-                if attempt == 44:
-                    lock_contention = True
-                    session = {
-                        "status": "recovery_running",
-                        "valid": False,
-                        "reason": "buyer_session_lock_busy",
-                    }
-                    break
-                time.sleep(0.5)
-        if session.get("status") == "valid":
-            payload = {
-                "run_id": run_id,
-                "status": "completed",
-                "reason": "buyer_session_already_valid",
-                "started_at": _now_text(),
-                "finished_at": _now_text(),
-                "session": session,
-            }
-            _write_status(config, payload)
-            return read_recovery_status(config, with_probe=False)
-        try:
-            adapter.prepare_fingerprint_migration()
-        except (BlockingIOError, RuntimeError) as exc:
-            if isinstance(exc, RuntimeError) and "lock" not in str(exc).lower():
-                raise
-            # The preflight lease may still be held by the immediately
-            # preceding check; the supervisor will perform migration under
-            # its own verified single-flight lifecycle.
-            pass
         _write_status(
             config,
             {
@@ -208,7 +169,11 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
                 "reason": "buyer_recovery_starting",
                 "started_at": _now_text(),
                 "deadline_at": (_now() + timedelta(seconds=config.timeout_sec)).isoformat(),
-                "session": session,
+                "session": {
+                    "status": "recovery_running",
+                    "valid": False,
+                    "reason": "buyer_recovery_in_progress",
+                },
             },
         )
         with _open_secure_log(config.supervisor_log_path) as log_file:
@@ -287,7 +252,7 @@ def read_recovery_status(
             "running": payload["running"],
             "session": {},
         }
-    if with_probe and not payload["running"]:
+    if with_probe and not payload["running"] and str(payload.get("status") or "") not in ACTIVE_STATUSES:
         payload["session"] = WbBuyerSessionAdapter(config=config.session).check_session()
     return payload
 
@@ -308,19 +273,75 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
     _write_supervisor_identity(config, pid=os.getpid(), run_id=run_id)
     processes: list[subprocess.Popen[Any]] = []
     adapter = WbBuyerSessionAdapter(config=config.session)
+    completion: dict[str, Any] | None = None
+    result = 1
     try:
-        with adapter.session_lock(blocking=False):
-            _ensure_commands(config)
-            _write_status(config, {**_read_status(config.status_path), "status": "starting", "reason": "buyer_visual_session_starting"})
-            xvfb = _spawn(["Xvfb", config.display, "-screen", "0", "1600x900x24", "-nolisten", "tcp"], config.xvfb_log_path)
-            processes.append(xvfb)
-            _wait_display(config.display)
-            openbox_path = shutil.which("openbox")
-            if openbox_path:
-                processes.append(_spawn([openbox_path], config.openbox_log_path, env={"DISPLAY": config.display}))
-            return _capture_login(config, adapter, processes)
-    except BlockingIOError:
-        _write_status(config, {**_read_status(config.status_path), "status": "error", "reason": "buyer_session_lock_busy", "finished_at": _now_text()})
+        with adapter.session_lock(
+            blocking=True,
+            timeout_seconds=config.lock_wait_sec,
+            poll_seconds=min(0.25, max(0.02, config.poll_sec)),
+        ):
+            _write_status(
+                config,
+                {
+                    **_read_status(config.status_path),
+                    "status": "checking_session",
+                    "reason": "buyer_recovery_checking_session",
+                },
+            )
+            session = adapter.check_session(acquire_lock=False)
+            if session.get("status") == "valid":
+                completion = {
+                    "reason": "buyer_session_already_valid",
+                    "session": session,
+                }
+                result = 0
+            else:
+                _ensure_commands(config)
+                _write_status(
+                    config,
+                    {
+                        **_read_status(config.status_path),
+                        "status": "starting",
+                        "reason": "buyer_visual_session_starting",
+                        "session": session,
+                    },
+                )
+                xvfb = _spawn(["Xvfb", config.display, "-screen", "0", "1600x900x24", "-nolisten", "tcp"], config.xvfb_log_path)
+                processes.append(xvfb)
+                _wait_display(config.display)
+                openbox_path = shutil.which("openbox")
+                if openbox_path:
+                    processes.append(_spawn([openbox_path], config.openbox_log_path, env={"DISPLAY": config.display}))
+                result = _capture_login(config, adapter, processes)
+                if result == 0:
+                    settled = _read_status(config.status_path)
+                    completion = {
+                        "reason": "buyer_session_saved_and_validated",
+                        "session": settled.get("session") if isinstance(settled.get("session"), Mapping) else {},
+                    }
+        if completion is not None:
+            _write_status(
+                config,
+                {
+                    **_read_status(config.status_path),
+                    "status": "completed",
+                    "reason": completion["reason"],
+                    "finished_at": _now_text(),
+                    "session": completion["session"],
+                },
+            )
+        return result
+    except WbBuyerSessionLockTimeout:
+        _write_status(
+            config,
+            {
+                **_read_status(config.status_path),
+                "status": "error",
+                "reason": "buyer_session_lock_wait_timeout",
+                "finished_at": _now_text(),
+            },
+        )
         return 1
     except Exception:
         _write_status(config, {**_read_status(config.status_path), "status": "error", "reason": "buyer_recovery_runtime_error", "finished_at": _now_text()})
@@ -543,13 +564,7 @@ def _accept_recovery_candidate(
     rollback_path.unlink(missing_ok=True)
     _write_status(
         config,
-        {
-            **_read_status(config.status_path),
-            "status": "completed",
-            "reason": "buyer_session_saved_and_validated",
-            "finished_at": _now_text(),
-            "session": validated,
-        },
+        {**_read_status(config.status_path), "status": "validating_session", "reason": "buyer_session_saved_and_validated", "session": validated},
     )
     return 0
 
@@ -1065,6 +1080,8 @@ def _supervisor_command(config: BuyerRecoveryConfig) -> list[str]:
         str(config.timeout_sec),
         "--poll-sec",
         str(config.poll_sec),
+        "--lock-wait-sec",
+        str(config.lock_wait_sec),
         "--ssh-destination",
         config.ssh_destination,
         "--novnc-web-dir",
@@ -1080,6 +1097,7 @@ def _add_args(parser: argparse.ArgumentParser, config: BuyerRecoveryConfig) -> N
     parser.add_argument("--web-port", type=int, default=config.web_port)
     parser.add_argument("--timeout-sec", type=int, default=config.timeout_sec)
     parser.add_argument("--poll-sec", type=float, default=config.poll_sec)
+    parser.add_argument("--lock-wait-sec", type=float, default=config.lock_wait_sec)
     parser.add_argument("--ssh-destination", default=config.ssh_destination)
     parser.add_argument("--novnc-web-dir", default=str(config.novnc_web_dir))
 
@@ -1101,6 +1119,7 @@ def _config_from_args(args: argparse.Namespace) -> BuyerRecoveryConfig:
         web_port=args.web_port,
         timeout_sec=args.timeout_sec,
         poll_sec=args.poll_sec,
+        lock_wait_sec=args.lock_wait_sec,
         ssh_destination=args.ssh_destination,
         novnc_web_dir=Path(args.novnc_web_dir),
     )

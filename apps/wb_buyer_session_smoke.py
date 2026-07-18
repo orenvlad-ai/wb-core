@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps import wb_buyer_session_recovery as recovery_tool  # noqa: E402
 from apps.wb_buyer_session_recovery import (  # noqa: E402
     BuyerRecoveryConfig,
     _accept_recovery_candidate,
@@ -51,6 +52,7 @@ def main() -> None:
     _run_price_extraction_smoke()
     _run_launcher_smoke()
     _run_recovery_lifecycle_smoke()
+    _run_preflight_supervisor_handoff_smoke()
     print("wb_buyer_session_smoke: OK")
 
 
@@ -488,5 +490,225 @@ def _run_recovery_lifecycle_smoke() -> None:
             raise AssertionError("stop must remove temporary candidate state and supervisor pid")
 
 
+def _run_preflight_supervisor_handoff_smoke() -> None:
+    """Exercise the real start/supervisor process handoff under production lock ordering."""
+
+    with TemporaryDirectory(prefix="wb-buyer-recovery-handoff-") as tmp:
+        state_dir = Path(tmp)
+        storage_path = state_dir / "storage_state.json"
+        browser_marker = state_dir / "browser_recovery_started.json"
+        cleanup_marker = state_dir / "browser_process_cleaned.json"
+        session = WbBuyerSessionConfig(state_dir=state_dir, storage_state_path=storage_path)
+        config = BuyerRecoveryConfig(session=session, timeout_sec=10, poll_sec=0.05, lock_wait_sec=5.0)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        storage_path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+        spawned_commands: list[list[str]] = []
+
+        def fixture_supervisor_command(_config: BuyerRecoveryConfig) -> list[str]:
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "_handoff_supervisor",
+                str(state_dir),
+                str(storage_path),
+                str(browser_marker),
+                str(cleanup_marker),
+                "wb_buyer_session_recovery.py",
+                "supervise",
+            ]
+            spawned_commands.append(command)
+            return command
+
+        original_supervisor_command = recovery_tool._supervisor_command
+        preflight_adapter = WbBuyerSessionAdapter(config=session)
+        with preflight_adapter.session_lock(blocking=True):
+            recovery_tool._supervisor_command = fixture_supervisor_command
+            try:
+                first = recovery_tool.start_recovery(config, replace=False)
+                identity = recovery_tool._read_supervisor_identity(config)
+                supervisor_pid = int(identity.get("pid") or 0)
+                if first.get("status") not in recovery_tool.ACTIVE_STATUSES or not first.get("running"):
+                    raise AssertionError(f"recovery must remain active while preflight owns buyer lock: {first}")
+                if supervisor_pid <= 0:
+                    raise AssertionError("real start_recovery must publish the spawned supervisor identity")
+
+                second = recovery_tool.start_recovery(config, replace=False)
+                if second.get("run_id") != first.get("run_id") or len(spawned_commands) != 1:
+                    raise AssertionError(f"double recovery start must rejoin one run: {first} {second}")
+
+                guarded = WbBuyerSessionAdapter(
+                    config=session,
+                    browser_probe=lambda _path: (_ for _ in ()).throw(
+                        AssertionError("session probe must not start after recovery status is starting")
+                    ),
+                ).check_session()
+                if guarded.get("status") != "recovery_running" or guarded.get("reason") != "buyer_recovery_in_progress":
+                    raise AssertionError(f"active recovery must gate independent UI/session probes: {guarded}")
+                status_with_probe = recovery_tool.read_recovery_status(config, with_probe=True)
+                if status_with_probe.get("run_id") != first.get("run_id") or status_with_probe.get("status") not in recovery_tool.ACTIVE_STATUSES:
+                    raise AssertionError(f"status preflight must rejoin the active recovery without probing: {status_with_probe}")
+                time.sleep(0.2)
+                if browser_marker.exists():
+                    raise AssertionError("browser recovery must wait while the preflight buyer lock is held")
+            finally:
+                recovery_tool._supervisor_command = original_supervisor_command
+
+        deadline = time.monotonic() + 10
+        terminal: Mapping[str, Any] = {}
+        while time.monotonic() < deadline:
+            terminal = recovery_tool.read_recovery_status(config, with_probe=False)
+            if terminal.get("status") == "completed" and not terminal.get("running") and not config.pid_path.exists():
+                break
+            time.sleep(0.05)
+        if terminal.get("status") != "completed" or terminal.get("reason") != "buyer_session_saved_and_validated":
+            raise AssertionError(f"the same supervisor must continue to terminal completion after lock handoff: {terminal}")
+        browser_event = json.loads(browser_marker.read_text(encoding="utf-8")) if browser_marker.exists() else {}
+        if int(browser_event.get("pid") or 0) != supervisor_pid or browser_event.get("run_id") != first.get("run_id"):
+            raise AssertionError(f"the original supervisor must launch browser recovery after preflight release: {browser_event}")
+        if not cleanup_marker.exists() or config.candidate_path.exists() or config.pid_path.exists():
+            raise AssertionError("terminal recovery must clean browser processes, candidate state and supervisor identity")
+        serialized_status = config.status_path.read_text(encoding="utf-8")
+        serialized_log = config.supervisor_log_path.read_text(encoding="utf-8") if config.supervisor_log_path.exists() else ""
+        if "buyer_session_lock_busy" in serialized_status or "buyer_session_lock_busy" in serialized_log:
+            raise AssertionError("the preflight-to-supervisor handoff must not publish buyer_session_lock_busy")
+        with WbBuyerSessionAdapter(config=session).session_lock(blocking=False):
+            pass
+        with recovery_tool._recovery_start_lock(config):
+            pass
+
+
+def _run_handoff_supervisor_fixture(
+    state_dir: Path,
+    storage_path: Path,
+    browser_marker: Path,
+    cleanup_marker: Path,
+) -> int:
+    """Child-process fixture that keeps real supervise_recovery orchestration."""
+
+    session = WbBuyerSessionConfig(
+        state_dir=state_dir,
+        storage_state_path=storage_path,
+        settle_timeout_ms=1,
+    )
+    config = BuyerRecoveryConfig(session=session, timeout_sec=10, poll_sec=0.05, lock_wait_sec=5.0)
+    real_adapter_class = recovery_tool.WbBuyerSessionAdapter
+
+    class FixtureAdapter:
+        def __init__(self, *, config: WbBuyerSessionConfig) -> None:
+            self.delegate = real_adapter_class(config=config)
+            self.persisted = False
+
+        def session_lock(self, **kwargs: Any) -> Any:
+            return self.delegate.session_lock(**kwargs)
+
+        def check_session(self, **kwargs: Any) -> Mapping[str, Any]:
+            if kwargs.get("acquire_lock") is not False:
+                raise AssertionError("supervisor session preflight must run under its owned automation lock")
+            if self.persisted:
+                return {
+                    "status": "valid",
+                    "valid": True,
+                    "reason": "buyer_session_valid",
+                    "account_confirmed": True,
+                }
+            return {"status": "expired", "valid": False, "reason": "buyer_login_required"}
+
+        def persist_storage_state_atomically(self, candidate_path: Path) -> None:
+            storage_path.write_text(candidate_path.read_text(encoding="utf-8"), encoding="utf-8")
+            self.persisted = True
+
+    class FixtureProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+            cleanup_marker.write_text(json.dumps({"cleaned": True, "pid": os.getpid()}), encoding="utf-8")
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.terminate()
+
+    class FixturePage:
+        url = "https://www.wildberries.ru/lk"
+        wb_recovery_surface = {"state": "authenticated", "reason": "buyer_visible_account_opened"}
+
+        def goto(self, *_args: Any, **_kwargs: Any) -> None:
+            current = recovery_tool._read_status(config.status_path)
+            browser_marker.write_text(
+                json.dumps({"pid": os.getpid(), "run_id": current.get("run_id"), "browser_recovery_started": True}),
+                encoding="utf-8",
+            )
+
+        def wait_for_load_state(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    class FixtureBrowserContext:
+        def new_page(self) -> FixturePage:
+            return FixturePage()
+
+    class FixtureBrowser:
+        def new_context(self, **_kwargs: Any) -> FixtureBrowserContext:
+            return FixtureBrowserContext()
+
+        def close(self) -> None:
+            return None
+
+    class FixtureChromium:
+        def launch(self, **_kwargs: Any) -> FixtureBrowser:
+            return FixtureBrowser()
+
+    class FixturePlaywright:
+        chromium = FixtureChromium()
+
+        def __enter__(self) -> "FixturePlaywright":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+    def fake_candidate_capture(
+        fixture_config: BuyerRecoveryConfig,
+        _adapter: Any,
+        _context: Any,
+        _page: Any,
+    ) -> Mapping[str, Any]:
+        fixture_config.candidate_path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+        return {
+            "status": "valid",
+            "valid": True,
+            "reason": "buyer_session_valid",
+            "account_confirmed": True,
+        }
+
+    recovery_tool.WbBuyerSessionAdapter = FixtureAdapter  # type: ignore[assignment]
+    recovery_tool._ensure_commands = lambda _config: None
+    recovery_tool._spawn = lambda *_args, **_kwargs: FixtureProcess()
+    recovery_tool._wait_display = lambda _display: None
+    recovery_tool.sync_playwright = lambda: FixturePlaywright()
+    recovery_tool._capture_settled_candidate = fake_candidate_capture
+    recovery_tool.shutil.which = lambda _name: None
+    return recovery_tool.supervise_recovery(config)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) >= 6 and sys.argv[1] == "_handoff_supervisor":
+        raise SystemExit(
+            _run_handoff_supervisor_fixture(
+                Path(sys.argv[2]),
+                Path(sys.argv[3]),
+                Path(sys.argv[4]),
+                Path(sys.argv[5]),
+            )
+        )
     main()

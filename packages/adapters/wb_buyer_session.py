@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import time
 from typing import Any, Callable, Iterator, Mapping
 from urllib import parse as urllib_parse
 
@@ -34,6 +35,19 @@ CHALLENGE_MARKERS = (
     "подтвердите, что вы не робот",
     "почти готово",
 )
+RECOVERY_PROBE_BLOCKING_STATUSES = {
+    "starting",
+    "checking_session",
+    "automatic_login",
+    "stabilizing_session",
+    "awaiting_human",
+    "saving_session",
+    "validating_session",
+}
+
+
+class WbBuyerSessionLockTimeout(TimeoutError):
+    """The recovery supervisor could not acquire its automation lock in time."""
 
 
 @dataclass(frozen=True)
@@ -105,6 +119,11 @@ class WbBuyerSessionAdapter:
     ) -> dict[str, Any]:
         path = storage_state_path or self.config.storage_state_path
         self._ensure_runtime_permissions()
+        if acquire_lock and self._recovery_probe_blocked():
+            result = self._session_result("recovery_running", reason="buyer_recovery_in_progress")
+            if path == self.config.storage_state_path:
+                self._write_probe_metadata(result)
+            return result
         if not path.exists():
             result = self._session_result("missing", reason="buyer_storage_state_missing")
             if path == self.config.storage_state_path:
@@ -114,7 +133,10 @@ class WbBuyerSessionAdapter:
         try:
             if acquire_lock:
                 with self.session_lock(blocking=False):
-                    result = self._probe_and_validate(path, persist_fingerprint=persist_fingerprint)
+                    if self._recovery_probe_blocked():
+                        result = self._session_result("recovery_running", reason="buyer_recovery_in_progress")
+                    else:
+                        result = self._probe_and_validate(path, persist_fingerprint=persist_fingerprint)
             else:
                 result = self._probe_and_validate(path, persist_fingerprint=persist_fingerprint)
         except BlockingIOError:
@@ -130,11 +152,15 @@ class WbBuyerSessionAdapter:
         if normalized_nm_id <= 0:
             return self._price_error(normalized_nm_id, "probe_error", "invalid_nm_id")
         self._ensure_runtime_permissions()
+        if self._recovery_probe_blocked():
+            return self._price_error(normalized_nm_id, "session_recovery_running", "buyer_recovery_in_progress")
         path = self.config.storage_state_path
         if not path.exists():
             return self._price_error(normalized_nm_id, "session_missing", "buyer_storage_state_missing")
         try:
             with self.session_lock(blocking=False):
+                if self._recovery_probe_blocked():
+                    return self._price_error(normalized_nm_id, "session_recovery_running", "buyer_recovery_in_progress")
                 session = self._probe_and_validate(path, persist_fingerprint=True)
                 if session.get("status") != "valid":
                     return self._price_error(
@@ -194,14 +220,32 @@ class WbBuyerSessionAdapter:
         return result
 
     @contextmanager
-    def session_lock(self, *, blocking: bool) -> Iterator[None]:
+    def session_lock(
+        self,
+        *,
+        blocking: bool,
+        timeout_seconds: float | None = None,
+        poll_seconds: float = 0.1,
+    ) -> Iterator[None]:
         self._ensure_runtime_permissions()
         handle = self.config.lock_path.open("a+", encoding="utf-8")
         os.chmod(self.config.lock_path, 0o600)
-        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
         try:
-            fcntl.flock(handle.fileno(), flags)
-        except BlockingIOError:
+            if blocking and timeout_seconds is not None:
+                deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+                while True:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError as exc:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise WbBuyerSessionLockTimeout("buyer session automation lock wait timed out") from exc
+                        time.sleep(min(max(0.01, float(poll_seconds)), remaining))
+            else:
+                flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), flags)
+        except Exception:
             handle.close()
             raise
         try:
@@ -209,6 +253,13 @@ class WbBuyerSessionAdapter:
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
+
+    def _recovery_probe_blocked(self) -> bool:
+        try:
+            payload = json.loads((self.config.state_dir / "recovery_status.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, Mapping) and str(payload.get("status") or "") in RECOVERY_PROBE_BLOCKING_STATUSES
 
     def persist_storage_state_atomically(self, candidate_path: Path) -> None:
         self._ensure_runtime_permissions()
