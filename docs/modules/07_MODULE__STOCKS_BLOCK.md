@@ -74,7 +74,7 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
   - quantity из raw regions/warehouses вне configured district map не invent-ится в district rows: она остаётся внутри `stock_total` и surface-ится в `StocksSuccess.detail` / `STATUS.stocks[yesterday_closed].note`;
   - publish guard не допускает success при неполном coverage requested `nmId`;
   - current `wb-warehouses` adapter по-прежнему уважает `X-Ratelimit-Retry` / `X-Ratelimit-Reset`, использует per-seller limiter и после bounded retry budget не превращается в fake-success внутри source.
-  - invalid `warehouseId` по-прежнему fail-closed: bounded error evidence фиксирует только наличие поля, JSON type, усечённое value и digest строки, чтобы production dry-run мог доказать расхождение с official integer contract без публикации snapshot и без вывода полного raw payload.
+  - invalid `warehouseId` по-прежнему fail-closed: bounded error evidence фиксирует только наличие поля, JSON type, усечённое value, allowlisted warehouse/region name + three quantity fields и digest строки, чтобы production dry-run мог доказать семантику расхождения с official integer contract без публикации snapshot и без вывода полного raw payload.
 
 # 3. Target contract и смысл результата
 
