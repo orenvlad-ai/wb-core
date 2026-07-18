@@ -110,6 +110,12 @@
     .settings-tab-button.is-active { border-color: rgba(167, 139, 250, .48); background: var(--panel-2); color: var(--text); }
     .settings-panels { min-width: 0; }
     .settings-panel[hidden], .settings-group-panel[hidden] { display: none; }
+    .calculation-grid { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 12px; margin-top: 16px; }
+    .calculation-card { border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: var(--panel-2); }
+    .calculation-total { font-size: 22px; font-weight: 900; }
+    .formula-preview { margin-top: 14px; padding: 12px; border: 1px solid rgba(52,211,153,.32); border-radius: 8px; color: var(--success); background: rgba(52,211,153,.06); }
+    .calculation-table { min-width: 980px; }
+    .calculation-diff { margin: 12px 0 0; white-space: pre-wrap; color: var(--warning); }
     .document-toolbar { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; align-items: end; }
     .document-toolbar .toolbar { grid-column: span 2; }
     .document-table { min-width: 1340px; }
@@ -159,6 +165,7 @@
       .document-toolbar { grid-template-columns: 1fr; }
       .document-toolbar .toolbar { grid-column: auto; }
       .users-form { grid-template-columns: 1fr; }
+      .calculation-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -178,6 +185,7 @@
 
       <nav class="settings-group-tabs" aria-label="Группы настроек">
         <button class="settings-tab-button is-active" type="button" data-settings-group-button="directories" aria-controls="directoriesGroupPanel" aria-selected="true">Справочники</button>
+        <button class="settings-tab-button" type="button" data-settings-group-button="user-directory" aria-controls="userDirectoryGroupPanel" aria-selected="false">Справочник пользователя</button>
         <button class="settings-tab-button" type="button" data-settings-group-button="users" aria-controls="usersGroupPanel" aria-selected="false">Пользователи</button>
       </nav>
 
@@ -384,6 +392,41 @@
       </div>
       </section>
 
+      <section id="userDirectoryGroupPanel" class="block settings-group-panel" data-settings-group-panel="user-directory" aria-labelledby="calculationParametersTitle" hidden>
+        <div class="toolbar" style="justify-content: space-between;">
+          <div>
+            <h2 id="calculationParametersTitle">Расчётные параметры</h2>
+            <p>Версионные параметры формул. Изменение не затрагивает физические склады.</p>
+          </div>
+          <button id="reloadCalculationParametersButton" type="button">Обновить</button>
+        </div>
+        <h2 style="margin-top: 18px;">Proxy прибыль и маржинальность</h2>
+        <div id="calculationParametersForm" class="calculation-grid">
+          <label class="field"><span>Коэффициент выкупа, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="buyout_rate"></label>
+          <label class="field"><span>Налог, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="tax_rate"></label>
+          <label class="field"><span>Агентское вознаграждение WB и прочие расходы, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="wb_agent_and_other_rate"></label>
+          <label class="field"><span>Эквайринг, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="acquiring_rate"></label>
+          <label class="field"><span>Логистика WB до покупателя, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="wb_logistics_rate"></label>
+          <label class="field"><span>Хранение WB, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="wb_storage_rate"></label>
+          <label class="field"><span>Штрафы/корректировки, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="penalties_adjustments_rate"></label>
+          <label class="field"><span>Другие расходы, %</span><input type="number" min="0" max="100" step="0.01" data-calculation-rate="other_expense_rate"></label>
+          <label class="field"><span>Effective date</span><input id="calculationEffectiveDate" type="date" value="2026-07-01"></label>
+          <div class="calculation-card"><span class="muted">Всего расходов</span><div id="calculationExpenseTotal" class="calculation-total">44%</div></div>
+          <div class="calculation-card"><span class="muted">Остаётся</span><div id="calculationRetainedShare" class="calculation-total">56%</div></div>
+        </div>
+        <div id="calculationFormulaPreview" class="formula-preview">orderSum × 91% × 56% − orderCount × 91% × canonical_WB_WAC − ads_sum</div>
+        <p id="calculationParametersMessage" class="message">Читаем расчётные параметры...</p>
+        <pre id="calculationParametersDiff" class="calculation-diff"></pre>
+        <div class="toolbar" style="margin-top: 10px;">
+          <button id="previewCalculationParametersButton" type="button">Показать diff</button>
+          <button id="saveCalculationParametersButton" class="primary" type="button" disabled>Сохранить новую версию</button>
+        </div>
+        <h2 style="margin-top: 22px;">Справочная информация по WB — три закрытые недели</h2>
+        <div class="table-wrap"><table class="calculation-table"><thead id="calculationReferenceHead"></thead><tbody id="calculationReferenceRows"><tr><td>Данные загружаются...</td></tr></tbody></table></div>
+        <h2 style="margin-top: 22px;">История версий</h2>
+        <div class="table-wrap"><table class="calculation-table"><thead><tr><th>Версия</th><th>Effective date</th><th>Выкуп</th><th>Расходы</th><th>Остаётся</th><th>Автор</th><th>Создано</th></tr></thead><tbody id="calculationHistoryRows"><tr><td colspan="7">История загружается...</td></tr></tbody></table></div>
+      </section>
+
       <section id="usersGroupPanel" class="block settings-group-panel" data-settings-group-panel="users" aria-labelledby="usersTitle" hidden>
         <div class="toolbar" style="justify-content: space-between;">
           <div>
@@ -464,6 +507,8 @@
       const skuGroupsPath = config.sku_groups_path;
       const tradeDocumentsPath = config.trade_documents_path;
       const usersPath = config.settings_users_path;
+      const calculationParametersPath = config.calculation_parameters_path;
+      const calculationParametersPreviewPath = config.calculation_parameters_preview_path;
       const canManageUsers = config.can_manage_users !== false;
       const rowsBody = document.getElementById("nomenclatureRows");
       const message = document.getElementById("nomenclatureMessage");
@@ -514,6 +559,20 @@
       const newManageUsersInput = document.getElementById("newManageUsersInput");
       const newAccessPicker = document.querySelector('[data-access-picker="new"]');
       const newActiveSelect = document.getElementById("newActiveSelect");
+      const calculationForm = document.getElementById("calculationParametersForm");
+      const calculationInputs = Array.from(document.querySelectorAll("[data-calculation-rate]"));
+      const calculationEffectiveDate = document.getElementById("calculationEffectiveDate");
+      const calculationExpenseTotal = document.getElementById("calculationExpenseTotal");
+      const calculationRetainedShare = document.getElementById("calculationRetainedShare");
+      const calculationFormulaPreview = document.getElementById("calculationFormulaPreview");
+      const calculationMessage = document.getElementById("calculationParametersMessage");
+      const calculationDiff = document.getElementById("calculationParametersDiff");
+      const calculationReferenceHead = document.getElementById("calculationReferenceHead");
+      const calculationReferenceRows = document.getElementById("calculationReferenceRows");
+      const calculationHistoryRows = document.getElementById("calculationHistoryRows");
+      const reloadCalculationButton = document.getElementById("reloadCalculationParametersButton");
+      const previewCalculationButton = document.getElementById("previewCalculationParametersButton");
+      const saveCalculationButton = document.getElementById("saveCalculationParametersButton");
       const SETTINGS_TAB_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-tab:v2";
       const SETTINGS_GROUP_STORAGE_KEY = "wb-core:sheet-vitrina-v1:settings-active-group:v1";
       const NOMENCLATURE_COLUMNS_STORAGE_KEY = "wb-core:sheet-vitrina-v1:nomenclature-columns:v1";
@@ -543,6 +602,7 @@
       let pendingDocumentType = "";
       let editingContractId = "";
       let users = [];
+      let calculationPreviewFingerprint = "";
       let availableSections = [
         {section_id: "vitrina", label: "Витрина"},
         {section_id: "supply", label: "Поставки"},
@@ -621,7 +681,8 @@
       }
 
       function activateSettingsGroup(groupName, options) {
-        const requested = groupName === "users" && canManageUsers ? "users" : "directories";
+        const allowed = groupName === "user-directory" || (groupName === "users" && canManageUsers);
+        const requested = allowed ? groupName : "directories";
         settingsGroupButtons.forEach((button) => {
           const isActive = button.dataset.settingsGroupButton === requested;
           button.classList.toggle("is-active", isActive);
@@ -640,6 +701,9 @@
         if (requested === "users" && !users.length) {
           loadUsers();
         }
+        if (requested === "user-directory") {
+          loadCalculationParameters();
+        }
       }
 
       function restoreSettingsGroup() {
@@ -649,7 +713,7 @@
         } catch (error) {
           saved = "";
         }
-        activateSettingsGroup(saved === "users" ? "users" : "directories", { persist: false });
+        activateSettingsGroup(["users", "user-directory"].includes(saved) ? saved : "directories", { persist: false });
       }
 
       function activateSettingsTab(tabName, options) {
@@ -1966,6 +2030,139 @@
         }
       }
 
+      function calculationPayload() {
+        const payload = { effective_date: calculationEffectiveDate.value };
+        calculationInputs.forEach((input) => {
+          const value = Number(input.value);
+          if (!Number.isFinite(value) || value < 0 || value > 100) {
+            throw new Error("Все проценты должны быть от 0 до 100.");
+          }
+          payload[input.dataset.calculationRate] = String(value / 100);
+        });
+        const expenseFields = [
+          "tax_rate", "wb_agent_and_other_rate", "acquiring_rate", "wb_logistics_rate",
+          "wb_storage_rate", "penalties_adjustments_rate", "other_expense_rate"
+        ];
+        const total = expenseFields.reduce((sum, field) => sum + Number(payload[field]), 0);
+        if (total >= 1) {
+          throw new Error("Сумма включённых расходов должна быть меньше 100%.");
+        }
+        return payload;
+      }
+
+      function refreshCalculationPreview() {
+        calculationPreviewFingerprint = "";
+        saveCalculationButton.disabled = true;
+        calculationDiff.textContent = "";
+        try {
+          const payload = calculationPayload();
+          const expenses = [
+            payload.tax_rate, payload.wb_agent_and_other_rate, payload.acquiring_rate,
+            payload.wb_logistics_rate, payload.wb_storage_rate,
+            payload.penalties_adjustments_rate, payload.other_expense_rate
+          ].reduce((sum, value) => sum + Number(value), 0);
+          const retained = 1 - expenses;
+          const buyout = Number(payload.buyout_rate);
+          calculationExpenseTotal.textContent = (expenses * 100).toFixed(2).replace(/\.00$/, "") + "%";
+          calculationRetainedShare.textContent = (retained * 100).toFixed(2).replace(/\.00$/, "") + "%";
+          calculationFormulaPreview.textContent =
+            "orderSum × " + (buyout * 100).toFixed(2).replace(/\.00$/, "") + "% × " +
+            (retained * 100).toFixed(2).replace(/\.00$/, "") + "% − orderCount × " +
+            (buyout * 100).toFixed(2).replace(/\.00$/, "") + "% × canonical_WB_WAC − ads_sum";
+          calculationMessage.textContent = "Изменения требуют preview/diff перед сохранением.";
+          calculationMessage.className = "message warning";
+        } catch (error) {
+          calculationMessage.textContent = error.message;
+          calculationMessage.className = "message error";
+        }
+      }
+
+      function renderCalculationReference(reference) {
+        const weeks = Array.isArray(reference && reference.weeks) ? reference.weeks : [];
+        calculationReferenceHead.innerHTML = "<tr><th>Статья</th>" + weeks.map((week) => (
+          "<th>" + escapeHtml(week.week_start) + " — " + escapeHtml(week.week_end) + "</th>"
+        )).join("") + "<th>Weighted average</th></tr>";
+        const rows = Array.isArray(reference && reference.rows) ? reference.rows : [];
+        calculationReferenceRows.innerHTML = rows.length ? rows.map((row) => (
+          "<tr><td>" + escapeHtml(row.label) + (row.note ? "<div class=\"user-source-note\">" + escapeHtml(row.note) + "</div>" : "") + "</td>" +
+          (row.weekly_rate_pct || []).map((value) => "<td>" + escapeHtml(value == null ? "—" : value + "%") + "</td>").join("") +
+          "<td>" + escapeHtml(row.weighted_average_pct == null ? "—" : row.weighted_average_pct + "%") + "</td></tr>"
+        )).join("") : "<tr><td colspan=\"5\">Нет трёх полностью закрытых недель.</td></tr>";
+      }
+
+      function renderCalculationHistory(history) {
+        calculationHistoryRows.innerHTML = history.length ? history.map((item) => {
+          const parameters = item.parameters || {};
+          return "<tr><td>" + escapeHtml(item.version_id) + "</td><td>" + escapeHtml(item.effective_date) +
+            "</td><td>" + escapeHtml(parameters.buyout_rate_pct || "—") + "%</td><td>" +
+            escapeHtml(parameters.included_expense_rate_pct || "—") + "%</td><td>" +
+            escapeHtml(parameters.retained_share_pct || "—") + "%</td><td>" +
+            escapeHtml(item.created_by || "—") + "</td><td>" + escapeHtml(item.created_at || "—") + "</td></tr>";
+        }).join("") : "<tr><td colspan=\"7\">Начальная версия будет создана functional cutover.</td></tr>";
+      }
+
+      async function loadCalculationParameters() {
+        if (!calculationParametersPath) return;
+        calculationMessage.textContent = "Читаем расчётные параметры...";
+        calculationMessage.className = "message";
+        try {
+          const payload = await fetchJson(calculationParametersPath, { headers: { Accept: "application/json" } });
+          const parameters = (payload.current && payload.current.parameters) || {};
+          calculationInputs.forEach((input) => {
+            const raw = parameters[input.dataset.calculationRate];
+            input.value = raw == null ? "0" : String(Number(raw) * 100);
+          });
+          calculationEffectiveDate.value = (payload.current && payload.current.effective_date) || "2026-07-01";
+          renderCalculationReference(payload.reference || {});
+          renderCalculationHistory(Array.isArray(payload.history) ? payload.history : []);
+          refreshCalculationPreview();
+          calculationMessage.textContent = payload.status === "ready" ? "Параметры загружены." : "Начальная версия ожидает functional cutover.";
+          calculationMessage.className = "message " + (payload.status === "ready" ? "success" : "warning");
+        } catch (error) {
+          calculationMessage.textContent = error.message;
+          calculationMessage.className = "message error";
+        }
+      }
+
+      async function previewCalculationParameters() {
+        try {
+          const result = await fetchJson(calculationParametersPreviewPath, {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify(calculationPayload())
+          });
+          calculationPreviewFingerprint = result.preview_fingerprint || "";
+          calculationDiff.textContent = (result.diff || []).length
+            ? result.diff.map((item) => item.label + ": " + item.before_pct + "% → " + item.after_pct + "%").join("\n")
+            : "Изменений относительно действующей версии нет.";
+          saveCalculationButton.disabled = !calculationPreviewFingerprint || !(result.diff || []).length;
+          calculationMessage.textContent = "Diff построен. Проверьте изменения перед сохранением новой версии.";
+          calculationMessage.className = "message warning";
+        } catch (error) {
+          calculationMessage.textContent = error.message;
+          calculationMessage.className = "message error";
+        }
+      }
+
+      async function saveCalculationParameters() {
+        if (!calculationPreviewFingerprint) return;
+        try {
+          const body = calculationPayload();
+          body.preview_fingerprint = calculationPreviewFingerprint;
+          await fetchJson(calculationParametersPath, {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify(body)
+          });
+          await loadCalculationParameters();
+          calculationMessage.textContent = "Новая версия сохранена; Proxy targeted recalculation поставлен в очередь.";
+          calculationMessage.className = "message success";
+        } catch (error) {
+          calculationMessage.textContent = error.message;
+          calculationMessage.className = "message error";
+        }
+      }
+
       addItemButton.addEventListener("click", () => {
         const draft = {
           item_id: "",
@@ -2030,6 +2227,11 @@
       });
       reloadUsersButton.addEventListener("click", loadUsers);
       createUserButton.addEventListener("click", createUser);
+      calculationInputs.forEach((input) => input.addEventListener("input", refreshCalculationPreview));
+      calculationEffectiveDate.addEventListener("change", refreshCalculationPreview);
+      reloadCalculationButton.addEventListener("click", loadCalculationParameters);
+      previewCalculationButton.addEventListener("click", previewCalculationParameters);
+      saveCalculationButton.addEventListener("click", saveCalculationParameters);
       document.addEventListener("click", () => closeAccessPickers());
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Any, Callable, Iterable, Mapping
@@ -26,6 +27,7 @@ from packages.contracts.cny_ledger import (
     CNY_CALC_STATUS_PAYMENT_NOT_LINKED,
     CNY_DOCUMENT_SOURCE_CNY_ACCOUNT,
     CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+    CNY_DOCUMENT_STATUS_EXCLUDED,
     CNY_DOCUMENT_STATUS_NEEDS_REVIEW,
     CNY_DOCUMENT_STATUS_PARSE_ERROR,
     CNY_DOCUMENT_STATUS_POSTED,
@@ -48,6 +50,9 @@ from packages.contracts.cny_ledger import (
     CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT,
     CNY_LEDGER_OPERATION_TRANSFER_FEE,
     CNY_LEDGER_PARSER_VERSION,
+)
+from packages.contracts.supplier_financial_documents import (
+    FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED,
 )
 from packages.contracts.supplier_financial_documents import FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION
 
@@ -271,11 +276,13 @@ class CnyLedgerBlock:
                 expenses_complete=False,
             )
         replay = self.replay_ledger(reason="document_upload")
-        return {
+        payload = {
             **self._with_download_path(saved),
             "idempotent": False,
             "replay": replay.get("replay") or replay,
         }
+        payload["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(saved)
+        return payload
 
     def create_opening_balance(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         operation_date = _optional_iso_date(payload.get("operation_date") or payload.get("effective_date"))
@@ -338,11 +345,13 @@ class CnyLedgerBlock:
         }
         saved = self.runtime.save_cny_document(document)
         replay = self.replay_ledger(reason="opening_balance")
-        return {
+        result = {
             **self._with_download_path(saved),
             "idempotent": existing is not None,
             "replay": replay.get("replay") or replay,
         }
+        result["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(saved)
+        return result
 
     def save_bank_fee_document(
         self,
@@ -763,18 +772,13 @@ class CnyLedgerBlock:
             raise ValueError(f"CNY document not found: {document_id}")
         if str(document.get("linked_financial_document_id") or "").strip():
             raise ValueError("CNY document is linked to a supplier financial document; delete the source document instead")
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-
-        capital = OwnProductCapitalBlock(
-            runtime=self.runtime,
-            timestamp_factory=self.timestamp_factory,
+        archived = self.runtime.save_cny_document(
+            {
+                **document,
+                "status": CNY_DOCUMENT_STATUS_EXCLUDED,
+                "updated_at": self.timestamp_factory(),
+            }
         )
-        if capital.has_supplier_payment_layer(str(document.get("document_id") or "")):
-            raise ValueError(
-                "CNY payment already created an invested-capital layer; "
-                "deletion requires the audited reversal/backfill contour"
-            )
-        deleted = self.runtime.delete_cny_document(str(document.get("document_id") or ""))
         source_order_id = str(document.get("source_order_id") or "").strip()
         if source_order_id:
             self.runtime.update_supplier_shipment_expenses_complete(
@@ -782,19 +786,86 @@ class CnyLedgerBlock:
                 expenses_complete=False,
                 updated_at=self.timestamp_factory(),
             )
-            capital.set_expenses_certification(
+            from packages.application.own_product_capital import OwnProductCapitalBlock
+
+            OwnProductCapitalBlock(
+                runtime=self.runtime,
+                timestamp_factory=self.timestamp_factory,
+            ).set_expenses_certification(
                 shipment_id=source_order_id,
                 expenses_complete=False,
             )
-        self._delete_document_file_if_owned(deleted)
-        replay = self.replay_ledger(reason="document_delete")
-        return {
+        replay = self.replay_ledger(reason="document_archive")
+        result = {
             "contract_name": CNY_LEDGER_CONTRACT_NAME,
             "status": "ok",
-            "document_id": str(deleted.get("document_id") or ""),
-            "deleted": True,
+            "document_id": str(archived.get("document_id") or ""),
+            "deleted": False,
+            "archived": True,
+            "audit_record_retained": True,
+            "file_deleted": False,
             "replay": replay.get("replay") or replay,
         }
+        result["warehouse_targeted_recalculation"] = self._enqueue_functional_recalculation(archived)
+        return result
+
+    def _enqueue_functional_recalculation(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        """Reset affected certifications and coalesce a replay by CNY source revision."""
+
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+        from packages.application.warehouse_functional import enqueue_warehouse_targeted_recalculation
+
+        source_order_id = str(document.get("source_order_id") or "").strip()
+        shipment_summaries = self.runtime.list_supplier_shipments()
+        affected_ids = [
+            str(item.get("shipment_id") or "")
+            for item in shipment_summaries
+            if str(item.get("shipment_id") or "")
+            and (not source_order_id or str(item.get("shipment_id") or "") == source_order_id)
+        ]
+        nm_ids: set[int] = set()
+        capital = OwnProductCapitalBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
+        now = self.timestamp_factory()
+        for shipment_id in affected_ids:
+            shipment = self.runtime.load_supplier_shipment(shipment_id) or {}
+            header = dict(shipment.get("header") or {})
+            if shipment_id:
+                self.runtime.update_supplier_shipment_expenses_complete(
+                    shipment_id=shipment_id,
+                    expenses_complete=False,
+                    updated_at=now,
+                )
+                capital.set_expenses_certification(shipment_id=shipment_id, expenses_complete=False)
+            for line in shipment.get("lines") or []:
+                nm_id = int(line.get("internal_nm_id") or 0)
+                if nm_id > 0:
+                    nm_ids.add(nm_id)
+        revision_payload = {
+            key: document.get(key)
+            for key in (
+                "document_id",
+                "document_type",
+                "natural_key",
+                "operation_date",
+                "status",
+                "rub_amount",
+                "cny_amount",
+                "bank_rate",
+                "file_sha256",
+                "updated_at",
+            )
+        }
+        revision = "sha256:" + hashlib.sha256(
+            json.dumps(revision_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        return enqueue_warehouse_targeted_recalculation(
+            runtime=self.runtime,
+            stable_source_id=f"cny_document:{document.get('document_id')}",
+            source_revision=revision,
+            effective_date=str(document.get("operation_date") or now)[:10],
+            affected_nm_ids=nm_ids,
+            requested_at=now,
+        )
 
     def _sync_supplier_payment_documents_from_financial_documents(self, *, now: str) -> None:
         if not hasattr(self.runtime, "list_supplier_financial_documents_all"):
@@ -828,7 +899,12 @@ class CnyLedgerBlock:
                 "updated_at": now,
                 "operation_date": operation_date,
                 "operation_datetime": operation_datetime,
-                "status": CNY_DOCUMENT_STATUS_POSTED,
+                "status": (
+                    CNY_DOCUMENT_STATUS_POSTED
+                    if str(financial_document.get("parse_status") or "")
+                    == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
+                    else CNY_DOCUMENT_STATUS_EXCLUDED
+                ),
                 "document_number": normalized.get("document_number") or financial_document.get("document_number") or "",
                 "currency": "CNY",
                 "rub_amount": "",
@@ -1087,7 +1163,7 @@ def _build_planned_operations(documents: list[Mapping[str, Any]], *, created_at:
         operation_date = str(document.get("operation_date") or parsed.get("operation_date") or parsed.get("document_date") or "")
         document_created_at = str(document.get("created_at") or document.get("uploaded_at") or created_at)
         common = {
-            "operation_id": "cnyop_" + uuid4().hex,
+            "operation_id": _stable_cny_operation_id(document_id, "primary"),
             "source_document_id": document_id,
             "source_order_id": source_order_id,
             "operation_date": operation_date,
@@ -1135,7 +1211,7 @@ def _build_planned_operations(documents: list[Mapping[str, Any]], *, created_at:
                 operations.append(
                     {
                         **common,
-                        "operation_id": "cnyop_" + uuid4().hex,
+                        "operation_id": _stable_cny_operation_id(document_id, "conversion_fee"),
                         "operation_type": CNY_LEDGER_OPERATION_CONVERSION_FEE,
                         "cny_delta": "0",
                         "rub_value_delta": _decimal_to_storage(fee_rub),
@@ -1173,6 +1249,11 @@ def _build_planned_operations(documents: list[Mapping[str, Any]], *, created_at:
             )
     _mark_date_only_sequence_warnings(operations)
     return operations
+
+
+def _stable_cny_operation_id(document_id: str, component: str) -> str:
+    identity = f"{str(document_id or '').strip()}|{str(component or '').strip()}"
+    return "cnyop_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
 def _mark_date_only_sequence_warnings(operations: list[dict[str, Any]]) -> None:

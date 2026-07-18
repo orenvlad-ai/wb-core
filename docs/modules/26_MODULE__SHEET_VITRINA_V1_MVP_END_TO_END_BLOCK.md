@@ -376,13 +376,12 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - dry-run compares server-side ready snapshots against accepted temporal slots for bounded windows and reports insert/skip/diff actions;
   - apply inserts only missing `fin_report_daily` / `ads_compact` accepted slots from daily SKU values already present in server-side ready snapshots;
   - existing accepted snapshots are not overwritten, blank ready values are not fabricated as zero, and the path is not a recurring Google Sheets/GAS source.
-- One-off completion of historical `proxy_margin_3_pct` / `proxy_margin_3_pct_total` rows is handled only by `apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py`:
-  - the runner scans `sheet_vitrina_v1_ready_snapshots` across every bundle generation and processes only actually stored date columns, including multi-date tails, using the SKU scope universe of each frozen snapshot;
-  - dry-run is the default; apply requires the exact fresh fingerprint, verified SQLite backup, one transaction and optimistic equality on the original `plan_json`;
-  - only the two target row families and their necessary DATA dimensions/timestamp-map entries may change; normalized deep digest after excluding those targets proves all other plan content and row order are preserved;
-  - persisted profit 3 divided by orderSum is primary. Before `2026-07-01`, a missing profit-3 cell may use persisted margin 2; otherwise missing operands remain blank. Zero denominators with present numerator become `0.0`, TOTAL stays a ratio of aggregates, and nonfinite/conflicting values block the entire apply;
-  - this path never calls historical refresh/rebuild/import, source fetch, group refresh, cost recalculate or stock backfill and never changes STATUS, snapshot identity, confirmed share, profit 3, margin 2, orderSum or temporal/source state;
-  - repeated dry-run/apply is a true no-op with no SQLite write.
+- Legacy one-off `apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py` остаётся migration evidence для прежнего двухрядного repair и не является active post-functional writer.
+- Active bounded publication с `2026-07-01` выполняет только `packages/application/warehouse_functional_economics_backfill.py` через repo-owned команды `warehouse-functional-economics-dry-run/apply`:
+  - она читает frozen/canonical daily WB WAC и effective versioned calculation parameters, затем публикует ровно восемь public cost/coverage/Proxy 3 SKU+TOTAL metric families;
+  - Proxy margin делится на expected buyout revenue, TOTAL строится как ratio aggregate profits к aggregate expected revenue, а missing operand/zero denominator остаётся blank;
+  - exact plan включает digest полного ready-snapshot manifest и non-target digest; apply требует fresh fingerprint, backup `0600`, проверяет manifest под `BEGIN IMMEDIATE`, делает in-transaction readback и сохраняет все non-target rows/metadata;
+  - repeated dry-run после apply возвращает zero changes; settings save запускает тот же targeted publisher без physical warehouse rebuild.
 - User-facing term `ЕБД` / `единая база данных` names the shared server-side accepted truth/runtime layer for this contour: persisted accepted closed-day temporal source slots, ready snapshots and related runtime state produced by repo-owned refresh/group-refresh/reconcile paths. Web-vitrina, plan-report and future reports consume this server-side layer; Google Sheets/GAS, the HTML UI, browser `localStorage` and report-private manual tables are not the EBD.
 - Канонический operator live-log path:
   - `GET /v1/sheet-vitrina-v1/job`
@@ -501,14 +500,14 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - `proxy_profit_2_rub` / `total_proxy_profit_2_rub` = proxy-profit formula with only `cost_price_rub` replaced by `onec_WB_STOCK_unit_cost_rub`
   - `proxy_margin_2_pct` / `proxy_margin_2_pct_total` = SKU `proxy_profit_2_rub / orderSum`, TOTAL `SUM(proxy_profit_2_rub) / SUM(orderSum)`
   - `inventory_capital_return_pct` / `inventory_capital_return_pct_total` = SKU `proxy_profit_2_rub / onec_total_cost_rub`, TOTAL `SUM(proxy_profit_2_rub) / SUM(onec_total_cost_rub)`
-- Current management proxy WB cost keys are runtime-extended from repo code and read materialized daily state from `sheet_vitrina_v1_wb_cost_daily_state`:
-  - `our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` = `Себестоимость WB наша, ₽/шт`; TOTAL is `SUM(unit_cost * stock_qty) / SUM(stock_qty)`;
+- Current management proxy WB cost keys are runtime-extended from repo code and, from `2026-07-01`, read the functional historical/current daily WB WAC projection:
+  - `our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` = `Себестоимость WB наша, ₽/шт`; it is a direct projection of canonical WB WAC and TOTAL is `SUM(WB contour capital) / SUM(WB contour quantity)`;
   - `our_wb_cost_confirmed_share_pct` / `total_our_wb_cost_confirmed_share_pct` = `Доля подтверждённой себестоимости, %`; SKU value is bucket-based `confirmed_qty / stock_qty` and may be partial, blank is allowed only when stock is zero/missing, and TOTAL is quantity-weighted `SUM(confirmed_qty) / SUM(stock_qty)` rather than an average of SKU percentages;
-  - `proxy_profit_3_rub` / `total_proxy_profit_3_rub` = `proxy прибыль 3`; before `2026-07-01` it equals `proxy_profit_2_rub`, from `2026-07-01` it uses `orderSum * 0.5096 - orderCount * 0.91 * our_wb_unit_cost_rub - ads_sum`, and TOTAL is sum of SKU rows.
-  - `proxy_margin_3_pct` / `proxy_margin_3_pct_total` = `Прокси маржинальность 3, %` / `Прокси маржинальность 3 всего, %`; SKU is `proxy_profit_3_rub / orderSum`, TOTAL is `SUM(proxy_profit_3_rub) / SUM(orderSum)`, values are fractional percent-formatted runtime extensions, and before `2026-07-01` margin 3 equals margin 2.
+  - `proxy_profit_3_rub` / `total_proxy_profit_3_rub` = `proxy прибыль 3`; before `2026-07-01` it equals `proxy_profit_2_rub`, from `2026-07-01` it uses the effective calculation-parameter version: `orderSum × buyout_rate × retained_share − orderCount × buyout_rate × canonical_WB_WAC − ads_sum`; TOTAL is the sum of complete SKU rows.
+  - `proxy_margin_3_pct` / `proxy_margin_3_pct_total` = `Прокси маржинальность 3, %` / `Прокси маржинальность 3 всего, %`; from `2026-07-01` SKU denominator is expected buyout revenue `orderSum × buyout_rate`, TOTAL is `SUM(SKU profit) / SUM(SKU expected buyout revenue)`, and before the boundary margin 3 equals margin 2.
 - Preliminary WB supply cost layers may exist for status `4/6` or planned quantity, but physical daily rolling admits only final `acceptedQuantity` / `accepted_quantity` on status `5` and groups it by normalized local `accepted_date` derived from the fact date. Planned `supply_date`, status `4/6`, and `quantity/qty` do not move physical buckets. Final accepted NULL-cost quantity enters explicit estimated/unknown, `confirmed + estimated + fallback` closes to stock, and zero-stock inbound carry remains internal to recalculation while persisted buckets stay capped to stock.
 - Web-vitrina read contract uses the same runtime-extended metric catalog as the DATA snapshot builder, so SKU/TOTAL our-WB rows must expose Russian labels and format metadata; confirmed share rows use `format=percent`, not raw number rendering.
-- Ordinary manual/auto refresh saves the ready snapshot, runs idempotent our-WB cost recalculation from runtime truth, and rebuilds/saves the ready snapshot again only if recalculation changed supplier/WB/opening/daily state. This post-refresh hook must not call legacy Google Sheets/GAS and must not depend on WB sync/enrich/upload.
+- Ordinary manual/auto vitrina refresh reads the already materialized functional warehouse/cost state and never runs WB supply sync, stock fetch or Seller Portal automation. The separate bounded hourly/manual WB pipeline owns external refresh and atomic functional publication.
 - Frozen snapshots created before margin 3 entered the runtime catalog are completed only by the guarded margin-3 one-off runner described above. Ordinary historical refresh, replace-existing materialization and workbook/stock importers are prohibited for this repair because they can rewrite unrelated frozen cells.
 - Management proxy WB cost rows are not strict accounting FIFO and do not replace `proxy_profit_2_rub`; source/component statuses must stay explicit when values come from fallback, estimates or pending components.
 - `total_proxy_profit_rub` не invent-ится как новый surface key: используется уже существующий canonical uploaded metric key из current bundle.
@@ -557,11 +556,11 @@ update_note: "Обновлён под Google Sheets decommission and current pla
   - TOTAL `total_proxy_profit_rub` = sum of SKU `proxy_profit_rub`;
   - TOTAL `proxy_margin_pct_total` = `total_proxy_profit_rub / total_orderSum`, если denominator допустим.
   - 1C `proxy_profit_2_rub` uses the same coefficients and dependencies as `proxy_profit_rub`, replacing only `cost_price_rub` with `onec_WB_STOCK_unit_cost_rub`;
-  - `proxy_profit_3_rub` keeps the same coefficients and date boundary: before `2026-07-01` it resolves to `proxy_profit_2_rub`, after the opening date it replaces only the cost input with `our_wb_unit_cost_rub`;
-  - `proxy_margin_3_pct` uses `_divide_or_zero(proxy_profit_3_rub, orderSum)` and TOTAL uses `_divide_or_zero(total_proxy_profit_3_rub, total_orderSum)`; missing operands stay blank, a zero denominator with present numerator returns `0.0`, and TOTAL is not an average of SKU percentages;
+  - `proxy_profit_3_rub` before `2026-07-01` resolves to `proxy_profit_2_rub`; from the boundary it uses the effective versioned `buyout_rate`, included expense rates and direct canonical `our_wb_unit_cost_rub` projection;
+  - `proxy_margin_3_pct` divides by `orderSum × buyout_rate`; TOTAL divides summed complete SKU profits by summed expected buyout revenue. Missing operands stay blank and a zero denominator returns blank; TOTAL is not an average of SKU percentages;
   - 1C percent totals `proxy_margin_2_pct_total` and `inventory_capital_return_pct_total` are ratio-of-aggregates, not averages of SKU rows;
   - margin 3 SKU/TOTAL rows are Python runtime extensions placed immediately after profit 3 and assigned to the same web-vitrina source/group refresh set, so profit and margin update atomically in partial merges;
-  - zero denominators for the new percent metrics return `0.0` when numerator data is present, matching existing proxy margin behavior.
+  - the initial effective version is `91%` buyout, `44%` included expenses and `56%` retained share; hardcoded `0.5096/0.91` are not active Proxy 3 formula inputs.
 - Пустой или неполный `COST_PRICE` dataset не валит refresh/load:
   - cost-based rows остаются blank;
   - `STATUS.cost_price[*]` объясняет missing/incomplete coverage;
@@ -723,10 +722,10 @@ Bounded допущение:
   - что `DATA_VITRINA` materialize-ит полный server-driven metric set как `date_matrix`, не режется до `7` metric keys и сразу грузит `yesterday_closed + today_current`;
   - что current-snapshot-only sources materialize-ят `yesterday_closed` через accepted-current rollover seam и не blank-ят already accepted previous-day truth;
   - что later invalid auto/manual current-only attempt не перетирает already accepted same-day snapshot;
-  - что ordinary refresh/auto-refresh запускает idempotent our-WB cost recalculation after ready-snapshot save and updates/rebuilds ready snapshot only when cost state changed;
+  - что ordinary refresh/auto-refresh только читает materialized functional warehouse/cost state, а отдельный hourly/manual WB pipeline обновляет sources и публикует coherent version;
   - что runtime-extended our-WB SKU/TOTAL rows in `GET /v1/sheet-vitrina-v1/web-vitrina` expose Russian labels and percent format metadata;
   - что `proxy_profit_3_rub` is visible for historical dates before `2026-07-01` by equaling `proxy_profit_2_rub`, while our WB cost/share stay blank before their model opening date;
-  - что `proxy_margin_3_pct` / `proxy_margin_3_pct_total` are percent-formatted ratio rows immediately after profit 3, use ratio-of-aggregates for TOTAL, equal margin 2 before `2026-07-01`, and refresh in the same source group as profit 3;
+  - что `proxy_margin_3_pct` / `proxy_margin_3_pct_total` are percent-formatted rows immediately after profit 3, use expected-buyout-revenue denominator and ratio-of-aggregates for TOTAL, equal margin 2 before `2026-07-01`, and refresh in the same source group as profit 3;
   - что planned/open status `4/6` never changes physical daily buckets, status `4 -> 5` enters once on final acceptance fact, accepted NULL-cost inbound closes into explicit estimated quantity, and unchanged rebuild is idempotent;
   - что manual refresh не создаёт persisted long-retry tail;
   - что `STATUS` фиксирует live sources per temporal slot, `cost_price[*]` coverage и current/closed promo source facts `promo_by_price[*]` with collector trace/debug note;

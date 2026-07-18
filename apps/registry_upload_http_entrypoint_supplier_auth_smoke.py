@@ -28,6 +28,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_FF_STOCKS_EXPORT_PATH,
     DEFAULT_FF_STOCKS_PATH,
     DEFAULT_FF_STOCKS_PREVIEW_PATH,
+    DEFAULT_CALCULATION_PARAMETERS_PATH,
     DEFAULT_NOMENCLATURE_EXPORT_PATH,
     DEFAULT_NOMENCLATURE_IMPORT_PATH,
     DEFAULT_NOMENCLATURE_PATH,
@@ -152,9 +153,18 @@ def main() -> None:
                     operator_warehouse_shell_code != 200
                     or 'data-unified-tab-button="warehouses"' not in operator_warehouse_shell
                     or 'data-unified-tab-panel="warehouses"' not in operator_warehouse_shell
-                    or operator_warehouse_shell.count('<button class="warehouse-switch"') != 6
+                    or operator_warehouse_shell.count(
+                        'class="warehouse-switch" type="button" data-warehouse-key="'
+                    ) != 6
                 ):
-                    raise AssertionError("operator warehouse shell must expose one common six-warehouse component")
+                    raise AssertionError(
+                        "operator warehouse shell must expose one common six-warehouse component: "
+                        f"status={operator_warehouse_shell_code}, "
+                        f"button={'data-unified-tab-button=\"warehouses\"' in operator_warehouse_shell}, "
+                        f"panel={'data-unified-tab-panel=\"warehouses\"' in operator_warehouse_shell}, "
+                        "warehouse_keys="
+                        f"{operator_warehouse_shell.count('class=\"warehouse-switch\" type=\"button\" data-warehouse-key=\"')}"
+                    )
                 warehouse_code, warehouse_payload = _opener_json(
                     operator,
                     f"{base_url}{DEFAULT_WAREHOUSES_PATH}",
@@ -439,6 +449,17 @@ def main() -> None:
                     )
                     if internal_warehouse_code != 200 or "warehouse" not in internal_warehouse:
                         raise AssertionError(f"{expected_role} must access warehouse read APIs")
+                    calculation_code, calculation_payload = _opener_json(
+                        internal,
+                        f"{base_url}{DEFAULT_CALCULATION_PARAMETERS_PATH}",
+                    )
+                    if expected_role == "supply_operator":
+                        if calculation_code != 403 or calculation_payload.get("error") != "forbidden":
+                            raise AssertionError(
+                                "supply-only operator must not access calculation settings"
+                            )
+                    elif calculation_code != 200:
+                        raise AssertionError("full operator must retain calculation settings access")
                 supplier_status_code, supplier_status_payload = _opener_patch_json(
                         supplier,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
@@ -535,8 +556,12 @@ def main() -> None:
                         operator,
                         f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
                     )
-                if operator_delete_code != 200 or operator_delete_payload.get("deleted") is not True:
-                        raise AssertionError(f"operator role must delete supplier orders, got {operator_delete_code} {operator_delete_payload}")
+                if (
+                    operator_delete_code != 200
+                    or operator_delete_payload.get("deleted") is not True
+                    or operator_delete_payload.get("archived") is not True
+                ):
+                        raise AssertionError(f"operator role must archive supplier orders, got {operator_delete_code} {operator_delete_payload}")
             finally:
                 server.shutdown()
                 server.server_close()

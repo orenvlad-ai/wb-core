@@ -138,15 +138,18 @@ Contract keeps runtime truth inside hosted WebCore and does not move supplier/or
 Canonical runner:
 - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
 
-The same runner owns the only production path for the bounded six-warehouse opening initialization after deploy:
-- `warehouse-opening-dry-run --output <absolute local plan.json>` reads primary sources and fresh official WB stock without inserting opening rows;
-- `warehouse-opening-apply --plan-file <same plan.json> --fingerprint <exact sha256:...>` pins the active EU target/runtime, creates a coherent integrity-checked backup under `/opt/wb-core-runtime/backups/warehouse-opening` and applies the exact plan atomically;
-- `warehouse-opening-readback` proves the stored six-document reconciliation;
-- `warehouse-opening-diagnostic --nm-id <positive-nmID>` reads only selected WB discrepancy evidence and never mutates/refetches the WB cache; hosted dotenv values are parsed as data inside Python, not sourced by a shell;
-- `warehouse-opening-rollback --fingerprint <exact stored sha256:...>` is the bounded recovery path and removes only the new warehouse cutover through FK cascade after another backup.
-- `warehouse-ui-flow --evidence-dir <absolute path outside repo>` is the read-only post-deploy acceptance path: it derives a short-lived signed owner session from the hosted env without logging the secret, opens a fresh local Playwright context, reconciles visible totals/rows for all six warehouses with protected detail APIs, reconciles immutable opening documents with production readback, compares the current FF projection with the legacy canonical FF API, verifies the legacy FF transition and writes screenshots plus a sanitized JSON report outside Git.
+The same runner owns the only production path for the active functional cutover after deploy:
+- `warehouse-functional-dry-run --output <absolute local plan.json>` captures coherent primary sources and fresh complete official WB stock without derived writes;
+- `warehouse-functional-apply --plan-file <same plan.json> --fingerprint <exact sha256:...>` pins the active EU target/runtime, creates a coherent `0600` integrity-checked backup and atomically applies six-stage balances, frozen historical cost projection and initial calculation parameters;
+- `warehouse-functional-readback` proves stage/source/capital reconciliation and the exact cutover identity;
+- repeated exact apply must return idempotent/no-op and create no second movement;
+- `warehouse-functional-economics-dry-run --output <absolute plan.json>` and `warehouse-functional-economics-apply --plan-file <same plan.json> --fingerprint <exact sha256:...>` are the only bounded `2026-07-01+` ready-snapshot WB cost/Proxy 3 publication path; apply preserves a separate `0600` backup and proves non-target digest invariance and idempotent readback;
+- `warehouse-functional-sync` is the bounded manual/hourly WB pipeline: official supply refresh, supply-specific downstream component materialization, complete official stock capture, one canonical warehouse/cost publication and targeted Proxy publication; it does not invoke legacy daily cost/product-capital rebuild or the global vitrina refresh;
+- `warehouse-functional-enable-hourly` enables the timer only after successful cutover/readback;
+- `warehouse-functional-rollback --fingerprint <exact stored sha256:...>` removes only functional derived state after another backup;
+- `warehouse-ui-flow --evidence-dir <absolute path outside repo>` uses a fresh isolated Playwright context and reconciles navigation, six warehouses, WB contour, settings/reference, Proxy 3, supplier cost/bank fee fields, consumers, legacy redirects and sync freshness with protected readback. Evidence stays outside Git.
 
-Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. Detailed sources/non-target invariants are fixed in `docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` and `migration/102_warehouse_opening_snapshot.md`.
+Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. `warehouse_opening_v1` remains immutable audit under migration 102; active sources/non-target invariants are fixed in module 48 and `migration/103_warehouse_functional_cutover.md`.
 
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`

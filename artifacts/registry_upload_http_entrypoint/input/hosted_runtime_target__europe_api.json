@@ -97,6 +97,16 @@
       "restart": true
     },
     {
+      "name": "wb-core-warehouse-functional-sync.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-warehouse-functional-sync.timer",
+      "enable": false,
+      "restart": false
+    },
+    {
       "name": "wb-core-data-mcp.service",
       "enable": true,
       "restart": true

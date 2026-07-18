@@ -839,7 +839,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
     tab_texts = [item["text"] for item in tabs]
-    if tab_texts != ["Витрина", "Поставки", "Остатки / Склады", "Отчёты", "Отзывы", "Реклама", "Цены", "Управление SKU", "Исследования"]:
+    if tab_texts != ["Витрина", "Поставки", "Остатки", "Отчёты", "Отзывы", "Реклама", "Цены", "Управление SKU", "Исследования"]:
         raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
     shell_actions = page.locator(".shell-actions").evaluate(
         "node => Array.from(node.querySelectorAll('button, a')).map(item => (item.textContent || '').trim())"
@@ -2786,7 +2786,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if payload["unified_tabs"] != ["Витрина", "Поставки", "Остатки / Склады", "Отчёты", "Отзывы", "Реклама", "Цены", "Управление SKU", "Исследования"]:
+    if payload["unified_tabs"] != ["Витрина", "Поставки", "Остатки", "Отчёты", "Отзывы", "Реклама", "Цены", "Управление SKU", "Исследования"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
     if payload["shell_actions"] != ["Инструкции", "Настройки", "Выйти"]:
         raise AssertionError(f"web-vitrina must expose Instructions and Settings next to logout, got {payload}")

@@ -19,6 +19,7 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
 )
+from packages.application.calculation_parameters import DEFAULT_PROXY_PARAMETERS
 
 
 DATA_SHEET_NAME = "DATA_VITRINA"
@@ -476,7 +477,7 @@ def _expected_margin_cell(
         "zero_denominator": False,
         "blank_operands": [],
     }
-    if numerator is None and column_date < OUR_WB_COST_OPENING_DATE:
+    if column_date < OUR_WB_COST_OPENING_DATE:
         margin2 = _operand_cell(rows_by_id.get(margin2_id), column_index, row_id=margin2_id)
         if margin2 is not None:
             evidence.update({"fallback": True, "source_row_id": margin2_id})
@@ -487,20 +488,21 @@ def _expected_margin_cell(
         evidence["blank_operands"].append(denominator_id)
     if evidence["blank_operands"]:
         return "", evidence
-    if denominator == 0:
+    expected_buyout_revenue = denominator * float(DEFAULT_PROXY_PARAMETERS.buyout_rate)
+    if expected_buyout_revenue == 0:
         evidence["zero_denominator"] = True
-        return 0.0, evidence
-    return _to_sheet_value(numerator / denominator), evidence
+        return "", evidence
+    return _to_sheet_value(numerator / expected_buyout_revenue), evidence
 
 
 def _compare_target_cell(*, current: Any, expected: Any) -> str:
     if _is_blank(current):
         return "same" if _is_blank(expected) else "change"
     if _is_blank(expected):
-        return "conflict"
+        return "change"
     current_number = _finite_number(current, field_name="existing target cell")
     expected_number = _finite_number(expected, field_name="expected target cell")
-    return "same" if abs(current_number - expected_number) <= _CELL_TOLERANCE else "conflict"
+    return "same" if abs(current_number - expected_number) <= _CELL_TOLERANCE else "change"
 
 
 def _target_insert_index(rows: Sequence[Any]) -> int:

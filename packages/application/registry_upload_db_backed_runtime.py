@@ -452,6 +452,88 @@ class RegistryUploadDbBackedRuntime:
             return {}
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            functional_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_warehouse_functional_balances'"
+            ).fetchone()
+            if functional_exists is not None:
+                cutover = conn.execute(
+                    """SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers
+                       WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""
+                ).fetchone()
+                if cutover is not None and date_key >= "2026-07-01":
+                    daily_rows = conn.execute(
+                        """SELECT * FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                           WHERE cutover_id='warehouse_functional_cutover_v1' AND as_of_date=?
+                           ORDER BY nm_id""",
+                        (date_key,),
+                    ).fetchall()
+                    if daily_rows:
+                        result = {}
+                        for row in daily_rows:
+                            quantity = float(row["quantity"])
+                            fallback = quantity if str(row["quality"]) == "fallback_average" else 0.0
+                            result[int(row["nm_id"])] = {
+                                "as_of_date": date_key,
+                                "nm_id": int(row["nm_id"]),
+                                "stock_qty": quantity,
+                                "cost_covered_qty": quantity,
+                                "our_wb_unit_cost_rub": float(row["wac_rub"]),
+                                "confirmed_qty": 0.0,
+                                "estimated_qty": max(quantity - fallback, 0.0),
+                                "fallback_qty": fallback,
+                                "confirmed_share_pct": 0.0,
+                                "source_status": str(row["quality"]),
+                                "component_status_json": row["provenance_json"],
+                                "calculated_at": row["created_at"],
+                                "warehouse_cutover_id": str(row["cutover_id"]),
+                            }
+                        return result
+                if cutover is not None and date_key >= str(cutover["cutover_at"])[:10]:
+                    version = conn.execute(
+                        """SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions
+                           WHERE cutover_id='warehouse_functional_cutover_v1'
+                             AND status='good' AND substr(effective_at,1,10)<=?
+                           ORDER BY effective_at DESC,created_at DESC LIMIT 1""",
+                        (date_key,),
+                    ).fetchone()
+                    if version is not None:
+                        functional_rows = conn.execute(
+                            """SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances
+                               WHERE version_id=? AND warehouse_key='wb' ORDER BY nm_id""",
+                            (version["version_id"],),
+                        ).fetchall()
+                        if functional_rows:
+                            result = {}
+                            for row in functional_rows:
+                                quantity = float(row["quantity"])
+                                covered = min(float(row["cost_covered_quantity"]), quantity)
+                                certified = bool(row["certified"])
+                                fallback = (
+                                    covered if str(row["quality"]) == "fallback_average" else 0.0
+                                )
+                                confirmed = covered if certified else 0.0
+                                estimated = max(covered - confirmed - fallback, 0.0)
+                                result[int(row["nm_id"])] = {
+                                    "as_of_date": date_key,
+                                    "nm_id": int(row["nm_id"]),
+                                    "stock_qty": quantity,
+                                    "cost_covered_qty": covered,
+                                    "our_wb_unit_cost_rub": (
+                                        float(row["wac_rub"]) if row["wac_rub"] not in (None, "") else None
+                                    ),
+                                    "confirmed_qty": confirmed,
+                                    "estimated_qty": estimated,
+                                    "fallback_qty": fallback,
+                                    "confirmed_share_pct": confirmed / quantity if quantity > 0 else None,
+                                    "source_status": str(row["quality"]),
+                                    "component_status_json": row["provenance_json"],
+                                    "calculated_at": version["created_at"],
+                                    "warehouse_version_id": str(version["version_id"]),
+                                }
+                            return result
+                    return {}
+                if cutover is not None and "2026-07-01" <= date_key < str(cutover["cutover_at"])[:10]:
+                    return {}
             canonical_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_canonical_cost_daily_state'"
             ).fetchone()
@@ -3950,8 +4032,13 @@ class RegistryUploadDbBackedRuntime:
                        source_filename,
                        source_file_sha256,
                        source_file_path,
-                       invoice_document_id
+                       invoice_document_id,
+                       archived_at,
+                       archive_event_id,
+                       archive_reason,
+                       archive_actor
                 FROM sheet_vitrina_v1_supplier_shipments
+                WHERE archived_at IS NULL OR archived_at = ''
                 ORDER BY shipment_date DESC, created_at DESC
                 """
             ).fetchall()
@@ -4050,6 +4137,150 @@ class RegistryUploadDbBackedRuntime:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def archive_supplier_shipment(
+        self,
+        *,
+        shipment_id: str,
+        archived_at: str,
+        actor: str = "operator",
+        reason: str = "operator_delete_controlled_archive",
+    ) -> dict[str, Any] | None:
+        """Archive a supplier source without deleting posted evidence.
+
+        The legacy DELETE method remains available only for old fixtures and
+        migrations.  Operator-facing removal uses this append-only audit event
+        and an inactive persisted status so warehouse replay can deterministically
+        reverse the source while retaining its complete provenance.
+        """
+
+        shipment_id = str(shipment_id or "").strip()
+        if not shipment_id:
+            raise ValueError("supplier shipment_id is required")
+        _validate_timestamp(str(archived_at or ""), field_name="archived_at")
+        normalized_actor = str(actor or "operator").strip() or "operator"
+        normalized_reason = str(reason or "operator_delete_controlled_archive").strip()
+        if not normalized_reason:
+            raise ValueError("supplier shipment archive reason is required")
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            header_row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id = ?",
+                (shipment_id,),
+            ).fetchone()
+            if header_row is None:
+                conn.rollback()
+                return None
+            existing_event_id = str(header_row["archive_event_id"] or "")
+            if str(header_row["archived_at"] or ""):
+                event = conn.execute(
+                    """
+                    SELECT * FROM sheet_vitrina_v1_supplier_shipment_archive_events
+                    WHERE event_id = ?
+                    """,
+                    (existing_event_id,),
+                ).fetchone()
+                conn.commit()
+                if event is not None:
+                    payload = dict(event)
+                    payload["idempotent"] = True
+                    return payload
+                return {
+                    "event_id": existing_event_id,
+                    "shipment_id": shipment_id,
+                    "archived_at": str(header_row["archived_at"] or ""),
+                    "source_fingerprint": "",
+                    "idempotent": True,
+                }
+            line_rows = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines
+                WHERE shipment_id = ? ORDER BY sort_order, line_id
+                """,
+                (shipment_id,),
+            ).fetchall()
+            snapshot = {
+                "header": dict(header_row),
+                "lines": [dict(row) for row in line_rows],
+            }
+            snapshot_json = json.dumps(
+                snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            source_fingerprint = "sha256:" + hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+            event_id = "supplier_archive_" + hashlib.sha256(
+                f"{shipment_id}|{archived_at}|{source_fingerprint}".encode("utf-8")
+            ).hexdigest()[:24]
+            conn.execute(
+                """
+                INSERT INTO sheet_vitrina_v1_supplier_shipment_archive_events(
+                    event_id, shipment_id, archived_at, actor, reason,
+                    source_fingerprint, source_snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    shipment_id,
+                    archived_at,
+                    normalized_actor,
+                    normalized_reason,
+                    source_fingerprint,
+                    snapshot_json,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE sheet_vitrina_v1_supplier_shipments
+                SET order_status = 'archived',
+                    expenses_complete = 0,
+                    updated_at = ?,
+                    archived_at = ?,
+                    archive_event_id = ?,
+                    archive_reason = ?,
+                    archive_actor = ?
+                WHERE shipment_id = ?
+                """,
+                (
+                    archived_at,
+                    archived_at,
+                    event_id,
+                    normalized_reason,
+                    normalized_actor,
+                    shipment_id,
+                ),
+            )
+            conn.commit()
+            return {
+                "event_id": event_id,
+                "shipment_id": shipment_id,
+                "archived_at": archived_at,
+                "actor": normalized_actor,
+                "reason": normalized_reason,
+                "source_fingerprint": source_fingerprint,
+                "idempotent": False,
+            }
+
+    def load_supplier_shipment_archive(self, shipment_id: str) -> dict[str, Any] | None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT * FROM sheet_vitrina_v1_supplier_shipment_archive_events
+                WHERE shipment_id = ? ORDER BY archived_at DESC, event_id DESC LIMIT 1
+                """,
+                (str(shipment_id or "").strip(),),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = dict(row)
+            payload["source_snapshot"] = _loads_json_object(payload.pop("source_snapshot_json"))
+            return payload
 
     def save_supplier_financial_document(
         self,
@@ -6829,6 +7060,10 @@ def _supplier_shipment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source_file_sha256": row["source_file_sha256"] or "",
         "source_file_path": row["source_file_path"] or "",
         "invoice_document_id": row["invoice_document_id"] or "",
+        "archived_at": row["archived_at"] or "",
+        "archive_event_id": row["archive_event_id"] or "",
+        "archive_reason": row["archive_reason"] or "",
+        "archive_actor": row["archive_actor"] or "",
     })
 
 
@@ -6869,6 +7104,10 @@ def _supplier_shipment_header_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source_file_sha256": row["source_file_sha256"] or "",
         "source_file_path": row["source_file_path"] or "",
         "invoice_document_id": row["invoice_document_id"] or "",
+        "archived_at": row["archived_at"] or "",
+        "archive_event_id": row["archive_event_id"] or "",
+        "archive_reason": row["archive_reason"] or "",
+        "archive_actor": row["archive_actor"] or "",
         "parser_version": row["parser_version"] or "",
         "warnings": _loads_json_list(row["warnings_json"]),
         "errors": _loads_json_list(row["errors_json"]),
@@ -8247,11 +8486,30 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             invoice_document_id TEXT,
             parser_version TEXT,
             warnings_json TEXT NOT NULL,
-            errors_json TEXT NOT NULL
+            errors_json TEXT NOT NULL,
+            archived_at TEXT,
+            archive_event_id TEXT,
+            archive_reason TEXT NOT NULL DEFAULT '',
+            archive_actor TEXT NOT NULL DEFAULT ''
         );
 
         CREATE INDEX IF NOT EXISTS sheet_vitrina_v1_supplier_shipments_by_date
         ON sheet_vitrina_v1_supplier_shipments(shipment_date DESC, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_archive_events (
+            event_id TEXT PRIMARY KEY,
+            shipment_id TEXT NOT NULL,
+            archived_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            source_snapshot_json TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS supplier_shipment_archive_events_by_shipment
+        ON sheet_vitrina_v1_supplier_shipment_archive_events(
+            shipment_id, archived_at DESC, event_id DESC
+        );
 
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_supplier_shipment_historical_status_events (
             event_id TEXT PRIMARY KEY,
@@ -8516,6 +8774,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ff_services_per_unit_rub REAL NOT NULL DEFAULT 0,
             ff_storage_amount_total REAL NOT NULL DEFAULT 0,
             ff_storage_per_unit_rub REAL NOT NULL DEFAULT 0,
+            pre_acceptance_unit_cost_rub REAL,
+            wb_acceptance_amount_total REAL NOT NULL DEFAULT 0,
+            wb_acceptance_per_accepted_unit_rub REAL NOT NULL DEFAULT 0,
             our_wb_unit_cost_rub REAL,
             source_status TEXT NOT NULL,
             component_status_json TEXT NOT NULL DEFAULT '{}',
@@ -8869,6 +9130,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         column_name="invoice_document_id",
         column_sql="TEXT",
     )
+    for column_name, column_sql in (
+        ("archived_at", "TEXT"),
+        ("archive_event_id", "TEXT"),
+        ("archive_reason", "TEXT NOT NULL DEFAULT ''"),
+        ("archive_actor", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_supplier_shipments",
+            column_name=column_name,
+            column_sql=column_sql,
+        )
     for column_name in (
         "cny_ledger_effective_rate",
         "cny_payment_currency_rub_cost",
@@ -8883,6 +9156,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             table_name="sheet_vitrina_v1_supplier_shipments",
             column_name=column_name,
             column_sql="TEXT",
+        )
+    for column_name, column_sql in (
+        ("pre_acceptance_unit_cost_rub", "REAL"),
+        ("wb_acceptance_amount_total", "REAL NOT NULL DEFAULT 0"),
+        ("wb_acceptance_per_accepted_unit_rub", "REAL NOT NULL DEFAULT 0"),
+    ):
+        _ensure_column(
+            conn,
+            table_name="sheet_vitrina_v1_wb_supply_cost_layers",
+            column_name=column_name,
+            column_sql=column_sql,
         )
     _ensure_column(
         conn,

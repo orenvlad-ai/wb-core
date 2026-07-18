@@ -87,6 +87,10 @@
       display: none;
     }
 
+    body.stock-report-only .subsection-strip {
+      display: none;
+    }
+
     .tab-strip {
       display: flex;
       gap: 12px;
@@ -4828,7 +4832,7 @@
             <div class="wb-supplies-header">
               <div>
                 <h2 id="ffStockTitle" class="wb-supplies-title">Операции остатков ФФ</h2>
-                <p class="wb-supplies-lead">Оприходования, списания и журнал канонического FF ledger. Текущий остаток показан в разделе «Остатки / Склады».</p>
+                <p class="wb-supplies-lead">Оприходования, списания и журнал канонического FF ledger. Текущий остаток показан в разделе «Остатки → Склады и себестоимость».</p>
               </div>
               <div class="block-actions">
                 <button id="ffStockExportButton" class="action-button secondary-button" type="button">Скачать Excel</button>
@@ -5521,6 +5525,13 @@
         ...PLAN_REPORT_CANONICAL_INPUTS
       };
       const isEmbeddedMode = Boolean(config.embedded);
+      const operatorQuery = new URLSearchParams(window.location.search);
+      const stockReportEmbedMode = isEmbeddedMode && operatorQuery.get("stock_report_embed") === "1";
+      if (stockReportEmbedMode) document.body.classList.add("stock-report-only");
+      if (isEmbeddedMode && !stockReportEmbedMode) {
+        const legacyStockButton = reportSectionButtons.find((button) => button.dataset.reportSectionButton === "stock");
+        if (legacyStockButton) legacyStockButton.hidden = true;
+      }
       const configuredInitialTab = normalizePersistedSectionName(config.initial_tab, VALID_TABS, DEFAULT_ACTIVE_TAB);
       let activeJobId = null;
       let completedJob = null;
@@ -13731,7 +13742,13 @@
         { persist: !isEmbeddedMode }
       );
       activateReportSection(
-        persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION,
+        stockReportEmbedMode
+          ? "stock"
+          : (
+              isEmbeddedMode && (operatorQuery.get("report_section") || persistedOperatorUiState.report_section) === "stock"
+                ? DEFAULT_REPORT_SECTION
+                : (operatorQuery.get("report_section") || persistedOperatorUiState.report_section || DEFAULT_REPORT_SECTION)
+            ),
         { persist: !isEmbeddedMode }
       );
       activateSupplyMode(

@@ -19,6 +19,7 @@ import threading
 from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
+from packages.adapters.stocks_block import HttpBackedStocksSource
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.fulfillment_services import FulfillmentServicesBlock
@@ -54,6 +55,7 @@ from packages.application.sheet_vitrina_v1_auto_refresh import (
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import list_active_sku_options
 from packages.application.supplier_shipments import SupplierShipmentsBlock
+from packages.application.stocks_block import StocksBlock
 from packages.application.supplier_shipment_factual_correction import (
     SupplierShipmentFactualCorrectionBlock,
 )
@@ -127,6 +129,13 @@ from packages.application.wb_regional_supply import WbRegionalSupplyBlock
 from packages.application.wb_regional_supply_planning import WbRegionalSupplyPlanningBlock
 from packages.application.wb_supplies import WbSuppliesBlock
 from packages.application.warehouse_stocks import WarehouseStocksBlock
+from packages.application.warehouse_functional import (
+    WarehouseFunctionalBlock,
+    _normalized_wb_record,
+    _validated_wb_goods,
+    enqueue_warehouse_targeted_recalculation,
+)
+from packages.application.calculation_parameters import CalculationParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
 from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
@@ -827,6 +836,13 @@ class RegistryUploadHttpEntrypoint:
             now_factory=self.now_factory,
             timestamp_factory=self.activated_at_factory,
         )
+        self.warehouse_functional_block = WarehouseFunctionalBlock(
+            runtime=self.runtime,
+            stocks_block=StocksBlock(HttpBackedStocksSource(reuse_ttl_seconds=0.0)),
+            now_factory=self.now_factory,
+            timestamp_factory=self.activated_at_factory,
+        )
+        self.calculation_parameters_block = CalculationParametersBlock(runtime=self.runtime)
         self.our_wb_cost_block = OurWbCostBlock(
             runtime=self.runtime,
             timestamp_factory=self.activated_at_factory,
@@ -2552,16 +2568,22 @@ class RegistryUploadHttpEntrypoint:
         document_id: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        return self.supplier_financial_documents_block.update_document_status(
+        result = self.supplier_financial_documents_block.update_document_status(
             shipment_id,
             document_id,
             str(payload.get("parse_status") or ""),
         )
+        if result.get("cny_documents_status_changed"):
+            replay = self.cny_ledger_block.replay_ledger(
+                reason="supplier_financial_document_status_change"
+            )
+            result["cny_replay"] = replay.get("replay") or replay
+        return result
 
     def handle_supplier_financial_document_delete_request(self, shipment_id: str, document_id: str) -> dict[str, Any]:
         payload = self.supplier_financial_documents_block.delete_document(shipment_id, document_id)
-        if payload.get("cny_documents_deleted"):
-            replay = self.cny_ledger_block.replay_ledger(reason="supplier_financial_document_delete")
+        if payload.get("cny_documents_archived"):
+            replay = self.cny_ledger_block.replay_ledger(reason="supplier_financial_document_archive")
             payload["cny_replay"] = replay.get("replay") or replay
         return payload
 
@@ -2733,11 +2755,16 @@ class RegistryUploadHttpEntrypoint:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
     ) -> dict[str, Any]:
-        return self.fulfillment_services_block.upload_xlsx(
+        result = self.fulfillment_services_block.upload_xlsx(
             workbook_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
         )
+        result["warehouse_targeted_recalculation"] = self._enqueue_fulfillment_recalculation(
+            result,
+            revision=str((result.get("upload") or {}).get("file_sha256") or ""),
+        )
+        return result
 
     def handle_fulfillment_services_uploads_request(self) -> dict[str, Any]:
         return self.fulfillment_services_block.list_uploads()
@@ -2746,7 +2773,61 @@ class RegistryUploadHttpEntrypoint:
         return self.fulfillment_services_block.get_upload(upload_id)
 
     def handle_fulfillment_services_upload_delete_request(self, upload_id: str) -> dict[str, Any]:
-        return self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
+        before = self.fulfillment_services_block.get_upload(upload_id)
+        result = self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
+        result["warehouse_targeted_recalculation"] = self._enqueue_fulfillment_recalculation(
+            before,
+            revision=f"deleted:{result.get('deleted_at') or ''}",
+        )
+        return result
+
+    def _enqueue_fulfillment_recalculation(
+        self,
+        detail: Mapping[str, Any],
+        *,
+        revision: str,
+    ) -> dict[str, Any]:
+        upload = dict(detail.get("upload") or {})
+        if str(upload.get("validation_status") or detail.get("validation_status") or "") != "ok":
+            return {"status": "not_eligible", "reason": "fulfillment_document_not_confirmed"}
+        supply_records: dict[str, Mapping[str, Any]] = {}
+        for line in detail.get("lines") or []:
+            if str(line.get("match_status") or "") != "ok" or bool(line.get("is_storage_line")):
+                continue
+            candidates = (
+                line.get("matched_wb_supply_id"),
+                str(line.get("matched_wb_cache_key") or "").removeprefix("supply:"),
+                line.get("supply_id_input"),
+            )
+            for candidate in candidates:
+                supply_id = str(candidate or "").strip()
+                if not supply_id or supply_id in supply_records:
+                    continue
+                record = self.runtime.load_wb_supply_record(supply_id)
+                if record is not None:
+                    supply_records[supply_id] = record
+                    break
+        nm_ids: set[int] = set()
+        effective_dates: list[str] = []
+        for record in supply_records.values():
+            normalized = _normalized_wb_record(record)
+            nm_ids.update(int(item["nm_id"]) for item in _validated_wb_goods(normalized))
+            for field in ("fact_date", "supply_date", "updated_date", "created_date"):
+                value = str(normalized.get(field) or record.get(field) or "")[:10]
+                if value:
+                    effective_dates.append(value)
+                    break
+        if not nm_ids:
+            return {"status": "not_eligible", "reason": "no_matched_supply_skus"}
+        upload_id = str(upload.get("upload_id") or detail.get("upload_id") or "").strip()
+        return enqueue_warehouse_targeted_recalculation(
+            runtime=self.runtime,
+            stable_source_id=f"fulfillment_upload:{upload_id}",
+            source_revision=str(revision or upload.get("updated_at") or upload_id),
+            effective_date=min(effective_dates) if effective_dates else str(upload.get("uploaded_at") or "")[:10],
+            affected_nm_ids=nm_ids,
+            requested_at=self.activated_at_factory(),
+        )
 
     def handle_fulfillment_services_payment_validation_pdf_request(
         self,
@@ -2755,10 +2836,84 @@ class RegistryUploadHttpEntrypoint:
         return self.fulfillment_services_block.download_pdf(upload_id)
 
     def handle_warehouses_overview_request(self) -> dict[str, Any]:
-        return self.warehouse_stocks_block.overview()
+        functional = self.warehouse_functional_block.overview()
+        return functional if functional.get("status") == "ready" else self.warehouse_stocks_block.overview()
 
     def handle_warehouse_detail_request(self, warehouse_key: str) -> dict[str, Any]:
+        functional = self.warehouse_functional_block.readback()
+        if functional.get("status") == "ready":
+            return self.warehouse_functional_block.warehouse_detail(warehouse_key)
         return self.warehouse_stocks_block.warehouse_detail(warehouse_key)
+
+    def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
+        try:
+            supply_payload = self.wb_supplies_block.sync_functional_sources()
+            downstream_cost_layers = self.our_wb_cost_block.materialize_wb_supply_cost_layers(
+                opening_date="2026-07-01"
+            )
+            plan = self.warehouse_functional_block.build_sync_plan()
+            result = self.warehouse_functional_block.apply_plan(
+                plan,
+                confirm_fingerprint=str(plan["plan_fingerprint"]),
+            )
+            proxy_recalculation = self.calculation_parameters_block.process_pending_targeted_recalculations()
+            economics_publication = self.calculation_parameters_block.publish_current_functional_economics()
+        except Exception as exc:
+            self.warehouse_functional_block.record_failed_sync(exc)
+            raise
+        sync = dict(supply_payload.get("sync") or {})
+        return {
+            "status": "success",
+            "mode": "manual_sync",
+            "official_supply_sync": {
+                "run_id": str(sync.get("run_id") or ""),
+                "changed_rows": int(sync.get("changed_rows") or 0),
+                "accepted_qty_changed_rows": int(sync.get("accepted_qty_changed_rows") or 0),
+            },
+            "downstream_cost_layers_materialized": downstream_cost_layers,
+            "plan_fingerprint": plan["plan_fingerprint"],
+            "diff": plan["diff"],
+            "active_version": result.get("active_version"),
+            "sync": result.get("sync"),
+            "proxy_targeted_recalculation": proxy_recalculation,
+            "functional_economics_publication": {
+                "plan_fingerprint": economics_publication.get("plan_fingerprint"),
+                "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
+                "database_written": economics_publication.get("database_written"),
+            },
+        }
+
+    def handle_warehouse_emergency_preview_request(self) -> dict[str, Any]:
+        return self.warehouse_functional_block.build_emergency_rebuild_plan()
+
+    def handle_warehouse_emergency_apply_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm") is not True:
+            raise ValueError("explicit emergency rebuild confirmation is required")
+        plan = payload.get("plan")
+        if not isinstance(plan, Mapping):
+            raise ValueError("exact reviewed emergency plan is required")
+        fingerprint = str(payload.get("fingerprint") or "")
+        return self.warehouse_functional_block.apply_plan(
+            plan,
+            confirm_fingerprint=fingerprint,
+        )
+
+    def handle_calculation_parameters_request(self) -> dict[str, Any]:
+        return self.calculation_parameters_block.get_payload()
+
+    def handle_calculation_parameters_preview_request(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return self.calculation_parameters_block.preview_version(payload)
+
+    def handle_calculation_parameters_save_request(
+        self, payload: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any]:
+        return self.calculation_parameters_block.create_version(
+            payload,
+            preview_fingerprint=str(payload.get("preview_fingerprint") or ""),
+            created_by=actor,
+        )
 
     def handle_ff_stock_status_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         query = dict(params or {})
@@ -2955,7 +3110,17 @@ class RegistryUploadHttpEntrypoint:
                 )
                 raise
 
-            wb_supplies_payload = self._run_wb_supplies_auto_sync(log=emit)
+            # WB operational state is materialized by the bounded hourly contour.
+            # A full vitrina refresh is a read-only consumer of that state and must
+            # never trigger supply APIs or Seller Portal automation as a side effect.
+            wb_supplies_payload = {
+                "status": "success",
+                "semantic_status": "success",
+                "stage": "wb_supplies_auto_sync",
+                "reason": "disabled: read materialized hourly WB state",
+                "official_sync": {"status": "materialized_hourly"},
+                "transit_cost": {"status": "not_requested"},
+            }
             finished_at = self.activated_at_factory()
             auto_result = _build_auto_update_result_payload(
                 refresh_payload=refresh_payload,
@@ -3008,77 +3173,16 @@ class RegistryUploadHttpEntrypoint:
             return payload
 
     def _run_wb_supplies_auto_sync(self, *, log: OperatorLogEmitter | None) -> dict[str, Any]:
-        emit = log or _noop_log
-        started_at = self.activated_at_factory()
-        result: dict[str, Any] = {
-            "status": "warning",
-            "semantic_status": "warning",
+        del log
+        return {
+            "status": "success",
+            "semantic_status": "success",
             "stage": "wb_supplies_auto_sync",
-            "started_at": started_at,
-            "official_sync": {"status": "not_started"},
-            "transit_cost": {"status": "not_started"},
+            "reason": "disabled: read materialized hourly WB state",
+            "official_sync": {"status": "materialized_hourly"},
+            "transit_cost": {"status": "not_requested"},
+            "finished_at": self.activated_at_factory(),
         }
-        emit(_format_log_event("wb_supplies_auto_sync_start", stage="official_sync"))
-        try:
-            official_payload = self.wb_supplies_block.sync_supplies(
-                {
-                    "mode": "incremental_refresh",
-                    "limit": 1000,
-                    "enrich": "changed_only",
-                    "list_params": {
-                        "limit": 20,
-                        "offset": 0,
-                        "size_filter": "main_250",
-                        "sort_key": "supply_date",
-                        "sort_dir": "desc",
-                    },
-                }
-            )
-            official_sync = dict(official_payload.get("sync") or {})
-            result["official_sync"] = {
-                "status": "success",
-                "run_id": str(official_sync.get("run_id") or ""),
-                "raw_merged_count": int(official_sync.get("raw_merged_count") or 0),
-                "new_rows": int(official_sync.get("new_rows") or 0),
-                "changed_rows": int(official_sync.get("changed_rows") or 0),
-                "unchanged_rows": int(official_sync.get("unchanged_rows") or 0),
-                "enriched": int(official_sync.get("enriched") or 0),
-                "failed_enrich": int(official_sync.get("failed_enrich") or 0),
-                "forced_status_refresh_rows": int(official_sync.get("forced_status_refresh_rows") or 0),
-                "refreshed_recent_historical_rows": int(official_sync.get("refreshed_recent_historical_rows") or 0),
-                "accepted_qty_changed_rows": int(official_sync.get("accepted_qty_changed_rows") or 0),
-                "warnings": list(official_sync.get("warnings") or [])[:10],
-            }
-            result["status"] = "success"
-            result["semantic_status"] = "success"
-            emit(
-                _format_log_event(
-                    "wb_supplies_auto_sync_finish",
-                    stage="official_sync",
-                    status="success",
-                    run_id=result["official_sync"]["run_id"],
-                    changed_rows=result["official_sync"]["changed_rows"],
-                    accepted_qty_changed_rows=result["official_sync"]["accepted_qty_changed_rows"],
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - auto-refresh must not fail critical web-vitrina snapshot.
-            error = str(exc)
-            result["official_sync"] = {"status": "failed", "error": error}
-            result["status"] = "warning"
-            result["semantic_status"] = "warning"
-            result["reason"] = f"WB supplies official sync failed: {error}"
-            emit(_format_log_event("wb_supplies_auto_sync_finish", stage="official_sync", status="warning", error=error))
-            result["finished_at"] = self.activated_at_factory()
-            return result
-
-        transit_result = self._maybe_start_wb_supplies_auto_transit_cost_enrichment(log=emit)
-        result["transit_cost"] = transit_result
-        if str(transit_result.get("status") or "") not in {"success", "queued", "skipped_no_candidates"}:
-            result["status"] = "warning"
-            result["semantic_status"] = "warning"
-        result["reason"] = _wb_supplies_auto_sync_reason(result)
-        result["finished_at"] = self.activated_at_factory()
-        return result
 
     def _maybe_start_wb_supplies_auto_transit_cost_enrichment(self, *, log: OperatorLogEmitter | None) -> dict[str, Any]:
         emit = log or _noop_log
@@ -3313,55 +3417,15 @@ class RegistryUploadHttpEntrypoint:
                     finished_at=self.activated_at_factory(),
                     status="success",
                 )
-                our_wb_cost_recalculate = self._run_our_wb_cost_post_refresh_recalculate(
-                    emit=emit,
-                    refresh_diagnostics=refresh_diagnostics,
-                )
-                refresh_diagnostics["our_wb_cost_recalculate"] = our_wb_cost_recalculate
-                if our_wb_cost_recalculate.get("changed"):
-                    emit(
-                        _format_log_event(
-                            "our_wb_cost_snapshot_rebuild_start",
-                            cycle="refresh",
-                            as_of_date=effective_as_of_date,
-                            reason="post_refresh_recalculate_changed_runtime_state",
-                        )
-                    )
-                    rebuild_phase = _start_operator_phase(
-                        "rebuild_plan_after_our_wb_cost_recalculate",
-                        started_at=self.activated_at_factory(),
-                    )
-                    initial_plan = plan
-                    plan = self.sheet_plan_block.build_plan(
-                        as_of_date=effective_as_of_date,
-                        log=emit,
-                        execution_mode=execution_mode,
-                    )
-                    plan = _with_full_refresh_metadata(
-                        plan,
-                        refreshed_at=refreshed_at,
-                        previous_plan=initial_plan,
-                        previous_refreshed_at=refreshed_at,
-                    )
-                    refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
-                        current_state=current_state,
-                        refreshed_at=refreshed_at,
-                        plan=plan,
-                    )
-                    _finish_operator_phase(
-                        refresh_diagnostics,
-                        rebuild_phase,
-                        finished_at=self.activated_at_factory(),
-                        status="success",
-                    )
-                    emit(
-                        _format_log_event(
-                            "our_wb_cost_snapshot_rebuild_finish",
-                            cycle="refresh",
-                            snapshot_id=refresh_result.snapshot_id,
-                            data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
-                        )
-                    )
+                # The full vitrina refresh is a consumer of the last atomically
+                # published functional warehouse/cost version.  External WB fetch,
+                # movement replay and legacy WB/own-capital rebuilds are owned only
+                # by the bounded hourly/manual functional pipeline.
+                refresh_diagnostics["our_wb_cost_recalculate"] = {
+                    "status": "skipped",
+                    "reason": "materialized_functional_state_read_only",
+                    "changed": False,
+                }
                 promo_gc_phase = _start_operator_phase(
                     "promo_artifact_light_gc",
                     started_at=self.activated_at_factory(),

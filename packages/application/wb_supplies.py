@@ -338,7 +338,9 @@ class WbSuppliesBlock:
         return [(int(item.nm_id), str(item.display_name)) for item in enabled]
 
     def sync_supplies(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        request = _normalize_sync_request(payload or {})
+        raw_payload = dict(payload or {})
+        record_ff_movements = bool(raw_payload.pop("_record_ff_movements", True))
+        request = _normalize_sync_request(raw_payload)
         if request["mode"] == SYNC_MODE_FULL_BACKFILL:
             return self.start_full_backfill(request)
         synced_at = self.timestamp_factory()
@@ -356,9 +358,10 @@ class WbSuppliesBlock:
         )
         ff_auto_writeoff_checkpoint: dict[str, Any] = {}
         try:
-            ff_auto_writeoff_checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
-                reason="wb_supplies_incremental_refresh"
-            )
+            if record_ff_movements:
+                ff_auto_writeoff_checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
+                    reason="wb_supplies_incremental_refresh"
+                )
             warehouses = self._fetch_warehouses(warnings)
             list_result = _coerce_list_result(
                 self.source.list_supplies(
@@ -464,8 +467,16 @@ class WbSuppliesBlock:
                     self.runtime.list_wb_supplies_cache_records(),
                     raw_rows,
                 )
-            ff_stock_debits = self.ff_stock_ledger.record_wb_supply_debits(
-                self.runtime.list_wb_supplies_cache_records()
+            ff_stock_debits = (
+                self.ff_stock_ledger.record_wb_supply_debits(
+                    self.runtime.list_wb_supplies_cache_records()
+                )
+                if record_ff_movements
+                else {
+                    "status": "skipped",
+                    "reason": "disposable_read_only_supply_capture",
+                    "created_count": 0,
+                }
             )
         except Exception as exc:
             block_error = _to_block_error(exc)
@@ -558,10 +569,52 @@ class WbSuppliesBlock:
             "may_have_more": list_result.raw_count >= list_result.limit,
             "latest_window_only": True,
             "enrich": request["enrich"],
+            "record_ff_movements": record_ff_movements,
             "ff_stock_debits": ff_stock_debits,
             "ff_auto_writeoff_checkpoint": ff_auto_writeoff_checkpoint,
             "warnings": warnings,
         }
+        return response
+
+    def sync_functional_sources(self, *, record_ff_movements: bool = True) -> dict[str, Any]:
+        """Fetch one complete supply source set for functional warehouse replay.
+
+        Automatic FF movements are intentionally deferred until all active and
+        recently completed status slices plus their required enrichment pass
+        the completeness gate.
+        """
+
+        response = self.sync_supplies(
+            {
+                "mode": SYNC_MODE_INCREMENTAL_REFRESH,
+                "limit": 1000,
+                "enrich": "changed_only",
+                "_record_ff_movements": False,
+            }
+        )
+        sync = dict(response.get("sync") or {})
+        validate_functional_supply_sync(sync)
+        ff_stock_debits: dict[str, Any] = {
+            "status": "skipped",
+            "reason": "disposable_read_only_supply_capture",
+            "created_count": 0,
+        }
+        checkpoint: dict[str, Any] = {}
+        if record_ff_movements:
+            checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
+                reason="warehouse_functional_bounded_sync"
+            )
+            ff_stock_debits = self.ff_stock_ledger.record_wb_supply_debits(
+                self.runtime.list_wb_supplies_cache_records()
+            )
+        sync.update(
+            {
+                "record_ff_movements": record_ff_movements,
+                "ff_stock_debits": ff_stock_debits,
+                "ff_auto_writeoff_checkpoint": checkpoint,
+            }
+        )
+        response["sync"] = sync
         return response
 
     def start_full_backfill(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -1606,6 +1659,23 @@ def _normalize_list_request(params: Mapping[str, Any]) -> dict[str, Any]:
         "sort_key": _normalize_sort_key(params.get("sort_key")),
         "sort_dir": _normalize_sort_dir(params.get("sort_dir")),
     }
+
+
+def validate_functional_supply_sync(sync: Mapping[str, Any]) -> None:
+    blockers: list[str] = []
+    if str(sync.get("status") or "") != "ok":
+        blockers.append("sync_status_not_ok")
+    if not bool(sync.get("active_reconciliation_complete")):
+        blockers.append("active_reconciliation_incomplete")
+    if bool(sync.get("partial_status_slices")):
+        blockers.append("active_or_recent_status_slice_partial")
+    if int(sync.get("failed_enrich") or 0) > 0:
+        blockers.append("supply_detail_or_goods_enrichment_failed")
+    if blockers:
+        raise WbSuppliesBlockError(
+            "official WB supply refresh is incomplete: " + ",".join(blockers),
+            http_status=503,
+        )
 
 
 def _normalize_sync_request(payload: Mapping[str, Any]) -> dict[str, Any]:

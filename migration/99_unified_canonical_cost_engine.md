@@ -1,5 +1,9 @@
 # Unified canonical cost engine cutover contract
 
+## Status
+
+Completed legacy migration/audit contract. Its tables, manifests and applied evidence remain immutable but are not active quantity/cost truth after `warehouse_functional_cutover_v1`. Active rules are migration 103 and module 48. References below describe the historical guarded cutover and must not be reused as a current baseline or production runner.
+
 ## Scope
 
 - cutover: `2026-07-01`;

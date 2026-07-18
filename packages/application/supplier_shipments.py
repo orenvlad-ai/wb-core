@@ -448,7 +448,9 @@ class SupplierShipmentsBlock:
             linked_by="system",
             source=TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
         )
-        return self.get_shipment(shipment_id)
+        result = self.get_shipment(shipment_id)
+        result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+        return result
 
     def create_shipment_supplier_safe(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         sanitized = _sanitize_supplier_write_payload(payload, require_upload_id=True)
@@ -471,6 +473,7 @@ class SupplierShipmentsBlock:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(detail, shipment_id=shipment_id)
         payload = _detail_payload(detail)
         payload["lines"] = _project_supplier_line_contract(
             payload.get("lines") or [],
@@ -488,6 +491,7 @@ class SupplierShipmentsBlock:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(detail, shipment_id=shipment_id)
         payload = _detail_payload(detail)
         return _supplier_safe_detail_projection(
             payload,
@@ -502,6 +506,7 @@ class SupplierShipmentsBlock:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(existing, shipment_id=shipment_id)
         legacy_product_barcodes_missing = any(
             item.get("line_type") == LINE_TYPE_PRODUCT and not str(item.get("barcode") or "").strip()
             for item in existing.get("lines") or []
@@ -585,6 +590,11 @@ class SupplierShipmentsBlock:
             or str(existing_header.get("currency") or "") != str(metadata.get("currency") or "")
             or _optional_number(existing_header.get("approx_yuan_rate")) != _optional_number(approx_yuan_rate)
         )
+        warehouse_affecting_changed = bool(
+            cost_affecting_changed
+            or actual_shipment_date != str(existing_header.get("actual_shipment_date") or "")
+            or actual_ff_acceptance_date != str(existing_header.get("actual_ff_acceptance_date") or "")
+        )
         header = {
             **existing_header,
             "updated_at": now,
@@ -636,7 +646,10 @@ class SupplierShipmentsBlock:
                 )
             else:
                 self.unlink_shipment_contract(shipment_id)
-        return self.get_shipment(shipment_id)
+        result = self.get_shipment(shipment_id)
+        if warehouse_affecting_changed:
+            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+        return result
 
     def update_shipment_supplier_safe(
         self,
@@ -753,6 +766,7 @@ class SupplierShipmentsBlock:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(existing, shipment_id=shipment_id)
         normalized = _normalize_bool_field(expenses_complete, field_name="expenses_complete")
         updated = self.runtime.update_supplier_shipment_expenses_complete(
             shipment_id=shipment_id,
@@ -770,7 +784,9 @@ class SupplierShipmentsBlock:
             shipment_id=shipment_id,
             expenses_complete=normalized,
         )
-        return self.get_shipment(shipment_id)
+        result = self.get_shipment(shipment_id)
+        result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+        return result
 
     def _materialize_ff_cost_layer(self, shipment_id: str) -> None:
         from packages.application.our_wb_costs import OurWbCostBlock
@@ -781,8 +797,60 @@ class SupplierShipmentsBlock:
         )
         cost_block.materialize_supplier_ff_cost_layer(shipment_id)
         cost_block.materialize_wb_supply_cost_layers()
-        cost_block.materialize_opening_baseline()
-        cost_block.materialize_daily_state()
+
+    def _enqueue_warehouse_recalculation(self, shipment: Mapping[str, Any]) -> dict[str, Any]:
+        from packages.application.warehouse_functional import enqueue_warehouse_targeted_recalculation
+
+        header = dict(shipment.get("header") or {})
+        shipment_id = str(header.get("shipment_id") or shipment.get("shipment_id") or "").strip()
+        lines = [
+            dict(line)
+            for line in shipment.get("lines") or []
+            if str(line.get("line_type") or "") == LINE_TYPE_PRODUCT
+        ]
+        nm_ids = sorted(
+            {
+                int(line.get("internal_nm_id") or 0)
+                for line in lines
+                if int(line.get("internal_nm_id") or 0) > 0
+            }
+        )
+        effective_date = next(
+            (
+                str(value)[:10]
+                for value in (
+                    header.get("invoice_date"),
+                    header.get("shipment_date"),
+                    header.get("actual_shipment_date"),
+                    header.get("actual_ff_acceptance_date"),
+                    header.get("created_at"),
+                )
+                if str(value or "")[:10]
+            ),
+            date.today().isoformat(),
+        )
+        revision_payload = {
+            "shipment_id": shipment_id,
+            "header": header,
+            "lines": lines,
+        }
+        revision = "sha256:" + hashlib.sha256(
+            json.dumps(
+                revision_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return enqueue_warehouse_targeted_recalculation(
+            runtime=self.runtime,
+            stable_source_id=f"supplier_shipment:{shipment_id}",
+            source_revision=revision,
+            effective_date=effective_date,
+            affected_nm_ids=nm_ids,
+            requested_at=self.timestamp_factory(),
+        )
 
     def _record_ff_stock_receipt(self, shipment_detail: Mapping[str, Any]) -> dict[str, Any] | None:
         return FfStockLedgerBlock(
@@ -884,26 +952,58 @@ class SupplierShipmentsBlock:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = dict(detail.get("header") or {})
         invoice_document_id = str(header.get("invoice_document_id") or "")
-        deleted = self.runtime.delete_supplier_shipment(shipment_id)
-        if not deleted:
+        archived_at = self.timestamp_factory()
+        archive_event = self.runtime.archive_supplier_shipment(
+            shipment_id=shipment_id,
+            archived_at=archived_at,
+        )
+        if archive_event is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         if invoice_document_id:
-            self.runtime.delete_invoice_contract_link(invoice_document_id)
             try:
-                self.runtime.archive_trade_document(invoice_document_id, updated_at=self.timestamp_factory())
+                self.runtime.archive_trade_document(invoice_document_id, updated_at=archived_at)
             except ValueError:
                 pass
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        OwnProductCapitalBlock(
+            runtime=self.runtime,
+            timestamp_factory=self.timestamp_factory,
+        ).set_expenses_certification(
+            shipment_id=shipment_id,
+            expenses_complete=False,
+            actor="supplier_shipment_archive",
+        )
+        archived_header = {
+            **header,
+            "updated_at": archived_at,
+            "order_status": "archived",
+            "persisted_order_status": "archived",
+            "expenses_complete": False,
+            "archived_at": archived_at,
+            "archive_event_id": str(archive_event.get("event_id") or ""),
+        }
+        targeted = self._enqueue_warehouse_recalculation(
+            {"header": archived_header, "lines": list(detail.get("lines") or [])}
+        )
         return {
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
             "status": "ok",
+            # Keep the public response field for route compatibility.  The
+            # implementation is a controlled archive, never a physical delete.
             "deleted": True,
+            "archived": True,
             "shipment_id": shipment_id,
+            "archive_event_id": str(archive_event.get("event_id") or ""),
+            "source_fingerprint": str(archive_event.get("source_fingerprint") or ""),
+            "warehouse_targeted_recalculation": targeted,
         }
 
     def rematch_shipment(self, shipment_id: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(existing, shipment_id=shipment_id)
         detail_payload = _detail_payload(existing)
         missing_barcode_lines = [
             item
@@ -958,6 +1058,7 @@ class SupplierShipmentsBlock:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(detail, shipment_id=shipment_id)
         header = detail["header"]
         file_path: Path | None = None
         source_file_path = str(header.get("source_file_path") or "")
@@ -2988,6 +3089,18 @@ def _detail_payload(detail: Mapping[str, Any]) -> dict[str, Any]:
         "invoice_download_path": _invoice_download_path(str(header.get("shipment_id") or "")),
     }
     return payload
+
+
+def _assert_supplier_shipment_active(
+    detail: Mapping[str, Any],
+    *,
+    shipment_id: str,
+) -> None:
+    header = detail.get("header") if isinstance(detail.get("header"), Mapping) else detail
+    if str(header.get("archived_at") or "").strip() or str(
+        header.get("persisted_order_status") or ""
+    ).strip().lower() == "archived":
+        raise ValueError(f"supplier shipment not found: {shipment_id}")
 
 
 def _with_invoice_download_path(row: Mapping[str, Any]) -> dict[str, Any]:

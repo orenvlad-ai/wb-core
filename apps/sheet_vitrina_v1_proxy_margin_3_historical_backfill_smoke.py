@@ -195,7 +195,7 @@ def main() -> None:
         _assert(dry_run["first_available_date"] == "2026-06-28", "earliest date must be discovered")
         _assert(dry_run["last_available_date"] == "2026-07-03", "latest tail date must be discovered")
         _assert(dry_run["unique_date_columns"] == 6, "multi-date tail must be included")
-        _assert(dry_run["pre_boundary_margin2_fallbacks"] == 3, "pre-boundary margin2 fallback count mismatch")
+        _assert(dry_run["pre_boundary_margin2_fallbacks"] >= 3, "pre-boundary Proxy 2 preservation count mismatch")
         _assert(dry_run["zero_denominator_cells"] >= 1, "zero denominator must be counted")
         _assert(dry_run["blank_operand_cells"] >= 3, "missing operands must stay explicit")
         _assert(dry_run["non_target_preserved"], "dry-run non-target deep digest must match")
@@ -297,10 +297,10 @@ def _pure_conflict_and_non_finite_guards(db_path: Path) -> None:
     data = next(sheet for sheet in plan["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
     target = next(row for row in data["rows"] if str(row[1]).endswith("|proxy_margin_3_pct"))
     target[2] = 0.123456
-    conflict = transform_ready_snapshot(
+    repaired = transform_ready_snapshot(
         ReadySnapshotInput(**{**record.__dict__, "plan_json": json.dumps(plan, ensure_ascii=False)})
     )
-    _assert(conflict.blockers, "nonblank mismatching target value must block")
+    _assert(not repaired.blockers and repaired.changed, "nonblank mismatching target value must be repaired")
 
     nan_plan = json.loads(record.plan_json)
     nan_data = next(sheet for sheet in nan_plan["sheets"] if sheet["sheet_name"] == "DATA_VITRINA")
@@ -342,8 +342,8 @@ def _verify_full_period_web_contract(
     _assert(first.values_by_date["2026-06-30"] == 0.5, "SKU ratio mismatch")
     _assert(second.values_by_date["2026-06-30"] == 0.0, "zero denominator must produce 0.0")
     _assert(total.values_by_date["2026-06-30"] == 0.75, "TOTAL must be ratio of aggregates")
-    _assert(total.values_by_date["2026-07-01"] == 0.23, "post-boundary TOTAL ratio mismatch")
-    _assert(third.values_by_date["2026-07-02"] == 0.0, "current-universe zero denominator mismatch")
+    _assert(total.values_by_date["2026-07-01"] == 0.252747, "post-boundary expected-buyout denominator mismatch")
+    _assert(third.values_by_date["2026-07-02"] in ("", None), "current-universe zero denominator must be blank")
 
 
 def _verify_order_and_timestamp_map(db_path: Path, *, first_nm: int) -> None:

@@ -3,7 +3,7 @@ title: "Модуль: ff_stock_ledger_block"
 doc_id: "WB-CORE-MODULE-43-FF-STOCK-LEDGER-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract server-owned FF quantity ledger: единый пользовательский остаток в `Остатки / Склады -> Склад FF`, Excel preview/confirm ручных документов, автооприходование supplier shipments, автосписание WB supplies и расчётный источник `Остатки ФФ`."
+purpose: "Зафиксировать canonical contract server-owned FF quantity ledger: единый пользовательский остаток в `Остатки -> Склады и себестоимость -> Склад FF`, Excel preview/confirm ручных документов, автооприходование supplier shipments, автосписание WB supplies и расчётный источник `Остатки ФФ`."
 scope: "Operator supply contour for FF quantity operations plus the reused balance source for the unified warehouse screen: runtime SQLite operation headers/lines/previews, original manual Excel storage, protected legacy HTTP routes, operator operation journal, idempotent supplier/WB auto movements, and factory-order/WB regional stock_ff source. FIFO, партии, себестоимость, бухгалтерский склад, 1C writes, WB mutations and Google Sheets/GAS are out of scope."
 source_basis:
   - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
@@ -45,13 +45,15 @@ source_of_truth_level: "module_canonical"
 update_note: "`Остатки ФФ` are computed from an append-only quantity ledger. Manual Excel documents require preview then explicit confirm, auto supplier movements are idempotent by source key, and ordinary WB auto writeoffs remain guarded by an explicit repair/mechanics checkpoint with baseline-known WB cache/source/supply keys, ledger activation/opening balance and no-negative-balance checks. A separate repo-owned v2 runner is bounded to WB supply `40561872`: it can bypass only the exact pair `wb_supply_before_auto_writeoff_checkpoint` + `wb_supply_before_ledger_activation` after a read-only dry-run, exact fingerprint confirmation, integrity-checked SQLite backup and atomic cache/goods/status/activation/nomenclature/balance/total recheck; reversal is an audited compensating receipt and never deletes history. Ordinary pre-activation supplies remain fail closed. Calculations can choose `stock_ff_source=ff_stock_ledger` without removing manual Excel or `1С / Фулфилмент` sources."
 ---
 
+> Functional boundary: конкретные incident values `38 250 / 31 500 / 31 477 / 6 750` ниже — immutable migration/ledger evidence, а не текущие warehouse totals. После `warehouse_functional_cutover_v1` активные `FF`, `FF → WB` и discrepancy projections рассчитывает module 48 из fresh WB state и этого append-only ledger; cutover preflight отдельно доказывает FF-debit/checkpoint coverage каждой gated supply и не подгоняет quantity по историческим числам.
+
 # 1. Contract
 
 `Поставки` exposes top-level section `ФФ` with operational subsections:
 - `Услуги ФФ` for the existing fulfillment service upload/payment-validation contour.
 - `Операции остатков ФФ` for manual receipt/writeoff and the existing ledger journal.
 
-The old `Остатки ФФ` navigation item is a compatibility transition to `Остатки / Склады -> Склад FF`. The new screen reads this same ledger and does not own a second FF calculation or balance table.
+The old `Остатки ФФ` navigation item is a compatibility transition to `Остатки -> Склады и себестоимость -> Склад FF`. The new screen reads this same ledger and does not own a second FF calculation or balance table.
 
 `Остатки ФФ` is not an editable snapshot table. Current balance is computed from ledger lines:
 - manual receipt documents add quantity;
@@ -63,7 +65,7 @@ Negative balances can still exist from explicit manual documents or older incide
 
 # 2. Operator UI
 
-The unified `Остатки / Склады -> Склад FF` screen shows the only user-facing current balance registry for active, non-hidden nomenclature SKU and the warehouse opening document. The `Поставки -> ФФ -> Операции остатков ФФ` subsection keeps:
+The unified `Остатки -> Склады и себестоимость -> Склад FF` screen shows the only user-facing current balance registry for active, non-hidden nomenclature SKU and the warehouse opening document. The `Поставки -> ФФ -> Операции остатков ФФ` subsection keeps:
 - operation journal;
 - current-balance XLSX export;
 - manual `Оприходовать`;
@@ -227,7 +229,7 @@ The one-time `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1` pins exactly 10 final-a
 
 The independent `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V2` pins another 9 exact supply/SKU rows / 12 units without changing V1. Its stronger row contract includes empty original-supply identity plus raw persisted supply-row, goods-line, combined and semantic fingerprints. It is also audit-only and cannot create an FF receipt/debit or alter the authoritative `6 750` balance. The runner's layer-continuity gate checks that the exact recognized/paid FF debit snapshot remains unchanged in every downstream outstanding child.
 
-From `2026-07-01`, ledger operation lines are the only physical FF quantity truth consumed by product-capital and WB-cost projections. Canonical replay applies supplier acceptance on `actual_ff_acceptance_date`, and WB debit on its persisted source business timestamp. Receipt changes FF moving WAC; writeoff freezes exact recognized/paid WAC in `sheet_vitrina_v1_canonical_cost_movement_layers`; ordinary writeoff does not change remaining WAC. Derived cost tables may cache linkage/cost, but never add, remove or reinterpret ledger quantity.
+From `2026-07-01`, ledger operation lines are the only physical FF quantity truth. Pre-functional `sheet_vitrina_v1_canonical_cost_movement_layers` остаётся migration/audit evidence; после `warehouse_functional_cutover_v1` module 48 replay сам получает supplier acceptance по `actual_ff_acceptance_date`, фиксирует moving FF WAC в момент WB debit и публикует единственную active warehouse/cost version. Derived compatibility tables may cache linkage/components, but never add, remove or reinterpret ledger quantity.
 
 The canonical effective-date resolver does not mutate legacy ledger operations. For WB auto-writeoffs it records deterministic provenance from a valid operation source timestamp (including the bounded targeted-runner compatibility key) or resolves the exact linked persisted WB supply and its acceptance/fact/supply business-date field. A technical ledger write timestamp is not business evidence. Missing supply, ambiguous/mismatched identity, invalid timestamp or absent authoritative business date is a structured blocker. `apps/canonical_cost_engine_preflight.py` audits the full class before heavy replay; `apps/canonical_cost_engine_diagnostic.py` continues through independent pipeline branches on a coherent disposable copy and emits blocker/fixpoint/coverage evidence. Every operation dated before cutover is audit-only. The activation receipt is the cutover opening boundary; exact checkpoint writeoff + linked runtime-repair pairs are preserved as audit history and are not replayed into physical FF twice. A persisted `targeted_pre_activation_remediation` reason explicitly excludes `40561872` from that collapse, so its `2026-07-02` debit remains physical even though the identity is present in the checkpoint.
 

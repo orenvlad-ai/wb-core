@@ -193,6 +193,8 @@ def main() -> None:
             )
             if upload_status != 200 or upload_payload.get("validation_status") != "ok":
                 raise AssertionError(f"upload route must accept valid XLSX, got {upload_status} {upload_payload}")
+            if (upload_payload.get("warehouse_targeted_recalculation") or {}).get("status") != "queued":
+                raise AssertionError(f"confirmed FF upload must enqueue bounded warehouse replay, got {upload_payload}")
             upload_id = upload_payload["upload"]["upload_id"]
 
             list_status, list_payload = _get_json(f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}")
@@ -231,6 +233,8 @@ def main() -> None:
             delete_status, delete_payload = _delete_json(f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}")
             if delete_status != 200 or not delete_payload.get("deleted"):
                 raise AssertionError(f"DELETE route must soft-delete upload, got {delete_status} {delete_payload}")
+            if (delete_payload.get("warehouse_targeted_recalculation") or {}).get("status") != "queued":
+                raise AssertionError(f"FF upload cancellation must enqueue a new bounded revision, got {delete_payload}")
             pdf_after_delete_status, _, _ = _get_bytes(
                 f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}/payment-validation.pdf"
             )

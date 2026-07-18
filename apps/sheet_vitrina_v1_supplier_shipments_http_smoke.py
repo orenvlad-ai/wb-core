@@ -1017,14 +1017,32 @@ def main() -> None:
             if "attachment" not in str(invoice_headers.get("Content-Disposition", "")):
                 raise AssertionError("invoice download must be an attachment")
             delete_status, delete_payload = _delete_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}")
-            if delete_status != 200 or delete_payload.get("deleted") is not True:
-                raise AssertionError(f"delete route must remove shipment, got {delete_status} {delete_payload}")
+            if (
+                delete_status != 200
+                or delete_payload.get("deleted") is not True
+                or delete_payload.get("archived") is not True
+                or not str(delete_payload.get("archive_event_id") or "")
+                or not str(delete_payload.get("source_fingerprint") or "").startswith("sha256:")
+            ):
+                raise AssertionError(f"delete route must archive shipment, got {delete_status} {delete_payload}")
             after_delete_status, after_delete_payload = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
             if after_delete_status != 200 or after_delete_payload.get("shipments") != []:
-                raise AssertionError("deleted supplier order must disappear from registry")
+                raise AssertionError("archived supplier order must disappear from active registry")
+            archived_detail = runtime.load_supplier_shipment(shipment_id)
+            archive_event = runtime.load_supplier_shipment_archive(shipment_id)
+            if (
+                archived_detail is None
+                or not archived_detail.get("lines")
+                or archived_detail.get("header", {}).get("persisted_order_status") != "archived"
+                or not str(archived_detail.get("header", {}).get("archived_at") or "")
+                or archive_event is None
+                or archive_event.get("source_snapshot", {}).get("header", {}).get("shipment_id") != shipment_id
+                or not archive_event.get("source_snapshot", {}).get("lines")
+            ):
+                raise AssertionError("supplier archive must retain header, lines and fingerprinted source snapshot")
             deleted_invoice_status, _, _ = _get_bytes(f"{base_url}{invoice_path}")
             if deleted_invoice_status != 404:
-                raise AssertionError("deleted supplier invoice must not remain downloadable")
+                raise AssertionError("archived supplier invoice must not remain downloadable")
 
             runtime.save_supplier_shipment(
                 header={

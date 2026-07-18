@@ -102,6 +102,31 @@ def main() -> None:
     opening_args = hosted_runtime.build_arg_parser().parse_args(["warehouse-opening-readback"])
     if opening_args.handler is not hosted_runtime.run_warehouse_opening_command:
         raise AssertionError("hosted runner must expose canonical warehouse opening commands")
+    with TemporaryDirectory(prefix="warehouse-functional-reviewed-plan-smoke-") as plan_temp_dir:
+        reviewed_plan_path = Path(plan_temp_dir) / "functional-plan.json"
+        functional_args = hosted_runtime.build_arg_parser().parse_args(
+            ["warehouse-functional-dry-run", "--output", str(reviewed_plan_path)]
+        )
+        remote_payload = {
+            "kind": "functional_cutover",
+            "plan_fingerprint": "sha256:reviewed-plan-smoke",
+            "calculation_digest": "sha256:calculation-smoke",
+            "preflight_supply_refresh": {"production_source_mutation": False},
+        }
+        with (
+            mock.patch.object(
+                hosted_runtime,
+                "_run_remote_warehouse_functional_action",
+                return_value=remote_payload,
+            ),
+            mock.patch.object(hosted_runtime, "_print_json"),
+        ):
+            hosted_runtime.run_warehouse_functional_command(functional_args)
+        reviewed_plan = json.loads(reviewed_plan_path.read_text(encoding="utf-8"))
+        if "preflight_supply_refresh" in reviewed_plan:
+            raise AssertionError("diagnostic refresh evidence must not alter the exact reviewed plan")
+        if reviewed_plan.get("plan_fingerprint") != "sha256:reviewed-plan-smoke":
+            raise AssertionError("hosted dry-run must preserve the exact signed plan fingerprint")
     diagnostic_args = hosted_runtime.build_arg_parser().parse_args(
         ["warehouse-opening-diagnostic", "--nm-id", "180330785"]
     )
@@ -376,6 +401,28 @@ def main() -> None:
             ).read_text(encoding="utf-8")
             if "--runtime-dir /opt/wb-core-runtime/state" not in refresh_unit:
                 raise AssertionError("refresh tick systemd unit must pin production runtime state dir")
+            functional_service = (
+                ROOT
+                / "artifacts"
+                / "registry_upload_http_entrypoint"
+                / "systemd"
+                / "wb-core-warehouse-functional-sync.service"
+            ).read_text(encoding="utf-8")
+            functional_timer = (
+                ROOT
+                / "artifacts"
+                / "registry_upload_http_entrypoint"
+                / "systemd"
+                / "wb-core-warehouse-functional-sync.timer"
+            ).read_text(encoding="utf-8")
+            if (
+                "apps/warehouse_functional_runner.py" not in functional_service
+                or "hourly-sync" not in functional_service
+                or "sheet-vitrina-refresh" in functional_service
+            ):
+                raise AssertionError("functional scheduler must run only the bounded warehouse runner")
+            if "OnCalendar=*-*-* *:17:00 Europe/Moscow" not in functional_timer:
+                raise AssertionError("functional scheduler must run hourly in the explicit business timezone")
             spp_service = (
                 ROOT
                 / "artifacts"

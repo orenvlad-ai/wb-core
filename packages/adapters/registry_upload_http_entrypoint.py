@@ -279,6 +279,9 @@ DEFAULT_FF_STOCKS_CONFIRM_PATH = f"{DEFAULT_FF_STOCKS_PATH}/confirm"
 DEFAULT_FF_STOCKS_OPERATIONS_PATH = f"{DEFAULT_FF_STOCKS_PATH}/operations"
 DEFAULT_WAREHOUSES_PATH = "/v1/sheet-vitrina-v1/warehouses"
 DEFAULT_WAREHOUSES_PREFIX = f"{DEFAULT_WAREHOUSES_PATH}/"
+DEFAULT_WAREHOUSES_SYNC_PATH = f"{DEFAULT_WAREHOUSES_PATH}/sync"
+DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/preview"
+DEFAULT_WAREHOUSES_EMERGENCY_APPLY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/apply"
 DEFAULT_SUPPLIER_SHIPMENTS_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments"
 DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/parse"
 DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH = "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry"
@@ -301,6 +304,8 @@ DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH = "/v1/sheet-vitrina-v1/settings/nomencla
 DEFAULT_SKU_GROUPS_PATH = "/v1/sheet-vitrina-v1/settings/sku-groups"
 DEFAULT_TRADE_DOCUMENTS_PATH = "/v1/sheet-vitrina-v1/settings/documents"
 DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
+DEFAULT_CALCULATION_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters"
+DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_CALCULATION_PARAMETERS_PATH}/preview"
 DEFAULT_RUNTIME_DIR = ROOT / ".runtime" / "registry_upload"
 OPERATOR_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_operator.html"
 WEB_VITRINA_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_web_vitrina.html"
@@ -419,6 +424,60 @@ def _build_handler(
                 return
             if parsed.path == DEFAULT_SETTINGS_USERS_PATH:
                 _handle_settings_user_create(self, entrypoint)
+                return
+            if parsed.path in {
+                DEFAULT_CALCULATION_PARAMETERS_PATH,
+                DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH,
+            }:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    body = _load_request_payload(self)
+                    if parsed.path == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH:
+                        payload = entrypoint.handle_calculation_parameters_preview_request(body)
+                    else:
+                        payload = entrypoint.handle_calculation_parameters_save_request(
+                            body,
+                            actor=_current_web_user_config_key(self),
+                        )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"calculation parameters failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+            if parsed.path in {
+                DEFAULT_WAREHOUSES_SYNC_PATH,
+                DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH,
+                DEFAULT_WAREHOUSES_EMERGENCY_APPLY_PATH,
+            }:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    body = _load_optional_request_payload(self)
+                    if parsed.path == DEFAULT_WAREHOUSES_SYNC_PATH:
+                        payload = entrypoint.handle_warehouse_manual_sync_request()
+                    elif parsed.path == DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH:
+                        payload = entrypoint.handle_warehouse_emergency_preview_request()
+                    else:
+                        payload = entrypoint.handle_warehouse_emergency_apply_request(body)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"warehouse operation failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
             if parsed.path == upload_path:
                 try:
@@ -2180,6 +2239,21 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SETTINGS_USERS_PATH:
                 _handle_settings_users_list(self, entrypoint, query=parsed.query)
+                return
+
+            if parsed.path == DEFAULT_CALCULATION_PARAMETERS_PATH:
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_calculation_parameters_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self,
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"calculation parameters failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
             if parsed.path == sheet_operator_ui_path:
@@ -6685,6 +6759,8 @@ def _required_section_for_path(path: str) -> str:
         or normalized == DEFAULT_NOMENCLATURE_IMPORT_PATH
         or normalized == DEFAULT_TRADE_DOCUMENTS_PATH
         or normalized.startswith(DEFAULT_TRADE_DOCUMENTS_PATH + "/")
+        or normalized == DEFAULT_CALCULATION_PARAMETERS_PATH
+        or normalized == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH
     ):
         return WEB_AUTH_SECTION_SETTINGS
     if (
@@ -7233,6 +7309,8 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "sku_groups_path": DEFAULT_SKU_GROUPS_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
+        "calculation_parameters_path": DEFAULT_CALCULATION_PARAMETERS_PATH,
+        "calculation_parameters_preview_path": DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH,
         "vitrina_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
         "logout_path": DEFAULT_WEB_AUTH_LOGOUT_PATH,
         "embedded": bool(embedded),

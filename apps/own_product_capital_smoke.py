@@ -496,10 +496,14 @@ def _assert_payment_document_hard_gate() -> None:
             paid_rub="150000",
             product_lines=LINES,
         )
-        _must_fail(
-            lambda: block.delete_document(str(saved["document_id"])),
-            "deletion of a payment already recognized as invested capital",
-        )
+        archived = block.delete_document(str(saved["document_id"]))
+        if archived.get("archived") is not True or archived.get("audit_record_retained") is not True:
+            raise AssertionError(f"recognized payment must use audited archive/replay: {archived}")
+        if any(
+            str(item.get("source_document_id") or "") == str(saved["document_id"])
+            for item in runtime.list_cny_ledger_operations()
+        ):
+            raise AssertionError("archived payment must be removed by deterministic CNY replay")
         broken = CnyLedgerBlock(
             runtime=runtime,
             timestamp_factory=lambda: NOW,

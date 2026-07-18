@@ -2260,29 +2260,29 @@ def _assert_http_api_smoke() -> None:
             if file_status != 200 or b"synthetic financial smoke" not in file_bytes:
                 raise AssertionError(f"financial file download mismatch: {file_status} {headers}")
             delete_status, delete_payload = _delete_json(f"{collection_url}/{quote_document_id}")
-            if delete_status != 200 or delete_payload.get("deleted") is not True or delete_payload.get("file_deleted") is not True:
-                raise AssertionError(f"financial delete failed: {delete_status} {delete_payload}")
+            if delete_status != 200 or delete_payload.get("deleted") is not False or delete_payload.get("archived") is not True or delete_payload.get("file_deleted") is not False:
+                raise AssertionError(f"financial archive failed: {delete_status} {delete_payload}")
             deleted_detail_status, deleted_detail = _get_json(f"{collection_url}/{quote_document_id}")
-            if deleted_detail_status != 404:
-                raise AssertionError(f"deleted financial detail must return 404: {deleted_detail_status} {deleted_detail}")
+            if deleted_detail_status != 200 or deleted_detail.get("parse_status") != "excluded":
+                raise AssertionError(f"archived financial detail must remain auditable: {deleted_detail_status} {deleted_detail}")
             deleted_list_status, after_delete = _get_json(collection_url)
             if (
                 deleted_list_status != 200
-                or len(after_delete.get("documents", [])) != 3
-                or len(after_delete.get("expense_lines", [])) != 5
+                or len(after_delete.get("documents", [])) != 4
+                or len(after_delete.get("expense_lines", [])) != 14
                 or after_delete.get("summary", {}).get("quote", {}).get("logistics_usd") is not None
                 or after_delete.get("summary", {}).get("quote_invoice_match", {}).get("implied_rate") is not None
             ):
                 raise AssertionError(f"financial list after delete mismatch: {deleted_list_status} {after_delete}")
             status, payload = _post_multipart(collection_url, b"%PDF-1.4\n% synthetic financial smoke\n", filename="quote.pdf")
-            if status != 200 or payload.get("parse_status") != "parsed":
-                raise AssertionError(f"financial re-upload after delete failed: {status} {payload}")
+            if status != 200 or payload.get("parse_status") not in {"parsed", "excluded"}:
+                raise AssertionError(f"financial re-upload after archive failed: {status} {payload}")
             final_status, final_list = _get_json(collection_url)
             final_summary = final_list.get("summary") or {}
             if (
                 final_status != 200
-                or len(final_list.get("documents", [])) != 4
-                or len(final_list.get("expense_lines", [])) != 14
+                or len(final_list.get("documents", [])) != 5
+                or len(final_list.get("expense_lines", [])) != 23
                 or final_summary.get("quote", {}).get("logistics_usd") != 16151.0
                 or not _approx(final_summary.get("quote_invoice_match", {}).get("implied_rate"), 75.29, tolerance=0.01)
             ):
@@ -2303,8 +2303,8 @@ def _assert_http_api_smoke() -> None:
             packing_summary = (packed_list.get("summary") or {}).get("packing_list") or {}
             if (
                 packed_status != 200
-                or len(packed_list.get("documents", [])) != 5
-                or len(packed_list.get("expense_lines", [])) != 14
+                or len(packed_list.get("documents", [])) != 6
+                or len(packed_list.get("expense_lines", [])) != 23
                 or packing_summary.get("total_cartons") != 221.0
                 or packing_summary.get("total_quantity") != 55250.0
                 or packing_summary.get("total_gross_weight_kg") != 4680.45
@@ -2371,8 +2371,8 @@ def _assert_http_api_smoke() -> None:
             all_status, all_bytes, _ = _get_bytes(f"{documents_url}/archive.zip")
             all_manifest = _zip_manifest(all_bytes)
             all_types = [item.get("document_type") for item in all_manifest.get("included", [])]
-            if all_status != 200 or len(all_manifest.get("included", [])) != 9:
-                raise AssertionError(f"all-documents archive must include all uploaded docs: {all_status} {all_manifest}")
+            if all_status != 200 or len(all_manifest.get("included", [])) != 10:
+                raise AssertionError(f"all-documents archive must retain active and archived audit docs: {all_status} {all_manifest}")
             for expected_type in ("invoice", "contract", "logistics_quote", "logistics_invoice", "customs_declaration", "bank_control_statement", "bank_transfer_application", "packing_list"):
                 if expected_type not in all_types:
                     raise AssertionError(f"all-documents archive missing {expected_type}: {all_manifest}")

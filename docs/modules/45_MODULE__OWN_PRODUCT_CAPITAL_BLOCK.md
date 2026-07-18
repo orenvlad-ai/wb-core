@@ -3,107 +3,85 @@ title: "Модуль: own_product_capital_block"
 doc_id: "WB-CORE-MODULE-45-OWN-PRODUCT-CAPITAL-BLOCK"
 doc_type: "module"
 status: "active_read_side_facade"
-purpose: "Зафиксировать paid-capital projection и пять физических стадий поверх единого canonical cost engine."
-scope: "Public SKU/TOTAL metrics, Decimal aggregate semantics и underaccepted presentation; legacy event/state rows остаются audit-only."
+purpose: "Зафиксировать compatibility projection товарного капитала поверх active functional engine шести складов."
+scope: "Public SKU/TOTAL metric keys, Decimal aggregate semantics, canonical warehouse quantities/capital и legacy audit boundary."
 source_basis:
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
-  - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
   - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
+  - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
 related_modules:
-  - "packages/application/canonical_cost_engine.py"
+  - "packages/application/warehouse_functional.py"
   - "packages/application/own_product_capital.py"
   - "packages/application/sheet_vitrina_v1_own_product_capital.py"
-  - "apps/canonical_cost_engine_backfill.py"
 related_tables:
-  - "sheet_vitrina_v1_canonical_cost_baseline_versions"
-  - "sheet_vitrina_v1_canonical_cost_baseline_lines"
-  - "sheet_vitrina_v1_canonical_cost_components"
-  - "sheet_vitrina_v1_canonical_cost_movement_layers"
-  - "sheet_vitrina_v1_canonical_cost_wb_outstanding_layers"
-  - "sheet_vitrina_v1_canonical_cost_daily_state"
+  - "sheet_vitrina_v1_warehouse_functional_versions"
+  - "sheet_vitrina_v1_warehouse_functional_balances"
+  - "sheet_vitrina_v1_warehouse_functional_documents"
   - "sheet_vitrina_v1_own_capital_* (legacy audit)"
 related_endpoints:
-  - "POST /v1/sheet-vitrina-v1/product-capital/recalculate"
+  - "GET /v1/sheet-vitrina-v1/warehouses"
   - "GET /v1/sheet-vitrina-v1/product-capital/status"
-related_runners:
-  - "apps/canonical_cost_engine_backfill.py"
-  - "apps/canonical_cost_engine_smoke.py"
-  - "apps/canonical_cost_engine_backfill_smoke.py"
-related_docs:
-  - "migration/99_unified_canonical_cost_engine.md"
 source_of_truth_level: "module_canonical"
-update_note: "Module 45 больше не владеет parallel inventory/cost baseline; quantity и costs являются двумя projections единого engine."
+update_note: "После `warehouse_functional_cutover_v1` module 45 читает quantity/capital только из active six-stage functional version; отдельного quantity/cost baseline нет."
 ---
 
-# 1. Five physical stages
+# 1. Единственные шесть стадий
 
-Стадии ровно пять:
+Товарный капитал состоит ровно из шести взаимоисключающих stage totals:
 
-1. `На производстве` (`PRODUCTION`);
-2. `Производство → ФФ` (`PRODUCTION_TO_FF`);
-3. `На ФФ` (`FF`);
-4. `ФФ → WB` (`FF_TO_WB`);
-5. `На WB` (`WB`).
+1. `На производстве` (`production`);
+2. `Китай → FF` (`china_to_ff`);
+3. `Склад FF` (`ff`);
+4. `FF → WB` (`ff_to_wb`);
+5. `Склад WB` (`wb`);
+6. `Расхождения приёмки WB` (`wb_acceptance_discrepancy`).
 
-Physical sources не принадлежат module 45:
+Supplier registry не является седьмым складом. Он хранит состояние invoice/order и stable `supplier_flow_id`; warehouse projection агрегирует все активные flows по SKU. На FF одинаковые SKU смешиваются moving WAC. После смешивания downstream identity принадлежит WB supply.
 
-- production/in-transit — supplier registry, factual statuses/dates и полностью matched product lines;
-- FF — сумма authoritative `ff_stock_ledger` operation lines по factual effective dates;
-- FF→WB — exact FF debit минус persisted cumulative accepted/doprinato evidence;
-- WB — official persisted WB stock.
+# 2. Количество и капитал
 
-Canonical daily rows являются replay/cache, а не отдельным складом. Они обязаны reconciliate FF/WB/registry quantities с источниками.
+Production quantity равно нулю до первого confirmed supplier payment. Первый платёж, включая 15%, активирует полный physical invoice composition. Последующие платежи увеличивают capital/WAC, но не quantity. Legacy `paid_equivalent_qty` остаётся только audit/diagnostic field и не участвует в public warehouse quantity, WAC или общем капитале.
 
-# 2. Paid and recognized projections
+Physical source по стадиям:
 
-Один component graph строит две проекции на одних quantities/linkage:
+- production/China → FF — active supplier flows и factual shipment dates;
+- FF — existing append-only FF ledger; functional projection не создаёт второй FF ledger;
+- FF → WB — `max(packed - accepted, 0)` до final acceptance;
+- WB — только complete official WB contour snapshot `quantity + inWayToClient + inWayFromClient`;
+- discrepancies — positive final `packed - accepted`, уменьшенное pooled doprinato matching строго по SKU.
 
-- paid capital: только factual payments с factual effective dates;
-- recognized cost: подтверждённые понесённые/признанные расходы, даже если paid date позже.
+Accepted supply quantity не добавляется поверх WB snapshot. Пока приёмка не final, open quantity остаётся только в FF → WB. После final acceptance positive difference перемещается только в discrepancy; она не остаётся в FF → WB. Transitional unmatched doprinato — audit registry с нулевым warehouse quantity/capital.
 
-Physical quantity не исчезает при неполной оплате или cost gap. Для production отдельно выводятся physical quantity, paid-equivalent quantity и paid capital. Partial supplier payment распределяется по всем matched product lines: при 15% оплаты 100 000 физ. единиц дают 15 000 paid-equivalent, а paid unit cost использует denominator 15 000.
+Capital следует тому же physical layer. В каждой стадии и по каждому SKU:
 
-Public fields дополнены `paid_equivalent_qty` и `cost_coverage_pct`. `confirmed_share_pct` остаётся отдельным quality ratio. 1С fallback и bounded `business_approved_primary_wac_fallback` для nmID `497415593/497416931` считаются covered, но не primary-confirmed; production paid projection по-прежнему использует только factual payments.
+`WAC = capital / quantity`.
+
+Обычное proportional movement переносит exact quantity и proportional capital без изменения unit WAC. Все intermediate calculations используют `Decimal`; округляется только UI.
 
 # 3. TOTAL semantics
 
-- physical quantity = сумма SKU physical quantities;
-- paid-equivalent quantity = сумма SKU paid-equivalent quantities;
-- capital = сумма SKU paid capital;
-- paid unit cost = `SUM(paid capital) / SUM(paid-equivalent quantity)`;
-- coverage = `SUM(cost-covered physical quantity) / SUM(physical quantity)`;
-- confirmation = `SUM(confirmed physical quantity) / SUM(physical quantity)`.
+- stage quantity = сумма positive SKU quantities;
+- stage capital = сумма SKU capital;
+- stage WAC = `SUM(capital) / SUM(quantity)`;
+- overall quantity = сумма шести stage quantities;
+- overall capital = сумма шести stage capitals;
+- overall WAC = `SUM(all stage capital) / SUM(all stage quantity)`;
+- coverage/confirmation — ratio of quantity/capital aggregates по фактическим quality buckets, не average SKU percentages.
 
-Никаких arithmetic means SKU averages/percentages.
+Каждая физическая единица входит ровно в один stage total. WB physical/in-way/return quantities сначала суммируются внутри WB contour и не являются дополнительными stages. Discrepancy не прибавляется второй раз к FF → WB.
 
-# 4. Underaccepted WB
+# 4. Cost boundary
 
-`Недопринято WB` — derived substate `ФФ → WB`, не шестая стадия и не отдельный склад. Exact immutable layers хранят original supply, nmID, warehouse/destination, FF movement snapshot, sent/accepted/open quantities, recognized/paid costs и provenance.
+На производстве capital включает factual CNY supplier payments по weighted RUB cost списанного CNY и относящиеся direct bank fees ровно один раз. В China → FF добавляются confirmed logistics/customs components с canonical allocation rules. FF receipt переносит exact supplier-flow capital. FF → WB добавляет confirmed FF services, storage и transit по packed quantity. Paid WB acceptance относится только к actually accepted units и не входит в discrepancy cost.
 
-Opening-boundary source anomalies не являются новым складом или пользовательской метрикой. Вся pre-cutover history сохраняется только как audit provenance и не создаёт physical/paid-equivalent quantity, recognized/paid capital или historical underaccepted. Пять stage totals следуют authoritative opening snapshots/ledger. Post-cutover composition mismatch допускается только exact manifest policy с supply-level quantity/capital conservation; missing identity/date/cost и fingerprint drift блокируют весь candidate.
+WB использует periodic/snapshot WAC: official snapshot задаёт quantity, accepted supplies добавляют доказанный inbound capital, current day provisional, closed days versioned. Zero-stock SKU сохраняет last valid WAC. `Себестоимость WB наша` является direct read projection этого canonical WB WAC.
 
-Reconciliation: direct original identity, иначе strict FIFO по `warehouse + destination + nmID`; future layer не eligible; surplus/negative блокируются; retry idempotent; second FF debit отсутствует. Cost layers не смешиваются при переносе.
+# 5. Historical and migration boundary
 
-UI добавляет только:
+`warehouse_opening_v1`, legacy own-capital events/daily rows и прежние canonical-cost baseline rows immutable audit-only. Они не суммируются с active functional state. Полная warehouse history начинается с production timestamp `warehouse_functional_cutover_v1`; текущий snapshot назад не копируется.
 
-- `Недопринято WB: количество, шт`;
-- `Недопринято WB: средняя себестоимость, ₽/шт`.
+До functional cutover разрешена только bounded cost projection с `2026-07-01` для `our_wb_unit_cost_rub`, Proxy 3 и direct consumers. Она использует frozen opening map от доказанной accepted-on-FF поставки около 24.06, persisted historical quantities и confirmed downstream expenses. Positive quantity не получает silent zero/NULL cost; fallback всегда имеет explicit quality/provenance.
 
-TOTAL quantity суммируется, cost равен `SUM(open paid capital) / SUM(open quantity)`. Underaccepted уже включён в stage `ФФ → WB` и повторно в stage/overall capital не прибавляется. Нет age/color/drilldown/actions/manual loss writeoff.
-
-# 5. Legacy boundary and migration
-
-Даты раньше `2026-07-01` и legacy `own_capital` events/daily rows не переписываются. После approved baseline apply `OwnProductCapitalBlock.load_daily_metric_lookup()` читает canonical rows; старые events/outstanding остаются audit evidence и не являются live physical truth. Targeted historical orphan exceptions legacy runner не переносятся в canonical methodology.
-
-General production baseline/canonical candidate/apply выполняет только `apps/canonical_cost_engine_backfill.py`. Exact source correction `actual_shipment_date` uses the narrower repo-owned `apps/supplier_shipment_factual_date_correction.py`: it does not rewrite legacy `own_capital` evidence, builds the same guarded `2026-07-01..business_today` canonical candidate, pins unchanged baseline fingerprint, reports target stage/paid/recognized/coverage deltas plus non-target/pre-cutover digests, and applies header/cache/canonical rows in one optimistic transaction with verified online backup and zero-change second rebuild. Both runners prohibit apply without the exact human-approved dry-run fingerprint and backup plan.
-
-Supplier financial-document `cost_payment` events remain legacy audit evidence after cutover and do not by themselves admit an expense into canonical capital. Canonical components read only expense lines whose parent document is `confirmed`. The exact 26GN390 invoice-136 chained reconciliation fingerprints the already persisted 27 zero-quantity audit events, validates their invoice-value allocation/conservation, confirms only the exact parent document inside the guarded supplier transaction and rebuilds canonical state without creating another event or physical movement. The same exact 27 allocations become recognized and paid capital with zero paid-equivalent quantity; the aggregate may differ from the document by at most the documented six-decimal allocation rounding tolerance and a second rebuild must be zero-change.
-## Canonical cutover boundary (2026-07-01)
-
-Capital uses the paid projection of the same canonical layers as recognized COGS. Legacy pre-cutover movements do not create opening capital or historical underaccepted. Exact post-cutover source normalization preserves the same-supply paid-capital pool and never becomes an independent inventory or user-facing anomaly metric.
-
-The separate `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1` is consumed only from the canonical engine. Its 10 exact supplies / 11 units are evidence already represented by official WB stock and are removed before direct/FIFO with zero movement/capital/confirmation/underaccepted delta. The paid-capital projection therefore keeps valuing official WB stock through its existing SKU WAC and does not add manifest exposure a second time. Drifted or future evidence remains a blocker.
-
-`CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V2` is a separate 9-row / 12-unit approval keyed by exact supply and SKU and leaves V1 unchanged. It has the same zero-delta audit-only semantics, so its reference exposure is never added to capital. The strict layer-continuity report requires paid and recognized unit cost to remain attached to the original FF debit identity; differing aggregate stage WACs reflect different SKU/lot composition and do not imply a layer-level cost decrease.
+Source change/archive не удаляет ledger evidence: он сбрасывает certification и ставит targeted replay по stable flow/supply/SKU/effective date. Failed candidate сохраняет last good active version.

@@ -18,13 +18,15 @@ OWN_PRODUCT_CAPITAL_STAGES: tuple[str, ...] = (
     "FF",
     "FF_TO_WB",
     "WB",
+    "WB_ACCEPTANCE_DISCREPANCY",
 )
 OWN_PRODUCT_CAPITAL_STAGE_LABELS_RU: Mapping[str, str] = {
     "PRODUCTION": "На производстве",
-    "PRODUCTION_TO_FF": "Производство → ФФ",
+    "PRODUCTION_TO_FF": "Китай → FF",
     "FF": "На ФФ",
     "FF_TO_WB": "ФФ → WB",
     "WB": "На WB",
+    "WB_ACCEPTANCE_DISCREPANCY": "Расхождения приёмки WB",
 }
 OWN_PRODUCT_CAPITAL_STAGE_FIELDS: tuple[str, ...] = (
     "capital_rub",

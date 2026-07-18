@@ -26,6 +26,9 @@ class StocksItem:
     stock_ru_ural: float
     stock_ru_south_caucasus: float
     stock_ru_far_siberia: float
+    in_way_to_client: float = 0.0
+    in_way_from_client: float = 0.0
+    wb_contour_total: float = 0.0
 
 
 @dataclass(frozen=True)

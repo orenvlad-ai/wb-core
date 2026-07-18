@@ -3,72 +3,91 @@ title: "Модуль: our_wb_cost_model"
 doc_id: "WB-CORE-MODULE-40-OUR-WB-COST-MODEL-BLOCK"
 doc_type: "module"
 status: "active_read_side_facade"
-purpose: "Зафиксировать compatibility/read-side boundary `Себестоимость WB наша` поверх единого canonical cost engine."
-scope: "Public metric keys, proxy profit/margin 3 и legacy audit tables; отдельная физическая или baseline-модель модулю больше не принадлежит."
+purpose: "Зафиксировать direct projection `Себестоимость WB наша` и versioned Proxy 3 поверх canonical functional warehouse/cost engine."
+scope: "Public metric keys, daily WB WAC, Proxy profit/margin 3, calculation parameters and legacy audit boundary."
 source_basis:
-  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
-  - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
-  - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
+  - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
   - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
+  - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
 related_modules:
-  - "packages/application/canonical_cost_engine.py"
+  - "packages/application/warehouse_functional.py"
+  - "packages/application/calculation_parameters.py"
   - "packages/application/our_wb_costs.py"
-  - "packages/application/sheet_vitrina_v1_our_wb_costs.py"
-  - "apps/canonical_cost_engine_backfill.py"
+  - "packages/application/sheet_vitrina_v1_live_plan.py"
+  - "packages/application/warehouse_functional_economics_backfill.py"
+  - "packages/application/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"
 related_tables:
-  - "sheet_vitrina_v1_canonical_cost_components"
-  - "sheet_vitrina_v1_canonical_cost_movement_layers"
-  - "sheet_vitrina_v1_canonical_cost_daily_state"
-  - "sheet_vitrina_v1_supplier_ff_cost_layers (source cost-layer evidence)"
-  - "sheet_vitrina_v1_wb_cost_daily_state (legacy audit)"
+  - "sheet_vitrina_v1_warehouse_functional_balances"
+  - "sheet_vitrina_v1_warehouse_wb_daily_cost"
+  - "sheet_vitrina_v1_calculation_parameter_versions"
+  - "sheet_vitrina_v1_wb_cost_daily_state (legacy audit/fallback before functional apply only)"
 related_endpoints:
-  - "POST /v1/sheet-vitrina-v1/wb-cost/recalculate"
-  - "GET /v1/sheet-vitrina-v1/wb-cost/status"
+  - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
+  - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
+  - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "С 2026-07-01 module 40 является read-side facade единого canonical cost engine; собственные opening/rolling rows не являются live truth."
+update_note: "С 2026-07-01 active Proxy 3 читает versioned settings и canonical daily WB WAC; hardcoded `0.5096/0.91` и denominator `orderSum` удалены из active formula."
 ---
 
-# 1. Boundary
+# 1. Canonical WB WAC
 
-С `2026-07-01` `our_wb_unit_cost_rub`, confirmed-share, `proxy_profit_3_rub` и `proxy_margin_3_pct` читают recognized WB projection из `packages/application/canonical_cost_engine.py`. Module 40 сохраняет публичные metric keys и endpoint compatibility, но не владеет отдельным baseline, physical quantity или rolling methodology.
+`our_wb_unit_cost_rub` / `total_our_wb_unit_cost_rub` (`Себестоимость WB наша`) — direct read projection canonical daily WB WAC. Отдельная formula/baseline в module 40 запрещена.
 
-Legacy `sheet_vitrina_v1_wb_opening_baseline`, `sheet_vitrina_v1_wb_supply_cost_layers` и `sheet_vitrina_v1_wb_cost_daily_state` сохраняются как migration evidence/audit. После guarded baseline apply runtime сначала читает canonical `WB` daily rows. До apply переключение не активируется.
+WB quantity задаёт только complete official contour snapshot:
 
-# 2. Unified components and projections
+`quantity + inWayToClient + inWayFromClient`.
 
-Canonical component содержит component type, shipment/supply/SKU, recognized amount/date, paid amount/date, allocation method, source document/line, provenance, confirmation status, fingerprint/version. Один component graph строит:
+Accepted WB supply добавляет доказанный inbound capital, но не quantity поверх snapshot. Periodic WAC сохраняет last valid cost при zero stock; late cost evidence запускает targeted replay от effective business date. TOTAL cost:
 
-- recognized projection для WB cost, COGS, Finance/P&L и proxy3;
-- paid projection для товарного капитала.
+`SUM(WB contour capital) / SUM(WB contour quantity)`.
 
-Поздний документ сохраняет factual effective date, создаёт новую immutable component version и инвалидирует replay от самой ранней затронутой recognized/paid date. Upload time не становится business date.
+Для SKU/дат `2026-07-01..functional cutover` loader сначала читает frozen functional historical cost projection. Она построена из frozen 24.06 opening map, persisted historical quantities и known downstream costs. После cutover loader читает active functional daily/current state. Legacy WB daily tables остаются audit и не являются параллельным active source.
 
-# 3. FF and WB rolling
+# 2. Versioned calculation parameters
 
-FF receipt меняет SKU moving WAC. FF writeoff сохраняет immutable recognized/paid snapshot конкретного ledger debit. WB supply связывается с этим snapshot по source operation/supply identity; более новый FF receipt не может изменить старую WB supply cost. Transit, accepted FF service и allocated storage добавляются как supply-specific canonical components.
+`Настройки → Справочник пользователя → Расчётные параметры` хранит immutable versions с effective date, revision, author/time, exact fingerprint и diff preview. Initial version effective `2026-07-01`:
 
-WB daily quantity берётся только из official persisted WB stock. Eligible inbound требует accepted status, final accepted quantity и factual accepted date. Stock reduction сохраняет WAC. Unexplained growth использует существующий WAC только с quality `unexplained_growth_existing_wac`; без предыдущей стоимости остаётся coverage gap.
+- buyout rate — `91%`;
+- tax — `6%`;
+- WB agent/other expenses — `38%`;
+- acquiring/logistics/storage/penalties/other — `0%`;
+- total included expenses — `44%`;
+- retained share — `56%`.
 
-# 4. Opening baseline
+Validation требует каждый процент в `0..100%` и total expenses `<100%`. Save создаёт новую version и targeted Proxy recalculation от effective date; physical warehouses не пересчитываются.
 
-Единственный baseline принадлежит canonical engine. Primary source автоматически обнаруживается среди fully matched/certified `accepted_ff` shipment в окне `2026-06-21..2026-06-24`, с количеством не менее 100 000, confirmed FF layer, reconciliation `ok` и weighted landed cost `111.181389 ± 0.01 ₽/шт`.
+Reference table использует три последние полностью закрытые недели WB finance reports. Каждая expense category делится на ту же canonical gross buyout revenue base (`net_revenue`) и three-week value считается как `SUM(expense) / SUM(gross buyout revenue)`, а не arithmetic mean weekly percentages. Paid acceptance показана только как reference: она не входит в Proxy expense rate, потому что капитализируется в WB cost. `ads_sum` вычитается отдельно; FF → WB transit уже находится в cost.
 
-Для отсутствующей SKU используется ближайший назад `onec_FF_STOCK_unit_cost_rub`, строго `<= 2026-05-16`, с exact bundle/date/metric provenance и quality `legacy_1c_fallback`. Единственное bounded исключение `{497415593, 497416931}` использует `business_approved_primary_wac_fallback`: recognized FF cost вычисляется из weighted cost exact current primary FF layer, а confirmation остаётся 0%. `near_future_proxy`, 1С после cutoff, WB-stage 1C cost, future shipment, zero, hidden last-known и общий estimated fallback запрещены. Любая другая missing owned SKU блокирует весь baseline; coverage должна быть 100%.
+# 3. Proxy 3 formula
 
-# 5. Finance compatibility
+До `2026-07-01` Profit/Margin 3 сохраняют legacy Proxy 2 semantics. С `2026-07-01` для SKU/date:
 
-Finance/P&L применяет canonical recognized WB projection с `2026-07-01`; даты раньше cutover остаются legacy. Existing `our_wb_unit_cost_rub` contract сохраняется. TOTAL cost и confirmation считаются ratio of Decimal aggregates, не средним SKU averages.
+```text
+expected_buyout_revenue = orderSum × buyout_rate
+expected_buyout_qty     = orderCount × buyout_rate
+included_expense_rate   = SUM(enabled versioned expense rates)
+proxy_profit_3           = expected_buyout_revenue × (1 − included_expense_rate)
+                           − expected_buyout_qty × canonical_WB_WAC
+                           − ads_sum
+proxy_margin_3           = proxy_profit_3 / expected_buyout_revenue
+```
 
-# 6. Migration and non-goals
+Advertising is not multiplied by buyout rate. Missing required operand remains NULL; it does not become zero. Zero expected revenue returns NULL margin. TOTAL:
 
-`apps/canonical_cost_engine_backfill.py` — единственный apply-capable runner. Он default dry-run, до baseline/rebuild выполняет exhaustive source-anomaly preflight, требует scope `2026-07-01..current`, stable fingerprint, explicit backup directory, coherent SQLite backup `0600`, `integrity_check=ok`, `BEGIN IMMEDIATE`, optimistic recheck и in-place apply без `os.replace`/force/partial mode. Pre-cutover operations audit-only; exact post-cutover manifest evidence, raw/direct/normalized quantities and capital exposure enter the candidate fingerprint but not public cost metrics. Apply разрешается только отдельным human gate.
+- profit = `SUM(SKU proxy profit)`;
+- expected revenue = `SUM(SKU expected buyout revenue)`;
+- margin = `total profit / total expected revenue`;
+- SKU margins are never averaged.
 
-Перед baseline/rebuild runner включает в fingerprint полный audit legacy WB FF writeoffs без ordinary source timestamp. Effective date берётся из canonical resolver и содержит field-level provenance; `operation.created_at` запрещён как fallback для связанной WB supply. Поэтому upload/repair timestamp не может превратить pre-cutover supply в post-cutover cost movement, а отсутствие exact supply/date блокирует candidate до любых target changes.
+Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3_pct` and their existing TOTAL keys.
 
-Не являются целями: бухгалтерский FIFO, изменение 1С/proxy2, Google Sheets/GAS, browser truth, ad-hoc SQL или server-only fixes.
-## Canonical cutover boundary (2026-07-01)
+# 4. Quality and consumers
 
-This module is a read-side projection of the unified recognized-cost engine. Pre-cutover WB movements are legacy audit-only; official WB opening owns physical quantity. Exact manifest normalization uses the weighted recognized/paid pool of the same FF debit and gives normalized quantity confirmation `0`; it does not create a second WB cost truth.
+Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `interpolation`, `extrapolation`, `fallback average`, confirmed downstream layers). Vitrina does not invent a value when a required persisted source is truly absent. All direct consumers, including товарный капитал, его рентабельность, web-vitrina and `Управление SKU`, resolve the same functional daily projection from `2026-07-01`; hidden fallback to 1C/legacy cost after activation is prohibited.
 
-Exact unmatched `Допринято` rows approved in `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1` are audit-only evidence already contained in official WB stock. They are excluded before direct/FIFO and add no movement, capital or confirmation; this read side continues to value the authoritative stock through the existing canonical SKU WAC.
+# 5. Migration boundary
+
+Legacy module-40 opening/supply/daily rows and the separate canonical-cost baseline stay immutable audit evidence. `warehouse_functional_cutover_v1` activates the single warehouse/cost engine and initial settings version atomically. The bounded historical backfill may rewrite only `our_wb_unit_cost_rub`, Proxy 3 and direct dependent read models from `2026-07-01`; it preserves non-target snapshot cells/digests and is idempotent.
+
+Non-goals: accounting FIFO, event-based WB customer movements, Proxy 2 rewrite before the boundary, marketing as a percentage, transit double count, Google Sheets/GAS truth or ad-hoc production SQL.

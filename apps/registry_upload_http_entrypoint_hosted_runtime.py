@@ -1722,6 +1722,172 @@ def run_warehouse_opening_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_warehouse_functional_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action = str(args.warehouse_functional_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action in {
+        "cutover-apply",
+        "emergency-apply",
+        "economics-backfill-apply",
+    } else None
+    payload = _run_remote_warehouse_functional_action(
+        target,
+        action=action,
+        plan_path=plan_path,
+        fingerprint=str(getattr(args, "fingerprint", "") or ""),
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if action in {"cutover-dry-run", "emergency-dry-run", "economics-backfill-dry-run"} and output:
+        output_path = Path(output).resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # The remote cutover dry-run returns diagnostic refresh evidence next to
+        # the signed plan. Keep that evidence in stdout, but never inject it
+        # into the exact reviewed plan file: apply_plan hashes every plan field.
+        reviewed_plan = dict(payload)
+        reviewed_plan.pop("preflight_supply_refresh", None)
+        output_path.write_text(
+            json.dumps(reviewed_plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": action,
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_warehouse_functional_action(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    plan_path: Path | None = None,
+    fingerprint: str = "",
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"warehouse-functional-{action}")
+    mutation_actions = {
+        "cutover-apply",
+        "emergency-apply",
+        "economics-backfill-apply",
+        "rollback",
+        "hourly-sync",
+        "manual-sync",
+        "enable-hourly",
+    }
+    if action in mutation_actions:
+        _ensure_target_allows_mutation(target, action=f"warehouse-functional-{action}", dry_run=False)
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("warehouse functional runner requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("warehouse functional runner requires the hosted environment file")
+
+    if action == "enable-hourly":
+        readback = _run_remote_warehouse_functional_action(target, action="readback")
+        if str(readback.get("status") or "") != "ready":
+            raise RuntimeError("hourly timer cannot be enabled before successful functional cutover readback")
+        if str((readback.get("active_version") or {}).get("version_kind") or "") != "hourly_wb_sync":
+            raise RuntimeError("hourly timer cannot be enabled before one successful bounded WB sync")
+        economics = _run_remote_warehouse_functional_action(
+            target,
+            action="economics-backfill-dry-run",
+        )
+        if int(economics.get("changed_snapshot_count") or 0) != 0:
+            raise RuntimeError("hourly timer cannot be enabled while functional economics publication is pending")
+        unit = "wb-core-warehouse-functional-sync.timer"
+        command = " && ".join(
+            [
+                f"systemctl enable --now {shlex.quote(unit)}",
+                f"systemctl is-enabled {shlex.quote(unit)}",
+                f"systemctl is-active {shlex.quote(unit)}",
+            ]
+        )
+        result = subprocess.run(
+            _remote_shell_command(target, command),
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            timeout=WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("hourly timer enable failed: " + (result.stderr.strip() or result.stdout.strip()))
+        return {
+            "status": "enabled",
+            "unit": unit,
+            "systemctl": result.stdout.strip().splitlines(),
+            "active_version_id": (readback.get("active_version") or {}).get("version_id"),
+            "economics_plan_fingerprint": economics.get("plan_fingerprint"),
+        }
+
+    runner_args = [
+        "python3",
+        "apps/warehouse_functional_runner.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--env-file",
+        target.environment_file,
+        action,
+    ]
+    stdin_text: str | None = None
+    if action in {"cutover-apply", "emergency-apply", "economics-backfill-apply"}:
+        if plan_path is None:
+            raise ValueError(f"warehouse functional {action} requires a plan path")
+        stdin_text = plan_path.read_text(encoding="utf-8")
+        plan = json.loads(stdin_text)
+        if not isinstance(plan, dict) or str(plan.get("plan_fingerprint") or "") != fingerprint:
+            raise ValueError("warehouse functional plan and --fingerprint do not match")
+        runner_args.extend(["--plan-file", "/dev/stdin", "--fingerprint", fingerprint])
+        if action == "cutover-apply":
+            runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional"])
+        elif action == "economics-backfill-apply":
+            runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional-economics"])
+    elif action == "rollback":
+        runner_args.extend(
+            [
+                "--fingerprint",
+                fingerprint,
+                "--backup-dir",
+                "/opt/wb-core-runtime/backups/warehouse-functional",
+            ]
+        )
+
+    prefix: list[str] = [f"cd {shlex.quote(target.target_dir)}"]
+    if action == "rollback":
+        prefix.append("systemctl disable --now wb-core-warehouse-functional-sync.timer || true")
+    shell_command = " && ".join([*prefix, " ".join(shlex.quote(item) for item in runner_args)])
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        input=stdin_text,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=(
+            WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS
+            if action in mutation_actions
+            else WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS
+        ),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"warehouse functional {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("warehouse functional runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("warehouse functional runner returned a non-object JSON payload")
+    return payload
+
+
 def _run_remote_warehouse_opening_action(
     target: HostedRuntimeTarget,
     *,
@@ -1838,7 +2004,7 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
         pass
     else:
         raise ValueError("warehouse UI evidence must be stored outside the repository")
-    readback = _run_remote_warehouse_opening_action(target, action="readback")
+    readback = _run_remote_warehouse_functional_action(target, action="readback")
     from apps.warehouse_stocks_production_ui_flow import run_warehouse_ui_flow
 
     result = run_warehouse_ui_flow(
@@ -1952,6 +2118,106 @@ def build_arg_parser() -> argparse.ArgumentParser:
     warehouse_rollback.set_defaults(
         handler=run_warehouse_opening_command,
         warehouse_action="rollback",
+    )
+
+    functional_dry_run = subparsers.add_parser(
+        "warehouse-functional-dry-run",
+        help="Refresh bounded WB supply sources and build the exact functional cutover plan.",
+    )
+    functional_dry_run.add_argument("--output", default="")
+    functional_dry_run.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="cutover-dry-run",
+    )
+
+    functional_apply = subparsers.add_parser(
+        "warehouse-functional-apply",
+        help="Apply one exact reviewed functional cutover plan.",
+    )
+    functional_apply.add_argument("--plan-file", required=True)
+    functional_apply.add_argument("--fingerprint", required=True)
+    functional_apply.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="cutover-apply",
+    )
+
+    functional_readback = subparsers.add_parser(
+        "warehouse-functional-readback",
+        help="Read functional cutover, active version and reconciliation.",
+    )
+    functional_readback.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="readback",
+    )
+
+    functional_sync = subparsers.add_parser(
+        "warehouse-functional-sync",
+        help="Run one bounded official WB synchronization and atomic calculation.",
+    )
+    functional_sync.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="manual-sync",
+    )
+
+    functional_emergency_dry_run = subparsers.add_parser(
+        "warehouse-functional-emergency-dry-run",
+        help="Build an emergency full rebuild plan from persisted local sources only.",
+    )
+    functional_emergency_dry_run.add_argument("--output", default="")
+    functional_emergency_dry_run.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="emergency-dry-run",
+    )
+
+    functional_emergency_apply = subparsers.add_parser(
+        "warehouse-functional-emergency-apply",
+        help="Apply an exact reviewed local-source emergency rebuild plan.",
+    )
+    functional_emergency_apply.add_argument("--plan-file", required=True)
+    functional_emergency_apply.add_argument("--fingerprint", required=True)
+    functional_emergency_apply.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="emergency-apply",
+    )
+
+    functional_economics_dry_run = subparsers.add_parser(
+        "warehouse-functional-economics-dry-run",
+        help="Build the targeted 01.07 functional WB cost/Proxy publication plan.",
+    )
+    functional_economics_dry_run.add_argument("--output", default="")
+    functional_economics_dry_run.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="economics-backfill-dry-run",
+    )
+
+    functional_economics_apply = subparsers.add_parser(
+        "warehouse-functional-economics-apply",
+        help="Apply the exact targeted functional WB cost/Proxy publication plan.",
+    )
+    functional_economics_apply.add_argument("--plan-file", required=True)
+    functional_economics_apply.add_argument("--fingerprint", required=True)
+    functional_economics_apply.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="economics-backfill-apply",
+    )
+
+    functional_enable_hourly = subparsers.add_parser(
+        "warehouse-functional-enable-hourly",
+        help="Enable the repo-owned hourly timer only after successful cutover readback.",
+    )
+    functional_enable_hourly.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="enable-hourly",
+    )
+
+    functional_rollback = subparsers.add_parser(
+        "warehouse-functional-rollback",
+        help="Disable hourly sync and rollback only functional derived state.",
+    )
+    functional_rollback.add_argument("--fingerprint", required=True)
+    functional_rollback.set_defaults(
+        handler=run_warehouse_functional_command,
+        warehouse_functional_action="rollback",
     )
 
     warehouse_ui_flow = subparsers.add_parser(
@@ -2366,7 +2632,7 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             "Проверить сессию",
             "Установить сессию",
             "Отзывы",
-            "Остатки / Склады",
+            "Склады и себестоимость",
             'data-unified-tab-panel="warehouses"',
             DEFAULT_WAREHOUSES_PATH,
             "Загрузить отзывы",
@@ -2767,7 +3033,10 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
             success_keys=["contract_name", "contract_version", "status", "warehouses"],
         )
         if evaluation["ok"] and (
-            payload.get("contract_name") != "sheet_vitrina_v1_warehouses"
+            payload.get("contract_name") not in {
+                "sheet_vitrina_v1_warehouse_functional",
+                "sheet_vitrina_v1_warehouses",
+            }
             or len(payload.get("warehouses") or []) != 6
         ):
             evaluation["ok"] = False

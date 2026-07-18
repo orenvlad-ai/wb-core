@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -102,6 +103,7 @@ class _HistoricalStocksHttpStatusError(RuntimeError):
 class HttpBackedStocksSource:
     """HTTP adapter к batched WB warehouses inventory endpoint."""
 
+    _max_nm_ids_per_request = 1000
     _shared_lock = threading.Lock()
     _rate_limit_states: dict[str, _StocksRateLimitState] = {}
     _single_flights: dict[tuple[str, str, tuple[int, ...]], _StocksSingleFlight] = {}
@@ -213,7 +215,7 @@ class HttpBackedStocksSource:
         requested_nm_ids: list[int],
         timeout_seconds: float,
     ) -> Mapping[str, Any]:
-        items = self._fetch_current_inventory_items(
+        items, pagination = self._fetch_current_inventory_capture(
             base_url=base_url,
             token=token,
             requested_nm_ids=requested_nm_ids,
@@ -233,8 +235,33 @@ class HttpBackedStocksSource:
             "requested_nm_ids": requested_nm_ids,
             "data": {
                 "rows": rows,
+                "raw_rows": items,
                 "requested_snapshot_date": requested_snapshot_date,
                 "fetched_at": snapshot_dt.isoformat().replace("+00:00", "Z"),
+                "pagination_complete": True,
+                "missing_nm_ids_are_zero": True,
+                "page_count": pagination["page_count"],
+                "page_offsets": pagination["page_offsets"],
+                "batch_count": pagination["batch_count"],
+                "batch_requested_nm_ids": pagination["batch_requested_nm_ids"],
+                "raw_row_count": len(items),
+                "raw_rows_digest": "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        sorted(
+                            items,
+                            key=lambda item: json.dumps(
+                                item,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        ),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
             },
         }
 
@@ -246,8 +273,60 @@ class HttpBackedStocksSource:
         requested_nm_ids: list[int],
         timeout_seconds: float,
     ) -> list[Mapping[str, Any]]:
+        items, _pagination = self._fetch_current_inventory_capture(
+            base_url=base_url,
+            token=token,
+            requested_nm_ids=requested_nm_ids,
+            timeout_seconds=timeout_seconds,
+        )
+        return items
+
+    def _fetch_current_inventory_capture(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        requested_nm_ids: list[int],
+        timeout_seconds: float,
+    ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+        batches = [
+            requested_nm_ids[index : index + self._max_nm_ids_per_request]
+            for index in range(0, len(requested_nm_ids), self._max_nm_ids_per_request)
+        ]
+        if not batches:
+            batches = [[]]
+        items: list[Mapping[str, Any]] = []
+        page_offsets: list[int] = []
+        for batch_nm_ids in batches:
+            batch_items, batch_pagination = self._fetch_current_inventory_batch_capture(
+                base_url=base_url,
+                token=token,
+                requested_nm_ids=batch_nm_ids,
+                timeout_seconds=timeout_seconds,
+            )
+            items.extend(batch_items)
+            page_offsets.extend(batch_pagination["page_offsets"])
+        return items, {
+            "batch_count": len(batches),
+            "batch_requested_nm_ids": batches,
+            "page_count": len(page_offsets),
+            "page_offsets": page_offsets,
+        }
+
+    def _fetch_current_inventory_batch_capture(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        requested_nm_ids: list[int],
+        timeout_seconds: float,
+    ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
         items: list[Mapping[str, Any]] = []
         offset = 0
+        page_offsets: list[int] = []
+        full_page_digests: set[str] = set()
+        row_identities: set[tuple[int, int, int]] = set()
+        requested_set = set(requested_nm_ids)
         seller_key = _seller_cache_key(base_url=base_url, token=token)
         while True:
             page_payload = self._post_inventory_page_with_retry(
@@ -259,11 +338,64 @@ class HttpBackedStocksSource:
                 timeout_seconds=timeout_seconds,
             )
             page_items = self._extract_items(page_payload)
+            for item in page_items:
+                identity = self._validate_official_item(item, requested_nm_ids=requested_set)
+                if identity in row_identities:
+                    raise RuntimeError(
+                        "official stocks request returned duplicate size/warehouse row "
+                        f"for nmId {identity[0]}"
+                    )
+                row_identities.add(identity)
+            page_offsets.append(offset)
+            if len(page_offsets) > 1000:
+                raise RuntimeError("official stocks pagination exceeded the safety page limit")
+            if len(page_items) == self._page_limit:
+                page_digest = hashlib.sha256(
+                    json.dumps(
+                        page_items,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if page_digest in full_page_digests:
+                    raise RuntimeError("official stocks pagination repeated a full page")
+                full_page_digests.add(page_digest)
             items.extend(page_items)
             if len(page_items) < self._page_limit:
                 break
             offset += self._page_limit
-        return items
+        return items, {"page_count": len(page_offsets), "page_offsets": page_offsets}
+
+    @staticmethod
+    def _validate_official_item(
+        item: Mapping[str, Any],
+        *,
+        requested_nm_ids: set[int],
+    ) -> tuple[int, int, int]:
+        nm_id = item.get("nmId")
+        chrt_id = item.get("chrtId")
+        warehouse_id = item.get("warehouseId")
+        if not isinstance(nm_id, int) or isinstance(nm_id, bool) or nm_id <= 0:
+            raise RuntimeError("official stocks request returned invalid nmId")
+        if nm_id not in requested_nm_ids:
+            raise RuntimeError(f"official stocks request returned unexpected nmId {nm_id}")
+        if not isinstance(chrt_id, int) or isinstance(chrt_id, bool) or chrt_id <= 0:
+            raise RuntimeError(f"official stocks request returned invalid chrtId for nmId {nm_id}")
+        if not isinstance(warehouse_id, int) or isinstance(warehouse_id, bool) or warehouse_id <= 0:
+            raise RuntimeError(f"official stocks request returned invalid warehouseId for nmId {nm_id}")
+        for field in ("quantity", "inWayToClient", "inWayFromClient"):
+            value = item.get(field)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or float(value) < 0
+            ):
+                raise RuntimeError(
+                    f"official stocks request returned invalid {field} for nmId {nm_id}"
+                )
+        return nm_id, chrt_id, warehouse_id
 
     def _post_inventory_page_with_retry(
         self,
@@ -338,11 +470,13 @@ class HttpBackedStocksSource:
     def _extract_items(self, payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         data = payload.get("data")
         if not isinstance(data, Mapping):
-            return []
+            raise RuntimeError("official stocks request returned invalid data object")
         items = data.get("items")
         if not isinstance(items, list):
-            return []
-        return [item for item in items if isinstance(item, Mapping)]
+            raise RuntimeError("official stocks request returned invalid data.items list")
+        if not all(isinstance(item, Mapping) for item in items):
+            raise RuntimeError("official stocks request returned a non-object item")
+        return list(items)
 
     def _parse_items_to_rows(
         self,
@@ -356,18 +490,20 @@ class HttpBackedStocksSource:
         for item in items:
             nm_id = item.get("nmId")
             quantity = item.get("quantity")
-            if not isinstance(nm_id, int) or nm_id not in requested_nm_ids:
-                continue
-            if not isinstance(quantity, (int, float)):
-                continue
+            in_way_to_client = item.get("inWayToClient")
+            in_way_from_client = item.get("inWayFromClient")
             rows.append(
                 {
                     "snapshot_date": snapshot_date,
                     "snapshot_ts": snapshot_ts,
                     "nmId": nm_id,
+                    "chrtId": item.get("chrtId"),
+                    "warehouseId": item.get("warehouseId"),
                     "warehouseName": str(item.get("warehouseName") or ""),
                     "regionName": str(item.get("regionName") or ""),
                     "stockCount": float(quantity),
+                    "inWayToClient": float(in_way_to_client),
+                    "inWayFromClient": float(in_way_from_client),
                 }
             )
         return rows

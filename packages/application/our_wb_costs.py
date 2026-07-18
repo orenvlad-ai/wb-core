@@ -346,13 +346,29 @@ class OurWbCostBlock:
                     continue
                 supply_id = str(supply.get("supply_id") or "")
                 overlay = ff_overlays.get(supply_id)
-                supply_qty = _sum_positive(_wb_good_quantity(item).qty for item in goods)
-                denominator = _positive_number(supply.get("quantity_for_size_filter")) or supply_qty
+                supply_qty = _sum_positive(_wb_good_packed_quantity(item).qty for item in goods)
+                # Allocation of supply-specific expenses is always based on the
+                # full packed composition.  The UI size filter quantity is not
+                # a physical/cost denominator.
+                denominator = supply_qty
                 if denominator <= 0:
                     continue
                 transit = classify_wb_supply_transit(
                     _normalized_wb_row(supply),
                     denominator=denominator,
+                )
+                normalized_supply = _normalized_wb_row(supply)
+                acceptance_total = _number_or_zero(
+                    normalized_supply.get("acceptance_cost")
+                    if normalized_supply.get("acceptance_cost") is not None
+                    else normalized_supply.get("acceptanceCost")
+                )
+                accepted_denominator = _sum_positive(
+                    _number_or_zero(item.get("acceptedQuantity") if item.get("acceptedQuantity") is not None else item.get("accepted_quantity"))
+                    for item in goods
+                )
+                acceptance_per_accepted_unit = (
+                    acceptance_total / accepted_denominator if accepted_denominator > 0 else 0.0
                 )
                 services_total = _number_or_zero(
                     (overlay or {}).get("service_amount_with_vat_without_storage_total")
@@ -364,19 +380,19 @@ class OurWbCostBlock:
                 storage_per_unit = storage_total / denominator if denominator > 0 else 0.0
                 for good in goods:
                     nm_id = _optional_int(good.get("nmID") or good.get("nmId") or good.get("nm_id"))
-                    quantity = _wb_good_quantity(good)
-                    qty = _positive_number(quantity.qty)
-                    if nm_id is None or qty <= 0:
+                    packed_quantity = _wb_good_packed_quantity(good)
+                    accepted_quantity = _wb_good_accepted_quantity(good)
+                    if nm_id is None or packed_quantity.qty <= 0:
                         continue
                     ff_line = current_ff_lines.get(nm_id)
                     layer_payload = self._build_wb_supply_cost_layer_payload(
                         supply=supply,
                         nm_id=nm_id,
-                        accepted_qty=qty,
-                        quantity_source=quantity.source,
+                        accepted_qty=accepted_quantity.qty,
+                        quantity_source=accepted_quantity.source,
                         quantity_is_final_accepted=_wb_good_quantity_is_final_accepted(
                             supply=supply,
-                            quantity=quantity,
+                            quantity=accepted_quantity,
                         ),
                         denominator=denominator,
                         ff_line=ff_line,
@@ -385,6 +401,8 @@ class OurWbCostBlock:
                         services_per_unit=services_per_unit,
                         storage_total=storage_total,
                         storage_per_unit=storage_per_unit,
+                        acceptance_total=acceptance_total,
+                        acceptance_per_accepted_unit=acceptance_per_accepted_unit,
                         overlay=overlay,
                     )
                     inputs_hash = _stable_hash(layer_payload["input"])
@@ -1084,6 +1102,8 @@ class OurWbCostBlock:
         services_per_unit: float,
         storage_total: float,
         storage_per_unit: float,
+        acceptance_total: float,
+        acceptance_per_accepted_unit: float,
         overlay: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         sku_ff_cost = _optional_float((ff_line or {}).get("sku_ff_unit_cost_rub"))
@@ -1095,7 +1115,8 @@ class OurWbCostBlock:
             transit_per_unit = transit.per_unit
             if transit_per_unit is None:
                 transit_per_unit = 0.0
-            our_cost = sku_ff_cost + transit_per_unit + services_per_unit + storage_per_unit
+            pre_acceptance_cost = sku_ff_cost + transit_per_unit + services_per_unit + storage_per_unit
+            our_cost = pre_acceptance_cost + acceptance_per_accepted_unit
             if transit.status == TRANSIT_MISSING or transit.status == TRANSIT_UNKNOWN_ROUTE:
                 source_status = WB_COST_STATUS_PENDING
                 missing_reason = transit.missing_reason or "transit_cost_pending"
@@ -1130,6 +1151,9 @@ class OurWbCostBlock:
             "ff_services_per_unit_rub": services_per_unit,
             "ff_storage_amount_total": storage_total,
             "ff_storage_per_unit_rub": storage_per_unit,
+            "pre_acceptance_unit_cost_rub": pre_acceptance_cost if sku_ff_cost is not None else None,
+            "wb_acceptance_amount_total": acceptance_total,
+            "wb_acceptance_per_accepted_unit_rub": acceptance_per_accepted_unit,
             "our_wb_unit_cost_rub": our_cost,
             "source_status": source_status,
             "missing_reason": missing_reason,
@@ -1138,6 +1162,7 @@ class OurWbCostBlock:
                 "transit": transit.status,
                 "ff_services": "accepted_upload" if overlay else "missing_or_zero",
                 "ff_storage": "accepted_upload_allocated_storage" if overlay else "missing_or_zero",
+                "wb_acceptance": "accepted_quantity_only" if acceptance_total else "zero_or_absent",
                 "transit_evidence": transit.evidence,
                 "wb_supply_status_id": supply_status_id,
                 "wb_quantity_source": quantity_source,
@@ -1215,6 +1240,9 @@ class OurWbCostBlock:
                 ff_services_per_unit_rub,
                 ff_storage_amount_total,
                 ff_storage_per_unit_rub,
+                pre_acceptance_unit_cost_rub,
+                wb_acceptance_amount_total,
+                wb_acceptance_per_accepted_unit_rub,
                 our_wb_unit_cost_rub,
                 source_status,
                 component_status_json,
@@ -1225,7 +1253,7 @@ class OurWbCostBlock:
                 is_current,
                 supersedes_id,
                 superseded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL)
             """,
             (
                 layer_id,
@@ -1247,6 +1275,9 @@ class OurWbCostBlock:
                 payload["ff_services_per_unit_rub"],
                 payload["ff_storage_amount_total"],
                 payload["ff_storage_per_unit_rub"],
+                payload["pre_acceptance_unit_cost_rub"],
+                payload["wb_acceptance_amount_total"],
+                payload["wb_acceptance_per_accepted_unit_rub"],
                 payload["our_wb_unit_cost_rub"],
                 payload["source_status"],
                 _json_dumps(payload["component_status"]),
@@ -1270,16 +1301,23 @@ def classify_wb_supply_transit(
         or supply_row.get("transit_warehouse_id")
         or str(supply_row.get("transit_warehouse_name") or "").strip()
     )
-    official_cost = _optional_float(supply_row.get("cost_total"))
-    acceptance_cost = _optional_float(supply_row.get("acceptanceCost") or supply_row.get("acceptance_cost"))
+    official_cost = _optional_float(supply_row.get("transit_cost") or supply_row.get("transitCost"))
+    official_total = _optional_float(supply_row.get("cost_total") or supply_row.get("costTotal"))
+    acceptance_cost = _optional_float(supply_row.get("acceptance_cost") or supply_row.get("acceptanceCost"))
+    if official_cost is None and official_total is not None:
+        official_cost = max(official_total - (acceptance_cost or 0.0), 0.0)
     effective_cost = _optional_float(supply_row.get("effective_transit_cost_total"))
-    seller_portal_cost = _optional_float(supply_row.get("seller_portal_transit_cost_total"))
+    seller_portal_cost = _optional_float(
+        supply_row.get("seller_portal_transit_cost_total") or supply_row.get("seller_portal_transit_cost")
+    )
     cost_source = str(supply_row.get("cost_evidence") or supply_row.get("effective_transit_cost_source") or "")
+    if not cost_source and official_total is not None:
+        cost_source = "official_cost_total_minus_acceptance_cost"
     qty = _positive_number(denominator)
     if has_transit_marker:
-        amount = effective_cost if effective_cost is not None else seller_portal_cost
+        amount = official_cost
         if amount is None:
-            amount = official_cost if official_cost is not None else acceptance_cost
+            amount = effective_cost if effective_cost is not None else seller_portal_cost
         if amount is not None:
             return TransitCostClassification(
                 status=TRANSIT_CONFIRMED,
@@ -1299,12 +1337,7 @@ def classify_wb_supply_transit(
         or str(supply_row.get("warehouse_display") or "").strip()
         or supply_row.get("warehouse_id")
     )
-    zero_cost_evidence = (
-        official_cost == 0
-        or acceptance_cost == 0
-        or effective_cost == 0
-        or seller_portal_cost == 0
-    )
+    zero_cost_evidence = not has_transit_marker and official_cost in {None, 0}
     if route_known and zero_cost_evidence:
         return TransitCostClassification(
             status=TRANSIT_DIRECT_ZERO_CONFIRMED,
@@ -1504,6 +1537,20 @@ def _wb_good_quantity(item: Mapping[str, Any]) -> _WbGoodQuantity:
         if item.get(key) is not None:
             return _WbGoodQuantity(qty=_number_or_zero(item.get(key)), source=key, is_final_accepted=False)
     return _WbGoodQuantity(qty=0.0, source="missing", is_final_accepted=False)
+
+
+def _wb_good_packed_quantity(item: Mapping[str, Any]) -> _WbGoodQuantity:
+    for key in ("quantity", "qty"):
+        if item.get(key) is not None:
+            return _WbGoodQuantity(qty=_number_or_zero(item.get(key)), source=key, is_final_accepted=False)
+    return _WbGoodQuantity(qty=0.0, source="packed_quantity_missing", is_final_accepted=False)
+
+
+def _wb_good_accepted_quantity(item: Mapping[str, Any]) -> _WbGoodQuantity:
+    for key in ("acceptedQuantity", "accepted_quantity"):
+        if item.get(key) is not None:
+            return _WbGoodQuantity(qty=_number_or_zero(item.get(key)), source=key, is_final_accepted=True)
+    return _WbGoodQuantity(qty=0.0, source="accepted_quantity_missing", is_final_accepted=False)
 
 
 def _wb_supply_status_id(supply: Mapping[str, Any]) -> int | None:
