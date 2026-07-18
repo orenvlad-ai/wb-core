@@ -191,7 +191,13 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
             }
             _write_status(config, payload)
             return read_recovery_status(config, with_probe=False)
-        adapter.prepare_fingerprint_migration()
+        try:
+            adapter.prepare_fingerprint_migration()
+        except BlockingIOError:
+            # The preflight lease may still be held by the immediately
+            # preceding check; the supervisor will perform migration under
+            # its own verified single-flight lifecycle.
+            pass
         _write_status(
             config,
             {
