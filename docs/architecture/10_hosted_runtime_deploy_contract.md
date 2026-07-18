@@ -139,7 +139,7 @@ Canonical runner:
 - `apps/registry_upload_http_entrypoint_hosted_runtime.py`
 
 The same runner owns the only production path for the active functional cutover after deploy:
-- `warehouse-functional-dry-run --output <absolute local plan.json>` captures coherent primary sources and fresh complete official WB stock without derived writes;
+- `warehouse-functional-dry-run --output <absolute local plan.json>` captures coherent primary sources and fresh complete official WB stock without derived writes; functional plan builders use the same bounded 30-minute remote timeout as atomic apply because the official supply/stock capture can legitimately exceed the 5-minute readback timeout;
 - `warehouse-functional-apply --plan-file <same plan.json> --fingerprint <exact sha256:...>` pins the active EU target/runtime, creates a coherent `0600` integrity-checked backup and atomically applies six-stage balances, frozen historical cost projection and initial calculation parameters;
 - `warehouse-functional-readback` proves stage/source/capital reconciliation and the exact cutover identity;
 - repeated exact apply must return idempotent/no-op and create no second movement;
