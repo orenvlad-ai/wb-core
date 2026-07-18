@@ -94,6 +94,32 @@ def main() -> None:
                 raise AssertionError(
                     f"warehouse opening {action} subprocess timeout must be {expected_timeout}, got {actual_timeout}"
                 )
+        for action, expected_timeout in (
+            ("readback", 300.0),
+            ("cutover-dry-run", 1800.0),
+            ("emergency-dry-run", 1800.0),
+            ("economics-backfill-dry-run", 1800.0),
+            ("cutover-apply", 1800.0),
+        ):
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='{"ok":true}',
+                stderr="",
+            )
+            with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
+                hosted_runtime._run_remote_warehouse_functional_action(
+                    active_target,
+                    action=action,
+                    plan_path=plan_path if action == "cutover-apply" else None,
+                    fingerprint="sha256:timeout-smoke" if action == "cutover-apply" else "",
+                )
+            actual_timeout = run_mock.call_args.kwargs.get("timeout")
+            if actual_timeout != expected_timeout:
+                raise AssertionError(
+                    f"warehouse functional {action} subprocess timeout must be "
+                    f"{expected_timeout}, got {actual_timeout}"
+                )
     ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["warehouse-ui-flow", "--evidence-dir", "/tmp/wb-core-warehouse-ui-smoke"]
     )

@@ -31,6 +31,13 @@ if str(ROOT) not in sys.path:
 PROBE_BODY_LIMIT_BYTES = 768 * 1024
 WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
+WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
+    {
+        "cutover-dry-run",
+        "emergency-dry-run",
+        "economics-backfill-dry-run",
+    }
+)
 PROBE_SYSTEM_CA_FILE_CANDIDATES = (
     "/etc/ssl/cert.pem",
     "/private/etc/ssl/cert.pem",
@@ -1870,7 +1877,7 @@ def _run_remote_warehouse_functional_action(
         cwd=ROOT,
         timeout=(
             WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS
-            if action in mutation_actions
+            if action in mutation_actions or action in WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS
             else WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS
         ),
         check=False,
