@@ -3371,12 +3371,22 @@ def _supply_revision(row: Mapping[str, Any]) -> str:
         {
             "supply_id": row.get("supply_id"),
             "status_id": row.get("status_id"),
-            "normalized": row.get("normalized_row_json"),
+            "normalized": _stable_supply_normalized(row.get("normalized_row_json")),
             "goods_hash": row.get("raw_goods_hash"),
             "goods": row.get("raw_goods_json"),
             "updated": row.get("updated_date"),
         }
     )
+
+
+def _stable_supply_normalized(value: Any) -> Any:
+    normalized = _loads(value, value)
+    if not isinstance(normalized, Mapping):
+        return normalized
+    business_state = dict(normalized)
+    for key in ("synced_at", "last_list_synced_at", "last_enriched_at"):
+        business_state.pop(key, None)
+    return business_state
 
 
 def _supply_revisions(rows: Iterable[Mapping[str, Any]]) -> dict[str, str]:
