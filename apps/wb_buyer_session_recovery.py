@@ -340,6 +340,11 @@ def _capture_login(
                 while time.monotonic() < deadline:
                     surface = _inspect_login_surface(page)
                     if surface.get("state") == "authenticated":
+                        # Human completion can arrive through an async WB
+                        # redirect just like the saved-account click.  Apply
+                        # the same bounded DOM/network-idle settle before
+                        # taking candidate storage state.
+                        _settle_after_login_action(config, page)
                         _write_status(
                             config,
                             {
