@@ -557,7 +557,7 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
 def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
     result: list[Any] = []
     try:
-        locator = page.locator("button, [role='button']")
+        locator = page.locator("button, [role='button'], input[type='submit'], input[type='button']")
         count = min(int(locator.count()), 100)
     except Exception:
         return result
@@ -589,6 +589,10 @@ def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
                 "продолжить как",
                 "войти как",
                 "войти через аккаунт",
+                "войти в аккаунт",
+                "войти в личный кабинет",
+                "продолжить вход",
+                "выбрать аккаунт",
             )
         )
         if action_text in {"продолжить", "далее"} and not body_has_account_marker:
