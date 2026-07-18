@@ -54,7 +54,7 @@ related_docs:
   - "docs/architecture/09_official_api_secret_boundary.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
 source_of_truth_level: "module_canonical"
-update_note: "Prices table semantics are unchanged. `Цены -> Проверка СПП` now closes interrupted/emergency-restored jobs from fresh seller-tuple plus quarantine proof, clears the active current-job pointer only after that proof, keeps latest terminal history visible, and never lets later buyer-price diagnostics invalidate seller restore."
+update_note: "Prices table semantics are unchanged. `Цены -> Проверка СПП` now automatically checks/recovers the dedicated buyer session, resumes an existing recovery after reload, auto-clicks one saved WB account, opens noVNC only for real human steps, and applies the same no-write preflight to manual and scheduled starts."
 ---
 
 # 1. Идентификатор и статус
@@ -70,7 +70,7 @@ update_note: "Prices table semantics are unchanged. `Цены -> Проверк�
 
 Раздел имеет два подтаба:
 - `Текущие цены` — текущая таблица цен/скидок и ручной guarded upload-task workflow.
-- `Проверка СПП` — bounded live tool for one SKU/nmID that temporarily changes seller discounted price across an operator-specified range, measures anonymous public buyer price, calculates `SPP-прокси`, detects suspicious adjacent thresholds and restores baseline through staged proof.
+- `Проверка СПП` — bounded live tool for one SKU/nmID that first proves or automatically recovers the dedicated buyer session, temporarily changes seller discounted price across an operator-specified range, measures authenticated buyer price plus anonymous control, detects suspicious adjacent thresholds and restores baseline through staged proof.
 
 Top-level UI shows one row per active `nmID` where possible:
 - photo/name/our SKU/vendorCode/nmID;
@@ -215,6 +215,7 @@ The `Цены` tab is a sibling section in the unified operator shell. It render
 - row-level WB error overlay after status/detail readback.
 
 `Проверка СПП` renders a minimal operator surface:
+- automatic buyer-session check/recovery lifecycle with reload-safe `run_id` attachment and human-only noVNC escalation;
 - `Автопроверка` above manual inputs with one daily schedule, explicit future-live-change consent, `Asia/Yekaterinburg — Оренбург`, next run and last automatic status;
 - SKU/nmID selector sourced from current price rows / active registry;
 - baseline card with seller price, discount, discounted price, public buyer price, current `SPP-прокси`, quarantine and `editableSizePrice`;

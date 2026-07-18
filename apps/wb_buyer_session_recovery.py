@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import fcntl
 import io
 import json
 import os
@@ -43,8 +45,16 @@ DEFAULT_TIMEOUT_SEC = 1800
 DEFAULT_POLL_SEC = 3.0
 DEFAULT_SSH_DESTINATION = "wb-core-eu-root"
 DEFAULT_NOVNC_WEB_DIR = Path("/usr/share/novnc")
-ACTIVE_STATUSES = {"starting", "awaiting_login", "saving_session", "validating_session"}
-FINAL_STATUSES = {"completed", "stopped", "timeout", "error"}
+ACTIVE_STATUSES = {
+    "starting",
+    "checking_session",
+    "automatic_login",
+    "stabilizing_session",
+    "awaiting_human",
+    "saving_session",
+    "validating_session",
+}
+FINAL_STATUSES = {"completed", "migration_required", "stopped", "timeout", "error"}
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,10 @@ class BuyerRecoveryConfig:
     @property
     def pid_path(self) -> Path:
         return self.session.state_dir / "recovery_supervisor.pid"
+
+    @property
+    def start_lock_path(self) -> Path:
+        return self.session.state_dir / "recovery_start.lock"
 
     @property
     def candidate_path(self) -> Path:
@@ -136,75 +150,87 @@ def main() -> None:
 
 def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dict[str, Any]:
     _ensure_state_dir(config)
-    current = read_recovery_status(config, with_probe=False)
-    if current.get("running"):
-        if not replace:
-            return current
-        stop_recovery(config)
-    run_id = f"buyer-recovery-{_now().strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
-    session = WbBuyerSessionAdapter(config=config.session).check_session()
-    if session.get("status") == "valid":
-        payload = {
-            "run_id": run_id,
-            "status": "completed",
-            "reason": "buyer_session_already_valid",
-            "started_at": _now_text(),
-            "finished_at": _now_text(),
-            "session": session,
-        }
-        _write_status(config, payload)
-        return read_recovery_status(config, with_probe=False)
-    _write_status(
-        config,
-        {
-            "run_id": run_id,
-            "status": "starting",
-            "reason": "buyer_recovery_starting",
-            "started_at": _now_text(),
-            "deadline_at": (_now() + timedelta(seconds=config.timeout_sec)).isoformat(),
-            "session": session,
-        },
-    )
-    with _open_secure_log(config.supervisor_log_path) as log_file:
-        process = subprocess.Popen(
-            _supervisor_command(config),
-            cwd=str(ROOT),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
+    with _recovery_start_lock(config):
+        current = read_recovery_status(config, with_probe=False)
+        if current.get("running"):
+            if not replace:
+                return current
+            stop_recovery(config, requested_run_id=str(current.get("run_id") or ""), acquire_start_lock=False)
+        run_id = f"buyer-recovery-{_now().strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+        adapter = WbBuyerSessionAdapter(config=config.session)
+        session = adapter.check_session()
+        if session.get("status") == "valid":
+            payload = {
+                "run_id": run_id,
+                "status": "completed",
+                "reason": "buyer_session_already_valid",
+                "started_at": _now_text(),
+                "finished_at": _now_text(),
+                "session": session,
+            }
+            _write_status(config, payload)
+            return read_recovery_status(config, with_probe=False)
+        adapter.prepare_fingerprint_migration()
+        _write_status(
+            config,
+            {
+                "run_id": run_id,
+                "status": "starting",
+                "reason": "buyer_recovery_starting",
+                "started_at": _now_text(),
+                "deadline_at": (_now() + timedelta(seconds=config.timeout_sec)).isoformat(),
+                "session": session,
+            },
         )
-    config.pid_path.write_text(str(process.pid), encoding="utf-8")
-    os.chmod(config.pid_path, 0o600)
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        status = read_recovery_status(config, with_probe=False)
-        if status.get("status") in ACTIVE_STATUSES | FINAL_STATUSES:
-            return status
-        time.sleep(0.25)
-    return read_recovery_status(config, with_probe=False)
+        with _open_secure_log(config.supervisor_log_path) as log_file:
+            process = subprocess.Popen(
+                _supervisor_command(config),
+                cwd=str(ROOT),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        _write_supervisor_identity(config, pid=process.pid, run_id=run_id)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            status = read_recovery_status(config, with_probe=False)
+            if status.get("status") in ACTIVE_STATUSES | FINAL_STATUSES:
+                return status
+            time.sleep(0.25)
+        return read_recovery_status(config, with_probe=False)
 
 
-def stop_recovery(config: BuyerRecoveryConfig) -> dict[str, Any]:
-    pid = _read_pid(config.pid_path)
-    if pid and _pid_running(pid):
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and _pid_running(pid):
-            time.sleep(0.2)
-        if _pid_running(pid):
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-    config.pid_path.unlink(missing_ok=True)
-    config.candidate_path.unlink(missing_ok=True)
-    payload = _read_status(config.status_path)
-    if str(payload.get("status") or "") not in FINAL_STATUSES:
-        payload.update({"status": "stopped", "reason": "buyer_recovery_stopped", "finished_at": _now_text()})
-        _write_status(config, payload)
+def stop_recovery(
+    config: BuyerRecoveryConfig,
+    *,
+    requested_run_id: str | None = None,
+    acquire_start_lock: bool = True,
+) -> dict[str, Any]:
+    manager = _recovery_start_lock(config) if acquire_start_lock else _null_context()
+    with manager:
+        payload = _read_status(config.status_path)
+        current_run_id = str(payload.get("run_id") or "")
+        requested = str(requested_run_id or "").strip()
+        if requested and requested != current_run_id:
+            return {
+                **payload,
+                "status": "error",
+                "reason": "buyer_recovery_run_not_current",
+                "running": _verified_supervisor_running(config, current_run_id),
+            }
+        identity = _read_supervisor_identity(config)
+        pid = _identity_pid(identity)
+        if pid and _pid_running(pid) and not _supervisor_identity_matches(config, identity, current_run_id):
+            payload.update({"status": "error", "reason": "buyer_recovery_process_identity_mismatch", "finished_at": _now_text()})
+            _write_status(config, payload)
+            return read_recovery_status(config, with_probe=False)
+        if pid and _supervisor_identity_matches(config, identity, current_run_id):
+            _terminate_process_group(pid)
+        config.pid_path.unlink(missing_ok=True)
+        config.candidate_path.unlink(missing_ok=True)
+        if str(payload.get("status") or "") not in FINAL_STATUSES:
+            payload.update({"status": "stopped", "reason": "buyer_recovery_stopped", "finished_at": _now_text()})
+            _write_status(config, payload)
     return read_recovery_status(config, with_probe=True)
 
 
@@ -215,11 +241,12 @@ def read_recovery_status(
     requested_run_id: str | None = None,
 ) -> dict[str, Any]:
     payload = _read_status(config.status_path)
-    pid = _read_pid(config.pid_path)
-    payload["running"] = bool(pid and _pid_running(pid))
+    run_id = str(payload.get("run_id") or "")
+    payload["running"] = _verified_supervisor_running(config, run_id)
     payload.setdefault("status", "idle")
     payload.setdefault("run_id", "")
-    if not payload["running"] and payload["status"] in ACTIVE_STATUSES:
+    launch_grace = payload["status"] == "starting" and _status_age_seconds(payload) < 5.0
+    if not payload["running"] and payload["status"] in ACTIVE_STATUSES and not launch_grace:
         payload.update({"status": "error", "reason": "buyer_recovery_unexpected_exit", "finished_at": _now_text()})
         _write_status(config, payload)
     requested = str(requested_run_id or "").strip()
@@ -236,10 +263,20 @@ def read_recovery_status(
     return payload
 
 
+def _status_age_seconds(payload: Mapping[str, Any]) -> float:
+    try:
+        started_at = datetime.fromisoformat(str(payload.get("started_at") or ""))
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (_now() - started_at.astimezone(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 def supervise_recovery(config: BuyerRecoveryConfig) -> int:
     _ensure_state_dir(config)
-    config.pid_path.write_text(str(os.getpid()), encoding="utf-8")
-    os.chmod(config.pid_path, 0o600)
+    run_id = str(_read_status(config.status_path).get("run_id") or "")
+    _write_supervisor_identity(config, pid=os.getpid(), run_id=run_id)
     processes: list[subprocess.Popen[Any]] = []
     adapter = WbBuyerSessionAdapter(config=config.session)
     try:
@@ -252,19 +289,7 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
             openbox_path = shutil.which("openbox")
             if openbox_path:
                 processes.append(_spawn([openbox_path], config.openbox_log_path, env={"DISPLAY": config.display}))
-            x11vnc = _spawn(
-                ["x11vnc", "-display", config.display, "-localhost", "-shared", "-forever", "-nopw", "-noxdamage", "-rfbport", str(config.vnc_port)],
-                config.x11vnc_log_path,
-            )
-            processes.append(x11vnc)
-            _wait_port(config.vnc_port)
-            websockify = _spawn(
-                ["websockify", f"127.0.0.1:{config.web_port}", f"127.0.0.1:{config.vnc_port}", "--web", str(config.novnc_web_dir)],
-                config.websockify_log_path,
-            )
-            processes.append(websockify)
-            _wait_port(config.web_port)
-            return _capture_login(config, adapter)
+            return _capture_login(config, adapter, processes)
     except BlockingIOError:
         _write_status(config, {**_read_status(config.status_path), "status": "error", "reason": "buyer_session_lock_busy", "finished_at": _now_text()})
         return 1
@@ -275,10 +300,15 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
         for process in reversed(processes):
             _terminate(process)
         config.candidate_path.unlink(missing_ok=True)
-        config.pid_path.unlink(missing_ok=True)
+        if _supervisor_identity_matches(config, _read_supervisor_identity(config), run_id):
+            config.pid_path.unlink(missing_ok=True)
 
 
-def _capture_login(config: BuyerRecoveryConfig, adapter: WbBuyerSessionAdapter) -> int:
+def _capture_login(
+    config: BuyerRecoveryConfig,
+    adapter: WbBuyerSessionAdapter,
+    processes: list[subprocess.Popen[Any]],
+) -> int:
     deadline = time.monotonic() + config.timeout_sec
     env = os.environ.copy()
     env["DISPLAY"] = config.display
@@ -298,65 +328,79 @@ def _capture_login(config: BuyerRecoveryConfig, adapter: WbBuyerSessionAdapter) 
                     config,
                     {
                         **_read_status(config.status_path),
-                        "status": "awaiting_login",
-                        "reason": "buyer_login_window_ready",
+                        "status": "checking_session",
+                        "reason": "buyer_recovery_checking_session",
                         "session": {"status": "missing", "valid": False},
                     },
                 )
                 last_session: Mapping[str, Any] = {}
+                automatic_login_attempted = False
+                human_window_started = False
                 while time.monotonic() < deadline:
-                    context.storage_state(path=str(config.candidate_path))
-                    os.chmod(config.candidate_path, 0o600)
-                    candidate = _probe_recovery_candidate(config, adapter, page)
-                    last_session = candidate
-                    if candidate.get("status") == "valid":
-                        _write_status(config, {**_read_status(config.status_path), "status": "saving_session", "reason": "buyer_session_saving", "session": candidate})
-                        adapter.persist_storage_state_atomically(config.candidate_path)
-                        _write_status(config, {**_read_status(config.status_path), "status": "validating_session", "reason": "buyer_session_validating", "session": candidate})
-                        validated = adapter.check_session(persist_fingerprint=True, acquire_lock=False)
-                        if validated.get("status") != "valid":
+                    surface = _inspect_login_surface(page)
+                    if surface.get("state") == "authenticated":
+                        _write_status(
+                            config,
+                            {
+                                **_read_status(config.status_path),
+                                "status": "stabilizing_session",
+                                "reason": "buyer_session_stabilizing",
+                                "session": last_session,
+                            },
+                        )
+                        candidate = _capture_settled_candidate(config, adapter, context, page)
+                        last_session = candidate
+                        result = _accept_recovery_candidate(config, adapter, candidate)
+                        if result is not None:
+                            return result
+                        if candidate.get("status") == "wrong_account":
+                            surface = {"state": "human", "reason": "buyer_account_fingerprint_mismatch"}
+                        elif candidate.get("status") == "migration_required":
                             _write_status(
                                 config,
                                 {
                                     **_read_status(config.status_path),
-                                    "status": "error",
-                                    "reason": str(validated.get("reason") or "buyer_session_post_save_validation_failed"),
+                                    "status": "migration_required",
+                                    "reason": "buyer_fingerprint_migration_unproven",
                                     "finished_at": _now_text(),
-                                    "session": validated,
+                                    "session": candidate,
                                 },
                             )
                             return 1
+                        else:
+                            page.wait_for_timeout(max(500, int(config.poll_sec * 1000)))
+                            continue
+
+                    if surface.get("state") == "automatic_login" and not automatic_login_attempted:
+                        automatic_login_attempted = True
                         _write_status(
                             config,
                             {
                                 **_read_status(config.status_path),
-                                "status": "completed",
-                                "reason": "buyer_session_saved_and_validated",
-                                "finished_at": _now_text(),
-                                "session": validated,
+                                "status": "automatic_login",
+                                "reason": "buyer_saved_account_login_started",
+                                "session": last_session,
                             },
                         )
-                        return 0
-                    if candidate.get("status") == "wrong_account":
-                        _write_status(
-                            config,
-                            {
-                                **_read_status(config.status_path),
-                                "status": "awaiting_login",
-                                "reason": "buyer_account_fingerprint_mismatch",
-                                "session": candidate,
-                            },
-                        )
-                    else:
-                        _write_status(
-                            config,
-                            {
-                                **_read_status(config.status_path),
-                                "status": "awaiting_login",
-                                "reason": _candidate_wait_reason(candidate),
-                                "session": candidate,
-                            },
-                        )
+                        if _click_saved_account(surface):
+                            _settle_after_login_action(config, page)
+                            continue
+                        surface = {"state": "human", "reason": "buyer_saved_account_login_unavailable"}
+
+                    if surface.get("state") == "automatic_login":
+                        surface = {"state": "human", "reason": "buyer_saved_account_login_not_completed"}
+                    if not human_window_started:
+                        _start_human_window(config, processes)
+                        human_window_started = True
+                    _write_status(
+                        config,
+                        {
+                            **_read_status(config.status_path),
+                            "status": "awaiting_human",
+                            "reason": str(surface.get("reason") or "buyer_human_action_required"),
+                            "session": last_session,
+                        },
+                    )
                     page.wait_for_timeout(max(500, int(config.poll_sec * 1000)))
                 _write_status(
                     config,
@@ -378,31 +422,169 @@ def _capture_login(config: BuyerRecoveryConfig, adapter: WbBuyerSessionAdapter) 
             os.environ["DISPLAY"] = old_display
 
 
-def _probe_recovery_candidate(
+def _capture_settled_candidate(
     config: BuyerRecoveryConfig,
     adapter: WbBuyerSessionAdapter,
+    context: Any,
     page: Any,
     *,
     fresh_adapter_factory: Any = WbBuyerSessionAdapter,
 ) -> dict[str, Any]:
-    candidate = adapter.check_session(
-        storage_state_path=config.candidate_path,
-        persist_fingerprint=False,
-        acquire_lock=False,
-    )
-    status = str(candidate.get("status") or "probe_error")
-    if status in {"valid", "wrong_account"} or not _visible_login_completed(page):
-        return candidate
-
-    # WB rotates browser-side auth material immediately after the /lk redirect.
-    # Revalidate this same secure snapshot after a short settle interval instead
-    # of overwriting it again first.
-    page.wait_for_timeout(min(3_000, max(750, int(config.poll_sec * 1000))))
+    del adapter
+    page.wait_for_timeout(max(1_000, int(config.session.settle_timeout_ms)))
+    context.storage_state(path=str(config.candidate_path))
+    os.chmod(config.candidate_path, 0o600)
     return fresh_adapter_factory(config=config.session).check_session(
         storage_state_path=config.candidate_path,
         persist_fingerprint=False,
         acquire_lock=False,
     )
+
+
+def _accept_recovery_candidate(
+    config: BuyerRecoveryConfig,
+    adapter: WbBuyerSessionAdapter,
+    candidate: Mapping[str, Any],
+) -> int | None:
+    if candidate.get("status") != "valid":
+        return None
+    _write_status(
+        config,
+        {**_read_status(config.status_path), "status": "saving_session", "reason": "buyer_session_saving", "session": candidate},
+    )
+    rollback_path = config.session.state_dir / f"storage_state.rollback.{uuid4().hex}.json"
+    had_canonical_state = config.session.storage_state_path.exists()
+    if had_canonical_state:
+        shutil.copy2(config.session.storage_state_path, rollback_path)
+        os.chmod(rollback_path, 0o600)
+    try:
+        adapter.persist_storage_state_atomically(config.candidate_path)
+    except Exception:
+        _restore_canonical_storage(config, rollback_path, had_canonical_state=had_canonical_state)
+        raise
+    _write_status(
+        config,
+        {**_read_status(config.status_path), "status": "validating_session", "reason": "buyer_session_validating", "session": candidate},
+    )
+    try:
+        validated = adapter.check_session(persist_fingerprint=True, acquire_lock=False)
+    except Exception:
+        validated = {
+            "status": "probe_error",
+            "valid": False,
+            "reason": "buyer_session_post_save_validation_failed",
+        }
+    if validated.get("status") != "valid":
+        _restore_canonical_storage(config, rollback_path, had_canonical_state=had_canonical_state)
+        _write_status(
+            config,
+            {
+                **_read_status(config.status_path),
+                "status": "error",
+                "reason": str(validated.get("reason") or "buyer_session_post_save_validation_failed"),
+                "finished_at": _now_text(),
+                "session": validated,
+            },
+        )
+        return 1
+    rollback_path.unlink(missing_ok=True)
+    _write_status(
+        config,
+        {
+            **_read_status(config.status_path),
+            "status": "completed",
+            "reason": "buyer_session_saved_and_validated",
+            "finished_at": _now_text(),
+            "session": validated,
+        },
+    )
+    return 0
+
+
+def _restore_canonical_storage(
+    config: BuyerRecoveryConfig,
+    rollback_path: Path,
+    *,
+    had_canonical_state: bool,
+) -> None:
+    if rollback_path.exists():
+        rollback_path.replace(config.session.storage_state_path)
+        os.chmod(config.session.storage_state_path, 0o600)
+        return
+    if not had_canonical_state:
+        config.session.storage_state_path.unlink(missing_ok=True)
+
+
+def _inspect_login_surface(page: Any) -> dict[str, Any]:
+    injected = getattr(page, "wb_recovery_surface", None)
+    if isinstance(injected, Mapping):
+        return dict(injected)
+    body = _safe_body_text(page).lower()
+    if any(marker in body for marker in ("код из смс", "введите код", "код подтверждения", "отправили код")):
+        return {"state": "human", "reason": "buyer_sms_required"}
+    if any(marker in body for marker in ("введите номер телефона", "номер телефона", "получить код")):
+        return {"state": "human", "reason": "buyer_phone_required"}
+    if any(marker in body for marker in ("подтвердите, что вы не робот", "капча", "captcha", "data-site-key")):
+        return {"state": "human", "reason": "buyer_captcha_required"}
+    if any(marker in body for marker in ("подтвердите вход", "подтверждение безопасности", "это вы")):
+        return {"state": "human", "reason": "buyer_security_confirmation_required"}
+    candidates = _saved_account_login_candidates(page)
+    if len(candidates) == 1:
+        return {"state": "automatic_login", "reason": "buyer_saved_account_available", "candidate": candidates[0]}
+    if len(candidates) > 1 or any(marker in body for marker in ("выберите аккаунт", "другой аккаунт")):
+        return {"state": "human", "reason": "buyer_account_selection_required"}
+    if _visible_login_completed(page) and not any(
+        marker in body for marker in ("войти или зарегистрироваться", "войдите в аккаунт", "получить код")
+    ):
+        return {"state": "authenticated", "reason": "buyer_visible_account_opened"}
+    return {"state": "human", "reason": "buyer_human_action_required"}
+
+
+def _saved_account_login_candidates(page: Any) -> list[Any]:
+    result: list[Any] = []
+    try:
+        locator = page.locator("button, [role='button']")
+        count = min(int(locator.count()), 100)
+    except Exception:
+        return result
+    allowed = {"войти", "войти под этим аккаунтом"}
+    for index in range(count):
+        item = locator.nth(index)
+        try:
+            text = " ".join(str(item.inner_text(timeout=500) or "").split()).lower()
+            visible = bool(item.is_visible())
+            enabled = bool(item.is_enabled())
+        except Exception:
+            continue
+        if visible and enabled and text in allowed:
+            result.append(item)
+    return result
+
+
+def _click_saved_account(surface: Mapping[str, Any]) -> bool:
+    candidate = surface.get("candidate")
+    if candidate is None:
+        return False
+    try:
+        candidate.click(timeout=5_000)
+        return True
+    except Exception:
+        return False
+
+
+def _settle_after_login_action(config: BuyerRecoveryConfig, page: Any) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=min(15_000, config.session.navigation_timeout_ms))
+    except Exception:
+        pass
+    page.wait_for_timeout(max(1_000, int(config.session.settle_timeout_ms)))
+
+
+def _safe_body_text(page: Any) -> str:
+    try:
+        return str(page.locator("body").inner_text(timeout=2_000) or "")[:30_000]
+    except Exception:
+        return ""
 
 
 def _visible_login_completed(page: Any) -> bool:
@@ -417,17 +599,36 @@ def _visible_login_completed(page: Any) -> bool:
     )
 
 
-def _candidate_wait_reason(candidate: Mapping[str, Any]) -> str:
-    status = str(candidate.get("status") or "probe_error")
-    reasons = {
-        "missing": "buyer_storage_state_missing",
-        "expired": "buyer_login_required",
-        "login_redirect": "buyer_login_redirect",
-        "security_challenge": "buyer_security_challenge",
-        "probe_error": "buyer_session_probe_failed",
-        "recovery_running": "buyer_session_lock_busy",
-    }
-    return reasons.get(status, "buyer_session_not_ready")
+def _start_human_window(config: BuyerRecoveryConfig, processes: list[subprocess.Popen[Any]]) -> None:
+    x11vnc = _spawn(
+        [
+            "x11vnc",
+            "-display",
+            config.display,
+            "-localhost",
+            "-shared",
+            "-forever",
+            "-nopw",
+            "-noxdamage",
+            "-rfbport",
+            str(config.vnc_port),
+        ],
+        config.x11vnc_log_path,
+    )
+    processes.append(x11vnc)
+    _wait_port(config.vnc_port)
+    websockify = _spawn(
+        [
+            "websockify",
+            f"127.0.0.1:{config.web_port}",
+            f"127.0.0.1:{config.vnc_port}",
+            "--web",
+            str(config.novnc_web_dir),
+        ],
+        config.websockify_log_path,
+    )
+    processes.append(websockify)
+    _wait_port(config.web_port)
 
 
 def build_macos_launcher_archive(
@@ -438,7 +639,7 @@ def build_macos_launcher_archive(
 ) -> tuple[bytes, str]:
     status = read_recovery_status(config, with_probe=False)
     run_id = str(status.get("run_id") or "")
-    if not run_id or not status.get("running") or status.get("status") not in {"starting", "awaiting_login"}:
+    if not run_id or not status.get("running") or status.get("status") != "awaiting_human":
         raise RuntimeError("buyer recovery launcher is not ready")
     body = _launcher_script(
         config,
@@ -470,23 +671,31 @@ def _launcher_script(
             f"NOVNC_URL={shlex.quote(config.novnc_url)}",
             f"RUN_ID={shlex.quote(run_id)}",
             f"OPERATOR_URL={shlex.quote(public_operator_url)}",
+            "REMOTE_APP=/opt/wb-core-runtime/app/apps/wb_buyer_session_recovery.py",
             'SSH_LOG="${TMPDIR:-/tmp}/wb-buyer-recovery-ssh.log"',
             f"MAX_POLLS={max(1, int(config.timeout_sec / 3) + 20)}",
             'cleanup() { if [[ -n "${SSH_PID:-}" ]]; then kill "${SSH_PID}" >/dev/null 2>&1 || true; fi; }',
+            'close_novnc() {',
+            '  osascript -e "tell application \\"Safari\\" to close (every tab of every window whose URL starts with \\"http://127.0.0.1:${WEB_PORT}/\\")" >/dev/null 2>&1 || true',
+            '  osascript -e "tell application \\"Google Chrome\\" to close (every tab of every window whose URL starts with \\"http://127.0.0.1:${WEB_PORT}/\\")" >/dev/null 2>&1 || true',
+            '}',
             "trap cleanup EXIT",
             'ssh -o ExitOnForwardFailure=yes -L "${WEB_PORT}:127.0.0.1:${WEB_PORT}" "${SSH_DESTINATION}" -N >"${SSH_LOG}" 2>&1 &',
             "SSH_PID=$!",
             'for attempt in $(seq 1 20); do if curl -fsS --max-time 2 "${NOVNC_URL}" >/dev/null 2>&1; then break; fi; sleep 1; done',
             'open "${NOVNC_URL}"',
             'echo "Окно входа Wildberries открыто для запуска ${RUN_ID}."',
-            'MISSING_POLLS=0',
+            'FINAL_STATUS=""',
             'for attempt in $(seq 1 "${MAX_POLLS}"); do',
-            '  if ! kill -0 "${SSH_PID}" >/dev/null 2>&1; then break; fi',
-            '  if curl -fsS --max-time 2 "${NOVNC_URL}" >/dev/null 2>&1; then MISSING_POLLS=0; else MISSING_POLLS=$((MISSING_POLLS + 1)); fi',
-            '  if [[ "${MISSING_POLLS}" -ge 3 ]]; then break; fi',
+            '  if ! kill -0 "${SSH_PID}" >/dev/null 2>&1; then FINAL_STATUS="tunnel_error"; break; fi',
+            '  STATUS_JSON=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_DESTINATION}" python3 "${REMOTE_APP}" status --run-id "${RUN_ID}" 2>/dev/null || true)',
+            '  RUN_STATUS=$(printf "%s" "${STATUS_JSON}" | /usr/bin/python3 -c \'import json,sys; data=json.load(sys.stdin); print(data.get("status", ""))\' 2>/dev/null || true)',
+            '  case "${RUN_STATUS}" in completed|migration_required|stopped|timeout|error) FINAL_STATUS="${RUN_STATUS}"; break ;; esac',
             '  sleep 3',
             'done',
-            'echo "Окно входа Wildberries закрыто или время запуска завершилось."',
+            'if [[ -z "${FINAL_STATUS}" ]]; then FINAL_STATUS="timeout"; fi',
+            'close_novnc',
+            'echo "WB_BUYER_RECOVERY_FINAL=${FINAL_STATUS}"',
             'open "${OPERATOR_URL}" >/dev/null 2>&1 || true',
             "",
         ]
@@ -580,11 +789,135 @@ def _terminate(process: subprocess.Popen[Any]) -> None:
             pass
 
 
-def _read_pid(path: Path) -> int | None:
+@contextmanager
+def _recovery_start_lock(config: BuyerRecoveryConfig) -> Any:
+    handle = config.start_lock_path.open("a+", encoding="utf-8")
+    os.chmod(config.start_lock_path, 0o600)
     try:
-        return int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+@contextmanager
+def _null_context() -> Any:
+    yield
+
+
+def _write_supervisor_identity(config: BuyerRecoveryConfig, *, pid: int, run_id: str) -> None:
+    payload = {
+        "pid": int(pid),
+        "pgid": _safe_process_group(int(pid)),
+        "run_id": str(run_id or ""),
+        "proc_start_ticks": _process_start_ticks(int(pid)),
+    }
+    staged = config.session.state_dir / f".recovery-supervisor-{uuid4().hex}.tmp"
+    staged.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    os.chmod(staged, 0o600)
+    staged.replace(config.pid_path)
+    os.chmod(config.pid_path, 0o600)
+
+
+def _read_supervisor_identity(config: BuyerRecoveryConfig) -> dict[str, Any]:
+    try:
+        raw = config.pid_path.read_text(encoding="utf-8").strip()
+        payload = json.loads(raw)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _identity_pid(identity: Mapping[str, Any]) -> int | None:
+    try:
+        pid = int(identity.get("pid") or 0)
+    except (TypeError, ValueError):
         return None
+    return pid if pid > 0 else None
+
+
+def _verified_supervisor_running(config: BuyerRecoveryConfig, run_id: str) -> bool:
+    return _supervisor_identity_matches(config, _read_supervisor_identity(config), run_id)
+
+
+def _supervisor_identity_matches(
+    config: BuyerRecoveryConfig,
+    identity: Mapping[str, Any],
+    run_id: str,
+) -> bool:
+    del config
+    pid = _identity_pid(identity)
+    if not pid or not _pid_running(pid):
+        return False
+    if str(identity.get("run_id") or "") != str(run_id or ""):
+        return False
+    if int(identity.get("pgid") or 0) != pid or _safe_process_group(pid) != pid:
+        return False
+    recorded_start = str(identity.get("proc_start_ticks") or "")
+    if not recorded_start or recorded_start != _process_start_ticks(pid):
+        return False
+    cmdline = _process_command_line(pid)
+    if not cmdline:
+        return False
+    return Path(__file__).name in cmdline and " supervise " in f" {cmdline} "
+
+
+def _process_start_ticks(pid: int) -> str:
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
+        _prefix, separator, suffix = raw.rpartition(") ")
+        fields = suffix.split() if separator else raw.split()
+        return str(fields[19] if separator else fields[21])
+    except (OSError, IndexError, ValueError):
+        try:
+            return subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(int(pid))],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            ).stdout.strip()
+        except Exception:
+            return ""
+
+
+def _process_command_line(pid: int) -> str:
+    try:
+        return Path(f"/proc/{int(pid)}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+    except OSError:
+        try:
+            return subprocess.run(
+                ["ps", "-o", "command=", "-p", str(int(pid))],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            ).stdout.strip()
+        except Exception:
+            return ""
+
+
+def _safe_process_group(pid: int) -> int:
+    try:
+        return int(os.getpgid(int(pid)))
+    except (OSError, ValueError):
+        return 0
+
+
+def _terminate_process_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _pid_running(pid):
+        time.sleep(0.2)
+    if _pid_running(pid):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def _pid_running(pid: int) -> bool:

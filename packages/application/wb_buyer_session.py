@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import time
 from typing import Any, Callable, Mapping
 
 from packages.adapters.wb_buyer_session import WbBuyerSessionAdapter
@@ -16,12 +17,16 @@ BUYER_STATUS_LABELS = {
     "login_redirect": "Требуется вход",
     "security_challenge": "Требуется проверка WB",
     "probe_error": "Ошибка проверки",
-    "recovery_running": "Открыто окно входа",
+    "recovery_running": "Восстановление выполняется",
     "starting": "Запускается",
-    "awaiting_login": "Нужно войти",
+    "checking_session": "Проверяем сессию",
+    "automatic_login": "Выполняем автоматический вход",
+    "stabilizing_session": "Стабилизируем вход",
+    "awaiting_human": "Ждём действие человека",
     "saving_session": "Сохраняется",
-    "validating_session": "Проверяется",
+    "validating_session": "Проверяем сохранённую сессию",
     "completed": "Установлена",
+    "migration_required": "Нужно подтвердить привязку аккаунта",
     "stopped": "Остановлена",
     "timeout": "Время истекло",
     "error": "Ошибка",
@@ -37,16 +42,32 @@ SAFE_BUYER_REASONS = {
     "authenticated_primary_price_missing",
     "buyer_account_context_missing",
     "buyer_account_fingerprint_mismatch",
+    "buyer_account_selection_required",
+    "buyer_captcha_required",
+    "buyer_fingerprint_migrated",
+    "buyer_fingerprint_migration_unproven",
+    "buyer_fingerprint_ready",
+    "buyer_human_action_required",
     "buyer_login_redirect",
     "buyer_login_required",
     "buyer_login_timeout",
     "buyer_login_window_ready",
+    "buyer_phone_required",
+    "buyer_recovery_checking_session",
+    "buyer_recovery_process_identity_mismatch",
     "buyer_recovery_run_not_current",
     "buyer_recovery_runtime_error",
     "buyer_recovery_starting",
     "buyer_recovery_stopped",
     "buyer_recovery_unexpected_exit",
     "buyer_security_challenge",
+    "buyer_security_confirmation_required",
+    "buyer_session_stabilizing",
+    "buyer_sms_required",
+    "buyer_saved_account_available",
+    "buyer_saved_account_login_not_completed",
+    "buyer_saved_account_login_started",
+    "buyer_saved_account_login_unavailable",
     "buyer_session_already_valid",
     "buyer_session_expired",
     "buyer_session_lock_busy",
@@ -72,6 +93,49 @@ class WbBuyerSessionBlock:
 
     def check_session(self) -> dict[str, Any]:
         return _public_session_payload(self.adapter.check_session())
+
+    def ensure_session(
+        self,
+        *,
+        auto_recover: bool = True,
+        wait_seconds: float = 90.0,
+        poll_seconds: float = 1.0,
+    ) -> dict[str, Any]:
+        session = self.check_session()
+        if session.get("valid") or not auto_recover:
+            return session
+        controller = WbBuyerSessionRecoveryController()
+        launcher_path = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip"
+        recovery = controller.start(replace=False, launcher_download_path=launcher_path)
+        deadline = time.monotonic() + max(0.0, float(wait_seconds))
+        while recovery.get("running") and recovery.get("status") != "awaiting_human":
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(max(0.1, float(poll_seconds)))
+            recovery = controller.read_status(
+                launcher_download_path=launcher_path,
+                run_id=str(recovery.get("run_id") or "") or None,
+                with_probe=False,
+            )
+        if recovery.get("status") == "completed":
+            return self.check_session()
+        if recovery.get("status") == "awaiting_human":
+            return {
+                **session,
+                "status": "action_required",
+                "status_label": "Нужно действие человека",
+                "valid": False,
+                "reason": _safe_reason(recovery.get("reason")),
+                "action": "Откройте защищённое окно и завершите вход в Wildberries",
+                "recovery": recovery,
+            }
+        return {
+            **session,
+            "status": "recovery_pending" if recovery.get("running") else str(recovery.get("status") or session.get("status") or "probe_error"),
+            "valid": False,
+            "reason": _safe_reason(recovery.get("reason") or session.get("reason")),
+            "recovery": recovery,
+        }
 
     def fetch_authenticated_buyer_price(self, nm_id: int) -> dict[str, Any]:
         return _public_price_payload(self.adapter.fetch_authenticated_buyer_price(int(nm_id)))
@@ -120,12 +184,12 @@ class WbBuyerSessionRecoveryController:
         )
         return _public_recovery_payload(raw, launcher_download_path=launcher_download_path)
 
-    def stop(self, *, launcher_download_path: str) -> dict[str, Any]:
+    def stop(self, *, launcher_download_path: str, run_id: str | None = None) -> dict[str, Any]:
         config = self._config()
         raw = dict(
             self._stop_runner(config)
             if self._stop_runner is not None
-            else self._tool().stop_recovery(config)
+            else self._tool().stop_recovery(config, requested_run_id=run_id)
         )
         return _public_recovery_payload(raw, launcher_download_path=launcher_download_path)
 
@@ -180,7 +244,7 @@ def _public_price_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
 def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: str) -> dict[str, Any]:
     status = str(raw.get("status") or "idle")
     running = bool(raw.get("running"))
-    launcher_ready = running and status in {"starting", "awaiting_login"}
+    launcher_ready = running and status == "awaiting_human"
     session = raw.get("session") if isinstance(raw.get("session"), Mapping) else {}
     session_status = str(session.get("status") or ("valid" if status == "completed" else "missing"))
     return {
@@ -190,11 +254,14 @@ def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: 
         "status_label": BUYER_STATUS_LABELS.get(status, "Неизвестно"),
         "status_tone": "success" if status in {"completed"} else ("warning" if running else "danger" if status in {"error", "timeout"} else "neutral"),
         "running": running,
-        "run_is_final": status in {"completed", "stopped", "timeout", "error"},
+        "run_is_final": status in {"completed", "migration_required", "stopped", "timeout", "error"},
         "started_at": str(raw.get("started_at") or ""),
         "finished_at": str(raw.get("finished_at") or ""),
         "deadline_at": str(raw.get("deadline_at") or ""),
         "reason": _safe_reason(raw.get("reason") or raw.get("message")),
+        "stage": status,
+        "human_action_required": status == "awaiting_human",
+        "human_action": _human_action(_safe_reason(raw.get("reason") or raw.get("message"))) if status == "awaiting_human" else "",
         "launcher_ready": launcher_ready,
         "can_download_launcher": launcher_ready,
         "launcher_download_path": launcher_download_path if launcher_ready else "",
@@ -207,6 +274,17 @@ def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: 
             "account_confirmed": bool(session.get("account_confirmed")),
         },
     }
+
+
+def _human_action(reason: str) -> str:
+    return {
+        "buyer_sms_required": "Введите SMS-код в защищённом окне Wildberries.",
+        "buyer_phone_required": "Введите номер телефона в защищённом окне Wildberries.",
+        "buyer_captcha_required": "Пройдите проверку Wildberries в защищённом окне.",
+        "buyer_account_selection_required": "Выберите разрешённый покупательский аккаунт.",
+        "buyer_account_fingerprint_mismatch": "Открыт другой аккаунт. Переключитесь на ранее привязанный аккаунт.",
+        "buyer_security_confirmation_required": "Подтвердите вход в защищённом окне Wildberries.",
+    }.get(reason, "Завершите требуемое действие в защищённом окне Wildberries.")
 
 
 def _safe_reason(value: Any) -> str:

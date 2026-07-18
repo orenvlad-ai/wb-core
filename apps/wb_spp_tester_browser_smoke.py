@@ -21,7 +21,12 @@ from apps.wb_prices_management_smoke import (  # noqa: E402
     _reserve_free_port,
     _seed_runtime,
 )
-from apps.wb_spp_tester_smoke import FakeBuyerSource, FakePublicSource, FakeSppPricesSource  # noqa: E402
+from apps.wb_spp_tester_smoke import (  # noqa: E402
+    FakeBuyerRecoveryController,
+    FakeBuyerSource,
+    FakePublicSource,
+    FakeSppPricesSource,
+)
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -47,6 +52,8 @@ def main() -> None:
                 base_url = server.base_url
                 page = browser.new_page(viewport={"width": 1440, "height": 940})
                 _prepare_spp_page(page, base_url)
+                if server.buyer_recovery.start_calls != 0:
+                    raise AssertionError("a valid buyer session must not start recovery or create a launcher")
                 if page.locator("[data-spp-test-start]").is_disabled():
                     raise AssertionError("SPP start must become enabled after successful plan and confirmations")
                 if page.locator("[data-spp-test-start-reason]").inner_text().strip():
@@ -143,7 +150,7 @@ def main() -> None:
                 page.locator('[data-unified-tab-button="prices"]').click()
                 page.locator('[data-prices-subtab="spp-test"]').click()
                 page.wait_for_function(
-                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Не установлена')",
+                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Ждём SMS/действие')",
                     timeout=7000,
                 )
                 panel = page.locator('[data-prices-subpanel="spp-test"]')
@@ -159,6 +166,34 @@ def main() -> None:
                     raise AssertionError("invalid buyer session must disable enabling the schedule")
                 if "Установить сессию" not in (page.locator("[data-spp-schedule-save]").get_attribute("title") or ""):
                     raise AssertionError("invalid buyer session schedule gate must name the install action")
+                first_run_id = str((server.buyer_recovery._payload("") or {}).get("run_id") or "")
+                page.reload(wait_until="domcontentloaded")
+                page.locator('[data-unified-tab-button="prices"]').click()
+                page.locator('[data-prices-subtab="spp-test"]').click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Ждём SMS/действие')",
+                    timeout=7000,
+                )
+                if server.buyer_recovery.start_calls != 1 or first_run_id != "buyer-recovery-test":
+                    raise AssertionError("reload must attach to the existing buyer recovery run without starting a duplicate")
+                page.close()
+
+            with _LocalSppUiServer(
+                spp_test_enabled=True,
+                prices_write_enabled=True,
+                buyer_session_status="expired",
+                buyer_recovery_auto_complete=True,
+            ) as server:
+                page = browser.new_page(viewport={"width": 1440, "height": 940})
+                page.goto(f"{server.base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
+                page.locator('[data-unified-tab-button="prices"]').click()
+                page.locator('[data-prices-subtab="spp-test"]').click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Действует')",
+                    timeout=7000,
+                )
+                if server.buyer_recovery.start_calls != 1 or server.buyer_recovery.launcher_calls != 0:
+                    raise AssertionError("saved-account auto recovery must complete once without creating/downloading a noVNC launcher")
                 page.close()
         finally:
             browser.close()
@@ -221,6 +256,7 @@ class _LocalSppUiServer:
         spp_test_enabled: bool,
         prices_write_enabled: bool,
         buyer_session_status: str = "valid",
+        buyer_recovery_auto_complete: bool = False,
         seed_manual_restore_required: bool = False,
     ) -> None:
         self.tmp: TemporaryDirectory[str] | None = None
@@ -231,8 +267,10 @@ class _LocalSppUiServer:
         self.spp_test_enabled = spp_test_enabled
         self.prices_write_enabled = prices_write_enabled
         self.buyer_session_status = buyer_session_status
+        self.buyer_recovery_auto_complete = buyer_recovery_auto_complete
         self.seed_manual_restore_required = seed_manual_restore_required
         self.spp_block: WbSppTesterBlock | None = None
+        self.buyer_recovery: FakeBuyerRecoveryController | None = None
 
     def __enter__(self) -> "_LocalSppUiServer":
         self.tmp = TemporaryDirectory(prefix="wb-spp-browser-")
@@ -240,12 +278,17 @@ class _LocalSppUiServer:
         runtime = _seed_runtime(runtime_dir)
         prices_source = FakePricesSource()
         spp_prices_source = self.spp_prices_source
+        buyer_source = FakeBuyerSource(spp_prices_source, session_status=self.buyer_session_status)
+        self.buyer_recovery = FakeBuyerRecoveryController(
+            auto_complete=self.buyer_recovery_auto_complete,
+            on_complete=lambda: setattr(buyer_source, "session_status", "valid"),
+        )
         spp_block = WbSppTesterBlock(
             runtime=runtime,
             runtime_dir=runtime_dir,
             prices_source=spp_prices_source,
             public_source=FakePublicSource(spp_prices_source),
-            buyer_source=FakeBuyerSource(spp_prices_source, session_status=self.buyer_session_status),
+            buyer_source=buyer_source,
             now_factory=lambda: NOW,
             timestamp_factory=lambda: "2026-07-07T07:00:00Z",
             sleep=lambda _seconds: None,
@@ -311,6 +354,8 @@ class _LocalSppUiServer:
             activated_at_factory=lambda: "2026-07-07T07:00:00Z",
             prices_block=_build_prices_block(runtime, runtime_dir, prices_source, write_enabled=self.prices_write_enabled),
             spp_tester_block=spp_block,
+            buyer_session_block=buyer_source,  # type: ignore[arg-type]
+            buyer_session_recovery_controller=self.buyer_recovery,
         )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",

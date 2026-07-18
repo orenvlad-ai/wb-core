@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import hmac
+from itertools import combinations
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,8 @@ DEFAULT_BUYER_SESSION_DIR = Path("/opt/wb-core-runtime/state/wb_buyer_session")
 DEFAULT_BUYER_STORAGE_STATE_PATH = DEFAULT_BUYER_SESSION_DIR / "storage_state.json"
 DEFAULT_BUYER_URL = "https://www.wildberries.ru/lk"
 DEFAULT_PRODUCT_URL = "https://www.wildberries.ru/catalog/{nm_id}/detail.aspx"
-FINGERPRINT_VERSION = "wb-buyer-account-hmac-sha256-v1"
+LEGACY_FINGERPRINT_VERSION = "wb-buyer-account-hmac-sha256-v1"
+FINGERPRINT_VERSION = "wb-buyer-account-hmac-sha256-v2-stable-identity"
 MAX_NETWORK_JSON_BYTES = 2_000_000
 AUTH_NAME_RE = re.compile(r"(?:auth|token|session|user|profile|account|login|validation|wbx)", re.IGNORECASE)
 LOGIN_URL_RE = re.compile(r"/(?:login|security|authorize|auth)(?:[/?#]|$)", re.IGNORECASE)
@@ -220,24 +222,75 @@ class WbBuyerSessionAdapter:
         os.chmod(self.config.storage_state_path, 0o600)
 
     def stored_fingerprint(self) -> str:
+        return str(self._fingerprint_record().get("fingerprint") or "")
+
+    def prepare_fingerprint_migration(self) -> dict[str, Any]:
+        """Migrate a provably bound v1 fingerprint without rebinding an account."""
+
+        record = self._fingerprint_record()
+        expected = str(record.get("fingerprint") or "")
+        version = str(record.get("version") or LEGACY_FINGERPRINT_VERSION)
+        if not expected or version == FINGERPRINT_VERSION:
+            return {
+                "status": "ready",
+                "reason": "buyer_fingerprint_ready",
+                "migrated": False,
+            }
+        anchor = self._legacy_bound_stable_identity(expected)
+        if not anchor:
+            return {
+                "status": "migration_required",
+                "reason": "buyer_fingerprint_migration_unproven",
+                "migrated": False,
+            }
+        fingerprint = self._fingerprint(anchor)
+        self._write_fingerprint_record(
+            fingerprint,
+            created_at=str(record.get("created_at") or ""),
+            migration_state="legacy_binding_proved_from_canonical_state",
+        )
+        return {
+            "status": "ready",
+            "reason": "buyer_fingerprint_migrated",
+            "migrated": True,
+        }
+
+    def _fingerprint_record(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.config.fingerprint_record_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return ""
-        return str(payload.get("fingerprint") or "") if isinstance(payload, Mapping) else ""
+            return {}
+        return dict(payload) if isinstance(payload, Mapping) else {}
 
     def _probe_and_validate(self, path: Path, *, persist_fingerprint: bool) -> dict[str, Any]:
         raw = dict(self.browser_probe(path) if self.browser_probe is not None else self._run_playwright_session_probe(path))
         status = str(raw.get("status") or "probe_error")
         if status != "valid":
             return self._session_result(status, reason=str(raw.get("reason") or f"buyer_session_{status}"))
-        identity_material = raw.pop("identity_material", None)
+        identity_material = _canonical_account_identity(raw.pop("identity_material", None))
         if not identity_material:
             identity_material = _derive_identity_material(path)
         if not identity_material:
             return self._session_result("probe_error", reason="account_fingerprint_source_missing")
         fingerprint = self._fingerprint(identity_material)
-        expected = self.stored_fingerprint()
+        record = self._fingerprint_record()
+        expected = str(record.get("fingerprint") or "")
+        version = str(record.get("version") or LEGACY_FINGERPRINT_VERSION)
+        if expected and version != FINGERPRINT_VERSION:
+            if hmac.compare_digest(expected, fingerprint):
+                self._write_fingerprint_record(
+                    fingerprint,
+                    created_at=str(record.get("created_at") or ""),
+                    migration_state="legacy_candidate_direct_match",
+                )
+            else:
+                migration = self.prepare_fingerprint_migration()
+                if migration.get("status") != "ready":
+                    return self._session_result(
+                        "migration_required",
+                        reason="buyer_fingerprint_migration_unproven",
+                    )
+                expected = self.stored_fingerprint()
         if expected and not hmac.compare_digest(expected, fingerprint):
             return self._session_result(
                 "wrong_account",
@@ -290,7 +343,11 @@ class WbBuyerSessionAdapter:
                     return {"status": "security_challenge", "reason": "buyer_security_challenge"}
                 if _looks_logged_out(lowered):
                     return {"status": "expired", "reason": "buyer_login_required"}
-                identity = (identity_candidates[-1] if identity_candidates else None) or _derive_context_identity_material(context) or _derive_identity_material(path)
+                identity = _select_stable_account_identity(
+                    list(reversed(identity_candidates)),
+                    _derive_context_identity_material(context),
+                    _derive_identity_material(path),
+                )
                 if not identity:
                     return {"status": "probe_error", "reason": "buyer_account_context_missing"}
                 return {"status": "valid", "identity_material": identity}
@@ -389,13 +446,50 @@ class WbBuyerSessionAdapter:
         os.chmod(path, 0o600)
         return key
 
-    def _write_fingerprint_record(self, fingerprint: str) -> None:
+    def _write_fingerprint_record(
+        self,
+        fingerprint: str,
+        *,
+        created_at: str = "",
+        migration_state: str = "",
+    ) -> None:
         payload = {
             "version": FINGERPRINT_VERSION,
             "fingerprint": fingerprint,
-            "created_at": self._now_text(),
+            "created_at": created_at or self._now_text(),
         }
+        if migration_state:
+            payload["migrated_at"] = self._now_text()
+            payload["migration_state"] = migration_state
         _atomic_write_json(self.config.fingerprint_record_path, payload, mode=0o600)
+
+    def _legacy_bound_stable_identity(self, expected: str) -> Mapping[str, Any] | None:
+        legacy = _derive_legacy_identity_material(self.config.storage_state_path)
+        if not isinstance(legacy, Mapping):
+            return None
+        account_fields = legacy.get("account_fields") if isinstance(legacy.get("account_fields"), list) else []
+        matched: list[Mapping[str, Any]] = []
+        legacy_candidates: list[Mapping[str, Any]] = []
+        if account_fields:
+            legacy_candidates.append({"account_fields": sorted(account_fields, key=lambda item: json.dumps(item, sort_keys=True))})
+        for row in account_fields:
+            if not isinstance(row, Mapping):
+                continue
+            items = list(row.items())
+            for size in range(1, len(items) + 1):
+                for subset in combinations(items, size):
+                    legacy_candidates.append(dict(subset))
+        for candidate in legacy_candidates:
+            if not hmac.compare_digest(expected, self._fingerprint(candidate)):
+                continue
+            canonical = _canonical_account_identity(candidate)
+            if canonical:
+                matched.append(canonical)
+        unique = {
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")): value
+            for value in matched
+        }
+        return next(iter(unique.values())) if len(unique) == 1 else None
 
     def _write_probe_metadata(self, result: Mapping[str, Any]) -> None:
         payload = {
@@ -581,6 +675,16 @@ def _derive_identity_material(path: Path) -> Mapping[str, Any] | None:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    return _stable_identity_from_storage_state(state)
+
+
+def _derive_legacy_identity_material(path: Path) -> Mapping[str, Any] | None:
+    """Reconstruct only the v1 stable-field shapes for a fail-closed migration."""
+
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
     if not isinstance(state, Mapping):
         return None
     material: dict[str, Any] = {"cookies": [], "storage": [], "account_fields": []}
@@ -608,12 +712,7 @@ def _derive_identity_material(path: Path) -> Mapping[str, Any] | None:
                     material["account_fields"].append(identity)
     if material["account_fields"]:
         return {"account_fields": sorted(material["account_fields"], key=lambda item: json.dumps(item, sort_keys=True))}
-    stable_cookies = [item for item in material["cookies"] if re.search(r"(?:user|profile|account|uid)", item[1], re.IGNORECASE)]
-    if stable_cookies:
-        return {"cookies": sorted(stable_cookies)}
-    material["cookies"].sort()
-    material["storage"].sort()
-    return material if material["cookies"] or material["storage"] else None
+    return None
 
 
 def _derive_context_identity_material(context: Any) -> Mapping[str, Any] | None:
@@ -621,69 +720,80 @@ def _derive_context_identity_material(context: Any) -> Mapping[str, Any] | None:
         state = context.storage_state()
     except Exception:
         return None
-    staged = {"cookies": [], "origins": state.get("origins", []) if isinstance(state, Mapping) else []}
-    for cookie in state.get("cookies", []) if isinstance(state, Mapping) and isinstance(state.get("cookies"), list) else []:
-        if isinstance(cookie, Mapping):
-            staged["cookies"].append(dict(cookie))
-    material: dict[str, Any] = {"cookies": [], "storage": [], "account_fields": []}
-    for cookie in staged["cookies"]:
-        domain = str(cookie.get("domain") or "").lower()
-        name = str(cookie.get("name") or "")
-        value = str(cookie.get("value") or "")
-        if domain.endswith("wildberries.ru") and value and AUTH_NAME_RE.search(name):
-            material["cookies"].append([domain, name, value])
-    for origin in staged["origins"]:
+    return _stable_identity_from_storage_state(state)
+
+
+IDENTITY_KEY_ALIASES = {
+    "userid": "user_id",
+    "user_id": "user_id",
+    "profileid": "profile_id",
+    "profile_id": "profile_id",
+    "accountid": "account_id",
+    "account_id": "account_id",
+    "phone": "phone",
+    "phone_number": "phone",
+    "login": "login",
+}
+IDENTITY_KEY_PRIORITY = ("user_id", "account_id", "profile_id", "phone", "login")
+
+
+def _stable_identity_from_storage_state(state: Any) -> Mapping[str, Any] | None:
+    if not isinstance(state, Mapping):
+        return None
+    candidates: list[Any] = []
+    for origin in state.get("origins", []) if isinstance(state.get("origins"), list) else []:
         if not isinstance(origin, Mapping) or "wildberries.ru" not in str(origin.get("origin") or "").lower():
             continue
         for item in origin.get("localStorage", []) if isinstance(origin.get("localStorage"), list) else []:
-            if isinstance(item, Mapping) and AUTH_NAME_RE.search(str(item.get("name") or "")) and str(item.get("value") or ""):
-                value = str(item.get("value") or "")
-                material["storage"].append([str(origin.get("origin") or ""), str(item.get("name") or ""), value])
-                identity = _extract_account_identity(_json_or_text(value))
-                if identity:
-                    material["account_fields"].append(identity)
-    if material["account_fields"]:
-        return {"account_fields": sorted(material["account_fields"], key=lambda item: json.dumps(item, sort_keys=True))}
-    stable_cookies = [item for item in material["cookies"] if re.search(r"(?:user|profile|account|uid)", item[1], re.IGNORECASE)]
-    if stable_cookies:
-        return {"cookies": sorted(stable_cookies)}
-    material["cookies"].sort()
-    material["storage"].sort()
-    return material if material["cookies"] or material["storage"] else None
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name") or "")
+            value = str(item.get("value") or "")
+            if value and AUTH_NAME_RE.search(name):
+                candidates.append(_json_or_text(value))
+    return _select_stable_account_identity(candidates)
+
+
+def _select_stable_account_identity(*values: Any) -> Mapping[str, Any] | None:
+    claims: dict[str, set[str]] = {key: set() for key in IDENTITY_KEY_PRIORITY}
+    for value in values:
+        _collect_account_identity_claims(value, claims=claims)
+    for key in IDENTITY_KEY_PRIORITY:
+        candidates = claims[key]
+        if len(candidates) == 1:
+            return {key: next(iter(candidates))}
+        if len(candidates) > 1:
+            return None
+    return None
+
+
+def _canonical_account_identity(value: Any) -> Mapping[str, Any] | None:
+    return _select_stable_account_identity(value)
+
+
+def _collect_account_identity_claims(
+    value: Any,
+    *,
+    claims: dict[str, set[str]],
+    depth: int = 0,
+) -> None:
+    if depth > 8:
+        return
+    if isinstance(value, Mapping):
+        for raw_key, raw_value in value.items():
+            key = IDENTITY_KEY_ALIASES.get(str(raw_key or "").lower())
+            if key and isinstance(raw_value, (str, int)) and str(raw_value).strip():
+                claims[key].add(str(raw_value).strip())
+            else:
+                _collect_account_identity_claims(raw_value, claims=claims, depth=depth + 1)
+    elif isinstance(value, list):
+        for child in value[:100]:
+            _collect_account_identity_claims(child, claims=claims, depth=depth + 1)
 
 
 def _extract_account_identity(value: Any, *, depth: int = 0) -> Mapping[str, Any] | None:
-    if depth > 6:
-        return None
-    identity_keys = {
-        "userid",
-        "user_id",
-        "profileid",
-        "profile_id",
-        "accountid",
-        "account_id",
-        "phone",
-        "phone_number",
-        "login",
-    }
-    if isinstance(value, Mapping):
-        found: dict[str, str] = {}
-        for raw_key, raw_value in value.items():
-            key = str(raw_key or "").lower()
-            if key in identity_keys and raw_value is not None and raw_value != "" and isinstance(raw_value, (str, int)):
-                found[key] = str(raw_value)
-        if found:
-            return found
-        for child in value.values():
-            nested = _extract_account_identity(child, depth=depth + 1)
-            if nested:
-                return nested
-    elif isinstance(value, list):
-        for child in value[:50]:
-            nested = _extract_account_identity(child, depth=depth + 1)
-            if nested:
-                return nested
-    return None
+    del depth
+    return _canonical_account_identity(value)
 
 
 def _json_or_text(value: str) -> Any:

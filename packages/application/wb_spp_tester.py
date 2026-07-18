@@ -522,7 +522,7 @@ class WbSppTesterBlock:
                     payload={"reason": "active_or_unrestored_job", "active_job": blocking},
                 )
             nm_id, range_min, range_max, precision, max_measurements = self._parse_plan_input(payload)
-            buyer_session = self._require_buyer_session()
+            buyer_session = self._require_buyer_session(auto_recover=True)
             baseline = self._capture_baseline(nm_id=nm_id, strict=True)
             plan_payload = self.build_plan(payload)["plan"]
             job_id = uuid4().hex
@@ -1565,9 +1565,10 @@ class WbSppTesterBlock:
             )
         return baseline
 
-    def _safe_buyer_session_preflight(self) -> dict[str, Any]:
+    def _safe_buyer_session_preflight(self, *, auto_recover: bool = False) -> dict[str, Any]:
         try:
-            payload = dict(self.buyer_source.check_session())
+            ensure = getattr(self.buyer_source, "ensure_session", None)
+            payload = dict(ensure(auto_recover=True) if auto_recover and callable(ensure) else self.buyer_source.check_session())
         except Exception:
             payload = {
                 "status": "probe_error",
@@ -1579,13 +1580,21 @@ class WbSppTesterBlock:
         payload.setdefault("valid", payload.get("status") == "valid")
         return payload
 
-    def _require_buyer_session(self) -> dict[str, Any]:
-        session = self._safe_buyer_session_preflight()
+    def _require_buyer_session(self, *, auto_recover: bool = False) -> dict[str, Any]:
+        session = self._safe_buyer_session_preflight(auto_recover=auto_recover)
         if session.get("status") != "valid" or session.get("valid") is not True:
+            action_required = session.get("status") == "action_required"
             raise WbSppTesterError(
-                "Покупательская сессия недействительна. Установить сессию.",
+                "Требуется действие человека для покупательской сессии."
+                if action_required
+                else "Покупательская сессия недействительна. Автовосстановление не завершено.",
                 http_status=422,
-                payload={"reason": "buyer_session_invalid", "buyer_session": session, "action": "Установить сессию"},
+                payload={
+                    "reason": "action_required" if action_required else "buyer_session_invalid",
+                    "buyer_session": session,
+                    "action_required": action_required,
+                    "action": str(session.get("action") or "Дождитесь автоматического восстановления сессии"),
+                },
             )
         return session
 
