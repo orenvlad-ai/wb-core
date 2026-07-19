@@ -1876,6 +1876,13 @@ def _run_remote_warehouse_functional_action(
         runner_args.extend(["--plan-file", "/dev/stdin", "--fingerprint", fingerprint])
         if action == "cutover-apply":
             runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional"])
+        elif action == "emergency-apply":
+            runner_args.extend(
+                [
+                    "--backup-dir",
+                    "/opt/wb-core-runtime/backups/warehouse-functional-recovery",
+                ]
+            )
         elif action == "economics-backfill-apply":
             runner_args.extend(["--backup-dir", "/opt/wb-core-runtime/backups/warehouse-functional-economics"])
     elif action == "rollback":
@@ -2058,14 +2065,22 @@ def _run_remote_warehouse_functional_failed_backup_cleanup(
     if apply:
         _ensure_target_allows_mutation(target, action=action, dry_run=False)
     source_path = Path(str(source or ""))
-    allowed_parent = Path("/opt/wb-core-runtime/backups/warehouse-functional")
+    allowed_candidates = {
+        Path("/opt/wb-core-runtime/backups/warehouse-functional"): re.compile(
+            r"warehouse_functional_cutover_v1-[0-9TZ]+\.sqlite3"
+        ),
+        Path("/opt/wb-core-runtime/backups/warehouse-functional-recovery"): re.compile(
+            r"warehouse-functional-emergency-[0-9a-f]{16}(?:-[0-9TZ]+)?\.sqlite3"
+        ),
+    }
+    allowed_name = allowed_candidates.get(source_path.parent)
     if (
         not source_path.is_absolute()
-        or source_path.parent != allowed_parent
-        or re.fullmatch(r"warehouse_functional_cutover_v1-[0-9TZ]+\.sqlite3", source_path.name) is None
+        or allowed_name is None
+        or allowed_name.fullmatch(source_path.name) is None
     ):
         raise ValueError(
-            "failed backup cleanup is restricted to one functional-cutover SQLite candidate"
+            "failed backup cleanup is restricted to one functional cutover or emergency SQLite candidate"
         )
     runner_args = [
         "python3",

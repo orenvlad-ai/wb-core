@@ -531,18 +531,24 @@ class RegistryUploadDbBackedRuntime:
                         result = {}
                         for row in daily_rows:
                             quantity = float(row["quantity"])
-                            fallback = quantity if str(row["quality"]) == "fallback_average" else 0.0
+                            quality = str(row["quality"])
+                            fallback = quantity if quality == "fallback_average" else 0.0
+                            unit_cost = (
+                                None
+                                if quality == "zero_quantity_without_cost_basis"
+                                else float(row["wac_rub"])
+                            )
                             result[int(row["nm_id"])] = {
                                 "as_of_date": date_key,
                                 "nm_id": int(row["nm_id"]),
                                 "stock_qty": quantity,
                                 "cost_covered_qty": quantity,
-                                "our_wb_unit_cost_rub": float(row["wac_rub"]),
+                                "our_wb_unit_cost_rub": unit_cost,
                                 "confirmed_qty": 0.0,
                                 "estimated_qty": max(quantity - fallback, 0.0),
                                 "fallback_qty": fallback,
                                 "confirmed_share_pct": 0.0,
-                                "source_status": str(row["quality"]),
+                                "source_status": quality,
                                 "component_status_json": row["provenance_json"],
                                 "calculated_at": row["created_at"],
                                 "warehouse_cutover_id": str(row["cutover_id"]),

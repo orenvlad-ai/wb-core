@@ -96,7 +96,11 @@ def _functional_wb_cost_state(
         fallback = quantity if quality == "fallback_average" else ZERO
         estimated = max(quantity - fallback, ZERO)
         return {
-            "our_wb_unit_cost_rub": row["wac_rub"],
+            "our_wb_unit_cost_rub": (
+                None
+                if quality == "zero_quantity_without_cost_basis"
+                else row["wac_rub"]
+            ),
             "confirmed_qty": "0",
             "estimated_qty": _money_text(estimated),
             "fallback_qty": _money_text(fallback),

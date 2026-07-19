@@ -139,6 +139,20 @@ def main() -> None:
             )
         if run_mock.call_args.kwargs.get("timeout") != 1800.0:
             raise AssertionError("failed backup SHA planning must allow the bounded mutation timeout")
+        failed_emergency_backup_source = (
+            "/opt/wb-core-runtime/backups/warehouse-functional-recovery/"
+            "warehouse-functional-emergency-0123456789abcdef.sqlite3"
+        )
+        with mock.patch.object(hosted_runtime.subprocess, "run", return_value=completed) as run_mock:
+            hosted_runtime._run_remote_warehouse_functional_failed_backup_cleanup(
+                active_target,
+                source=failed_emergency_backup_source,
+                apply=False,
+                fingerprint="",
+            )
+        emergency_cleanup_command = run_mock.call_args.args[0]
+        if failed_emergency_backup_source not in " ".join(emergency_cleanup_command):
+            raise AssertionError("failed emergency backup must use the repo-owned cleanup flow")
         try:
             hosted_runtime._run_remote_warehouse_functional_failed_backup_cleanup(
                 active_target,
@@ -151,6 +165,21 @@ def main() -> None:
                 raise AssertionError("failed backup cleanup rejected with unexpected error") from exc
         else:
             raise AssertionError("failed backup cleanup unexpectedly accepted the live database")
+        try:
+            hosted_runtime._run_remote_warehouse_functional_failed_backup_cleanup(
+                active_target,
+                source=(
+                    "/opt/wb-core-runtime/backups/warehouse-functional-recovery/"
+                    "unrelated.sqlite3"
+                ),
+                apply=False,
+                fingerprint="",
+            )
+        except ValueError as exc:
+            if "restricted" not in str(exc):
+                raise AssertionError("unrelated recovery backup rejected with unexpected error") from exc
+        else:
+            raise AssertionError("cleanup unexpectedly accepted an unrelated recovery backup")
     ui_flow_args = hosted_runtime.build_arg_parser().parse_args(
         ["warehouse-ui-flow", "--evidence-dir", "/tmp/wb-core-warehouse-ui-smoke"]
     )

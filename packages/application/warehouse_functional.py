@@ -112,6 +112,10 @@ WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
         "Закрытая средневзвешенная WB",
         "Количество и стоимость зафиксированы для закрытой канонической бизнес-даты.",
     ),
+    "zero_quantity_without_cost_basis": (
+        "Нулевой остаток без базы себестоимости",
+        "На эту дату SKU присутствует в точном снимке с нулевым количеством; стоимость не подменяется нулём.",
+    ),
     "same_purchase_price": (
         "По подтверждённой одинаковой закупочной цене",
         "SKU сопоставлен с подтверждённой строкой той же закупочной цены в базовой приёмке.",
@@ -723,6 +727,33 @@ def build_historical_wb_cost_projection(
             if seed is None or _decimal(seed.get("wac")) <= ZERO:
                 if quantity > ZERO:
                     raise WarehouseFunctionalError(f"historical WB quantity has no frozen cost for {day}:{nm_id}")
+                # A later republished snapshot may legitimately declare a SKU
+                # that did not exist at cutover and had zero stock on the
+                # historical day. Preserve the exact-column identity and zero
+                # capital, but mark the absent cost basis explicitly so Proxy
+                # consumers do not mistake zero for a proven unit cost.
+                provenance = {
+                    "source": "persisted_historical_daily_quantity",
+                    "quantity_evidence": dict(quantity_row.get("provenance") or {}),
+                    "frozen_opening": {},
+                    "previous_snapshot_quantity": _text(last_qty[nm_id]),
+                    "inbound_quantity": "0",
+                    "inbound_supply_ids": [],
+                    "last_valid_wac_retained": False,
+                    "zero_quantity_without_cost_basis": True,
+                }
+                last_qty[nm_id] = ZERO
+                item = {
+                    "as_of_date": day,
+                    "nm_id": nm_id,
+                    "quantity": "0",
+                    "wac_rub": "0",
+                    "capital_rub": "0",
+                    "quality": "zero_quantity_without_cost_basis",
+                    "provenance": provenance,
+                }
+                item["fingerprint"] = "sha256:" + _hash(item)
+                result.append(item)
                 continue
             previous_wac = _decimal(seed["wac"])
             previous_qty = last_qty[nm_id]
@@ -766,6 +797,556 @@ def build_historical_wb_cost_projection(
             item["fingerprint"] = "sha256:" + _hash(item)
             result.append(item)
     return result
+
+
+def _historical_projection_business_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return only the arithmetic identity used to prove a correction is non-rewriting."""
+
+    return sorted(
+        (
+            {
+                "as_of_date": str(item.get("as_of_date") or "")[:10],
+                "nm_id": int(item.get("nm_id") or 0),
+                "quantity": _text(_decimal(item.get("quantity"))),
+                "wac_rub": _text(_decimal(item.get("wac_rub"))),
+                "capital_rub": _text(_decimal(item.get("capital_rub"))),
+            }
+            for item in rows
+        ),
+        key=lambda item: (item["as_of_date"], item["nm_id"]),
+    )
+
+
+def _historical_snapshot_manifest(
+    cells_by_date: Mapping[str, Mapping[int, Mapping[str, Any]]],
+    *,
+    business_dates: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Pin only the selected exact columns consumed by the correction."""
+
+    result: list[dict[str, Any]] = []
+    for day in sorted({str(value or "")[:10] for value in business_dates}):
+        cells = cells_by_date.get(day) or {}
+        if not cells:
+            continue
+        provenance = dict(next(iter(cells.values())).get("provenance") or {})
+        result.append(
+            {
+                "business_date": day,
+                "bundle_version": str(provenance.get("bundle_version") or ""),
+                "snapshot_as_of_date": str(
+                    provenance.get("snapshot_as_of_date") or ""
+                ),
+                "activated_at": str(provenance.get("snapshot_activated_at") or ""),
+                "refreshed_at": str(provenance.get("snapshot_refreshed_at") or ""),
+                "sku_count": len(cells),
+                "exact_stock_total_sha256": str(
+                    provenance.get("snapshot_exact_stock_total_sha256") or ""
+                ),
+            }
+        )
+    return result
+
+
+def _historical_snapshot_manifest_digest(
+    manifest: Iterable[Mapping[str, Any]],
+) -> str:
+    normalized = [
+        [
+            str(item.get("business_date") or ""),
+            str(item.get("bundle_version") or ""),
+            str(item.get("snapshot_as_of_date") or ""),
+            str(item.get("activated_at") or ""),
+            str(item.get("refreshed_at") or ""),
+            int(item.get("sku_count") or 0),
+            str(item.get("exact_stock_total_sha256") or ""),
+        ]
+        for item in manifest
+    ]
+    return "sha256:" + _hash(normalized)
+
+
+def _historical_correction_manifest_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reconstruct the exact-column manifest bound into correction row provenance."""
+
+    grouped: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for item in rows:
+        grouped[str(item.get("as_of_date") or "")[:10]].append(item)
+    result: list[dict[str, Any]] = []
+    for day, day_rows in sorted(grouped.items()):
+        identities = {
+            (
+                str(evidence.get("bundle_version") or ""),
+                str(evidence.get("snapshot_as_of_date") or ""),
+                str(evidence.get("snapshot_activated_at") or ""),
+                str(evidence.get("snapshot_refreshed_at") or ""),
+                str(evidence.get("snapshot_exact_stock_total_sha256") or ""),
+            )
+            for item in day_rows
+            for evidence in [
+                dict(item.get("provenance") or {}).get("quantity_evidence") or {}
+            ]
+        }
+        if len(identities) != 1:
+            raise WarehouseFunctionalError(
+                f"historical correction rows have mixed exact-column provenance: {day}"
+            )
+        bundle, as_of_date, activated_at, refreshed_at, evidence_digest = next(
+            iter(identities)
+        )
+        if not bundle or not evidence_digest:
+            raise WarehouseFunctionalError(
+                f"historical correction rows have incomplete exact-column provenance: {day}"
+            )
+        result.append(
+            {
+                "business_date": day,
+                "bundle_version": bundle,
+                "snapshot_as_of_date": as_of_date,
+                "activated_at": activated_at,
+                "refreshed_at": refreshed_at,
+                "sku_count": len(day_rows),
+                "exact_stock_total_sha256": evidence_digest,
+            }
+        )
+    return result
+
+
+def _latest_exact_stock_total_cells_by_date(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[int, dict[str, Any]]]:
+    """Return one coherent newest ready-snapshot column for each business date."""
+
+    candidates_by_date: defaultdict[
+        str, list[tuple[dict[int, dict[str, Any]], dict[str, Any]]]
+    ] = defaultdict(list)
+    ordered = sorted(
+        (dict(item) for item in rows),
+        key=lambda item: (
+            str(item.get("activated_at") or ""),
+            str(item.get("refreshed_at") or ""),
+            str(item.get("as_of_date") or ""),
+            str(item.get("bundle_version") or ""),
+        ),
+    )
+    for raw_snapshot in ordered:
+        plan_json = str(raw_snapshot.get("plan_json") or "")
+        plan = _loads(plan_json, {})
+        if not isinstance(plan, Mapping):
+            continue
+        dates = [str(value or "") for value in plan.get("date_columns") or []]
+        data_sheet = next(
+            (
+                item
+                for item in plan.get("sheets") or []
+                if isinstance(item, Mapping)
+                and str(item.get("sheet_name") or "") == "DATA_VITRINA"
+            ),
+            None,
+        )
+        if not dates or not isinstance(data_sheet, Mapping):
+            continue
+        declared_nm_ids: set[int] = set()
+        stock_rows: dict[int, list[Any]] = {}
+        duplicate_nm_ids: set[int] = set()
+        for row in data_sheet.get("rows") or []:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            row_id = str(row[1] or "")
+            if row_id.startswith("SKU:") and "|" in row_id:
+                try:
+                    declared_nm_id = int(row_id[len("SKU:") :].split("|", 1)[0])
+                except ValueError:
+                    declared_nm_id = 0
+                if declared_nm_id > 0:
+                    declared_nm_ids.add(declared_nm_id)
+            if not row_id.startswith("SKU:") or not row_id.endswith("|stock_total"):
+                continue
+            try:
+                nm_id = int(row_id[len("SKU:") : -len("|stock_total")])
+            except ValueError:
+                continue
+            if nm_id <= 0:
+                continue
+            if nm_id in stock_rows:
+                duplicate_nm_ids.add(nm_id)
+            stock_rows[nm_id] = row
+        for index, day in enumerate(dates):
+            if day < "2026-07-01":
+                continue
+            cells: dict[int, dict[str, Any]] = {}
+            base_provenance = {
+                "source": "persisted_ready_snapshot_exact_column",
+                "metric_key": "stock_total",
+                "column_date": day,
+                "snapshot_as_of_date": str(raw_snapshot.get("as_of_date") or ""),
+                "snapshot_activated_at": str(raw_snapshot.get("activated_at") or ""),
+                "snapshot_refreshed_at": str(raw_snapshot.get("refreshed_at") or ""),
+                "bundle_version": str(raw_snapshot.get("bundle_version") or ""),
+            }
+            for nm_id in sorted(declared_nm_ids):
+                row = stock_rows.get(nm_id)
+                quantity = (
+                    None
+                    if row is None
+                    or nm_id in duplicate_nm_ids
+                    or len(row) <= 2 + index
+                    else _optional_decimal(row[2 + index])
+                )
+                cells[nm_id] = {
+                    "quantity": quantity,
+                    "provenance": {},
+                }
+            base_provenance["snapshot_exact_stock_total_sha256"] = "sha256:" + _hash(
+                [
+                    [
+                        nm_id,
+                        None
+                        if cell.get("quantity") is None
+                        else _text(_decimal(cell.get("quantity"))),
+                    ]
+                    for nm_id, cell in sorted(cells.items())
+                ]
+            )
+            for cell in cells.values():
+                cell["provenance"] = dict(base_provenance)
+            candidates_by_date[day].append((cells, base_provenance))
+
+    selected: dict[str, dict[int, dict[str, Any]]] = {}
+    for day, candidates in candidates_by_date.items():
+        # A later publication cannot silently shrink a historical day's SKU
+        # universe.  The complete identity set is the union declared by every
+        # persisted candidate carrying that exact business date.
+        expected_nm_ids = set().union(*(set(cells) for cells, _ in candidates))
+        chosen: dict[int, dict[str, Any]] | None = None
+        diagnostic: dict[int, dict[str, Any]] = {}
+        for cells, base_provenance in candidates:
+            expanded = {
+                nm_id: (
+                    cells[nm_id]
+                    if nm_id in cells
+                    else {
+                        "quantity": None,
+                        "provenance": {
+                            **base_provenance,
+                            "missing_declared_sku_scope": True,
+                        },
+                    }
+                )
+                for nm_id in sorted(expected_nm_ids)
+            }
+            coherent = bool(expanded) and set(cells) == expected_nm_ids and all(
+                cell.get("quantity") is not None
+                and _decimal(cell.get("quantity")) >= ZERO
+                for cell in expanded.values()
+            )
+            if coherent:
+                # Candidates are oldest to newest. Only a later column with the
+                # same complete historical SKU universe may replace an older
+                # coherent source.
+                chosen = expanded
+            elif chosen is None:
+                # Retain an expanded invalid candidate only for exact fail-closed
+                # date/SKU diagnostics when no coherent source exists at all.
+                diagnostic = expanded
+        selected[day] = chosen if chosen is not None else diagnostic
+    return selected
+
+
+def _missing_pre_cutover_historical_dates(
+    frozen_rows: Iterable[Mapping[str, Any]],
+    *,
+    cutover_date: str,
+) -> list[str]:
+    """Return whole business dates absent from the immutable pre-cutover calendar."""
+
+    normalized_cutover_date = str(cutover_date or "")[:10]
+    if not normalized_cutover_date:
+        return []
+    last_pre_cutover = (
+        date.fromisoformat(normalized_cutover_date) - timedelta(days=1)
+    ).isoformat()
+    expected_dates = set(_date_range("2026-07-01", last_pre_cutover))
+    frozen_dates = {
+        str(item.get("as_of_date") or "")[:10]
+        for item in frozen_rows
+        if str(item.get("as_of_date") or "")[:10]
+    }
+    return sorted(expected_dates - frozen_dates)
+
+
+def _build_versioned_historical_correction(
+    *,
+    cutover: Mapping[str, Any],
+    opening_cost_map: Iterable[Mapping[str, Any]],
+    frozen_rows: Iterable[Mapping[str, Any]],
+    correction_quantity_rows: Iterable[Mapping[str, Any]],
+    downstream_rows: Iterable[Mapping[str, Any]],
+    ready_snapshot_rows: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build an append-only correction for absent dates without rewriting frozen rows."""
+
+    cutover_date = str(cutover.get("cutover_at") or "")[:10]
+    if not cutover_date:
+        raise WarehouseFunctionalError("historical correction has no cutover date")
+    frozen = _canonical_daily_projection_rows(frozen_rows)
+    missing_dates = _missing_pre_cutover_historical_dates(
+        frozen,
+        cutover_date=cutover_date,
+    )
+    frozen_dates = {str(item["as_of_date"]) for item in frozen}
+    snapshot_rows = [dict(item) for item in ready_snapshot_rows]
+    snapshot_manifest: list[dict[str, Any]] = []
+    snapshot_manifest_digest = _historical_snapshot_manifest_digest(snapshot_manifest)
+    base = {
+        "required": bool(missing_dates),
+        "correction_id": None,
+        "missing_dates": missing_dates,
+        "row_count": 0,
+        "row_fingerprints": [],
+        "ready_snapshot_manifest": snapshot_manifest,
+        "ready_snapshot_manifest_digest": snapshot_manifest_digest,
+        "supersedes_cutover_id": str(cutover.get("cutover_id") or FUNCTIONAL_CUTOVER_ID),
+        "supersedes_plan_fingerprint": str(cutover.get("plan_fingerprint") or ""),
+        "method": "append_missing_dates_from_exact_persisted_snapshot_columns_v1",
+    }
+    if not missing_dates:
+        return base, []
+    if not snapshot_rows:
+        raise WarehouseFunctionalError(
+            "missing pre-cutover dates have no persisted exact-column snapshot evidence"
+        )
+    exact_cells_by_date = _latest_exact_stock_total_cells_by_date(snapshot_rows)
+    incomplete_cells = sorted(
+        (day, nm_id)
+        for day in missing_dates
+        for nm_id, cell in exact_cells_by_date.get(day, {}).items()
+        if cell.get("quantity") is None or _decimal(cell.get("quantity")) < ZERO
+    )
+    absent_exact_dates = sorted(
+        day for day in missing_dates if not exact_cells_by_date.get(day)
+    )
+    if absent_exact_dates or incomplete_cells:
+        detail = [f"date:{day}" for day in absent_exact_dates]
+        detail.extend(f"{day}:{nm_id}" for day, nm_id in incomplete_cells)
+        raise WarehouseFunctionalError(
+            "historical correction has incomplete exact stock_total evidence: "
+            + ",".join(detail)
+        )
+    snapshot_manifest = _historical_snapshot_manifest(
+        exact_cells_by_date,
+        business_dates=missing_dates,
+    )
+    snapshot_manifest_digest = _historical_snapshot_manifest_digest(snapshot_manifest)
+    base["ready_snapshot_manifest"] = snapshot_manifest
+    base["ready_snapshot_manifest_digest"] = snapshot_manifest_digest
+    correction_quantities = [dict(item) for item in correction_quantity_rows]
+    supplied_missing_quantities = {
+        (str(item.get("as_of_date") or "")[:10], int(item.get("nm_id") or 0)): _text(
+            _decimal(item.get("physical_quantity"))
+        )
+        for item in correction_quantities
+        if str(item.get("as_of_date") or "")[:10] in missing_dates
+        and int(item.get("nm_id") or 0) > 0
+    }
+    exact_missing_quantities = {
+        (day, nm_id): _text(_decimal(cell.get("quantity")))
+        for day in missing_dates
+        for nm_id, cell in exact_cells_by_date[day].items()
+    }
+    if supplied_missing_quantities != exact_missing_quantities:
+        raise WarehouseFunctionalError(
+            "historical correction quantity view differs from pinned exact stock_total columns"
+        )
+    replay_quantities = [
+        {
+            "as_of_date": str(item["as_of_date"]),
+            "nm_id": int(item["nm_id"]),
+            "physical_quantity": str(item["quantity"]),
+            "quantity_provenance": {
+                "source": "immutable_frozen_projection_overlap",
+                "fingerprint": str(item.get("fingerprint") or ""),
+            },
+        }
+        for item in frozen
+    ]
+    replay_quantities.extend(
+        {
+            "as_of_date": day,
+            "nm_id": nm_id,
+            "physical_quantity": _text(_decimal(cell.get("quantity"))),
+            "quantity_provenance": dict(cell.get("provenance") or {}),
+        }
+        for day in missing_dates
+        for nm_id, cell in sorted(exact_cells_by_date[day].items())
+    )
+    candidate = build_historical_wb_cost_projection(
+        opening_cost_map=opening_cost_map,
+        daily_quantity_rows=replay_quantities,
+        downstream_rows=downstream_rows,
+        cutover_date=cutover_date,
+    )
+    candidate_on_frozen_dates = [
+        item for item in candidate if str(item.get("as_of_date") or "")[:10] in frozen_dates
+    ]
+    if _historical_projection_business_rows(candidate_on_frozen_dates) != (
+        _historical_projection_business_rows(frozen)
+    ):
+        raise WarehouseFunctionalError(
+            "historical correction evidence differs from existing frozen business values"
+        )
+    candidate_missing = [
+        item for item in candidate if str(item.get("as_of_date") or "")[:10] in missing_dates
+    ]
+    candidate_nm_ids_by_date: defaultdict[str, set[int]] = defaultdict(set)
+    for item in candidate_missing:
+        candidate_nm_ids_by_date[str(item.get("as_of_date") or "")[:10]].add(
+            int(item.get("nm_id") or 0)
+        )
+    identity_mismatches = []
+    for day in missing_dates:
+        expected_nm_ids = set(exact_cells_by_date[day])
+        actual_nm_ids = candidate_nm_ids_by_date.get(day, set())
+        if actual_nm_ids != expected_nm_ids:
+            identity_mismatches.append(
+                {
+                    "date": day,
+                    "missing_nm_ids": sorted(expected_nm_ids - actual_nm_ids),
+                    "unexpected_nm_ids": sorted(actual_nm_ids - expected_nm_ids),
+                }
+            )
+    if identity_mismatches:
+        raise WarehouseFunctionalError(
+            "historical correction exact stock_total SKU coverage mismatch: "
+            + _json(identity_mismatches)
+        )
+    covered_dates = {str(item.get("as_of_date") or "")[:10] for item in candidate_missing}
+    if covered_dates != set(missing_dates):
+        absent = sorted(set(missing_dates) - covered_dates)
+        raise WarehouseFunctionalError(
+            "historical correction has no exact evidence for missing business dates: "
+            + ",".join(absent)
+        )
+    correction_id = "whcorr_" + _hash(
+        {
+            "cutover_id": base["supersedes_cutover_id"],
+            "supersedes": base["supersedes_plan_fingerprint"],
+            "missing_dates": missing_dates,
+            "snapshot_manifest_digest": snapshot_manifest_digest,
+            "business_rows": _historical_projection_business_rows(candidate_missing),
+        }
+    )[:24]
+    corrected_rows: list[dict[str, Any]] = []
+    for item in candidate_missing:
+        original_provenance = dict(item.get("provenance") or {})
+        corrected_rows.append(
+            _daily_wb_cost_row(
+                day=str(item["as_of_date"]),
+                nm_id=int(item["nm_id"]),
+                quantity=_decimal(item["quantity"]),
+                wac=_decimal(item["wac_rub"]),
+                quality=str(item["quality"]),
+                provenance={
+                    **original_provenance,
+                    "versioned_historical_correction": {
+                        "correction_id": correction_id,
+                        "method": base["method"],
+                        "supersedes_cutover_id": base["supersedes_cutover_id"],
+                        "supersedes_plan_fingerprint": base[
+                            "supersedes_plan_fingerprint"
+                        ],
+                        "ready_snapshot_manifest_digest": snapshot_manifest_digest,
+                        "original_projection_fingerprint": str(item.get("fingerprint") or ""),
+                    },
+                },
+            )
+        )
+    result = {
+        **base,
+        "correction_id": correction_id,
+        "row_count": len(corrected_rows),
+        "row_fingerprints": [str(item["fingerprint"]) for item in corrected_rows],
+    }
+    return result, corrected_rows
+
+
+def _validate_historical_correction_plan(
+    correction: Mapping[str, Any],
+    *,
+    rows: Iterable[Mapping[str, Any]],
+    cutover: Mapping[str, Any],
+) -> None:
+    normalized_rows = _canonical_daily_projection_rows(rows)
+    fingerprints = [str(item["fingerprint"]) for item in normalized_rows]
+    dates = sorted({str(item["as_of_date"]) for item in normalized_rows})
+    if not str(correction.get("correction_id") or "").startswith("whcorr_"):
+        raise WarehouseFunctionalError("historical correction id is invalid")
+    if int(correction.get("row_count") or 0) != len(normalized_rows):
+        raise WarehouseFunctionalError("historical correction row count mismatch")
+    if list(correction.get("row_fingerprints") or []) != fingerprints:
+        raise WarehouseFunctionalError("historical correction row fingerprint mismatch")
+    if list(correction.get("missing_dates") or []) != dates:
+        raise WarehouseFunctionalError("historical correction date identity mismatch")
+    manifest = list(correction.get("ready_snapshot_manifest") or [])
+    if not manifest or _historical_snapshot_manifest_digest(manifest) != str(
+        correction.get("ready_snapshot_manifest_digest") or ""
+    ):
+        raise WarehouseFunctionalError("historical correction source manifest mismatch")
+    if manifest != _historical_correction_manifest_from_rows(normalized_rows):
+        raise WarehouseFunctionalError(
+            "historical correction source manifest differs from row provenance"
+        )
+    if str(correction.get("supersedes_cutover_id") or "") != str(
+        cutover.get("cutover_id") or ""
+    ) or str(correction.get("supersedes_plan_fingerprint") or "") != str(
+        cutover.get("plan_fingerprint") or ""
+    ):
+        raise WarehouseFunctionalError("historical correction supersedes identity mismatch")
+    for item in normalized_rows:
+        provenance = dict(item.get("provenance") or {}).get(
+            "versioned_historical_correction"
+        )
+        if not isinstance(provenance, Mapping) or str(
+            provenance.get("correction_id") or ""
+        ) != str(correction["correction_id"]):
+            raise WarehouseFunctionalError("historical correction provenance mismatch")
+        if str(provenance.get("supersedes_cutover_id") or "") != str(
+            correction.get("supersedes_cutover_id") or ""
+        ) or str(provenance.get("supersedes_plan_fingerprint") or "") != str(
+            correction.get("supersedes_plan_fingerprint") or ""
+        ):
+            raise WarehouseFunctionalError("historical correction row supersedes mismatch")
+        if str(provenance.get("ready_snapshot_manifest_digest") or "") != str(
+            correction.get("ready_snapshot_manifest_digest") or ""
+        ):
+            raise WarehouseFunctionalError(
+                "historical correction row source manifest digest mismatch"
+            )
+
+
+def _validate_historical_correction_matches_derived(
+    *,
+    planned_correction: Mapping[str, Any],
+    planned_rows: Iterable[Mapping[str, Any]],
+    expected_correction: Mapping[str, Any],
+    expected_rows: Iterable[Mapping[str, Any]],
+) -> None:
+    """Require a reviewed correction to equal the current deterministic derivation."""
+
+    if _clone(planned_correction) != _clone(expected_correction):
+        raise WarehouseFunctionalError(
+            "historical correction plan differs from current persisted evidence"
+        )
+    if _canonical_daily_projection_rows(planned_rows) != (
+        _canonical_daily_projection_rows(expected_rows)
+    ):
+        raise WarehouseFunctionalError(
+            "historical correction rows differ from current persisted evidence"
+        )
 
 
 class WarehouseFunctionalBlock:
@@ -831,7 +1412,11 @@ class WarehouseFunctionalBlock:
         if wb_payload is None:
             nomenclature = self.opening._opening_nomenclature_request()  # noqa: SLF001
             wb_payload = self.opening._fetch_wb_stock_snapshot(nomenclature)  # noqa: SLF001
-        capture = self._capture_sources(captured_at=captured_at, wb_payload=wb_payload)
+        capture = self._capture_sources(
+            captured_at=captured_at,
+            wb_payload=wb_payload,
+            include_historical_correction=kind == "emergency_rebuild",
+        )
         ff_debit_coverage = (
             validate_cutover_ff_debit_coverage(capture) if kind == "functional_cutover" else None
         )
@@ -863,6 +1448,34 @@ class WarehouseFunctionalBlock:
             # business dates from a newly published snapshot.
             pre_cutover_wb_cost_projection = list(
                 capture.get("frozen_pre_cutover_wb_cost_projection") or []
+            )
+        historical_correction = {
+            "required": False,
+            "correction_id": None,
+            "missing_dates": [],
+            "row_count": 0,
+            "row_fingerprints": [],
+            "ready_snapshot_manifest": [],
+            "ready_snapshot_manifest_digest": None,
+            "supersedes_cutover_id": None,
+            "supersedes_plan_fingerprint": None,
+        }
+        if cutover is not None and kind == "emergency_rebuild":
+            historical_correction, correction_rows = _build_versioned_historical_correction(
+                cutover=cutover,
+                opening_cost_map=opening_cost_map,
+                frozen_rows=pre_cutover_wb_cost_projection,
+                correction_quantity_rows=capture.get(
+                    "historical_correction_wb_daily_quantities"
+                )
+                or [],
+                downstream_rows=capture["downstream_cost_rows"],
+                ready_snapshot_rows=capture.get("historical_correction_ready_snapshots")
+                or [],
+            )
+            pre_cutover_wb_cost_projection.extend(correction_rows)
+            pre_cutover_wb_cost_projection = _canonical_daily_projection_rows(
+                pre_cutover_wb_cost_projection
             )
         post_cutover_wb_cost_projection = self._build_post_cutover_daily_cost_projection(
             captured_at=captured_at,
@@ -910,6 +1523,7 @@ class WarehouseFunctionalBlock:
             "absorbed_supply_revisions": capture["supply_revisions"] if kind == "functional_cutover" else {},
             "wb_snapshot": capture["wb_snapshot"],
             "opening_cost_map": opening_cost_map if kind == "functional_cutover" else [],
+            "historical_correction": historical_correction,
             "historical_wb_cost_projection": historical_wb_cost_projection,
             "lines": [_line_payload(line) for line in lines],
             "summaries": summaries,
@@ -966,27 +1580,47 @@ class WarehouseFunctionalBlock:
             raise WarehouseFunctionalError(
                 "active functional warehouse version drifted after bounded calculation"
             )
-        backup = None
-        if kind == "functional_cutover":
-            if backup_dir is None or not Path(backup_dir).is_absolute():
-                raise WarehouseFunctionalError("absolute backup_dir is required for functional cutover")
-            Path(backup_dir).mkdir(parents=True, exist_ok=True)
-            destination = Path(backup_dir) / (
-                f"{FUNCTIONAL_CUTOVER_ID}-{self.timestamp_factory().replace(':', '').replace('-', '')}.sqlite3"
-            )
-            backup = self.runtime.backup_database(destination)
-            destination.chmod(0o600)
-            if str(backup.get("integrity_check") or "").lower() != "ok":
-                raise WarehouseFunctionalError("pre-cutover backup integrity_check is not ok")
-
         recovery_end_date = str(normalized.get("effective_date") or "")[:10]
-        current_digest = self._local_source_digest(recovery_end_date=recovery_end_date)
+        include_historical_correction = kind == "emergency_rebuild"
+        current_digest = self._local_source_digest(
+            recovery_end_date=recovery_end_date,
+            include_historical_correction=include_historical_correction,
+        )
         if current_digest != str(normalized.get("local_source_digest") or ""):
             raise WarehouseFunctionalError("local sources drifted after dry-run")
         if kind != "functional_cutover" and self._wb_supply_source_digest() != str(
             normalized.get("wb_supply_source_digest") or ""
         ):
             raise WarehouseFunctionalError("WB supply sources drifted after bounded capture")
+        if kind == "emergency_rebuild":
+            with _connect(self.runtime.db_path) as correction_conn:
+                ensure_warehouse_functional_schema(correction_conn)
+                self._validate_emergency_correction_against_current(
+                    normalized,
+                    connection=correction_conn,
+                    recovery_end_date=recovery_end_date,
+                )
+        backup = None
+        if kind in {"functional_cutover", "emergency_rebuild"}:
+            if backup_dir is None or not Path(backup_dir).is_absolute():
+                raise WarehouseFunctionalError(
+                    f"absolute backup_dir is required for {kind.replace('_', ' ')}"
+                )
+            Path(backup_dir).mkdir(parents=True, exist_ok=True)
+            timestamp = self.timestamp_factory().replace(":", "").replace("-", "")
+            if kind == "functional_cutover":
+                prefix = FUNCTIONAL_CUTOVER_ID
+                destination = Path(backup_dir) / f"{prefix}-{timestamp}.sqlite3"
+            else:
+                prefix = f"warehouse-functional-emergency-{fingerprint.removeprefix('sha256:')[:16]}"
+                destination = Path(backup_dir) / f"{prefix}.sqlite3"
+            if kind == "emergency_rebuild" and destination.exists():
+                destination = Path(backup_dir) / f"{prefix}-{timestamp}.sqlite3"
+            backup = self.runtime.backup_database(destination)
+            destination.chmod(0o600)
+            if str(backup.get("integrity_check") or "").lower() != "ok":
+                _discard_uncommitted_backup(backup)
+                raise WarehouseFunctionalError(f"pre-{kind} backup integrity_check is not ok")
         now = self.timestamp_factory()
         publication_effective_at = now if kind == "functional_cutover" else str(normalized["captured_at"])
         version_id = "whfv_" + fingerprint.removeprefix("sha256:")[:24]
@@ -1000,6 +1634,7 @@ class WarehouseFunctionalBlock:
                 ).fetchone()
                 if duplicate is not None:
                     conn.rollback()
+                    _discard_uncommitted_backup(backup)
                     return {**self.readback(), "idempotent": True}
                 if kind != "functional_cutover" and self._active_version_id(connection=conn) != str(
                     normalized.get("base_active_version_id") or ""
@@ -1010,12 +1645,19 @@ class WarehouseFunctionalBlock:
                 if self._local_source_digest(
                     connection=conn,
                     recovery_end_date=recovery_end_date,
+                    include_historical_correction=include_historical_correction,
                 ) != current_digest:
                     raise WarehouseFunctionalError("local sources drifted while acquiring apply lock")
                 if kind != "functional_cutover" and self._wb_supply_source_digest(connection=conn) != str(
                     normalized.get("wb_supply_source_digest") or ""
                 ):
                     raise WarehouseFunctionalError("WB supply sources drifted while acquiring apply lock")
+                if kind == "emergency_rebuild":
+                    self._validate_emergency_correction_against_current(
+                        normalized,
+                        connection=conn,
+                        recovery_end_date=recovery_end_date,
+                    )
                 if kind == "functional_cutover":
                     conn.execute(
                         """INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers(
@@ -1073,9 +1715,78 @@ class WarehouseFunctionalBlock:
                         conn,
                         cutover_date=cutover_date,
                     )
-                    if planned_frozen != persisted_frozen:
+                    correction = dict(normalized.get("historical_correction") or {})
+                    correction_fingerprints = {
+                        str(value) for value in correction.get("row_fingerprints") or []
+                    }
+                    planned_correction = [
+                        item
+                        for item in planned_frozen
+                        if str(item.get("fingerprint") or "") in correction_fingerprints
+                    ]
+                    planned_existing = [
+                        item
+                        for item in planned_frozen
+                        if str(item.get("fingerprint") or "") not in correction_fingerprints
+                    ]
+                    if planned_existing != persisted_frozen:
                         raise WarehouseFunctionalError(
                             "pre-cutover WB daily cost projection differs from the frozen cutover history"
+                        )
+                    if bool(correction.get("required")):
+                        if kind != "emergency_rebuild":
+                            raise WarehouseFunctionalError(
+                                "historical correction is allowed only in an emergency rebuild"
+                            )
+                        _validate_historical_correction_plan(
+                            correction,
+                            rows=planned_correction,
+                            cutover=existing or {},
+                        )
+                        for item in planned_correction:
+                            conn.execute(
+                                """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
+                                       cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,
+                                       quality,provenance_json,fingerprint,created_at
+                                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                                (
+                                    FUNCTIONAL_CUTOVER_ID,
+                                    str(item["as_of_date"]),
+                                    int(item["nm_id"]),
+                                    str(item["quantity"]),
+                                    str(item["wac_rub"]),
+                                    str(item["capital_rub"]),
+                                    str(item["quality"]),
+                                    _json(item.get("provenance") or {}),
+                                    str(item["fingerprint"]),
+                                    now,
+                                ),
+                            )
+                        conn.execute(
+                            """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost_corrections(
+                                   correction_id,cutover_id,version_id,supersedes_plan_fingerprint,
+                                   correction_plan_fingerprint,missing_dates_json,row_fingerprints_json,
+                                   ready_snapshot_manifest_json,ready_snapshot_manifest_digest,
+                                   provenance_json,backup_json,created_at
+                               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                str(correction["correction_id"]),
+                                FUNCTIONAL_CUTOVER_ID,
+                                version_id,
+                                str(correction["supersedes_plan_fingerprint"]),
+                                fingerprint,
+                                _json(correction["missing_dates"]),
+                                _json(correction["row_fingerprints"]),
+                                _json(correction["ready_snapshot_manifest"]),
+                                str(correction["ready_snapshot_manifest_digest"]),
+                                _json(correction),
+                                _json(backup or {}),
+                                now,
+                            ),
+                        )
+                    elif planned_correction:
+                        raise WarehouseFunctionalError(
+                            "unexpected historical correction rows in emergency plan"
                         )
                     conn.execute(
                         """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
@@ -1226,6 +1937,7 @@ class WarehouseFunctionalBlock:
                 conn.commit()
             except Exception:
                 conn.rollback()
+                _discard_uncommitted_backup(backup)
                 raise
         return {**self.readback(), "idempotent": False, "backup": backup}
 
@@ -1297,6 +2009,7 @@ class WarehouseFunctionalBlock:
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_wb_sync_status WHERE slot=1")
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue")
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_functional_versions WHERE cutover_id=?", (FUNCTIONAL_CUTOVER_ID,))
+                conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost_corrections WHERE cutover_id=?", (FUNCTIONAL_CUTOVER_ID,))
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost WHERE cutover_id=?", (FUNCTIONAL_CUTOVER_ID,))
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_opening_cost_map WHERE cutover_id=?", (FUNCTIONAL_CUTOVER_ID,))
                 conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_supplier_flows")
@@ -1643,6 +2356,24 @@ class WarehouseFunctionalBlock:
                     (FUNCTIONAL_CUTOVER_ID,),
                 ).fetchall()
             ]
+            historical_corrections = [
+                {
+                    **dict(row),
+                    "missing_dates": _loads(row["missing_dates_json"], []),
+                    "row_fingerprints": _loads(row["row_fingerprints_json"], []),
+                    "ready_snapshot_manifest": _loads(
+                        row["ready_snapshot_manifest_json"], []
+                    ),
+                    "provenance": _loads(row["provenance_json"], {}),
+                    "backup": _loads(row["backup_json"], {}),
+                }
+                for row in conn.execute(
+                    """SELECT *
+                       FROM sheet_vitrina_v1_warehouse_wb_daily_cost_corrections
+                       WHERE cutover_id=? ORDER BY created_at,correction_id""",
+                    (FUNCTIONAL_CUTOVER_ID,),
+                ).fetchall()
+            ]
             cutover_version = conn.execute(
                 """SELECT version_id,effective_at FROM sheet_vitrina_v1_warehouse_functional_versions
                    WHERE cutover_id=? AND version_kind='functional_cutover'
@@ -1689,6 +2420,7 @@ class WarehouseFunctionalBlock:
             "documents": [_document_public(item) for item in documents],
             "unmatched_doprinato": [_unmatched_public(item) for item in unmatched],
             "historical_wb_cost_projection": historical_public,
+            "historical_wb_cost_corrections": historical_corrections,
             "cutover_opening_discrepancy": {
                 "quantity": _text(sum((_decimal(row["quantity"]) for row in cutover_discrepancy_rows), ZERO)),
                 "capital_rub": _text(sum((_decimal(row["capital_rub"]) for row in cutover_discrepancy_rows), ZERO)),
@@ -1709,11 +2441,21 @@ class WarehouseFunctionalBlock:
             },
         }
 
-    def _capture_sources(self, *, captured_at: str, wb_payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _capture_sources(
+        self,
+        *,
+        captured_at: str,
+        wb_payload: Mapping[str, Any],
+        include_historical_correction: bool = False,
+    ) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as conn:
             ensure_warehouse_functional_schema(conn)
             conn.execute("BEGIN")
-            sources = _source_rows(conn, recovery_end_date=captured_at[:10])
+            sources = _source_rows(
+                conn,
+                recovery_end_date=captured_at[:10],
+                include_historical_correction=include_historical_correction,
+            )
             conn.commit()
         sources = _functional_local_source_view(sources)
         local_digest = "sha256:" + _hash(_guarded_local_sources(sources))
@@ -2875,17 +3617,79 @@ class WarehouseFunctionalBlock:
         *,
         connection: sqlite3.Connection | None = None,
         recovery_end_date: str | None = None,
+        include_historical_correction: bool = False,
     ) -> str:
         if connection is not None:
             sources = _functional_local_source_view(
-                _source_rows(connection, recovery_end_date=recovery_end_date)
+                _source_rows(
+                    connection,
+                    recovery_end_date=recovery_end_date,
+                    include_historical_correction=include_historical_correction,
+                )
             )
             return "sha256:" + _hash(_guarded_local_sources(sources))
         with _connect(self.runtime.db_path) as conn:
             sources = _functional_local_source_view(
-                _source_rows(conn, recovery_end_date=recovery_end_date)
+                _source_rows(
+                    conn,
+                    recovery_end_date=recovery_end_date,
+                    include_historical_correction=include_historical_correction,
+                )
             )
             return "sha256:" + _hash(_guarded_local_sources(sources))
+
+    def _validate_emergency_correction_against_current(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        connection: sqlite3.Connection,
+        recovery_end_date: str,
+    ) -> None:
+        """Re-derive the only admissible frozen correction from current evidence."""
+
+        sources = _functional_local_source_view(
+            _source_rows(
+                connection,
+                recovery_end_date=recovery_end_date,
+                include_historical_correction=True,
+            )
+        )
+        cutover_row = connection.execute(
+            "SELECT * FROM sheet_vitrina_v1_warehouse_functional_cutovers WHERE cutover_id=?",
+            (FUNCTIONAL_CUTOVER_ID,),
+        ).fetchone()
+        if cutover_row is None:
+            raise WarehouseFunctionalError("historical correction has no persisted cutover")
+        expected_correction, expected_rows = _build_versioned_historical_correction(
+            cutover=_cutover_public(cutover_row),
+            opening_cost_map=_frozen_opening_cost_map_rows(connection),
+            frozen_rows=sources.get("frozen_pre_cutover_wb_cost_projection") or [],
+            correction_quantity_rows=sources.get(
+                "historical_correction_wb_daily_quantities"
+            )
+            or [],
+            downstream_rows=sources.get("downstream_cost_rows") or [],
+            ready_snapshot_rows=sources.get(
+                "historical_correction_ready_snapshots"
+            )
+            or [],
+        )
+        planned_correction = dict(plan.get("historical_correction") or {})
+        correction_fingerprints = {
+            str(value)
+            for value in planned_correction.get("row_fingerprints") or []
+        }
+        planned_rows = [
+            item
+            for item in plan.get("historical_wb_cost_projection") or []
+            if str(item.get("fingerprint") or "") in correction_fingerprints
+        ]
+        _validate_historical_correction_matches_derived(
+            planned_correction=planned_correction,
+            planned_rows=planned_rows,
+            expected_correction=expected_correction,
+            expected_rows=expected_rows,
+        )
 
     def _wb_supply_source_digest(self, *, connection: sqlite3.Connection | None = None) -> str:
         if connection is not None:
@@ -3127,6 +3931,14 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS warehouse_wb_daily_cost_by_date
         ON sheet_vitrina_v1_warehouse_wb_daily_cost(as_of_date,nm_id);
+        CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_wb_daily_cost_corrections(
+            correction_id TEXT PRIMARY KEY,cutover_id TEXT NOT NULL,version_id TEXT NOT NULL,
+            supersedes_plan_fingerprint TEXT NOT NULL,correction_plan_fingerprint TEXT NOT NULL UNIQUE,
+            missing_dates_json TEXT NOT NULL,row_fingerprints_json TEXT NOT NULL,
+            ready_snapshot_manifest_json TEXT NOT NULL,ready_snapshot_manifest_digest TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,
+            backup_json TEXT NOT NULL,created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_functional_versions(
             version_id TEXT PRIMARY KEY,cutover_id TEXT NOT NULL,version_kind TEXT NOT NULL,
             effective_at TEXT NOT NULL,status TEXT NOT NULL,plan_fingerprint TEXT NOT NULL UNIQUE,
@@ -3196,6 +4008,7 @@ def _source_rows(
     conn: sqlite3.Connection,
     *,
     recovery_end_date: str | None = None,
+    include_historical_correction: bool = False,
 ) -> dict[str, Any]:
     tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     required = {
@@ -3272,6 +4085,25 @@ def _source_rows(
     )
     result["ready_snapshots"] = ready_snapshots
     result["frozen_pre_cutover_wb_cost_projection"] = frozen_projection
+    correction_missing_dates = (
+        _missing_pre_cutover_historical_dates(
+            frozen_projection,
+            cutover_date=str(cutover_row["cutover_at"] or "")[:10],
+        )
+        if cutover_row is not None
+        else []
+    )
+    result["historical_correction_ready_snapshots"] = (
+        _ready_snapshot_historical_correction_rows(
+            conn,
+            missing_dates=correction_missing_dates,
+        )
+        if include_historical_correction
+        and cutover_row is not None
+        and correction_missing_dates
+        else []
+    )
+    result["historical_correction_missing_dates"] = correction_missing_dates
     result["primary_cost_rows"] = [dict(row) for row in conn.execute(
         """SELECT line.nm_id,line.qty,line.invoice_unit_price_cny,line.sku_ff_unit_cost_rub,
                   line.layer_line_id,line.source_status
@@ -3316,6 +4148,41 @@ def _ready_snapshot_recovery_rows(
                ORDER BY snapshot.activated_at,snapshot.refreshed_at,
                         snapshot.as_of_date,snapshot.bundle_version""",
             (recovery_boundary, recovery_boundary),
+        ).fetchall()
+    ]
+
+
+def _ready_snapshot_historical_correction_rows(
+    conn: sqlite3.Connection,
+    *,
+    missing_dates: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Load every persisted bundle carrying an exact missing-date column.
+
+    Unlike the ordinary pre-cutover source scan, the outer snapshot date is not
+    a business-date boundary here: a later publication may legitimately retain
+    the only persisted exact column for a date omitted by cutover.
+    """
+
+    dates = sorted({str(value or "")[:10] for value in missing_dates if value})
+    if not dates:
+        return []
+    placeholders = ",".join("?" for _ in dates)
+    return [
+        dict(row)
+        for row in conn.execute(
+            f"""SELECT snapshot.bundle_version,snapshot.as_of_date,snapshot.activated_at,
+                       snapshot.refreshed_at,snapshot.plan_json
+                FROM sheet_vitrina_v1_ready_snapshots snapshot
+                WHERE json_valid(snapshot.plan_json)
+                  AND EXISTS (
+                        SELECT 1
+                        FROM json_each(snapshot.plan_json, '$.date_columns') day
+                        WHERE CAST(day.value AS TEXT) IN ({placeholders})
+                  )
+                ORDER BY snapshot.activated_at,snapshot.refreshed_at,
+                         snapshot.as_of_date,snapshot.bundle_version""",
+            dates,
         ).fetchall()
     ]
 
@@ -3391,6 +4258,24 @@ def _frozen_pre_cutover_wb_cost_projection(
     )
 
 
+def _frozen_opening_cost_map_rows(
+    conn: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **dict(row),
+            "provenance": _loads(row["provenance_json"], {}),
+        }
+        for row in conn.execute(
+            """SELECT nm_id,ff_unit_cost_rub,wb_unit_cost_rub,quality,
+                      provenance_json,fingerprint
+               FROM sheet_vitrina_v1_warehouse_opening_cost_map
+               WHERE cutover_id=? ORDER BY nm_id""",
+            (FUNCTIONAL_CUTOVER_ID,),
+        ).fetchall()
+    ]
+
+
 def _merge_historical_wb_quantity_evidence(
     *,
     canonical_rows: Iterable[Mapping[str, Any]],
@@ -3405,18 +4290,27 @@ def _merge_historical_wb_quantity_evidence(
     """
 
     merged: dict[tuple[str, int], dict[str, Any]] = {}
-    for raw_snapshot in ready_snapshot_rows:
+    ordered_snapshots = sorted(
+        (dict(item) for item in ready_snapshot_rows),
+        key=lambda item: (
+            str(item.get("activated_at") or ""),
+            str(item.get("refreshed_at") or ""),
+            str(item.get("as_of_date") or ""),
+            str(item.get("bundle_version") or ""),
+        ),
+    )
+    for raw_snapshot in ordered_snapshots:
         plan_json = str(raw_snapshot.get("plan_json") or "")
         plan = _loads(plan_json, {})
         if not isinstance(plan, Mapping):
             continue
         dates = [str(value or "") for value in plan.get("date_columns") or []]
-        sheets = plan.get("sheets") or []
         data_sheet = next(
             (
                 item
-                for item in sheets
-                if isinstance(item, Mapping) and str(item.get("sheet_name") or "") == "DATA_VITRINA"
+                for item in plan.get("sheets") or []
+                if isinstance(item, Mapping)
+                and str(item.get("sheet_name") or "") == "DATA_VITRINA"
             ),
             None,
         )
@@ -3472,6 +4366,33 @@ def _merge_historical_wb_quantity_evidence(
     return [merged[key] for key in sorted(merged)]
 
 
+def _coherent_historical_wb_quantity_evidence(
+    ready_snapshot_rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize each date only from its selected single coherent column."""
+
+    result: list[dict[str, Any]] = []
+    for day, cells in sorted(
+        _latest_exact_stock_total_cells_by_date(ready_snapshot_rows).items()
+    ):
+        if not cells or any(
+            cell.get("quantity") is None or _decimal(cell.get("quantity")) < ZERO
+            for cell in cells.values()
+        ):
+            continue
+        for nm_id, cell in sorted(cells.items()):
+            quantity = _decimal(cell["quantity"])
+            result.append(
+                {
+                    "as_of_date": day,
+                    "nm_id": nm_id,
+                    "physical_quantity": _text(quantity),
+                    "quantity_provenance": dict(cell.get("provenance") or {}),
+                }
+            )
+    return result
+
+
 def _functional_local_source_view(sources: Mapping[str, Any]) -> dict[str, Any]:
     """Return the deterministic source representation used by plan and apply.
 
@@ -3485,7 +4406,26 @@ def _functional_local_source_view(sources: Mapping[str, Any]) -> dict[str, Any]:
         canonical_rows=normalized.get("historical_wb_daily_quantities") or [],
         ready_snapshot_rows=normalized.get("ready_snapshots") or [],
     )
+    correction_quantities = (
+        # A post-cutover correction is deliberately narrower than the normal
+        # canonical replay. Every date comes from one selected coherent exact
+        # column; neither canonical rows nor per-SKU snapshot stitching enter.
+        _coherent_historical_wb_quantity_evidence(
+            normalized.get("historical_correction_ready_snapshots") or []
+        )
+    )
+    missing_dates_value = normalized.get("historical_correction_missing_dates")
+    if missing_dates_value is not None:
+        missing_dates = {str(value or "")[:10] for value in missing_dates_value or []}
+        correction_quantities = [
+            item
+            for item in correction_quantities
+            if str(item.get("as_of_date") or "")[:10] in missing_dates
+        ]
+    normalized["historical_correction_wb_daily_quantities"] = correction_quantities
     normalized.setdefault("ready_snapshots", [])
+    normalized.setdefault("historical_correction_ready_snapshots", [])
+    normalized.setdefault("historical_correction_missing_dates", [])
     return normalized
 
 
@@ -3501,7 +4441,16 @@ def _guarded_local_sources(sources: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in sources.items()
-        if key not in {"wb_supplies", "downstream_cost_rows"}
+        if key
+        not in {
+            "wb_supplies",
+            "downstream_cost_rows",
+            # Raw ready-snapshot JSON contains unrelated publication rows and
+            # metadata. The derived exact-column view below is the only
+            # correction evidence consumed by arithmetic and therefore the
+            # only snapshot state admitted to the optimistic drift digest.
+            "historical_correction_ready_snapshots",
+        }
     }
 
 
@@ -4549,6 +5498,19 @@ def _text(value: Decimal | None) -> str:
     if normalized == normalized.to_integral():
         return str(normalized.quantize(ONE))
     return format(normalized, "f")
+
+
+def _discard_uncommitted_backup(backup: Mapping[str, Any] | None) -> None:
+    """Remove only the coherent backup created by an apply that never committed."""
+
+    path_value = str((backup or {}).get("path") or "")
+    if not path_value:
+        return
+    path = Path(path_value)
+    if not path.is_absolute():
+        return
+    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+        candidate.unlink(missing_ok=True)
 
 
 def _connect(path: Path) -> sqlite3.Connection:

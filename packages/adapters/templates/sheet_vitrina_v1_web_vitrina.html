@@ -8062,16 +8062,10 @@
         if (!previewResponse.ok) throw new Error("HTTP " + previewResponse.status + ": " + await previewResponse.text());
         const plan = await previewResponse.json();
         const count = Number(plan && plan.diff && plan.diff.changed_line_count || 0);
-        if (!window.confirm("Emergency rebuild изменит " + count + " строк. Применить exact plan " + String(plan.plan_fingerprint || "") + "?")) return;
-        setWarehouseActionState(warehouseEmergencyButton, "loading", "Публикуем…");
-        const applyResponse = await fetch(basePath + "/emergency-rebuild/apply", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({confirm: true, fingerprint: plan.plan_fingerprint, plan: plan})
-        });
-        if (!applyResponse.ok) throw new Error("HTTP " + applyResponse.status + ": " + await applyResponse.text());
-        await ensureWarehouseLoaded(state.warehouses.activeKey, {force: true});
-        setWarehouseActionState(warehouseEmergencyButton, "success", "Пересчёт опубликован");
+        if (warehouseStatusDetailNode) {
+          warehouseStatusDetailNode.textContent = "Dry-run готов: " + count + " изменённых строк, exact plan " + String(plan.plan_fingerprint || "—") + ". Применение выполняется через защищённый release-контур с backup и readback.";
+        }
+        setWarehouseActionState(warehouseEmergencyButton, "success", "Dry-run готов");
       } catch (error) {
         renderWarehouseError(String(error && error.message ? error.message : error));
         setWarehouseActionState(warehouseEmergencyButton, "error", "Ошибка пересчёта");
