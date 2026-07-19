@@ -7454,6 +7454,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "allowed_sections": normalized_sections,
         "allowed_tabs": allowed_tabs,
         "initial_tab": initial_tab,
+        "initial_tab_is_route_explicit": bool(active_tab),
         "read_path": read_path,
         "operator_path": operator_path,
         "warehouses_path": DEFAULT_WAREHOUSES_PATH,
