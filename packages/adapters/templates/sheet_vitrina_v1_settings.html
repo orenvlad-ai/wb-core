@@ -2085,9 +2085,23 @@
         const rows = Array.isArray(reference && reference.rows) ? reference.rows : [];
         calculationReferenceRows.innerHTML = rows.length ? rows.map((row) => (
           "<tr><td>" + escapeHtml(row.label) + (row.note ? "<div class=\"user-source-note\">" + escapeHtml(row.note) + "</div>" : "") + "</td>" +
-          (row.weekly_rate_pct || []).map((value) => "<td>" + escapeHtml(value == null ? "—" : value + "%") + "</td>").join("") +
-          "<td>" + escapeHtml(row.weighted_average_pct == null ? "—" : row.weighted_average_pct + "%") + "</td></tr>"
+          (row.weekly_rate_pct || []).map((value) => "<td>" + escapeHtml(formatCalculationReferencePct(value)) + "</td>").join("") +
+          "<td>" + escapeHtml(formatCalculationReferencePct(row.weighted_average_pct)) + "</td></tr>"
         )).join("") : "<tr><td colspan=\"5\">Нет трёх полностью закрытых недель.</td></tr>";
+      }
+
+      function formatCalculationReferencePct(value) {
+        if (value == null || String(value).trim() === "") {
+          return "—";
+        }
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return "—";
+        }
+        return numeric.toLocaleString("ru-RU", {
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 2,
+        }) + "%";
       }
 
       function renderCalculationHistory(history) {

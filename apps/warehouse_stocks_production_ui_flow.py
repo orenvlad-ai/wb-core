@@ -26,6 +26,16 @@ WAREHOUSE_UI_PATH = "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=producti
 WAREHOUSE_CHAIN_RECOVERY_PROFILE = "warehouse_chain_recovery_20260719"
 
 
+def _period_vitrina_url(base_url: str, *, date_to: str) -> str:
+    """Open the canonical vitrina tab regardless of browser-local tab state."""
+
+    return (
+        str(base_url or "").strip().rstrip("/")
+        + "/sheet-vitrina-v1/vitrina?tab=vitrina&date_from=2026-07-01&date_to="
+        + quote(str(date_to or ""), safe="")
+    )
+
+
 def run_warehouse_ui_flow(
     *,
     base_url: str,
@@ -494,6 +504,21 @@ def run_warehouse_ui_flow(
         reference_rows = settings_surface.locator("#calculationReferenceRows tr")
         expect(reference_rows).to_have_count(6, timeout=60_000)
         _assert(reference_rows.count() == 6, "six WB reference rows")
+        reference_values = settings_surface.locator(
+            "#calculationReferenceRows tr td:not(:first-child)"
+        ).all_inner_texts()
+        _assert(
+            reference_values
+            and all(
+                value.strip() == "—"
+                or (
+                    value.strip().endswith("%")
+                    and len(value.strip()) <= 8
+                )
+                for value in reference_values
+            ),
+            "WB reference percentages are rounded and readable",
+        )
         history_rows = settings_surface.locator("#calculationHistoryRows tr")
         history_rows.first.wait_for(timeout=60_000)
         _assert(history_rows.count() >= 1, "settings version history")
@@ -709,10 +734,9 @@ def run_warehouse_ui_flow(
         page.screenshot(path=str(sku_screenshot), full_page=False)
         screenshots.append(str(sku_screenshot))
         period_date_to = str((expected_readback.get("active_version") or {}).get("effective_at") or "")[:10]
-        period_vitrina_url = (
-            normalized_base_url
-            + "/sheet-vitrina-v1/vitrina?date_from=2026-07-01&date_to="
-            + quote(period_date_to, safe="")
+        period_vitrina_url = _period_vitrina_url(
+            normalized_base_url,
+            date_to=period_date_to,
         )
         period_vitrina_response = page.goto(
             period_vitrina_url,

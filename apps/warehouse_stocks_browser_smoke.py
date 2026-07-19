@@ -183,12 +183,62 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             page.goto(f"{base_url}/sheet-vitrina-v1/vitrina", wait_until="domcontentloaded")
             page.locator('[data-unified-tab-button="warehouses"]').click()
             page.locator('[data-unified-tab-panel="warehouses"]:not([hidden])').wait_for()
+            page.route(
+                "**/v1/sheet-vitrina-v1/settings/calculation-parameters",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "status": "ready",
+                            "current": {
+                                "effective_date": "2026-07-01",
+                                "parameters": {
+                                    "buyout_rate": "0.91",
+                                    "tax_rate": "0.06",
+                                    "wb_agent_and_other_rate": "0.38",
+                                    "acquiring_rate": "0",
+                                    "wb_logistics_rate": "0",
+                                    "wb_storage_rate": "0",
+                                    "penalties_adjustments_rate": "0",
+                                    "other_expense_rate": "0",
+                                },
+                            },
+                            "history": [],
+                            "reference": {
+                                "weeks": [
+                                    {"week_start": "2026-06-22", "week_end": "2026-06-28"},
+                                    {"week_start": "2026-06-29", "week_end": "2026-07-05"},
+                                    {"week_start": "2026-07-06", "week_end": "2026-07-12"},
+                                ],
+                                "rows": [
+                                    {
+                                        "label": "Агентское вознаграждение",
+                                        "weekly_rate_pct": ["33.959072199101011", "0", None],
+                                        "weighted_average_pct": "2.766203712870102",
+                                        "note": "",
+                                    }
+                                ],
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
             page.goto(f"{base_url}/sheet-vitrina-v1/settings", wait_until="domcontentloaded")
             frame = page.locator('[data-settings-embed-frame]:not([hidden])')
             frame.wait_for()
             surface = page.frame_locator("[data-settings-embed-frame]")
-            surface.locator('[data-settings-group-button="user-directory"]').wait_for()
+            surface.locator('[data-settings-group-button="user-directory"]').click()
+            rendered_values = surface.locator(
+                "#calculationReferenceRows tr:first-child td:not(:first-child)"
+            )
+            rendered_values.first.wait_for()
             _assert("embedded=1" in str(frame.get_attribute("src") or ""), "settings iframe source")
+            _assert(
+                rendered_values.all_inner_texts() == ["33,96%", "0%", "—", "2,77%"],
+                "settings reference percentages are rounded for display",
+            )
         finally:
             browser.close()
 
