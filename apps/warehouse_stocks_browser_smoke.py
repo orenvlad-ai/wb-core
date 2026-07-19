@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.warehouse_stocks_smoke import _block, _seed_runtime  # noqa: E402
-from apps.warehouse_stocks_production_ui_flow import run_warehouse_ui_flow  # noqa: E402
+from apps.warehouse_stocks_production_ui_flow import _visible_money, run_warehouse_ui_flow  # noqa: E402
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -43,6 +43,8 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 def main() -> None:
+    _assert(_visible_money("78\u00a0086,09 RUB") == Decimal("78086.09"), "localized RUB money")
+    _assert(_visible_money("1\u202f234,50 CNY") == Decimal("1234.50"), "localized CNY money")
     with TemporaryDirectory(prefix="warehouse-browser-smoke-") as temp_dir:
         root = Path(temp_dir)
         runtime = _seed_runtime(root / "runtime")

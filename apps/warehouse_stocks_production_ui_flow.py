@@ -739,6 +739,8 @@ def _visible_money(value: str) -> Decimal:
         .replace("\u202f", "")
         .replace(" ", "")
         .replace("₽", "")
+        .replace("RUB", "")
+        .replace("CNY", "")
         .replace(",", ".")
     )
     try:
