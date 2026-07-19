@@ -317,6 +317,9 @@ class WbRegionalSupplyBlock:
         seed_allocated_qty_total = 0
         seed_unfulfilled_qty_total = 0
         seed_by_nm_id: dict[str, dict[str, Any]] = {}
+        central_start_allocated_totals = {
+            key: 0 for key in (PLANNING_ZONE_CENTRAL_NORTH, PLANNING_ZONE_CENTRAL_EAST, PLANNING_ZONE_CENTRAL_SOUTH)
+        }
 
         for nm_id, sku_comment in active_skus:
             demand_estimate = regional_demand_by_nm[nm_id]
@@ -370,7 +373,13 @@ class WbRegionalSupplyBlock:
                 district_daily_demand_by_key=district_daily_demand_by_key,
                 included_district_keys=settings.included_district_keys,
                 order_batch_qty=settings.order_batch_qty,
+                accumulated_by_key=central_start_allocated_totals
+                if str(demand_estimate.diagnostics.get("calculation_mode")) == "Стартовое распределение"
+                else None,
             )
+            if str(demand_estimate.diagnostics.get("calculation_mode")) == "Стартовое распределение":
+                for key in central_start_allocated_totals:
+                    central_start_allocated_totals[key] += int(full_recommendation_by_key.get(key, 0))
 
             demand_allocated_by_key = _allocate_boxes(
                 full_recommendation_by_key=full_recommendation_by_key,
@@ -1318,6 +1327,7 @@ def _rebalance_central_recommendations(
     district_daily_demand_by_key: Mapping[str, float],
     included_district_keys: tuple[str, ...],
     order_batch_qty: int,
+    accumulated_by_key: dict[str, int] | None = None,
 ) -> None:
     """Round the two-level Central total once, then distribute boxes deterministically."""
 
@@ -1345,6 +1355,8 @@ def _rebalance_central_recommendations(
     if sum(weights.values()) <= 0:
         weights = {key: 1.0 for key in central_keys}
     total_weight = sum(weights.values())
+    if accumulated_by_key is not None and all(abs(weights[key] - weights[central_keys[0]]) < 1e-9 for key in central_keys):
+        weights = {key: 1.0 for key in central_keys}
     exact_boxes = {key: target_boxes * weights[key] / total_weight for key in central_keys}
     allocated = {
         key: int(math.floor(exact_boxes[key] / order_batch_qty) * order_batch_qty)
@@ -1353,14 +1365,27 @@ def _rebalance_central_recommendations(
     remaining = target_boxes - sum(allocated.values())
     order_index = {key: index for index, key in enumerate(central_keys)}
     while remaining >= order_batch_qty:
-        chosen = max(
-            central_keys,
-            key=lambda key: (exact_boxes[key] - allocated[key], -order_index[key]),
+        chosen = min(central_keys, key=lambda key: (int((accumulated_by_key or {}).get(key, 0)) + allocated[key], order_index[key])) if accumulated_by_key is not None else max(
+            central_keys, key=lambda key: (exact_boxes[key] - allocated[key], -order_index[key])
         )
         allocated[chosen] += order_batch_qty
         remaining -= order_batch_qty
     for key in central_keys:
         full_recommendation_by_key[key] = int(allocated[key])
+
+
+def allocate_start_distribution_boxes(*, total_qty: int, included_keys: tuple[str, ...], order_batch_qty: int, accumulated_by_key: Mapping[str, int] | None = None) -> dict[str, int]:
+    """Deterministic global least-total allocator for start-mode box rounding."""
+    keys = tuple(str(key) for key in included_keys if str(key))
+    result = {key: 0 for key in keys}
+    if not keys or order_batch_qty <= 0:
+        return result
+    totals = {key: int((accumulated_by_key or {}).get(key, 0)) for key in keys}
+    for _ in range(max(int(total_qty), 0) // int(order_batch_qty)):
+        chosen = min(keys, key=lambda key: (totals[key], keys.index(key)))
+        result[chosen] += order_batch_qty
+        totals[chosen] += order_batch_qty
+    return result
 
 
 def _seed_floor_recommendation_by_key(
