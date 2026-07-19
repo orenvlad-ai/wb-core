@@ -2200,7 +2200,6 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--state", choices=sorted(STATE_LABELS), required=True)
     transition.add_argument("--comment", default="")
     transition.set_defaults(handler=command_transition)
-
     halt = subparsers.add_parser("halt-merged")
     halt.add_argument("--pr", type=int, required=True)
     halt.add_argument("--merge-sha", required=True)
