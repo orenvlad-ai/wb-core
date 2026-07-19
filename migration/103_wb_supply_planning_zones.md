@@ -125,6 +125,15 @@ barcode lists and other secrets are never logged.
 
 ## Recovery
 
+Расчёт ЦФО выполняется в два уровня: общая потребность сохраняет legacy-историю
+`central`, затем распределяется только между выбранными Севером, Востоком и
+Югом. При cold-start доли равны, а переход к направленной истории идёт по
+confidence достоверных наблюдений; отсутствие наблюдений не является нулевым
+спросом. В параметрах расчёта доступен read-only incident override
+`Не учитывать остатки Электростали`: он исключает только warehouseID `120762`
+из текущего effective stock и сохраняет причину и фактические значения в
+diagnostics/result.
+
 If WB, catalog or coefficient evidence is unavailable, the picker fails closed
 with controlled blockers and does not alter the calculation.  If a release
 must be rolled back, use the normal repository release/deploy path; do not edit

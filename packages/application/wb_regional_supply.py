@@ -17,7 +17,7 @@ from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
-from packages.application.stocks_block import StocksBlock
+from packages.application.stocks_block import StocksBlock, build_elektrostal_stock_override
 from packages.application.stock_ff_onec_source import build_onec_stock_ff_state, resolve_onec_stock_ff_rows
 from packages.application.wb_supply_overlay import (
     apply_stock_ff_overlay,
@@ -236,6 +236,11 @@ class WbRegionalSupplyBlock:
             getattr(stock_response, "planning_reconciliation", {}) or {}
         )
         stock_warehouse_rows = list(getattr(stock_response, "warehouse_rows", []) or [])
+        elektrostal_override = build_elektrostal_stock_override(
+            items=list(getattr(stock_response, "items", []) or []),
+            warehouse_rows=stock_warehouse_rows,
+            enabled=settings.exclude_elektrostal_stock,
+        )
         if set(stock_items) != set(nm_ids):
             missing = sorted(set(nm_ids) - set(stock_items))
             raise ValueError(
@@ -273,6 +278,14 @@ class WbRegionalSupplyBlock:
             }
             for nm_id in nm_ids
         }
+        if settings.exclude_elektrostal_stock:
+            for nm_id in nm_ids:
+                override_row = dict((elektrostal_override.get("by_nm_id") or {}).get(str(nm_id)) or {})
+                excluded_qty = max(float(override_row.get("excluded_elektrostal_stock") or 0.0), 0.0)
+                current_stock_by_nm[nm_id][PLANNING_ZONE_CENTRAL_EAST] = max(
+                    current_stock_by_nm[nm_id][PLANNING_ZONE_CENTRAL_EAST] - excluded_qty,
+                    0.0,
+                )
         regional_demand_by_nm = _estimate_wb_regional_demand(
             runtime=self.runtime,
             report_date=report_date_obj,
@@ -284,6 +297,14 @@ class WbRegionalSupplyBlock:
             included_district_keys=settings.included_district_keys,
             persistent_zero_current_stock_max_qty=max(float(settings.order_batch_qty - 1), 0.0),
             sku_metadata_by_nm=sku_metadata_by_nm,
+            legacy_district_field_by_key={
+                "central": "stock_ru_central",
+                DISTRICT_NORTHWEST: "stock_ru_northwest",
+                DISTRICT_VOLGA: "stock_ru_volga",
+                DISTRICT_URAL: "stock_ru_ural",
+                DISTRICT_SOUTH_CAUCASUS: "stock_ru_south_caucasus",
+                DISTRICT_FAR_SIBERIA: "stock_ru_far_siberia",
+            },
         )
         result_diagnostics = _build_regional_demand_result_diagnostics(regional_demand_by_nm)
         district_rows_by_key: dict[str, list[WbRegionalSupplyDistrictRow]] = {
@@ -342,6 +363,14 @@ class WbRegionalSupplyBlock:
                     "full_recommendation_qty": full_recommendation_qty,
                     "selected_wb_supply_qty": selected_wb_supply_qty,
                 }
+
+            _rebalance_central_recommendations(
+                full_recommendation_by_key=full_recommendation_by_key,
+                raw_recommendation_by_key=raw_recommendation_by_key,
+                district_daily_demand_by_key=district_daily_demand_by_key,
+                included_district_keys=settings.included_district_keys,
+                order_batch_qty=settings.order_batch_qty,
+            )
 
             demand_allocated_by_key = _allocate_boxes(
                 full_recommendation_by_key=full_recommendation_by_key,
@@ -526,6 +555,7 @@ class WbRegionalSupplyBlock:
                 "stock_ff_source_state": dict(ledger_stock_ff_state) if stock_ff_source == STOCK_FF_SOURCE_LEDGER else {},
                 "wb_supply_overlay": wb_regional_overlay_diagnostics,
                 "central_stock_reconciliation": stock_planning_reconciliation,
+                "elektrostal_stock_override": elektrostal_override,
                 "stock_warehouse_row_count": len(stock_warehouse_rows),
             }
         )
@@ -763,6 +793,7 @@ class WbRegionalSupplyBlock:
             stock_ff_source=stock_ff_source,
             included_district_keys=_parse_included_district_keys(settings_payload.get("included_district_keys")),
             selected_wb_supply_ids=_parse_selected_wb_supply_ids_from_settings(settings_payload),
+            exclude_elektrostal_stock=_parse_bool(settings_payload.get("exclude_elektrostal_stock")),
         )
         shared_datasets = {
             key: FactoryOrderDatasetState(
@@ -960,6 +991,7 @@ def _parse_settings(payload: Mapping[str, Any]) -> WbRegionalSupplySettings:
         stock_ff_source=_parse_stock_ff_source(payload.get("stock_ff_source")),
         included_district_keys=_parse_included_district_keys(payload.get("included_district_keys")),
         selected_wb_supply_ids=parse_selected_wb_supply_ids(payload),
+        exclude_elektrostal_stock=_parse_bool(payload.get("exclude_elektrostal_stock")),
     )
 
 
@@ -968,6 +1000,16 @@ def _parse_stock_ff_source(value: Any) -> str:
     if normalized not in {STOCK_FF_SOURCE_MANUAL_EXCEL, STOCK_FF_SOURCE_ONEC_FF_STOCK, STOCK_FF_SOURCE_LEDGER}:
         raise ValueError("Источник остатков ФФ должен быть manual_excel, onec_ff_stock или ff_stock_ledger")
     return normalized
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "да"}
 
 
 def _normalize_stock_ff_source(value: Any) -> str:
@@ -1267,6 +1309,58 @@ def _allocate_boxes(
         allocated[chosen] += order_batch_qty
         remaining -= order_batch_qty
     return allocated
+
+
+def _rebalance_central_recommendations(
+    *,
+    full_recommendation_by_key: dict[str, int],
+    raw_recommendation_by_key: Mapping[str, float],
+    district_daily_demand_by_key: Mapping[str, float],
+    included_district_keys: tuple[str, ...],
+    order_batch_qty: int,
+) -> None:
+    """Round the two-level Central total once, then distribute boxes deterministically."""
+
+    central_keys = tuple(
+        key for key in (PLANNING_ZONE_CENTRAL_NORTH, PLANNING_ZONE_CENTRAL_EAST, PLANNING_ZONE_CENTRAL_SOUTH)
+        if key in included_district_keys
+    )
+    if not central_keys or order_batch_qty <= 0:
+        return
+    raw_total = sum(max(float(raw_recommendation_by_key.get(key, 0.0)), 0.0) for key in central_keys)
+    target_boxes = int(math.ceil(raw_total / order_batch_qty) * order_batch_qty) if raw_total > 0 else 0
+    if target_boxes <= 0:
+        for key in central_keys:
+            full_recommendation_by_key[key] = 0
+        return
+    weights = {
+        key: max(float(raw_recommendation_by_key.get(key, 0.0)), 0.0)
+        for key in central_keys
+    }
+    if sum(weights.values()) <= 0:
+        weights = {
+            key: max(float(district_daily_demand_by_key.get(key, 0.0)), 0.0)
+            for key in central_keys
+        }
+    if sum(weights.values()) <= 0:
+        weights = {key: 1.0 for key in central_keys}
+    total_weight = sum(weights.values())
+    exact_boxes = {key: target_boxes * weights[key] / total_weight for key in central_keys}
+    allocated = {
+        key: int(math.floor(exact_boxes[key] / order_batch_qty) * order_batch_qty)
+        for key in central_keys
+    }
+    remaining = target_boxes - sum(allocated.values())
+    order_index = {key: index for index, key in enumerate(central_keys)}
+    while remaining >= order_batch_qty:
+        chosen = max(
+            central_keys,
+            key=lambda key: (exact_boxes[key] - allocated[key], -order_index[key]),
+        )
+        allocated[chosen] += order_batch_qty
+        remaining -= order_batch_qty
+    for key in central_keys:
+        full_recommendation_by_key[key] = int(allocated[key])
 
 
 def _seed_floor_recommendation_by_key(

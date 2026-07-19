@@ -22,6 +22,9 @@ from packages.contracts.wb_supply_planning_zones import (
 )
 
 
+ELEKTROSTAL_WAREHOUSE_ID = 120762
+
+
 REGION_TO_FIELD = {
     "Центральный": "stock_ru_central",
     "Северо-Западный": "stock_ru_northwest",
@@ -236,6 +239,59 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             },
         )
     )
+
+
+def build_elektrostal_stock_override(
+    *,
+    items: list[StocksItem],
+    warehouse_rows: list[StocksWarehouseRow],
+    enabled: bool,
+) -> dict[str, Any]:
+    """Build a calculation-only, non-negative incident adjustment.
+
+    The source snapshot and historical rows remain untouched.  The exact
+    warehouse ID is the only identity accepted for the adjustment.
+    """
+
+    excluded_by_nm: dict[int, float] = defaultdict(float)
+    if enabled:
+        for row in warehouse_rows:
+            if row.warehouse_id == ELEKTROSTAL_WAREHOUSE_ID:
+                excluded_by_nm[int(row.nm_id)] += max(float(row.quantity), 0.0)
+    result: dict[str, Any] = {}
+    for item in items:
+        actual = max(float(item.stock_ru_central), 0.0)
+        excluded = min(actual, max(float(excluded_by_nm.get(int(item.nm_id), 0.0)), 0.0))
+        effective = max(actual - excluded, 0.0)
+        result[str(int(item.nm_id))] = {
+            "warehouse_id": ELEKTROSTAL_WAREHOUSE_ID,
+            "enabled": bool(enabled),
+            "actual_central_stock": round(actual, 6),
+            "excluded_elektrostal_stock": round(excluded, 6),
+            "effective_central_stock": round(effective, 6),
+            "reason": (
+                "Электросталь исключена только из текущего расчёта"
+                if enabled and excluded > 0
+                else "Электросталь не исключалась из текущего расчёта"
+            ),
+        }
+    total_actual = sum(float(item["actual_central_stock"]) for item in result.values())
+    total_excluded = sum(float(item["excluded_elektrostal_stock"]) for item in result.values())
+    return {
+        "enabled": bool(enabled),
+        "warehouse_id": ELEKTROSTAL_WAREHOUSE_ID,
+        "warehouse_name": "Электросталь",
+        "reason": (
+            "Электросталь исключена только из текущего расчёта"
+            if enabled
+            else "Инцидент Электростали не включён"
+        ),
+        "actual_central_stock": round(total_actual, 6),
+        "excluded_elektrostal_stock": round(total_excluded, 6),
+        "effective_central_stock": round(max(total_actual - total_excluded, 0.0), 6),
+        "by_nm_id": result,
+        "idempotent": True,
+    }
 
 
 def _normalize_region_name(value: str) -> str:
