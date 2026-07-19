@@ -153,4 +153,4 @@ Targeted verification:
 - `python3 apps/own_product_capital_smoke.py`;
 - `python3 apps/cny_ledger_smoke.py`;
 - `python3 apps/supplier_financial_documents_smoke.py`;
-- production `warehouse-ui-flow` in a fresh Playwright/Chromium context, entering the shared-shell operator/settings frames before asserting their controls, with screenshots/report outside Git.
+- production `warehouse-ui-flow` in a fresh Playwright/Chromium context, entering the shared-shell operator/settings frames before asserting their controls and accepting localized `₽` / `RUB` / `CNY` money suffixes without weakening numeric reconciliation, with screenshots/report outside Git.
