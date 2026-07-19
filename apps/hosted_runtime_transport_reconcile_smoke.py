@@ -40,7 +40,7 @@ def _evidence(
     *,
     unit: str = "active",
     pid: int = 42,
-    probes: str = "200,401",
+    probes: str = "401,303",
 ) -> dict[str, object]:
     return {
         "metadata_sha": metadata,
