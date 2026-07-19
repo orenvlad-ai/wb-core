@@ -540,8 +540,7 @@ def run_warehouse_ui_flow(
             all(Decimal(str(item.get("amount_rub") or 0)) > 0 for item in bank_fee_lines),
             "supplier bank fee RUB equivalents",
         )
-        supplier_url = normalized_base_url + "/sheet-vitrina-v1/supplier"
-        supplier_detail_url = supplier_url + "?shipment_id=" + quote(bank_fee_shipment_id, safe="") + "&tab=documents"
+        supplier_detail_url = _supplier_financial_detail_url(normalized_base_url, bank_fee_shipment_id)
         supplier_detail_response = page.goto(supplier_detail_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(supplier_detail_response is not None and supplier_detail_response.status == 200, "supplier fee detail page status")
         page.locator("#shipmentCard:not([hidden])").wait_for(timeout=60_000)
@@ -730,6 +729,15 @@ def _settings_frame_locator(page: Page) -> FrameLocator:
     surface = page.frame_locator("[data-settings-embed-frame]")
     surface.locator("body").wait_for(timeout=60_000)
     return surface
+
+
+def _supplier_financial_detail_url(base_url: str, shipment_id: str) -> str:
+    return (
+        str(base_url).rstrip("/")
+        + "/sheet-vitrina-v1/supplier?embedded=operator&shipment_id="
+        + quote(str(shipment_id), safe="")
+        + "&tab=documents"
+    )
 
 
 def _visible_money(value: str) -> Decimal:
