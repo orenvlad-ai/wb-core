@@ -1028,6 +1028,8 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                     ["SKU", "SKU:104|orderCount", 2],
                     ["SKU", "SKU:104|ads_sum", 10],
                     ["Legacy", "SKU:104|non_target", 777],
+                    ["Legacy presentation A", 93.54754799999999, ""],
+                    ["Legacy presentation B", 93.54754799999999, ""],
                 ],
             }
         ],
@@ -1099,6 +1101,14 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
     _assert(profit == Decimal("15.48"), "Proxy 3 default settings formula")
     _assert(abs(margin - profit / Decimal("91")) < Decimal("0.0000005"), "Proxy 3 margin uses expected buyout revenue")
     _assert(rows["SKU:104|non_target"][2] == 777, "functional economics backfill preserves non-target cells")
+    _assert(
+        [row for row in stored["sheets"][0]["rows"] if row[0].startswith("Legacy presentation")]
+        == [
+            ["Legacy presentation A", 93.54754799999999, ""],
+            ["Legacy presentation B", 93.54754799999999, ""],
+        ],
+        "functional economics ignores and preserves legacy non-key presentation rows",
+    )
     parameters = CalculationParametersBlock(runtime=runtime)
     changed_payload = {
         "effective_date": "2026-07-01",

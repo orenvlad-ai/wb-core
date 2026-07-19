@@ -87,12 +87,19 @@ def build_functional_economics_backfill_plan(
     non_target_before: list[list[str]] = []
     non_target_after: list[list[str]] = []
     for snapshot in snapshots:
-        transformed = _transform_snapshot(
-            snapshot,
-            costs=costs,
-            parameters=parameter_by_date,
-            source_fingerprint=source_fingerprint,
-        )
+        try:
+            transformed = _transform_snapshot(
+                snapshot,
+                costs=costs,
+                parameters=parameter_by_date,
+                source_fingerprint=source_fingerprint,
+            )
+        except Exception as exc:
+            raise FunctionalEconomicsBackfillError(
+                "functional economics ready snapshot failed: "
+                f"bundle_version={snapshot['bundle_version']} "
+                f"as_of_date={snapshot['as_of_date']}: {exc}"
+            ) from exc
         non_target_before.append([snapshot["bundle_version"], snapshot["as_of_date"], transformed["non_target_before"]])
         non_target_after.append([snapshot["bundle_version"], snapshot["as_of_date"], transformed["non_target_after"]])
         changed_cells += int(transformed["changed_cells"])
@@ -253,6 +260,7 @@ def _transform_snapshot(
             "non_target_before": before_digest,
             "non_target_after": before_digest,
         }
+    _validate_data_projection_layout(sheet, dates=dates)
     by_id = _rows_by_id(rows)
     scopes = sorted({row_id.split("|", 1)[0] for row_id in by_id if row_id.startswith("SKU:")})
     if not scopes:
@@ -435,12 +443,38 @@ def _optional_decimal(value: Any) -> Decimal | None:
 def _rows_by_id(rows: list[Any]) -> dict[str, list[Any]]:
     result: dict[str, list[Any]] = {}
     for row in rows:
-        if isinstance(row, list) and len(row) >= 2 and str(row[1] or ""):
-            row_id = str(row[1])
-            if row_id in result:
-                raise FunctionalEconomicsBackfillError(f"duplicate ready row id: {row_id}")
-            result[row_id] = row
+        if not isinstance(row, list) or len(row) < 2 or not isinstance(row[1], str):
+            continue
+        row_id = row[1].strip()
+        # Historical ready snapshots can retain presentation-only rows whose
+        # second cell is a value rather than a stable projection key.  Public
+        # vitrina reads already ignore those rows.  Preserve them byte-for-byte
+        # and index only the same stable ``scope|metric`` contract here.
+        if not _is_projection_row_id(row_id):
+            continue
+        if row_id in result:
+            raise FunctionalEconomicsBackfillError(f"duplicate ready projection row id: {row_id}")
+        result[row_id] = row
     return result
+
+
+def _is_projection_row_id(value: str) -> bool:
+    scope, separator, metric = str(value or "").partition("|")
+    return bool(separator and scope.strip() and metric.strip())
+
+
+def _validate_data_projection_layout(sheet: Mapping[str, Any], *, dates: list[str]) -> None:
+    header = sheet.get("header")
+    if not isinstance(header, list):
+        raise FunctionalEconomicsBackfillError("DATA_VITRINA header is missing")
+    if len(header) != 2 + len(dates):
+        raise FunctionalEconomicsBackfillError(
+            "DATA_VITRINA header width does not match date_columns"
+        )
+    if [str(value) for value in header[2:]] != dates:
+        raise FunctionalEconomicsBackfillError(
+            "DATA_VITRINA header dates do not match date_columns"
+        )
 
 
 def _snapshot_dates(plan_json: str) -> list[str]:
