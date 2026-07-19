@@ -924,16 +924,30 @@ class RegistryUploadHttpEntrypoint:
         payload = asdict(refresh_status)
         active_summary = active_refresh_summary(refresh_status)
         payload["transport_status"] = payload["status"]
-        payload["technical_status"] = payload["semantic_status"]
-        payload["technical_status_label"] = payload["semantic_label"]
-        payload["technical_status_tone"] = payload["semantic_tone"]
-        payload["technical_status_reason"] = payload["semantic_reason"]
+        payload["technical_status"] = payload["status"]
+        payload["technical_status_label"] = (
+            "Успешно" if payload["status"] == "success" else "Ошибка"
+        )
+        payload["technical_status_tone"] = (
+            "success" if payload["status"] == "success" else "error"
+        )
+        payload["technical_status_reason"] = (
+            "Сохранённый снимок прочитан"
+            if payload["status"] == "success"
+            else "Сохранённый снимок не прочитан"
+        )
+        payload["technical_semantic_status"] = payload["semantic_status"]
+        payload["technical_semantic_label"] = payload["semantic_label"]
+        payload["technical_semantic_tone"] = payload["semantic_tone"]
+        payload["technical_semantic_reason"] = payload["semantic_reason"]
         payload["technical_source_outcome_counts"] = dict(payload["source_outcome_counts"])
+        payload["technical_source_outcomes"] = list(payload["source_outcomes"])
         payload["semantic_status"] = active_summary["status"]
         payload["semantic_label"] = active_summary["label"]
         payload["semantic_tone"] = active_summary["tone"]
         payload["semantic_reason"] = active_summary["reason"]
         payload["source_outcome_counts"] = dict(active_summary["counts"])
+        payload["source_outcomes"] = list(active_summary["outcomes"])
         payload["status"] = active_summary["status"]
         payload["status_label"] = active_summary["label"]
         payload["status_reason"] = active_summary["reason"]

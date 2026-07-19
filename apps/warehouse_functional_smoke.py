@@ -560,6 +560,34 @@ def _test_human_evidence_uses_source_quality_and_date() -> None:
         "FF ledger evidence capital reconciles to the balance",
     )
     _assert(ledger["items"][1]["date"] == "2026-07-06", "FF ledger evidence retains operation date")
+    nested_ledger = _warehouse_human_evidence(
+        {"source_records": [{
+            "source": "canonical_append_only_ff_ledger_replay",
+            "cutover_date": "2026-07-05",
+            "operations": [
+                {
+                    "operation_id": "op-in",
+                    "created_at": "2026-07-06T10:00:00Z",
+                    "quantity_delta": "5",
+                    "unit_cost_rub": "10",
+                },
+                {
+                    "operation_id": "op-out",
+                    "created_at": "2026-07-07T10:00:00Z",
+                    "quantity_delta": "-3",
+                    "unit_cost_rub": "10",
+                },
+            ],
+        }]},
+        quantity="12",
+        capital_rub="120",
+        quality="moving_weighted_average",
+    )
+    _assert(
+        [item["document"] for item in nested_ledger["items"]]
+        == ["Остаток FF на cutover", "Операция FF op-in", "Операция FF op-out"],
+        "persisted source_records FF provenance expands every ledger operation",
+    )
 
 
 def _test_proxy() -> None:

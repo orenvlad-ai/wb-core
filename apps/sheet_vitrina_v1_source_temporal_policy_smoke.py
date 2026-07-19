@@ -104,6 +104,8 @@ def main() -> None:
             raise AssertionError(f"/status semantic payload mismatch, got {status_payload}")
         if status_payload["source_outcome_counts"] != {"success": 10, "warning": 1, "error": 1}:
             raise AssertionError(f"/status source_outcome_counts mismatch, got {status_payload}")
+        if status_payload["technical_status"] != "success":
+            raise AssertionError(f"/status technical read status mismatch, got {status_payload}")
 
         archived_only_failure = replace(
             refresh_status,
@@ -148,9 +150,29 @@ def main() -> None:
                 "/status must exclude an archived-only source failure from public status: "
                 f"{archived_status_payload}"
             )
-        if archived_status_payload["technical_status"] != "error":
+        if archived_status_payload["technical_status"] != "success":
             raise AssertionError(
-                "/status must retain the archived-source failure as technical status: "
+                "/status must retain successful snapshot read as technical status: "
+                f"{archived_status_payload}"
+            )
+        if archived_status_payload["technical_semantic_status"] != "error":
+            raise AssertionError(
+                "/status must retain the archive-inclusive semantic failure separately: "
+                f"{archived_status_payload}"
+            )
+        if any(
+            item.get("source_key") == "onec_stocks"
+            for item in archived_status_payload["source_outcomes"]
+        ):
+            raise AssertionError(
+                "/status active outcome list must exclude archived-only sources: "
+                f"{archived_status_payload}"
+            )
+        if sum(archived_status_payload["source_outcome_counts"].values()) != len(
+            archived_status_payload["source_outcomes"]
+        ):
+            raise AssertionError(
+                "/status active outcome counts must match the returned list: "
                 f"{archived_status_payload}"
             )
 

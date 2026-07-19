@@ -3937,10 +3937,47 @@ def _warehouse_evidence_records(
     source_records = raw.get("source_records")
     records = [dict(item) for item in source_records or [] if isinstance(item, Mapping)]
     if records:
-        return records
+        expanded: list[dict[str, Any]] = []
+        for record in records:
+            if not record.get("operations"):
+                expanded.append(record)
+                continue
+            record_quantity = record.get("flow_quantity")
+            record_capital = record.get("flow_capital_rub")
+            if len(records) == 1:
+                record_quantity = (
+                    aggregate_quantity if record_quantity is None else record_quantity
+                )
+                record_capital = aggregate_capital if record_capital is None else record_capital
+            if record_quantity is None or record_capital is None:
+                expanded.append(record)
+                continue
+            expanded.extend(
+                _expand_ff_ledger_evidence_record(
+                    record,
+                    aggregate_quantity=record_quantity,
+                    aggregate_capital=record_capital,
+                )
+            )
+        return expanded
     operations = [dict(item) for item in raw.get("operations") or [] if isinstance(item, Mapping)]
     if not operations:
         return [dict(raw)]
+
+    return _expand_ff_ledger_evidence_record(
+        raw,
+        aggregate_quantity=aggregate_quantity,
+        aggregate_capital=aggregate_capital,
+    )
+
+
+def _expand_ff_ledger_evidence_record(
+    raw: Mapping[str, Any],
+    *,
+    aggregate_quantity: Any,
+    aggregate_capital: Any,
+) -> list[dict[str, Any]]:
+    operations = [dict(item) for item in raw.get("operations") or [] if isinstance(item, Mapping)]
 
     common = {
         key: value

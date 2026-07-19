@@ -46,6 +46,7 @@ def active_refresh_summary(refresh_status: Any) -> dict[str, Any]:
             "tone": str(getattr(refresh_status, "semantic_tone", "") or "warning"),
             "reason": str(getattr(refresh_status, "semantic_reason", "") or ""),
             "counts": dict(getattr(refresh_status, "source_outcome_counts", {}) or {}),
+            "outcomes": [],
         }
     active = [
         item
@@ -79,4 +80,5 @@ def active_refresh_summary(refresh_status: Any) -> dict[str, Any]:
         "tone": status,
         "reason": reason,
         "counts": counts,
+        "outcomes": active,
     }
