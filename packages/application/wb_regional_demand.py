@@ -17,6 +17,12 @@ from packages.application.demand_estimation import DEMAND_VALID_DAY_BASELINE_RAT
 from packages.application.factory_order_sales_history import SALES_HISTORY_SOURCE_KEY
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.contracts.wb_regional_supply import DISTRICT_KEYS as CANONICAL_DISTRICT_KEYS
+from packages.contracts.wb_supply_planning_zones import (
+    CENTRAL_PLANNING_ZONE_KEYS,
+    PLANNING_ZONE_CENTRAL_EAST,
+    PLANNING_ZONE_CENTRAL_NORTH,
+    PLANNING_ZONE_CENTRAL_SOUTH,
+)
 
 
 STOCKS_SOURCE_KEY = "stocks"
@@ -95,6 +101,7 @@ class _SkuSignal:
     full_clean_excluded_reason_counts: dict[str, int]
     partial_global_day_reason_counts: dict[str, int]
     observation_stats_by_district: dict[str, _DistrictObservationStats]
+    legacy_observation_stats_by_district: dict[str, _DistrictObservationStats]
     order_count_samples: list[tuple[str, float]]
     order_count_positive_fallback_used: bool
     current_stock_by_district: Mapping[str, float]
@@ -113,6 +120,7 @@ def estimate_wb_regional_demand(
     persistent_zero_current_stock_max_qty: float = 0.0,
     sku_metadata_by_nm: Mapping[int, Mapping[str, Any]] | None = None,
     district_keys: list[str] | tuple[str, ...] | None = None,
+    legacy_district_field_by_key: Mapping[str, str] | None = None,
 ) -> dict[int, WbRegionalDemandEstimate]:
     """Estimate demand using an explicit, request-scoped region contract."""
 
@@ -140,6 +148,7 @@ def estimate_wb_regional_demand(
             included_district_keys=included_district_keys,
             persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
             sku_metadata_by_nm=sku_metadata_by_nm,
+            legacy_district_field_by_key=legacy_district_field_by_key,
         )
     finally:
         _DISTRICT_KEYS_CONTEXT.reset(token)
@@ -156,6 +165,7 @@ def _estimate_wb_regional_demand_inner(
     included_district_keys: list[str] | tuple[str, ...] | None = None,
     persistent_zero_current_stock_max_qty: float = 0.0,
     sku_metadata_by_nm: Mapping[int, Mapping[str, Any]] | None = None,
+    legacy_district_field_by_key: Mapping[str, str] | None = None,
 ) -> dict[int, WbRegionalDemandEstimate]:
     """Estimate district demand for each SKU using the regional share ladder."""
 
@@ -182,6 +192,19 @@ def _estimate_wb_regional_demand_inner(
         snapshot_date: _stocks_by_nm_id(payload, district_field_by_key=district_field_by_key)
         for snapshot_date, payload in stock_payloads.items()
     }
+    legacy_fields = dict(legacy_district_field_by_key or {})
+    legacy_stock_by_date = (
+        {
+            snapshot_date: _stocks_by_nm_id(
+                payload,
+                district_field_by_key=legacy_fields,
+                keys=tuple(legacy_fields),
+            )
+            for snapshot_date, payload in stock_payloads.items()
+        }
+        if legacy_fields
+        else {}
+    )
     order_counts_by_date = {
         snapshot_date: _order_count_by_nm_id(payload)
         for snapshot_date, payload in sales_payloads.items()
@@ -201,6 +224,8 @@ def _estimate_wb_regional_demand_inner(
             current_stock_by_district=current_stock_by_nm.get(normalized_nm_id, {}),
             included_district_keys=included_keys,
             metadata=metadata_by_nm.get(normalized_nm_id, {}),
+            legacy_stock_by_date=legacy_stock_by_date,
+            legacy_district_keys=tuple(legacy_fields),
         )
 
     prior_candidates = _build_prior_candidates(signals)
@@ -230,13 +255,14 @@ def _estimate_wb_regional_demand_inner(
             included_district_keys=included_keys,
             min_peer_count=GLOBAL_PRIOR_MIN_PEERS,
         )
-        out[normalized_nm_id] = _ladder_estimate(
+        estimate = _ladder_estimate(
             signal=signal,
             report_date=report_date,
             group_prior=group_prior,
             global_prior=global_prior,
             persistent_zero_current_stock_max_qty=persistent_zero_current_stock_max_qty,
         )
+        out[normalized_nm_id] = _apply_central_transition(estimate, signal=signal)
     return out
 
 
@@ -354,6 +380,8 @@ def _build_result_diagnostics_inner(estimates: Mapping[int, WbRegionalDemandEsti
             "group_prior_sku_district_count": 0,
             "global_prior_sku_district_count": 0,
             "seed_floor_sku_district_count": 0,
+            "calculation_mode": "Стартовое распределение",
+            "central_transition": {},
             "warnings": [],
         }
 
@@ -419,6 +447,8 @@ def _build_result_diagnostics_inner(estimates: Mapping[int, WbRegionalDemandEsti
             key: int(value) for key, value in sorted(zero_zero_no_signal_by_district.items())
         },
         "persistent_zero_district_counts": {},
+        "calculation_mode": str(first.get("calculation_mode") or ""),
+        "central_transition": dict(first.get("central_transition") or {}),
         "warnings": compact_warnings,
     }
 
@@ -434,6 +464,8 @@ def _collect_sku_signal(
     current_stock_by_district: Mapping[str, float],
     included_district_keys: tuple[str, ...],
     metadata: Mapping[str, Any],
+    legacy_stock_by_date: Mapping[str, Mapping[int, Mapping[str, float]]],
+    legacy_district_keys: tuple[str, ...],
 ) -> _SkuSignal:
     order_values = [
         float(order_counts_by_date.get(candidate.isoformat(), {}).get(nm_id, 0.0))
@@ -461,6 +493,10 @@ def _collect_sku_signal(
     observation_stats_by_district = {
         key: _DistrictObservationStats()
         for key in _active_district_keys()
+    }
+    legacy_observation_stats_by_district = {
+        key: _DistrictObservationStats()
+        for key in legacy_district_keys
     }
     full_clean_inspected_day_count = 0
     initial_window_full_clean_day_count = 0
@@ -506,6 +542,17 @@ def _collect_sku_signal(
                 order_count=order_count,
                 stats=observation_stats_by_district[key],
             )
+        legacy_previous_row = legacy_stock_by_date.get(previous_date := (candidate - timedelta(days=1)).isoformat(), {}).get(nm_id)
+        legacy_current_row = legacy_stock_by_date.get(candidate.isoformat(), {}).get(nm_id)
+        if legacy_previous_row is not None and legacy_current_row is not None:
+            for key in legacy_district_keys:
+                _collect_district_observation(
+                    key=key,
+                    previous_row=legacy_previous_row,
+                    current_row=legacy_current_row,
+                    order_count=order_count,
+                    stats=legacy_observation_stats_by_district[key],
+                )
 
     return _SkuSignal(
         nm_id=nm_id,
@@ -520,6 +567,7 @@ def _collect_sku_signal(
         full_clean_excluded_reason_counts=full_clean_excluded_reason_counts,
         partial_global_day_reason_counts=partial_global_day_reason_counts,
         observation_stats_by_district=observation_stats_by_district,
+        legacy_observation_stats_by_district=legacy_observation_stats_by_district,
         order_count_samples=order_samples,
         order_count_positive_fallback_used=positive_fallback_used,
         current_stock_by_district=current_stock_by_district,
@@ -734,6 +782,112 @@ def _ladder_estimate(
     )
 
 
+def _apply_central_transition(
+    estimate: WbRegionalDemandEstimate,
+    *,
+    signal: _SkuSignal,
+) -> WbRegionalDemandEstimate:
+    """Keep legacy Central demand inside Central while directional history warms up."""
+
+    central_keys = tuple(key for key in CENTRAL_PLANNING_ZONE_KEYS if key in _active_district_keys())
+    selected_central = tuple(key for key in central_keys if key in signal.included_district_keys)
+    legacy_stats = signal.legacy_observation_stats_by_district
+    legacy_scores = {
+        key: max(float(legacy_stats.get(key, _DistrictObservationStats()).score), 0.0)
+        for key in legacy_stats
+    }
+    legacy_total = sum(legacy_scores.values())
+    if not selected_central or legacy_total <= 0:
+        return estimate
+
+    legacy_shares = {
+        key: value / legacy_total
+        for key, value in legacy_scores.items()
+    }
+    directed_counts = {
+        key: int(signal.observation_stats_by_district[key].observation_count)
+        for key in central_keys
+    }
+    directed_scores = {
+        key: max(float(signal.observation_stats_by_district[key].score), 0.0)
+        for key in central_keys
+    }
+    transition_confidence = min(
+        1.0,
+        max(directed_counts.values(), default=0) / float(max(signal.requested_valid_day_count, 1)),
+    )
+    raw: dict[str, float] = {}
+    for key in signal.included_district_keys:
+        if key in selected_central:
+            startup_share = float(legacy_shares.get("central", 0.0)) / float(len(selected_central))
+            raw[key] = (
+                (1.0 - transition_confidence) * startup_share
+                + transition_confidence * directed_scores.get(key, 0.0)
+            )
+        elif key in legacy_shares:
+            raw[key] = float(legacy_shares[key])
+        else:
+            raw[key] = 0.0
+    total = sum(max(value, 0.0) for value in raw.values())
+    if total <= 0:
+        return estimate
+    shares = {key: 0.0 for key in _active_district_keys()}
+    for key in signal.included_district_keys:
+        shares[key] = max(raw.get(key, 0.0), 0.0) / total
+    source = (
+        "central_start_distribution"
+        if transition_confidence <= 0
+        else "central_mixed_distribution"
+        if transition_confidence < 1
+        else "central_direction_history"
+    )
+    diagnostics = dict(estimate.diagnostics)
+    share_sources = dict(diagnostics.get("district_share_sources") or {})
+    confidences = dict(diagnostics.get("confidence_by_district") or {})
+    for key in selected_central:
+        share_sources[key] = source
+        confidences[key] = transition_confidence
+    diagnostics.update(
+        {
+            "calculation_mode": (
+                "Стартовое распределение"
+                if transition_confidence <= 0
+                else "Смешанное распределение"
+                if transition_confidence < 1
+                else "Распределение по истории"
+            ),
+            "central_transition": {
+                "legacy_central_share": round(float(legacy_shares.get("central", 0.0)), 6),
+                "direction_observation_counts": directed_counts,
+                "required_observation_count": int(signal.requested_valid_day_count),
+                "confidence": round(transition_confidence, 6),
+                "startup_model_weight": round(1.0 - transition_confidence, 6),
+                "directed_history_weight": round(transition_confidence, 6),
+                "source": source,
+            },
+            "central_legacy_share_by_district": {
+                key: round(float(value), 6) for key, value in legacy_shares.items()
+            },
+        }
+    )
+    diagnostics["district_share_sources"] = share_sources
+    diagnostics["source_used"] = dict(share_sources)
+    diagnostics["confidence_by_district"] = confidences
+    diagnostics["average_depletion_share_by_district"] = dict(shares)
+    diagnostics["final_share_by_district"] = dict(shares)
+    return WbRegionalDemandEstimate(
+        nm_id=estimate.nm_id,
+        daily_demand_total=estimate.daily_demand_total,
+        district_daily_demand_by_key={
+            key: float(estimate.daily_demand_total) * float(shares.get(key, 0.0))
+            for key in _active_district_keys()
+        },
+        average_depletion_share_by_district=shares,
+        diagnostics=diagnostics,
+        warning=estimate.warning,
+    )
+
+
 def _base_diagnostics(
     *,
     signal: _SkuSignal,
@@ -782,6 +936,14 @@ def _base_diagnostics(
     invalid_counts = {
         key: int(signal.observation_stats_by_district[key].invalid_count)
         for key in _active_district_keys()
+    }
+    legacy_observation_counts = {
+        key: int(value.observation_count)
+        for key, value in signal.legacy_observation_stats_by_district.items()
+    }
+    legacy_positive_counts = {
+        key: int(value.positive_depletion_count)
+        for key, value in signal.legacy_observation_stats_by_district.items()
     }
     group_keys = _sku_group_keys(signal.metadata)
     return {
@@ -838,6 +1000,9 @@ def _base_diagnostics(
         "district_stockout_risk_counts": stockout_counts,
         "district_restock_counts": restock_counts,
         "district_invalid_observation_counts": invalid_counts,
+        "legacy_district_observation_counts": legacy_observation_counts,
+        "legacy_district_positive_depletion_counts": legacy_positive_counts,
+        "calculation_mode": "Распределение по истории" if method == REGIONAL_SHARE_SOURCE_FULL_CLEAN_DAYS else "Смешанное распределение",
         "positive_stock_observation_count": int(sum(observation_counts.values())),
         "positive_depletion_observation_count": int(sum(positive_depletion_counts.values())),
         "zero_zero_no_signal_day_count": int(sum(zero_zero_counts.values())),
@@ -1276,6 +1441,7 @@ def _stocks_by_nm_id(
     payload: Any,
     *,
     district_field_by_key: Mapping[str, str],
+    keys: tuple[str, ...] | None = None,
 ) -> dict[int, dict[str, float]]:
     result = getattr(payload, "result", payload)
     if str(getattr(result, "kind", "")) != "success":
@@ -1286,7 +1452,7 @@ def _stocks_by_nm_id(
         if not isinstance(nm_id, int):
             continue
         row: dict[str, float] = {}
-        for key in _active_district_keys():
+        for key in (keys or _active_district_keys()):
             field_name = str(district_field_by_key[key])
             value = getattr(item, field_name, None)
             if _is_number(value):
