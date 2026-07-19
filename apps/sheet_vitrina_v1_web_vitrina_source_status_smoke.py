@@ -32,6 +32,7 @@ def main() -> None:
     _assert_spp_proxy_missing_public_price_reason_is_human()
     _assert_archived_onec_source_is_hidden()
     _assert_archived_onec_failure_is_nonblocking()
+    _assert_empty_source_outcomes_reconcile()
     print("web_vitrina_source_aware_statuses: ok")
 
 
@@ -89,6 +90,36 @@ def _assert_archived_onec_failure_is_nonblocking() -> None:
     )
     if summary["status"] != "success" or summary["counts"]["error"] != 0:
         raise AssertionError(f"archived-only 1C failure must not drive active status, got {summary}")
+    if sum(summary["counts"].values()) != len(summary["outcomes"]):
+        raise AssertionError(f"active source counts must equal the visible outcome list, got {summary}")
+
+    archived_only = _active_refresh_summary(
+        SimpleNamespace(
+            semantic_status="error",
+            semantic_label="Ошибка",
+            semantic_tone="error",
+            semantic_reason="1C failed",
+            source_outcome_counts={"success": 0, "warning": 0, "error": 1},
+            source_outcomes=[{"source_key": "onec_stocks", "status": "error"}],
+        )
+    )
+    if archived_only["counts"] != {"success": 0, "warning": 0, "error": 0} or archived_only["outcomes"]:
+        raise AssertionError(f"archived-only status must expose an empty reconciled active list, got {archived_only}")
+
+
+def _assert_empty_source_outcomes_reconcile() -> None:
+    summary = _active_refresh_summary(
+        SimpleNamespace(
+            semantic_status="warning",
+            semantic_label="Внимание",
+            semantic_tone="warning",
+            semantic_reason="No persisted source detail",
+            source_outcome_counts={"success": 4, "warning": 2, "error": 1},
+            source_outcomes=[],
+        )
+    )
+    if summary["counts"] != {"success": 0, "warning": 0, "error": 0} or summary["outcomes"]:
+        raise AssertionError(f"empty active source list must not retain technical source counts, got {summary}")
 
 
 def _assert_current_snapshot_latest_confirmed_is_ok() -> None:

@@ -8041,7 +8041,10 @@
         await ensureWarehouseLoaded(state.warehouses.activeKey, {force: true});
         setWarehouseActionState(warehouseSyncButton, "success", "WB обновлён");
       } catch (error) {
-        renderWarehouseError(String(error && error.message ? error.message : error));
+        // The sync endpoint persists its failure while retaining the active last-good
+        // warehouse version. Reload the detail so operators keep the usable balances
+        // and see the backend-localized failure reason instead of a generic error table.
+        await ensureWarehouseLoaded(state.warehouses.activeKey, {force: true});
         setWarehouseActionState(warehouseSyncButton, "error", "Ошибка обновления");
       } finally {
         window.setTimeout(function() {

@@ -45,7 +45,7 @@ def active_refresh_summary(refresh_status: Any) -> dict[str, Any]:
             "label": str(getattr(refresh_status, "semantic_label", "") or "Нужно проверить"),
             "tone": str(getattr(refresh_status, "semantic_tone", "") or "warning"),
             "reason": str(getattr(refresh_status, "semantic_reason", "") or ""),
-            "counts": dict(getattr(refresh_status, "source_outcome_counts", {}) or {}),
+            "counts": {"success": 0, "warning": 0, "error": 0},
             "outcomes": [],
         }
     active = [
@@ -72,7 +72,6 @@ def active_refresh_summary(refresh_status: Any) -> dict[str, Any]:
     else:
         status = "warning"
         reason = "Активные источники в сохранённом статусе не найдены."
-        counts["warning"] = 1
     label = "Успешно" if status == "success" else ("Ошибка" if status == "error" else "Внимание")
     return {
         "status": status,

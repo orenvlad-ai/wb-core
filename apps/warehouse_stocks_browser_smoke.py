@@ -102,6 +102,7 @@ def main() -> None:
                     ),
                 )
                 _assert_route_explicit_settings_frame(f"http://127.0.0.1:{config.port}")
+                _assert_manual_sync_failure_keeps_last_good(f"http://127.0.0.1:{config.port}")
                 _assert_supplier_registry_stage_cost_frame(f"http://127.0.0.1:{config.port}")
                 _assert_stock_report_frame(f"http://127.0.0.1:{config.port}")
                 _assert_sku_management_loaded(f"http://127.0.0.1:{config.port}")
@@ -128,6 +129,48 @@ def main() -> None:
                 server.server_close()
                 thread.join(timeout=5)
     print("warehouse stocks browser smoke: ok")
+
+
+def _assert_manual_sync_failure_keeps_last_good(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    detail_fragment = "/v1/sheet-vitrina-v1/warehouses/production"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route(
+                "**/v1/sheet-vitrina-v1/warehouses/sync",
+                lambda route: route.fulfill(
+                    status=429,
+                    content_type="application/json",
+                    body=json.dumps({"error": "injected sync failure"}),
+                ),
+            )
+            page.goto(
+                f"{base_url}/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=production",
+                wait_until="domcontentloaded",
+            )
+            page.locator("[data-warehouse-balances] tr").first.wait_for()
+            with page.expect_request(
+                lambda request: detail_fragment in request.url and request.method == "GET",
+                timeout=5000,
+            ):
+                page.locator("[data-warehouse-sync]").click()
+            page.wait_for_function(
+                "() => ((document.querySelector('[data-warehouse-status]') || {}).textContent || '').trim() !== 'Загрузка…'"
+            )
+            _assert(
+                page.locator("[data-warehouse-status]").inner_text().strip() != "Ошибка загрузки",
+                "failed manual sync reloads last-good detail",
+            )
+            _assert(
+                "Данные склада не загружены"
+                not in page.locator('[data-unified-tab-panel="warehouses"]').inner_text(),
+                "failed manual sync does not leave a generic error surface",
+            )
+        finally:
+            browser.close()
 
 
 def _assert_route_explicit_settings_frame(base_url: str) -> None:
