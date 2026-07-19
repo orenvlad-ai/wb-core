@@ -96,6 +96,8 @@ Periodic WB WAC получает accepted inbound capital, но quantity все�
 
 Map frozen навсегда и сохраняет quality/provenance. WB opening cost добавляет доказанные downstream costs, включая paid acceptance только для accepted quantity. Historical daily quantity переиспользуется только из persisted daily snapshot evidence; cost переигрывается через frozen map и confirmed post-01.07 inbound layers. Для positive quantity zero/NULL cost запрещён.
 
+Targeted economics publication проверяет, что `DATA_VITRINA.header[2:]` точно совпадает с versioned `date_columns`, и изменяет только строки со стабильным projection key `scope|metric`. Сохранённые legacy presentation-only rows без такого ключа не участвуют в расчёте и остаются byte-for-byte неизменными; duplicate stable projection key или неоднозначный header блокируют весь dry-run с identity конкретного ready snapshot. Это compatibility read/write boundary, а не второй источник себестоимости.
+
 # 4. Targeted replay and certification
 
 Source change/archive/exclusion сбрасывает `Все расходы учтены`, ставит coalesced queue по stable source id/revision/effective date и affected SKU, затем coherent calculation публикует новую version atomically. Physical source rows не удаляются. Failed calculation оставляет last good active version.
