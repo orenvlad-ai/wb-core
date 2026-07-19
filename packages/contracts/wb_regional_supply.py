@@ -86,6 +86,7 @@ class WbRegionalSupplyDistrictRow:
     seed_floor_applied: bool = False
     share_source: str = ""
     share_confidence: float = 0.0
+    in_transit_qty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,8 @@ class WbRegionalSupplyDistrictResult:
     filename: str
     rows: list[WbRegionalSupplyDistrictRow]
     lead_time_to_region_days: int = 0
+    planning_zone_key: str = ""
+    planning_zone_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -125,6 +128,7 @@ class WbRegionalSupplyCalculationResult:
     diagnostics: dict[str, Any] | None = None
     wb_supply_overlay: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
+    payload_version: str = "v2_planning_zones"
 
 
 @dataclass(frozen=True)
@@ -140,3 +144,6 @@ class WbRegionalSupplyStatus:
     onec_stock_ff_summary: FactoryOrderStockFfOnecState
     last_result: WbRegionalSupplyCalculationResult | None
     wb_supply_overlay_options: dict[str, Any] | None = None
+    planning_zone_options: tuple[dict[str, str], ...] = ()
+    payload_version: str = "v2_planning_zones"
+    migration_status: dict[str, Any] | None = None

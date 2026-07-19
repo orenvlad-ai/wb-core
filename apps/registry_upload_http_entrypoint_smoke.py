@@ -91,7 +91,11 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.business_time import current_business_date_iso
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
-from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU, DISTRICT_SHORT_LABELS_RU
+from packages.contracts.wb_supply_planning_zones import (
+    SUPPLY_PLANNING_ZONE_KEYS,
+    SUPPLY_PLANNING_ZONE_LABELS_RU,
+    SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU,
+)
 
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_http_entrypoint"
 INPUT_BUNDLE_FIXTURE = ARTIFACTS_DIR / "input" / "registry_upload_bundle__fixture.json"
@@ -335,12 +339,12 @@ def main() -> None:
                 "wb_regional_district_options": [
                     {
                         "district_key": key,
-                        "district_name_ru": DISTRICT_LABELS_RU[key],
-                        "district_short_label_ru": DISTRICT_SHORT_LABELS_RU[key],
+                        "district_name_ru": SUPPLY_PLANNING_ZONE_LABELS_RU[key],
+                        "district_short_label_ru": SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU[key],
                     }
-                    for key in DISTRICT_KEYS
+                    for key in SUPPLY_PLANNING_ZONE_KEYS
                 ],
-                "wb_regional_default_included_district_keys": list(DISTRICT_KEYS),
+                "wb_regional_default_included_district_keys": list(SUPPLY_PLANNING_ZONE_KEYS),
                 "wb_supplies_path": DEFAULT_WB_SUPPLIES_PATH,
                 "wb_supplies_sync_path": DEFAULT_WB_SUPPLIES_SYNC_PATH,
                 "wb_supplies_backfill_path": "/v1/sheet-vitrina-v1/supply/wb-supplies/backfill",

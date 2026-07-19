@@ -11,6 +11,14 @@ from packages.contracts.stocks_block import (
     StocksItem,
     StocksRequest,
     StocksSuccess,
+    StocksWarehouseRow,
+)
+from packages.contracts.wb_supply_planning_zones import (
+    PLANNING_ZONE_CENTRAL_EAST,
+    PLANNING_ZONE_CENTRAL_NORTH,
+    PLANNING_ZONE_CENTRAL_SOUTH,
+    resolve_central_storage_warehouse,
+    warehouse_name_exclusion_codes,
 )
 
 
@@ -50,9 +58,13 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             "stock_ru_ural": 0.0,
             "stock_ru_south_caucasus": 0.0,
             "stock_ru_far_siberia": 0.0,
+            "stock_ru_central_north": 0.0,
+            "stock_ru_central_east": 0.0,
+            "stock_ru_central_south": 0.0,
         }
     )
     unmapped_region_totals: dict[str, float] = defaultdict(float)
+    warehouse_rows_by_nm: dict[int, list[StocksWarehouseRow]] = defaultdict(list)
 
     for row in normalized_rows:
         if _require_str(row, "snapshot_date") != snapshot_date:
@@ -73,7 +85,11 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
                 "stock_ru_ural": 0.0,
                 "stock_ru_south_caucasus": 0.0,
                 "stock_ru_far_siberia": 0.0,
+                "stock_ru_central_north": 0.0,
+                "stock_ru_central_east": 0.0,
+                "stock_ru_central_south": 0.0,
             }
+            warehouse_rows_by_nm[nm_id] = []
         if latest_ts_by_nm.get(nm_id) != snapshot_ts:
             continue
 
@@ -90,13 +106,70 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
         aggregated[nm_id]["in_way_to_client"] += in_way_to_client
         aggregated[nm_id]["in_way_from_client"] += in_way_from_client
         region_name = _require_str(row, "regionName")
-        metric_key = REGION_TO_FIELD.get(_normalize_region_name(region_name))
+        normalized_region_name = _normalize_region_name(region_name)
+        metric_key = REGION_TO_FIELD.get(normalized_region_name)
         if metric_key:
             aggregated[nm_id][metric_key] += stock_count
         elif abs(stock_count) > 0:
             unmapped_region_totals[region_name] += stock_count
 
+        warehouse_name = str(row.get("warehouseName") or "").strip()
+        warehouse_id = _optional_non_negative_int(
+            row.get("warehouseId", row.get("warehouseID", row.get("warehouse_id")))
+        )
+        registry_item, classification_source = resolve_central_storage_warehouse(
+            warehouse_id=warehouse_id,
+            warehouse_name=warehouse_name,
+            historical=True,
+        )
+        exclusion_codes = warehouse_name_exclusion_codes(warehouse_name)
+        planning_zone_key: str | None = None
+        classification_status = "outside_central_planning"
+        if registry_item is not None:
+            planning_zone_key = registry_item.planning_zone_key
+            planning_field = {
+                PLANNING_ZONE_CENTRAL_NORTH: "stock_ru_central_north",
+                PLANNING_ZONE_CENTRAL_EAST: "stock_ru_central_east",
+                PLANNING_ZONE_CENTRAL_SOUTH: "stock_ru_central_south",
+            }[planning_zone_key]
+            aggregated[nm_id][planning_field] += stock_count
+            classification_status = "mapped"
+        elif normalized_region_name == "Центральный":
+            if exclusion_codes:
+                classification_status = "excluded"
+            else:
+                classification_status = "unmapped"
+        warehouse_rows_by_nm[nm_id].append(
+            StocksWarehouseRow(
+                nm_id=nm_id,
+                warehouse_id=warehouse_id,
+                warehouse_name=warehouse_name,
+                region_name=region_name,
+                quantity=stock_count,
+                planning_zone_key=planning_zone_key,
+                classification_status=classification_status,
+                classification_source=classification_source,
+                exclusion_codes=exclusion_codes,
+            )
+        )
+
     covered_nm_ids = sorted(aggregated.keys())
+    reconciliation = {
+        "legacy_central_total": 0.0,
+        "central_planning_zone_total": 0.0,
+        "central_unmapped_total": 0.0,
+        "central_excluded_total": 0.0,
+    }
+    for nm_id in covered_nm_ids:
+        for item in warehouse_rows_by_nm.get(nm_id, []):
+            if _normalize_region_name(item.region_name) == "Центральный":
+                reconciliation["legacy_central_total"] += item.quantity
+            if item.planning_zone_key:
+                reconciliation["central_planning_zone_total"] += item.quantity
+            elif item.classification_status == "excluded":
+                reconciliation["central_excluded_total"] += item.quantity
+            elif item.classification_status == "unmapped":
+                reconciliation["central_unmapped_total"] += item.quantity
     missing_nm_ids = sorted(set(requested_nm_ids) - set(covered_nm_ids))
     missing_are_zero = bool(data.get("pagination_complete")) and bool(data.get("missing_nm_ids_are_zero"))
     if missing_nm_ids and missing_are_zero:
@@ -133,6 +206,9 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
                 + aggregated[nm_id]["in_way_to_client"]
                 + aggregated[nm_id]["in_way_from_client"]
             ),
+            stock_ru_central_north=aggregated[nm_id]["stock_ru_central_north"],
+            stock_ru_central_east=aggregated[nm_id]["stock_ru_central_east"],
+            stock_ru_central_south=aggregated[nm_id]["stock_ru_central_south"],
         )
         for nm_id in covered_nm_ids
     ]
@@ -143,6 +219,21 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             count=len(items),
             items=items,
             detail=_build_unmapped_detail(unmapped_region_totals),
+            warehouse_rows=[
+                row
+                for nm_id in covered_nm_ids
+                for row in warehouse_rows_by_nm.get(nm_id, [])
+            ],
+            planning_reconciliation={
+                **{key: round(float(value), 6) for key, value in reconciliation.items()},
+                "difference": round(
+                    float(reconciliation["legacy_central_total"])
+                    - float(reconciliation["central_planning_zone_total"])
+                    - float(reconciliation["central_unmapped_total"])
+                    - float(reconciliation["central_excluded_total"]),
+                    6,
+                ),
+            },
         )
     )
 
@@ -179,6 +270,16 @@ def _format_quantity(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return str(round(float(value), 6))
+
+
+def _optional_non_negative_int(value: Any) -> int | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _require_str(payload: Mapping[str, Any], key: str) -> str:

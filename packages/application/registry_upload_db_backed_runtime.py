@@ -66,6 +66,7 @@ from packages.contracts.cny_ledger import (
     CNY_LEDGER_OPERATION_STATUSES,
     CNY_LEDGER_OPERATION_TYPES,
 )
+from packages.contracts.wb_supply_planning_zones import CENTRAL_PLANNING_ZONE_KEYS
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS_DIR = ROOT / "artifacts" / "registry_upload_db_backed_runtime"
@@ -7696,6 +7697,10 @@ def _build_wb_regional_supply_calculation_audit_row(
         for item in districts
         if str(item.get("district_key", "")).strip()
     }
+    central_planning_totals = {
+        key: district_totals.get(key, {"total_qty": 0, "deficit_qty": 0, "row_count": 0})
+        for key in CENTRAL_PLANNING_ZONE_KEYS
+    }
     included_district_keys = [
         str(item)
         for item in settings.get("included_district_keys", [])
@@ -7747,8 +7752,13 @@ def _build_wb_regional_supply_calculation_audit_row(
             "estimated_volume": _audit_float(summary.get("estimated_volume")),
         },
         "district_totals_by_key": district_totals,
-        "central_total_qty": _audit_int(district_totals.get("central", {}).get("total_qty")),
-        "central_deficit_qty": _audit_int(district_totals.get("central", {}).get("deficit_qty")),
+        "central_total_qty": sum(
+            _audit_int(item.get("total_qty")) for item in central_planning_totals.values()
+        ),
+        "central_deficit_qty": sum(
+            _audit_int(item.get("deficit_qty")) for item in central_planning_totals.values()
+        ),
+        "central_planning_totals_by_zone": central_planning_totals,
         "diagnostics_summary": {
             "district_selection_mode": str(diagnostics.get("district_selection_mode", "")),
             "fallback_sku_count": _audit_int(diagnostics.get("fallback_sku_count")),

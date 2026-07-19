@@ -698,17 +698,17 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     }
     if factory_state != {"top_tab": "factory-order", "supply_section": "regional"}:
         raise AssertionError(f"top tab + supply subsection must survive reload, got {factory_state}")
-    if page.locator('input[name="regionalIncludedDistrict"]').count() != 6:
-        raise AssertionError("regional district selector must render six district checkboxes")
-    if page.locator('input[name="regionalIncludedDistrict"]:checked').count() != 6:
+    if page.locator('input[name="regionalIncludedDistrict"]').count() != 8:
+        raise AssertionError("regional selector must render eight planning-zone checkboxes")
+    if page.locator('input[name="regionalIncludedDistrict"]:checked').count() != 8:
         raise AssertionError("regional district selector must default to all districts")
-    if page.locator("[data-regional-lead-time-district]").count() != 6:
-        raise AssertionError("regional district selector must render six district delivery inputs")
-    for district_key in ("central", "northwest", "volga", "ural", "south_caucasus", "far_siberia"):
+    if page.locator("[data-regional-lead-time-district]").count() != 8:
+        raise AssertionError("regional selector must render eight planning-zone delivery inputs")
+    for district_key in ("central_north", "central_east", "central_south", "northwest", "volga", "ural", "south_caucasus", "far_siberia"):
         if page.locator(f'[data-regional-lead-time-district="{district_key}"]').input_value() != "15":
             raise AssertionError("regional district delivery inputs must default to 15")
     selector_text = page.locator("#regionalDistrictSelectorList").inner_text()
-    for abbreviation in ("ЦФО", "СЗФО", "ПФО", "УФО", "ЮФО/СКФО", "ДВФО/СФО"):
+    for abbreviation in ("ЦФО Север", "ЦФО Восток", "ЦФО Юг", "СЗФО", "ПФО", "УФО", "ЮФО/СКФО", "ДВФО/СФО"):
         if abbreviation not in selector_text:
             raise AssertionError(f"regional selector must use district abbreviation {abbreviation!r}")
     if "Центральный федеральный округ" in selector_text:
@@ -720,18 +720,18 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             if (!raw) return false;
             const parsed = JSON.parse(raw);
             return Array.isArray(parsed.wb_regional_included_district_keys) &&
-                parsed.wb_regional_included_district_keys.length === 5 &&
+                parsed.wb_regional_included_district_keys.length === 7 &&
                 !parsed.wb_regional_included_district_keys.includes("far_siberia");
         }""",
         arg=STORAGE_KEY,
     )
-    page.fill('[data-regional-lead-time-district="central"]', "2")
-    page.dispatch_event('[data-regional-lead-time-district="central"]', "change")
+    page.fill('[data-regional-lead-time-district="central_north"]', "2")
+    page.dispatch_event('[data-regional-lead-time-district="central_north"]', "change")
     page.fill('[data-regional-lead-time-district="northwest"]', "10")
     page.dispatch_event('[data-regional-lead-time-district="northwest"]', "change")
     page.click("#regionalDistrictSelectAllButton")
     page.click("#regionalDistrictExcludeFarSiberiaButton")
-    if page.locator('[data-regional-lead-time-district="central"]').input_value() != "2":
+    if page.locator('[data-regional-lead-time-district="central_north"]').input_value() != "2":
         raise AssertionError("regional select-all/exclude buttons must not reset central delivery days")
     if page.locator('[data-regional-lead-time-district="northwest"]').input_value() != "10":
         raise AssertionError("regional select-all/exclude buttons must not reset northwest delivery days")
@@ -745,18 +745,21 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "report_date": "2026-04-20",
         "horizon_days": 7,
         "active_sku_count": 33,
+        "payload_version": "v2_planning_zones",
         "settings": {
-            "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
+            "included_district_keys": ["central_north", "central_east", "central_south", "northwest", "volga", "ural", "south_caucasus"],
         },
         "summary": {"total_qty": 100, "estimated_weight": 0.0, "estimated_volume": 0.0},
         "districts": [
             {
-                "district_key": "central",
-                "district_name_ru": "Центральный федеральный округ",
+                "district_key": "central_north",
+                "planning_zone_key": "central_north",
+                "planning_zone_label": "ЦФО Север",
+                "district_name_ru": "ЦФО Север",
                 "total_qty": 100,
                 "deficit_qty": 10,
                 "filename": "wb_regional_central_old.xlsx",
-                "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx",
+                "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central_north.xlsx",
                 "rows": [],
             },
         ],
@@ -789,9 +792,10 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             "report_date": "2026-04-20",
             "horizon_days": 7,
             "active_sku_count": 33,
+            "payload_version": "v2_planning_zones",
             "methodology_note": "test methodology note",
             "settings": {
-                "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
+                "included_district_keys": ["central_north", "central_east", "central_south", "northwest", "volga", "ural", "south_caucasus"],
                 "lead_time_to_region_days_by_district": request_payload.get("lead_time_to_region_days_by_district") or {},
             },
             "summary": {"total_qty": 0, "estimated_weight": 0.0, "estimated_volume": 0.0},
@@ -831,7 +835,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 "min_selected_valid_day_count": 0,
                 "max_selected_valid_day_count": 14,
                 "max_inspected_day_count": 120,
-                "included_district_keys": ["central", "northwest", "volga", "ural", "south_caucasus"],
+                "included_district_keys": ["central_north", "central_east", "central_south", "northwest", "volga", "ural", "south_caucasus"],
                 "excluded_district_keys": ["far_siberia"],
                 "lead_time_to_region_days_by_district": request_payload.get("lead_time_to_region_days_by_district") or {},
                 "excluded_day_reason_counts": {
@@ -849,12 +853,36 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             "recommendations_zip_path": "/v1/sheet-vitrina-v1/supply/wb-regional/recommendations.zip",
             "districts": [
                 {
-                    "district_key": "central",
-                    "district_name_ru": "Центральный федеральный округ",
+                    "district_key": "central_north",
+                    "planning_zone_key": "central_north",
+                    "planning_zone_label": "ЦФО Север",
+                    "district_name_ru": "ЦФО Север",
                     "total_qty": 100,
                     "deficit_qty": 10,
-                    "filename": "wb_regional_central_fo.xlsx",
-                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central.xlsx",
+                    "filename": "wb_regional_central_north_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central_north.xlsx",
+                    "rows": [],
+                },
+                {
+                    "district_key": "central_east",
+                    "planning_zone_key": "central_east",
+                    "planning_zone_label": "ЦФО Восток",
+                    "district_name_ru": "ЦФО Восток",
+                    "total_qty": 50,
+                    "deficit_qty": 15,
+                    "filename": "wb_regional_central_east_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central_east.xlsx",
+                    "rows": [],
+                },
+                {
+                    "district_key": "central_south",
+                    "planning_zone_key": "central_south",
+                    "planning_zone_label": "ЦФО Юг",
+                    "district_name_ru": "ЦФО Юг",
+                    "total_qty": 75,
+                    "deficit_qty": 25,
+                    "filename": "wb_regional_central_south_fo.xlsx",
+                    "download_path": "/v1/sheet-vitrina-v1/supply/wb-regional/district/central_south.xlsx",
                     "rows": [],
                 },
                 {
@@ -927,10 +955,12 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                 body=json.dumps(
                     {
                         "contract_name": "sheet_vitrina_v1_wb_regional_supply_planning",
-                        "contract_version": "v1",
+                        "contract_version": "v2_planning_zones",
                         "status": "blocked",
                         "calculation_id": "calc-browser-regional-retry",
-                        "district_key": "central",
+                        "district_key": "central_north",
+                        "planning_zone_key": "central_north",
+                        "planning_zone_label": "ЦФО Север",
                         "warnings": [],
                         "blockers": [
                             {
@@ -960,11 +990,13 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
             body=json.dumps(
                 {
                     "contract_name": "sheet_vitrina_v1_wb_regional_supply_planning",
-                    "contract_version": "v1",
+                    "contract_version": "v2_planning_zones",
                     "status": "ready",
                     "calculation_id": request_payload.get("calculation_id") or "calc-browser-regional-retry",
-                    "district_key": "central",
-                    "district_name_ru": "Центральный федеральный округ",
+                    "district_key": "central_north",
+                    "district_name_ru": "ЦФО Север",
+                    "planning_zone_key": "central_north",
+                    "planning_zone_label": "ЦФО Север",
                     "package_type": "box",
                     "products": [
                         {
@@ -984,6 +1016,12 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                         "planned_qty_total": 100,
                         "option_count": 1,
                         "grouped_warehouse_count": 1,
+                        "available_option_count": 1,
+                        "excluded_option_count": 8,
+                        "sorting_center_excluded_count": 1,
+                        "specialized_excluded_count": 2,
+                        "partial_excluded_count": 1,
+                        "blocked_excluded_count": 2,
                         "accepts_all_barcode_option_count": 1,
                         "sgt_option_count": 0,
                         "same_district_option_count": 1,
@@ -997,20 +1035,23 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                         {
                             "option_id": "browser-option-1",
                             "rank": 1,
-                            "recommendation": "Рекомендуемый вариант",
-                            "recommendation_explanation": "склад внутри выбранного округа; принимает все ШК; логистика 110%; хранение 105%.",
+                            "recommendation": "Рекомендуемый склад",
+                            "recommendation_explanation": "ЦФО Север; основной; ближайшая дата 2026-07-01.",
                             "option_kind": "warehouse_group",
                             "date": "2026-07-01",
-                            "best_date": {"date": "2026-07-01", "coefficient": 1, "allow_unload": True, "is_good_date": True},
-                            "dates": [{"date": "2026-07-01", "coefficient": 1, "allow_unload": True, "is_good_date": True}],
+                            "dates": [{"date": "2026-07-01", "coefficient": 1, "allow_unload": True, "is_available": True, "is_good_date": True, "is_free_date": False, "package_type": "box", "status": "paid"}],
                             "date_count": 1,
                             "good_date_count": 1,
                             "free_date_count": 0,
-                            "warehouse_id": 101,
-                            "warehouse_name": "Коледино",
-                            "warehouse_district_key": "central",
-                            "warehouse_district_label_ru": "Центральный федеральный округ",
-                            "warehouse_district_short_label_ru": "ЦФО",
+                            "first_available_date": "2026-07-01",
+                            "first_free_date": "",
+                            "unique_available_date_count": 1,
+                            "unique_free_date_count": 0,
+                            "planning_zone_key": "central_north",
+                            "planning_zone_label": "ЦФО Север",
+                            "warehouse_id": 301806,
+                            "warehouse_name": "Тверь",
+                            "warehouse_role": "primary",
                             "warehouse_scope": "same_district",
                             "route_type": "direct",
                             "transit_warehouse_id": "",
@@ -1020,10 +1061,14 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                             "allow_unload": True,
                             "barcode_coverage": {"accepted_count": 1, "total_count": 1, "accepts_all_barcodes": True},
                             "accepts_all_barcodes": True,
-                            "is_sgt": False,
-                            "is_major_expected": True,
+                            "package_type": "box",
+                            "package_supported": True,
+                            "is_storage_warehouse": True,
+                            "is_sorting_center": False,
+                            "recommendation_enabled": True,
+                            "direct_destination": True,
                             "box_tariff": {
-                                "warehouseName": "Коледино",
+                                "warehouseName": "Тверь",
                                 "boxDeliveryCoefExpr": "110%",
                                 "boxStorageCoefExpr": "105%",
                                 "boxDeliveryBase": "5",
@@ -1031,19 +1076,18 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                                 "logistics_display": "110%",
                                 "storage_display": "105%",
                             },
-                            "transit_route_count": 1,
-                            "best_transit_route": {
-                                "transitWarehouseName": "Обухово",
-                                "destinationWarehouseName": "Коледино",
-                                "best_box_tariff_value": 4.7,
-                                "palletTariff": 5700,
-                            },
-                            "tariff_evidence": {"box": {"warehouseName": "Коледино"}, "transit": None},
+                            "transit_route_count": 0,
+                            "best_transit_route": None,
+                            "tariff_evidence": {"box": {"warehouseName": "Тверь"}, "transit": None},
+                            "blocker_codes": [],
+                            "exclusion_reasons": [],
+                            "status": "available",
                             "warnings": [],
                             "operator_handoff": {
                                 "copy_format": "json",
-                                "district_key": "central",
-                                "warehouse_name": "Коледино",
+                                "district_key": "central_north",
+                                "planning_zone_key": "central_north",
+                                "warehouse_name": "Тверь",
                                 "date": "2026-07-01",
                                 "products": [{"nm_id": 1001, "barcode": "4600000000001", "quantity": 100}],
                             },
@@ -1051,34 +1095,30 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
                     ],
                     "major_warehouse_diagnostics": [
                         {
-                            "expected_warehouse_name": "Коледино",
-                            "found_in_acceptance_options": True,
-                            "found_in_warehouses_catalog": True,
-                            "found_in_box_tariffs": True,
-                            "found_in_acceptance_coefficients": True,
-                            "accepted_barcode_count": 1,
-                            "total_barcode_count": 1,
-                            "accepts_all_barcodes": True,
-                            "min_coefficient": 1,
-                            "has_free_date": False,
-                            "visible_in_main_list": True,
-                            "hidden_reason": "visible",
-                            "mapped_district_label_ru": "Центральный федеральный округ",
-                        },
-                        {
-                            "expected_warehouse_name": "Электросталь",
-                            "found_in_acceptance_options": False,
-                            "found_in_warehouses_catalog": True,
-                            "found_in_box_tariffs": True,
-                            "found_in_acceptance_coefficients": True,
-                            "accepted_barcode_count": 0,
-                            "total_barcode_count": 1,
-                            "accepts_all_barcodes": False,
-                            "visible_in_main_list": False,
-                            "hidden_reason": "not_returned_by_acceptance_options",
-                            "mapped_district_label_ru": "Центральный федеральный округ",
+                            "warehouse_id": 301806,
+                            "expected_warehouse_name": "Тверь",
+                            "planning_zone_key": "central_north",
+                            "found_in_catalog": True,
+                            "catalog_active": True,
+                            "status": "returned_by_general_acceptance_options",
+                            "probe_called": False,
                         },
                     ],
+                    "diagnostics": {
+                        "request_id": "browser-request-id",
+                        "requested_barcode_count": 1,
+                        "raw_option_count": 12,
+                        "grouped_warehouse_count": 9,
+                        "warehouse_registry_version": "central-storage-v1-2026-07-19",
+                        "exclusion_reason_counts": {"sorting_center": 1, "specialized_food": 1, "partial_barcode_coverage": 1},
+                        "excluded_options": [
+                            {
+                                "warehouse_id": 910004,
+                                "warehouse_name": "СЦ Тверь",
+                                "exclusion_reasons": ["sorting_center", "warehouse_unclassified"],
+                            }
+                        ],
+                    },
                     "cache": {"enabled": False},
                     "evidence": {"wb_api_read_only": True, "no_wb_mutations": True},
                 },
@@ -1091,11 +1131,13 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     page.route("**" + DEFAULT_WB_REGIONAL_PLANNING_OPTIONS_PATH, _capture_regional_planning)
     page.click("#calculateRegionalSupplyButton")
     page.wait_for_function("() => document.getElementById('regionalMessage') && document.getElementById('regionalMessage').textContent.includes('Расчёт выполнен')")
-    if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central", "northwest", "volga", "ural", "south_caucasus"]:
+    if not regional_requests or regional_requests[-1].get("included_district_keys") != ["central_north", "central_east", "central_south", "northwest", "volga", "ural", "south_caucasus"]:
         raise AssertionError(f"regional calculate payload must include selected districts, got {regional_requests}")
     lead_time_payload = regional_requests[-1].get("lead_time_to_region_days_by_district")
     expected_lead_times = {
-        "central": 2,
+        "central_north": 2,
+        "central_east": 15,
+        "central_south": 15,
         "northwest": 10,
         "volga": 15,
         "ural": 15,
@@ -1127,11 +1169,13 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if page.locator("#regionalDiagnosticsDetails").is_hidden():
         raise AssertionError("regional diagnostics details must be visible after fallback result")
     district_rows = page.locator("#regionalDistrictTableBody tr")
-    if district_rows.count() != 5:
+    if district_rows.count() != 7:
         raise AssertionError(f"regional district table must show only included districts, got {district_rows.count()} rows")
     district_table_text = page.locator("#regionalDistrictTableBody").inner_text()
-    if "ЦФО" not in district_table_text or "СЗФО" not in district_table_text:
+    if not all(label in district_table_text for label in ("ЦФО Север", "ЦФО Восток", "ЦФО Юг", "СЗФО")):
         raise AssertionError(f"regional district table must use short district labels, got {district_table_text!r}")
+    if "ЦФО Запад" in district_table_text:
+        raise AssertionError(f"central west must not appear in planning results: {district_table_text!r}")
     if "Центральный федеральный округ" in district_table_text:
         raise AssertionError(f"regional district table must not use full district names as primary labels, got {district_table_text!r}")
     if "Дальневосточный и Сибирский" in district_table_text or "far_siberia" in district_table_text:
@@ -1173,7 +1217,7 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     for technical in ("partial_district_observations", "district_zero_zero_no_signal", "district_restock_or_upward_correction", "seed_floor"):
         if technical in details_text:
             raise AssertionError(f"technical code {technical!r} must be translated in visible diagnostics details")
-    if page.locator('[data-regional-planning-district="central"]').is_disabled():
+    if page.locator('[data-regional-planning-district="central_north"]').is_disabled():
         raise AssertionError("regional planning button must be enabled for a district with positive quantity")
     volga_button = page.locator('[data-regional-planning-district="volga"]')
     if not volga_button.is_disabled():
@@ -1183,7 +1227,11 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     volga_cell_text = volga_button.locator("xpath=ancestor::td[1]").inner_text()
     if "Нет количества к поставке" not in volga_cell_text:
         raise AssertionError(f"zero-quantity disabled reason must be visible near the button, got {volga_cell_text!r}")
-    page.click('[data-regional-planning-district="central"]')
+    if page.locator('[data-regional-planning-district="central_east"]').count() != 1 or page.locator('[data-regional-planning-district="central_south"]').count() != 1:
+        raise AssertionError("all three Central planning-zone rows must expose warehouse selection")
+    if page.locator('[data-regional-planning-district="central_west"]').count() != 0:
+        raise AssertionError("ЦФО Запад must not appear in result rows")
+    page.click('[data-regional-planning-district="central_north"]')
     page.wait_for_function(
         "() => document.getElementById('regionalPlanningMessage') && document.getElementById('regionalPlanningMessage').textContent.includes('Найдено вариантов: 1')"
     )
@@ -1192,9 +1240,9 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
     if regional_planning_requests[0].get("calculation_id") != "calc-browser-regional":
         raise AssertionError(f"regional planning must use fresh calculate result, not stale status result, got {regional_planning_requests}")
     latest_planning_request = regional_planning_requests[-1]
-    if latest_planning_request.get("district_key") != "central" or latest_planning_request.get("calculation_id") != "calc-browser-regional-retry":
+    if latest_planning_request.get("district_key") != "central_north" or latest_planning_request.get("planning_zone_key") != "central_north" or latest_planning_request.get("calculation_id") != "calc-browser-regional-retry":
         raise AssertionError(f"regional planning must retry once with actual calculation id after mismatch, got {regional_planning_requests}")
-    if page.locator('[data-regional-planning-district="central"]').is_disabled():
+    if page.locator('[data-regional-planning-district="central_north"]').is_disabled():
         raise AssertionError("regional planning button must re-enable after successful planning response")
     if page.locator("#regionalPlanningPanel").is_hidden():
         raise AssertionError("regional planning panel must render after successful planning response")
@@ -1203,24 +1251,30 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         "Подбор складов WB",
         "SKU: 1",
         "ШК готово: 1/1",
-        "Вариантов: 1",
-        "Складов: 1",
-        "Все ШК: 1",
-        "Коледино",
-        "ЦФО",
-        "Прямо",
-        "Примут все ШК",
+        "Разрешённых складов: 1",
+        "С доступной датой: 1",
+        "Исключено: 8",
+        "Тверь",
+        "ЦФО Север",
+        "Прямой склад хранения",
+        "Все обязательные ШК",
         "Логистика: 110%",
         "Хранение: 105%",
-        "Транзит доступен: 1 маршрутов",
-        "Проверка ключевых складов округа",
-        "Электросталь",
-        "not_returned_by_acceptance_options",
-        "Скопировать JSON",
+        "Безопасная диагностика подбора",
+        "WB request ID: browser-request-id",
+        "Точные warehouseID-probes складов направления",
+        "Почему варианты исключены",
+        "Скопировать диагностику JSON",
         "Скопировать",
     ):
         if expected not in regional_planning_text:
             raise AssertionError(f"regional planning panel must include {expected!r}, got {regional_planning_text!r}")
+    if "СЦ Тверь" in page.locator("#regionalPlanningTableBody").inner_text():
+        raise AssertionError("excluded sorting centres must stay out of the manager table")
+    page.locator("#regionalPlanningDiagnostics details summary").click()
+    exclusion_detail_text = page.locator("#regionalPlanningDiagnostics details").inner_text()
+    if "СЦ Тверь" not in exclusion_detail_text or "Сортировочный центр" not in exclusion_detail_text:
+        raise AssertionError(f"diagnostic-only exclusions must explain the warehouse reason: {exclusion_detail_text!r}")
     regional_planning_overflow = page.evaluate(
         """() => {
             const root = document.scrollingElement || document.documentElement;
@@ -1246,25 +1300,75 @@ def _run_persistence_scenario(context, base_url: str) -> dict[str, object]:
         raise AssertionError(f"regional planning panel must not expand the page and copy button must stay visible, got {regional_planning_overflow}")
     if not regional_planning_overflow["wrapLocalScrollReady"]:
         raise AssertionError(f"regional planning table must be contained in local scroll wrapper, got {regional_planning_overflow}")
+    regional_planning_layout = page.evaluate(
+        """() => {
+            const panel = document.getElementById('regionalPlanningPanel');
+            const grid = panel && panel.parentElement ? panel.parentElement.querySelector(':scope > .factory-grid') : null;
+            const resultCard = document.querySelector('[aria-labelledby="regional-summary-title"]');
+            const gridRect = grid ? grid.getBoundingClientRect() : null;
+            const panelRect = panel ? panel.getBoundingClientRect() : null;
+            return {
+                outsideResultCard: Boolean(panel && resultCard && !resultCard.contains(panel)),
+                outsideTwoColumnGrid: Boolean(panel && grid && !grid.contains(panel)),
+                belowTwoColumnGrid: Boolean(gridRect && panelRect && panelRect.top >= gridRect.bottom - 1),
+                sameSurfaceWidth: Boolean(gridRect && panelRect && Math.abs(gridRect.width - panelRect.width) <= 2),
+                duplicatePanelCount: document.querySelectorAll('#regionalPlanningPanel').length
+            };
+        }"""
+    )
+    if regional_planning_layout != {
+        "outsideResultCard": True,
+        "outsideTwoColumnGrid": True,
+        "belowTwoColumnGrid": True,
+        "sameSurfaceWidth": True,
+        "duplicatePanelCount": 1,
+    }:
+        raise AssertionError(f"planning panel must be one full-width card below the two-column grid: {regional_planning_layout}")
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_timeout(50)
+    regional_planning_mobile = page.evaluate(
+        """() => {
+            const root = document.scrollingElement || document.documentElement;
+            const panel = document.getElementById('regionalPlanningPanel');
+            const wrap = document.querySelector('.regional-planning-table-wrap');
+            const grid = panel && panel.parentElement ? panel.parentElement.querySelector(':scope > .factory-grid') : null;
+            return {
+                pageOverflow: root ? root.scrollWidth > root.clientWidth + 2 : true,
+                panelWithinViewport: panel ? panel.getBoundingClientRect().width <= window.innerWidth + 1 : false,
+                localTableScroll: wrap ? wrap.scrollWidth > wrap.clientWidth : false,
+                singleColumnGrid: grid ? window.getComputedStyle(grid).gridTemplateColumns.split(' ').length === 1 : false
+            };
+        }"""
+    )
+    if regional_planning_mobile != {
+        "pageOverflow": False,
+        "panelWithinViewport": True,
+        "localTableScroll": True,
+        "singleColumnGrid": True,
+    }:
+        raise AssertionError(f"planning card must remain contained at a narrow viewport: {regional_planning_mobile}")
+    page.set_viewport_size({"width": 1280, "height": 720})
     if page.locator("#regionalPlanningFilters").is_hidden():
         raise AssertionError("regional planning grouped filters must be visible when options exist")
-    page.check('input[data-regional-planning-filter="freeDates"]')
-    if "По текущим фильтрам складов не найдено" not in page.locator("#regionalPlanningTableBody").inner_text():
-        raise AssertionError("free-date filter must hide paid-only warehouse options")
-    page.uncheck('input[data-regional-planning-filter="freeDates"]')
-    if "Коледино" not in page.locator("#regionalPlanningTableBody").inner_text():
-        raise AssertionError("unchecking free-date filter must restore grouped warehouse option")
+    page.fill("#regionalPlanningSearch", "нет такого склада")
+    if "Среди разрешённых складов нет совпадений" not in page.locator("#regionalPlanningTableBody").inner_text():
+        raise AssertionError("manager search must only filter already allowed warehouse options")
+    page.fill("#regionalPlanningSearch", "Тверь")
+    if "Тверь" not in page.locator("#regionalPlanningTableBody").inner_text():
+        raise AssertionError("warehouse search must restore the allowed option")
     regional_planning_state = {
         "request": latest_planning_request,
         "summary": page.locator("#regionalPlanningSummary").inner_text(),
         "first_option": page.locator("#regionalPlanningTableBody tr").first.inner_text(),
         "overflow": regional_planning_overflow,
+        "layout": regional_planning_layout,
+        "mobile": regional_planning_mobile,
     }
-    page.click('[data-regional-planning-district="central"]')
+    page.click('[data-regional-planning-district="central_north"]')
     page.wait_for_function(
         "() => document.getElementById('regionalPlanningMessage') && document.getElementById('regionalPlanningMessage').textContent.includes('Подбор завершился с ошибкой')"
     )
-    if page.locator('[data-regional-planning-district="central"]').is_disabled():
+    if page.locator('[data-regional-planning-district="central_north"]').is_disabled():
         raise AssertionError("regional planning button must re-enable after planning error")
     page.click('[data-supply-section-button="factory"]')
     if not page.locator('input[name="factoryInboundSource"][value="supplier_registry"]').is_checked():

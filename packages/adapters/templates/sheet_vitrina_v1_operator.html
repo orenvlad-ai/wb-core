@@ -2035,12 +2035,15 @@
     }
 
     .regional-planning-panel {
-      margin-top: 12px;
-      border-top: 1px solid var(--border);
-      padding-top: 12px;
+      width: 100%;
       max-width: 100%;
       min-width: 0;
+      box-sizing: border-box;
       overflow: hidden;
+    }
+
+    .regional-planning-fullwidth {
+      margin-top: 18px;
     }
 
     .regional-planning-panel[hidden] {
@@ -2076,8 +2079,9 @@
 
     .regional-planning-title {
       margin: 0;
-      font-size: 14px;
-      font-weight: 800;
+      font-size: 20px;
+      letter-spacing: normal;
+      text-transform: none;
     }
 
     .regional-planning-summary {
@@ -2123,18 +2127,10 @@
       color: var(--muted-strong);
     }
 
-    .regional-planning-filters label {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      min-width: 0;
-      white-space: nowrap;
-    }
-
     .regional-planning-search {
-      flex: 1 1 180px;
-      min-width: 140px;
-      max-width: 260px;
+      flex: 1 1 240px;
+      min-width: 180px;
+      max-width: 360px;
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 6px 8px;
@@ -2153,8 +2149,8 @@
     }
 
     .regional-planning-table {
-      width: 1280px;
-      min-width: 1280px;
+      width: 1840px;
+      min-width: 1840px;
       max-width: none;
       border-collapse: collapse;
       font-size: 11px;
@@ -3695,6 +3691,16 @@
         min-width: 0;
       }
 
+      .regional-planning-fullwidth {
+        margin-top: 12px;
+      }
+
+      .regional-planning-search {
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+      }
+
       .stock-selector-field {
         min-width: 0;
       }
@@ -4480,14 +4486,14 @@
               </p>
               <div class="district-selector" aria-labelledby="regionalDistrictSelectorTitle">
                 <div class="district-selector-head">
-                  <h3 id="regionalDistrictSelectorTitle">Округа для расчёта пропорций</h3>
+                  <h3 id="regionalDistrictSelectorTitle">Направления для расчёта поставки</h3>
                   <div class="district-selector-actions">
                     <button id="regionalDistrictSelectAllButton" class="district-selector-button" type="button">Все</button>
                     <button id="regionalDistrictExcludeFarSiberiaButton" class="district-selector-button" type="button">Без ДВ/Сибирь</button>
                   </div>
                 </div>
                 <div id="regionalDistrictSelectorList" class="district-selector-list"></div>
-                <p id="regionalDistrictSelectorMessage" class="field-note">По умолчанию участвуют все федеральные округа.</p>
+                <p id="regionalDistrictSelectorMessage" class="field-note">По умолчанию участвуют все операционные направления.</p>
               </div>
             </section>
 
@@ -4530,13 +4536,13 @@
                 </div>
               </dl>
               <div class="block-header" style="margin: 2px 0 0;">
-                <h3 id="regional-districts-title" class="block-title">Сводка по федеральным округам</h3>
+                <h3 id="regional-districts-title" class="block-title">Сводка по направлениям поставки</h3>
               </div>
               <div class="district-table-wrap">
                 <table class="district-table">
                   <thead>
                     <tr>
-                      <th>Федеральный округ</th>
+                      <th>Направление</th>
                       <th>Рекомендовано / к поставке</th>
                       <th>Дефицит</th>
                       <th>Скачать XLSX</th>
@@ -4550,49 +4556,6 @@
                   </tbody>
                 </table>
               </div>
-              <section id="regionalPlanningPanel" class="regional-planning-panel" hidden>
-                <div class="regional-planning-head">
-                  <div>
-                    <h3 id="regionalPlanningTitle" class="regional-planning-title">Подбор складов WB</h3>
-                    <p id="regionalPlanningMessage" class="section-message">Выберите округ для подбора.</p>
-                  </div>
-                  <button id="copyRegionalPlanningPayloadButton" class="action-button secondary-button" type="button" disabled>Скопировать JSON</button>
-                </div>
-                <div id="regionalPlanningSummary" class="regional-planning-summary"></div>
-                <ul id="regionalPlanningBlockers" class="regional-planning-blockers" hidden></ul>
-                <div id="regionalPlanningFilters" class="regional-planning-filters" hidden>
-                  <label><input type="checkbox" data-regional-planning-filter="sameDistrict"> Только выбранный округ</label>
-                  <label><input type="checkbox" data-regional-planning-filter="allBarcodes"> Примут все ШК</label>
-                  <label><input type="checkbox" data-regional-planning-filter="goodDates"> Хорошие даты</label>
-                  <label><input type="checkbox" data-regional-planning-filter="freeDates"> Бесплатные даты</label>
-                  <label><input type="checkbox" data-regional-planning-filter="hideSgt"> Скрыть СГТ</label>
-                  <label><input type="checkbox" data-regional-planning-filter="showPartial" checked> Показывать partial</label>
-                  <input id="regionalPlanningSearch" class="regional-planning-search" type="search" placeholder="Поиск склада">
-                </div>
-                <div class="regional-planning-table-wrap">
-                  <table class="regional-planning-table" aria-label="Варианты складов WB">
-                    <thead>
-                      <tr>
-                        <th>Ранг</th>
-                        <th>Склад</th>
-                        <th>ШК</th>
-                        <th>Приёмка</th>
-                        <th>Округ</th>
-                        <th>Логистика / хранение</th>
-                        <th>Маршрут / транзит</th>
-                        <th>Статус</th>
-                        <th>Действие</th>
-                      </tr>
-                    </thead>
-                    <tbody id="regionalPlanningTableBody">
-                      <tr>
-                        <td colspan="9">Варианты ещё не запрошены.</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div id="regionalPlanningDiagnostics" class="regional-planning-diagnostics" hidden></div>
-              </section>
               <p id="regionalMessage" class="section-message"></p>
               <p id="regionalWbSupplyOverlayNote" class="field-note">WB-поставки не выбраны.</p>
               <p id="regionalDiagnosticsNote" class="field-note">Диагностика методологии появится после расчёта.</p>
@@ -4606,6 +4569,46 @@
               </div>
             </section>
           </div>
+          <section id="regionalPlanningPanel" class="block regional-planning-panel regional-planning-fullwidth" aria-labelledby="regionalPlanningTitle" hidden>
+            <div class="regional-planning-head">
+              <div>
+                <h2 id="regionalPlanningTitle" class="block-title regional-planning-title">Подбор складов WB</h2>
+                <p id="regionalPlanningMessage" class="section-message">Выберите направление для подбора.</p>
+              </div>
+              <button id="copyRegionalPlanningPayloadButton" class="action-button secondary-button" type="button" disabled>Скопировать диагностику JSON</button>
+            </div>
+            <div id="regionalPlanningSummary" class="regional-planning-summary"></div>
+            <ul id="regionalPlanningBlockers" class="regional-planning-blockers" hidden></ul>
+            <div id="regionalPlanningFilters" class="regional-planning-filters" hidden>
+              <input id="regionalPlanningSearch" class="regional-planning-search" type="search" placeholder="Поиск среди разрешённых складов" aria-label="Поиск среди разрешённых складов">
+            </div>
+            <div class="regional-planning-table-wrap">
+              <table class="regional-planning-table" aria-label="Разрешённые склады хранения WB выбранного направления">
+                <thead>
+                  <tr>
+                    <th>Ранг</th>
+                    <th>Направление</th>
+                    <th>Склад / роль</th>
+                    <th>Покрытие ШК</th>
+                    <th>Тип поставки</th>
+                    <th>Ближайшая дата</th>
+                    <th>Бесплатная дата</th>
+                    <th>Следующие даты</th>
+                    <th>Коэффициент</th>
+                    <th>Логистика / хранение</th>
+                    <th>Назначение / статус</th>
+                    <th>Блокеры</th>
+                  </tr>
+                </thead>
+                <tbody id="regionalPlanningTableBody">
+                  <tr>
+                    <td colspan="12">Варианты ещё не запрошены.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="regionalPlanningDiagnostics" class="regional-planning-diagnostics" hidden></div>
+          </section>
         </section>
         </section>
 
@@ -5442,6 +5445,9 @@
       );
       const WB_DISTRICT_SHORT_LABELS = {
         central: "ЦФО",
+        central_north: "ЦФО Север",
+        central_east: "ЦФО Восток",
+        central_south: "ЦФО Юг",
         northwest: "СЗФО",
         volga: "ПФО",
         ural: "УФО",
@@ -5559,15 +5565,7 @@
       let regionalPlanningPayload = null;
       let regionalCalculationInFlight = false;
       let regionalPlanningInFlightDistrictKey = "";
-      let regionalPlanningFilterState = {
-        sameDistrict: false,
-        allBarcodes: false,
-        goodDates: false,
-        freeDates: false,
-        hideSgt: false,
-        showPartial: true,
-        search: ""
-      };
+      let regionalPlanningFilterState = { search: "" };
       let stockReportSelectedSkuIds = resolveRestoredStockReportDraftSkuIds(persistedOperatorUiState);
       let stockReportAppliedSkuIds = resolveRestoredStockReportAppliedSkuIds(persistedOperatorUiState);
       let stockReportVisibleColumnKeys = resolveRestoredStockReportVisibleColumnKeys(persistedOperatorUiState);
@@ -8712,6 +8710,15 @@
         renderRegionalDistricts(regionalLastResultPayload.districts || [], regionalLastResultPayload);
       }
 
+      function focusRegionalPlanningPanel() {
+        if (!regionalPlanningPanel || regionalPlanningPanel.hidden) {
+          return;
+        }
+        window.requestAnimationFrame(() => {
+          regionalPlanningPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
+
       async function requestRegionalPlanningOptions(districtKey, button) {
         const normalizedDistrictKey = String(districtKey || "").trim();
         if (!normalizedDistrictKey) {
@@ -8725,6 +8732,7 @@
         regionalPlanningInFlightDistrictKey = normalizedDistrictKey;
         rerenderRegionalDistrictButtons();
         renderRegionalPlanningLoading(normalizedDistrictKey);
+        focusRegionalPlanningPanel();
         try {
           let payload = await fetchRegionalPlanningPayload(normalizedDistrictKey, {});
           const mismatchBlocker = regionalPlanningCalculationMismatchBlocker(payload);
@@ -8741,13 +8749,14 @@
           regionalPlanningPayload = null;
           if (regionalPlanningPanel) {
             regionalPlanningPanel.hidden = false;
+            focusRegionalPlanningPanel();
           }
           if (regionalPlanningTitle) {
             regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictShortLabel(normalizedDistrictKey);
           }
           setRegionalPlanningMessage("Подбор завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)), "error");
           if (regionalPlanningTableBody) {
-            regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Варианты не получены.</td></tr>";
+            regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"12\">Варианты не получены.</td></tr>";
           }
           if (copyRegionalPlanningPayloadButton) {
             copyRegionalPlanningPayloadButton.disabled = true;
@@ -8774,9 +8783,11 @@
           },
           body: JSON.stringify({
             district_key: districtKey,
+            planning_zone_key: districtKey,
             calculation_id: calculationId,
             package_type: "box",
-            include_transit: true
+            only_same_district: true,
+            include_transit: false
           })
         });
         const payload = await readJson(response);
@@ -8808,7 +8819,7 @@
           regionalPlanningBlockers.innerHTML = "";
         }
         if (regionalPlanningTableBody) {
-          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Загрузка вариантов...</td></tr>";
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"12\">Загрузка вариантов выбранного направления...</td></tr>";
         }
         if (regionalPlanningFilters) {
           regionalPlanningFilters.hidden = true;
@@ -8828,8 +8839,9 @@
           regionalPlanningPanel.hidden = false;
         }
         if (regionalPlanningTitle) {
-          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictShortLabel(payload && payload.district_key);
+          regionalPlanningTitle.textContent = "Подбор складов WB · " + regionalDistrictShortLabel(payload && (payload.planning_zone_key || payload.district_key));
         }
+        focusRegionalPlanningPanel();
         const status = String(payload && payload.status || "");
         const blockers = Array.isArray(payload && payload.blockers) ? payload.blockers : [];
         const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings.filter(Boolean) : [];
@@ -8855,15 +8867,17 @@
         const summary = payload && payload.summary || {};
         const barcode = payload && payload.barcode_summary || {};
         const chips = [
+          "Направление: " + valueOrDash(payload && (payload.planning_zone_label || payload.district_name_ru)),
           "SKU: " + valueOrDash(summary.planned_product_count),
           "Штук: " + valueOrDash(summary.planned_qty_total),
           "ШК готово: " + valueOrDash(barcode.ready) + "/" + valueOrDash(barcode.total),
-          "Вариантов: " + valueOrDash(summary.option_count),
-          "Складов: " + valueOrDash(summary.grouped_warehouse_count || summary.option_count),
-          "Все ШК: " + valueOrDash(summary.accepts_all_barcode_option_count || 0),
-          "СГТ: " + valueOrDash(summary.sgt_option_count || 0),
-          "В округе: " + valueOrDash(summary.same_district_option_count || 0),
-          "Транзит: " + valueOrDash(summary.transit_option_count || 0)
+          "Разрешённых складов: " + valueOrDash(summary.option_count || 0),
+          "С доступной датой: " + valueOrDash(summary.available_option_count || 0),
+          "Исключено: " + valueOrDash(summary.excluded_option_count || 0),
+          "СЦ: " + valueOrDash(summary.sorting_center_excluded_count || 0),
+          "Спецсклады: " + valueOrDash(summary.specialized_excluded_count || 0),
+          "Partial: " + valueOrDash(summary.partial_excluded_count || 0),
+          "Заблокировано: " + valueOrDash(summary.blocked_excluded_count || 0)
         ];
         regionalPlanningSummary.innerHTML = chips.map((item) => "<span class=\"regional-planning-chip\">" + escapeHtml(item) + "</span>").join("");
       }
@@ -8890,60 +8904,40 @@
         }
         const filteredOptions = filterRegionalPlanningOptions(options || []);
         if (!options.length) {
-          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Доступные варианты не найдены или есть blockers.</td></tr>";
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"12\">Подходящие полноценные склады хранения не найдены. Причина показана выше.</td></tr>";
           return;
         }
         if (!filteredOptions.length) {
-          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">По текущим фильтрам складов не найдено.</td></tr>";
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"12\">Среди разрешённых складов нет совпадений с поиском.</td></tr>";
           return;
         }
         regionalPlanningTableBody.innerHTML = filteredOptions.map((item) => {
-          const scopeLabel = regionalPlanningScopeLabel(item.warehouse_scope);
           const coverage = item.barcode_coverage || {};
           const boxTariff = item.box_tariff || (item.tariff_evidence && item.tariff_evidence.box) || {};
-          const bestTransit = item.best_transit_route || {};
-          const routeLabel = item.route_type === "transit" ? "Транзит" : "Прямо";
-          const coverageBadge = item.accepts_all_barcodes
-            ? "<span class=\"status-badge is-good\">Примут все ШК</span>"
-            : "<span class=\"status-badge is-warning\">Примут часть ШК</span>";
-          const dateBadge = item.free_date_count > 0
-            ? "<span class=\"status-badge is-good\">есть бесплатные даты</span>"
-            : (item.good_date_count > 0 ? "<span class=\"status-badge is-good\">есть хорошие даты</span>" : "<span class=\"status-badge is-warning\">нет хороших дат</span>");
-          const warehouseBadges = [
-            item.is_major_expected ? "<span class=\"status-badge is-good\">ключевой</span>" : "",
-            item.is_sgt ? "<span class=\"status-badge is-warning\">СГТ</span>" : ""
-          ].filter(Boolean).join("");
-          const tariffLines = [
-            "Логистика: " + valueOrDash(boxTariff.logistics_display || boxTariff.boxDeliveryCoefExpr),
-            "Хранение: " + valueOrDash(boxTariff.storage_display || boxTariff.boxStorageCoefExpr),
-            "База: " + valueOrDash(boxTariff.boxDeliveryBase),
-            "Литр: " + valueOrDash(boxTariff.boxDeliveryLiter)
-          ];
-          const transitText = item.transit_route_count
-            ? [
-                "Транзит доступен: " + item.transit_route_count + " маршрутов",
-                valueOrDash(bestTransit.transitWarehouseName) + " → " + valueOrDash(bestTransit.destinationWarehouseName),
-                "box: " + valueOrDash(bestTransit.best_box_tariff_value),
-                "pallet: " + valueOrDash(bestTransit.palletTariff)
-              ].join("; ")
-            : "Транзитных тарифов нет";
-          const warnings = Array.isArray(item.warnings) && item.warnings.length
-            ? "<span class=\"cell-subline\">" + escapeHtml(item.warnings.join(" ")) + "</span>"
-            : "";
-          const recommendation = item.recommendation_explanation
-            ? "<span class=\"cell-subline\">" + escapeHtml(item.recommendation_explanation) + "</span>"
-            : "";
+          const dates = Array.isArray(item.dates) ? item.dates : [];
+          const visibleDates = dates.filter((date) => date && date.is_available).slice(0, 5);
+          const coverageLabel = escapeHtml(valueOrDash(coverage.accepted_count)) + "/" + escapeHtml(valueOrDash(coverage.total_count));
+          const statusGood = item.status === "available";
+          const blockers = Array.isArray(item.blocker_codes) ? item.blocker_codes : [];
+          const reasons = Array.isArray(item.exclusion_reasons) ? item.exclusion_reasons : [];
+          const blockerText = blockers.concat(reasons).map(regionalPlanningReasonLabel).join("; ");
+          const nextDates = visibleDates.length
+            ? visibleDates.map((date) => regionalPlanningDateLabel(date)).join("")
+            : "<span class=\"cell-subline\">Нет доступных дат в официальном горизонте</span>";
           return [
             "<tr>",
             "<td><strong>#" + escapeHtml(valueOrDash(item.rank)) + "</strong><div class=\"muted\">" + escapeHtml(valueOrDash(item.recommendation)) + "</div></td>",
-            "<td><span class=\"cell-main\">" + escapeHtml(valueOrDash(item.warehouse_name)) + "</span><span class=\"cell-subline\">" + escapeHtml(valueOrDash(item.warehouse_id)) + "</span>" + warehouseBadges + recommendation + "</td>",
-            "<td>" + coverageBadge + "<span class=\"cell-subline\">" + escapeHtml(valueOrDash(coverage.accepted_count)) + "/" + escapeHtml(valueOrDash(coverage.total_count)) + " barcode</span></td>",
-            "<td>" + dateBadge + "<span class=\"cell-subline\">Дата: " + escapeHtml(valueOrDash(item.date || "не указана")) + "</span><span class=\"cell-subline\">Коэф.: " + escapeHtml(valueOrDash(item.coefficient_display)) + "; allowUnload: " + escapeHtml(regionalPlanningBoolLabel(item.allow_unload)) + "</span><span class=\"cell-subline\">Дат: " + escapeHtml(valueOrDash(item.date_count || 0)) + "; хороших: " + escapeHtml(valueOrDash(item.good_date_count || 0)) + "; бесплатных: " + escapeHtml(valueOrDash(item.free_date_count || 0)) + "</span></td>",
-            "<td>" + escapeHtml(valueOrDash(item.warehouse_district_short_label_ru || item.warehouse_district_label_ru || scopeLabel)) + "<div class=\"muted\">" + escapeHtml(scopeLabel) + "</div></td>",
-            "<td>" + tariffLines.map((line) => "<span class=\"cell-subline\">" + escapeHtml(line) + "</span>").join("") + "</td>",
-            "<td><span class=\"cell-main\">" + escapeHtml(routeLabel) + "</span><span class=\"cell-subline\">" + escapeHtml(transitText) + "</span></td>",
-            "<td>" + warnings + "</td>",
-            "<td><button class=\"action-button secondary-button\" type=\"button\" data-regional-planning-copy=\"" + escapeHtml(String(item.option_id || "")) + "\">Скопировать</button></td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(valueOrDash(item.planning_zone_label)) + "</span><span class=\"cell-subline\">" + escapeHtml(valueOrDash(item.planning_zone_key)) + "</span></td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(valueOrDash(item.warehouse_name)) + "</span><span class=\"cell-subline\">warehouseID " + escapeHtml(valueOrDash(item.warehouse_id)) + "</span><span class=\"status-badge is-good\">" + escapeHtml(regionalPlanningRoleLabel(item.warehouse_role)) + "</span></td>",
+            "<td><span class=\"status-badge is-good\">Все обязательные ШК</span><span class=\"cell-subline\">" + coverageLabel + " barcode</span></td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(regionalPlanningPackageLabel(item.package_type)) + "</span><span class=\"cell-subline\">canBox: " + escapeHtml(regionalPlanningBoolLabel(item.package_supported)) + "</span></td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(valueOrDash(item.first_available_date)) + "</span><span class=\"cell-subline\">Уникальных дат: " + escapeHtml(valueOrDash(item.unique_available_date_count || 0)) + "</span></td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(valueOrDash(item.first_free_date)) + "</span><span class=\"cell-subline\">Бесплатных дат: " + escapeHtml(valueOrDash(item.unique_free_date_count || 0)) + "</span></td>",
+            "<td>" + nextDates + "</td>",
+            "<td><span class=\"cell-main\">" + escapeHtml(valueOrDash(item.coefficient_display)) + "</span><span class=\"cell-subline\">allowUnload: " + escapeHtml(regionalPlanningBoolLabel(item.allow_unload)) + "</span><span class=\"cell-subline\">boxTypeID: 1/2</span></td>",
+            "<td><span class=\"cell-subline\">Логистика: " + escapeHtml(valueOrDash(boxTariff.logistics_display || boxTariff.boxDeliveryCoefExpr)) + "</span><span class=\"cell-subline\">Хранение: " + escapeHtml(valueOrDash(boxTariff.storage_display || boxTariff.boxStorageCoefExpr)) + "</span></td>",
+            "<td><span class=\"cell-main\">" + (item.direct_destination ? "Прямой склад хранения" : "Не прямой маршрут") + "</span><span class=\"status-badge " + (statusGood ? "is-good" : "is-warning") + "\">" + escapeHtml(regionalPlanningStatusLabel(item.status)) + "</span><button class=\"action-button secondary-button\" type=\"button\" data-regional-planning-copy=\"" + escapeHtml(String(item.option_id || "")) + "\">Скопировать</button></td>",
+            "<td><span class=\"cell-subline\">" + escapeHtml(blockerText || "Нет") + "</span></td>",
             "</tr>"
           ].join("");
         }).join("");
@@ -8964,33 +8958,15 @@
       }
 
       function filterRegionalPlanningOptions(options) {
-        const state = regionalPlanningFilterState || {};
-        const search = String(state.search || "").trim().toLowerCase();
+        const search = String(regionalPlanningFilterState.search || "").trim().toLowerCase();
         return (options || []).filter((item) => {
-          if (state.sameDistrict && item.warehouse_scope !== "same_district") {
-            return false;
-          }
-          if (state.allBarcodes && !item.accepts_all_barcodes) {
-            return false;
-          }
-          if (state.goodDates && !(Number(item.good_date_count || 0) > 0)) {
-            return false;
-          }
-          if (state.freeDates && !(Number(item.free_date_count || 0) > 0)) {
-            return false;
-          }
-          if (state.hideSgt && item.is_sgt) {
-            return false;
-          }
-          if (!state.showPartial && item.accepts_all_barcodes === false) {
-            return false;
-          }
           if (search) {
             const haystack = [
               item.warehouse_name,
               item.warehouse_id,
-              item.warehouse_district_label_ru,
-              item.warehouse_district_short_label_ru
+              item.warehouse_role,
+              item.planning_zone_key,
+              item.planning_zone_label
             ].join(" ").toLowerCase();
             if (!haystack.includes(search)) {
               return false;
@@ -9000,39 +8976,123 @@
         });
       }
 
+      function regionalPlanningDateLabel(item) {
+        const paidLabel = item && item.is_free_date ? "бесплатно" : "платно";
+        return "<span class=\"cell-subline\">" + escapeHtml(valueOrDash(item && item.date)) +
+          " · коэф. " + escapeHtml(valueOrDash(item && item.coefficient)) +
+          " · " + escapeHtml(paidLabel) +
+          " · unload " + escapeHtml(regionalPlanningBoolLabel(item && item.allow_unload)) + "</span>";
+      }
+
+      function regionalPlanningRoleLabel(role) {
+        const labels = { primary: "основной", reserve: "резервный", far_reserve: "дальний резерв" };
+        return labels[String(role || "")] || valueOrDash(role);
+      }
+
+      function regionalPlanningPackageLabel(packageType) {
+        return String(packageType || "") === "box" ? "Короба" : valueOrDash(packageType);
+      }
+
+      function regionalPlanningStatusLabel(status) {
+        const labels = { available: "доступен", no_available_date: "нет доступной даты" };
+        return labels[String(status || "")] || valueOrDash(status);
+      }
+
+      function regionalPlanningReasonLabel(code) {
+        const labels = {
+          no_available_date: "Нет доступной даты",
+          no_eligible_storage_warehouse: "Нет доступного склада хранения",
+          sorting_center: "Сортировочный центр",
+          sorting_center_name: "Название сортировочного центра",
+          specialized_food: "Специализированный склад «Питание»",
+          specialized_fuel: "Специализированный склад «Горючее»",
+          specialized_tires: "Специализированный склад «Шины»",
+          sgt_warehouse: "СГТ-склад",
+          partial_barcode_coverage: "Принимает не все обязательные ШК",
+          box_not_supported: "Коробочная поставка не поддерживается",
+          warehouse_inactive: "Склад неактивен в каталоге WB",
+          warehouse_catalog_missing: "Склад отсутствует в актуальном каталоге WB",
+          warehouse_blocked: "Склад временно заблокирован",
+          recommendation_disabled: "Рекомендации для склада отключены",
+          warehouse_unclassified: "Склад не классифицирован",
+          warehouse_id_missing: "WB не вернул warehouseID",
+          not_storage_warehouse: "Не является полноценным складом хранения",
+          outside_selected_planning_zone: "Другое операционное направление",
+          transit_route_not_allowed: "Транзитный маршрут не является складом назначения"
+        };
+        return labels[String(code || "")] || String(code || "");
+      }
+
       function renderRegionalPlanningDiagnostics(payload) {
         if (!regionalPlanningDiagnostics) {
           return;
         }
-        const diagnostics = Array.isArray(payload && payload.major_warehouse_diagnostics)
+        const probes = Array.isArray(payload && payload.major_warehouse_diagnostics)
           ? payload.major_warehouse_diagnostics
           : [];
-        if (!diagnostics.length) {
+        const diagnostics = payload && payload.diagnostics || {};
+        const exclusionCounts = diagnostics.exclusion_reason_counts || {};
+        const exclusionEntries = Object.entries(exclusionCounts);
+        const excludedOptions = Array.isArray(diagnostics.excluded_options)
+          ? diagnostics.excluded_options.slice(0, 20)
+          : [];
+        if (!probes.length && !exclusionEntries.length && !excludedOptions.length && !diagnostics.request_id) {
           regionalPlanningDiagnostics.hidden = true;
           regionalPlanningDiagnostics.innerHTML = "";
           return;
         }
         regionalPlanningDiagnostics.hidden = false;
         regionalPlanningDiagnostics.innerHTML = [
-          "<h4>Проверка ключевых складов округа</h4>",
+          "<h4>Безопасная диагностика подбора</h4>",
+          "<p class=\"muted\">WB request ID: " + escapeHtml(valueOrDash(diagnostics.request_id)) +
+            "; запрошено ШК: " + escapeHtml(valueOrDash(diagnostics.requested_barcode_count)) +
+            "; сырых вариантов: " + escapeHtml(valueOrDash(diagnostics.raw_option_count)) +
+            "; после группировки: " + escapeHtml(valueOrDash(diagnostics.grouped_warehouse_count)) +
+            "; справочник: " + escapeHtml(valueOrDash(diagnostics.warehouse_registry_version)) + ".</p>",
+          exclusionEntries.length
+            ? "<p class=\"muted\">Исключения: " + exclusionEntries.map(([code, count]) => escapeHtml(code + ": " + count)).join("; ") + ".</p>"
+            : "",
+          probes.length ? "<h4>Точные warehouseID-probes складов направления</h4>" : "",
           "<div class=\"regional-planning-diagnostics-grid\">",
-          diagnostics.map((item) => regionalPlanningDiagnosticCard(item)).join(""),
+          probes.map((item) => regionalPlanningDiagnosticCard(item)).join(""),
+          "</div>",
+          excludedOptions.length
+            ? [
+                "<details><summary>Почему варианты исключены (первые " + excludedOptions.length + ")</summary>",
+                "<div class=\"regional-planning-diagnostics-grid\">",
+                excludedOptions.map((item) => regionalPlanningExcludedCard(item)).join(""),
+                "</div></details>"
+              ].join("")
+            : ""
+        ].join("");
+      }
+
+      function regionalPlanningExcludedCard(item) {
+        const reasons = Array.isArray(item && item.exclusion_reasons)
+          ? item.exclusion_reasons.map(regionalPlanningReasonLabel)
+          : [];
+        return [
+          "<div class=\"regional-planning-diagnostic-card\">",
+          "<strong>" + escapeHtml(valueOrDash(item && item.warehouse_name)) + "</strong>",
+          "<span class=\"cell-subline\">warehouseID " + escapeHtml(valueOrDash(item && item.warehouse_id)) + "</span>",
+          "<span class=\"cell-subline\">" + escapeHtml(reasons.join("; ") || "Причина не указана") + "</span>",
           "</div>"
         ].join("");
       }
 
       function regionalPlanningDiagnosticCard(item) {
-        const found = item && item.found_in_acceptance_options;
-        const visible = item && item.visible_in_main_list;
-        const statusClass = visible ? "is-good" : (found ? "is-warning" : "is-warning");
-        const statusText = visible ? "виден в списке" : (found ? "есть в WB, не виден" : "WB не вернул");
+        const exactReturned = Boolean(item && item.exact_warehouse_returned);
+        const generalReturned = item && item.status === "returned_by_general_acceptance_options";
+        const statusClass = exactReturned || generalReturned ? "is-good" : "is-warning";
+        const statusText = generalReturned ? "возвращён общим запросом" : (exactReturned ? "возвращён exact ID-probe" : valueOrDash(item && item.status));
         return [
           "<div class=\"regional-planning-diagnostic-card\">",
           "<strong>" + escapeHtml(valueOrDash(item && item.expected_warehouse_name)) + "</strong>",
           "<span class=\"status-badge " + statusClass + "\">" + escapeHtml(statusText) + "</span>",
-          "<div class=\"muted\">acceptance/options: " + escapeHtml(regionalPlanningBoolLabel(found)) + "; catalog: " + escapeHtml(regionalPlanningBoolLabel(item && item.found_in_warehouses_catalog)) + "; tariffs: " + escapeHtml(regionalPlanningBoolLabel(item && item.found_in_box_tariffs)) + "; coeff: " + escapeHtml(regionalPlanningBoolLabel(item && item.found_in_acceptance_coefficients)) + "</div>",
-          "<div class=\"muted\">ШК: " + escapeHtml(valueOrDash(item && item.accepted_barcode_count)) + "/" + escapeHtml(valueOrDash(item && item.total_barcode_count)) + "; min coef: " + escapeHtml(valueOrDash(item && item.min_coefficient)) + "; free: " + escapeHtml(regionalPlanningBoolLabel(item && item.has_free_date)) + "</div>",
-          "<div class=\"muted\">Округ: " + escapeHtml(valueOrDash(item && (item.mapped_district_label_ru || item.mapped_district_key))) + "; reason: " + escapeHtml(valueOrDash(item && item.hidden_reason)) + "</div>",
+          "<div class=\"muted\">warehouseID: " + escapeHtml(valueOrDash(item && item.warehouse_id)) +
+            "; каталог: " + escapeHtml(regionalPlanningBoolLabel(item && item.found_in_catalog)) +
+            "; активен: " + escapeHtml(regionalPlanningBoolLabel(item && item.catalog_active)) +
+            "; probe: " + escapeHtml(regionalPlanningBoolLabel(item && item.probe_called)) + "</div>",
           "</div>"
         ].join("");
       }
@@ -9045,7 +9105,7 @@
           return "Подбор заблокирован: " + blockerCount + " проблем.";
         }
         if (status === "empty") {
-          return "В округе нет количества к поставке.";
+          return "В направлении нет количества к поставке.";
         }
         if (status === "no_last_calculation") {
           return "Сначала выполните региональный расчёт.";
@@ -9054,7 +9114,7 @@
           return "WB API вернул controlled error.";
         }
         if (status === "no_options") {
-          return "WB не вернул доступных вариантов.";
+          return "WB не подтвердил ни одного подходящего склада хранения.";
         }
         return valueOrDash(status);
       }
@@ -9453,7 +9513,7 @@
           regionalPlanningBlockers.innerHTML = "";
         }
         if (regionalPlanningTableBody) {
-          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"9\">Выберите округ для подбора.</td></tr>";
+          regionalPlanningTableBody.innerHTML = "<tr><td colspan=\"12\">Выберите направление для подбора.</td></tr>";
         }
         if (regionalPlanningFilters) {
           regionalPlanningFilters.hidden = true;
@@ -9569,6 +9629,13 @@
           renderSharedStockState(sharedDatasets.stock_ff);
         }
         renderRegionalResult(payload ? payload.last_result : null, payload && payload.active_sku_count, options || {});
+        if (payload && payload.status === "recalculation_required") {
+          regionalResultStatus.textContent = "нужен перерасчёт";
+          setRegionalMessage(
+            "Предыдущий расчёт сохранён в legacy-формате общего ЦФО. Выполните новый расчёт, чтобы получить ЦФО Север, Восток и Юг; старый результат не удалён.",
+            "warning"
+          );
+        }
       }
 
       function setShipmentRegistryMessage(message, tone) {
@@ -13326,17 +13393,6 @@
       if (copyRegionalPlanningPayloadButton) {
         copyRegionalPlanningPayloadButton.addEventListener("click", copyRegionalPlanningPayload);
       }
-      Array.from(document.querySelectorAll("[data-regional-planning-filter]")).forEach((input) => {
-        input.addEventListener("change", () => {
-          const key = input.getAttribute("data-regional-planning-filter") || "";
-          if (key) {
-            regionalPlanningFilterState[key] = Boolean(input.checked);
-          }
-          if (regionalPlanningPayload) {
-            renderRegionalPlanningOptions(Array.isArray(regionalPlanningPayload.options) ? regionalPlanningPayload.options : []);
-          }
-        });
-      });
       if (regionalPlanningSearch) {
         regionalPlanningSearch.addEventListener("input", () => {
           regionalPlanningFilterState.search = String(regionalPlanningSearch.value || "");

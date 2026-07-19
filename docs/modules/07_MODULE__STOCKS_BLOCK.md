@@ -70,7 +70,9 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
   - latest fetched `snapshot_ts` per `nmId` внутри exact-date payload считается authoritative;
   - `stock_total` суммирует `quantity` по всем WB warehouses / chart variants, которые вернул endpoint;
   - региональные `stock_*` строятся по текущему RU region mapping с нормализацией legacy/current alias-ов `Южный +/и Северо-Кавказский` и `Дальневосточный +/и Сибирский`;
-  - historical CSV использует `OfficeName`; live normalization map получает district alias из current `wb-warehouses` metadata и не превращает этот bridge в active current stocks truth;
+  - supply planning additionally retains `warehouseId`, `warehouseName`, `regionName` and quantity as `warehouse_rows[]`. Exact Central registry IDs aggregate into `stock_ru_central_north/east/south` without changing canonical `stock_ru_central`;
+  - historical CSV uses `OfficeName`; when warehouseID is absent, Central planning classification allows only exact canonical names/explicit aliases. Электросталь and Котовск remain East history, while SC/specialised and unknown rows remain excluded/unmapped rather than guessed;
+  - `planning_reconciliation` proves `legacy_central_total = three zone total + central_unmapped_total + central_excluded_total + difference`; expected difference is zero;
   - quantity из raw regions/warehouses вне configured district map не invent-ится в district rows: она остаётся внутри `stock_total` и surface-ится в `StocksSuccess.detail` / `STATUS.stocks[yesterday_closed].note`;
   - publish guard не допускает success при неполном coverage requested `nmId`;
   - current `wb-warehouses` adapter по-прежнему уважает `X-Ratelimit-Retry` / `X-Ratelimit-Reset`, использует per-seller limiter и после bounded retry budget не превращается в fake-success внутри source.
@@ -82,7 +84,8 @@ update_note: "Обновлён под final temporal classifier: current `wb-war
   - `kind = "success"`
   - `snapshot_date`
   - `count`
-  - `items[]` с `stock_total` и региональными `stock_*`
+  - `items[]` с `stock_total`, canonical regional `stock_*` and additive Central planning-zone stock fields
+  - `warehouse_rows[]` with exact identity/classification evidence and `planning_reconciliation`
   - `detail` для honest note по unmapped raw regions, если часть quantity не попала ни в один configured district bucket
 - Incomplete shape:
   - `kind = "incomplete"`

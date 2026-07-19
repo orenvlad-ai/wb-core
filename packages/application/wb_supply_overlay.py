@@ -8,6 +8,10 @@ from typing import Any, Mapping
 
 from packages.contracts.factory_order_supply import FactoryOrderInboundRow, FactoryOrderStockFfRow
 from packages.contracts.wb_regional_supply import DISTRICT_KEYS, DISTRICT_LABELS_RU, DISTRICT_SHORT_LABELS_RU
+from packages.contracts.wb_supply_planning_zones import (
+    SUPPLY_PLANNING_ZONE_KEYS,
+    resolve_central_storage_warehouse,
+)
 
 
 ELIGIBLE_WB_SUPPLY_STATUS_IDS = {3, 4, 6}
@@ -631,19 +635,37 @@ def factory_inbound_overlay_rows(
 def regional_overlay_quantities(
     *,
     overlay: Mapping[str, Any],
+    planning_zone_mode: bool = False,
 ) -> tuple[dict[int, dict[str, float]], dict[str, Any], tuple[str, ...]]:
     qty_by_nm_district: dict[int, dict[str, float]] = {}
-    by_district: dict[str, float] = {key: 0.0 for key in DISTRICT_KEYS}
+    result_keys = SUPPLY_PLANNING_ZONE_KEYS if planning_zone_mode else DISTRICT_KEYS
+    by_district: dict[str, float] = {key: 0.0 for key in result_keys}
     unmapped_events: list[dict[str, Any]] = []
     warnings: list[str] = []
     for event in overlay.get("events") or []:
         if not isinstance(event, Mapping):
             continue
         district_key = str(event.get("district_key") or "").strip()
+        if planning_zone_mode:
+            registry_item, _ = resolve_central_storage_warehouse(
+                warehouse_id=(
+                    event.get("district_source_warehouse_id")
+                    or event.get("warehouse_id")
+                ),
+                warehouse_name=(
+                    event.get("district_source_warehouse_name")
+                    or event.get("warehouse_name")
+                ),
+                historical=True,
+            )
+            if registry_item is not None:
+                district_key = registry_item.planning_zone_key
+            elif district_key == "central":
+                district_key = DISTRICT_UNMAPPED
         quantity = float(event.get("quantity") or 0.0)
         if quantity <= 0:
             continue
-        if district_key not in DISTRICT_KEYS:
+        if district_key not in result_keys:
             unmapped_events.append(dict(event))
             continue
         nm_id = int(event.get("nm_id"))
@@ -657,7 +679,7 @@ def regional_overlay_quantities(
             + " строк состава."
         )
     diagnostics = {
-        "added_qty_by_district": {key: by_district[key] for key in DISTRICT_KEYS},
+        "added_qty_by_district": {key: by_district[key] for key in result_keys},
         "added_qty_total": round(sum(by_district.values()), 4),
         "unmapped_events": unmapped_events,
     }
