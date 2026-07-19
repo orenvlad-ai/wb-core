@@ -31,7 +31,8 @@ def _period_vitrina_url(base_url: str, *, date_to: str) -> str:
 
     return (
         str(base_url or "").strip().rstrip("/")
-        + "/sheet-vitrina-v1/vitrina?tab=vitrina&date_from=2026-07-01&date_to="
+        + "/sheet-vitrina-v1/vitrina?tab=vitrina&history_mode=explicit"
+        + "&date_from=2026-07-01&date_to="
         + quote(str(date_to or ""), safe="")
     )
 

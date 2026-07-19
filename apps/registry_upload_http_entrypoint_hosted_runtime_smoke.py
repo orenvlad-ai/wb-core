@@ -192,7 +192,7 @@ def main() -> None:
     )
     if period_vitrina_url != (
         "https://api.selleros.pro/sheet-vitrina-v1/vitrina"
-        "?tab=vitrina&date_from=2026-07-01&date_to=2026-07-19"
+        "?tab=vitrina&history_mode=explicit&date_from=2026-07-01&date_to=2026-07-19"
     ):
         raise AssertionError("warehouse UI Flow must ignore persisted tabs for period acceptance")
     failed_backup_source = (
