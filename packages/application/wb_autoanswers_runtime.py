@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import fcntl
 import hashlib
 import json
 import os
@@ -324,30 +325,103 @@ class AutoanswersRepository:
             conn.close()
 
     def ensure_schema(self) -> None:
-        with self.transaction() as conn:
-            conn.executescript(_SCHEMA_SQL)
-            conn.execute(
-                "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
-                (SCHEMA_VERSION, iso_utc(self._now())),
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_settings(
-                    singleton, master_enabled, mode, enable_epoch, enabled_at,
-                    daily_cap_usd, monthly_cap_usd, warning_ratio,
-                    max_reservation_per_review_usd, policy_version, updated_at
-                ) VALUES(1, 0, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    MODE_DRAFT_ONLY,
-                    str(DEFAULT_DAILY_CAP_USD),
-                    str(DEFAULT_MONTHLY_CAP_USD),
-                    str(DEFAULT_WARNING_RATIO),
-                    str(DEFAULT_JOB_RESERVATION_USD),
-                    DEFAULT_POLICY_VERSION,
-                    iso_utc(self._now()),
-                ),
-            )
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.runtime_dir / ".wb_autoanswers_schema.lock"
+        with lock_path.open("a+b") as lock_handle:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                if not self._schema_version_is_applied():
+                    self._backup_database_before_first_schema()
+                conn = self._connect()
+                try:
+                    # sqlite3.executescript otherwise commits an already-open
+                    # transaction. Start the migration inside the script so
+                    # all additive DDL plus marker/settings rows are atomic.
+                    conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_schema_migrations(version, applied_at) VALUES(?, ?)",
+                        (SCHEMA_VERSION, iso_utc(self._now())),
+                    )
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_settings(
+                            singleton, master_enabled, mode, enable_epoch, enabled_at,
+                            daily_cap_usd, monthly_cap_usd, warning_ratio,
+                            max_reservation_per_review_usd, policy_version, updated_at
+                        ) VALUES(1, 0, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            MODE_DRAFT_ONLY,
+                            str(DEFAULT_DAILY_CAP_USD),
+                            str(DEFAULT_MONTHLY_CAP_USD),
+                            str(DEFAULT_WARNING_RATIO),
+                            str(DEFAULT_JOB_RESERVATION_USD),
+                            DEFAULT_POLICY_VERSION,
+                            iso_utc(self._now()),
+                        ),
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+    def _schema_version_is_applied(self) -> bool:
+        if not self.db_path.exists() or self.db_path.stat().st_size == 0:
+            return False
+        uri = f"file:{self.db_path.resolve()}?mode=ro"
+        try:
+            with sqlite3.connect(uri, uri=True, timeout=10) as conn:
+                table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    ("sheet_vitrina_v1_wb_autoanswers_schema_migrations",),
+                ).fetchone()
+                if table is None:
+                    return False
+                row = conn.execute(
+                    "SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=?",
+                    (SCHEMA_VERSION,),
+                ).fetchone()
+                return row is not None
+        except sqlite3.DatabaseError as exc:
+            raise AutoanswersRuntimeError(
+                "runtime database is unreadable before autoanswers schema migration",
+                code="schema_preflight_failed",
+            ) from exc
+
+    def _backup_database_before_first_schema(self) -> Path | None:
+        """Create and verify a coherent backup before the first additive schema."""
+
+        if not self.db_path.exists() or self.db_path.stat().st_size == 0:
+            return None
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v1"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(backup_dir, 0o700)
+        stamp = self._now().strftime("%Y%m%dT%H%M%SZ")
+        backup_path = backup_dir / (
+            f"registry_upload_runtime__pre_autoanswers_v{SCHEMA_VERSION}__{stamp}__{uuid4().hex[:8]}.sqlite3"
+        )
+        source_uri = f"file:{self.db_path.resolve()}?mode=ro"
+        try:
+            with sqlite3.connect(source_uri, uri=True, timeout=60) as source:
+                with sqlite3.connect(backup_path, timeout=60) as target:
+                    source.backup(target)
+            os.chmod(backup_path, 0o600)
+            with sqlite3.connect(f"file:{backup_path.resolve()}?mode=ro", uri=True, timeout=60) as verify:
+                integrity = str(verify.execute("PRAGMA integrity_check").fetchone()[0])
+            if integrity != "ok":
+                raise sqlite3.DatabaseError(f"backup integrity_check={integrity}")
+        except Exception as exc:
+            backup_path.unlink(missing_ok=True)
+            raise AutoanswersRuntimeError(
+                "verified backup failed; autoanswers schema was not applied",
+                code="schema_backup_failed",
+            ) from exc
+        return backup_path
 
     def settings(self) -> AutoanswersSettings:
         with closing(self._connect()) as conn:
@@ -390,6 +464,11 @@ class AutoanswersRepository:
             if current is None:
                 raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
             next_master = bool(current["master_enabled"]) if master_enabled is None else bool(master_enabled)
+            if next_master and not bool(current["master_enabled"]) and _force_off_from_env(self.env):
+                raise AutoanswersRuntimeError(
+                    "autoanswers cannot be enabled while emergency force-off is active",
+                    code="emergency_force_off",
+                )
             next_mode = str(current["mode"]) if mode is None else validate_mode(mode)
             daily = _money(current["daily_cap_usd"] if daily_cap_usd is None else daily_cap_usd)
             monthly = _money(current["monthly_cap_usd"] if monthly_cap_usd is None else monthly_cap_usd)
@@ -703,6 +782,110 @@ class AutoanswersRepository:
                     "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_feedbacks WHERE COALESCE(answer_text,'')=''"
                 ).fetchone()[0]
             )
+
+    def latest_feedback_id(self, *, sync_run_id: str | None = None) -> str | None:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if sync_run_id:
+            clauses.append("last_sync_run_id=?")
+            params.append(_clean_text(sync_run_id))
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"""
+                SELECT feedback_id FROM sheet_vitrina_v1_wb_feedbacks
+                {where}
+                ORDER BY COALESCE(created_at_wb, first_seen_at) DESC, feedback_id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return str(row["feedback_id"]) if row is not None else None
+
+    def operational_status(self) -> dict[str, Any]:
+        """Return content-free production evidence for sync and safety gates."""
+
+        with closing(self._connect()) as conn:
+            feedback = conn.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       MIN(substr(created_at_wb,1,10)) AS min_created_date,
+                       MAX(substr(created_at_wb,1,10)) AS max_created_date,
+                       SUM(CASE WHEN COALESCE(answer_text,'')='' THEN 1 ELSE 0 END) AS unanswered,
+                       SUM(CASE WHEN has_photo=1 THEN 1 ELSE 0 END) AS with_photo,
+                       SUM(CASE WHEN has_video=1 THEN 1 ELSE 0 END) AS with_video
+                FROM sheet_vitrina_v1_wb_feedbacks
+                """
+            ).fetchone()
+            ai_rows = conn.execute(
+                "SELECT state, COUNT(*) AS count FROM sheet_vitrina_v1_wb_autoanswer_jobs GROUP BY state"
+            ).fetchall()
+            publication_rows = conn.execute(
+                "SELECT state, COUNT(*) AS count FROM sheet_vitrina_v1_wb_publication_jobs GROUP BY state"
+            ).fetchall()
+            cursor_rows = conn.execute(
+                "SELECT stream_key, cursor_json, watermark_at, last_success_at, updated_at FROM sheet_vitrina_v1_wb_sync_state ORDER BY stream_key"
+            ).fetchall()
+            schema_rows = conn.execute(
+                "SELECT version, applied_at FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations ORDER BY version"
+            ).fetchall()
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v1"
+        backups = sorted(backup_dir.glob("*.sqlite3")) if backup_dir.is_dir() else []
+        settings = self.settings()
+        return {
+            "settings": {
+                "master_enabled": settings.master_enabled,
+                "force_off": settings.force_off,
+                "effective_enabled": settings.effective_enabled,
+                "mode": settings.mode,
+                "enable_epoch": settings.enable_epoch,
+            },
+            "feedbacks": {
+                "total": int(feedback["total"] or 0),
+                "min_created_date": feedback["min_created_date"],
+                "max_created_date": feedback["max_created_date"],
+                "unanswered": int(feedback["unanswered"] or 0),
+                "with_photo": int(feedback["with_photo"] or 0),
+                "with_video": int(feedback["with_video"] or 0),
+            },
+            "ai_jobs": {str(row["state"]): int(row["count"]) for row in ai_rows},
+            "publication_jobs": {str(row["state"]): int(row["count"]) for row in publication_rows},
+            "sync_cursors": [
+                {
+                    "stream_key": str(row["stream_key"]),
+                    "cursor": json.loads(str(row["cursor_json"])),
+                    "watermark_at": row["watermark_at"],
+                    "last_success_at": row["last_success_at"],
+                    "updated_at": row["updated_at"],
+                }
+                for row in cursor_rows
+            ],
+            "schema_migrations": [dict(row) for row in schema_rows],
+            "schema_backup": {
+                "count": len(backups),
+                "latest_filename": backups[-1].name if backups else None,
+            },
+        }
+
+    def verified_schema_backup_status(self) -> dict[str, Any]:
+        backup_dir = self.runtime_dir / "backups" / "wb_autoanswers_schema_v1"
+        backups = sorted(backup_dir.glob("*.sqlite3")) if backup_dir.is_dir() else []
+        if not backups:
+            return {"count": 0, "latest_filename": None, "integrity_check": None, "sha256": None}
+        latest = backups[-1]
+        with sqlite3.connect(f"file:{latest.resolve()}?mode=ro", uri=True, timeout=60) as conn:
+            integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+        digest = hashlib.sha256()
+        with latest.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return {
+            "count": len(backups),
+            "latest_filename": latest.name,
+            "size_bytes": latest.stat().st_size,
+            "integrity_check": integrity,
+            "sha256": f"sha256:{digest.hexdigest()}",
+        }
 
     def save_sync_cursor(
         self,
@@ -1493,11 +1676,16 @@ class AutoanswersRepository:
             )
 
     def claim_publication_job(self, *, worker_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> dict[str, Any] | None:
-        """Claim readback work even while OFF; claim new writes only while ON."""
+        """Claim no publication work while OFF, including pending readbacks."""
 
         now = self._now()
         lease_until = now + timedelta(seconds=max(1, int(lease_seconds)))
         with self.transaction() as conn:
+            settings_row = conn.execute(
+                "SELECT master_enabled FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
+            ).fetchone()
+            if not settings_row or not bool(settings_row["master_enabled"]) or _force_off_from_env(self.env):
+                return None
             row = conn.execute(
                 """
                 SELECT * FROM sheet_vitrina_v1_wb_publication_jobs
@@ -1519,11 +1707,6 @@ class AutoanswersRepository:
             ).fetchone()
             action = "readback"
             if row is None:
-                settings_row = conn.execute(
-                    "SELECT master_enabled FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1"
-                ).fetchone()
-                if not settings_row or not bool(settings_row["master_enabled"]) or _force_off_from_env(self.env):
-                    return None
                 row = conn.execute(
                     """
                     SELECT * FROM sheet_vitrina_v1_wb_publication_jobs

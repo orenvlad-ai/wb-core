@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import threading
 import unittest
@@ -100,6 +101,33 @@ class RuntimeTest(unittest.TestCase):
         self.assertFalse(self.repo.settings().effective_enabled)
         with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
             self.repo.assert_effective_on(operation="test")
+
+    def test_first_additive_schema_backs_up_existing_database_once(self) -> None:
+        with TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            db_path = runtime_dir / "registry_upload_runtime.sqlite3"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
+                conn.execute("INSERT INTO legacy_marker(value) VALUES('preserved')")
+            AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
+            backups = list((runtime_dir / "backups" / "wb_autoanswers_schema_v1").glob("*.sqlite3"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+            with sqlite3.connect(f"file:{backups[0].resolve()}?mode=ro", uri=True) as conn:
+                self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
+            AutoanswersRepository(runtime_dir=runtime_dir, now_factory=self.clock, env={})
+            self.assertEqual(
+                len(list((runtime_dir / "backups" / "wb_autoanswers_schema_v1").glob("*.sqlite3"))),
+                1,
+            )
+            evidence = AutoanswersRepository(
+                runtime_dir=runtime_dir, now_factory=self.clock, env={}
+            ).verified_schema_backup_status()
+            self.assertEqual(evidence["integrity_check"], "ok")
+            self.assertTrue(str(evidence["sha256"]).startswith("sha256:"))
         self.enable()
         self.assertTrue(self.repo.settings().effective_enabled)
         self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
@@ -108,6 +136,12 @@ class RuntimeTest(unittest.TestCase):
         self.assertFalse(settings.effective_enabled)
         with self.assertRaisesRegex(AutoanswersRuntimeError, "OFF"):
             self.repo.assert_effective_on(operation="test")
+
+    def test_emergency_force_off_prevents_persisting_master_on(self) -> None:
+        self.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "force-off"):
+            self.repo.update_settings(master_enabled=True, actor_id="admin")
+        self.assertFalse(self.repo.settings().master_enabled)
 
     def test_reenable_does_not_auto_enqueue_reviews_seen_while_off(self) -> None:
         first = self.insert_new("off-review")

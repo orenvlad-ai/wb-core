@@ -99,17 +99,25 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(len(self.transport.write_calls), 1)
         self.assertEqual(self.repo.get_feedback("publish")["processing_status"], "published")
 
-    def test_readback_429_retries_readback_even_while_master_off(self) -> None:
+    def test_readback_429_is_not_claimed_while_master_off(self) -> None:
         self.approved()
         reply = self.repo.get_feedback("publish")["generated_reply"]
         self.transport.readbacks = [WbAutoanswersHttpError(429, "limited", retry_after_seconds=1), {"answer": {"text": reply}}]
         self.worker.run_once()
         self.repo.update_settings(master_enabled=False, actor_id="admin")
         first_readback = self.worker.run_once()
-        self.assertEqual(first_readback["state"], "retryable_error")
+        self.assertIsNone(first_readback)
         self.clock.advance(2)
         second_readback = self.worker.run_once()
-        self.assertEqual(second_readback["state"], "published")
+        self.assertIsNone(second_readback)
+        self.assertEqual(len(self.transport.readbacks), 2)
+        self.assertEqual(len(self.transport.write_calls), 1)
+        self.repo.update_settings(master_enabled=True, actor_id="admin")
+        retryable = self.worker.run_once()
+        self.assertEqual(retryable["state"], "retryable_error")
+        self.clock.advance(2)
+        published = self.worker.run_once()
+        self.assertEqual(published["state"], "published")
         self.assertEqual(len(self.transport.write_calls), 1)
 
     def test_off_and_emergency_force_off_block_new_write(self) -> None:

@@ -28,7 +28,9 @@ WB Feedbacks GET
   -> mandatory GET feedback detail readback
 ```
 
-The implementation is intentionally not wired into a production timer or deployment manifest. `apps/wb_autoanswers_worker.py` performs no external I/O by default and refuses `--run-once` unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`. That environment gate does not replace the persisted master-switch: AI and every new WB write also require effective ON. `WB_AUTOANSWERS_FORCE_OFF=true` always wins.
+The production HTTP unit and active hosted target pin `WB_AUTOANSWERS_FORCE_OFF=true`; no AI/publication timer is installed. `apps/wb_autoanswers_worker.py` performs no external I/O by default and refuses `--run-once` unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`. That environment gate does not replace the persisted master-switch: AI and every WB write also require effective ON. `WB_AUTOANSWERS_FORCE_OFF=true` always wins.
+
+Production history and OFF-mode steady synchronization run only through `apps/wb_autoanswers_readonly.py`, invoked by the repo-owned hosted runner or its dedicated timer. That entrypoint imports only the GET adapter, reasserts force-off after loading its allowlisted env values, requires persisted master OFF, and proves that AI/publication job counts do not change. Deploy installs the timer disabled; it is enabled only after canary/detail/backfill acceptance.
 
 No Make route, Telegram route, WB answer PATCH, browser-side WB write, or HTTP-request-to-WB-write path exists.
 
@@ -59,6 +61,9 @@ The packaged `make_mvp/` bytes are preserved. The only new Node code is a siblin
 | Publication/readback lease worker | `packages/application/wb_autoanswers_publication.py` |
 | One bounded scheduler tick | `packages/application/wb_autoanswers_coordinator.py` |
 | Fail-closed CLI entrypoint | `apps/wb_autoanswers_worker.py` |
+| Force-off GET-only canary/backfill | `apps/wb_autoanswers_readonly.py`, hosted `autoanswers-readonly` command |
+| Authenticated production browser acceptance | `apps/wb_autoanswers_production_ui_flow.py`, hosted `autoanswers-ui-flow` command |
+| OFF-mode background GET sync | `wb-core-autoanswers-readonly-sync.service/.timer`, hosted timer gate |
 | Backend/UI integration | `packages/application/registry_upload_http_entrypoint.py`, `packages/adapters/registry_upload_http_entrypoint.py`, `packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html` |
 
 ## Local data model
@@ -93,7 +98,7 @@ Every twelfth coordinator tick rotates to archive reconciliation; other ticks ad
 The persisted default is OFF.
 
 - OFF: sync, local list and detail continue; processing, review approval and new writes fail closed.
-- emergency OFF: `WB_AUTOANSWERS_FORCE_OFF=true`; persisted ON remains visible but is ineffective.
+- emergency OFF: `WB_AUTOANSWERS_FORCE_OFF=true`; OFF→ON is rejected and any pre-existing persisted ON remains ineffective.
 - `draft_only`: valid drafts stop at `generated`.
 - `auto_safe`: only `public_only`, `wb_return`, and `wb_support` can become `approved`; `seller_chat` is always `needs_review`.
 - `auto_all`: any route passing every hard gate can become `approved`, except `seller_chat`, fallback, media uncertainty, stale version, external answer, or technical/contract uncertainty.
@@ -131,7 +136,7 @@ Before POST, the repository atomically rechecks:
 - no fallback and no media uncertainty;
 - seller_chat has exactly one frozen case code and no public request for photos, video, screenshots, labels, evidence or other materials.
 
-An attempt row containing exact reply, normalized hash, feedback ID, versions and evaluation signature is committed before transport. Any HTTP response, HTTP error or timeout becomes `publish_pending_readback`. The worker cannot write again from that state. It performs detail GET, compares normalized answer text and reaches `published` only on an exact match. Missing/different/external answer becomes `needs_review`. Readback `429`, `5xx` or timeout retries readback only, including while master is OFF.
+An attempt row containing exact reply, normalized hash, feedback ID, versions and evaluation signature is committed before transport. Any HTTP response, HTTP error or timeout becomes `publish_pending_readback`. The worker cannot write again from that state. It performs detail GET, compares normalized answer text and reaches `published` only on an exact match. Missing/different/external answer becomes `needs_review`. While master/force-off is active, no publication job is claimed, including pending readback. After a later authorized re-enable, pending readback is reconciled before any new write and can never become a second POST.
 
 ## UI and API
 
@@ -172,20 +177,24 @@ PYTHONPATH=. python3 apps/wb_autoanswers_node_bridge_test.py
 PYTHONPATH=. python3 apps/wb_autoanswers_media_worker_test.py
 PYTHONPATH=. python3 apps/wb_autoanswers_publication_test.py
 PYTHONPATH=. python3 apps/wb_autoanswers_http_ui_test.py
+PYTHONPATH=. python3 apps/wb_autoanswers_readonly_test.py
+PYTHONPATH=. python3 apps/wb_autoanswers_release_safety_test.py
 python3 -m compileall -q apps packages
 ```
 
 The frozen package is tested separately with `npm test` from its directory. Fixture execution requires `WB_AUTOANSWERS_TEST_MODE=1`; it never uses an API key.
 
-## Not activated here
+## Production release posture
 
-- no systemd/timer installation;
-- no hosted deployment;
-- no real SQLite migration execution outside temporary test directories;
-- no WB sandbox or production GET;
+- hosted deployment keeps both persisted master and effective mode OFF;
+- the HTTP systemd unit and active target pin force-off true;
+- first additive schema takes and integrity-checks a coherent SQLite backup before mutation;
+- no AI/publication timer is installed;
+- bounded GET-only canary/backfill is the only production WB capability authorized for this release;
+- the GET-only steady timer is installed disabled and may be enabled only after read acceptance;
 - no OpenAI call;
 - no WB POST;
 - no production mode change;
 - no PATCH of existing WB answers.
 
-The next external gate is an owner-authorized, credentials-bound, one-page WB sandbox/read-only sync with master OFF. OpenAI canary and any WB write require later, separate gates.
+After production read-only acceptance, the only next gate is separate owner authorization to remove force-off and run a bounded `draft_only` AI canary. Any WB write remains a later, separate gate.

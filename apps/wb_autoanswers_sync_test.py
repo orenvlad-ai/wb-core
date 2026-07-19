@@ -100,12 +100,14 @@ class SyncTest(unittest.TestCase):
         with self.assertRaises(FeedbackSyncError) as raised:
             self.service.initial_backfill_tick(is_answered=False)
         self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.retry_after_seconds, 2)
         self.assertIsNone(self.repo.sync_cursor("wb_feedback_backfill:unanswered"))
 
     def test_archive_and_unanswered_reconciliation(self) -> None:
         self.source.archive = [feedback("archived", answer="Уже отвечено")]
-        result = self.service.reconcile_archive_tick()
+        result = self.service.reconcile_archive_tick(resume_cursor=True)
         self.assertEqual(result["upserted"], 1)
+        self.assertTrue(self.repo.sync_cursor("wb_feedback_archive")["cursor"]["complete"])
         self.source.remote_unanswered = 0
         status = self.service.unanswered_reconciliation_status()
         self.assertTrue(status["matches"])

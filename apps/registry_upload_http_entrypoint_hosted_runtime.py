@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 PROBE_BODY_LIMIT_BYTES = 768 * 1024
 WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
+AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
 WAREHOUSE_FUNCTIONAL_PLAN_ACTIONS = frozenset(
     {
         "cutover-dry-run",
@@ -155,6 +156,7 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "WB_FEEDBACKS_API_BASE_URL",
     "WB_PRICES_API_BASE_URL",
     "WB_PRICES_WRITE_ENABLED",
+    "WB_AUTOANSWERS_FORCE_OFF",
     "WB_SPP_TEST_ENABLED",
     "WB_BUYER_SESSION_VALIDATION_NM_ID",
     "OPENAI_MODEL",
@@ -1819,6 +1821,152 @@ def run_warehouse_opening_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_remote_autoanswers_readonly(
+    target: HostedRuntimeTarget,
+    *,
+    operation: str,
+    page_size: int,
+    max_pages: int,
+    min_request_interval_seconds: float,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"autoanswers-readonly-{operation}")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("autoanswers read-only runner requires the canonical active runtime dir")
+    if not target.environment_file:
+        raise ValueError("autoanswers read-only runner requires the hosted environment file")
+    if operation not in {"status", "canary", "steady", "backfill"}:
+        raise ValueError(f"unsupported autoanswers read-only operation: {operation}")
+    runner_args = [
+        "python3",
+        "apps/wb_autoanswers_readonly.py",
+        "--operation",
+        operation,
+        "--runtime-dir",
+        runtime_dir,
+        "--page-size",
+        str(min(5000, max(1, int(page_size)))),
+        "--max-pages",
+        str(max(1, int(max_pages))),
+        "--min-request-interval-seconds",
+        str(max(0.333, float(min_request_interval_seconds))),
+    ]
+    if operation != "status":
+        runner_args.extend(["--env-file", target.environment_file])
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            "/usr/bin/env WB_AUTOANSWERS_FORCE_OFF=true WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true "
+            + " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=AUTOANSWERS_READONLY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"autoanswers read-only {operation} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("autoanswers read-only runner returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("autoanswers read-only runner returned a non-object JSON payload")
+    settings = ((payload.get("runtime") or {}).get("settings") or {})
+    if (
+        bool(settings.get("master_enabled"))
+        or not bool(settings.get("force_off"))
+        or bool(settings.get("effective_enabled"))
+    ):
+        raise RuntimeError("autoanswers read-only evidence did not prove effective force-off")
+    capabilities = ((payload.get("runtime") or {}).get("capabilities") or {})
+    if bool(capabilities.get("wb_post_patch")) or bool(capabilities.get("openai")):
+        raise RuntimeError("autoanswers read-only evidence exposed a forbidden capability")
+    if operation == "status":
+        backup = ((payload.get("runtime") or {}).get("schema_backup") or {})
+        if int(backup.get("count") or 0) < 1 or str(backup.get("integrity_check") or "") != "ok":
+            raise RuntimeError("autoanswers schema backup is missing or failed integrity readback")
+    return payload
+
+
+def _run_remote_autoanswers_readonly_timer(target: HostedRuntimeTarget, *, action: str) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"autoanswers-readonly-timer-{action}")
+    if action not in {"status", "enable", "disable"}:
+        raise ValueError(f"unsupported autoanswers timer action: {action}")
+    unit = "wb-core-autoanswers-readonly-sync.timer"
+    if action == "enable":
+        status = _run_remote_autoanswers_readonly(
+            target,
+            operation="status",
+            page_size=1,
+            max_pages=1,
+            min_request_interval_seconds=1.0,
+        )
+        settings = ((status.get("runtime") or {}).get("settings") or {})
+        if bool(settings.get("master_enabled")) or not bool(settings.get("force_off")):
+            raise RuntimeError("GET-only timer cannot be enabled without persisted and emergency OFF")
+        shell = (
+            f"systemctl enable --now {shlex.quote(unit)}"
+            f" && systemctl is-enabled {shlex.quote(unit)}"
+            f" && systemctl is-active {shlex.quote(unit)}"
+        )
+    elif action == "disable":
+        shell = (
+            f"systemctl disable --now {shlex.quote(unit)}"
+            f" && (systemctl is-enabled {shlex.quote(unit)} || true)"
+            f" && (systemctl is-active {shlex.quote(unit)} || true)"
+        )
+    else:
+        shell = (
+            f"(systemctl is-enabled {shlex.quote(unit)} || true)"
+            f" && (systemctl is-active {shlex.quote(unit)} || true)"
+            f" && systemctl show {shlex.quote(unit)} --property=UnitFileState,ActiveState,NextElapseUSecRealtime --no-pager"
+        )
+    result = subprocess.run(
+        _remote_shell_command(target, shell),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=300.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"autoanswers read-only timer {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    return {"status": "ok", "action": action, "unit": unit, "systemctl": result.stdout.strip().splitlines()}
+
+
+def run_autoanswers_readonly_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_autoanswers_readonly(
+        target,
+        operation=str(args.operation),
+        page_size=int(args.page_size),
+        max_pages=int(args.max_pages),
+        min_request_interval_seconds=float(args.min_request_interval_seconds),
+    )
+    _print_json({"target_id": target.target_id, "result": payload})
+    return 0
+
+
+def run_autoanswers_readonly_timer_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    payload = _run_remote_autoanswers_readonly_timer(target, action=str(args.action))
+    _print_json({"target_id": target.target_id, "result": payload})
+    return 0
+
+
 def run_warehouse_functional_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -2223,6 +2371,41 @@ def run_warehouse_ui_flow_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_autoanswers_ui_flow_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    _ensure_active_hosted_runtime_target(target, action="autoanswers-ui-flow")
+    if str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower() != "true":
+        raise RuntimeError("autoanswers UI flow requires the production target force-off pin")
+    auth_cookie = _build_probe_auth_cookie(target, timeout_seconds=float(args.timeout_seconds))
+    if not auth_cookie:
+        raise RuntimeError("autoanswers UI flow requires safely available production app-session auth")
+    evidence_dir = Path(str(args.evidence_dir)).resolve()
+    try:
+        evidence_dir.relative_to(ROOT.resolve())
+    except ValueError:
+        pass
+    else:
+        raise ValueError("autoanswers UI evidence must be stored outside the repository")
+    from apps.wb_autoanswers_production_ui_flow import run_autoanswers_ui_flow
+
+    result = run_autoanswers_ui_flow(
+        base_url=target.public_base_url,
+        auth_cookie=auth_cookie,
+        evidence_dir=evidence_dir,
+        headless=not bool(args.headed),
+    )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "public_base_url": target.public_base_url,
+            "auth": _probe_auth_summary(auth_cookie),
+            "result": result,
+        }
+    )
+    return 0
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Repo-owned deploy/probe contract for hosted registry upload runtime.",
@@ -2266,6 +2449,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     deploy_and_verify.add_argument("--dry-run", action="store_true", help="Print deploy commands without executing.")
     deploy_and_verify.add_argument("--allow-dirty", action="store_true", help="Allow deploy from dirty checkout.")
     deploy_and_verify.set_defaults(handler=run_deploy_and_verify_command)
+
+    autoanswers_readonly = subparsers.add_parser(
+        "autoanswers-readonly",
+        help="Run the force-off, GET-only WB feedback status/canary/backfill on the active runtime.",
+    )
+    autoanswers_readonly.add_argument("operation", choices=("status", "canary", "steady", "backfill"))
+    autoanswers_readonly.add_argument("--page-size", type=int, default=100)
+    autoanswers_readonly.add_argument("--max-pages", type=int, default=1000)
+    autoanswers_readonly.add_argument("--min-request-interval-seconds", type=float, default=1.0)
+    autoanswers_readonly.set_defaults(handler=run_autoanswers_readonly_command)
+
+    autoanswers_readonly_timer = subparsers.add_parser(
+        "autoanswers-readonly-timer",
+        help="Inspect, enable or disable the installed GET-only force-off background sync timer.",
+    )
+    autoanswers_readonly_timer.add_argument("action", choices=("status", "enable", "disable"))
+    autoanswers_readonly_timer.set_defaults(handler=run_autoanswers_readonly_timer_command)
 
     warehouse_dry_run = subparsers.add_parser(
         "warehouse-opening-dry-run",
@@ -2452,6 +2652,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional migration-specific immutable controls; the default Flow remains reusable.",
     )
     warehouse_ui_flow.set_defaults(handler=run_warehouse_ui_flow_command)
+
+    autoanswers_ui_flow = subparsers.add_parser(
+        "autoanswers-ui-flow",
+        help="Run authenticated read-only production Playwright acceptance for WB autoanswers.",
+    )
+    autoanswers_ui_flow.add_argument("--evidence-dir", required=True)
+    autoanswers_ui_flow.add_argument("--timeout-seconds", type=float, default=180.0)
+    autoanswers_ui_flow.add_argument("--headed", action="store_true")
+    autoanswers_ui_flow.set_defaults(handler=run_autoanswers_ui_flow_command)
 
     return parser
 
@@ -4209,6 +4418,8 @@ def _current_live_publication_invariant_blockers(target: HostedRuntimeTarget) ->
     blockers: list[str] = []
     if target.public_base_url != CURRENT_LIVE_PUBLIC_BASE_URL:
         blockers.append(f"public_base_url={target.public_base_url or '<missing>'}")
+    if str(target.runtime_env.get("WB_AUTOANSWERS_FORCE_OFF") or "").strip().lower() != "true":
+        blockers.append("runtime_env.WB_AUTOANSWERS_FORCE_OFF must be true")
 
     if not target.nginx_public_routes:
         blockers.append("nginx_public_routes=<missing>")

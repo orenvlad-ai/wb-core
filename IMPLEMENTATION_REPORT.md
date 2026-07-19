@@ -5,11 +5,11 @@ Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978
 Рабочая копия: `/Users/ovlmacbook/Downloads/wb-core-autoanswers-loop_20260719T214600Z/repo`  
 Локальная ветка: `codex/wb-autoanswers-server-v1`
 
-## Terminal status
+## Local release-candidate status
 
-`LOCAL_IMPLEMENTATION_COMPLETE__EXTERNAL_ACTION_GATE_REACHED`
+`LOCAL_RELEASE_CANDIDATE_READY__STANDARD_RELEASE_TRAIN_AUTHORIZED`
 
-Локальная реализация, fake-transport публикация, тесты и документация готовы. Работа остановлена ровно перед первым внешним WB sandbox/production или OpenAI действием. Production deploy, фоновые units и реальные credentials не настраивались.
+Локальная реализация, fake-transport публикация, release hardening, тесты и документация готовы. Production HTTP deployment pin-ит emergency force-off; AI/publication scheduler не добавлен. Фактические PR/deploy/production acceptance результаты фиксируются release-train evidence и финальным LOOP-отчётом, а не заранее в этом versioned code report.
 
 ## Что реализовано
 
@@ -21,7 +21,7 @@ Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978
 - Реализован узкий stdin/stdout JSON boundary Python → Node. Node перед каждым запуском проверяет все 28 manifest hashes и вызывает исходный frozen orchestrator.
 - В существующей runtime SQLite добавлены отдельные canonical feedback/version/media, sync, command, processing, publication, attempt, budget, backlog-preview and audit tables.
 - Master-switch default OFF; `WB_AUTOANSWERS_FORCE_OFF=true` имеет абсолютный приоритет.
-- OFF разрешает синхронизацию и локальный UI, но блокирует enqueue/claim AI, ручное approve и каждый новый WB write.
+- OFF разрешает синхронизацию и локальный UI, но блокирует enqueue/claim AI, ручное approve, все publication claims (включая readback) и каждый WB write.
 - OFF→ON увеличивает `enable_epoch`; старые jobs не продолжаются автоматически и переводятся в `needs_review`.
 - Реализованы `draft_only`, `auto_safe`, `auto_all`. Начальный auto_safe allowlist: `public_only`, `wb_return`, `wb_support`. `seller_chat` всегда review-only.
 - Реализован двухшаговый historical backlog: expiring preview с count/max cost → explicit enqueue. История не проходит эту границу автоматически.
@@ -72,7 +72,7 @@ Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978
 - `204` is not publication proof. HTTP success/error/timeout all go to `publish_pending_readback`.
 - Pending publication can execute only GET detail reconciliation; blind POST retry is structurally excluded.
 - Exact normalized readback reaches `published`. Missing/different/external reply reaches `needs_review` without a second write.
-- Readback 429/5xx/timeout retries readback only, even if master has since become OFF.
+- Readback 429/5xx/timeout сохраняет только readback retry. Пока master/force-off активен, такой job не claim-ится; после отдельного разрешённого ON он может выполнить только GET readback, никогда повторный POST.
 - PATCH existing WB answers is absent.
 
 ### 6. Documentation and explicit external boundary
@@ -80,7 +80,12 @@ Baseline: local `refs/remotes/origin/main` at `8cd6eeb62c4b9c6ef98d52b0a38270978
 - Added `docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md`.
 - Added `migration/105_wb_autoanswers_server_v1.md` with staged activation and rollback.
 - Updated module index and README.
-- `apps/wb_autoanswers_worker.py` is inert by default. `--run-once` is rejected unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`; no timer/deploy unit was added.
+- `apps/wb_autoanswers_worker.py` is inert by default. `--run-once` is rejected unless `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`; AI/publication timer не добавлен.
+- Active production target and HTTP systemd unit pin `WB_AUTOANSWERS_FORCE_OFF=true`; OFF→ON is rejected while the override is active.
+- `apps/wb_autoanswers_readonly.py` is a separate GET-only capability for bounded canary/backfill. It imports no writer/Node/OpenAI code, requires persisted master OFF, reasserts force-off after env load, rate-limits calls and proves zero AI/publication job delta.
+- A dedicated five-minute GET-only steady timer is deployed disabled, then can be enabled only by the repo-owned timer gate after production read acceptance. It also drains UI sync commands without importing AI/publication capabilities.
+- Authenticated production Playwright acceptance has a repo-owned flow that proves exact URL/render, OFF reason and disabled controls, local 50-row pagination, detail/media/status contracts, zero cross-page duplicates, no 5xx/page/console/fatal errors and screenshot evidence.
+- First additive schema execution takes a coherent SQLite backup under `backups/wb_autoanswers_schema_v1`, verifies `PRAGMA integrity_check=ok`, and applies DDL plus marker/settings atomically; failure aborts before activation.
 
 ## State and idempotency summary
 
@@ -88,19 +93,21 @@ Implemented states cover:
 
 `discovered → synced → queued → processing → generated → needs_review/approved → publishing → publish_pending_readback → published`, with `skipped`, `retryable_error` and `terminal_error` branches.
 
-SQLite uses WAL, foreign keys, 10-second busy timeout and `BEGIN IMMEDIATE` around claims/reservations/transitions. Claims have owner/lease timestamps. An expired processing or publication lease is recoverable by exactly one claimant. Publication pending readback is intentionally recoverable independently from master ON, but can never become a second POST.
+SQLite uses WAL, foreign keys, 10-second busy timeout and `BEGIN IMMEDIATE` around claims/reservations/transitions. Claims have owner/lease timestamps. An expired processing or publication lease is recoverable by exactly one claimant only while effective ON. Publication pending readback remains durable but unclaimed while OFF and can never become a second POST.
 
 ## Проверки
 
-### New autoanswers tests — PASS (40 methods)
+### New autoanswers tests — PASS (52 methods)
 
 ```text
-apps/wb_autoanswers_runtime_test.py          14 PASS
+apps/wb_autoanswers_runtime_test.py          16 PASS
 apps/wb_autoanswers_sync_test.py              6 PASS
 apps/wb_autoanswers_node_bridge_test.py       4 PASS
 apps/wb_autoanswers_media_worker_test.py      4 PASS
 apps/wb_autoanswers_publication_test.py       9 PASS
 apps/wb_autoanswers_http_ui_test.py           3 PASS
+apps/wb_autoanswers_readonly_test.py          6 PASS
+apps/wb_autoanswers_release_safety_test.py    4 PASS
 ```
 
 Покрыты обязательные сценарии:
@@ -120,7 +127,9 @@ apps/wb_autoanswers_http_ui_test.py           3 PASS
 - SQLite concurrent lease reclaim/crash recovery;
 - 204 with exact/missing/different readback;
 - ambiguous timeout and readback-only retry;
-- readback 429 while OFF;
+- readback 429 remains durable and unclaimed while OFF;
+- coherent pre-schema backup and atomic additive migration;
+- production target/unit force-off pin and GET-only hosted runner capability;
 - Python/Node contract, frozen identity, media frames and empty-five-star prefilter.
 
 ### Frozen package — PASS (28/28)
@@ -171,12 +180,12 @@ python3 apps/wb_autoanswers_worker.py --run-once
 
 These are activation tasks, not missing local implementation:
 
-1. Bind runtime credentials through the existing server secret boundary.
-2. Install lockfile dependencies and ffmpeg in a target image.
-3. Run the first owner-approved WB sandbox/read-only page with master OFF.
-4. Only after read reconciliation, authorize a one-review OpenAI `draft_only` canary under the budget gate.
-5. Add/deploy a scheduler unit only in a separate owner-approved live-runtime change.
-6. Any production WB POST requires a later explicit bounded canary decision and must preserve mandatory readback.
+1. Complete the standard GitHub release train and exact-SHA hosted deployment.
+2. Run the authorized production GET-only page/detail and resumable history backfill with master/force-off both OFF.
+3. Install/verify lockfile Node dependencies and ffmpeg before, but not as authorization for, a future AI canary.
+4. Only after a new owner decision may force-off be removed for one `draft_only` AI canary under the budget gate.
+5. Add an AI/publication scheduler only in a separate owner-approved live-runtime change.
+6. Any production WB POST requires a later explicit bounded canary decision and mandatory readback.
 
 No automatic PATCH/edit of an existing answer is planned for v1.
 
@@ -186,12 +195,12 @@ Before any future activation, take and verify a runtime SQLite backup. Emergency
 
 1. set `WB_AUTOANSWERS_FORCE_OFF=true`;
 2. stop only the future autoanswers timer/unit;
-3. keep GET-only reconciliation running for already ambiguous attempts;
+3. keep ambiguous attempts durable and unclaimed; after a later authorized re-enable, reconcile them by GET before any write decision;
 4. never retry their writes blindly;
 5. roll code back independently; additive tables can stay inert;
 6. restore the database only for corruption and only after WB readback reconciliation.
 
-## External-action accounting
+## External-action accounting at release-candidate creation
 
 - Wildberries API calls: **0**
 - OpenAI live/evaluation calls: **0**
@@ -202,8 +211,6 @@ Before any future activation, take and verify a runtime SQLite backup. Emergency
 
 All WB and model behaviors were exercised through fakes or frozen local fixture role outputs.
 
-## Exact next external gate
+## Exact post-release external gate
 
-Owner approval is required for **Gate A: one bounded WB sandbox/read-only feedback page plus one detail GET, with persisted master OFF and `WB_AUTOANSWERS_FORCE_OFF=true`, followed by local hash/cursor/UI reconciliation and proof that zero AI/publication jobs were created**.
-
-Until that explicit approval, `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED` must remain unset/false. OpenAI canary and every WB write are later, separate gates.
+The current owner authorization covers only the standard release train plus force-off production GET sync/backfill. After successful production acceptance, the single next gate is separate owner approval to remove `WB_AUTOANSWERS_FORCE_OFF` and run one bounded `draft_only` AI canary. OpenAI live calls and every WB write remain prohibited until that later gate.

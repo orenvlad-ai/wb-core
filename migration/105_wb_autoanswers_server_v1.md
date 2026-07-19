@@ -1,15 +1,15 @@
 # WB autoanswers server v1 — activation and rollback runbook
 
-Status: local implementation complete; external activation deliberately blocked.
+Status: production release train; feature deployed physically but activation deliberately blocked.
 
 ## Preconditions
 
 1. Review `IMPLEMENTATION_REPORT.md` and `docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md`.
 2. Keep persisted master-switch OFF and set `WB_AUTOANSWERS_FORCE_OFF=true` for the first database/schema and read-only checks.
-3. Back up the runtime SQLite database and verify restore in a disposable copy.
+3. The first schema initializer must create a coherent `runtime/backups/wb_autoanswers_schema_v1/` SQLite backup, verify `PRAGMA integrity_check=ok`, and abort before schema mutation on failure.
 4. Install the lockfile-pinned Node dependencies and ffmpeg in the target image; never commit `node_modules`.
 5. Bind only the named runtime secrets through the existing hosted secret boundary.
-6. Obtain a separate owner authorization before setting `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true`.
+6. The repo-owned GET-only runner may set its narrow external-I/O gate for approved sync/backfill; the full worker gate stays disabled.
 
 ## Staged external gates
 
@@ -27,6 +27,7 @@ Status: local implementation complete; external activation deliberately blocked.
 - advance from `2026-01-01` under rate limits;
 - compare local/remote unanswered count and archive samples;
 - verify history created no AI jobs.
+- after successful reconciliation, enable only `wb-core-autoanswers-readonly-sync.timer`; the full AI/publication worker remains unscheduled.
 
 ### Gate C — OpenAI draft-only canary
 
@@ -49,9 +50,9 @@ Status: local implementation complete; external activation deliberately blocked.
 
 ## Rollback
 
-1. Set `WB_AUTOANSWERS_FORCE_OFF=true`; this blocks AI, manual approval and every new write without blocking readback reconciliation.
+1. Set `WB_AUTOANSWERS_FORCE_OFF=true`; this blocks AI, manual approval, every write and all publication claims, including pending readback.
 2. Stop only the future autoanswers scheduler unit after it exists; do not delete queued data.
-3. Let `publish_pending_readback` jobs perform GET-only reconciliation. Never replay their POST blindly.
+3. Keep `publish_pending_readback` jobs unclaimed while OFF. After a separately authorized re-enable, reconcile them by GET before considering any new write; never replay their POST blindly.
 4. Restore code independently. Additive SQLite tables may remain inert; destructive down migrations are not required.
 5. Restore the pre-activation SQLite backup only for database corruption, never to hide ambiguous publication attempts. Reconcile WB first.
 

@@ -24,10 +24,18 @@ STEADY_OVERLAP_SECONDS = 48 * 60 * 60
 
 
 class FeedbackSyncError(RuntimeError):
-    def __init__(self, message: str, *, code: str, retryable: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        retryable: bool,
+        retry_after_seconds: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _day_bounds(day: date) -> tuple[int, int]:
@@ -245,12 +253,25 @@ class WbFeedbackSyncService:
             )
             raise error from exc
 
-    def reconcile_archive_tick(self, *, skip: int = 0) -> dict[str, Any]:
+    def reconcile_archive_tick(
+        self,
+        *,
+        skip: int | None = None,
+        resume_cursor: bool = False,
+    ) -> dict[str, Any]:
+        stream_key = "wb_feedback_archive"
+        stored = self.repository.sync_cursor(stream_key) if resume_cursor else None
+        cursor = dict(stored["cursor"]) if stored else {"skip": 0, "complete": False}
+        if skip is not None:
+            cursor = {"skip": max(0, int(skip)), "complete": False}
+        if bool(cursor.get("complete")):
+            return {"rows": 0, "upserted": 0, "cursor": cursor}
+        current_skip = max(0, int(cursor.get("skip") or 0))
         run_id = self.repository.start_sync_run(
-            run_kind="reconciliation", source_stream="archive", cursor={"skip": int(skip)}
+            run_kind="reconciliation", source_stream="archive", cursor={"skip": current_skip}
         )
         try:
-            page = self.source.fetch_archive_page(take=self.page_size, skip=max(0, int(skip)))
+            page = self.source.fetch_archive_page(take=self.page_size, skip=current_skip)
             upserted = 0
             for row in page.rows:
                 if not _inside_history_window(row):
@@ -260,6 +281,12 @@ class WbFeedbackSyncService:
                 )
                 upserted += int(outcome["is_new"] or outcome["content_changed"] or outcome["observation_changed"])
             cursor = {"skip": page.skip + page.take if page.has_more else 0, "complete": not page.has_more}
+            if resume_cursor and skip is None:
+                self.repository.save_sync_cursor(
+                    stream_key,
+                    cursor=cursor,
+                    successful=not page.has_more,
+                )
             self.repository.finish_sync_run(
                 run_id,
                 state="succeeded",
@@ -275,7 +302,7 @@ class WbFeedbackSyncService:
                 state="retryable_error" if error.retryable else "terminal_error",
                 discovered_count=0,
                 upserted_count=0,
-                cursor={"skip": int(skip)},
+                cursor={"skip": current_skip},
                 error_code=error.code,
             )
             raise error from exc
@@ -292,7 +319,10 @@ class WbFeedbackSyncService:
         if isinstance(exc, WbAutoanswersHttpError):
             retryable = exc.status_code == 429 or exc.status_code >= 500
             return FeedbackSyncError(
-                str(exc), code=f"wb_http_{exc.status_code}", retryable=retryable
+                str(exc),
+                code=f"wb_http_{exc.status_code}",
+                retryable=retryable,
+                retry_after_seconds=exc.retry_after_seconds,
             )
         if isinstance(exc, WbAutoanswersTransportError):
             return FeedbackSyncError(str(exc), code="wb_transport", retryable=True)

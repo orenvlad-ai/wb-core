@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Any, Mapping, Protocol
 from urllib import error, parse as urllib_parse, request as urllib_request
 
@@ -16,6 +17,28 @@ from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, loa
 
 
 OFFICIAL_FEEDBACKS_API_BASE_URL = "https://feedbacks-api.wildberries.ru"
+
+
+def _retry_after_seconds(headers: Mapping[str, Any] | None) -> int | None:
+    if not headers:
+        return None
+    values: list[float] = []
+    for name in ("Retry-After", "X-Ratelimit-Retry"):
+        try:
+            value = float(str(headers.get(name) or "").strip())
+        except ValueError:
+            continue
+        if value > 0:
+            values.append(value)
+    try:
+        reset_at = float(str(headers.get("X-Ratelimit-Reset") or "").strip())
+    except ValueError:
+        reset_at = 0
+    if reset_at > 0:
+        import time
+
+        values.append(max(0.0, reset_at - time.time()))
+    return int(math.ceil(max(values))) if values else None
 
 
 class WbAutoanswersHttpError(RuntimeError):
@@ -153,11 +176,10 @@ class HttpBackedWbAutoanswersReadAdapter:
                 payload = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            retry_after = exc.headers.get("Retry-After") if exc.headers else None
             raise WbAutoanswersHttpError(
                 exc.code,
                 body,
-                retry_after_seconds=int(retry_after) if str(retry_after or "").isdigit() else None,
+                retry_after_seconds=_retry_after_seconds(exc.headers),
             ) from exc
         except (error.URLError, TimeoutError) as exc:
             raise WbAutoanswersTransportError("WB Feedbacks API transport failed") from exc
@@ -204,11 +226,10 @@ class HttpBackedWbAnswerWriter(HttpBackedWbAutoanswersReadAdapter):
                 return int(response.status)
         except error.HTTPError as exc:
             response_body = exc.read().decode("utf-8", errors="replace")
-            retry_after = exc.headers.get("Retry-After") if exc.headers else None
             raise WbAutoanswersHttpError(
                 exc.code,
                 response_body,
-                retry_after_seconds=int(retry_after) if str(retry_after or "").isdigit() else None,
+                retry_after_seconds=_retry_after_seconds(exc.headers),
             ) from exc
         except (error.URLError, TimeoutError) as exc:
             raise WbAutoanswersTransportError("WB answer transport result is ambiguous") from exc

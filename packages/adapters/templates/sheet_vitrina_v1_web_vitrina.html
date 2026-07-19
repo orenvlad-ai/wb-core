@@ -12308,21 +12308,27 @@
       const budget = server.budget || {};
       const effectiveOn = !!settings.effective_enabled;
       if (autoanswersMasterStatusNode) {
-        autoanswersMasterStatusNode.textContent = settings.force_off ? "FORCE OFF" : (effectiveOn ? "ON" : "OFF");
+        autoanswersMasterStatusNode.textContent = effectiveOn ? "Автоответы включены" : "Автоответы выключены";
         autoanswersMasterStatusNode.classList.toggle("is-on", effectiveOn);
       }
       if (autoanswersModeNode && settings.mode) autoanswersModeNode.value = settings.mode;
-      if (autoanswersModeNode) autoanswersModeNode.disabled = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      if (autoanswersModeNode) autoanswersModeNode.disabled = !WEB_VITRINA_CONFIG.feedbacks_can_admin || !!settings.force_off;
       if (autoanswersToggleButton) {
         autoanswersToggleButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
         autoanswersToggleButton.disabled = server.settingsLoading || !!settings.force_off;
         autoanswersToggleButton.textContent = settings.master_enabled ? "Выключить" : "Включить";
       }
-      if (autoanswersSaveModeButton) autoanswersSaveModeButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
-      if (autoanswersBacklogButton) autoanswersBacklogButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      if (autoanswersSaveModeButton) {
+        autoanswersSaveModeButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+        autoanswersSaveModeButton.disabled = server.settingsLoading || !!settings.force_off;
+      }
+      if (autoanswersBacklogButton) {
+        autoanswersBacklogButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+        autoanswersBacklogButton.disabled = server.settingsLoading || !!settings.force_off;
+      }
       if (autoanswersBudgetDayNode) autoanswersBudgetDayNode.textContent = "$" + Number(budget.daily_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budget.daily_cap_usd || 5).toFixed(2);
       if (autoanswersBudgetMonthNode) autoanswersBudgetMonthNode.textContent = "$" + Number(budget.monthly_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budget.monthly_cap_usd || 50).toFixed(2);
-      if (autoanswersSettingsNoteNode) autoanswersSettingsNoteNode.textContent = settings.force_off ? "Emergency override WB_AUTOANSWERS_FORCE_OFF активен." : "Master-switch имеет приоритет. После повторного ON исторический backlog не запускается автоматически.";
+      if (autoanswersSettingsNoteNode) autoanswersSettingsNoteNode.textContent = settings.force_off ? "Автоответы выключены: production force-off WB_AUTOANSWERS_FORCE_OFF=true. AI и публикация заблокированы server-side." : "Master-switch имеет приоритет. После повторного ON исторический backlog не запускается автоматически.";
       if (autoanswersErrorNode) autoanswersErrorNode.textContent = server.error || "";
       if (autoanswersListMetaNode) autoanswersListMetaNode.textContent = server.loading ? "Загрузка…" : ("Найдено: " + server.total + " · по 50 на странице");
       if (autoanswersPrevButton) autoanswersPrevButton.disabled = server.loading || server.page <= 1;
@@ -12350,7 +12356,7 @@
       const product = row.productDetails || {};
       const media = Array.isArray(row.media) ? row.media : [];
       const latestJob = Array.isArray(row.ai_jobs) && row.ai_jobs.length ? row.ai_jobs[0] : null;
-      const canApprove = WEB_VITRINA_CONFIG.feedbacks_can_ai_review && latestJob && ["generated", "needs_review"].includes(String(latestJob.state || ""));
+      const canApprove = WEB_VITRINA_CONFIG.feedbacks_can_ai_review && !!((state.feedbacks.server.settings || {}).effective_enabled) && latestJob && ["generated", "needs_review"].includes(String(latestJob.state || ""));
       autoanswersDetailBodyNode.innerHTML = '<div class="autoanswers-detail-grid">' +
         '<section class="autoanswers-detail-block"><strong>Отзыв</strong>\n' + escapeHtml(row.text || "") + '\n\nПлюсы: ' + escapeHtml(row.pros || "—") + '\nМинусы: ' + escapeHtml(row.cons || "—") + '\nТеги: ' + escapeHtml((row.tags || []).join(", ")) + '</section>' +
         '<section class="autoanswers-detail-block"><strong>Товар</strong>\n' + escapeHtml(product.product_name || "—") + '\nnmId: ' + escapeHtml(product.nm_id || "—") + '\nАртикул: ' + escapeHtml(product.supplier_article || "—") + '\nВерсия: ' + escapeHtml(row.content_version || "—") + '</section>' +

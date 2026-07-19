@@ -78,6 +78,8 @@ class HttpUiTest(unittest.TestCase):
         )
         self.assertIn("data-feedbacks-subtab=\"server-reviews\"", html)
         self.assertIn("data-autoanswers-master-status", html)
+        self.assertIn("Автоответы выключены", html)
+        self.assertIn("WB_AUTOANSWERS_FORCE_OFF=true", html)
         self.assertIn("feedbacks_autoanswers_settings_path", html)
         self.assertIn("AUTO_ALL", html)
         scripts = re.findall(r"<script(?: [^>]*)?>(.*?)</script>", html, flags=re.DOTALL)
