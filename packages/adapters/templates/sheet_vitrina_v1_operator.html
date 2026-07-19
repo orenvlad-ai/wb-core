@@ -4479,6 +4479,13 @@
                   <label for="regionalReportDateOverride">Ручная дата расчёта</label>
                   <input id="regionalReportDateOverride" type="date">
                 </div>
+                <div class="field field-span-full">
+                  <label class="checkbox-field" for="excludeElektrostalStock">
+                    <input id="excludeElektrostalStock" type="checkbox">
+                    <span>Не учитывать остатки Электростали</span>
+                  </label>
+                  <p class="field-note">Остатки склада Электросталь исключаются только из текущего расчёта. История продаж и данные других складов не изменяются.</p>
+                </div>
               </div>
               <p class="field-note" id="regionalMethodologyNote">
                 Сервер использует общий файл <strong>«Остатки ФФ»</strong>, total orderCount по SKU и ladder долей:
@@ -5275,7 +5282,8 @@
         cycle_supply_days: document.getElementById("cycleSupplyDays"),
         safety_days: document.getElementById("regionalSafetyDays"),
         order_batch_qty: document.getElementById("regionalOrderBatchQty"),
-        report_date_override: document.getElementById("regionalReportDateOverride")
+        report_date_override: document.getElementById("regionalReportDateOverride"),
+        exclude_elektrostal_stock: document.getElementById("excludeElektrostalStock")
       };
       const regionalMethodologyNote = document.getElementById("regionalMethodologyNote");
       const regionalDistrictSelectorList = document.getElementById("regionalDistrictSelectorList");
@@ -8110,6 +8118,7 @@
         payload.factory_inbound_source = factoryInboundSource;
         payload.stock_ff_source = stockFfSource;
         payload.selected_wb_supply_ids = selectedWbSupplyIds.slice();
+        payload.exclude_elektrostal_stock = Boolean(regionalFields.exclude_elektrostal_stock && regionalFields.exclude_elektrostal_stock.checked);
         return payload;
       }
 
@@ -9234,6 +9243,20 @@
         }
         const diagnostics = result.diagnostics || {};
         const parts = ["Доли восстановлены по расширенной методологии."];
+        if (diagnostics.calculation_mode) {
+          parts.push("Режим: " + String(diagnostics.calculation_mode) + ".");
+        }
+        const incident = diagnostics.elektrostal_stock_override && typeof diagnostics.elektrostal_stock_override === "object"
+          ? diagnostics.elektrostal_stock_override
+          : null;
+        if (incident) {
+          parts.push(
+            "Электросталь: фактически " + valueOrDash(incident.actual_central_stock) +
+            ", исключено " + valueOrDash(incident.excluded_elektrostal_stock) +
+            ", эффективно " + valueOrDash(incident.effective_central_stock) +
+            (incident.enabled ? " (override включён)." : " (override выключен).")
+          );
+        }
         if (diagnostics.requested_valid_day_count) {
           parts.push("Идеальные дни по всем округам: " + valueOrDash(diagnostics.min_selected_valid_day_count) + "-" + valueOrDash(diagnostics.max_selected_valid_day_count) + " из " + valueOrDash(diagnostics.requested_valid_day_count) + ".");
         }
@@ -9283,12 +9306,41 @@
           : {};
         const included = Array.isArray(diagnostics.included_district_keys) ? diagnostics.included_district_keys : [];
         const excluded = Array.isArray(diagnostics.excluded_district_keys) ? diagnostics.excluded_district_keys : [];
+        const incident = diagnostics.elektrostal_stock_override && typeof diagnostics.elektrostal_stock_override === "object"
+          ? diagnostics.elektrostal_stock_override
+          : null;
         const qualityRows = [
           "Fallback на старую формулу: " + valueOrDash(diagnostics.fallback_sku_count || 0) + " SKU",
           "Низкая уверенность: " + valueOrDash(diagnostics.low_confidence_sku_district_count || 0) + " направлений SKU-округ",
           "Идеальные дни по всем округам: " + valueOrDash(diagnostics.min_selected_valid_day_count) + "-" + valueOrDash(diagnostics.max_selected_valid_day_count) + " из " + valueOrDash(diagnostics.requested_valid_day_count),
           "Максимальная глубина поиска: " + valueOrDash(diagnostics.max_inspected_day_count) + " дней"
         ];
+        const transition = diagnostics.central_transition && typeof diagnostics.central_transition === "object"
+          ? diagnostics.central_transition
+          : {};
+        if (diagnostics.calculation_mode) {
+          qualityRows.unshift("Режим расчёта: " + diagnostics.calculation_mode);
+        }
+        if (Object.keys(transition).length) {
+          qualityRows.push(
+            "ЦФО: стартовая модель " + valueOrDash(Math.round(Number(transition.startup_model_weight || 0) * 100)) +
+            "%, направленная история " + valueOrDash(Math.round(Number(transition.directed_history_weight || 0) * 100)) +
+            "%, confidence " + valueOrDash(Math.round(Number(transition.confidence || 0) * 100)) + "%"
+          );
+          qualityRows.push(
+            "Достоверные дни ЦФО-направлений: " +
+            formatReasonCounts(transition.direction_observation_counts, { districtLabels: true }) +
+            " из " + valueOrDash(transition.required_observation_count)
+          );
+        }
+        if (incident) {
+          qualityRows.push(
+            "Электросталь: WB " + valueOrDash(incident.actual_central_stock) +
+            ", исключено " + valueOrDash(incident.excluded_elektrostal_stock) +
+            ", effective " + valueOrDash(incident.effective_central_stock) +
+            "; " + String(incident.reason || "")
+          );
+        }
         const htmlParts = [
           "<h4>Как считались доли</h4>",
           renderRegionalDiagnosticsList(regionalShareSourceRows(diagnostics.share_source_counts || {})),
@@ -9385,7 +9437,10 @@
           sku_group_prior: "Похожие SKU",
           global_prior: "Общий профиль",
           seed_floor: "Тестовая поставка",
-          seed_floor_candidate: "Тестовая поставка"
+          seed_floor_candidate: "Тестовая поставка",
+          central_start_distribution: "Стартовое распределение ЦФО",
+          central_mixed_distribution: "Смешанное распределение ЦФО",
+          central_direction_history: "История направления ЦФО"
         };
         const ordered = [
           "full_clean_days",
@@ -9394,7 +9449,10 @@
           "sku_group_prior",
           "global_prior",
           "seed_floor",
-          "seed_floor_candidate"
+          "seed_floor_candidate",
+          "central_start_distribution",
+          "central_mixed_distribution",
+          "central_direction_history"
         ];
         return ordered.map((key) => labels[key] + ": " + Number(sourceCounts[key] || 0) + " направлений SKU-округ");
       }
@@ -9445,6 +9503,9 @@
           global_prior: "общий профиль по всем SKU",
           seed_floor: "тестовая поставка",
           seed_floor_candidate: "тестовая поставка",
+          central_start_distribution: "стартовое распределение ЦФО",
+          central_mixed_distribution: "смешанное распределение ЦФО",
+          central_direction_history: "история направления ЦФО",
           current_stock_share_fallback: "старый резервный способ по текущим остаткам",
           district_zero_zero_no_signal: "нулевой остаток без сигнала продаж",
           district_restock_or_upward_correction: "пополнение или скачок остатка вверх",
