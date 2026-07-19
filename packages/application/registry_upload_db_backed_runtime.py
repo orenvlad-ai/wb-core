@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 from decimal import Decimal, ROUND_HALF_UP
 from types import SimpleNamespace
@@ -116,18 +118,36 @@ class RegistryUploadDbBackedRuntime:
         if target.exists():
             raise ValueError(f"Backup destination already exists: {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as source_conn, sqlite3.connect(target) as target_conn:
-            source_conn.backup(target_conn)
-            integrity_rows = target_conn.execute("PRAGMA integrity_check").fetchall()
-            integrity_check = [str(row[0]) for row in integrity_rows]
-            if integrity_check != ["ok"]:
-                raise ValueError(f"SQLite backup integrity_check failed: {integrity_check}")
-        digest = hashlib.sha256()
-        size_bytes = 0
-        with target.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                size_bytes += len(chunk)
-                digest.update(chunk)
+        source_size = self.db_path.stat().st_size
+        safety_margin = max(256 * 1024 * 1024, source_size // 20)
+        required_free_bytes = source_size + safety_margin
+        available_free_bytes = shutil.disk_usage(target.parent).free
+        if available_free_bytes < required_free_bytes:
+            raise ValueError(
+                "insufficient filesystem capacity for coherent SQLite backup: "
+                f"required_free_bytes={required_free_bytes}, available_free_bytes={available_free_bytes}"
+            )
+        destination_created = False
+        try:
+            descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(descriptor)
+            destination_created = True
+            with sqlite3.connect(self.db_path) as source_conn, sqlite3.connect(target) as target_conn:
+                source_conn.backup(target_conn)
+                integrity_rows = target_conn.execute("PRAGMA integrity_check").fetchall()
+                integrity_check = [str(row[0]) for row in integrity_rows]
+                if integrity_check != ["ok"]:
+                    raise ValueError(f"SQLite backup integrity_check failed: {integrity_check}")
+            digest = hashlib.sha256()
+            size_bytes = 0
+            with target.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    size_bytes += len(chunk)
+                    digest.update(chunk)
+        except Exception:
+            if destination_created:
+                _remove_incomplete_backup_destination(target)
+            raise
         return {
             "path": str(target),
             "size_bytes": size_bytes,
@@ -9385,3 +9405,23 @@ def _default_sheet_vitrina_sections_for_role(role: str) -> list[str]:
 
 def _default_sheet_vitrina_manage_users_for_role(role: str) -> bool:
     return str(role or "").strip() == "admin"
+
+
+def _remove_incomplete_backup_destination(target: Path) -> None:
+    """Remove only files owned by one backup attempt that did not complete."""
+    failures: list[str] = []
+    for candidate in (
+        target,
+        Path(str(target) + "-wal"),
+        Path(str(target) + "-shm"),
+        Path(str(target) + "-journal"),
+    ):
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            failures.append(candidate.name)
+    if failures:
+        raise RuntimeError(
+            "SQLite backup failed and incomplete destination cleanup failed: "
+            + ", ".join(failures)
+        )

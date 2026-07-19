@@ -6,6 +6,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from decimal import Decimal
 import copy
+import json
 import os
 from pathlib import Path
 import socket
@@ -18,7 +19,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.warehouse_stocks_smoke import _block, _seed_runtime  # noqa: E402
-from apps.warehouse_stocks_production_ui_flow import run_warehouse_ui_flow  # noqa: E402
+from apps.warehouse_stocks_production_ui_flow import (  # noqa: E402
+    _supplier_financial_detail_url,
+    _visible_money,
+    run_warehouse_ui_flow,
+)
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -42,6 +47,13 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 
 def main() -> None:
+    _assert(_visible_money("78\u00a0086,09 RUB") == Decimal("78086.09"), "localized RUB money")
+    _assert(_visible_money("1\u202f234,50 CNY") == Decimal("1234.50"), "localized CNY money")
+    _assert(
+        _supplier_financial_detail_url("https://example.invalid/", "shipment id/1")
+        == "https://example.invalid/sheet-vitrina-v1/supplier?embedded=operator&shipment_id=shipment%20id%2F1&tab=documents",
+        "operator supplier financial detail URL",
+    )
     with TemporaryDirectory(prefix="warehouse-browser-smoke-") as temp_dir:
         root = Path(temp_dir)
         runtime = _seed_runtime(root / "runtime")
@@ -89,6 +101,10 @@ def main() -> None:
                         "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
                     ),
                 )
+                _assert_route_explicit_settings_frame(f"http://127.0.0.1:{config.port}")
+                _assert_supplier_registry_stage_cost_frame(f"http://127.0.0.1:{config.port}")
+                _assert_stock_report_frame(f"http://127.0.0.1:{config.port}")
+                _assert_sku_management_loaded(f"http://127.0.0.1:{config.port}")
                 _assert(result.get("status") == "ok", "browser flow status")
                 legacy_ff = result.get("legacy_ff_reconciliation") or {}
                 ff_evidence = next(
@@ -112,6 +128,172 @@ def main() -> None:
                 server.server_close()
                 thread.join(timeout=5)
     print("warehouse stocks browser smoke: ok")
+
+
+def _assert_route_explicit_settings_frame(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.goto(f"{base_url}/sheet-vitrina-v1/vitrina", wait_until="domcontentloaded")
+            page.locator('[data-unified-tab-button="warehouses"]').click()
+            page.locator('[data-unified-tab-panel="warehouses"]:not([hidden])').wait_for()
+            page.goto(f"{base_url}/sheet-vitrina-v1/settings", wait_until="domcontentloaded")
+            frame = page.locator('[data-settings-embed-frame]:not([hidden])')
+            frame.wait_for()
+            surface = page.frame_locator("[data-settings-embed-frame]")
+            surface.locator('[data-settings-group-button="user-directory"]').wait_for()
+            _assert("embedded=1" in str(frame.get_attribute("src") or ""), "settings iframe source")
+        finally:
+            browser.close()
+
+
+def _assert_supplier_registry_stage_cost_frame(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    payload = {
+        "status": "ready",
+        "columns": [
+            {
+                "shipment_id": "shipment-browser-fixture",
+                "title": "Invoice browser fixture",
+                "subtitle": "2026-07-01",
+                "order_status": "production",
+                "order_status_display": "На производстве",
+            }
+        ],
+        "sections": [
+            {
+                "section_id": "cargo_value",
+                "title": "Стоимость товара",
+                "rows": [
+                    {
+                        "row_id": "production_average_cost_rub",
+                        "label": "Средняя себестоимость: на производстве",
+                        "cells": {
+                            "shipment-browser-fixture": {
+                                "value": "100",
+                                "display": "100 ₽",
+                                "status": "complete",
+                            }
+                        },
+                    },
+                    {
+                        "row_id": "china_to_ff_average_cost_rub",
+                        "label": "Средняя себестоимость: Китай → FF",
+                        "cells": {
+                            "shipment-browser-fixture": {
+                                "value": None,
+                                "display": "—",
+                            }
+                        },
+                    },
+                ],
+            }
+        ],
+        "warnings": [],
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route(
+                "**/v1/sheet-vitrina-v1/supply/supplier-shipments/registry",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            page.goto(
+                f"{base_url}/sheet-vitrina-v1/vitrina?tab=factory-order",
+                wait_until="domcontentloaded",
+            )
+            surface = page.frame_locator('[data-operator-embed-frame="factory-order"]')
+            surface.locator('[data-supply-mode-button="shipment-registry"]').click()
+            surface.get_by_text("Средняя себестоимость: на производстве", exact=True).wait_for()
+            surface.get_by_text("Средняя себестоимость: Китай → FF", exact=True).wait_for()
+        finally:
+            browser.close()
+
+
+def _assert_stock_report_frame(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.goto(
+                f"{base_url}/sheet-vitrina-v1/vitrina?tab=warehouses",
+                wait_until="domcontentloaded",
+            )
+            button = page.locator("[data-open-stock-report]")
+            _assert(button.inner_text().strip() == "Отчёт об остатках", "stock report shell label")
+            button.click()
+            frame = page.locator('[data-warehouse-stock-report-frame]:not([hidden])')
+            frame.wait_for()
+            page.wait_for_function(
+                "Boolean(document.querySelector('[data-warehouse-stock-report-frame]')?.getAttribute('src'))"
+            )
+            surface = page.frame_locator("[data-warehouse-stock-report-frame]")
+            surface.get_by_role("heading", name="Отчёт по остаткам", exact=True).wait_for()
+        finally:
+            browser.close()
+
+
+def _assert_sku_management_loaded(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route(
+                "**/v1/sheet-vitrina-v1/sku-management",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "rows": [
+                                {
+                                    "nm_id": 210183142,
+                                    "sku": "browser fixture SKU",
+                                    "name": "Browser fixture SKU",
+                                    "risk": "low",
+                                    "profit_rub": "123.45",
+                                    "margin_pct": "0.25",
+                                    "quality": "canonical_daily_projection",
+                                }
+                            ],
+                            "settings": {"forecast": {}, "revision": 0, "table": {}},
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            page.goto(
+                f"{base_url}/sheet-vitrina-v1/vitrina?tab=sku-management",
+                wait_until="domcontentloaded",
+            )
+            page.locator('[data-unified-tab-panel="sku-management"]:not([hidden])').wait_for()
+            row = page.locator('[data-sku-row-nm-id="210183142"]')
+            row.wait_for()
+            _assert(row.locator('[data-sku-cell="profit_rub"]').inner_text().strip() == "123,45 ₽", "loaded SKU profit")
+            _assert(row.locator('[data-sku-cell="margin_pct"]').inner_text().strip() == "25,0%", "loaded SKU margin")
+            _assert(
+                page.locator("[data-sku-management-status]").inner_text().strip().startswith("SKU:"),
+                "loaded SKU management status",
+            )
+            _assert(
+                not page.locator("[data-sku-management-error]").inner_text().strip(),
+                "loaded SKU management error state",
+            )
+        finally:
+            browser.close()
 
 
 def _apply_functional_fixture(

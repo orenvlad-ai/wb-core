@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, urlparse
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import FrameLocator, Page, expect, sync_playwright
 
 
 WAREHOUSES = (
@@ -404,11 +404,17 @@ def run_warehouse_ui_flow(
         settings_url = normalized_base_url + "/sheet-vitrina-v1/settings"
         settings_response = page.goto(settings_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(settings_response is not None and settings_response.status == 200, "calculation settings page status")
-        page.locator('[data-settings-group-button="user-directory"]').click()
-        page.locator('[data-settings-group-panel="user-directory"]:not([hidden])').wait_for(timeout=60_000)
-        page.wait_for_function(
-            "document.querySelector('[data-calculation-rate=\"buyout_rate\"]').value === '91'",
-            timeout=60_000,
+        settings_surface = _settings_frame_locator(page)
+        settings_surface.locator('[data-settings-group-button="user-directory"]').click()
+        settings_surface.locator('[data-settings-group-panel="user-directory"]:not([hidden])').wait_for(
+            timeout=60_000
+        )
+        buyout_input = settings_surface.locator('[data-calculation-rate="buyout_rate"]')
+        buyout_input.wait_for(timeout=60_000)
+        expect(buyout_input).to_have_value("91", timeout=60_000)
+        _assert(
+            buyout_input.input_value() == "91",
+            "visible calculation settings buyout 91%",
         )
         settings_api = context.request.get(
             normalized_base_url + "/v1/sheet-vitrina-v1/settings/calculation-parameters",
@@ -423,16 +429,30 @@ def run_warehouse_ui_flow(
         _assert(parameters.get("retained_share_pct") == "56", "calculation settings retained share 56%")
         reference = dict(settings_payload.get("reference") or {})
         _assert(reference.get("status") == "ready" and len(reference.get("weeks") or []) == 3, "three closed WB weeks")
-        _assert(page.locator("#calculationExpenseTotal").inner_text().strip() == "44%", "visible expenses 44%")
-        _assert(page.locator("#calculationRetainedShare").inner_text().strip() == "56%", "visible retained share 56%")
-        _assert("canonical_WB_WAC" in page.locator("#calculationFormulaPreview").inner_text(), "visible Proxy formula")
-        _assert(page.locator("#calculationReferenceRows tr").count() == 6, "six WB reference rows")
-        _assert(page.locator("#calculationHistoryRows tr").count() >= 1, "settings version history")
+        _assert(
+            settings_surface.locator("#calculationExpenseTotal").inner_text().strip() == "44%",
+            "visible expenses 44%",
+        )
+        _assert(
+            settings_surface.locator("#calculationRetainedShare").inner_text().strip() == "56%",
+            "visible retained share 56%",
+        )
+        _assert(
+            "canonical_WB_WAC" in settings_surface.locator("#calculationFormulaPreview").inner_text(),
+            "visible Proxy formula",
+        )
+        reference_rows = settings_surface.locator("#calculationReferenceRows tr")
+        expect(reference_rows).to_have_count(6, timeout=60_000)
+        _assert(reference_rows.count() == 6, "six WB reference rows")
+        history_rows = settings_surface.locator("#calculationHistoryRows tr")
+        history_rows.first.wait_for(timeout=60_000)
+        _assert(history_rows.count() >= 1, "settings version history")
         settings_screenshot = evidence_dir / "calculation_parameters.png"
         page.screenshot(path=str(settings_screenshot), full_page=True)
         screenshots.append(str(settings_screenshot))
         settings_evidence = {
             "url": page.url,
+            "embedded_url": page.locator("[data-settings-embed-frame]").get_attribute("src"),
             "buyout_rate_pct": parameters.get("buyout_rate_pct"),
             "included_expense_rate_pct": parameters.get("included_expense_rate_pct"),
             "retained_share_pct": parameters.get("retained_share_pct"),
@@ -442,13 +462,33 @@ def run_warehouse_ui_flow(
             "screenshot": str(settings_screenshot),
         }
 
-        supplier_url = normalized_base_url + "/sheet-vitrina-v1/supplier"
-        supplier_response = page.goto(supplier_url, wait_until="domcontentloaded", timeout=120_000)
-        _assert(supplier_response is not None and supplier_response.status == 200, "supplier registry page status")
-        page.wait_for_function(
-            "document.body.innerText.includes('Средняя себестоимость: на производстве') && document.body.innerText.includes('Средняя себестоимость: Китай → FF')",
-            timeout=60_000,
+        supplier_registry_url = normalized_base_url + "/sheet-vitrina-v1/vitrina?tab=factory-order"
+        supplier_registry_response = page.goto(
+            supplier_registry_url,
+            wait_until="domcontentloaded",
+            timeout=120_000,
         )
+        _assert(
+            supplier_registry_response is not None and supplier_registry_response.status == 200,
+            "supplier registry shell status",
+        )
+        supplier_operator = page.frame_locator('[data-operator-embed-frame="factory-order"]')
+        supplier_operator.locator('[data-supply-mode-button="shipment-registry"]').click()
+        supplier_operator.locator(
+            '[data-supply-mode-panel="shipment-registry"]:not([hidden])'
+        ).wait_for(timeout=60_000)
+        supplier_operator.get_by_text("Средняя себестоимость: на производстве", exact=True).wait_for(
+            timeout=60_000
+        )
+        supplier_operator.get_by_text("Средняя себестоимость: Китай → FF", exact=True).wait_for(
+            timeout=60_000
+        )
+        supplier_registry_embedded_url = supplier_operator.locator("body").evaluate(
+            "element => element.ownerDocument.location.href"
+        )
+        supplier_registry_screenshot = evidence_dir / "supplier_registry_stage_costs.png"
+        page.screenshot(path=str(supplier_registry_screenshot), full_page=True)
+        screenshots.append(str(supplier_registry_screenshot))
         registry_api = context.request.get(
             normalized_base_url + "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry",
             headers={"Accept": "application/json"},
@@ -500,7 +540,7 @@ def run_warehouse_ui_flow(
             all(Decimal(str(item.get("amount_rub") or 0)) > 0 for item in bank_fee_lines),
             "supplier bank fee RUB equivalents",
         )
-        supplier_detail_url = supplier_url + "?shipment_id=" + quote(bank_fee_shipment_id, safe="") + "&tab=documents"
+        supplier_detail_url = _supplier_financial_detail_url(normalized_base_url, bank_fee_shipment_id)
         supplier_detail_response = page.goto(supplier_detail_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(supplier_detail_response is not None and supplier_detail_response.status == 200, "supplier fee detail page status")
         page.locator("#shipmentCard:not([hidden])").wait_for(timeout=60_000)
@@ -539,6 +579,8 @@ def run_warehouse_ui_flow(
         screenshots.append(str(supplier_screenshot))
         supplier_evidence = {
             "url": page.url,
+            "registry_url": supplier_registry_url,
+            "registry_embedded_url": supplier_registry_embedded_url,
             "registry_status": registry_payload.get("status"),
             "production_cost_field": True,
             "china_to_ff_cost_field": True,
@@ -548,18 +590,22 @@ def run_warehouse_ui_flow(
             "bank_fee_line_count": len(bank_fee_lines),
             "bank_fee_currencies": sorted({str(item.get("currency") or "") for item in bank_fee_lines}),
             "bank_fee_sources": sorted({str((item.get("raw") or {}).get("source") or "") for item in bank_fee_lines}),
+            "registry_screenshot": str(supplier_registry_screenshot),
             "screenshot": str(supplier_screenshot),
         }
 
         vitrina_url = normalized_base_url + "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=production"
         vitrina_response = page.goto(vitrina_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(vitrina_response is not None and vitrina_response.status == 200, "vitrina consumer page status")
+        _assert(
+            page.locator("[data-open-stock-report]").inner_text().strip() == "Отчёт об остатках",
+            "stock report public navigation label",
+        )
         page.locator("[data-open-stock-report]").click()
-        report_frame = page.locator('[data-warehouse-stock-report-frame]:not([hidden])')
-        report_frame.wait_for(timeout=60_000)
-        report_body = report_frame.content_frame.locator("body")
-        report_body.wait_for(timeout=60_000)
-        _assert("Отчёт по остаткам" in report_body.inner_text(), "stock report navigation")
+        report_surface = _stock_report_frame_locator(page)
+        report_surface.get_by_role("heading", name="Отчёт по остаткам", exact=True).wait_for(
+            timeout=60_000
+        )
         stock_report_screenshot = evidence_dir / "stock_report_navigation.png"
         page.screenshot(path=str(stock_report_screenshot), full_page=False)
         screenshots.append(str(stock_report_screenshot))
@@ -579,6 +625,33 @@ def run_warehouse_ui_flow(
             if item.get("profit_rub") is not None and item.get("margin_pct") is not None
         ]
         _assert(sku_rows_with_proxy_3, "SKU management consumes populated Proxy 3")
+        sku_rows = page.locator("[data-sku-row-nm-id]")
+        expect(sku_rows).to_have_count(len(sku_payload.get("rows") or []), timeout=120_000)
+        _assert(
+            page.locator("[data-sku-management-status]").inner_text().strip().startswith("SKU:"),
+            "SKU management loaded status",
+        )
+        _assert(
+            not page.locator("[data-sku-management-error]").inner_text().strip(),
+            "SKU management visible error state",
+        )
+        visible_proxy_3_rows = 0
+        for item in sku_rows_with_proxy_3:
+            row = page.locator(f'[data-sku-row-nm-id="{int(item["nm_id"])}"]')
+            profit_cell = row.locator('[data-sku-cell="profit_rub"]')
+            margin_cell = row.locator('[data-sku-cell="margin_pct"]')
+            if (
+                profit_cell.count() == 1
+                and margin_cell.count() == 1
+                and profit_cell.inner_text().strip() not in {"", "—", "-"}
+                and margin_cell.inner_text().strip() not in {"", "—", "-"}
+            ):
+                visible_proxy_3_rows += 1
+        _assert(
+            visible_proxy_3_rows == len(sku_rows_with_proxy_3),
+            "SKU management visible Proxy 3 consumer cells",
+        )
+        page.locator('[data-sku-sort="profit_rub"]').scroll_into_view_if_needed(timeout=60_000)
         sku_screenshot = evidence_dir / "sku_management_consumer.png"
         page.screenshot(path=str(sku_screenshot), full_page=False)
         screenshots.append(str(sku_screenshot))
@@ -607,6 +680,7 @@ def run_warehouse_ui_flow(
             "stock_report_navigation": True,
             "sku_management_visible": True,
             "sku_management_proxy_3_row_count": len(sku_rows_with_proxy_3),
+            "sku_management_visible_proxy_3_row_count": visible_proxy_3_rows,
             "proxy_profit_3_visible": True,
             "proxy_margin_3_visible": True,
             "filled_metric_cells_from_2026_07_01": filled_metrics,
@@ -676,6 +750,39 @@ def _visible_decimal(value: str) -> Decimal:
         raise AssertionError(f"visible value is not numeric: {value!r}") from exc
 
 
+def _settings_frame_locator(page: Page) -> FrameLocator:
+    frame = page.locator("[data-settings-embed-frame]")
+    frame.wait_for(state="visible", timeout=60_000)
+    page.wait_for_function(
+        "Boolean(document.querySelector('[data-settings-embed-frame]')?.getAttribute('src'))",
+        timeout=60_000,
+    )
+    surface = page.frame_locator("[data-settings-embed-frame]")
+    surface.locator("body").wait_for(timeout=60_000)
+    return surface
+
+
+def _supplier_financial_detail_url(base_url: str, shipment_id: str) -> str:
+    return (
+        str(base_url).rstrip("/")
+        + "/sheet-vitrina-v1/supplier?embedded=operator&shipment_id="
+        + quote(str(shipment_id), safe="")
+        + "&tab=documents"
+    )
+
+
+def _stock_report_frame_locator(page: Page) -> FrameLocator:
+    frame = page.locator('[data-warehouse-stock-report-frame]:not([hidden])')
+    frame.wait_for(timeout=60_000)
+    page.wait_for_function(
+        "Boolean(document.querySelector('[data-warehouse-stock-report-frame]')?.getAttribute('src'))",
+        timeout=60_000,
+    )
+    surface = page.frame_locator("[data-warehouse-stock-report-frame]")
+    surface.locator("body").wait_for(timeout=60_000)
+    return surface
+
+
 def _visible_money(value: str) -> Decimal:
     normalized = (
         str(value or "")
@@ -683,6 +790,8 @@ def _visible_money(value: str) -> Decimal:
         .replace("\u202f", "")
         .replace(" ", "")
         .replace("₽", "")
+        .replace("RUB", "")
+        .replace("CNY", "")
         .replace(",", ".")
     )
     try:

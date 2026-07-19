@@ -7497,13 +7497,16 @@
 
     function initialUnifiedTab() {
       const params = new URLSearchParams(window.location.search);
-      const queryTab = normalizeUnifiedTab(params.get("tab"));
-      if (queryTab !== defaultAllowedUnifiedTab()) {
-        return queryTab;
+      const rawQueryTab = String(params.get("tab") || "").trim();
+      if (rawQueryTab && VALID_UNIFIED_TABS.has(rawQueryTab) && ALLOWED_UNIFIED_TABS.has(rawQueryTab)) {
+        return normalizeUnifiedTab(rawQueryTab);
       }
-      const hashTab = normalizeUnifiedTab(String(window.location.hash || "").replace(/^#/, ""));
-      if (hashTab !== defaultAllowedUnifiedTab()) {
-        return hashTab;
+      const rawHashTab = String(window.location.hash || "").replace(/^#/, "").trim();
+      if (rawHashTab && VALID_UNIFIED_TABS.has(rawHashTab) && ALLOWED_UNIFIED_TABS.has(rawHashTab)) {
+        return normalizeUnifiedTab(rawHashTab);
+      }
+      if (WEB_VITRINA_CONFIG.initial_tab_is_route_explicit === true) {
+        return defaultAllowedUnifiedTab();
       }
       return normalizeUnifiedTab(readPersistedUnifiedTab() || defaultAllowedUnifiedTab());
     }
