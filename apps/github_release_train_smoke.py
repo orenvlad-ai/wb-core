@@ -89,6 +89,7 @@ class FakeApi:
         self.updated: list[tuple[int, str]] = []
         self.dispatched: list[tuple[str, str]] = []
         self.ensured_labels: list[str] = []
+        self.replaced_labels: list[tuple[int, set[str]]] = []
         self.comments: list[tuple[int, str]] = []
         self.comment_ids: list[int] = []
         self.events: dict[int, list[dict[str, Any]]] = {}
@@ -154,6 +155,20 @@ class FakeApi:
         current.update(additions)
         _set_labels(self.pulls[number], current)
         for label in sorted(additions):
+            self.events.setdefault(number, []).append(
+                {
+                    "event": "labeled",
+                    "label": {"name": label},
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+    def set_labels(self, number: int, labels: Iterable[str]) -> None:
+        before = _labels(self.pulls[number])
+        after = {str(label) for label in labels}
+        self.replaced_labels.append((number, set(after)))
+        _set_labels(self.pulls[number], after)
+        for label in sorted(after - before):
             self.events.setdefault(number, []).append(
                 {
                     "event": "labeled",
@@ -626,6 +641,7 @@ def _assert_blocked_halted_and_production_mutation() -> None:
         check_name="baseline",
     ) == READY_LABEL
     assert READY_LABEL in _labels(fixed) and BLOCKED_LABEL not in _labels(fixed)
+    assert api.replaced_labels[-1] == (22, _labels(fixed))
 
 
 def _assert_ack_invalidated_by_head_change() -> None:

@@ -48,7 +48,7 @@ Queue eligibility требует одновременно:
 
 Промежуточные `release:ready`, `release:running`, `release:awaiting-agent`, `release:needs-resume` и `release:awaiting-ui` не являются closure. `release:superseded` не является success исходной итерации, но исключает доказанно заменённый PR из активной очереди.
 
-Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task classification, active/overlay/terminal sets, transition matrix, critical transitions, monitor query и marker names. Runtime, waiter и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. Ручно добавленный label не является proof: ack, terminal completion, deployed UI gate, acceptance и halted recovery требуют repo-owned marker и exact PR/head/merge/root/evidence.
+Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task classification, active/overlay/terminal sets, transition matrix, critical transitions, monitor query и marker names. Runtime, waiter и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State transition заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: ack, terminal completion, deployed UI gate, acceptance и halted recovery требуют repo-owned marker и exact PR/head/merge/root/evidence.
 
 ## STANDARD Flow
 

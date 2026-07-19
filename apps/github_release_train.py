@@ -140,6 +140,8 @@ class ReleaseApi(Protocol):
 
     def add_labels(self, number: int, labels: Iterable[str]) -> None: ...
 
+    def set_labels(self, number: int, labels: Iterable[str]) -> None: ...
+
     def remove_label(self, number: int, label: str) -> None: ...
 
     def add_comment(self, number: int, body: str) -> None: ...
@@ -347,6 +349,10 @@ class GitHubApi:
         values = sorted({str(label) for label in labels if str(label)})
         if values:
             self._request("POST", self._repo_path(f"issues/{number}/labels"), {"labels": values})
+
+    def set_labels(self, number: int, labels: Iterable[str]) -> None:
+        values = sorted({str(label) for label in labels if str(label)})
+        self._request("PUT", self._repo_path(f"issues/{number}/labels"), {"labels": values})
 
     def remove_label(self, number: int, label: str) -> None:
         encoded = urllib_parse.quote(label, safe="")
@@ -835,9 +841,8 @@ def set_release_state(
         current_labels = label_names(api.get_pull(number))
     before = set(current_labels)
     after = transition_label_set(before, state)
-    api.add_labels(number, sorted(after - before))
-    for label in sorted((before & (STATE_LABELS | {NEEDS_RESUME_LABEL})) - after):
-        api.remove_label(number, label)
+    if before != after:
+        api.set_labels(number, sorted(after))
     if comment:
         api.add_comment(number, comment)
 
@@ -1412,8 +1417,6 @@ def request_loop_agent(
     if head_sha != expected_head_sha:
         raise ReleaseBlocked("LOOP head changed before acknowledgement request")
     already_waiting = AWAITING_AGENT_LABEL in labels
-    for stale in sorted(loop_ack_labels(labels)):
-        api.remove_label(number, stale)
     set_release_state(
         api,
         number,
@@ -1466,8 +1469,6 @@ def acknowledge_loop_agent(
         raise ReleaseBlocked("agent acknowledgement applies only to LOOP PRs")
     if str(pull.get("state") or "") != "open" or bool(pull.get("draft")):
         raise ReleaseBlocked("LOOP PR is no longer an open non-draft change")
-    for stale in sorted(loop_ack_labels(labels) - {acknowledgement}):
-        api.remove_label(number, stale)
     api.ensure_label(
         acknowledgement,
         "6F42C1",
@@ -1710,10 +1711,11 @@ def normalize_completed_loop_chain(
     for chain_number, chain_labels in merged_members:
         if chain_number == number:
             continue
-        for stale in sorted(
-            (chain_labels & (STATE_LABELS | {NEEDS_RESUME_LABEL})) | loop_ack_labels(chain_labels)
-        ):
-            api.remove_label(chain_number, stale)
+        historical_labels = chain_labels - (
+            STATE_LABELS | {NEEDS_RESUME_LABEL} | loop_ack_labels(chain_labels)
+        )
+        if historical_labels != chain_labels:
+            api.set_labels(chain_number, sorted(historical_labels))
         if not _has_comment_proof(
             api,
             chain_number,
@@ -1731,8 +1733,6 @@ def normalize_completed_loop_chain(
     normalized: list[int] = []
     for chain_number, chain_labels in superseded_members:
         was_superseded = SUPERSEDED_LABEL in chain_labels
-        for acknowledgement in sorted(loop_ack_labels(chain_labels)):
-            api.remove_label(chain_number, acknowledgement)
         set_release_state(
             api,
             chain_number,
