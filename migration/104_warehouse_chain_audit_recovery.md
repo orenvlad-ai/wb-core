@@ -24,7 +24,7 @@ The functional rebuild:
 4. reports a complete calendar and separates missing-date gaps from positive-quantity cost gaps;
 5. preserves all six-stage Decimal quantity/capital/WAC identities.
 
-The economics cutover updates only canonical WB cost and Proxy 3 targets and removes centrally enumerated archived metric rows from all persisted ready snapshots, including archive-only snapshots entirely before 2026-07-01. The canonical rollback/fallback reader also preserves the public physical denominator for SKU/stage WAC; paid-equivalent quantity cannot re-enter active arithmetic. Non-target snapshot digest equality, exact ready-snapshot manifest, coherent `0600` SQLite backup, `integrity_check=ok`, one atomic transaction and a zero-change repeat are mandatory.
+The economics cutover updates only canonical WB cost and Proxy 3 targets and removes centrally enumerated archived metric rows from all persisted ready snapshots, including archive-only snapshots entirely before 2026-07-01. The canonical rollback/fallback reader also preserves the public physical denominator for SKU/stage WAC; paid-equivalent quantity cannot re-enter active arithmetic. The functional cutover freezes the exact pre-cutover WB daily-cost rows: later hourly/emergency rebuilds do not read mutable ready snapshots for those dates, verify the frozen rows byte-for-semantic-byte against the reviewed plan, and write only the cutover date and later. Non-target snapshot digest equality, exact ready-snapshot manifest, coherent `0600` SQLite backup, `integrity_check=ok`, one atomic transaction and a zero-change repeat are mandatory.
 
 ## Acceptance
 

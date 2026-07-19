@@ -41,6 +41,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     _counted_cny_operation,
     _fingerprint,
     _guarded_local_sources,
+    _historical_recovery_source_rows,
     _line_payload,
     _merge_historical_wb_quantity_evidence,
     _nomenclature_purchase_prices,
@@ -1136,6 +1137,16 @@ def _test_guarded_publication() -> None:
             "movement_documents": [],
             "historical_wb_cost_projection": [
                 {
+                    "as_of_date": "2026-07-17",
+                    "nm_id": 104,
+                    "quantity": "1",
+                    "wac_rub": "14",
+                    "capital_rub": "14",
+                    "quality": "periodic_snapshot_wac_closed",
+                    "provenance": {"test": True, "frozen_at_cutover": True},
+                    "fingerprint": "sha256:pre-cutover-daily",
+                },
+                {
                     "as_of_date": NOW[:10],
                     "nm_id": 104,
                     "quantity": "1",
@@ -1246,7 +1257,10 @@ def _test_guarded_publication() -> None:
                 "base_active_version_id": applied["active_version"]["version_id"],
                 "wb_snapshot": next_snapshot,
                 "opening_cost_map": [],
-                "historical_wb_cost_projection": daily_replay,
+                "historical_wb_cost_projection": [
+                    plan["historical_wb_cost_projection"][0],
+                    *daily_replay,
+                ],
                 "lines": [_line_payload(item) for item in candidate_lines],
                 "summaries": _summaries(candidate_lines),
                 "new_events": [acceptance_event],
@@ -1254,6 +1268,22 @@ def _test_guarded_publication() -> None:
         )
         sync_plan.pop("plan_fingerprint", None)
         sync_plan["plan_fingerprint"] = _fingerprint(sync_plan)
+        tampered_history_plan = copy.deepcopy(sync_plan)
+        tampered_history_plan["historical_wb_cost_projection"][0]["capital_rub"] = "15"
+        tampered_history_plan.pop("plan_fingerprint", None)
+        tampered_history_plan["plan_fingerprint"] = _fingerprint(tampered_history_plan)
+        try:
+            block.apply_plan(
+                tampered_history_plan,
+                confirm_fingerprint=tampered_history_plan["plan_fingerprint"],
+            )
+        except Exception as exc:
+            _assert(
+                "differs from the frozen cutover history" in str(exc),
+                "post-cutover apply rejects a rewritten frozen daily row",
+            )
+        else:
+            raise AssertionError("post-cutover apply must not rewrite frozen daily history")
         sync_applied = block.apply_plan(
             sync_plan,
             confirm_fingerprint=sync_plan["plan_fingerprint"],
@@ -1362,6 +1392,10 @@ def _test_ready_snapshot_recovery_scan_is_bounded(runtime: RegistryUploadDbBacke
             ("future-recovery-smoke", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
         )
         conn.execute(
+            "INSERT INTO registry_upload_versions(bundle_version,uploaded_at,activated_at) VALUES(?,?,?)",
+            ("late-predated-recovery-smoke", "2026-07-20T00:00:00Z", "2026-07-20T00:00:00Z"),
+        )
+        conn.execute(
             """INSERT INTO sheet_vitrina_v1_ready_snapshots(
                    bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
                ) VALUES(?,?,?,?,?,?,?)""",
@@ -1375,16 +1409,48 @@ def _test_ready_snapshot_recovery_scan_is_bounded(runtime: RegistryUploadDbBacke
                 json.dumps(future_plan),
             ),
         )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                   bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "late-predated-recovery-smoke",
+                "2026-07-20T00:00:00Z",
+                "2026-07-17",
+                "late-predated-recovery-snapshot",
+                "v1",
+                "2026-07-20T00:00:00Z",
+                json.dumps(future_plan),
+            ),
+        )
         conn.commit()
         snapshots = _ready_snapshot_recovery_rows(conn, recovery_boundary="2026-07-18")
         _assert(
             all(item["bundle_version"] != "future-recovery-smoke" for item in snapshots),
             "post-cutover ready snapshots are excluded from the recovery source scan",
         )
-        conn.execute(
-            "DELETE FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version='future-recovery-smoke'"
+        ready_snapshots, frozen = _historical_recovery_source_rows(
+            conn,
+            cutover_at=NOW,
+            recovery_boundary="2026-07-18",
         )
-        conn.execute("DELETE FROM registry_upload_versions WHERE bundle_version='future-recovery-smoke'")
+        _assert(
+            ready_snapshots == [],
+            "an established cutover rejects even later-published snapshots with pre-cutover outer dates",
+        )
+        _assert(
+            [(item["as_of_date"], item["fingerprint"]) for item in frozen]
+            == [("2026-07-17", "sha256:pre-cutover-daily")],
+            "post-cutover source capture reuses only the persisted frozen daily projection",
+        )
+        conn.execute(
+            """DELETE FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version IN ('future-recovery-smoke','late-predated-recovery-smoke')"""
+        )
+        conn.execute(
+            """DELETE FROM registry_upload_versions
+               WHERE bundle_version IN ('future-recovery-smoke','late-predated-recovery-smoke')"""
+        )
         conn.commit()
 
 

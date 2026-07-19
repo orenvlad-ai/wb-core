@@ -849,12 +849,21 @@ class WarehouseFunctionalBlock:
             if kind == "functional_cutover"
             else str((cutover or {}).get("cutover_at") or captured_at)[:10]
         )
-        pre_cutover_wb_cost_projection = build_historical_wb_cost_projection(
-            opening_cost_map=opening_cost_map,
-            daily_quantity_rows=capture["historical_wb_daily_quantities"],
-            downstream_rows=capture["downstream_cost_rows"],
-            cutover_date=projection_cutoff,
-        )
+        if cutover is None:
+            pre_cutover_wb_cost_projection = build_historical_wb_cost_projection(
+                opening_cost_map=opening_cost_map,
+                daily_quantity_rows=capture["historical_wb_daily_quantities"],
+                downstream_rows=capture["downstream_cost_rows"],
+                cutover_date=projection_cutoff,
+            )
+        else:
+            # The cutover materializes the exact pre-cutover replay.  Later
+            # ready snapshots are mutable publication artifacts, so an hourly
+            # sync must reuse these frozen rows instead of reconstructing old
+            # business dates from a newly published snapshot.
+            pre_cutover_wb_cost_projection = list(
+                capture.get("frozen_pre_cutover_wb_cost_projection") or []
+            )
         post_cutover_wb_cost_projection = self._build_post_cutover_daily_cost_projection(
             captured_at=captured_at,
             candidate_lines=lines,
@@ -1046,6 +1055,7 @@ class WarehouseFunctionalBlock:
                                 now,
                             ),
                         )
+                cutover_date = ""
                 if kind != "functional_cutover":
                     cutover_date_row = conn.execute(
                         "SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers WHERE cutover_id=?",
@@ -1053,12 +1063,28 @@ class WarehouseFunctionalBlock:
                     ).fetchone()
                     if cutover_date_row is None:
                         raise WarehouseFunctionalError("functional daily replay has no cutover row")
+                    cutover_date = str(cutover_date_row["cutover_at"])[:10]
+                    planned_frozen = _canonical_daily_projection_rows(
+                        item
+                        for item in normalized.get("historical_wb_cost_projection") or []
+                        if str(item.get("as_of_date") or "")[:10] < cutover_date
+                    )
+                    persisted_frozen = _frozen_pre_cutover_wb_cost_projection(
+                        conn,
+                        cutover_date=cutover_date,
+                    )
+                    if planned_frozen != persisted_frozen:
+                        raise WarehouseFunctionalError(
+                            "pre-cutover WB daily cost projection differs from the frozen cutover history"
+                        )
                     conn.execute(
                         """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
                            WHERE cutover_id=? AND as_of_date>=?""",
-                        (FUNCTIONAL_CUTOVER_ID, str(cutover_date_row["cutover_at"])[:10]),
+                        (FUNCTIONAL_CUTOVER_ID, cutover_date),
                     )
                 for item in normalized.get("historical_wb_cost_projection") or []:
+                    if cutover_date and str(item.get("as_of_date") or "")[:10] < cutover_date:
+                        continue
                     conn.execute(
                         """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
                                cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,
@@ -3239,10 +3265,13 @@ def _source_rows(
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
     }
-    result["ready_snapshots"] = _ready_snapshot_recovery_rows(
+    ready_snapshots, frozen_projection = _historical_recovery_source_rows(
         conn,
+        cutover_at=(str(cutover_row["cutover_at"]) if cutover_row is not None else ""),
         recovery_boundary=recovery_boundary,
     )
+    result["ready_snapshots"] = ready_snapshots
+    result["frozen_pre_cutover_wb_cost_projection"] = frozen_projection
     result["primary_cost_rows"] = [dict(row) for row in conn.execute(
         """SELECT line.nm_id,line.qty,line.invoice_unit_price_cny,line.sku_ff_unit_cost_rub,
                   line.layer_line_id,line.source_status
@@ -3289,6 +3318,77 @@ def _ready_snapshot_recovery_rows(
             (recovery_boundary, recovery_boundary),
         ).fetchall()
     ]
+
+
+def _historical_recovery_source_rows(
+    conn: sqlite3.Connection,
+    *,
+    cutover_at: str,
+    recovery_boundary: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select mutable snapshot evidence only before the immutable cutover."""
+
+    if not str(cutover_at or "").strip():
+        return (
+            _ready_snapshot_recovery_rows(
+                conn,
+                recovery_boundary=recovery_boundary,
+            ),
+            [],
+        )
+    # Ready snapshots can legitimately be republished for old outer dates.
+    # After cutover they are no longer an admissible historical input: the
+    # versioned daily rows written by cutover are the immutable replay boundary.
+    return (
+        [],
+        _frozen_pre_cutover_wb_cost_projection(
+            conn,
+            cutover_date=str(cutover_at)[:10],
+        ),
+    )
+
+
+def _canonical_daily_projection_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize derived daily rows for immutable-history comparisons."""
+
+    result = [
+        {
+            "as_of_date": str(item.get("as_of_date") or "")[:10],
+            "nm_id": int(item.get("nm_id") or 0),
+            "quantity": str(item.get("quantity") or "0"),
+            "wac_rub": str(item.get("wac_rub") or "0"),
+            "capital_rub": str(item.get("capital_rub") or "0"),
+            "quality": str(item.get("quality") or ""),
+            "provenance": dict(item.get("provenance") or {}),
+            "fingerprint": str(item.get("fingerprint") or ""),
+        }
+        for item in rows
+    ]
+    return sorted(result, key=lambda item: (item["as_of_date"], item["nm_id"]))
+
+
+def _frozen_pre_cutover_wb_cost_projection(
+    conn: sqlite3.Connection,
+    *,
+    cutover_date: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT as_of_date,nm_id,quantity,wac_rub,capital_rub,quality,
+                  provenance_json,fingerprint
+           FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+           WHERE cutover_id=? AND as_of_date<?
+           ORDER BY as_of_date,nm_id""",
+        (FUNCTIONAL_CUTOVER_ID, str(cutover_date)[:10]),
+    ).fetchall()
+    return _canonical_daily_projection_rows(
+        {
+            **dict(row),
+            "provenance": _loads(row["provenance_json"], {}),
+        }
+        for row in rows
+    )
 
 
 def _merge_historical_wb_quantity_evidence(
