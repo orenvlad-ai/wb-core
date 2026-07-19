@@ -13,6 +13,19 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      reconcile_pr:
+        description: "Merged release:halted PR to reconcile; omit for normal queue dispatch"
+        required: false
+        type: string
+      expected_head_sha:
+        description: "Exact pre-merge PR head for reconciliation"
+        required: false
+        type: string
+      expected_merge_sha:
+        description: "Exact deployed merge SHA for reconciliation"
+        required: false
+        type: string
 
 concurrency:
   group: wb-core-production-release
@@ -56,10 +69,78 @@ jobs:
           --actor "$LOOP_ACTOR"
           --association "$LOOP_ASSOCIATION"
 
+  reconcile_halted:
+    name: Reconcile exact-SHA halted release
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.reconcile_pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+      WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+    steps:
+      - name: Checkout trusted main reconciler
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Configure canonical production SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/wb-core-release-key"
+          known_hosts_file="$RUNNER_TEMP/wb-core-known-hosts"
+          install -m 600 /dev/null "$key_file"
+          printf '%s\n' "$WB_CORE_DEPLOY_SSH_KEY" > "$key_file"
+          install -m 600 /dev/null "$known_hosts_file"
+          printf '%s\n' "$WB_CORE_DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
+          install -d -m 700 "$HOME/.ssh"
+          target_file="artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
+          target_host="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["host_ip"])' "$target_file")"
+          target_alias="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ssh_destination"])' "$target_file")"
+          config_file="$HOME/.ssh/config"
+          install -m 600 /dev/null "$config_file"
+          printf 'Host %s\n  HostName %s\n  User root\n  IdentityFile %s\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile %s\n' \
+            "$target_alias" "$target_host" "$key_file" "$known_hosts_file" > "$config_file"
+
+      - name: Reconcile bounded exact-SHA evidence
+        run: >-
+          python3 apps/hosted_runtime_transport_reconcile.py
+          --target-file artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json
+          --expected-sha "${{ inputs.expected_merge_sha }}"
+          --pr "${{ inputs.reconcile_pr }}"
+          --head "${{ inputs.expected_head_sha }}"
+          --merge "${{ inputs.expected_merge_sha }}"
+          --failed-stage readback
+          --output "$RUNNER_TEMP/wb-core-reconcile.json"
+
+      - name: Apply evidence-bound halted transition
+        run: >-
+          python3 apps/github_release_train.py resume-halted
+          --pr "${{ inputs.reconcile_pr }}"
+          --evidence-file "$RUNNER_TEMP/wb-core-reconcile.json"
+
+      - name: Remove temporary reconciliation material
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/wb-core-release-key" "$RUNNER_TEMP/wb-core-known-hosts" \
+            "$RUNNER_TEMP/wb-core-reconcile.json" "$HOME/.ssh/config"
+
+      - name: Continue queue after healthy reconciliation
+        if: success()
+        run: python3 apps/github_release_train.py dispatch-next
+
   select:
     name: Select queued PR
     if: >-
       github.event_name != 'issue_comment' &&
+      (github.event_name != 'workflow_dispatch' || inputs.reconcile_pr == '') &&
       (github.event_name != 'pull_request_target' ||
       github.event.label.name == 'release:ready')
     runs-on: ubuntu-latest
@@ -236,10 +317,10 @@ jobs:
       - name: Mark repo-only completion
         if: steps.merge.outputs.skip_release != 'true'
         run: >-
-          python3 apps/github_release_train.py transition
+          python3 apps/github_release_train.py complete-standard
           --pr "${{ needs.select.outputs.pr_number }}"
-          --state release:done
-          --comment "Release Train смёржил repo-only PR как \`${{ steps.merge.outputs.merge_sha }}\`; deploy не применялся."
+          --merge-sha "${{ steps.merge.outputs.merge_sha }}"
+          --contour repo-only
 
       - name: Delete merged feature branch
         if: always() && steps.merge.outputs.merge_sha != ''
@@ -339,6 +420,9 @@ jobs:
 
       - name: Deploy and verify exact merge SHA
         if: steps.merge.outputs.skip_release != 'true'
+        env:
+          WB_CORE_RELEASE_PR: ${{ needs.select.outputs.pr_number }}
+          WB_CORE_RELEASE_HEAD: ${{ needs.prepare.outputs.head_sha }}
         run: python3 apps/registry_upload_http_entrypoint_hosted_runtime.py deploy-and-verify
 
       - name: Mark production completion
@@ -346,10 +430,10 @@ jobs:
           steps.merge.outputs.skip_release != 'true' &&
           needs.prepare.outputs.task_class == 'task:standard'
         run: >-
-          python3 apps/github_release_train.py transition
+          python3 apps/github_release_train.py complete-standard
           --pr "${{ needs.select.outputs.pr_number }}"
-          --state release:production
-          --comment "Release Train задеплоил и проверил production merge SHA \`${{ steps.merge.outputs.merge_sha }}\`."
+          --merge-sha "${{ steps.merge.outputs.merge_sha }}"
+          --contour production-verified
 
       - name: Open production UI gate for LOOP
         if: needs.prepare.outputs.task_class == 'task:loop'
@@ -378,10 +462,10 @@ jobs:
           steps.merge.outputs.merge_sha != '' &&
           steps.merge.outputs.skip_release != 'true'
         run: >-
-          python3 apps/github_release_train.py transition
+          python3 apps/github_release_train.py halt-merged
           --pr "${{ needs.select.outputs.pr_number }}"
-          --state release:halted
-          --comment "Release Train остановил всю очередь: PR уже смёржен, но deploy или production verify не завершился успешно."
+          --merge-sha "${{ steps.merge.outputs.merge_sha }}"
+          --reason "deploy or production verify did not complete successfully"
 
       - name: Remove temporary SSH material
         if: always()

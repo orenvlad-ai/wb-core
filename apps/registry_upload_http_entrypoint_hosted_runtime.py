@@ -900,33 +900,64 @@ def deploy_current_checkout(
     if dry_run:
         return summary
 
+    def run_stage(stage: str, command: list[str]) -> None:
+        try:
+            _run_command(command)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 255:
+                raise
+            release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
+            release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip()
+            release_merge = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
+            if not release_pr.isdigit() or not release_head:
+                raise RuntimeError(
+                    f"transport-indeterminate during {stage}; release identity is unavailable"
+                ) from exc
+            from apps.hosted_runtime_transport_reconcile import reconcile
+
+            reconciliation = reconcile(
+                target_file=target_file or resolve_target_file(),
+                expected_sha=release_merge,
+                pr=int(release_pr),
+                head=release_head,
+                merge=release_merge,
+                failed_stage=stage
+                if stage in {"daemon-reload", "restart", "probes", "readback"}
+                else "sync",
+            )
+            summary["transport_reconciliation"] = reconciliation
+            if not bool(reconciliation.get("healthy")):
+                raise RuntimeError(
+                    f"transport-indeterminate during {stage}; exact-SHA reconciliation halted"
+                ) from exc
+
     # Never let a deploy/restart proceed against a missing hosted auth contour.
-    _run_command(auth_env_preflight_command)
-    _run_command(mkdir_command)
-    _run_command(rsync_plan)
-    _run_command(chown_target_dir_command)
-    _run_command(deploy_metadata_command)
-    _run_command(seller_recovery_os_dependencies_command)
-    _run_command(seller_owner_os_dependencies_command)
-    _run_command(runtime_pip_install_command)
-    _run_command(seller_recovery_venv_command)
-    _run_command(seller_owner_venv_command)
-    _run_command(seller_owner_contract_command)
-    _run_command(seller_recovery_playwright_browser_command)
+    run_stage("auth-preflight", auth_env_preflight_command)
+    run_stage("mkdir", mkdir_command)
+    run_stage("sync", rsync_plan)
+    run_stage("chown", chown_target_dir_command)
+    run_stage("metadata", deploy_metadata_command)
+    run_stage("dependencies", seller_recovery_os_dependencies_command)
+    run_stage("dependencies", seller_owner_os_dependencies_command)
+    run_stage("dependencies", runtime_pip_install_command)
+    run_stage("dependencies", seller_recovery_venv_command)
+    run_stage("dependencies", seller_owner_venv_command)
+    run_stage("dependencies", seller_owner_contract_command)
+    run_stage("dependencies", seller_recovery_playwright_browser_command)
     if systemd_commands["install"]:
-        _run_command(systemd_commands["install"])
-        _run_command(systemd_commands["daemon_reload"])
+        run_stage("systemd-install", systemd_commands["install"])
+        run_stage("daemon-reload", systemd_commands["daemon_reload"])
     if nginx_public_routes_command:
-        _run_command(nginx_public_routes_command)
-    _run_command(restart_command)
+        run_stage("nginx", nginx_public_routes_command)
+    run_stage("restart", restart_command)
     if systemd_commands["enable"]:
-        _run_command(systemd_commands["enable"])
+        run_stage("restart", systemd_commands["enable"])
     if systemd_commands["restart"]:
-        _run_command(systemd_commands["restart"])
+        run_stage("restart", systemd_commands["restart"])
     if status_command:
-        _run_command(status_command)
+        run_stage("readback", status_command)
     # Read back the same contract after all managed-unit operations.
-    _run_command(auth_env_preflight_command)
+    run_stage("readback", auth_env_preflight_command)
     return summary
 
 
@@ -961,10 +992,14 @@ def _build_deploy_metadata_command(target: HostedRuntimeTarget) -> list[str]:
     )
     target_path = f"{target.target_dir.rstrip('/')}/{DEPLOY_METADATA_FILENAME}"
     temp_path = f"{target_path}.tmp"
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    runtime_sha_temp = f"{runtime_sha_path}.tmp"
     shell = (
         "umask 022 && "
         f"printf '%s\\n' {shlex.quote(payload)} > {shlex.quote(temp_path)} && "
-        f"mv {shlex.quote(temp_path)} {shlex.quote(target_path)}"
+        f"printf '%s\\n' {shlex.quote(commit)} > {shlex.quote(runtime_sha_temp)} && "
+        f"mv {shlex.quote(temp_path)} {shlex.quote(target_path)} && "
+        f"mv {shlex.quote(runtime_sha_temp)} {shlex.quote(runtime_sha_path)}"
     )
     return _remote_shell_command(target, shell)
 
@@ -1681,6 +1716,37 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
         timeout_seconds=args.timeout_seconds,
         auth_cookie=auth_cookie,
     )
+    transport_disconnect = any(
+        "ssh exit code 255" in str(route.get("network_error") or "").lower()
+        for route in loopback_summary.get("routes") or []
+    )
+    if transport_disconnect and not args.dry_run:
+        release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
+        release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip()
+        release_merge = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
+        if release_pr.isdigit() and release_head:
+            from apps.hosted_runtime_transport_reconcile import reconcile
+
+            reconciliation = reconcile(
+                target_file=target_file,
+                expected_sha=release_merge,
+                pr=int(release_pr),
+                head=release_head,
+                merge=release_merge,
+                failed_stage="probes",
+            )
+            deploy_summary["transport_reconciliation"] = reconciliation
+            if bool(reconciliation.get("healthy")):
+                loopback_summary = collect_loopback_surface(
+                    target,
+                    as_of_date=args.as_of_date,
+                    include_refresh=include_refresh,
+                    include_feedbacks=args.include_feedbacks,
+                    feedbacks_date_from=args.feedbacks_date_from,
+                    feedbacks_date_to=args.feedbacks_date_to,
+                    timeout_seconds=args.timeout_seconds,
+                    auth_cookie=auth_cookie,
+                )
     public_summary = evaluate_surface_results(
         collect_public_surface(
             base_url=target.public_base_url,

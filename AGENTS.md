@@ -28,11 +28,11 @@
 
 ## Классы задач
 
-Каждый новый task prompt по возможности начинается ровно с одной явной строки:
+Каждый новый task prompt по возможности начинается ровно с одной канонической строки:
 
-- `Класс задачи: стандарт`
-- `Класс задачи: loop`
-- `Класс задачи: диагностика`
+- `КЛАСС ЗАДАЧИ: СТАНДАРТ`
+- `КЛАСС ЗАДАЧИ: LOOP`
+- `КЛАСС ЗАДАЧИ: ДИАГНОСТИКА`
 
 Класс управляет orchestration/closure, а execution-контур определяет техническую область и риск. `СТАНДАРТ` может иметь `scope:repo-only`, `scope:live-runtime` или `scope:production-mutation`; `LOOP` всегда имеет `scope:live-runtime`.
 
@@ -60,9 +60,9 @@
 
 Перед каждым LOOP merge/deploy Release Train после sync и baseline ставит `release:awaiting-agent`. Активная Codex-сессия подтверждает readiness GitHub-native acknowledgement, привязанным к номеру PR и exact head SHA. Ack одноразовый, потребляется непосредственно перед merge, становится недействительным после изменения head и обязателен заново для каждого recovery PR. Пока ack нет, production и остальная очередь не меняются. Просроченное ожидание получает overlay `release:needs-resume` и точную команду восстановления, но никакого автоматического ack или пропуска очереди.
 
-После deploy задача переходит в `release:awaiting-ui`, блокируя несвязанные production releases. Codex продолжает ту же сессию и выполняет UI Flow. При ошибке создаётся recovery PR с теми же `task:loop + scope:live-runtime` и выданной Release Train точной `loop:root-<PR>` связью; после нового ack и deploy gate переносится на recovery. После успешного UI Flow Codex оставляет на активном PR точную команду `/wb-core loop accept-ui <PR>`. Только UI acceptance переводит всю Loop-цепочку в `release:production` и продолжает очередь.
+После deploy задача переходит в `release:awaiting-ui`, блокируя несвязанные production releases. Codex продолжает ту же сессию и выполняет UI Flow. При ошибке создаётся recovery PR с теми же `task:loop + scope:live-runtime` и exact `loop:root-<PR>`; после нового ack и deploy gate переносится на recovery. После успешного UI Flow Codex оставляет `/wb-core loop accept-ui <PR> deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>`. Acceptance требует repo-owned deployed-SHA proof и допустим только для последнего задеплоенного PR. Только он получает `release:production`; предыдущие merged iterations теряют stale release states, а доказанно заменённые unmerged recovery PR получают `release:superseded` и закрываются.
 
-Ожидание чужой LOOP-цепочки никогда не становится blocker из-за числа проверок, goal-turns или длительности. Нельзя снимать, обходить или перехватывать чужой gate. Codex-владелец продолжает waiter до своей очереди; если заканчивается текущий goal-turn, он создаёт следующий goal на продолжение ожидания, а не завершает задачу handoff-сообщением. Сохранённую CLI-сессию возобновляют через `codex resume`.
+Чужие `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui` и занятый global production gate всегда являются normal waiting, а не blocker. Потерянный LOOP owner на `ready/running/awaiting-agent/awaiting-ui` получает overlay `release:needs-resume`; новый владелец запускает `python3 apps/github_release_train_wait.py <PR> --resume-owner --no-ack-agent`, повторно проверяет exact head/root и затем отдельно выполняет ack/UI action. Resume идемпотентен и сам ack не выполняет.
 
 ## Production UI-проверки
 
@@ -106,7 +106,11 @@ Repo-owned waiter для Codex CLI:
 
 `python3 apps/github_release_train_wait.py <PR>`
 
-Он показывает смену release/queue state, механически отличает чужой gate от собственного blocker и по умолчанию продолжает bounded polling без terminal timeout. Для LOOP он при собственном `release:awaiting-agent` заново читает exact head, оставляет точный ack-comment, продолжает наблюдение merge/deploy и возвращает код `3` только на собственном `release:awaiting-ui`, чтобы та же Codex-сессия выполнила UI Flow; повторный запуск после acceptance ждёт `release:production`. `--no-ack-agent` запрещает единственную write-операцию waiter, `--status-seconds` (и совместимый alias `--timeout-seconds`) задаёт только heartbeat, `Ctrl-C` возвращает код `130`.
+Он отличает normal waiting, own action, own failure и terminal state и продолжает polling без terminal timeout. На активном PR waiter обновляет ровно один idempotent status-comment с task title/class/stage/queue reason/root/last action/intervention/resume command и не плодит heartbeat comments. LOOP ack привязан к exact head и repo-owned proof. Код `3` означает own `release:awaiting-ui`, `4` — принятый resume без ack, `2` — own failure или conflicting invariant, `130` — interrupt. `--status-seconds` задаёт heartbeat, не timeout.
+
+Release states и transitions определены машинно в `apps/github_release_train_spec.py`: primary active — `ready/running/awaiting-agent/awaiting-ui/blocked/halted`, overlay — `needs-resume`, terminal — `done/production/superseded`. Кроме временной пары `ready+running`, два primary states запрещены. Ручной label edit не доказывает ack, deploy, acceptance или halted recovery: критический transition требует repo-owned exact PR/head/merge/root/evidence command.
+
+После исправления own pre-merge blocker PR возвращается из `release:blocked` в `release:ready` только через `python3 apps/github_release_train.py retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`: command повторно проверяет exact head и successful baseline. Ручное снятие blocker не является retry proof.
 
 ## Независимая проверка
 
