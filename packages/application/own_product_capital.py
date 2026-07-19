@@ -2042,7 +2042,7 @@ class OwnProductCapitalBlock:
             target[own_stage_metric_key(stage, "paid_equivalent_qty")] = float(paid_equivalent)
             target[own_stage_metric_key(stage, "capital_rub")] = float(capital)
             target[own_stage_metric_key(stage, "unit_cost_rub")] = (
-                float(capital / paid_equivalent) if paid_equivalent > ZERO else None
+                float(capital / qty) if qty > ZERO else None
             )
             target[own_stage_metric_key(stage, "cost_coverage_pct")] = (
                 float(covered / qty) if qty > ZERO else None
@@ -2084,7 +2084,7 @@ class OwnProductCapitalBlock:
             target[OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY] = float(paid_equivalent)
             target[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = float(capital)
             target[OWN_AVG_COST_RUB_METRIC_KEY] = (
-                float(capital / paid_equivalent) if paid_equivalent > ZERO else None
+                float(capital / qty) if qty > ZERO else None
             )
             target[OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY] = (
                 float(confirmed / qty) if qty > ZERO else None

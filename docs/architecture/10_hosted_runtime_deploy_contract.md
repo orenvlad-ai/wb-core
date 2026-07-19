@@ -150,7 +150,7 @@ The same runner owns the only production path for the active functional cutover 
 - `warehouse-functional-rollback --fingerprint <exact stored sha256:...>` removes only functional derived state after another backup;
 - `warehouse-ui-flow --evidence-dir <absolute path outside repo>` uses a fresh isolated Playwright context and reconciles navigation, six warehouses, WB contour, settings/reference, Proxy 3, supplier cost/bank fee fields, consumers, legacy redirects and sync freshness with protected readback. Evidence stays outside Git.
 
-Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. `warehouse_opening_v1` remains immutable audit under migration 102; active sources/non-target invariants are fixed in module 48 and `migration/103_warehouse_functional_cutover.md`.
+Ad-hoc SQL, arbitrary remote commands and server-only scripts are not valid initialization paths. `warehouse_opening_v1` remains immutable audit under migration 102; active sources/non-target invariants are fixed in module 48 and `migration/103_warehouse_functional_cutover.md`. Exact-date warehouse-chain recovery and archived-metric cleanup additionally follow `migration/104_warehouse_chain_audit_recovery.md` through the same repo-owned dry-run/apply/readback/UI contours.
 
 Canonical target template:
 - `artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__example.json`

@@ -97,10 +97,23 @@ def main() -> None:
             onec_stage_metric_key("FF_TO_WB", "qty"),
             onec_stage_metric_key("WB_STOCK", "qty"),
         ]
+        try:
+            sheet_block.build_plan(
+                as_of_date=AS_OF_DATE,
+                execution_mode="manual_operator",
+                source_keys=[ONEC_STOCKS_SOURCE_KEY],
+                metric_keys=metric_keys,
+            )
+        except ValueError as exc:
+            if "enabled show_in_data rows" not in str(exc):
+                raise
+        else:
+            raise AssertionError("archived-only 1C metrics must not materialize in a normal live plan")
         plan = sheet_block.build_plan(
             as_of_date=AS_OF_DATE,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            _include_archived_metrics_for_audit=True,
             metric_keys=metric_keys,
         )
         partial_source = _PartialOnecStocksSource(ARTIFACTS)
@@ -117,6 +130,7 @@ def main() -> None:
             as_of_date=AS_OF_DATE,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            _include_archived_metrics_for_audit=True,
             metric_keys=metric_keys,
         )
         data_rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
@@ -226,16 +240,8 @@ def main() -> None:
             as_of_date=AS_OF_DATE,
         )
         web_rows = {row.row_id: row for row in web_contract.rows}
-        if web_rows["TOTAL|total_onec_total_cost_rub"].section != ONEC_STOCKS_SOURCE_GROUP_LABEL_RU:
-            raise AssertionError(f"web contract must expose 1C section labels, got {web_rows}")
-        assert_nonblank(
-            web_rows["TOTAL|total_onec_total_cost_rub"].values_by_date.get(TODAY_DATE),
-            "web explicit as_of_date total 1C cost",
-        )
-        assert_nonblank(
-            web_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"].values_by_date.get(TODAY_DATE),
-            "web explicit as_of_date SKU 1C qty",
-        )
+        if any("|onec_" in row_id or "|total_onec_" in row_id for row_id in web_rows):
+            raise AssertionError(f"archived 1C rows leaked into active web contract: {web_rows}")
 
         period_contract = web_block.build(
             page_route="/sheet-vitrina-v1/vitrina",
@@ -244,18 +250,8 @@ def main() -> None:
             date_to=TODAY_DATE,
         )
         period_rows = {row.row_id: row for row in period_contract.rows}
-        if "TOTAL|total_onec_total_cost_rub" not in period_rows:
-            raise AssertionError(f"period web contract must keep 1C total rows visible, got {period_rows}")
-        if f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty" not in period_rows:
-            raise AssertionError(f"period web contract must keep 1C SKU rows visible, got {period_rows}")
-        assert_nonblank(
-            period_rows["TOTAL|total_onec_total_cost_rub"].values_by_date.get(TODAY_DATE),
-            "period total 1C cost",
-        )
-        assert_nonblank(
-            period_rows[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"].values_by_date.get(TODAY_DATE),
-            "period SKU 1C qty",
-        )
+        if any("|onec_" in row_id or "|total_onec_" in row_id for row_id in period_rows):
+            raise AssertionError(f"archived 1C rows leaked into period web contract: {period_rows}")
 
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=Path(tmp),
@@ -273,19 +269,14 @@ def main() -> None:
         )
         loading_table = page_payload["activity_surface"]["loading_table"]
         groups = {item["group_id"]: item for item in loading_table["groups"]}
-        if groups[ONEC_STOCKS_SOURCE_GROUP_ID]["label"] != ONEC_STOCKS_SOURCE_GROUP_LABEL_RU:
-            raise AssertionError(f"1C source group must be visible in status surface, got {groups}")
+        if ONEC_STOCKS_SOURCE_GROUP_ID in groups:
+            raise AssertionError(f"archived 1C group leaked into active status surface: {groups}")
         onec_rows = [
             row for row in loading_table["rows"]
             if row["source_key"] == ONEC_STOCKS_SOURCE_KEY
         ]
-        if not onec_rows or onec_rows[0]["source_group_id"] != ONEC_STOCKS_SOURCE_GROUP_ID:
-            raise AssertionError(f"1C loading row must carry source group id, got {loading_table}")
-        onec_metric_labels = list(onec_rows[0]["metric_labels"])
-        if "товарный капитал всего, руб" not in onec_metric_labels:
-            raise AssertionError(f"1C loading row must expose metric labels, got {onec_rows[0]}")
-        if any(str(label).startswith(("1C:", "1С:", "1C ", "1С ")) for label in onec_metric_labels):
-            raise AssertionError(f"1C loading row labels must not expose 1C prefix, got {onec_rows[0]}")
+        if onec_rows:
+            raise AssertionError(f"archived 1C loading rows leaked into active status surface: {loading_table}")
         period_page_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
@@ -311,72 +302,23 @@ def main() -> None:
             onec_stage_total_metric_key("CHINA_TO_FF", "unit_cost_rub"),
             onec_stage_metric_key("CHINA_TO_FF", "qty"),
         ):
-            if expected_metric_key not in metric_option_values:
+            if expected_metric_key in metric_option_values:
                 raise AssertionError(
-                    f"period filter/options must expose 1C metric {expected_metric_key}, got {metric_option_values}"
+                    f"period filter/options leaked archived 1C metric {expected_metric_key}: {metric_option_values}"
                 )
 
-        captured: dict[str, object] = {}
-
-        def build_partial_plan(**kwargs: object) -> SheetVitrinaV1Envelope:
-            captured["source_keys"] = list(kwargs.get("source_keys") or [])
-            captured["metric_keys"] = list(kwargs.get("metric_keys") or [])
-            return partial_plan
-
-        entrypoint.sheet_plan_block.build_plan = build_partial_plan  # type: ignore[method-assign]
-        job = entrypoint.start_sheet_source_group_refresh_job(
-            source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
-            as_of_date=TODAY_DATE,
-        )
-        job_snapshot = _wait_job(entrypoint, str(job["job_id"]))
-        if job_snapshot["status"] != "success":
-            raise AssertionError(f"1C group refresh must finish successfully, got {job_snapshot}")
-        if captured.get("source_keys") != [ONEC_STOCKS_SOURCE_KEY]:
-            raise AssertionError(f"1C group refresh must select only 1C source, got {captured}")
-        job_result = dict(job_snapshot.get("result") or {})
-        if int(job_result.get("updated_cell_count") or 0) <= 0:
-            raise AssertionError(f"partial 1C group refresh must update cells, got {job_result}")
-        if job_result.get("snapshot_semantic_status") != "error":
-            raise AssertionError(f"group refresh must preserve overall snapshot semantic status, got {job_result}")
-        if job_result.get("semantic_status") == "error" or job_result.get("status_label") == "Ошибка":
-            raise AssertionError(f"1C group refresh must not surface unrelated source errors as group blockers, got {job_result}")
-        captured_metric_keys = set(captured.get("metric_keys") or [])
-        for expected in (
-            ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
-            ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
-            onec_stage_total_metric_key("CHINA_TO_FF", "qty"),
-            onec_stage_total_metric_key("CHINA_TO_FF", "unit_cost_rub"),
-            onec_stage_metric_key("CHINA_TO_FF", "qty"),
-            onec_stage_metric_key("WB_STOCK", "cost_total_rub"),
-        ):
-            if expected not in captured_metric_keys:
-                raise AssertionError(f"1C group refresh must select virtual metric {expected}, got {captured}")
-
-        captured.clear()
-        yesterday_job = entrypoint.start_sheet_source_group_refresh_job(
-            source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
-            as_of_date=AS_OF_DATE,
-        )
-        yesterday_job_snapshot = _wait_job(entrypoint, str(yesterday_job["job_id"]))
-        if yesterday_job_snapshot["status"] != "success":
-            raise AssertionError(f"1C yesterday group refresh must finish successfully, got {yesterday_job_snapshot}")
-        yesterday_result = dict(yesterday_job_snapshot.get("result") or {})
-        yesterday_cells = {
-            (str(cell.get("row_id") or ""), str(cell.get("as_of_date") or ""), str(cell.get("status") or ""))
-            for cell in (yesterday_result.get("updated_cells") or [])
-            if isinstance(cell, dict)
-        }
-        if (
-            f"TOTAL|{onec_stage_total_metric_key('CHINA_TO_FF', 'qty')}",
-            AS_OF_DATE,
-            "updated",
-        ) not in yesterday_cells:
-            raise AssertionError(f"1C historical group refresh must update requested-date cells, got {yesterday_cells}")
-        if int(yesterday_result.get("updated_cell_count") or 0) <= 0:
-            raise AssertionError(f"1C historical group refresh must mark cells updated, got {yesterday_result}")
-        yesterday_merge_summary = dict(yesterday_result.get("merge_summary") or {})
-        if int(yesterday_merge_summary.get("status_rows_updated") or 0) <= 0:
-            raise AssertionError(f"1C historical group refresh must update STATUS truth, got {yesterday_result}")
+        for selected_date in (TODAY_DATE, AS_OF_DATE):
+            try:
+                entrypoint.start_sheet_source_group_refresh_job(
+                    source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
+                    as_of_date=selected_date,
+                )
+            except ValueError as exc:
+                if "technical archive" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("archived-only 1C group refresh must not mutate active ready snapshots")
+        captured_metric_keys = set(metric_keys)
 
         _assert_onec_mismatched_historical_payload_not_reused()
         _assert_onec_single_metric_historical_action()
@@ -387,9 +329,9 @@ def main() -> None:
 
         print("sheet_vitrina_onec_stocks_metrics: ok -> summary_and_sku_values_present")
         print("sheet_vitrina_onec_stocks_partial_acceptance: ok -> covered=1 missing=1")
-        print("sheet_vitrina_onec_stocks_period_visibility: ok -> filter_and_rows_present")
+        print("sheet_vitrina_onec_stocks_period_archive: ok -> technical source retained, public rows hidden")
         print("sheet_vitrina_onec_stocks_status_group: ok ->", ONEC_STOCKS_SOURCE_GROUP_ID)
-        print("sheet_vitrina_onec_stocks_group_refresh: ok ->", len(captured_metric_keys))
+        print("sheet_vitrina_onec_stocks_group_refresh: ok -> archived", len(captured_metric_keys))
         print("sheet_vitrina_onec_stocks_mismatch_rejection: ok ->", AS_OF_DATE)
         print("sheet_vitrina_onec_stocks_single_metric_action: ok ->", AS_OF_DATE)
         print("sheet_vitrina_onec_stocks_date_specific_lineage: ok -> 2026-05-15/2026-05-16/2026-05-17")
@@ -456,6 +398,7 @@ def _assert_onec_mismatched_historical_payload_not_reused() -> None:
             as_of_date=AS_OF_DATE,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            _include_archived_metrics_for_audit=True,
             metric_keys=[metric_key],
         )
         rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
@@ -493,6 +436,7 @@ def _assert_onec_single_metric_historical_action() -> None:
             as_of_date=AS_OF_DATE,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            _include_archived_metrics_for_audit=True,
             metric_keys=[metric_key],
         )
         rows = {str(row[1]): row for row in _sheet_rows(plan, "DATA_VITRINA")}
@@ -535,6 +479,7 @@ def _assert_onec_date_specific_snapshot_lineage() -> None:
             as_of_date=closed_date,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            _include_archived_metrics_for_audit=True,
             metric_keys=metric_keys,
         )
         current_state = runtime.load_current_state()
@@ -556,6 +501,7 @@ def _assert_onec_date_specific_snapshot_lineage() -> None:
             as_of_date=next_closed_date,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            _include_archived_metrics_for_audit=True,
             metric_keys=metric_keys,
         )
         runtime.save_sheet_vitrina_ready_snapshot(
@@ -593,12 +539,9 @@ def _assert_onec_date_specific_snapshot_lineage() -> None:
             date_from=closed_date,
             date_to=current_date,
         )
-        web_row = {
-            item.row_id: item
-            for item in period_contract.rows
-        }[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
-        for expected_date in expected_dates:
-            assert_close(web_row.values_by_date.get(expected_date), float(expected_date[-2:]), f"{expected_date} web qty")
+        web_row_ids = {item.row_id for item in period_contract.rows}
+        if f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty" in web_row_ids:
+            raise AssertionError(f"archived 1C lineage row leaked into active web contract: {web_row_ids}")
 
 
 def _assert_onec_date_specific_period_snapshots() -> None:
@@ -638,6 +581,7 @@ def _assert_onec_date_specific_period_snapshots() -> None:
                 as_of_date=closed_day.isoformat(),
                 execution_mode="manual_operator",
                 source_keys=[ONEC_STOCKS_SOURCE_KEY],
+                _include_archived_metrics_for_audit=True,
                 metric_keys=metric_keys,
             )
             row = {
@@ -676,20 +620,9 @@ def _assert_onec_date_specific_period_snapshots() -> None:
             date_from=start.isoformat(),
             date_to=end.isoformat(),
         )
-        row = {
-            item.row_id: item
-            for item in period_contract.rows
-        }[f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty"]
-        actual_values = [
-            row.values_by_date.get(snapshot_date)
-            for snapshot_date in expected_dates
-        ]
-        for offset, actual in enumerate(actual_values, start=1):
-            assert_close(actual, float(offset), f"period {expected_dates[offset - 1]} qty")
-        for snapshot_date in expected_dates[:14]:
-            assert_nonblank(row.values_by_date.get(snapshot_date), f"period {snapshot_date} 1C value")
-        if len({float(value) for value in actual_values if isinstance(value, (int, float))}) != len(expected_dates):
-            raise AssertionError(f"period 1C values must stay date-specific, got {actual_values}")
+        row_ids = {item.row_id for item in period_contract.rows}
+        if f"SKU:{NM_ID}|onec_CHINA_TO_FF_qty" in row_ids:
+            raise AssertionError(f"archived period 1C row leaked into active web contract: {row_ids}")
 
 
 def _assert_onec_profitability_metric_calculations() -> None:
@@ -904,6 +837,7 @@ def _assert_weighted_unit_cost_semantics() -> None:
             as_of_date=AS_OF_DATE,
             execution_mode="manual_operator",
             source_keys=[ONEC_STOCKS_SOURCE_KEY],
+            _include_archived_metrics_for_audit=True,
             metric_keys=[
                 onec_stage_total_metric_key("CHINA_TO_FF", "qty"),
                 onec_stage_total_metric_key("CHINA_TO_FF", "cost_total_rub"),

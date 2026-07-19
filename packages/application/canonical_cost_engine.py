@@ -1555,24 +1555,14 @@ class CanonicalCostEngine:
         return result
 
     def _snapshot_metric(self, as_of_date: str, metric_key: str) -> dict[int, float]:
-        snapshot_date = as_of_date
         try:
-            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=snapshot_date)
-        except Exception:
-            candidates = self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
-                date_to=as_of_date, descending=True
+            snapshot = self.runtime.load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(
+                column_date=as_of_date
             )
-            if not candidates:
-                return {}
-            snapshot_date = candidates[0]
-            try:
-                snapshot = self.runtime.load_sheet_vitrina_ready_snapshot_any_bundle(
-                    as_of_date=snapshot_date
-                )
-            except Exception:
-                return {}
+        except Exception:
+            return {}
         return _extract_snapshot_sku_metric(
-            snapshot, column_date=snapshot_date, metric_key=metric_key
+            snapshot, column_date=as_of_date, metric_key=metric_key
         )
 
     def _supplier_payment_projection_as_of(

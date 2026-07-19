@@ -26,7 +26,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "`warehouse_opening_v1` сохранён immutable audit. Active truth после guarded apply принадлежит `warehouse_functional_cutover_v1` и versioned functional balances."
+update_note: "Active truth принадлежит versioned functional balances; exact-date history, stable nomenclature identity, version-scoped unmatched audit, localized evidence UI and archived-metric cutover are enforced fail closed."
 ---
 
 # 1. Active warehouse contract
@@ -94,7 +94,7 @@ Periodic WB WAC получает accepted inbound capital, но quantity все�
 - extrapolation/single-band ratio;
 - explicit fallback average при missing price.
 
-Map frozen навсегда и сохраняет quality/provenance. WB opening cost добавляет доказанные downstream costs, включая paid acceptance только для accepted quantity. Historical daily quantity переиспользуется только из persisted daily snapshot evidence; cost переигрывается через frozen map и confirmed post-01.07 inbound layers. Для positive quantity zero/NULL cost запрещён.
+Map frozen навсегда и сохраняет quality/provenance. WB opening cost добавляет доказанные downstream costs, включая paid acceptance только для accepted quantity. Historical daily quantity переиспользуется только из persisted daily snapshot evidence. Period-ready snapshot может закрыть отсутствующую canonical daily row только значением из колонки точной business date; canonical daily row имеет приоритет, а missing input не превращается в zero и не заменяется current/previous snapshot. Recovery scan читает только ready snapshots с outer `as_of_date` не позднее immutable functional cutover и только если внутри есть колонка `2026-07-01 <= date < cutover`; post-cutover daily snapshots поэтому не создают неограниченный рост hourly capture. Readback строит полный календарь `2026-07-01..active effective date` и отдельно сообщает missing dates и positive-quantity cost gaps. Cost переигрывается через frozen map и confirmed post-01.07 inbound layers. Для positive quantity zero/NULL cost запрещён.
 
 Targeted economics publication проверяет, что `DATA_VITRINA.header[2:]` точно совпадает с versioned `date_columns`, и изменяет только строки со стабильным projection key `scope|metric`. Сохранённые legacy presentation-only rows без такого ключа не участвуют в расчёте и остаются byte-for-byte неизменными; duplicate stable projection key или неоднозначный header блокируют весь dry-run с identity конкретного ready snapshot. Это compatibility read/write boundary, а не второй источник себестоимости.
 
@@ -115,7 +115,7 @@ Repo-owned `wb-core-warehouse-functional-sync.timer` запускает bounded 
 3. только после complete validation провести idempotent FF debit и bounded-материализовать supply-specific downstream components без legacy daily/global rebuild;
 4. fetch uncached complete official stock snapshot;
 5. compute FF→WB, discrepancies, unmatched, WB snapshot and targeted/daily cost states из coherent capture;
-6. publish one atomic good version.
+6. publish one atomic good version. Unmatched audit identity включает owning functional `version_id`, поэтому одна и та же source evidence может безопасно присутствовать в последовательных versions без primary-key collision; повтор exact plan остаётся no-op.
 
 `wb-core-sheet-vitrina-refresh.timer` больше не вызывает WB supply sync или Seller Portal automation. Global vitrina refresh только читает materialized warehouse/cost state. Manual WB refresh вызывает тот же bounded pipeline.
 
@@ -142,7 +142,11 @@ python3 apps/registry_upload_http_entrypoint_hosted_runtime.py warehouse-ui-flow
 
 # 7. UI and verification
 
-Navigation is `Остатки → Склады и себестоимость / Отчёт об остатках`. One component renders quantity, WAC, capital, quality/provenance, sync status, SKU and document registry for all stages. Document rows persist their own immutable SKU lines; discrepancy documents distinguish final-acceptance receipt, pooled `Допринято` and non-stock transitional audit. `wb_discrepancy_writeoff` is a reserved disabled type, not an automatic/manual action. WB adds four contour quantities; discrepancy detail adds transitional unmatched registry. The `Поставки → Реестр поставок` matrix inside the operator frame exposes production/China stage cost fields; supplier order details and bank-fee source rows use the same operator-authorized `embedded=operator` detail surface opened by that matrix. Settings exposes calculation parameters and three-week WB reference.
+Navigation is `Остатки → Склады и себестоимость / Отчёт об остатках`. One component renders quantity, WAC, capital, localized quality, sync status, SKU and document registry for all stages. Exact active nomenclature by `nm_id` enriches name/barcode; conflicting active identities remain visibly ambiguous and are never guessed. Every applicable row exposes a centralized Russian status plus human-readable evidence fields (document/date/invoice or supply/quantity source/cost source/confirmation/allocation/contribution). Source/stage date and per-source quality are persisted in provenance; a mixed SKU therefore shows the exact certified/provisional status of each contributing invoice, while a document line uses its known document occurrence as a bounded date fallback. For several FF→WB supplies each evidence row owns its exact open quantity and capital, and their sums equal the displayed SKU balance. FF evidence expands the cutover opening and every post-cutover append-only ledger operation with signed quantity/capital and operation date instead of duplicating an aggregate wrapper. Raw provenance JSON exists only in a nested technical disclosure.
+
+`Обновить WB` and the explicit emergency rebuild use dark-theme tokens and distinct normal/hover/pressed/disabled/loading/success/error states. Status text includes last success timestamp or the latest failed attempt with a sanitized reason while the last good version stays visible. A successful later sync clears stale failure lifecycle state. Neither page open nor global vitrina refresh launches a heavy warehouse rebuild.
+
+Document rows persist their own immutable SKU lines; discrepancy documents distinguish final-acceptance receipt, pooled `Допринято` and non-stock transitional audit. `wb_discrepancy_writeoff` is a reserved disabled type, not an automatic/manual action. WB adds four contour quantities; discrepancy detail adds transitional unmatched registry. The `Поставки → Реестр поставок` matrix exposes production/China stage cost fields and an aggregated `Комиссии банка, ₽` row derived from the same exact fee summary used by cost allocation. Settings exposes calculation parameters and three-week WB reference.
 
 Targeted verification:
 
@@ -151,6 +155,7 @@ Targeted verification:
 - `python3 apps/warehouse_stocks_smoke.py` (immutable legacy opening regression);
 - `python3 apps/our_wb_costs_smoke.py`;
 - `python3 apps/own_product_capital_smoke.py`;
+- `python3 apps/canonical_cost_engine_smoke.py` (exact period-column selection; no current-value backfill);
 - `python3 apps/cny_ledger_smoke.py`;
 - `python3 apps/supplier_financial_documents_smoke.py`;
-- production `warehouse-ui-flow` in a fresh Playwright/Chromium context, entering the shared-shell operator/settings/report frames only after their explicit `src` navigation before asserting controls, waiting for rendered `Управление SKU` rows and non-empty visible Proxy profit/margin consumer cells, accepting localized `₽` / `RUB` / `CNY` money suffixes without weakening numeric reconciliation, with screenshots/report outside Git.
+- production `warehouse-ui-flow` in a fresh Playwright/Chromium context, entering the shared-shell operator/settings/report frames only after their explicit `src` navigation; its reusable default verifies six-stage arithmetic, identities/evidence, bank-fee aggregate/detail, correctly parsed dark-theme contrast, canonical product-capital keys, date coverage, archived-metric absence and rendered consumers. The bounded migration-104 controls (four exact production identities, China range, FF `391662965`, zero FF→WB/31 500 absence and exact 17–18 July coverage) run only with explicit `--acceptance-profile warehouse_chain_recovery_20260719`, so later legitimate stock movements cannot break the general release gate. Evidence stays outside Git.

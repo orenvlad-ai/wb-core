@@ -15,6 +15,10 @@ OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY = "proxy_profit_3_rub"
 OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY = "total_proxy_profit_3_rub"
 OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY = "proxy_margin_3_pct"
 OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY = "proxy_margin_3_pct_total"
+OUR_WB_ARCHIVED_METRIC_KEYS: tuple[str, ...] = (
+    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
+)
 
 OUR_WB_UNIT_COST_RUB_LABEL = "Себестоимость WB наша, ₽/шт"
 OUR_WB_COST_CONFIRMED_SHARE_PCT_LABEL = "Доля подтверждённой себестоимости, %"
@@ -46,21 +50,7 @@ def extend_metrics_with_our_wb_cost_metrics(metrics: Iterable[MetricV2Item]) -> 
             show_in_data=True,
             format="rub",
             display_order=1095,
-            section="1С",
-        )
-    )
-    _append(
-        MetricV2Item(
-            metric_key=TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
-            enabled=True,
-            scope="TOTAL",
-            label_ru=OUR_WB_UNIT_COST_RUB_LABEL,
-            calc_type="metric",
-            calc_ref="aggregate:weighted_avg:our_wb_unit_cost_rub:stock_qty",
-            show_in_data=True,
-            format="rub",
-            display_order=1090,
-            section="1С",
+            section="Товарный капитал",
         )
     )
     _append(
@@ -74,7 +64,7 @@ def extend_metrics_with_our_wb_cost_metrics(metrics: Iterable[MetricV2Item]) -> 
             show_in_data=True,
             format="percent",
             display_order=1105,
-            section="1С",
+            section="Технический архив",
         )
     )
     _append(
@@ -88,7 +78,21 @@ def extend_metrics_with_our_wb_cost_metrics(metrics: Iterable[MetricV2Item]) -> 
             show_in_data=True,
             format="percent",
             display_order=1100,
-            section="1С",
+            section="Технический архив",
+        )
+    )
+    _append(
+        MetricV2Item(
+            metric_key=TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
+            enabled=True,
+            scope="TOTAL",
+            label_ru=OUR_WB_UNIT_COST_RUB_LABEL,
+            calc_type="metric",
+            calc_ref="aggregate:weighted_avg:our_wb_unit_cost_rub:stock_qty",
+            show_in_data=True,
+            format="rub",
+            display_order=1090,
+            section="Товарный капитал",
         )
     )
     _append(

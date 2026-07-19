@@ -34,6 +34,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     STAGES,
     STAGE_DISCREPANCY,
     STAGE_WB,
+    WAREHOUSE_QUALITY_PRESENTATIONS,
     WarehouseFunctionalBlock,
     WarehouseLine,
     _calculation_digest,
@@ -41,11 +42,14 @@ from packages.application.warehouse_functional import (  # noqa: E402
     _fingerprint,
     _guarded_local_sources,
     _line_payload,
+    _merge_historical_wb_quantity_evidence,
     _nomenclature_purchase_prices,
+    _ready_snapshot_recovery_rows,
     _supply_downstream_component_index,
     _supply_revision,
     _summaries,
     _validated_financial_expense,
+    _warehouse_human_evidence,
     accepted_capital_delta,
     accepted_quantity_delta,
     allocate_capital,
@@ -78,6 +82,9 @@ def main() -> None:
     _test_frozen_cost_map()
     _test_nomenclature_purchase_price_source()
     _test_historical_wb_projection()
+    _test_exact_historical_wb_quantity_evidence()
+    _test_quality_localization_catalog()
+    _test_human_evidence_uses_source_quality_and_date()
     _test_proxy()
     _test_versioned_parameters_and_reference()
     _test_initial_settings_preserve_outer_transaction()
@@ -377,6 +384,182 @@ def _test_historical_wb_projection() -> None:
         {item["as_of_date"]: item for item in corrected}["2026-07-03"]["wac_rub"] == "130",
         "late confirmed downstream expense replays historical WAC from its effective date",
     )
+
+
+def _test_exact_historical_wb_quantity_evidence() -> None:
+    period_plan = {
+        "date_columns": ["2026-07-17", "2026-07-18", "2026-07-19"],
+        "sheets": [
+            {
+                "sheet_name": "DATA_VITRINA",
+                "rows": [
+                    ["SKU", "SKU:104|stock_total", 7, 8, 99],
+                    ["SKU", "SKU:105|stock_total", "", 3, 4],
+                ],
+            }
+        ],
+    }
+    merged = _merge_historical_wb_quantity_evidence(
+        canonical_rows=[
+            {"as_of_date": "2026-07-19", "nm_id": 104, "physical_quantity": "9"},
+        ],
+        ready_snapshot_rows=[
+            {
+                "bundle_version": "period-smoke",
+                "as_of_date": "2026-07-19",
+                "plan_json": json.dumps(period_plan),
+            }
+        ],
+    )
+    by_key = {(item["as_of_date"], int(item["nm_id"])): item for item in merged}
+    _assert(by_key[("2026-07-17", 104)]["physical_quantity"] == "7", "17 July uses its exact period column")
+    _assert(by_key[("2026-07-18", 104)]["physical_quantity"] == "8", "18 July uses its exact period column")
+    _assert(by_key[("2026-07-19", 104)]["physical_quantity"] == "9", "canonical daily evidence has priority")
+    _assert(("2026-07-17", 105) not in by_key, "missing historical input is not fabricated as zero")
+    _assert(
+        by_key[("2026-07-18", 104)]["quantity_provenance"]["column_date"] == "2026-07-18",
+        "historical provenance binds the exact business date",
+    )
+
+
+def _test_quality_localization_catalog() -> None:
+    expected_codes = {
+        "provisional",
+        "mixed",
+        "certified",
+        "primary_documents",
+        "confirmed_payments_provisional_expenses",
+        "moving_weighted_average",
+        "periodic_snapshot_wac",
+        "periodic_snapshot_wac_provisional",
+        "periodic_snapshot_wac_closed",
+        "direct_24_06",
+        "same_purchase_price",
+        "interpolation",
+        "extrapolation",
+        "fallback_average",
+        "direct_confirmed_downstream",
+        "confirmed_weighted_downstream_unit_cost",
+        "supply_specific_downstream_cost",
+        "proportional_wac_outbound",
+        "current_wac_adjustment",
+        "pooled_final_acceptance_discrepancy",
+        "empty",
+    }
+    missing = sorted(expected_codes - set(WAREHOUSE_QUALITY_PRESENTATIONS))
+    _assert(not missing, f"warehouse quality localization is complete: missing={missing}")
+    for code in expected_codes:
+        label, description = WAREHOUSE_QUALITY_PRESENTATIONS[code]
+        _assert(bool(label and description), f"warehouse quality {code} has label and explanation")
+        _assert(label != code, f"warehouse quality {code} does not expose its technical token")
+
+
+def _test_human_evidence_uses_source_quality_and_date() -> None:
+    evidence = _warehouse_human_evidence(
+        {
+            "source_records": [
+                {
+                    "invoice_no": "CERTIFIED",
+                    "invoice_date": "2026-07-01",
+                    "flow_quantity": "1",
+                    "flow_capital_rub": "10",
+                    "expenses_complete_certification": True,
+                },
+                {
+                    "invoice_no": "PROVISIONAL",
+                    "business_date": "2026-07-02",
+                    "flow_quantity": "2",
+                    "flow_capital_rub": "20",
+                    "expenses_complete_certification": False,
+                },
+            ]
+        },
+        quantity="3",
+        capital_rub="30",
+        quality="mixed:certified,confirmed_payments_provisional_expenses",
+    )
+    items = {item["document"]: item for item in evidence["items"]}
+    _assert(items["CERTIFIED"]["date"] == "2026-07-01", "evidence retains invoice date")
+    _assert(items["PROVISIONAL"]["date"] == "2026-07-02", "evidence retains business date")
+    _assert(
+        items["CERTIFIED"]["confirmation_status"] == "Подтверждено документами",
+        "certified source keeps its own status inside a mixed SKU",
+    )
+    _assert(
+        items["PROVISIONAL"]["confirmation_status"]
+        == "Платежи подтверждены, часть расходов предварительная",
+        "provisional source keeps its own status inside a mixed SKU",
+    )
+    supplies = _warehouse_human_evidence(
+        {
+            "source_records": [
+                {
+                    "wb_supply_id": "SUPPLY-A",
+                    "business_date": "2026-07-03",
+                    "packed_quantity": "12",
+                    "accepted_quantity": "2",
+                    "ff_wac_at_ledger_debit_rub": "5",
+                    "downstream_pre_acceptance_addon_rub": "1",
+                },
+                {
+                    "wb_supply_id": "SUPPLY-B",
+                    "business_date": "2026-07-04",
+                    "packed_quantity": "20",
+                    "accepted_quantity": "0",
+                    "ff_wac_at_ledger_debit_rub": "5",
+                    "downstream_pre_acceptance_addon_rub": "1",
+                },
+            ]
+        },
+        quantity="30",
+        capital_rub="180",
+        quality="supply_specific_downstream_cost",
+    )
+    _assert(
+        sum(Decimal(item["quantity_contribution"]) for item in supplies["items"]) == Decimal("30"),
+        "FF to WB evidence conserves aggregate quantity across supplies",
+    )
+    _assert(
+        sum(Decimal(item["capital_contribution_rub"]) for item in supplies["items"]) == Decimal("180"),
+        "FF to WB evidence conserves aggregate capital across supplies",
+    )
+    ledger = _warehouse_human_evidence(
+        {
+            "source": "canonical_append_only_ff_ledger_replay",
+            "cutover_date": "2026-07-05",
+            "operations": [
+                {
+                    "operation_id": "op-in",
+                    "created_at": "2026-07-06T10:00:00Z",
+                    "quantity_delta": "5",
+                    "unit_cost_rub": "10",
+                },
+                {
+                    "operation_id": "op-out",
+                    "created_at": "2026-07-07T10:00:00Z",
+                    "quantity_delta": "-3",
+                    "unit_cost_rub": "10",
+                },
+            ],
+        },
+        quantity="12",
+        capital_rub="120",
+        quality="moving_weighted_average",
+    )
+    _assert(
+        [item["document"] for item in ledger["items"]]
+        == ["Остаток FF на cutover", "Операция FF op-in", "Операция FF op-out"],
+        "FF ledger evidence exposes opening and each operation",
+    )
+    _assert(
+        sum(Decimal(item["quantity_contribution"]) for item in ledger["items"]) == Decimal("12"),
+        "FF ledger evidence quantity reconciles to the balance",
+    )
+    _assert(
+        sum(Decimal(item["capital_contribution_rub"]) for item in ledger["items"]) == Decimal("120"),
+        "FF ledger evidence capital reconciles to the balance",
+    )
+    _assert(ledger["items"][1]["date"] == "2026-07-06", "FF ledger evidence retains operation date")
 
 
 def _test_proxy() -> None:
@@ -698,6 +881,31 @@ def _test_source_capture_exposes_calculation_timestamp() -> None:
         "fulfillment_service_uploads": [],
         "ff_operations": [],
         "ff_auto_writeoff_checkpoint": [],
+        "historical_wb_daily_quantities": [
+            {
+                "as_of_date": "2026-07-17",
+                "nm_id": 1,
+                "physical_quantity": "9",
+            }
+        ],
+        "ready_snapshots": [
+            {
+                "bundle_version": "period-fixture",
+                "as_of_date": "2026-07-19",
+                "plan_json": json.dumps(
+                    {
+                        "date_columns": ["2026-07-17"],
+                        "sheets": [
+                            {
+                                "sheet_name": "DATA_VITRINA",
+                                "rows": [["stock", "SKU:1|stock_total", 10]],
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+            }
+        ],
     }
     with tempfile.TemporaryDirectory(prefix="warehouse-capture-") as temp_dir:
         block = WarehouseFunctionalBlock(
@@ -722,7 +930,12 @@ def _test_source_capture_exposes_calculation_timestamp() -> None:
             return_value=source_rows,
         ):
             capture = block._capture_sources(captured_at=NOW, wb_payload=wb_payload)  # noqa: SLF001
+            apply_digest = block._local_source_digest()  # noqa: SLF001
         _assert(capture["captured_at"] == NOW, "source capture exposes calculation timestamp")
+        _assert(
+            capture["local_source_digest"] == apply_digest,
+            "dry-run and apply hash the same normalized local source view",
+        )
 
 
 def _test_supply_refresh_completeness_gate() -> None:
@@ -770,6 +983,24 @@ def _test_guarded_publication() -> None:
         root = Path(temp_dir)
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=root / "runtime")
         block = WarehouseFunctionalBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        runtime.save_nomenclature_item(
+            {
+                "item_id": "nom-104",
+                "is_active": True,
+                "our_sku": "anti-spy-smoke",
+                "nm_id": 104,
+                "barcode": "2052929000104",
+                "vendor_code": "anti-spy-smoke",
+                "nomenclature_name": "Anti-Spy smoke",
+                "product_type": "anti_spy",
+                "match_key": "anti_spy|smoke",
+                "purchase_price_yuan": 7.2,
+                "aliases": [],
+                "compatible_model_keys": [],
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
         block._local_source_digest = lambda **_: "sha256:local"  # type: ignore[method-assign]
         block._wb_supply_source_digest = lambda **_: "sha256:supply"  # type: ignore[method-assign]
         with sqlite3.connect(runtime.db_path) as conn:
@@ -839,7 +1070,17 @@ def _test_guarded_publication() -> None:
             ],
             "lines": [_line_payload(item) for item in lines],
             "summaries": summaries,
-            "unmatched_doprinato": [],
+            "unmatched_doprinato": [
+                {
+                    "source_id": "unmatched-smoke",
+                    "source_fingerprint": "sha256:unmatched-smoke",
+                    "business_date": "2026-07-18",
+                    "nm_id": 999,
+                    "quantity": "1",
+                    "matched_quantity": "0",
+                    "reason": "smoke audit row",
+                }
+            ],
             "new_events": [],
             "movement_documents": [],
             "historical_wb_cost_projection": [
@@ -967,6 +1208,15 @@ def _test_guarded_publication() -> None:
             confirm_fingerprint=sync_plan["plan_fingerprint"],
         )
         _assert(sync_applied["idempotent"] is False, "hourly daily WAC version publishes")
+        with sqlite3.connect(runtime.db_path) as conn:
+            unmatched_ids = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT unmatched_id FROM sheet_vitrina_v1_warehouse_unmatched_doprinato ORDER BY created_at,unmatched_id"
+                ).fetchall()
+            ]
+        _assert(len(unmatched_ids) == 2, "the same unmatched evidence is auditable in two versions")
+        _assert(len(set(unmatched_ids)) == 2, "unmatched identity includes its owning version")
         daily_state = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-19")
         _assert(
             Decimal(str(daily_state[104]["our_wb_unit_cost_rub"])) == Decimal("17"),
@@ -995,14 +1245,43 @@ def _test_guarded_publication() -> None:
         wb_detail = entrypoint.handle_warehouse_detail_request("wb")
         _assert((wb_detail.get("warehouse") or {}).get("wb_contour") is not None, "WB HTTP detail exposes contour")
         _assert((wb_detail.get("documents") or [])[0].get("lines"), "warehouse documents persist their own lines")
+        document_line = (wb_detail.get("documents") or [])[0]["lines"][0]
+        _assert(
+            document_line["quality_presentation"]["code"] != "provisional",
+            "persisted document line retains its actual quality",
+        )
+        _assert(
+            document_line["human_evidence"]["items"][0]["date"] != "—",
+            "persisted document evidence has a known document date fallback",
+        )
+        wb_balance = next(item for item in wb_detail["balances"] if int(item["nm_id"]) == 104)
+        _assert(wb_balance["nomenclature_name"] == "Anti-Spy smoke", "active nomenclature resolves exact nmID")
+        _assert(wb_balance["barcode"] == "2052929000104", "active nomenclature exposes stable barcode")
+        _assert(
+            wb_balance["identity_source"] == "active_nomenclature_exact_nm_id",
+            "warehouse identity records exact-key provenance",
+        )
+        _assert(wb_balance["quality_presentation"]["label_ru"], "warehouse quality has a Russian label")
+        _assert(wb_balance["human_evidence"]["items"], "warehouse row exposes structured human evidence")
+        _assert(wb_detail["warehouse"]["status_label"] != wb_detail["warehouse"]["status"], "status code is localized")
+        discrepancy_detail = entrypoint.handle_warehouse_detail_request("wb_acceptance_discrepancy")
+        _assert(
+            (discrepancy_detail.get("unmatched_doprinato") or [])[0]["human_evidence"]["items"],
+            "unmatched audit row exposes structured human evidence",
+        )
         settings = entrypoint.handle_calculation_parameters_request()
         _assert(settings["status"] == "ready", "calculation parameters HTTP readback")
+        _test_ready_snapshot_recovery_scan_is_bounded(runtime)
         _test_functional_economics_backfill(runtime=runtime, root=root)
         active_before_failure = block.readback()["active_version"]["version_id"]
         block.record_failed_sync(RuntimeError("injected 429 exhaustion"))
         failed = block.readback()
         _assert(failed["active_version"]["version_id"] == active_before_failure, "last good survives failure")
         _assert("429" in failed["sync"]["last_error"], "last failure is visible")
+        failed_public = entrypoint.handle_warehouse_detail_request("wb")
+        failed_description = str((failed_public.get("warehouse") or {}).get("status_description") or "")
+        _assert("ограничил частоту" in failed_description, "public sync reason is localized and categorized")
+        _assert("injected 429 exhaustion" not in failed_description, "raw sync error stays outside public reason")
         rolled_back = block.rollback_functional_cutover(
             confirm_fingerprint=plan["plan_fingerprint"],
             backup_dir=root / "rollback-backups",
@@ -1013,6 +1292,49 @@ def _test_guarded_publication() -> None:
             _assert(conn.execute("SELECT COUNT(*) FROM immutable_warehouse_opening_v1").fetchone()[0] == 1, "old opening audit preserved")
         backup_path = Path(str(applied["backup"]["path"]))
         _assert(backup_path.stat().st_mode & 0o777 == 0o600, "backup mode 0600")
+
+
+def _test_ready_snapshot_recovery_scan_is_bounded(runtime: RegistryUploadDbBackedRuntime) -> None:
+    future_plan = {
+        "date_columns": ["2026-07-17", "2026-08-01"],
+        "sheets": [
+            {
+                "sheet_name": "DATA_VITRINA",
+                "rows": [["SKU", "SKU:104|stock_total", 10, 99]],
+            }
+        ],
+    }
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "INSERT INTO registry_upload_versions(bundle_version,uploaded_at,activated_at) VALUES(?,?,?)",
+            ("future-recovery-smoke", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                   bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "future-recovery-smoke",
+                "2026-08-01T00:00:00Z",
+                "2026-08-01",
+                "future-recovery-snapshot",
+                "v1",
+                "2026-08-01T00:00:00Z",
+                json.dumps(future_plan),
+            ),
+        )
+        conn.commit()
+        snapshots = _ready_snapshot_recovery_rows(conn, recovery_boundary="2026-07-18")
+        _assert(
+            all(item["bundle_version"] != "future-recovery-smoke" for item in snapshots),
+            "post-cutover ready snapshots are excluded from the recovery source scan",
+        )
+        conn.execute(
+            "DELETE FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version='future-recovery-smoke'"
+        )
+        conn.execute("DELETE FROM registry_upload_versions WHERE bundle_version='future-recovery-smoke'")
+        conn.commit()
 
 
 def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntime, root: Path) -> None:
@@ -1028,12 +1350,33 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                     ["SKU", "SKU:104|orderCount", 2],
                     ["SKU", "SKU:104|ads_sum", 10],
                     ["Legacy", "SKU:104|non_target", 777],
+                    ["Archived coverage", "SKU:104|our_wb_cost_confirmed_share_pct", 1],
+                    ["Archived proxy 2", "SKU:104|proxy_profit_2_rub", 12],
+                    ["Archived paid equivalent", "SKU:104|own_total_paid_equivalent_qty", 10],
                     ["Legacy presentation A", 93.54754799999999, ""],
                     ["Legacy presentation B", 93.54754799999999, ""],
                 ],
             }
         ],
         "metadata": {"preserved": True},
+    }
+    pre_boundary_plan = {
+        "date_columns": ["2026-06-30"],
+        "sheets": [
+            {
+                "sheet_name": "DATA_VITRINA",
+                "write_start_cell": "A1",
+                "header": ["Показатель", "row_id", "2026-06-30"],
+                "rows": [
+                    ["Legacy", "SKU:104|non_target", 555],
+                    ["Archived proxy 2", "SKU:104|proxy_profit_2_rub", 11],
+                ],
+            }
+        ],
+        "metadata": {
+            "preserved": True,
+            "row_last_updated_at_by_row_id": {"SKU:104|proxy_profit_2_rub": NOW},
+        },
     }
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute(
@@ -1053,9 +1396,24 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                ) VALUES(?,?,?,?,?,?,?)""",
             ("economics-smoke", NOW, "2026-07-01", "snap-economics", "v1", NOW, json.dumps(plan)),
         )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                   bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "economics-smoke",
+                NOW,
+                "2026-06-30",
+                "snap-economics-pre-boundary",
+                "v1",
+                NOW,
+                json.dumps(pre_boundary_plan),
+            ),
+        )
         conn.commit()
     dry_run = build_functional_economics_backfill_plan(runtime)
-    _assert(dry_run["changed_snapshot_count"] == 1, "functional economics backfill finds target snapshot")
+    _assert(dry_run["changed_snapshot_count"] == 2, "functional economics backfill finds target and archive-only snapshots")
+    _assert(dry_run["archived_row_count"] == 4, "functional economics dry-run inventories archived rows")
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute(
             """UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=?
@@ -1093,7 +1451,12 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
     _assert(repeated["changed_snapshot_count"] == 0, "functional economics backfill is idempotent")
     with sqlite3.connect(runtime.db_path) as conn:
         stored = json.loads(conn.execute(
-            "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version='economics-smoke'"
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
+        ).fetchone()[0])
+        pre_boundary_stored = json.loads(conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-06-30'"""
         ).fetchone()[0])
     rows = {row[1]: row for row in stored["sheets"][0]["rows"]}
     profit = Decimal(str(rows["SKU:104|proxy_profit_3_rub"][2]))
@@ -1101,6 +1464,12 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
     _assert(profit == Decimal("15.48"), "Proxy 3 default settings formula")
     _assert(abs(margin - profit / Decimal("91")) < Decimal("0.0000005"), "Proxy 3 margin uses expected buyout revenue")
     _assert(rows["SKU:104|non_target"][2] == 777, "functional economics backfill preserves non-target cells")
+    for archived_key in (
+        "SKU:104|our_wb_cost_confirmed_share_pct",
+        "SKU:104|proxy_profit_2_rub",
+        "SKU:104|own_total_paid_equivalent_qty",
+    ):
+        _assert(archived_key not in rows, f"archived public row removed: {archived_key}")
     _assert(
         [row for row in stored["sheets"][0]["rows"] if row[0].startswith("Legacy presentation")]
         == [
@@ -1108,6 +1477,14 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             ["Legacy presentation B", 93.54754799999999, ""],
         ],
         "functional economics ignores and preserves legacy non-key presentation rows",
+    )
+    pre_boundary_rows = {row[1]: row for row in pre_boundary_stored["sheets"][0]["rows"]}
+    _assert("SKU:104|proxy_profit_2_rub" not in pre_boundary_rows, "pre-boundary archived row is removed")
+    _assert(pre_boundary_rows["SKU:104|non_target"][2] == 555, "pre-boundary non-target row is preserved")
+    _assert(
+        "SKU:104|proxy_profit_2_rub"
+        not in pre_boundary_stored["metadata"].get("row_last_updated_at_by_row_id", {}),
+        "pre-boundary archived timestamp is removed",
     )
     parameters = CalculationParametersBlock(runtime=runtime)
     changed_payload = {
@@ -1130,7 +1507,8 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
     _assert(saved["targeted_recalculation"]["status"] == "complete", "settings save executes targeted Proxy recalculation")
     with sqlite3.connect(runtime.db_path) as conn:
         updated = json.loads(conn.execute(
-            "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version='economics-smoke'"
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-07-01'"""
         ).fetchone()[0])
     updated_rows = {row[1]: row for row in updated["sheets"][0]["rows"]}
     _assert(

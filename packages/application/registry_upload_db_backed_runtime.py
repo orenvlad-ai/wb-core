@@ -411,6 +411,45 @@ class RegistryUploadDbBackedRuntime:
                 raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: as_of_date={as_of_date}")
             return _deserialize_sheet_vitrina_plan(row["plan_json"])
 
+    def load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(
+        self,
+        *,
+        column_date: str,
+    ) -> SheetVitrinaV1Envelope:
+        """Load the newest ready plan which contains an exact historical column.
+
+        Period snapshots are keyed by their publication ``as_of_date`` while
+        carrying several independently materialized business dates.  Historical
+        consumers must select the requested column, not substitute the outer
+        snapshot key or the latest current value.
+        """
+
+        date_key = str(column_date or "").strip()
+        if not date_key:
+            raise ValueError("column_date is required for cross-bundle ready snapshot read")
+        with _connect(self.db_path) as conn:
+            _ensure_schema(conn)
+            row = conn.execute(
+                """
+                SELECT snapshot.plan_json
+                FROM sheet_vitrina_v1_ready_snapshots AS snapshot
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM json_each(snapshot.plan_json, '$.date_columns') AS date_column
+                    WHERE date_column.value = ?
+                )
+                ORDER BY snapshot.activated_at DESC, snapshot.refreshed_at DESC,
+                         snapshot.as_of_date DESC, snapshot.bundle_version DESC
+                LIMIT 1
+                """,
+                (date_key,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"sheet_vitrina_v1 ready snapshot column missing: column_date={date_key}"
+            )
+        return _deserialize_sheet_vitrina_plan(row["plan_json"])
+
     def list_sheet_vitrina_ready_snapshot_dates(
         self,
         *,

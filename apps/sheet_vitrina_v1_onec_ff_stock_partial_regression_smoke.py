@@ -90,14 +90,7 @@ def main() -> None:
             date_to=CURRENT_DATE,
         )
         period_rows = {row.row_id: row for row in period_contract.rows}
-        _assert_web_ff_stock_filled(period_rows, FILLED_DATE)
-        _assert_web_ff_stock_zero(period_rows, MISSING_DATE)
-        _assert_web_ff_stock_zero(period_rows, CURRENT_DATE)
-        assert_close(
-            period_rows[f"TOTAL|{ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY}"].values_by_date.get(MISSING_DATE),
-            1560.0,
-            "missing-date total 1C cost must include available source buckets plus structural zero FF_STOCK",
-        )
+        _assert_archived_onec_rows_hidden(period_rows)
 
         stale_plan = _with_stale_ff_stock_cells_and_unrelated_row(second_plan)
         runtime.save_sheet_vitrina_ready_snapshot(
@@ -118,38 +111,16 @@ def main() -> None:
             onec_stocks_block=OnecStocksBlock(source, stage_mapping=DEFAULT_ONEC_STAGE_MAPPING),
             now_factory=lambda: datetime(2026, 5, 20, 8, 30, tzinfo=timezone.utc),
         )
-        job = entrypoint.start_sheet_source_group_refresh_job(
-            source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
-            as_of_date=MISSING_DATE,
-        )
-        job_snapshot = _wait_job(entrypoint, str(job["job_id"]))
-        if job_snapshot["status"] != "success":
-            raise AssertionError(f"1C FF_STOCK group refresh must finish, got {job_snapshot}")
-        job_result = dict(job_snapshot.get("result") or {})
-        if job_result.get("semantic_status") != "success":
-            raise AssertionError(f"zero-stock FF_STOCK group refresh must be a success, got {job_result}")
-
-        repaired_plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=MISSING_DATE)
-        repaired_rows = _data_rows(repaired_plan)
-        selected_idx = _date_index(repaired_plan, MISSING_DATE)
-        current_idx = _date_index(repaired_plan, CURRENT_DATE)
-        assert_close(repaired_rows[f"TOTAL|{FF_TOTAL_QTY}"][selected_idx], 0.0, "selected FF_STOCK qty after group refresh")
-        assert_close(
-            repaired_rows[f"TOTAL|{FF_TOTAL_UNIT_COST}"][selected_idx],
-            0.0,
-            "selected FF_STOCK unit cost after group refresh",
-        )
-        assert_close(
-            repaired_rows[f"TOTAL|{FF_TOTAL_COST}"][selected_idx],
-            0.0,
-            "selected FF_STOCK cost after group refresh",
-        )
-        for row_id in _ff_total_row_ids():
-            assert_close(repaired_rows[row_id][current_idx], 777.0, f"{row_id} non-selected date must be preserved")
-        unrelated = repaired_rows[UNRELATED_ROW_ID]
-        if unrelated[_date_index(repaired_plan, MISSING_DATE)] != "keep-selected":
-            raise AssertionError(f"group refresh must preserve unrelated selected-date cells, got {unrelated}")
-        _assert_ff_stock_status_has_zero_stock(repaired_plan, MISSING_DATE)
+        try:
+            entrypoint.start_sheet_source_group_refresh_job(
+                source_group_id=ONEC_STOCKS_SOURCE_GROUP_ID,
+                as_of_date=MISSING_DATE,
+            )
+        except ValueError as exc:
+            if "technical archive" not in str(exc):
+                raise
+        else:
+            raise AssertionError("archived-only 1C group refresh must not mutate the active vitrina")
         page_payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
@@ -157,7 +128,9 @@ def main() -> None:
             as_of_date=MISSING_DATE,
             include_source_status=True,
         )
-        _assert_loading_table_explains_zero_stock(page_payload)
+        loading_groups = page_payload["activity_surface"]["loading_table"]["groups"]
+        if any(item.get("group_id") == ONEC_STOCKS_SOURCE_GROUP_ID for item in loading_groups):
+            raise AssertionError(f"archived-only 1C group leaked into active loading controls: {loading_groups}")
 
         repaired_contract = SheetVitrinaV1WebVitrinaBlock(
             runtime=runtime,
@@ -169,11 +142,10 @@ def main() -> None:
             date_to=CURRENT_DATE,
         )
         repaired_web_rows = {row.row_id: row for row in repaired_contract.rows}
-        _assert_web_ff_stock_filled(repaired_web_rows, FILLED_DATE)
-        _assert_web_ff_stock_zero(repaired_web_rows, MISSING_DATE)
+        _assert_archived_onec_rows_hidden(repaired_web_rows)
 
-    print("sheet_vitrina_onec_ff_stock_partial_regression: ok -> fresh_empty_bucket_materialized_as_zero")
-    print("sheet_vitrina_onec_ff_stock_group_refresh: ok -> zero_stock_written_and_unrelated_preserved")
+    print("sheet_vitrina_onec_ff_stock_partial_regression: ok -> technical evaluator preserved")
+    print("sheet_vitrina_onec_ff_stock_group_refresh: ok -> archived from active vitrina")
 
 
 def _build_plan(
@@ -192,6 +164,7 @@ def _build_plan(
         as_of_date=as_of_date,
         execution_mode="manual_operator",
         source_keys=[ONEC_STOCKS_SOURCE_KEY],
+        _include_archived_metrics_for_audit=True,
         metric_keys=[
             ONEC_STOCKS_TOTAL_QTY_METRIC_KEY,
             ONEC_STOCKS_TOTAL_COST_RUB_METRIC_KEY,
@@ -269,6 +242,12 @@ def _assert_web_ff_stock_zero(rows: dict[str, Any], column_date: str) -> None:
         5.0,
         "web neighbor CHINA_TO_FF qty",
     )
+
+
+def _assert_archived_onec_rows_hidden(rows: dict[str, Any]) -> None:
+    leaked = sorted(row_id for row_id in rows if "|onec_" in row_id or "proxy_profit_2" in row_id)
+    if leaked:
+        raise AssertionError(f"archived 1C rows leaked into active web contract: {leaked}")
 
 
 def _find_onec_status_row(plan: SheetVitrinaV1Envelope, column_date: str) -> list[Any]:

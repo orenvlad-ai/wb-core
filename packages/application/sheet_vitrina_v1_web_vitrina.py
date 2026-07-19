@@ -8,6 +8,11 @@ import math
 from typing import Any, Callable, Mapping
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.sheet_vitrina_v1_archived_metrics import (
+    ARCHIVED_ONLY_SOURCE_KEYS,
+    ARCHIVED_PUBLIC_METRIC_KEYS,
+    active_refresh_summary as _active_refresh_summary,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
 from packages.application.sheet_vitrina_v1_own_product_capital import (
@@ -55,8 +60,6 @@ FUNNEL_CTR_METRIC_KEY = "ctr"
 FUNNEL_CTR_LABEL = "CTR в воронке"
 FUNNEL_OPEN_CARD_LABEL = "Открытия карточки в воронке"
 FUNNEL_DUPLICATE_VIEW_METRIC_KEYS = {"openCount", "total_openCount"}
-
-
 @dataclass(frozen=True)
 class _ScopeDescriptor:
     scope_kind: str
@@ -188,13 +191,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                     raise ValueError("sheet_vitrina_v1 ready snapshot missing: no readable snapshots are materialized")
             refresh_status = self.runtime.load_sheet_vitrina_refresh_status(as_of_date=snapshot.as_of_date)
             refreshed_at = refresh_status.refreshed_at
-            period_refresh_summary = {
-                "status": refresh_status.semantic_status,
-                "label": refresh_status.semantic_label,
-                "tone": refresh_status.semantic_tone,
-                "reason": refresh_status.semantic_reason,
-                "counts": dict(refresh_status.source_outcome_counts),
-            }
+            period_refresh_summary = _active_refresh_summary(refresh_status)
             source_status_snapshot_as_of_date = snapshot.as_of_date
             data_sheet_row_count = refresh_status.sheet_row_counts.get(WEB_VITRINA_SOURCE_SHEET_NAME, 0)
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
@@ -561,18 +558,19 @@ def _resolve_period_refresh_summary(
             }
         )
     ]
+    active_summaries = [_active_refresh_summary(item) for item in statuses]
     counts = {"success": 0, "warning": 0, "error": 0}
-    for item in statuses:
-        if item.semantic_status in counts:
-            counts[item.semantic_status] += 1
+    for item in active_summaries:
+        if item["status"] in counts:
+            counts[item["status"]] += 1
     missing_count = sum(1 for binding in period_date_bindings if binding.missing)
-    if any(item.semantic_status == "error" for item in statuses):
+    if any(item["status"] == "error" for item in active_summaries):
         status = "error"
         reason = (
             f"В выбранном периоде {counts['error']} snapshot с ошибками; "
             f"ещё {counts['warning']} требуют внимания."
         )
-    elif any(item.semantic_status == "warning" for item in statuses) or missing_count:
+    elif any(item["status"] == "warning" for item in active_summaries) or missing_count:
         status = "warning"
         reason = f"В выбранном периоде {counts['warning']} snapshot требуют внимания; {missing_count} дат пока без ready snapshot."
     else:
@@ -617,18 +615,19 @@ def _resolve_latest_load_window_status(
         }
     slot_today = _refresh_status_temporal_slot_date(refresh_status, "today_current") or today_current_date
     slot_yesterday = _refresh_status_temporal_slot_date(refresh_status, "yesterday_closed") or yesterday_closed_date
-    reason = str(refresh_status.semantic_reason or "").strip()
+    active_summary = _active_refresh_summary(refresh_status)
+    reason = str(active_summary["reason"] or "").strip()
     return {
-        "status": str(refresh_status.semantic_status or "warning"),
-        "label": str(refresh_status.semantic_label or ""),
-        "tone": str(refresh_status.semantic_tone or refresh_status.semantic_status or "warning"),
+        "status": str(active_summary["status"] or "warning"),
+        "label": str(active_summary["label"] or ""),
+        "tone": str(active_summary["tone"] or active_summary["status"] or "warning"),
         "reason": f"Последняя загрузка для окна {window_label}: {reason}" if reason else f"Последняя загрузка для окна {window_label}.",
         "refreshed_at": str(refresh_status.refreshed_at or ""),
         "snapshot_as_of_date": str(refresh_status.as_of_date or yesterday_closed_date),
         "today_current_date": slot_today,
         "yesterday_closed_date": slot_yesterday,
         "business_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
-        "counts": dict(refresh_status.source_outcome_counts),
+        "counts": dict(active_summary["counts"]),
     }
 
 
@@ -728,6 +727,8 @@ def _normalize_rows(
         if not row_id or "|" not in row_id:
             continue
         scope_token, metric_key = row_id.split("|", 1)
+        if metric_key in ARCHIVED_PUBLIC_METRIC_KEYS:
+            continue
         metric = metrics_by_key.get(metric_key)
         scope = _parse_scope(scope_token, row_label=str(row[0] or ""), config_by_nm_id=config_by_nm_id)
         values_by_date = {

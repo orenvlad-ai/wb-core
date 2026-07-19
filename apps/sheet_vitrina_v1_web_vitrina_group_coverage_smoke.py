@@ -14,6 +14,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
+    ARCHIVED_PUBLIC_METRIC_KEYS,
+    filter_archived_public_metrics,
+)
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     WEB_VITRINA_SOURCE_GROUPS,
     WEB_VITRINA_SOURCE_METRIC_KEYS,
@@ -131,7 +135,7 @@ def _assert_group_metric_coverage() -> None:
     )
     visible_metric_keys = [
         str(item.metric_key)
-        for item in sorted(visible_metrics, key=lambda row: int(row.display_order or 0))
+        for item in sorted(filter_archived_public_metrics(visible_metrics), key=lambda row: int(row.display_order or 0))
         if item.enabled and item.show_in_data
     ]
     metric_to_groups: dict[str, list[str]] = {metric_key: [] for metric_key in visible_metric_keys}
@@ -165,7 +169,7 @@ def _assert_group_metric_coverage() -> None:
         or missing_derived
         or missing_onec_derived
         or missing_our_wb_derived
-        or not any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
+        or any(groups == [ONEC_STOCKS_SOURCE_GROUP_ID] for groups in metric_to_groups.values())
         or any(
             _groups_for_metric(metric_to_groups, metric_key) != [OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID]
             for metric_key in OWN_PRODUCT_CAPITAL_METRIC_KEYS
@@ -178,6 +182,8 @@ def _assert_group_metric_coverage() -> None:
             f"missing_our_wb_derived={missing_our_wb_derived}, "
             f"onec_group={ONEC_STOCKS_SOURCE_GROUP_ID}"
         )
+    if set(visible_metric_keys) & ARCHIVED_PUBLIC_METRIC_KEYS:
+        raise AssertionError("archived metrics leaked into active group coverage")
     if _groups_for_metric(metric_to_groups, OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY) != _groups_for_metric(
         metric_to_groups, OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY
     ) or _groups_for_metric(

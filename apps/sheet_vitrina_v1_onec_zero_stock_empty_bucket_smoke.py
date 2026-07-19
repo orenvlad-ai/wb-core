@@ -148,6 +148,7 @@ def _build_plan(runtime: RegistryUploadDbBackedRuntime, source: "_OnecZeroStockS
         as_of_date=TARGET_DATE,
         execution_mode="manual_operator",
         source_keys=[ONEC_STOCKS_SOURCE_KEY],
+        _include_archived_metrics_for_audit=True,
         metric_keys=[
             FF_QTY,
             FF_UNIT_COST,

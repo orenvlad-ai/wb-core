@@ -1,0 +1,346 @@
+{
+  "schema_version": "wb_core_warehouse_chain_prechange_evidence_v1",
+  "captured_at": "2026-07-19T09:14:32Z",
+  "capture_mode": "read_only_hosted_readback_and_authenticated_production_api",
+  "production_target": {
+    "target_id": "wb_core_eu_hosted_runtime_active",
+    "public_base_url": "https://api.selleros.pro",
+    "runtime_dir": "/opt/wb-core-runtime/state"
+  },
+  "limitations": {
+    "webcore_data_mcp": "not_configured_in_this_session",
+    "fallback": "repo_owned_hosted_readback_and_authenticated_production_api",
+    "browser_baseline": "isolated Chromium rendered the production UI but the late sku-management API read ended with ECONNRESET; no production mutation occurred"
+  },
+  "active_projection": {
+    "version_id": "whfv_aa95480e0e9e2aa2c002752a",
+    "effective_at": "2026-07-19T02:18:01Z",
+    "plan_fingerprint": "sha256:aa95480e0e9e2aa2c002752a6ec830ff918161052547515a56af0f670cc9bd78",
+    "wb_snapshot_id": "wbsnap_c55fbb788d8874963533b999",
+    "wb_snapshot_fetched_at": "2026-07-19T02:18:02Z",
+    "wb_snapshot_pagination_complete": true,
+    "wb_snapshot_requested_nm_ids": 33,
+    "wb_snapshot_raw_rows": 885
+  },
+  "cutover": {
+    "cutover_id": "warehouse_functional_cutover_v1",
+    "cutover_at": "2026-07-19T01:11:40Z",
+    "plan_fingerprint": "sha256:99fb4f9f1747241fc6df41fc2ca925f5f3ff5cc8e5558d1cbe4ee8b7f84fe251",
+    "backup_path": "/opt/wb-core-runtime/backups/warehouse-functional/warehouse_functional_cutover_v1-20260719T010654Z.sqlite3",
+    "backup_sha256": "02ba31d1f6417dc9908193779dc0d54d90d91c4559e8a9c5a2790550c35744d9",
+    "backup_size_bytes": 10107240448,
+    "backup_integrity_check": "ok"
+  },
+  "warehouse_totals": {
+    "production": {
+      "sku_count": 28,
+      "quantity": "119750",
+      "capital_rub": "1313599.340000000000000000000",
+      "wac_rub": "10.96951432150313152400835073",
+      "min_sku_wac_rub": "8.599947052806376619063434077",
+      "max_sku_wac_rub": "13.81398004754015702657926961"
+    },
+    "china_to_ff": {
+      "sku_count": 29,
+      "quantity": "135500",
+      "capital_rub": "12882474.72999999999999999999",
+      "wac_rub": "95.07361424354243542435424347",
+      "min_sku_wac_rub": "66.71854986209051042264231262",
+      "max_sku_wac_rub": "130.4357210850608995999639293"
+    },
+    "ff": {
+      "sku_count": 1,
+      "quantity": "6750",
+      "capital_rub": "809605.450443052125",
+      "wac_rub": "119.9415482137855"
+    },
+    "ff_to_wb": {
+      "sku_count": 0,
+      "quantity": "0",
+      "capital_rub": "0",
+      "wac_rub": null
+    },
+    "wb": {
+      "sku_count": 33,
+      "quantity": "194641",
+      "capital_rub": "21597394.49828763009212232783",
+      "wac_rub": "110.9601497027226025972037126"
+    },
+    "wb_acceptance_discrepancy": {
+      "sku_count": 0,
+      "quantity": "0",
+      "capital_rub": "0",
+      "wac_rub": null
+    }
+  },
+  "reconciliation": {
+    "warehouse_count": 6,
+    "negative_balance_count": 0,
+    "positive_cost_gap_count": 0,
+    "ff_to_wb_expected_empty": true,
+    "dependent_31500_units_present": false,
+    "cutover_opening_discrepancy_quantity": "0"
+  },
+  "production_invoices": {
+    "26GN527": {
+      "quantity": "66000",
+      "recognized_capital_rub": "674334.39",
+      "wac_rub": "10.21718772727272727272727273",
+      "sku_wac_range_rub": [
+        "8.599947052806376619063434074",
+        "13.43741727000996346728661574"
+      ],
+      "confirmed_payment_cny": "59921.25",
+      "confirmed_payment_rub": "674334.39",
+      "effective_rub_per_cny": "11.253677",
+      "bank_fees_rub": "0",
+      "payment_operation_ids": [
+        "cnyop_8f31564e39b541aabbe0ba6c53b421aa"
+      ],
+      "expenses_complete": false
+    },
+    "26GN582": {
+      "invoice_date": "2026-07-13",
+      "planned_shipment_date": "2026-08-08",
+      "quantity": "53750",
+      "product_amount_cny": "347075",
+      "invoice_total_cny": "365887.5",
+      "confirmed_payment_cny": "54883",
+      "confirmed_payment_share": "0.1499996583649345768849714735",
+      "confirmed_payment_rub": "639264.95",
+      "effective_rub_per_cny": "11.647777",
+      "bank_fees_rub": "0",
+      "recognized_capital_rub": "639264.95",
+      "wac_rub": "11.89330139534883720930232558",
+      "sku_wac_range_rub": [
+        "8.840947230425700497010732551",
+        "13.81398004754015702657926961"
+      ],
+      "allocation_coefficient_rub_per_product_cny": "1.841864006338687603543902615",
+      "proof_examples": [
+        {
+          "unit_price_cny": "7.5",
+          "unit_cost_rub": "13.81398004754015702657926961"
+        },
+        {
+          "unit_price_cny": "6.7",
+          "unit_cost_rub": "12.34048884246920694374414752"
+        }
+      ],
+      "payment_operation_ids": [
+        "cnyop_a7a1b2c04f474779b878313eb648c87a"
+      ],
+      "future_85_percent_included": false,
+      "expenses_complete": false
+    }
+  },
+  "identity_findings": [
+    {
+      "nm_id": 1221231049,
+      "identity_type": "Wildberries nmID",
+      "nomenclature_name": "(Anti-Spy) iPhone 18 Pro",
+      "barcode": "2052929218682",
+      "invoice_no": "26GN582",
+      "quantity": "7500",
+      "unit_price_cny": "7.5",
+      "unit_cost_rub": "13.81398004754015702657926961"
+    },
+    {
+      "nm_id": 1221235702,
+      "identity_type": "Wildberries nmID",
+      "nomenclature_name": "(Anti-Spy) iPhone 18 Pro Max",
+      "barcode": "2052929357916",
+      "invoice_no": "26GN582",
+      "quantity": "8750",
+      "unit_price_cny": "7.5",
+      "unit_cost_rub": "13.81398004754015702657926961"
+    },
+    {
+      "nm_id": 1221244040,
+      "identity_type": "Wildberries nmID",
+      "nomenclature_name": "(Matte) iPhone 18 Pro",
+      "barcode": "2052929400131",
+      "invoice_no": "26GN582",
+      "quantity": "6750",
+      "unit_price_cny": "6.7",
+      "unit_cost_rub": "12.34048884246920694374414752"
+    },
+    {
+      "nm_id": 1221249681,
+      "identity_type": "Wildberries nmID",
+      "nomenclature_name": "(Matte) iPhone 18 Pro Max",
+      "barcode": "2052929473890",
+      "invoice_no": "26GN582",
+      "quantity": "6000",
+      "unit_price_cny": "6.7",
+      "unit_cost_rub": "12.34048884246920694374414752"
+    }
+  ],
+  "identity_root_cause": {
+    "source_identity_is_valid": true,
+    "invoice_legacy_barcode_is_empty": true,
+    "projection_bug": "WarehouseFunctionalBlock._nomenclature_names reads only config_v2 and omits active server nomenclature",
+    "required_fix": "versioned read-model enrichment by exact nmID from active nomenclature; do not rewrite the immutable invoice"
+  },
+  "china_to_ff_invoices": {
+    "26GN390": {
+      "quantity": "80250",
+      "payment_rub": "5724403.57",
+      "bank_fees_rub": "120899.32",
+      "china_stage_expenses_rub": "3256828.23",
+      "capital_rub": "9102131.12",
+      "wac_rub": "113.4221946417445482866043614",
+      "sku_wac_range_rub": [
+        "88.54474560658850845425728856",
+        "130.4357210850608995999639293"
+      ],
+      "expenses_complete": true,
+      "allocation": "payment and bank fees by invoice value; logistics and customs fee 1010 by quantity; duty 2010 and import VAT 5010 by invoice value",
+      "high_cost_sku_count_at_or_above_120_rub": 8
+    },
+    "26GN462": {
+      "quantity": "55250",
+      "payment_rub": "3697257.52",
+      "bank_fees_rub": "78086.09",
+      "china_stage_expenses_rub": "5000.00",
+      "capital_rub": "3780343.61",
+      "wac_rub": "68.42250877828054298642533935",
+      "sku_wac_range_rub": [
+        "55.6783791117896899203286789",
+        "86.94656238479582488965383228"
+      ],
+      "expenses_complete": false,
+      "allocation": "payment and bank fees by invoice value; available logistics by quantity; future expenses excluded"
+    }
+  },
+  "china_to_ff_mixing_proof": {
+    "example_nm_id": 210183142,
+    "components": [
+      {
+        "invoice_no": "26GN390",
+        "quantity": "2250",
+        "capital_rub": "199225.6776148241440220788993",
+        "quality": "certified"
+      },
+      {
+        "invoice_no": "26GN462",
+        "quantity": "3000",
+        "capital_rub": "167035.1373353690697609860367",
+        "quality": "confirmed_payments_provisional_expenses"
+      }
+    ],
+    "combined_quantity": "5250",
+    "combined_capital_rub": "366260.814950193213783064936",
+    "combined_wac_rub": "69.76396475241775500629808305"
+  },
+  "ff_control_sku": {
+    "nm_id": 391662965,
+    "nomenclature": "anti-spy iPhone 15/16",
+    "quantity": "6750",
+    "wac_rub": "119.9415482137855",
+    "capital_rub": "809605.450443052125",
+    "multiplication_matches": true,
+    "quality": "moving_weighted_average",
+    "source": "canonical append-only FF ledger replay and frozen SKU-specific opening cost",
+    "primary_invoice": "26GN310",
+    "primary_invoice_line_quantity": "4500",
+    "primary_invoice_line_unit_price_cny": "7.2",
+    "primary_ff_acceptance_date": "2026-06-24",
+    "post_cutover_operations_in_active_provenance": 0,
+    "append_only_ledger_rewrite_required": false
+  },
+  "historical_projection": {
+    "date_from": "2026-07-01",
+    "date_to": "2026-07-19",
+    "expected_inclusive_day_count": 19,
+    "actual_day_count": 17,
+    "actual_row_count": 612,
+    "missing_dates": [
+      "2026-07-17",
+      "2026-07-18"
+    ],
+    "existing_gap_count_is_false_negative": true,
+    "root_cause": "historical cost capture reads canonical daily rows only; exact dates stored inside period ready snapshots are not selected when their containing snapshot row has a different outer as_of_date",
+    "source_recoverable": true,
+    "recovery_source": "exact-date stock_total columns in persisted ready snapshots",
+    "current_snapshot_backfill_allowed": false
+  },
+  "proxy_3_before": {
+    "date_from": "2026-07-01",
+    "date_to": "2026-07-19",
+    "sku_count": 33,
+    "missing_dates": [
+      "2026-07-17",
+      "2026-07-18"
+    ],
+    "missing_our_wb_cost_cells": 66,
+    "missing_proxy_profit_3_cells": 66,
+    "missing_proxy_margin_3_cells": 66,
+    "total_proxy_profit_3_rub": {
+      "2026-07-16": 431106.62078567344,
+      "2026-07-17": null,
+      "2026-07-18": null,
+      "2026-07-19_open_day": 44715.737628
+    },
+    "total_proxy_margin_3": {
+      "2026-07-16": 0.2746030529464605,
+      "2026-07-17": null,
+      "2026-07-18": null,
+      "2026-07-19_open_day": 0.261173
+    },
+    "effective_settings": {
+      "buyout_rate_pct": "91",
+      "included_expense_rate_pct": "44",
+      "retained_share_pct": "56"
+    }
+  },
+  "hourly_sync_failure": {
+    "last_success_at": "2026-07-19T02:18:03Z",
+    "last_attempt_at": "2026-07-19T08:18:03Z",
+    "last_error": "UNIQUE constraint failed: sheet_vitrina_v1_warehouse_unmatched_doprinato.unmatched_id",
+    "last_good_preserved": true,
+    "root_cause": "unmatched_id is globally primary but generated without version_id, so the same immutable audit row collides on the next hourly version"
+  },
+  "legacy_active_vitrina_inventory": {
+    "own_stage_metric_count": 72,
+    "confirmed_cost_share_metric_keys": 2,
+    "deprecated_families": [
+      "paid_equivalent_qty",
+      "cost_coverage_pct",
+      "confirmed_share_pct",
+      "underaccepted_wb",
+      "inventory_capital_return_pct",
+      "duplicate_1c_product_capital_and_proxy_2"
+    ],
+    "primary_business_records_are_deletion_targets": false
+  },
+  "supplier_registry_bank_fee_finding": {
+    "detail_summary_contains_exact_bank_fees_rub": true,
+    "registry_has_aggregate_bank_fee_row": false,
+    "known_exact_bank_fees_rub": {
+      "26GN390": "120899.32",
+      "26GN462": "78086.09",
+      "26GN310": "182350.10"
+    },
+    "double_count_observed": false
+  },
+  "prechange_conclusion": {
+    "correct_values_to_preserve": [
+      "production 26GN582 unit costs produced from the factual 15% payment",
+      "China-to-FF high SKU costs from fully costed 26GN390",
+      "FF 391662965 display WAC 119.94 and capital 809605.45",
+      "zero FF-to-WB and zero WB acceptance discrepancy"
+    ],
+    "confirmed_defects": [
+      "active nomenclature omitted from warehouse identity presentation",
+      "hourly sync unmatched audit id collision",
+      "17-18 July exact-date historical cost selection gap",
+      "Proxy 3 gaps caused by missing canonical WB costs",
+      "raw technical qualities and JSON used as primary UI",
+      "light button/status styles on dark theme",
+      "legacy and duplicate product-capital metrics remain active",
+      "supplier registry omits aggregate bank-fee row",
+      "production UI flow leaks request internals on transport exception and lacks bounded retry"
+    ]
+  }
+}

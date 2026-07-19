@@ -59,6 +59,7 @@ from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
 def main() -> int:
     _partial_payment()
     _wac_and_snapshot_stability()
+    _exact_period_snapshot_date_selection()
     _outstanding_reconciliation()
     _ff_operation_effective_date_resolution()
     _targeted_remediation_stays_outside_opening_collapse()
@@ -101,6 +102,139 @@ def _wac_and_snapshot_stability() -> None:
     _eq(debit_snapshot, Decimal("15"), "older WB supply snapshot is immutable")
     if newer_wac == debit_snapshot:
         raise AssertionError("newer FF receipt must update current WAC")
+
+
+def _exact_period_snapshot_date_selection() -> None:
+    with TemporaryDirectory() as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+        plan = SheetVitrinaV1Envelope(
+            plan_version="canonical-cost-period-fixture",
+            snapshot_id="snapshot-period-2026-07-19",
+            as_of_date="2026-07-19",
+            date_columns=["2026-07-17", "2026-07-18", "2026-07-19"],
+            temporal_slots=[
+                SheetVitrinaV1TemporalSlot(slot_key=f"day-{day}", slot_label=day, column_date=day)
+                for day in ("2026-07-17", "2026-07-18", "2026-07-19")
+            ],
+            source_temporal_policies={},
+            sheets=[
+                SheetVitrinaWriteTarget(
+                    sheet_name="DATA_VITRINA",
+                    write_start_cell="A1",
+                    write_rect="A1:E2",
+                    clear_range="A:Z",
+                    write_mode="overwrite",
+                    partial_update_allowed=False,
+                    header=["label", "key", "2026-07-17", "2026-07-18", "2026-07-19"],
+                    rows=[["stock", "SKU:111|stock_total", 17, 18, 99]],
+                    row_count=1,
+                    column_count=5,
+                ),
+                SheetVitrinaWriteTarget(
+                    sheet_name="STATUS",
+                    write_start_cell="A1",
+                    write_rect="A1:B1",
+                    clear_range="A:B",
+                    write_mode="overwrite",
+                    partial_update_allowed=False,
+                    header=["key", "value"],
+                    rows=[],
+                    row_count=0,
+                    column_count=2,
+                ),
+            ],
+        )
+        older_exact_plan = SheetVitrinaV1Envelope(
+            plan_version="canonical-cost-exact-fixture",
+            snapshot_id="snapshot-exact-2026-07-17",
+            as_of_date="2026-07-17",
+            date_columns=["2026-07-17"],
+            temporal_slots=[
+                SheetVitrinaV1TemporalSlot(
+                    slot_key="day-2026-07-17",
+                    slot_label="2026-07-17",
+                    column_date="2026-07-17",
+                )
+            ],
+            source_temporal_policies={},
+            sheets=[
+                SheetVitrinaWriteTarget(
+                    sheet_name="DATA_VITRINA",
+                    write_start_cell="A1",
+                    write_rect="A1:C2",
+                    clear_range="A:Z",
+                    write_mode="overwrite",
+                    partial_update_allowed=False,
+                    header=["label", "key", "2026-07-17"],
+                    rows=[["stock", "SKU:111|stock_total", 1]],
+                    row_count=1,
+                    column_count=3,
+                ),
+                SheetVitrinaWriteTarget(
+                    sheet_name="STATUS",
+                    write_start_cell="A1",
+                    write_rect="A1:B1",
+                    clear_range="A:B",
+                    write_mode="overwrite",
+                    partial_update_allowed=False,
+                    header=["key", "value"],
+                    rows=[],
+                    row_count=0,
+                    column_count=2,
+                ),
+            ],
+        )
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            conn.execute(
+                "INSERT INTO registry_upload_versions(bundle_version,uploaded_at,activated_at) VALUES(?,?,?)",
+                ("exact-bundle", "2026-07-17T00:00:00Z", "2026-07-17T00:00:00Z"),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                       bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    "exact-bundle",
+                    "2026-07-17T00:00:00Z",
+                    "2026-07-17",
+                    older_exact_plan.snapshot_id,
+                    older_exact_plan.plan_version,
+                    "2026-07-17T01:00:00Z",
+                    _serialize_sheet_vitrina_plan(older_exact_plan),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO registry_upload_versions(bundle_version,uploaded_at,activated_at) VALUES(?,?,?)",
+                ("period-bundle", "2026-07-19T00:00:00Z", "2026-07-19T00:00:00Z"),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                       bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    "period-bundle",
+                    "2026-07-19T00:00:00Z",
+                    "2026-07-19",
+                    plan.snapshot_id,
+                    plan.plan_version,
+                    "2026-07-19T01:00:00Z",
+                    _serialize_sheet_vitrina_plan(plan),
+                ),
+            )
+            conn.commit()
+        covering = runtime.load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(
+            column_date="2026-07-17"
+        )
+        _eq(covering.date_columns, ["2026-07-17", "2026-07-18", "2026-07-19"], "period columns")
+        engine = CanonicalCostEngine(runtime=runtime)
+        _eq(
+            engine._snapshot_metric("2026-07-17", "stock_total"),
+            {111: 17.0},
+            "newest versioned exact column supersedes older outer-date snapshot",
+        )
+        _eq(engine._snapshot_metric("2026-07-18", "stock_total"), {111: 18.0}, "18 July exact column")
+        _eq(engine._snapshot_metric("2026-07-16", "stock_total"), {}, "missing day is not copied from current")
 
 
 def _outstanding_reconciliation() -> None:

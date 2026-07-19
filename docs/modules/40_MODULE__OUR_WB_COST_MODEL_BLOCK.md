@@ -27,7 +27,7 @@ related_endpoints:
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
   - "GET /v1/sheet-vitrina-v1/warehouses"
 source_of_truth_level: "module_canonical"
-update_note: "С 2026-07-01 active Proxy 3 читает versioned settings и canonical daily WB WAC; hardcoded `0.5096/0.91` и denominator `orderSum` удалены из active formula."
+update_note: "С 2026-07-01 active Proxy 3 читает versioned settings и exact-date canonical daily WB WAC; Proxy 2 и подтверждённость себестоимости остаются только technical archive и не выходят в active vitrina."
 ---
 
 # 1. Canonical WB WAC
@@ -42,7 +42,7 @@ Accepted WB supply добавляет доказанный inbound capital, но
 
 `SUM(WB contour capital) / SUM(WB contour quantity)`.
 
-Для SKU/дат `2026-07-01..functional cutover` loader сначала читает frozen functional historical cost projection. Она построена из frozen 24.06 opening map, persisted historical quantities и known downstream costs. После cutover loader читает active functional daily/current state. Legacy WB daily tables остаются audit и не являются параллельным active source.
+Для SKU/дат `2026-07-01..functional cutover` loader сначала читает frozen functional historical cost projection. Она построена из frozen 24.06 opening map, persisted historical quantities и known downstream costs. Если ready snapshot содержит период, lookup выбирает только колонку точной business date, даже когда внешний `snapshot.as_of_date` новее. Fallback на предыдущий/current snapshot и копирование текущего остатка назад запрещены. После cutover loader читает active functional daily/current state. Legacy WB daily tables остаются audit и не являются параллельным active source.
 
 # 2. Versioned calculation parameters
 
@@ -61,7 +61,7 @@ Reference table использует три последние полность�
 
 # 3. Proxy 3 formula
 
-До `2026-07-01` Profit/Margin 3 сохраняют legacy Proxy 2 semantics. С `2026-07-01` для SKU/date:
+Public Proxy 3 contract начинается `2026-07-01`. Legacy Proxy 2 definitions до этой границы сохраняются только как внутренний evaluator/source audit и не являются строками active web-vitrina. С `2026-07-01` для SKU/date:
 
 ```text
 expected_buyout_revenue = orderSum × buyout_rate
@@ -80,7 +80,7 @@ Advertising is not multiplied by buyout rate. Missing required operand remains N
 - margin = `total profit / total expected revenue`;
 - SKU margins are never averaged.
 
-Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3_pct` and their existing TOTAL keys.
+Public keys remain `our_wb_unit_cost_rub`, `proxy_profit_3_rub`, `proxy_margin_3_pct` and their existing TOTAL keys. `our_wb_cost_confirmed_share_pct`, Proxy 2 and old inventory-return metrics are archived at both catalog/read-contract boundaries; persisted legacy rows may remain only as technical evidence and are removed by the guarded economics cutover.
 
 # 4. Quality and consumers
 
@@ -88,6 +88,6 @@ Daily cost stores quality/provenance (`direct 24.06`, `same purchase price`, `in
 
 # 5. Migration boundary
 
-Legacy module-40 opening/supply/daily rows and the separate canonical-cost baseline stay immutable audit evidence. `warehouse_functional_cutover_v1` activates the single warehouse/cost engine and initial settings version atomically. The bounded historical backfill may rewrite only `our_wb_unit_cost_rub`, Proxy 3 and direct dependent read models from `2026-07-01`; it preserves non-target snapshot cells/digests and is idempotent.
+Legacy module-40 opening/supply/daily rows and the separate canonical-cost baseline stay immutable audit evidence. `warehouse_functional_cutover_v1` activates the single warehouse/cost engine and initial settings version atomically. The bounded historical backfill may rewrite only `our_wb_unit_cost_rub`, Proxy 3 and direct dependent read models from `2026-07-01`; it removes only the centrally enumerated archived metric rows, preserves every other non-target snapshot cell/digest, pins the exact ready-snapshot manifest and is idempotent.
 
 Non-goals: accounting FIFO, event-based WB customer movements, Proxy 2 rewrite before the boundary, marketing as a percentage, transit double count, Google Sheets/GAS truth or ad-hoc production SQL.

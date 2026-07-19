@@ -1,0 +1,107 @@
+{
+  "contract_name": "warehouse_chain_audit_implementation_evidence",
+  "contract_version": "v1",
+  "task_class": "LOOP",
+  "scope": "live-runtime",
+  "generated_on": "2026-07-19",
+  "prechange_evidence": "artifacts/warehouse_chain_audit_20260719/prechange_production_evidence.json",
+  "primary_source_mutations": false,
+  "implemented_root_cause_fixes": [
+    {
+      "cause": "warehouse identity presentation used registry config_v2 only",
+      "fix": "enrich by exact unambiguous active nomenclature nmID and preserve ambiguity fail-closed",
+      "source_records_rewritten": false
+    },
+    {
+      "cause": "historical WB cost selected ready snapshots by outer as_of_date instead of the exact embedded date column",
+      "fix": "select the newest versioned ready snapshot that contains the exact requested column and read only that column; do not carry current stock backward",
+      "covered_dates": [
+        "2026-07-17",
+        "2026-07-18"
+      ]
+    },
+    {
+      "cause": "unmatched doprinato audit identity was global while the same evidence belongs to multiple functional versions",
+      "fix": "scope the derived unmatched identity by owning functional version",
+      "append_only_or_primary_rows_rewritten": false
+    },
+    {
+      "cause": "public WAC totals and the rollback-compatible canonical reader used paid-equivalent quantity",
+      "fix": "use physical quantity for stage, SKU and total WAC while retaining paid-equivalent only as technical audit data"
+    },
+    {
+      "cause": "legacy 1C, Proxy 2, paid-equivalent, confirmation, coverage, underaccepted and inventory-return definitions remained active",
+      "fix": "central archive inventory, active read/live-plan filter, guarded all-snapshot materialization cleanup, archived-only group-refresh rejection and active-source public status reduction"
+    },
+    {
+      "cause": "supplier registry omitted an existing exact bank-fee aggregate",
+      "fix": "publish exact_bank_fees_rub as the aggregate bank-fee row without adding a second cost component"
+    },
+    {
+      "cause": "warehouse UI exposed internal quality tokens/raw JSON and light controls on a dark theme",
+      "fix": "central Russian status labels and explanations, human-readable source contributions, nested technical JSON, dark-theme tokens and explicit interaction/error states"
+    },
+    {
+      "cause": "production UI Flow leaked transport internals and lacked bounded recovery assertions",
+      "fix": "sanitize failures, retry bounded transient navigation, and add immutable warehouse_chain_recovery_20260719 acceptance profile"
+    }
+  ],
+  "preserved_proven_values": {
+    "production_15_percent_payment_costs": true,
+    "china_to_ff_high_sku_costs": true,
+    "ff_nm_391662965_wac": "119.9415482137855",
+    "ff_nm_391662965_capital_rub": "809605.450443052125",
+    "ff_to_wb_zero_expected": true,
+    "wb_snapshot_model_preserved": true
+  },
+  "guarded_cutover_contract": {
+    "dry_run_required": true,
+    "exact_plan_fingerprint_required": true,
+    "ready_snapshot_manifest_digest_required": true,
+    "coherent_sqlite_backup_required": true,
+    "backup_mode": "0600",
+    "backup_integrity_check": "ok required",
+    "atomic_transaction": true,
+    "non_target_digest_invariant": true,
+    "idempotent_repeat": "zero-change required",
+    "production_execution_status": "not_started_before_merge_and_release_train_deploy"
+  },
+  "semantic_review": {
+    "runs_completed": 2,
+    "resolved_findings": [
+      "dry-run/apply digest used different source views",
+      "mutable production values were embedded in the reusable UI Flow",
+      "active WAC denominator remained paid-equivalent on total and canonical fallback paths",
+      "archived rows were not removed from snapshots entirely before 2026-07-01",
+      "FF and FF-to-WB evidence duplicated aggregates or hid operation-level contributions",
+      "ready-snapshot recovery scan was not bounded by cutover",
+      "normal live refresh could recreate archived materializations",
+      "public status still degraded on an archived-only source"
+    ],
+    "open_findings": 0,
+    "post_rebase_review_required": true
+  },
+  "verified_tests": [
+    "apps/canonical_cost_engine_smoke.py",
+    "apps/cny_ledger_smoke.py",
+    "apps/own_product_capital_smoke.py",
+    "apps/supplier_financial_documents_smoke.py",
+    "apps/sheet_vitrina_v1_onec_stocks_wiring_smoke.py",
+    "apps/sheet_vitrina_v1_onec_zero_stock_empty_bucket_smoke.py",
+    "apps/sheet_vitrina_v1_onec_ff_stock_partial_regression_smoke.py",
+    "apps/sheet_vitrina_v1_source_temporal_policy_smoke.py",
+    "apps/sheet_vitrina_v1_web_vitrina_source_status_smoke.py",
+    "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py",
+    "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py",
+    "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
+    "apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py",
+    "apps/warehouse_functional_smoke.py",
+    "python3 -m py_compile targeted changed modules",
+    "git diff --check"
+  ],
+  "verification_notes": [
+    "stocks_block_http_smoke requires WB_API_TOKEN and was not used as local proof",
+    "authenticated production mutation/readback and Playwright evidence are intentionally deferred until reviewed merge and Release Train deploy",
+    "WebCore Data MCP was unavailable; prechange evidence used repo-owned authenticated hosted read-only contours"
+  ]
+}

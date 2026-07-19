@@ -92,7 +92,7 @@ def main() -> None:
         if payload.page_route != "/sheet-vitrina-v1/vitrina" or payload.read_route != "/v1/sheet-vitrina-v1/web-vitrina":
             raise AssertionError(f"route fixation mismatch, got {payload}")
 
-        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 15:
+        if payload.meta.snapshot_id != "web-vitrina-v1-fixture" or payload.meta.row_count != 13:
             raise AssertionError(f"meta mismatch, got {payload.meta}")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
             raise AssertionError(f"meta date columns mismatch, got {payload.meta}")
@@ -105,7 +105,7 @@ def main() -> None:
             raise AssertionError(f"status_summary.refresh_status_label mismatch, got {payload.status_summary}")
         if payload.status_summary.refresh_status_tone != "warning":
             raise AssertionError(f"status_summary.refresh_status_tone mismatch, got {payload.status_summary}")
-        if "требуют внимания" not in payload.status_summary.refresh_status_reason:
+        if "активных источников" not in payload.status_summary.refresh_status_reason:
             raise AssertionError(f"status_summary.refresh_status_reason mismatch, got {payload.status_summary}")
         if payload.status_summary.read_model != "persisted_ready_snapshot":
             raise AssertionError(f"status_summary.read_model mismatch, got {payload.status_summary}")
@@ -144,17 +144,13 @@ def main() -> None:
             raise AssertionError(f"values_by_date mismatch, got {second_sku_row}")
         rows_by_id = {row.row_id: row for row in payload.rows}
         total_cost_row = rows_by_id[f"TOTAL|{TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
-        total_share_row = rows_by_id[f"TOTAL|{TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}"]
         total_proxy3_row = rows_by_id[f"TOTAL|{OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY}"]
         total_margin3_row = rows_by_id[f"TOTAL|{OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY}"]
         sku_proxy3_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY}"]
         sku_margin3_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY}"]
         sku_cost_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_UNIT_COST_RUB_METRIC_KEY}"]
-        sku_share_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}"]
         if total_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or total_cost_row.format != "rub":
             raise AssertionError(f"TOTAL our WB cost metadata mismatch, got {total_cost_row}")
-        if total_share_row.metric_label != "Доля подтверждённой себестоимости, %" or total_share_row.format != "percent":
-            raise AssertionError(f"TOTAL confirmed share must be percent-labeled, got {total_share_row}")
         if sku_proxy3_row.metric_label != "proxy прибыль 3" or sku_proxy3_row.format != "rub":
             raise AssertionError(f"SKU proxy3 metadata mismatch, got {sku_proxy3_row}")
         if (
@@ -171,8 +167,12 @@ def main() -> None:
             raise AssertionError("SKU proxy margin 3 row must immediately follow SKU proxy profit 3")
         if sku_cost_row.metric_label != "Себестоимость WB наша, ₽/шт" or sku_cost_row.format != "rub":
             raise AssertionError(f"SKU our WB cost metadata mismatch, got {sku_cost_row}")
-        if sku_share_row.metric_label != "Доля подтверждённой себестоимости, %" or sku_share_row.format != "percent":
-            raise AssertionError(f"SKU confirmed share must be percent-labeled, got {sku_share_row}")
+        for archived_row_id in (
+            f"TOTAL|{TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}",
+            f"SKU:{enabled[0].nm_id}|{OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY}",
+        ):
+            if archived_row_id in rows_by_id:
+                raise AssertionError(f"archived metric leaked into active web contract: {archived_row_id}")
         seller_change_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{SELLER_PRICE_CHANGE_RUB_METRIC_KEY}"]
         bid_change_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{ADVERTISING_BID_CHANGE_RUB_METRIC_KEY}"]
         buyer_price_row = rows_by_id[f"SKU:{enabled[0].nm_id}|{BUYER_PRICE_RUB_METRIC_KEY}"]

@@ -15,8 +15,6 @@ from packages.application.calculation_parameters import (
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
-    OUR_WB_COST_CONFIRMED_SHARE_PCT_LABEL,
-    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_LABEL,
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_LABEL,
@@ -26,9 +24,9 @@ from packages.application.sheet_vitrina_v1_our_wb_costs import (
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_UNIT_COST_RUB_LABEL,
     OUR_WB_UNIT_COST_RUB_METRIC_KEY,
-    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
 )
+from packages.application.sheet_vitrina_v1_archived_metrics import ARCHIVED_PUBLIC_METRIC_KEYS
 from packages.application.sheet_vitrina_v1_proxy_margin_3_historical_backfill import (
     _data_sheet,
     _date_columns,
@@ -41,13 +39,13 @@ CONTRACT_NAME = "sheet_vitrina_v1_functional_economics_backfill"
 TARGET_KEYS = {
     OUR_WB_UNIT_COST_RUB_METRIC_KEY,
     TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY,
-    OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
-    TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY,
     OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY,
     OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY,
 }
+ARCHIVED_READY_METRIC_KEYS = ARCHIVED_PUBLIC_METRIC_KEYS
+MUTATED_READY_METRIC_KEYS = frozenset(TARGET_KEYS | set(ARCHIVED_READY_METRIC_KEYS))
 ZERO = Decimal("0")
 
 
@@ -84,6 +82,7 @@ def build_functional_economics_backfill_plan(
     updates: list[dict[str, Any]] = []
     changed_cells = 0
     inserted_rows = 0
+    archived_rows_removed = 0
     non_target_before: list[list[str]] = []
     non_target_after: list[list[str]] = []
     for snapshot in snapshots:
@@ -104,6 +103,7 @@ def build_functional_economics_backfill_plan(
         non_target_after.append([snapshot["bundle_version"], snapshot["as_of_date"], transformed["non_target_after"]])
         changed_cells += int(transformed["changed_cells"])
         inserted_rows += int(transformed["inserted_rows"])
+        archived_rows_removed += int(transformed["archived_rows_removed"])
         if transformed["after_plan_json"] != snapshot["plan_json"]:
             updates.append(
                 {
@@ -113,6 +113,7 @@ def build_functional_economics_backfill_plan(
                     "after_plan_json": transformed["after_plan_json"],
                     "changed_cells": transformed["changed_cells"],
                     "inserted_rows": transformed["inserted_rows"],
+                    "archived_rows_removed": transformed["archived_rows_removed"],
                     "dates": transformed["dates"],
                 }
             )
@@ -133,6 +134,8 @@ def build_functional_economics_backfill_plan(
         "changed_snapshot_count": len(updates),
         "changed_cell_count": changed_cells,
         "inserted_row_count": inserted_rows,
+        "archived_row_count": archived_rows_removed,
+        "archived_metric_keys": sorted(ARCHIVED_READY_METRIC_KEYS),
         "ready_snapshot_manifest_digest": _snapshot_manifest_digest(snapshots),
         "non_target_digest": before_digest,
         "updates": updates,
@@ -251,16 +254,29 @@ def _transform_snapshot(
     dates = _date_columns(plan)
     relevant_indices = [index for index, day in enumerate(dates) if day >= "2026-07-01"]
     before_digest = _non_target_digest(original)
+    _validate_data_projection_layout(sheet, dates=dates)
+    archived_rows_removed = _remove_archived_metric_rows(rows)
+    metadata = plan.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        raise FunctionalEconomicsBackfillError("ready snapshot metadata must be an object")
+    timestamps = metadata.get("row_last_updated_at_by_row_id")
+    if isinstance(timestamps, dict):
+        for row_id in list(timestamps):
+            if "|" in row_id and row_id.split("|", 1)[1] in ARCHIVED_READY_METRIC_KEYS:
+                timestamps.pop(row_id, None)
     if not relevant_indices:
+        if archived_rows_removed:
+            _update_data_dimensions(sheet)
+        after = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         return {
-            "after_plan_json": snapshot["plan_json"],
+            "after_plan_json": after,
             "changed_cells": 0,
             "inserted_rows": 0,
+            "archived_rows_removed": archived_rows_removed,
             "dates": [],
             "non_target_before": before_digest,
-            "non_target_after": before_digest,
+            "non_target_after": _non_target_digest(plan),
         }
-    _validate_data_projection_layout(sheet, dates=dates)
     by_id = _rows_by_id(rows)
     scopes = sorted({row_id.split("|", 1)[0] for row_id in by_id if row_id.startswith("SKU:")})
     if not scopes:
@@ -276,7 +292,6 @@ def _transform_snapshot(
             nm_id = int(scope.split(":", 1)[1])
             cost_state = costs.get(day, {}).get(nm_id)
             cost = _optional_decimal((cost_state or {}).get("our_wb_unit_cost_rub"))
-            confirmed_share = _optional_decimal((cost_state or {}).get("confirmed_share_pct"))
             order_sum = _cell_decimal(by_id.get(f"{scope}|orderSum"), index)
             order_count = _cell_decimal(by_id.get(f"{scope}|orderCount"), index)
             ads_sum = _cell_decimal(by_id.get(f"{scope}|ads_sum"), index)
@@ -289,7 +304,6 @@ def _transform_snapshot(
             )
             values = {
                 OUR_WB_UNIT_COST_RUB_METRIC_KEY: cost,
-                OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY: confirmed_share,
                 OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY: calculated["proxy_profit_3"],
                 OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY: calculated["proxy_margin_3"],
             }
@@ -320,25 +334,20 @@ def _transform_snapshot(
             ZERO,
         )
         total_cost = total_capital / total_qty if total_qty > ZERO and not missing_positive_cost else None
-        total_confirmed = sum((_optional_decimal((item or {}).get("confirmed_qty")) or ZERO for item in cost_states), ZERO)
-        total_confirmed_share = total_confirmed / total_qty if total_qty > ZERO else None
         total_values = {
             TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY: total_cost,
-            TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY: total_confirmed_share,
             OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY: total_profit,
             OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY: total_margin,
         }
         for metric_key, value in total_values.items():
             changed += _set_cell(by_id[f"TOTAL|{metric_key}"], index, value)
-    metadata = plan.setdefault("metadata", {})
-    if not isinstance(metadata, dict):
-        raise FunctionalEconomicsBackfillError("ready snapshot metadata must be an object")
     marker = {
         "cutover_id": FUNCTIONAL_CUTOVER_ID,
         "source_fingerprint": source_fingerprint,
         "date_from": dates[relevant_indices[0]],
         "date_to": dates[relevant_indices[-1]],
         "target_metric_keys": sorted(TARGET_KEYS),
+        "archived_metric_keys": sorted(ARCHIVED_READY_METRIC_KEYS),
     }
     if metadata.get("functional_economics_backfill") != marker:
         metadata["functional_economics_backfill"] = marker
@@ -347,7 +356,7 @@ def _transform_snapshot(
         for row_id in by_id:
             if "|" in row_id and row_id.split("|", 1)[1] in TARGET_KEYS:
                 timestamps[row_id] = str(snapshot.get("refreshed_at") or "")
-    if inserted:
+    if inserted or archived_rows_removed:
         _update_data_dimensions(sheet)
     after = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     after_digest = _non_target_digest(plan)
@@ -355,6 +364,7 @@ def _transform_snapshot(
         "after_plan_json": after,
         "changed_cells": changed,
         "inserted_rows": inserted,
+        "archived_rows_removed": archived_rows_removed,
         "dates": [dates[index] for index in relevant_indices],
         "non_target_before": before_digest,
         "non_target_after": after_digest,
@@ -370,7 +380,6 @@ def _ensure_target_rows(
 ) -> int:
     specs = [
         ("TOTAL", TOTAL_OUR_WB_UNIT_COST_RUB_METRIC_KEY, OUR_WB_UNIT_COST_RUB_LABEL),
-        ("TOTAL", TOTAL_OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY, OUR_WB_COST_CONFIRMED_SHARE_PCT_LABEL),
         ("TOTAL", OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, OUR_WB_PROXY_PROFIT_3_RUB_LABEL),
         ("TOTAL", OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_METRIC_KEY, OUR_WB_PROXY_MARGIN_3_PCT_TOTAL_LABEL),
     ]
@@ -379,7 +388,6 @@ def _ensure_target_rows(
         specs.extend(
             [
                 (scope, OUR_WB_UNIT_COST_RUB_METRIC_KEY, f"{prefix}: {OUR_WB_UNIT_COST_RUB_LABEL}"),
-                (scope, OUR_WB_COST_CONFIRMED_SHARE_PCT_METRIC_KEY, f"{prefix}: {OUR_WB_COST_CONFIRMED_SHARE_PCT_LABEL}"),
                 (scope, OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, f"{prefix}: {OUR_WB_PROXY_PROFIT_3_RUB_LABEL}"),
                 (scope, OUR_WB_PROXY_MARGIN_3_PCT_METRIC_KEY, f"{prefix}: {OUR_WB_PROXY_MARGIN_3_PCT_LABEL}"),
             ]
@@ -392,6 +400,21 @@ def _ensure_target_rows(
         rows.append([label, row_id, *([""] * date_count)])
         inserted += 1
     return inserted
+
+
+def _remove_archived_metric_rows(rows: list[Any]) -> int:
+    retained = []
+    removed = 0
+    for row in rows:
+        row_id = str(row[1] or "") if isinstance(row, list) and len(row) > 1 else ""
+        metric_key = row_id.split("|", 1)[1] if "|" in row_id else ""
+        if metric_key in ARCHIVED_READY_METRIC_KEYS:
+            removed += 1
+            continue
+        retained.append(row)
+    if removed:
+        rows[:] = retained
+    return removed
 
 
 def _scope_label_prefix(by_id: Mapping[str, list[Any]], scope: str) -> str:
@@ -496,7 +519,7 @@ def _non_target_digest(plan: Mapping[str, Any]) -> str:
             isinstance(row, list)
             and len(row) > 1
             and "|" in str(row[1])
-            and str(row[1]).split("|", 1)[1] in TARGET_KEYS
+            and str(row[1]).split("|", 1)[1] in MUTATED_READY_METRIC_KEYS
         )
     ]
     sheet.pop("row_count", None)
@@ -507,7 +530,7 @@ def _non_target_digest(plan: Mapping[str, Any]) -> str:
         timestamps = metadata.get("row_last_updated_at_by_row_id")
         if isinstance(timestamps, dict):
             for row_id in list(timestamps):
-                if "|" in row_id and row_id.split("|", 1)[1] in TARGET_KEYS:
+                if "|" in row_id and row_id.split("|", 1)[1] in MUTATED_READY_METRIC_KEYS:
                     timestamps.pop(row_id, None)
             if not timestamps:
                 metadata.pop("row_last_updated_at_by_row_id", None)

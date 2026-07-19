@@ -2579,6 +2579,7 @@ def _registry_row_definitions() -> list[tuple[str, str, list[tuple[str, str, Cal
                 ("customs_vat_rub", "ДТ НДС ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "import_vat_5010_rub"), "₽")),
                 ("customs_total_rub", "ДТ всего ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "total_customs_payments_rub"), "₽")),
                 ("customs_without_vat_rub", "таможня без НДС ₽", lambda item: _registry_money(_summary_path(item, "customs_declaration", "customs_payments_without_vat_rub"), "₽")),
+                ("bank_fees_rub", "Комиссии банка, ₽", lambda item: _registry_money(_summary_path(item, "per_unit", "exact_bank_fees_rub"), "₽")),
                 ("other_expenses_rub", "прочие расходы ₽", lambda item: _registry_blank()),
                 ("fact_total_rub", "факт доставка+таможня ₽", lambda item: _registry_money(_summary_path(item, "per_unit", "fact_delivery_customs_total_rub"), "₽")),
                 ("fact_total_rub_per_unit", "факт доставка+таможня ₽/шт", lambda item: _registry_money(_summary_path(item, "per_unit", "fact_delivery_customs_rub_per_unit"), "₽")),

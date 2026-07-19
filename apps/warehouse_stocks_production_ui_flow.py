@@ -6,9 +6,11 @@ from __future__ import annotations
 from decimal import Decimal
 import json
 from pathlib import Path
+import time
 from typing import Any, Mapping
 from urllib.parse import quote, urlparse
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import FrameLocator, Page, expect, sync_playwright
 
 
@@ -21,6 +23,7 @@ WAREHOUSES = (
     ("wb_acceptance_discrepancy", "Расхождения приёмки WB"),
 )
 WAREHOUSE_UI_PATH = "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=production"
+WAREHOUSE_CHAIN_RECOVERY_PROFILE = "warehouse_chain_recovery_20260719"
 
 
 def run_warehouse_ui_flow(
@@ -31,6 +34,7 @@ def run_warehouse_ui_flow(
     evidence_dir: Path,
     headless: bool = True,
     strict_business_acceptance: bool = True,
+    acceptance_profile: str | None = None,
     allowed_server_error_paths: tuple[str, ...] = (),
     allowed_console_error_messages: tuple[str, ...] = (),
 ) -> dict[str, Any]:
@@ -40,6 +44,9 @@ def run_warehouse_ui_flow(
     parsed_base_url = urlparse(normalized_base_url)
     if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.hostname:
         raise ValueError("warehouse UI flow requires an absolute http(s) base URL")
+    normalized_acceptance_profile = str(acceptance_profile or "").strip()
+    if normalized_acceptance_profile not in {"", WAREHOUSE_CHAIN_RECOVERY_PROFILE}:
+        raise ValueError(f"unknown warehouse UI acceptance profile: {normalized_acceptance_profile}")
     documents = [
         dict(item)
         for item in expected_readback.get("documents") or []
@@ -58,8 +65,15 @@ def run_warehouse_ui_flow(
     if Decimal(str(cutover_discrepancy.get("quantity") or 0)) != 0:
         raise ValueError("functional cutover discrepancy opening must be zero")
     historical_cost = dict(expected_readback.get("historical_wb_cost_projection") or {})
-    if int(historical_cost.get("gap_count") or 0) != 0:
+    value_gap_count = int(
+        historical_cost.get("value_gap_count")
+        if historical_cost.get("value_gap_count") is not None
+        else historical_cost.get("gap_count") or 0
+    )
+    if value_gap_count != 0:
         raise ValueError("historical WB cost projection has positive uncovered rows")
+    if strict_business_acceptance and int(historical_cost.get("total_gap_count") or historical_cost.get("gap_count") or 0) != 0:
+        raise ValueError("historical WB cost projection has missing business dates")
     sync_readback = dict(expected_readback.get("sync") or {})
     if not str(sync_readback.get("last_success_at") or ""):
         raise ValueError("warehouse UI flow requires a successful bounded WB sync timestamp")
@@ -73,6 +87,9 @@ def run_warehouse_ui_flow(
     fatal_surface_matches: list[dict[str, str]] = []
     screenshots: list[str] = []
     warehouse_evidence: list[dict[str, Any]] = []
+    warehouse_detail_by_key: dict[str, dict[str, Any]] = {}
+    warehouse_action_theme: dict[str, Any] = {}
+    business_acceptance: dict[str, Any] = {}
     settings_evidence: dict[str, Any] = {}
     supplier_evidence: dict[str, Any] = {}
     consumer_evidence: dict[str, Any] = {}
@@ -127,6 +144,7 @@ def run_warehouse_ui_flow(
         _assert(page.locator("[data-warehouse-key]").count() == 6, "exactly six warehouse selectors must render")
         _assert(bool(page.title().strip()), "document title must be non-empty")
         _assert(bool(page.locator("body").inner_text().strip()), "document body must be non-empty")
+        warehouse_action_theme = _warehouse_action_theme_evidence(page)
 
         for warehouse_key, warehouse_name in WAREHOUSES:
             expected = expected_by_key[warehouse_key]
@@ -141,13 +159,12 @@ def run_warehouse_ui_flow(
             )
             document_row.wait_for(timeout=60_000)
 
-            detail_response = context.request.get(
+            detail_payload = _protected_json_get(
+                context,
                 normalized_base_url + "/v1/sheet-vitrina-v1/warehouses/" + warehouse_key,
-                headers={"Accept": "application/json"},
-                timeout=60_000,
+                label=f"{warehouse_name}: detail API",
             )
-            _assert(detail_response.status == 200, f"{warehouse_name}: detail API status")
-            detail_payload = detail_response.json()
+            warehouse_detail_by_key[warehouse_key] = detail_payload
             detail_summary = dict(detail_payload.get("warehouse") or {})
             detail_balances = list(detail_payload.get("balances") or [])
             detail_documents = list(detail_payload.get("documents") or [])
@@ -198,9 +215,15 @@ def run_warehouse_ui_flow(
                 _assert(summary_values[3].strip() == "—", f"{warehouse_name}: zero warehouse WAC is honestly empty")
             _assert("Актуальность:" in page.locator("[data-warehouse-meta]").inner_text(), f"{warehouse_name}: timestamp")
             _assert("Источник:" in page.locator("[data-warehouse-meta]").inner_text(), f"{warehouse_name}: source")
+            visible_status = page.locator("[data-warehouse-status]").inner_text().strip()
             _assert(
-                any(marker in page.locator("[data-warehouse-status]").inner_text() for marker in ("Сертифицировано", "provisional", "last good")),
-                f"{warehouse_name}: functional status",
+                visible_status == str(detail_summary.get("status_label") or "").strip(),
+                f"{warehouse_name}: localized functional status",
+            )
+            _assert(
+                page.locator("[data-warehouse-status-detail]").inner_text().strip()
+                == str(detail_summary.get("status_description") or "").strip(),
+                f"{warehouse_name}: status reason and timestamp surface",
             )
             _assert(
                 all(
@@ -228,14 +251,12 @@ def run_warehouse_ui_flow(
             _assert(balance_count == int(expected_sku_count), f"{warehouse_name}: balance row count")
             _assert(balance_count == len(detail_balances), f"{warehouse_name}: UI/detail balance rows")
             if warehouse_key == "ff":
-                legacy_response = context.request.get(
+                legacy_payload = _protected_json_get(
+                    context,
                     normalized_base_url
                     + "/v1/sheet-vitrina-v1/supply/ff-stocks?operations_limit=50&operations_page=1&show_technical_archive=0",
-                    headers={"Accept": "application/json"},
-                    timeout=60_000,
+                    label="Склад FF: legacy canonical API",
                 )
-                _assert(legacy_response.status == 200, "Склад FF: legacy canonical API status")
-                legacy_payload = legacy_response.json()
                 legacy_rows = list(((legacy_payload.get("registry") or {}).get("rows") or []))
                 legacy_nonzero = {
                     int(item.get("nm_id") or 0): Decimal(str(item.get("quantity") or 0))
@@ -266,15 +287,34 @@ def run_warehouse_ui_flow(
                 any(label in document_text for label in ("Функциональный cutover", "Почасовая версия склада")),
                 f"{warehouse_name}: functional document type",
             )
-            document_provenance = document_row.locator(".warehouse-document-provenance details")
+            document_provenance = document_row.locator(
+                ".warehouse-document-provenance > details.warehouse-source-details"
+            )
             _assert(document_provenance.count() == 1, f"{warehouse_name}: document provenance control")
             document_provenance.click()
-            document_provenance_text = document_row.locator(".warehouse-document-provenance pre").inner_text()
+            _assert(
+                document_row.locator(".warehouse-document-provenance .warehouse-evidence-item").count() >= 1,
+                f"{warehouse_name}: human-readable document evidence",
+            )
+            technical_document = document_row.locator(
+                ".warehouse-document-provenance details.warehouse-technical-evidence"
+            )
+            technical_document.click()
+            document_provenance_text = technical_document.locator("pre").inner_text()
             _assert(bool(document_provenance_text.strip()), f"{warehouse_name}: document provenance payload")
             if expected_lines:
-                document_row.locator(".warehouse-document-lines details").first.click()
+                line_evidence = document_row.locator(
+                    ".warehouse-document-lines details.warehouse-source-details"
+                ).first
+                line_evidence.click()
                 _assert(
-                    bool(document_row.locator(".warehouse-document-lines pre").first.inner_text().strip()),
+                    line_evidence.locator(".warehouse-evidence-item").count() >= 1,
+                    f"{warehouse_name}: human-readable line evidence",
+                )
+                line_technical = line_evidence.locator("details.warehouse-technical-evidence")
+                line_technical.click()
+                _assert(
+                    bool(line_technical.locator("pre").inner_text().strip()),
                     f"{warehouse_name}: line provenance",
                 )
             document_screenshot = evidence_dir / f"warehouse_{warehouse_key}_document.png"
@@ -329,9 +369,15 @@ def run_warehouse_ui_flow(
         )
         _assert(_visible_money(legacy_summary_values[2]) > 0, "legacy FF transition: capital loaded")
         _assert(_visible_money(legacy_summary_values[3]) > 0, "legacy FF transition: WAC loaded")
+        legacy_ff_detail = _protected_json_get(
+            context,
+            normalized_base_url + "/v1/sheet-vitrina-v1/warehouses/ff",
+            label="legacy FF transition: functional detail",
+        )
         _assert(
-            any(marker in page.locator("[data-warehouse-status]").inner_text() for marker in ("Сертифицировано", "provisional", "last good")),
-            "legacy FF transition: functional status",
+            page.locator("[data-warehouse-status]").inner_text().strip()
+            == str((legacy_ff_detail.get("warehouse") or {}).get("status_label") or "").strip(),
+            "legacy FF transition: localized functional status",
         )
         _assert(
             page.locator("[data-warehouse-balance-row]").count()
@@ -375,6 +421,7 @@ def run_warehouse_ui_flow(
                 "supplier_registry": {"status": "not_in_local_structure_scope"},
                 "dependent_consumers": {"status": "not_in_local_structure_scope"},
                 "hourly_sync": dict(expected_readback.get("sync") or {}),
+                "warehouse_action_theme": warehouse_action_theme,
                 "historical_wb_cost_projection": dict(expected_readback.get("historical_wb_cost_projection") or {}),
                 "legacy_ff_transition": True,
                 "legacy_ff_reconciliation": {
@@ -401,6 +448,11 @@ def run_warehouse_ui_flow(
             report["report_path"] = str(report_path)
             return report
 
+        business_acceptance = _assert_business_warehouse_acceptance(
+            warehouse_detail_by_key,
+            acceptance_profile=normalized_acceptance_profile or None,
+        )
+
         settings_url = normalized_base_url + "/sheet-vitrina-v1/settings"
         settings_response = page.goto(settings_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(settings_response is not None and settings_response.status == 200, "calculation settings page status")
@@ -416,13 +468,11 @@ def run_warehouse_ui_flow(
             buyout_input.input_value() == "91",
             "visible calculation settings buyout 91%",
         )
-        settings_api = context.request.get(
+        settings_payload = _protected_json_get(
+            context,
             normalized_base_url + "/v1/sheet-vitrina-v1/settings/calculation-parameters",
-            headers={"Accept": "application/json"},
-            timeout=60_000,
+            label="calculation settings API",
         )
-        _assert(settings_api.status == 200, "calculation settings API status")
-        settings_payload = settings_api.json()
         parameters = dict(((settings_payload.get("current") or {}).get("parameters") or {}))
         _assert(parameters.get("buyout_rate_pct") == "91", "calculation settings buyout 91%")
         _assert(parameters.get("included_expense_rate_pct") == "44", "calculation settings expenses 44%")
@@ -489,13 +539,11 @@ def run_warehouse_ui_flow(
         supplier_registry_screenshot = evidence_dir / "supplier_registry_stage_costs.png"
         page.screenshot(path=str(supplier_registry_screenshot), full_page=True)
         screenshots.append(str(supplier_registry_screenshot))
-        registry_api = context.request.get(
+        registry_payload = _protected_json_get(
+            context,
             normalized_base_url + "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry",
-            headers={"Accept": "application/json"},
-            timeout=60_000,
+            label="supplier registry API",
         )
-        _assert(registry_api.status == 200, "supplier registry API status")
-        registry_payload = registry_api.json()
         registry_json = json.dumps(registry_payload, ensure_ascii=False)
         _assert("production_average_cost_rub" in registry_json, "supplier production cost field")
         _assert("china_to_ff_average_cost_rub" in registry_json, "supplier China-to-FF cost field")
@@ -505,22 +553,27 @@ def run_warehouse_ui_flow(
             shipment_id = str((column or {}).get("shipment_id") or "").strip()
             if not shipment_id:
                 continue
-            financial_api = context.request.get(
+            candidate = _protected_json_get(
+                context,
                 normalized_base_url
                 + "/v1/sheet-vitrina-v1/supply/supplier-shipments/"
                 + quote(shipment_id, safe="")
                 + "/financial-documents",
-                headers={"Accept": "application/json"},
-                timeout=60_000,
+                label=f"supplier financial API: {shipment_id}",
             )
-            _assert(financial_api.status == 200, f"supplier financial API status: {shipment_id}")
-            candidate = financial_api.json()
             exact_fee = ((candidate.get("summary") or {}).get("per_unit") or {}).get("exact_bank_fees_rub")
             if exact_fee is not None and Decimal(str(exact_fee)) > 0:
                 bank_fee_payload = candidate
                 bank_fee_shipment_id = shipment_id
                 break
         _assert(bank_fee_payload is not None, "supplier shipment with confirmed positive bank fees")
+        registry_bank_fee_display = _registry_cell_display(
+            registry_payload,
+            section_id="fact_expenses",
+            row_id="bank_fees_rub",
+            shipment_id=bank_fee_shipment_id,
+        )
+        _assert(_visible_money(registry_bank_fee_display) > 0, "supplier registry aggregated bank commissions")
         bank_fee_lines = [
             dict(item)
             for item in (bank_fee_payload or {}).get("expense_lines") or []
@@ -587,6 +640,7 @@ def run_warehouse_ui_flow(
             "bank_commissions_visible": True,
             "bank_fee_shipment_id": bank_fee_shipment_id,
             "bank_fee_total": parent_fee_text,
+            "registry_bank_fee_total": registry_bank_fee_display,
             "bank_fee_line_count": len(bank_fee_lines),
             "bank_fee_currencies": sorted({str(item.get("currency") or "") for item in bank_fee_lines}),
             "bank_fee_sources": sorted({str((item.get("raw") or {}).get("source") or "") for item in bank_fee_lines}),
@@ -612,13 +666,12 @@ def run_warehouse_ui_flow(
         page.locator('[data-unified-tab-button="sku-management"]').click()
         page.locator('[data-unified-tab-panel="sku-management"]:not([hidden])').wait_for(timeout=60_000)
         _assert(bool(page.locator('[data-unified-tab-panel="sku-management"]').inner_text().strip()), "SKU management visible render")
-        sku_api = context.request.get(
+        sku_payload = _protected_json_get(
+            context,
             normalized_base_url + "/v1/sheet-vitrina-v1/sku-management",
-            headers={"Accept": "application/json"},
-            timeout=120_000,
+            label="SKU management protected API",
+            timeout_ms=120_000,
         )
-        _assert(sku_api.status == 200, "SKU management protected API status")
-        sku_payload = sku_api.json()
         sku_rows_with_proxy_3 = [
             item
             for item in sku_payload.get("rows") or []
@@ -655,7 +708,21 @@ def run_warehouse_ui_flow(
         sku_screenshot = evidence_dir / "sku_management_consumer.png"
         page.screenshot(path=str(sku_screenshot), full_page=False)
         screenshots.append(str(sku_screenshot))
-        page.locator('[data-unified-tab-button="vitrina"]').click()
+        period_date_to = str((expected_readback.get("active_version") or {}).get("effective_at") or "")[:10]
+        period_vitrina_url = (
+            normalized_base_url
+            + "/sheet-vitrina-v1/vitrina?date_from=2026-07-01&date_to="
+            + quote(period_date_to, safe="")
+        )
+        period_vitrina_response = page.goto(
+            period_vitrina_url,
+            wait_until="domcontentloaded",
+            timeout=120_000,
+        )
+        _assert(
+            period_vitrina_response is not None and period_vitrina_response.status == 200,
+            "canonical vitrina period page status",
+        )
         page.locator('[data-unified-tab-panel="vitrina"]:not([hidden])').wait_for(timeout=60_000)
         page.wait_for_function(
             "document.body.innerText.includes('proxy прибыль 3') && document.body.innerText.includes('Прокси маржинальность 3')",
@@ -673,6 +740,61 @@ def run_warehouse_ui_flow(
             all(count > 0 for count in filled_metrics.values()),
             "canonical WB cost and Proxy 3 are filled from 2026-07-01 where persisted inputs exist",
         )
+        exact_gap_dates: dict[str, dict[str, dict[str, int]]] = {}
+        if normalized_acceptance_profile == WAREHOUSE_CHAIN_RECOVERY_PROFILE:
+            exact_gap_dates = {
+                metric_key: {
+                    day: _metric_date_coverage(page, metric_key=metric_key, day=day)
+                    for day in ("2026-07-17", "2026-07-18")
+                }
+                for metric_key in (
+                    "our_wb_unit_cost_rub",
+                    "proxy_profit_3_rub",
+                    "proxy_margin_3_pct",
+                )
+            }
+            for metric_key, day_rows in exact_gap_dates.items():
+                for day, coverage in day_rows.items():
+                    _assert(coverage["total"] > 0, f"{metric_key} {day}: rendered cells")
+                    _assert(
+                        coverage["filled"] == coverage["total"],
+                        f"{metric_key} {day}: no unexplained gaps",
+                    )
+        archived_metric_keys = (
+            "our_wb_cost_confirmed_share_pct",
+            "total_our_wb_cost_confirmed_share_pct",
+            "proxy_profit_2_rub",
+            "total_proxy_profit_2_rub",
+            "own_total_paid_equivalent_qty",
+            "own_total_confirmed_share_pct",
+            "own_inventory_capital_return_pct",
+            "own_underaccepted_wb_qty",
+        )
+        leaked_archived = [
+            metric_key
+            for metric_key in archived_metric_keys
+            if page.locator(f'[data-metric-key="{metric_key}"]').count() > 0
+        ]
+        _assert(not leaked_archived, f"active vitrina has no archived metric rows: {leaked_archived}")
+        canonical_stage_fields = ("qty", "unit_cost_rub", "capital_rub")
+        canonical_stage_keys = [
+            f"own_capital_{stage}_{field}"
+            for stage in (
+                "PRODUCTION",
+                "PRODUCTION_TO_FF",
+                "FF",
+                "FF_TO_WB",
+                "WB",
+                "WB_ACCEPTANCE_DISCREPANCY",
+            )
+            for field in canonical_stage_fields
+        ]
+        missing_canonical = [
+            metric_key
+            for metric_key in canonical_stage_keys
+            if page.locator(f'[data-metric-key="{metric_key}"]').count() == 0
+        ]
+        _assert(not missing_canonical, f"canonical six-stage metric block is complete: {missing_canonical}")
         proxy_screenshot = evidence_dir / "proxy3_vitrina.png"
         page.screenshot(path=str(proxy_screenshot), full_page=False)
         screenshots.append(str(proxy_screenshot))
@@ -684,6 +806,10 @@ def run_warehouse_ui_flow(
             "proxy_profit_3_visible": True,
             "proxy_margin_3_visible": True,
             "filled_metric_cells_from_2026_07_01": filled_metrics,
+            "exact_gap_date_coverage": exact_gap_dates,
+            "archived_metric_keys_absent": list(archived_metric_keys),
+            "canonical_stage_metric_keys": canonical_stage_keys,
+            "period_url": period_vitrina_url,
             "screenshots": [str(stock_report_screenshot), str(sku_screenshot), str(proxy_screenshot)],
         }
         final_url = page.url
@@ -718,6 +844,9 @@ def run_warehouse_ui_flow(
         "supplier_registry": supplier_evidence,
         "dependent_consumers": consumer_evidence,
         "hourly_sync": dict(expected_readback.get("sync") or {}),
+        "warehouse_action_theme": warehouse_action_theme,
+        "business_acceptance": business_acceptance,
+        "acceptance_profile": normalized_acceptance_profile or None,
         "historical_wb_cost_projection": dict(expected_readback.get("historical_wb_cost_projection") or {}),
         "legacy_ff_transition": True,
         "legacy_ff_reconciliation": {
@@ -740,6 +869,217 @@ def run_warehouse_ui_flow(
     report_path.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     report["report_path"] = str(report_path)
     return report
+
+
+def _warehouse_action_theme_evidence(page: Page) -> dict[str, Any]:
+    selectors = {
+        "sync": "[data-warehouse-sync]",
+        "rebuild": "[data-warehouse-emergency]",
+    }
+
+    def _style(locator: Any) -> dict[str, Any]:
+        return dict(
+            locator.evaluate(
+                """element => {
+                    const style = getComputedStyle(element);
+                    const rgba = value => {
+                      const normalized = String(value || '').trim();
+                      const hex = normalized.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+                      if (hex) {
+                        const raw = hex[1].length === 3
+                          ? hex[1].split('').map(channel => channel + channel).join('')
+                          : hex[1];
+                        return [
+                          parseInt(raw.slice(0, 2), 16),
+                          parseInt(raw.slice(2, 4), 16),
+                          parseInt(raw.slice(4, 6), 16),
+                          1
+                        ];
+                      }
+                      const match = normalized.match(/[\\d.]+/g) || [];
+                      const channels = match.slice(0, 4).map(Number);
+                      while (channels.length < 3) channels.push(0);
+                      if (channels.length < 4) channels.push(1);
+                      return channels;
+                    };
+                    const luminance = value => {
+                      const channels = value.slice(0, 3).map(channel => {
+                        const normalized = channel / 255;
+                        return normalized <= 0.03928
+                          ? normalized / 12.92
+                          : Math.pow((normalized + 0.055) / 1.055, 2.4);
+                      });
+                      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+                    };
+                    const foregroundChannels = rgba(style.color);
+                    const backgroundChannels = rgba(style.backgroundColor);
+                    const panelChannels = rgba(
+                      getComputedStyle(document.documentElement).getPropertyValue('--panel-bg')
+                    );
+                    const alpha = backgroundChannels[3];
+                    const effectiveBackground = backgroundChannels.slice(0, 3).map(
+                      (channel, index) => channel * alpha + panelChannels[index] * (1 - alpha)
+                    );
+                    const foreground = luminance(foregroundChannels);
+                    const background = luminance(effectiveBackground);
+                    return {
+                      color: style.color,
+                      background: style.backgroundColor,
+                      border: style.borderColor,
+                      opacity: Number(style.opacity),
+                      contrast_ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
+                      disabled: Boolean(element.disabled),
+                      state: element.getAttribute('data-state') || 'normal'
+                    };
+                }"""
+            )
+        )
+
+    evidence: dict[str, Any] = {}
+    for key, selector in selectors.items():
+        button = page.locator(selector)
+        _assert(button.count() == 1, f"warehouse {key} action exists")
+        button.evaluate(
+            "element => { element.disabled = false; element.setAttribute('data-state', 'normal'); }"
+        )
+        states: dict[str, dict[str, Any]] = {"normal": _style(button)}
+        button.hover()
+        page.wait_for_timeout(180)
+        states["hover"] = _style(button)
+        for state in ("pressed", "loading", "success", "error"):
+            button.evaluate(
+                "(element, state) => { element.disabled = state === 'loading'; element.setAttribute('data-state', state); }",
+                state,
+            )
+            page.wait_for_timeout(180)
+            states[state] = _style(button)
+        button.evaluate(
+            "element => { element.disabled = true; element.setAttribute('data-state', 'normal'); }"
+        )
+        page.wait_for_timeout(180)
+        states["disabled"] = _style(button)
+        button.evaluate(
+            "element => { element.disabled = false; element.setAttribute('data-state', 'normal'); }"
+        )
+        _assert(states["normal"]["background"] != "rgb(255, 255, 255)", f"warehouse {key} dark-theme background")
+        _assert(states["hover"]["background"] != states["normal"]["background"], f"warehouse {key} hover state")
+        _assert(states["pressed"]["background"] != states["hover"]["background"], f"warehouse {key} pressed state")
+        _assert(states["loading"]["disabled"] is True, f"warehouse {key} loading state")
+        _assert(states["disabled"]["opacity"] < states["normal"]["opacity"], f"warehouse {key} disabled state")
+        for state in ("normal", "hover", "pressed", "loading", "success", "error"):
+            _assert(
+                float(states[state]["contrast_ratio"]) >= 3.0,
+                f"warehouse {key} {state} text contrast",
+            )
+        evidence[key] = states
+    return evidence
+
+
+def _assert_business_warehouse_acceptance(
+    details: Mapping[str, Mapping[str, Any]],
+    *,
+    acceptance_profile: str | None,
+) -> dict[str, Any]:
+    _assert(set(details) == {key for key, _ in WAREHOUSES}, "business acceptance has all six warehouse details")
+    production_rows = list(details["production"].get("balances") or [])
+    recovery_profile = acceptance_profile == WAREHOUSE_CHAIN_RECOVERY_PROFILE
+    expected_identities = (
+        {
+            1221231049: "(Anti-Spy) iPhone 18 Pro",
+            1221235702: "(Anti-Spy) iPhone 18 Pro Max",
+            1221244040: "(Matte) iPhone 18 Pro",
+            1221249681: "(Matte) iPhone 18 Pro Max",
+        }
+        if recovery_profile
+        else {}
+    )
+    production_by_nm = {int(item.get("nm_id") or 0): dict(item) for item in production_rows}
+    for nm_id, name in expected_identities.items():
+        row = production_by_nm.get(nm_id)
+        _assert(row is not None, f"production nmID {nm_id} exists")
+        _assert(str((row or {}).get("nomenclature_name") or "") == name, f"production nmID {nm_id} exact name")
+        _assert(bool(str((row or {}).get("barcode") or "")), f"production nmID {nm_id} barcode")
+        _assert(
+            str((row or {}).get("identity_source") or "") == "active_nomenclature_exact_nm_id",
+            f"production nmID {nm_id} stable identity source",
+        )
+    unexplained = [
+        int(item.get("nm_id") or 0)
+        for item in production_rows
+        if Decimal(str(item.get("quantity") or 0)) > 0
+        and (
+            not str(item.get("nomenclature_name") or "").strip()
+            or not str(item.get("barcode") or "").strip()
+            or str(item.get("identity_source") or "") == "nm_id"
+        )
+    ]
+    _assert(not unexplained, f"production has no unexplained positive-quantity SKU: {unexplained}")
+
+    arithmetic: dict[str, dict[str, Any]] = {}
+    for warehouse_key, _ in WAREHOUSES:
+        rows = list(details[warehouse_key].get("balances") or [])
+        mismatches = []
+        for item in rows:
+            quantity = Decimal(str(item.get("quantity") or 0))
+            capital = Decimal(str(item.get("capital_rub") or 0))
+            wac = Decimal(str(item.get("wac_rub") or 0))
+            if quantity > 0 and (wac <= 0 or abs(quantity * wac - capital) > Decimal("0.02")):
+                mismatches.append(int(item.get("nm_id") or 0))
+        _assert(not mismatches, f"{warehouse_key}: SKU capital = quantity × WAC")
+        summary = dict(details[warehouse_key].get("warehouse") or {})
+        total_quantity = Decimal(str(summary.get("total_quantity") or 0))
+        total_capital = Decimal(str(summary.get("total_capital_rub") or 0))
+        total_wac = Decimal(str(summary.get("average_unit_cost_rub") or 0))
+        if total_quantity > 0:
+            _assert(abs(total_quantity * total_wac - total_capital) < Decimal("0.02"), f"{warehouse_key}: warehouse WAC identity")
+        arithmetic[warehouse_key] = {
+            "quantity": str(total_quantity),
+            "capital_rub": str(total_capital),
+            "wac_rub": str(total_wac) if total_quantity > 0 else None,
+            "sku_count": len(rows),
+        }
+
+    china_rows = list(details["china_to_ff"].get("balances") or [])
+    china_wacs = [Decimal(str(item.get("wac_rub") or 0)) for item in china_rows if Decimal(str(item.get("quantity") or 0)) > 0]
+    if recovery_profile:
+        _assert(china_wacs and min(china_wacs) < Decimal("84"), "China → FF retains lower-cost confirmed party rows")
+        _assert(max(china_wacs) >= Decimal("121"), "China → FF retains arithmetically supported 121–130 ₽ rows")
+
+    ff_control = next(
+        (dict(item) for item in details["ff"].get("balances") or [] if int(item.get("nm_id") or 0) == 391662965),
+        None,
+    )
+    if recovery_profile:
+        _assert(ff_control is not None, "FF control nmID 391662965 exists")
+        _assert(Decimal(str((ff_control or {}).get("quantity") or 0)) == Decimal("6750"), "FF control quantity")
+        _assert(abs(Decimal(str((ff_control or {}).get("wac_rub") or 0)) - Decimal("119.9415482137855")) < Decimal("0.0000001"), "FF control WAC")
+        _assert(abs(Decimal(str((ff_control or {}).get("capital_rub") or 0)) - Decimal("809605.450443052125")) < Decimal("0.0001"), "FF control capital")
+
+    ff_to_wb = dict(details["ff_to_wb"].get("warehouse") or {})
+    if recovery_profile:
+        _assert(Decimal(str(ff_to_wb.get("total_quantity") or 0)) == 0, "FF → WB expected zero")
+        _assert(
+            not any(Decimal(str(item.get("quantity") or 0)) == Decimal("31500") for item in details["ff_to_wb"].get("balances") or []),
+            "FF → WB has no stuck 31,500 units",
+        )
+    return {
+        "acceptance_profile": acceptance_profile,
+        "resolved_production_nm_ids": {str(key): value for key, value in expected_identities.items()},
+        "unexplained_production_nm_ids": unexplained,
+        "warehouse_arithmetic": arithmetic,
+        "china_to_ff_wac_min": str(min(china_wacs)) if china_wacs else None,
+        "china_to_ff_wac_max": str(max(china_wacs)) if china_wacs else None,
+        "ff_control_391662965": (
+            {
+                "quantity": str((ff_control or {}).get("quantity") or 0),
+                "wac_rub": str((ff_control or {}).get("wac_rub") or 0),
+                "capital_rub": str((ff_control or {}).get("capital_rub") or 0),
+            }
+            if recovery_profile
+            else None
+        ),
+        "ff_to_wb_quantity": str(ff_to_wb.get("total_quantity") or 0),
+    }
 
 
 def _visible_decimal(value: str) -> Decimal:
@@ -811,6 +1151,70 @@ def _filled_metric_cells(page: Page, *, metric_key: str, date_from: str) -> int:
         if text and text not in {"—", "-"}:
             filled += 1
     return filled
+
+
+def _metric_date_coverage(page: Page, *, metric_key: str, day: str) -> dict[str, int]:
+    cells = page.locator(
+        f'td[data-metric-key="{metric_key}"][data-cell-date="{day}"]'
+    )
+    filled = 0
+    for index in range(cells.count()):
+        if cells.nth(index).inner_text().strip() not in {"", "—", "-"}:
+            filled += 1
+    return {"total": cells.count(), "filled": filled}
+
+
+def _registry_cell_display(
+    registry: Mapping[str, Any],
+    *,
+    section_id: str,
+    row_id: str,
+    shipment_id: str,
+) -> str:
+    for section in registry.get("sections") or []:
+        if str((section or {}).get("section_id") or "") != section_id:
+            continue
+        for row in (section or {}).get("rows") or []:
+            if str((row or {}).get("row_id") or "") != row_id:
+                continue
+            cell = ((row or {}).get("cells") or {}).get(shipment_id) or {}
+            return str((cell or {}).get("display") or "")
+    return ""
+
+
+def _protected_json_get(
+    context: Any,
+    url: str,
+    *,
+    label: str,
+    timeout_ms: int = 60_000,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    """Read a protected API with bounded retry and secret-safe failures."""
+
+    path = urlparse(str(url)).path
+    for attempt in range(1, attempts + 1):
+        try:
+            response = context.request.get(
+                url,
+                headers={"Accept": "application/json"},
+                timeout=timeout_ms,
+            )
+            if response.status == 200:
+                payload = response.json()
+                _assert(isinstance(payload, dict), f"{label}: JSON object")
+                return payload
+            if response.status < 500 or attempt == attempts:
+                raise AssertionError(
+                    f"{label}: HTTP {response.status} for {path}"
+                )
+        except PlaywrightError:
+            if attempt == attempts:
+                raise AssertionError(
+                    f"{label}: transport failed after {attempts} attempts for {path}"
+                ) from None
+        time.sleep(0.4 * attempt)
+    raise AssertionError(f"{label}: unavailable for {path}")
 
 
 def _assert(condition: bool, label: str) -> None:

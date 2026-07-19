@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -14,6 +15,7 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     _build_web_vitrina_loading_table,
     _web_vitrina_source_status_not_loaded_activity_surface,
 )
+from packages.application.sheet_vitrina_v1_web_vitrina import _active_refresh_summary  # noqa: E402
 
 
 TODAY = "2026-04-25"
@@ -28,6 +30,8 @@ def main() -> None:
     _assert_promo_latest_confirmed_is_ok()
     _assert_fin_report_yesterday_latest_confirmed_is_ok()
     _assert_spp_proxy_missing_public_price_reason_is_human()
+    _assert_archived_onec_source_is_hidden()
+    _assert_archived_onec_failure_is_nonblocking()
     print("web_vitrina_source_aware_statuses: ok")
 
 
@@ -51,6 +55,40 @@ def _assert_not_loaded_activity_surface_is_lazy_neutral() -> None:
         raise AssertionError(f"not_loaded source-status must not expose stale summary items, got {surface}")
     if "не OK" in str(surface):
         raise AssertionError(f"not_loaded source-status must not reduce missing details to not OK, got {surface}")
+
+
+def _assert_archived_onec_source_is_hidden() -> None:
+    table = _build_web_vitrina_loading_table(
+        upload_summary={"items": [_item("onec_stocks", [])]},
+        today_date=TODAY,
+        yesterday_date=YESTERDAY,
+        available_dates=[YESTERDAY, TODAY],
+        default_refresh_date=YESTERDAY,
+        metric_labels_by_source={"onec_stocks": []},
+        group_last_updated_at={"onec_product_capital": "2026-04-25T08:00:00Z"},
+    )
+    if table["rows"] or any(
+        item.get("group_id") == "onec_product_capital" for item in table["groups"]
+    ):
+        raise AssertionError(f"archived 1C source must not leak into active loading surface, got {table}")
+
+
+def _assert_archived_onec_failure_is_nonblocking() -> None:
+    summary = _active_refresh_summary(
+        SimpleNamespace(
+            semantic_status="error",
+            semantic_label="Ошибка",
+            semantic_tone="error",
+            semantic_reason="1C failed",
+            source_outcome_counts={"success": 1, "warning": 0, "error": 1},
+            source_outcomes=[
+                {"source_key": "stocks", "status": "success"},
+                {"source_key": "onec_stocks", "status": "error"},
+            ],
+        )
+    )
+    if summary["status"] != "success" or summary["counts"]["error"] != 0:
+        raise AssertionError(f"archived-only 1C failure must not drive active status, got {summary}")
 
 
 def _assert_current_snapshot_latest_confirmed_is_ok() -> None:

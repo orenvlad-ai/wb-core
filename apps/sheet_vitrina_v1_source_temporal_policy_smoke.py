@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -103,6 +105,55 @@ def main() -> None:
         if status_payload["source_outcome_counts"] != {"success": 10, "warning": 1, "error": 1}:
             raise AssertionError(f"/status source_outcome_counts mismatch, got {status_payload}")
 
+        archived_only_failure = replace(
+            refresh_status,
+            semantic_status="error",
+            semantic_label="Ошибка",
+            semantic_tone="error",
+            semantic_reason="archived 1C source failed",
+            source_outcome_counts={
+                "success": len(refresh_status.source_outcomes),
+                "warning": 0,
+                "error": 1,
+            },
+            source_outcomes=[
+                *[
+                    {**item, "status": "success", "tone": "success", "label": "Успешно"}
+                    for item in refresh_status.source_outcomes
+                ],
+                {
+                    "source_key": "onec_stocks",
+                    "status": "error",
+                    "tone": "error",
+                    "label": "Ошибка",
+                    "reason": "technical archive unavailable",
+                    "slots": [],
+                },
+            ],
+        )
+        fake_entrypoint = SimpleNamespace(
+            runtime=SimpleNamespace(
+                load_sheet_vitrina_refresh_status=lambda as_of_date=None: archived_only_failure
+            ),
+            build_sheet_server_context=lambda: {},
+            build_sheet_manual_context=lambda: {},
+            build_sheet_load_context=lambda: {},
+        )
+        archived_status_payload = RegistryUploadHttpEntrypoint.handle_sheet_status_request(
+            fake_entrypoint,
+            as_of_date=AS_OF_DATE,
+        )
+        if archived_status_payload["status"] != "success":
+            raise AssertionError(
+                "/status must exclude an archived-only source failure from public status: "
+                f"{archived_status_payload}"
+            )
+        if archived_status_payload["technical_status"] != "error":
+            raise AssertionError(
+                "/status must retain the archived-source failure as technical status: "
+                f"{archived_status_payload}"
+            )
+
         contract_payload = entrypoint.handle_sheet_web_vitrina_request(
             page_route="/sheet-vitrina-v1/vitrina",
             read_route="/v1/sheet-vitrina-v1/web-vitrina",
@@ -124,10 +175,13 @@ def main() -> None:
         if composition_payload["status_badge"]["tone"] != "error":
             raise AssertionError(f"top badge must follow required-slot failures only, got {composition_payload['status_badge']}")
         loading_rows = composition_payload["activity_surface"]["loading_table"]["rows"]
-        if [item["source_key"] for item in loading_rows[:2]] != [
-            "seller_funnel_snapshot",
-            "web_source_snapshot",
-        ]:
+        loading_order = [item["source_key"] for item in loading_rows]
+        if (
+            "seller_funnel_snapshot" not in loading_order
+            or "web_source_snapshot" not in loading_order
+            or loading_order.index("seller_funnel_snapshot")
+            >= loading_order.index("web_source_snapshot")
+        ):
             raise AssertionError(f"activity order must stay error -> warning -> success, got {loading_rows}")
         item_by_source = {item["source_key"]: item for item in loading_rows}
         if item_by_source["stocks"]["yesterday"]["tone"] != "success":

@@ -4898,7 +4898,11 @@
     .warehouse-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
     .warehouse-title { margin: 0; font-size: 24px; line-height: 1.2; }
     .warehouse-meta { margin: 6px 0 0; color: var(--muted); font-size: 13px; max-width: 980px; }
-    .warehouse-status { display: inline-flex; padding: 5px 9px; border-radius: 999px; background: #fff7df; color: #745600; font-size: 12px; font-weight: 700; }
+    .warehouse-status { display: inline-flex; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-subtle); color: var(--muted); font-size: 12px; font-weight: 700; }
+    .warehouse-status[data-tone="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
+    .warehouse-status[data-tone="warning"] { border-color: var(--warning-text); background: var(--warning-bg); color: var(--warning-text); }
+    .warehouse-status[data-tone="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
+    .warehouse-status-detail { flex-basis: 100%; margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: right; max-width: 760px; }
     .warehouse-summary { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; }
     .warehouse-summary-item { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-subtle); }
     .warehouse-summary-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
@@ -4913,11 +4917,24 @@
     .warehouse-balance-warning { display: block; margin-top: 4px; color: var(--warning-text); font-size: 11px; font-weight: 700; white-space: normal; }
     .warehouse-source-details summary { color: var(--accent); cursor: pointer; font-weight: 650; }
     .warehouse-source-details pre { max-width: 680px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; color: var(--muted); }
+    .warehouse-evidence-list { display: grid; gap: 8px; margin-top: 10px; min-width: 420px; max-width: 760px; }
+    .warehouse-evidence-item { border: 1px solid var(--border); border-radius: 8px; background: var(--panel-subtle); padding: 10px; }
+    .warehouse-evidence-item dl { display: grid; grid-template-columns: minmax(130px, 0.65fr) minmax(220px, 1.35fr); gap: 5px 10px; margin: 0; }
+    .warehouse-evidence-item dt { color: var(--muted); font-size: 11px; }
+    .warehouse-evidence-item dd { margin: 0; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+    .warehouse-technical-evidence { margin-top: 9px; }
     .warehouse-empty { margin: 0; padding: 18px; color: var(--muted); text-align: center; }
     .warehouse-document-lines { margin: 8px 0 0; min-width: 620px; }
     .warehouse-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .warehouse-action { border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; background: #fff; color: var(--text); cursor: pointer; font-weight: 650; }
-    .warehouse-action.is-danger { color: #8a241f; border-color: #e8b7b3; }
+    .warehouse-action { border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; background: var(--panel-subtle); color: var(--text); cursor: pointer; font-weight: 650; transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 80ms ease, opacity 120ms ease; }
+    .warehouse-action:hover:not(:disabled) { border-color: var(--accent-border); background: var(--accent-soft); color: var(--text); }
+    .warehouse-action:active:not(:disabled), .warehouse-action.warehouse-action[data-state="pressed"] { transform: translateY(1px); background: var(--panel-bg); }
+    .warehouse-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .warehouse-action:disabled { cursor: not-allowed; opacity: 0.52; }
+    .warehouse-action[data-state="loading"] { border-color: var(--accent-border); color: var(--text); }
+    .warehouse-action.warehouse-action[data-state="success"] { border-color: var(--success-text); background: var(--success-bg); color: var(--success-text); }
+    .warehouse-action.warehouse-action[data-state="error"] { border-color: var(--error-text); background: var(--error-bg); color: var(--error-text); }
+    .warehouse-action.is-danger { color: var(--warning-text); border-color: var(--warning-text); }
     @media (max-width: 780px) {
       .warehouse-summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
     }
@@ -5219,7 +5236,8 @@
           <div class="warehouse-actions">
             <button class="warehouse-action" type="button" data-warehouse-sync>Обновить WB</button>
             <button class="warehouse-action is-danger" type="button" data-warehouse-emergency>Пересчитать все склады и себестоимость</button>
-            <span class="warehouse-status" data-warehouse-status>Загрузка…</span>
+            <span class="warehouse-status" data-tone="neutral" data-warehouse-status>Загрузка…</span>
+            <p class="warehouse-status-detail" data-warehouse-status-detail>Получаем время и состояние последней синхронизации…</p>
           </div>
         </div>
         <div class="warehouse-summary" data-warehouse-summary>
@@ -6014,6 +6032,7 @@
     const warehouseTitleNode = document.querySelector("[data-warehouse-title]");
     const warehouseMetaNode = document.querySelector("[data-warehouse-meta]");
     const warehouseStatusNode = document.querySelector("[data-warehouse-status]");
+    const warehouseStatusDetailNode = document.querySelector("[data-warehouse-status-detail]");
     const warehouseSummaryNode = document.querySelector("[data-warehouse-summary]");
     const warehouseBalancesNode = document.querySelector("[data-warehouse-balances]");
     const warehouseDocumentsNode = document.querySelector("[data-warehouse-documents]");
@@ -7885,14 +7904,22 @@
         warehouseTitleNode.textContent = button ? button.textContent : "Склады и себестоимость";
       }
       if (warehouseMetaNode) warehouseMetaNode.textContent = "Загрузка зафиксированного остатка…";
-      if (warehouseStatusNode) warehouseStatusNode.textContent = "Загрузка…";
+      if (warehouseStatusNode) {
+        warehouseStatusNode.textContent = "Загрузка…";
+        warehouseStatusNode.setAttribute("data-tone", "neutral");
+      }
+      if (warehouseStatusDetailNode) warehouseStatusDetailNode.textContent = "Получаем время и состояние последней синхронизации…";
       if (warehouseBalancesNode) warehouseBalancesNode.innerHTML = '<tr><td colspan="7"><p class="warehouse-empty">Загрузка…</p></td></tr>';
       if (warehouseDocumentsNode) warehouseDocumentsNode.innerHTML = '<tr><td colspan="12"><p class="warehouse-empty">Загрузка…</p></td></tr>';
     }
 
     function renderWarehouseError(message) {
       if (warehouseMetaNode) warehouseMetaNode.textContent = "Данные склада не загружены.";
-      if (warehouseStatusNode) warehouseStatusNode.textContent = "Ошибка";
+      if (warehouseStatusNode) {
+        warehouseStatusNode.textContent = "Ошибка загрузки";
+        warehouseStatusNode.setAttribute("data-tone", "error");
+      }
+      if (warehouseStatusDetailNode) warehouseStatusDetailNode.textContent = String(message || "Неизвестная ошибка");
       const body = '<tr><td colspan="12"><p class="warehouse-empty">' + escapeHtml(message) + '</p></td></tr>';
       if (warehouseBalancesNode) warehouseBalancesNode.innerHTML = body.replace('colspan="12"', 'colspan="7"');
       if (warehouseDocumentsNode) warehouseDocumentsNode.innerHTML = body;
@@ -7917,9 +7944,27 @@
         : (raw || "—");
     }
 
-    function warehouseEvidenceDetails(value, label) {
-      return '<details class="warehouse-source-details"><summary>' + escapeHtml(label || "Показать") + '</summary><pre>' +
-        escapeHtml(JSON.stringify(value || {}, null, 2)) + '</pre></details>';
+    function warehouseEvidenceDetails(summary, label, rawValue) {
+      const items = Array.isArray(summary && summary.items) ? summary.items : [];
+      const fields = [
+        ["document", "Документ"],
+        ["date", "Дата"],
+        ["invoice_or_supply", "Поставка / invoice"],
+        ["quantity_source", "Источник количества"],
+        ["cost_source", "Источник стоимости"],
+        ["confirmation_status", "Статус подтверждения"],
+        ["allocation_method", "Формула / распределение"],
+        ["quantity_contribution", "Вклад в количество"],
+        ["capital_contribution_rub", "Вклад в капитал, ₽"]
+      ];
+      const readable = items.length ? '<div class="warehouse-evidence-list">' + items.map(function(item) {
+        return '<article class="warehouse-evidence-item"><dl>' + fields.map(function(field) {
+          return '<dt>' + escapeHtml(field[1]) + '</dt><dd>' + escapeHtml(item[field[0]] == null ? "—" : String(item[field[0]])) + '</dd>';
+        }).join("") + '</dl></article>';
+      }).join("") + '</div>' : '<p class="warehouse-empty">Структурированное основание отсутствует.</p>';
+      const technical = '<details class="warehouse-technical-evidence"><summary>Технический JSON</summary><pre>' +
+        escapeHtml(JSON.stringify(rawValue || {}, null, 2)) + '</pre></details>';
+      return '<details class="warehouse-source-details"><summary>' + escapeHtml(label || "Показать") + '</summary>' + readable + technical + '</details>';
     }
 
     function renderWarehousePayload(payload) {
@@ -7932,7 +7977,14 @@
       if (warehouseMetaNode) {
         warehouseMetaNode.textContent = "Актуальность: " + warehouseDate(warehouse.updated_at) + " · Источник: " + String(warehouse.source_basis || "—");
       }
-      if (warehouseStatusNode) warehouseStatusNode.textContent = String(warehouse.status_label || "Начальные остатки ещё не зафиксированы");
+      const syncPresentation = (payload && payload.sync_presentation) || {};
+      if (warehouseStatusNode) {
+        warehouseStatusNode.textContent = String(warehouse.status_label || "Начальные остатки ещё не зафиксированы");
+        warehouseStatusNode.setAttribute("data-tone", String(syncPresentation.tone || "neutral"));
+      }
+      if (warehouseStatusDetailNode) {
+        warehouseStatusDetailNode.textContent = String(warehouse.status_description || syncPresentation.description_ru || "");
+      }
       if (warehouseSummaryNode) {
         const summaryItems = [
           ["Уникальных SKU", warehouseNumber(warehouse.sku_count)],
@@ -7963,7 +8015,7 @@
               (line.warning ? '<span class="warehouse-balance-warning">' + escapeHtml(line.warning) + '</span>' : '') + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td>' +
-            '<td>' + warehouseEvidenceDetails(line.provenance, "Раскрыть основание") + '</td></tr>';
+            '<td>' + warehouseEvidenceDetails(line.human_evidence, "Раскрыть основание", line.provenance) + '</td></tr>';
         }).join("") : '<tr><td colspan="7"><p class="warehouse-empty">' +
           (initialized ? 'На зафиксированном срезе остаток равен нулю.' : 'Начальные остатки ещё не зафиксированы.') +
           '</p></td></tr>';
@@ -7974,7 +8026,7 @@
       if (warehouseUnmatchedCard) warehouseUnmatchedCard.hidden = String(warehouse.warehouse_key || "") !== "wb_acceptance_discrepancy";
       if (warehouseUnmatchedNode) {
         warehouseUnmatchedNode.innerHTML = unmatched.length ? unmatched.map(function(item) {
-          return '<tr><td>' + escapeHtml(item.source_id || "—") + '</td><td>' + escapeHtml(warehouseDate(item.business_date)) + '</td><td>' + escapeHtml(String(item.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(item.quantity)) + '</td><td>' + escapeHtml(warehouseNumber(item.matched_quantity)) + '</td><td>' + escapeHtml(item.reason || "—") + '</td><td>' + warehouseEvidenceDetails(item.provenance, "Основание") + '</td></tr>';
+          return '<tr><td>' + escapeHtml(item.source_id || "—") + '</td><td>' + escapeHtml(warehouseDate(item.business_date)) + '</td><td>' + escapeHtml(String(item.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(item.quantity)) + '</td><td>' + escapeHtml(warehouseNumber(item.matched_quantity)) + '</td><td>' + escapeHtml(item.reason || "—") + '</td><td>' + warehouseEvidenceDetails(item.human_evidence, "Основание", item.provenance) + '</td></tr>';
         }).join("") : '<tr><td colspan="7"><p class="warehouse-empty">Неразнесённых доприёмок нет.</p></td></tr>';
       }
     }
@@ -7982,32 +8034,33 @@
     async function runWarehouseManualSync() {
       if (!warehouseSyncButton || warehouseSyncButton.disabled) return;
       const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
-      warehouseSyncButton.disabled = true;
-      warehouseSyncButton.textContent = "Обновляем…";
+      setWarehouseActionState(warehouseSyncButton, "loading", "Обновляем…");
       try {
         const response = await fetch(basePath + "/sync", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
         if (!response.ok) throw new Error("HTTP " + response.status + ": " + await response.text());
         await ensureWarehouseLoaded(state.warehouses.activeKey, {force: true});
+        setWarehouseActionState(warehouseSyncButton, "success", "WB обновлён");
       } catch (error) {
         renderWarehouseError(String(error && error.message ? error.message : error));
+        setWarehouseActionState(warehouseSyncButton, "error", "Ошибка обновления");
       } finally {
-        warehouseSyncButton.disabled = false;
-        warehouseSyncButton.textContent = "Обновить WB";
+        window.setTimeout(function() {
+          setWarehouseActionState(warehouseSyncButton, "normal", "Обновить WB");
+        }, 1800);
       }
     }
 
     async function runWarehouseEmergencyRebuild() {
       if (!warehouseEmergencyButton || warehouseEmergencyButton.disabled) return;
       const basePath = String(WEB_VITRINA_CONFIG.warehouses_path || "/v1/sheet-vitrina-v1/warehouses").replace(/\/$/, "");
-      warehouseEmergencyButton.disabled = true;
-      warehouseEmergencyButton.textContent = "Строим dry-run…";
+      setWarehouseActionState(warehouseEmergencyButton, "loading", "Строим dry-run…");
       try {
         const previewResponse = await fetch(basePath + "/emergency-rebuild/preview", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
         if (!previewResponse.ok) throw new Error("HTTP " + previewResponse.status + ": " + await previewResponse.text());
         const plan = await previewResponse.json();
         const count = Number(plan && plan.diff && plan.diff.changed_line_count || 0);
         if (!window.confirm("Emergency rebuild изменит " + count + " строк. Применить exact plan " + String(plan.plan_fingerprint || "") + "?")) return;
-        warehouseEmergencyButton.textContent = "Публикуем…";
+        setWarehouseActionState(warehouseEmergencyButton, "loading", "Публикуем…");
         const applyResponse = await fetch(basePath + "/emergency-rebuild/apply", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
@@ -8015,21 +8068,33 @@
         });
         if (!applyResponse.ok) throw new Error("HTTP " + applyResponse.status + ": " + await applyResponse.text());
         await ensureWarehouseLoaded(state.warehouses.activeKey, {force: true});
+        setWarehouseActionState(warehouseEmergencyButton, "success", "Пересчёт опубликован");
       } catch (error) {
         renderWarehouseError(String(error && error.message ? error.message : error));
+        setWarehouseActionState(warehouseEmergencyButton, "error", "Ошибка пересчёта");
       } finally {
-        warehouseEmergencyButton.disabled = false;
-        warehouseEmergencyButton.textContent = "Пересчитать все склады и себестоимость";
+        window.setTimeout(function() {
+          setWarehouseActionState(warehouseEmergencyButton, "normal", "Пересчитать все склады и себестоимость");
+        }, 1800);
       }
+    }
+
+    function setWarehouseActionState(button, actionState, label) {
+      if (!button) return;
+      const normalized = String(actionState || "normal");
+      button.setAttribute("data-state", normalized);
+      button.disabled = normalized === "loading";
+      button.setAttribute("aria-busy", normalized === "loading" ? "true" : "false");
+      button.textContent = String(label || "");
     }
 
     function renderWarehouseDocumentRow(documentRow) {
       const lines = Array.isArray(documentRow.lines) ? documentRow.lines : [];
       const movement = String(documentRow.warehouse_from_key || "—") + " → " + String(documentRow.warehouse_to_key || documentRow.warehouse_key || "—");
-      const documentProvenance = '<div class="warehouse-document-provenance">' + warehouseEvidenceDetails(documentRow.provenance, "Основание документа") + '</div>';
-      const lineTable = '<table class="warehouse-table warehouse-document-lines"><thead><tr><th>SKU</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Себестоимость</th><th>Капитал</th><th>Provenance</th></tr></thead><tbody>' +
+      const documentProvenance = '<div class="warehouse-document-provenance">' + warehouseEvidenceDetails(documentRow.human_evidence, "Основание документа", documentRow.provenance) + '</div>';
+      const lineTable = '<table class="warehouse-table warehouse-document-lines"><thead><tr><th>SKU</th><th>Наименование</th><th>Штрихкод / nmID</th><th>Количество</th><th>Себестоимость</th><th>Капитал</th><th>Основание</th></tr></thead><tbody>' +
         (lines.length ? lines.map(function(line) {
-          return '<tr><td>' + escapeHtml(line.sku || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td><td>' + escapeHtml((line.barcode ? line.barcode + " / " : "") + String(line.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(line.quantity)) + '</td><td>' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td><td>' + warehouseEvidenceDetails(line.provenance, "Основание") + '</td></tr>';
+          return '<tr><td>' + escapeHtml(line.sku || "—") + '</td><td>' + escapeHtml(line.nomenclature_name || "—") + '</td><td>' + escapeHtml((line.barcode ? line.barcode + " / " : "") + String(line.nm_id || "")) + '</td><td>' + escapeHtml(warehouseNumber(line.quantity)) + '</td><td>' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td><td>' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td><td>' + warehouseEvidenceDetails(line.human_evidence, "Основание", line.provenance) + '</td></tr>';
         }).join("") : '<tr><td colspan="7">Документ проведён с нулевым остатком.</td></tr>') + '</tbody></table>';
       return '<tr data-warehouse-document-id="' + escapeHtml(documentRow.document_id || "") + '">' +
         '<td>' + escapeHtml(documentRow.document_number || "—") + '</td><td>' + escapeHtml(warehouseDate(documentRow.occurred_at)) + '</td>' +
