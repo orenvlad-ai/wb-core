@@ -597,12 +597,15 @@ def run_warehouse_ui_flow(
         vitrina_url = normalized_base_url + "/sheet-vitrina-v1/vitrina?tab=warehouses&warehouse=production"
         vitrina_response = page.goto(vitrina_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(vitrina_response is not None and vitrina_response.status == 200, "vitrina consumer page status")
+        _assert(
+            page.locator("[data-open-stock-report]").inner_text().strip() == "Отчёт об остатках",
+            "stock report public navigation label",
+        )
         page.locator("[data-open-stock-report]").click()
-        report_frame = page.locator('[data-warehouse-stock-report-frame]:not([hidden])')
-        report_frame.wait_for(timeout=60_000)
-        report_body = report_frame.content_frame.locator("body")
-        report_body.wait_for(timeout=60_000)
-        _assert("Отчёт по остаткам" in report_body.inner_text(), "stock report navigation")
+        report_surface = _stock_report_frame_locator(page)
+        report_surface.get_by_role("heading", name="Отчёт по остаткам", exact=True).wait_for(
+            timeout=60_000
+        )
         stock_report_screenshot = evidence_dir / "stock_report_navigation.png"
         page.screenshot(path=str(stock_report_screenshot), full_page=False)
         screenshots.append(str(stock_report_screenshot))
@@ -738,6 +741,18 @@ def _supplier_financial_detail_url(base_url: str, shipment_id: str) -> str:
         + quote(str(shipment_id), safe="")
         + "&tab=documents"
     )
+
+
+def _stock_report_frame_locator(page: Page) -> FrameLocator:
+    frame = page.locator('[data-warehouse-stock-report-frame]:not([hidden])')
+    frame.wait_for(timeout=60_000)
+    page.wait_for_function(
+        "Boolean(document.querySelector('[data-warehouse-stock-report-frame]')?.getAttribute('src'))",
+        timeout=60_000,
+    )
+    surface = page.frame_locator("[data-warehouse-stock-report-frame]")
+    surface.locator("body").wait_for(timeout=60_000)
+    return surface
 
 
 def _visible_money(value: str) -> Decimal:

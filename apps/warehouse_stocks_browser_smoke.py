@@ -103,6 +103,7 @@ def main() -> None:
                 )
                 _assert_route_explicit_settings_frame(f"http://127.0.0.1:{config.port}")
                 _assert_supplier_registry_stage_cost_frame(f"http://127.0.0.1:{config.port}")
+                _assert_stock_report_frame(f"http://127.0.0.1:{config.port}")
                 _assert(result.get("status") == "ok", "browser flow status")
                 legacy_ff = result.get("legacy_ff_reconciliation") or {}
                 ff_evidence = next(
@@ -213,6 +214,31 @@ def _assert_supplier_registry_stage_cost_frame(base_url: str) -> None:
             surface.locator('[data-supply-mode-button="shipment-registry"]').click()
             surface.get_by_text("Средняя себестоимость: на производстве", exact=True).wait_for()
             surface.get_by_text("Средняя себестоимость: Китай → FF", exact=True).wait_for()
+        finally:
+            browser.close()
+
+
+def _assert_stock_report_frame(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.goto(
+                f"{base_url}/sheet-vitrina-v1/vitrina?tab=warehouses",
+                wait_until="domcontentloaded",
+            )
+            button = page.locator("[data-open-stock-report]")
+            _assert(button.inner_text().strip() == "Отчёт об остатках", "stock report shell label")
+            button.click()
+            frame = page.locator('[data-warehouse-stock-report-frame]:not([hidden])')
+            frame.wait_for()
+            page.wait_for_function(
+                "Boolean(document.querySelector('[data-warehouse-stock-report-frame]')?.getAttribute('src'))"
+            )
+            surface = page.frame_locator("[data-warehouse-stock-report-frame]")
+            surface.get_by_role("heading", name="Отчёт по остаткам", exact=True).wait_for()
         finally:
             browser.close()
 
