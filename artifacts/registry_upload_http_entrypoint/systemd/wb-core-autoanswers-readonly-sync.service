@@ -1,0 +1,15 @@
+[Unit]
+Description=WB Core Autoanswers GET-Only Force-Off Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+EnvironmentFile=/opt/wb-ai/.env
+ExecStart=/usr/bin/env PYTHONUNBUFFERED=1 WB_AUTOANSWERS_FORCE_OFF=true WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true /usr/bin/python3 /opt/wb-core-runtime/app/apps/wb_autoanswers_readonly.py --operation steady --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env --page-size 100 --max-pages 3 --min-request-interval-seconds 1.0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/wb-core-runtime/state

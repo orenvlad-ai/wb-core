@@ -1,0 +1,19 @@
+{
+  "name": "wb-autoanswers-make-mvp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate:manifest": "node scripts/generate_bundle_manifest.mjs",
+    "generate:payloads": "node scripts/generate_payload_templates.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "verify": "npm run generate:manifest && npm run generate:payloads && npm test"
+  },
+  "dependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

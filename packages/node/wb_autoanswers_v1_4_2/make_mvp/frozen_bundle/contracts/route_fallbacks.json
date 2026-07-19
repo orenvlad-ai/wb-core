@@ -1,0 +1,149 @@
+{
+  "schema_version": "1.0.0",
+  "doctrine_version": "1.0",
+  "approval_status": "approved",
+  "usage_gate": "Разрешено использовать только после двух неудачных циклов rewrite → validator и только при неизменном закреплённом маршруте.",
+  "fallbacks": [
+    {
+      "id": "POS_GENERAL_PUBLIC",
+      "route": "public_only",
+      "review_mode": "positive",
+      "issue_codes": [],
+      "owner_approval_status": "approved_owner_decision",
+      "reply": "Здравствуйте. Спасибо за отзыв — рады, что стекло вам понравилось."
+    },
+    {
+      "id": "NEG_VAGUE_PUBLIC",
+      "route": "public_only",
+      "review_mode": "negative",
+      "issue_codes": [
+        "VAGUE_QUALITY",
+        "MEDIA_ONLY_UNCLEAR",
+        "OTHER_SPECIFIC"
+      ],
+      "owner_approval_status": "approved_owner_decision",
+      "reply": "Здравствуйте. Жаль, что товар вас разочаровал. В отзыве нет описания проблемы, поэтому по имеющимся данным невозможно определить, что именно произошло."
+    },
+    {
+      "id": "INSTALL_CHAT",
+      "route": "seller_chat",
+      "review_mode": "negative",
+      "issue_codes": [
+        "SERVICE_GUARANTEE",
+        "INSTALL_MECHANISM",
+        "INSTALL_BREAKAGE",
+        "ALIGNMENT",
+        "ADHESION",
+        "BUBBLES_DUST"
+      ],
+      "owner_approval_status": "approved_owner_decision",
+      "reply_template": "Здравствуйте. Жаль, что установка не дала ожидаемого результата. Напишите нам в чат с продавцом и укажите номер обращения {{case_code}}. Разберёмся в ситуации."
+    },
+    {
+      "id": "SELLER_REPLY_MISSED_CHAT",
+      "route": "seller_chat",
+      "review_mode": "negative",
+      "issue_codes": [
+        "OTHER_SPECIFIC"
+      ],
+      "issue_subtype": "seller_support_no_response",
+      "applicability": "Только если покупатель прямо сообщает, что уже обращался к продавцу или в его поддержку, но сообщение или обращение осталось без ответа.",
+      "owner_approval_status": "approved_owner_decision",
+      "reply_template": "Здравствуйте. Приносим извинения, что ваше обращение осталось без ответа — вероятно, при его обработке произошёл технический сбой. Напишите нам, пожалуйста, повторно в чат с продавцом и укажите номер обращения {{case_code}} — проверим переписку и разберёмся в ситуации."
+    },
+    {
+      "id": "PROMO_ACCESS_BLOCKED_CHAT",
+      "route": "seller_chat",
+      "review_mode": "mixed",
+      "issue_codes": [
+        "OTHER_SPECIFIC"
+      ],
+      "positive_signal_codes": [
+        "POS_QUALITY"
+      ],
+      "issue_subtype": "promo_access_blocked",
+      "risk_flags": [
+        "fraud"
+      ],
+      "applicability": "Покупатель положительно оценивает товар, но прямо сообщает, что доступ к розыгрышу или другому промо продавца был заблокирован.",
+      "owner_approval_status": "approved_owner_decision",
+      "reply_template": "Здравствуйте. Спасибо, что отметили качество стекла. Блокировка участника не предусмотрена условиями розыгрыша, поэтому, вероятно, при работе сервиса произошёл технический сбой. Напишите нам, пожалуйста, в чат с продавцом и укажите номер обращения {{case_code}} — проверим информацию по вкладышу и разберёмся в ситуации."
+    },
+    {
+      "id": "PRODUCT_RETURN",
+      "route": "wb_return",
+      "review_mode": "negative",
+      "issue_codes": [
+        "DEFECT_OUT_OF_BOX",
+        "MISSING_PARTS",
+        "KIT_QUALITY",
+        "WRONG_ITEM",
+        "OPENED_USED",
+        "DEVICE_DAMAGE_CLAIM",
+        "INJURY_CLAIM"
+      ],
+      "owner_approval_status": "approved_owner_decision",
+      "reply": "Здравствуйте. Жаль, что с товаром возникла такая ситуация. В этом случае правильнее оформить возврат через Wildberries и приложить фотографии товара и маркировки упаковки."
+    },
+    {
+      "id": "MATTE_ABSENT_RETURN",
+      "route": "wb_return",
+      "review_mode": "negative",
+      "issue_codes": [
+        "MATTE",
+        "DESCRIPTION_MISMATCH"
+      ],
+      "applicability": "Только если покупатель прямо сообщает, что матовый эффект полностью отсутствует и стекло выглядит прозрачным или глянцевым.",
+      "owner_approval_status": "approved_owner_decision",
+      "reply": "Здравствуйте. Жаль, что стекло не оправдало ожиданий. У матовой версии должно быть равномерное покрытие, которое уменьшает блики и делает изображение слегка зернистым. Если стекло выглядит полностью прозрачным, вероятно, на одном из этапов комплектации заказа произошла ошибка, и к вам поступило стекло из другой линейки. В таком случае правильнее будет оформить возврат через Wildberries и приложить фотографии стекла и маркировки упаковки."
+    },
+    {
+      "id": "WRONG_ITEM_COMPLETION_RETURN",
+      "route": "wb_return",
+      "review_mode": "negative",
+      "issue_codes": [
+        "WRONG_ITEM",
+        "DESCRIPTION_MISMATCH",
+        "SIZE_FIT"
+      ],
+      "applicability": "Только если покупатель прямо сообщает о другой модели, линейке или варианте либо стекло явно не совпало с формой заявленной модели.",
+      "owner_approval_status": "approved_owner_rule",
+      "reply": "Здравствуйте. Жаль, что полученный товар не совпал с заказанным. Вероятно, на одном из этапов комплектации заказа произошла ошибка, и к вам поступило стекло другой модели или линейки. В таком случае правильнее будет оформить возврат через Wildberries и приложить фотографии стекла и маркировки упаковки."
+    },
+    {
+      "id": "MIXED_RESOLVED_DELIVERY_PUBLIC",
+      "route": "public_only",
+      "review_mode": "mixed",
+      "issue_codes": [
+        "DELIVERY_DAMAGE"
+      ],
+      "applicability": "Только если покупатель прямо сообщает, что проблема при получении уже решена, положительно оценивает итог и не просит о новом действии.",
+      "owner_approval_status": "approved_owner_decision",
+      "reply": "Здравствуйте. Спасибо, что поделились опытом. Рады, что ситуацию с повреждённым при доставке стеклом удалось решить и новое стекло вам понравилось. Отдельное спасибо за доверие и повторный заказ."
+    },
+    {
+      "id": "MIXED_COMPLETED_DELIVERY_DELAY_PUBLIC",
+      "route": "public_only",
+      "review_mode": "mixed",
+      "issue_codes": [
+        "OTHER_SPECIFIC"
+      ],
+      "issue_subtype": "delivery_delay",
+      "applicability": "Только если заказ уже получен, покупатель сообщает о прошедшей задержке и не просит о новом действии.",
+      "owner_approval_status": "approved_owner_decision",
+      "reply": "Здравствуйте. Спасибо за подробный отзыв — рады, что вам понравились качество стекла, антишпион-эффект и удобство установки. Жаль, что заказ пришлось ждать дольше обещанного срока. Доставкой и её сроками управляет Wildberries, поэтому со стороны продавца повлиять на них, к сожалению, невозможно."
+    },
+    {
+      "id": "WB_SUPPORT_GENERIC",
+      "route": "wb_support",
+      "review_mode": "negative",
+      "issue_codes": [
+        "WB_REFUND_STATUS",
+        "DELIVERY_DAMAGE",
+        "LEGAL_OR_FRAUD_CLAIM"
+      ],
+      "owner_approval_status": "approved_owner_decision",
+      "reply": "Здравствуйте. Проверить этот вопрос можно только по данным конкретного заказа в системе Wildberries. Пожалуйста, откройте в личном кабинете раздел поддержки и создайте обращение по заказу, приложив скриншот статуса."
+    }
+  ]
+}

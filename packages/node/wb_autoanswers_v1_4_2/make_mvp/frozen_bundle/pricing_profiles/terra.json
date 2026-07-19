@@ -1,0 +1,14 @@
+{
+  "pricing_version": "2026-07-18",
+  "profile_id": "terra",
+  "model": "gpt-5.6-terra",
+  "provider": "OpenAI",
+  "api": "responses",
+  "service_tier": "standard",
+  "currency": "USD",
+  "unit_tokens": 1000000,
+  "rates": {"input_tokens": 2.5, "cached_input_tokens": 0.25, "cache_write_input_tokens": 3.125, "output_tokens": 15.0},
+  "cache_write_billing": "Cache writes are billed at 1.25x the uncached input token rate.",
+  "reasoning_tokens_billing": "Reasoning tokens are included in output_tokens and are not billed a second time.",
+  "source": {"title": "GPT-5.6 Terra Model", "url": "https://developers.openai.com/api/docs/models/gpt-5.6-terra", "verified_at": "2026-07-18"}
+}

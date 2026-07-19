@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://selleros.local/schemas/review_input.schema.json",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "1.0.0"
+      ]
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "review_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "review_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "rating": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "text": {
+          "type": "string"
+        },
+        "pros": {
+          "type": "string"
+        },
+        "cons": {
+          "type": "string"
+        },
+        "wb_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0,
+          "maxItems": 50
+        },
+        "normalized_text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "review_id",
+        "review_version",
+        "created_at",
+        "rating",
+        "text",
+        "pros",
+        "cons",
+        "wb_tags",
+        "normalized_text"
+      ],
+      "additionalProperties": false
+    },
+    "product": {
+      "type": "object",
+      "properties": {
+        "nm_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seller_article": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "product_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phone_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0,
+          "maxItems": 10
+        },
+        "line": {
+          "type": "string",
+          "enum": [
+            "transparent",
+            "matte",
+            "anti_spy",
+            "frameless",
+            "unknown"
+          ]
+        },
+        "context_status": {
+          "type": "string",
+          "enum": [
+            "known",
+            "partial",
+            "unknown",
+            "conflict"
+          ]
+        }
+      },
+      "required": [
+        "nm_id",
+        "seller_article",
+        "product_name",
+        "phone_models",
+        "line",
+        "context_status"
+      ],
+      "additionalProperties": false
+    },
+    "media": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "none",
+            "analyzed",
+            "fetch_failed",
+            "video_present_unprocessed",
+            "unclear"
+          ]
+        },
+        "photo_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "photos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "full_size_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mini_size_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fetch_status": {
+                "type": "string",
+                "enum": [
+                  "not_requested",
+                  "downloaded",
+                  "fetch_failed"
+                ]
+              },
+              "local_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "index",
+              "full_size_url",
+              "mini_size_url",
+              "fetch_status",
+              "local_ref"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 20
+        },
+        "video": {
+          "type": "object",
+          "properties": {
+            "present": {
+              "type": "boolean"
+            },
+            "source_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "processing_status": {
+              "type": "string",
+              "enum": [
+                "none",
+                "not_processed",
+                "frames_extracted",
+                "fetch_failed"
+              ]
+            },
+            "frame_refs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 0,
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "present",
+            "source_url",
+            "processing_status",
+            "frame_refs"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "status",
+        "photo_count",
+        "photos",
+        "video"
+      ],
+      "additionalProperties": false
+    },
+    "history": {
+      "type": "object",
+      "properties": {
+        "previous_review_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "previous_review_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "previous_public_reply": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "previous_review_version",
+        "previous_review_text",
+        "previous_public_reply"
+      ],
+      "additionalProperties": false
+    },
+    "prefilter": {
+      "type": "object",
+      "properties": {
+        "publication_action": {
+          "type": "string",
+          "enum": [
+            "reply",
+            "skip"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "process",
+            "empty_five_star"
+          ]
+        },
+        "model_calls_allowed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "publication_action",
+        "reason",
+        "model_calls_allowed"
+      ],
+      "additionalProperties": false
+    },
+    "operational": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "telegram",
+            "wb_api",
+            "test"
+          ]
+        },
+        "ingestion_id": {
+          "type": "string"
+        },
+        "received_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "ingestion_id",
+        "received_at"
+      ],
+      "additionalProperties": false
+    },
+    "versions": {
+      "type": "object",
+      "properties": {
+        "doctrine": {
+          "type": "string",
+          "enum": [
+            "1.0"
+          ]
+        },
+        "product_context": {
+          "type": "string"
+        },
+        "prompt_bundle": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "doctrine",
+        "product_context",
+        "prompt_bundle",
+        "model"
+      ],
+      "additionalProperties": false
+    },
+    "untrusted_content": {
+      "type": "boolean",
+      "enum": [
+        true
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "review",
+    "product",
+    "media",
+    "history",
+    "prefilter",
+    "operational",
+    "versions",
+    "untrusted_content"
+  ],
+  "additionalProperties": false,
+  "title": "Review input"
+}

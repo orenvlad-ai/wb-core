@@ -24,6 +24,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SETTINGS_UI_PATH,
     DEFAULT_SETTINGS_USERS_PATH,
     DEFAULT_SHEET_DAILY_REPORT_PATH,
+    DEFAULT_SHEET_FEEDBACKS_LOCAL_PATH,
     DEFAULT_SHEET_FEEDBACKS_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -165,6 +166,8 @@ def main() -> None:
                     "supply",
                     "reports",
                     "feedbacks",
+                    "feedbacks.ai_review",
+                    "feedbacks.autoanswers_admin",
                     "ads",
                     "prices",
                     "sku_management",
@@ -348,7 +351,7 @@ def main() -> None:
                     supply_password,
                     DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
                 )
-                if supply_code != 200 or '"allowed_tabs": ["factory-order"]' not in supply_shell:
+                if supply_code != 200 or '"allowed_tabs": ["factory-order", "warehouses"]' not in supply_shell:
                     raise AssertionError("supply_operator must load shell with only supply tab allowed")
                 supply_status_code, supply_status_payload = _opener_json(supply, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}")
                 if supply_status_code != 200:
@@ -365,6 +368,11 @@ def main() -> None:
                 forbidden_feedbacks_code, forbidden_feedbacks_payload = _opener_json(supply, f"{base_url}{DEFAULT_SHEET_FEEDBACKS_PATH}")
                 if forbidden_feedbacks_code != 403 or forbidden_feedbacks_payload.get("error") != "forbidden":
                     raise AssertionError("supply_operator must not access feedbacks API")
+                forbidden_local_code, forbidden_local_payload = _opener_json(
+                    supply, f"{base_url}{DEFAULT_SHEET_FEEDBACKS_LOCAL_PATH}"
+                )
+                if forbidden_local_code != 403 or forbidden_local_payload.get("error") != "forbidden":
+                    raise AssertionError("supply_operator must not access local autoanswers feedbacks API")
                 forbidden_research_code, forbidden_research_payload = _opener_json(
                     supply,
                     f"{base_url}{DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_OPTIONS_PATH}",

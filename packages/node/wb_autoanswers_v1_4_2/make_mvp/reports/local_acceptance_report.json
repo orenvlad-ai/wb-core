@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-07-19T10:47:45Z",
+  "result": "pass",
+  "evaluation_signature": "sha256:5f305d7eceba13e90b5b51f2a774b6ce71c24b9b2af07cc2637210f2e25b30da",
+  "baseline": {
+    "manifest": {"result": "pass", "sha256_hashes": 87},
+    "static_tests": {
+      "result": "pass",
+      "golden_cases": 230,
+      "independent_holdout_cases": 77,
+      "schemas": 11,
+      "prompt_roles": 4
+    },
+    "offline_holdout_rescore": {
+      "result": "pass",
+      "api_calls": 0,
+      "guarded_route_accuracy": 0.961038961038961,
+      "primary_issue_macro_accuracy": 0.9365079365079364,
+      "false_seller_chat_count": 0,
+      "hard_gates_exact": true
+    }
+  },
+  "make_mvp": {
+    "tests": 28,
+    "passed": 28,
+    "failed": 0,
+    "routes_checked": ["public_only", "seller_chat", "wb_return", "wb_support"],
+    "normal_path_role_calls": ["classifier", "writer", "validator"],
+    "skip_model_calls": 0,
+    "max_rewrites_checked": 2,
+    "max_pipeline_model_calls_checked": 7,
+    "approved_fallback_checked": "INSTALL_CHAT",
+    "idempotency_reuse_new_model_calls": 0,
+    "seller_chat_public_material_requests_allowed": 0,
+    "unknown_sku_specific_properties_allowed": 0,
+    "credential_values_found": 0,
+    "external_write_operations_executed": 0,
+    "new_live_evaluation_calls": 0,
+    "new_live_evaluation_cost_usd": 0
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://selleros.local/schemas/wb_autoanswers_node_boundary_v1.json",
+  "title": "WB autoanswers Python to Node request envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["boundary_version", "operation"],
+  "properties": {
+    "boundary_version": {"const": "wb_autoanswers_node_boundary_v1"},
+    "operation": {"enum": ["verify", "run"]},
+    "processing_key": {"type": "string", "minLength": 1},
+    "execution_mode": {"enum": ["fixture", "live"]},
+    "fixture_scenario": {"type": "string"},
+    "raw_input": {"type": "object"}
+  }
+}

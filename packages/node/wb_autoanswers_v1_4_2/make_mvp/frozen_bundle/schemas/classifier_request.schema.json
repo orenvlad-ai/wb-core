@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://selleros.local/schemas/classifier_request.schema.json",
+  "type": "object",
+  "properties": {
+    "request_schema_version": {"type": "string", "const": "1.0.0"},
+    "review_input": {"$ref": "https://selleros.local/schemas/review_input.schema.json"},
+    "taxonomy_context": {"$ref": "https://selleros.local/schemas/common_prompt_context.schema.json#/$defs/versioned_context"},
+    "issue_playbook": {"$ref": "https://selleros.local/schemas/common_prompt_context.schema.json#/$defs/versioned_context"},
+    "route_policy": {"$ref": "https://selleros.local/schemas/common_prompt_context.schema.json#/$defs/versioned_context"},
+    "product_context": {"$ref": "https://selleros.local/schemas/common_prompt_context.schema.json#/$defs/versioned_context"}
+  },
+  "required": ["request_schema_version", "review_input", "taxonomy_context", "issue_playbook", "route_policy", "product_context"],
+  "additionalProperties": false
+}

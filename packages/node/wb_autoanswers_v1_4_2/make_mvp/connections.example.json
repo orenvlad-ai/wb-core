@@ -1,0 +1,9 @@
+{
+  "required_connection_names": [
+    "telegram_bot_mvp",
+    "openai_responses_mvp"
+  ],
+  "required_environment_names": [
+    "OPENAI_API_KEY"
+  ]
+}

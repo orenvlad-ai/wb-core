@@ -1,0 +1,12 @@
+[Unit]
+Description=Run WB Core Autoanswers GET-Only Sync Every Five Minutes
+
+[Timer]
+OnActiveSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=15
+Persistent=true
+Unit=wb-core-autoanswers-readonly-sync.service
+
+[Install]
+WantedBy=timers.target

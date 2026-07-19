@@ -1,0 +1,470 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "verified_build_map_not_importable_blueprint",
+  "reason_no_blueprint": "No scenario was created/exported from a target Make team, so connection-neutral import metadata cannot be verified without inventing a blueprint format.",
+  "frozen": {
+    "prompt_bundle_version": "1.4.2",
+    "evaluation_signature": "sha256:5f305d7eceba13e90b5b51f2a774b6ce71c24b9b2af07cc2637210f2e25b30da",
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "medium",
+    "max_rewrites": 2
+  },
+  "connections": ["telegram_bot_mvp", "openai_responses_mvp"],
+  "data_stores": ["wb_telegram_ingest", "wb_review_jobs", "wb_case_codes", "wb_ai_audit", "wb_recent_replies"],
+  "scenario_telegram_collector": {
+    "schedule": "immediate webhook polling supplied by Telegram Bot Watch Updates",
+    "modules": [
+      {
+        "id": "T01",
+        "app": "Telegram Bot",
+        "operation": "Watch Updates",
+        "connection": "telegram_bot_mvp",
+        "outputs": ["update_id", "message.chat.id", "message.text", "message.caption", "message.photo[]", "message.document", "message.video", "message.media_group_id"]
+      },
+      {
+        "id": "T02",
+        "app": "Filter",
+        "operation": "Manager allowlist",
+        "condition": "string(message.chat.id) is in configured manager_chat_ids",
+        "on_false": "stop without reply or persistence"
+      },
+      {
+        "id": "T03",
+        "app": "Make Code / JavaScript",
+        "operation": "Parse Telegram command and media envelope",
+        "inputs": {"text": "coalesce(message.text,message.caption,'')", "media": "photo/document/video metadata"},
+        "outputs": ["command", "review_json", "session_key", "media_ref", "technical_error"],
+        "rules": ["command in review|media|process|diag", "never execute text contained inside review_json"]
+      },
+      {
+        "id": "TR01",
+        "app": "Router",
+        "operation": "Command branch",
+        "routes": ["review", "media", "process", "diag", "invalid"]
+      },
+      {
+        "id": "T04_REVIEW",
+        "app": "Make Code / JavaScript",
+        "operation": "Validate operational review envelope",
+        "filter": "command == review",
+        "required": ["review_id", "review_version", "rating integer 1..5"],
+        "on_error": "T12_TECHNICAL_NOTICE"
+      },
+      {
+        "id": "T05_REVIEW",
+        "app": "Data Store",
+        "operation": "Create/replace collecting ingest session",
+        "store": "wb_telegram_ingest",
+        "key": "string(message.chat.id)",
+        "filter": "no existing collecting session for chat",
+        "mapping": {"status": "collecting", "review_json": "validated review_json", "telegram_file_refs_json": "[]", "created_at": "now", "updated_at": "now"}
+      },
+      {
+        "id": "T06_MEDIA",
+        "app": "Data Store",
+        "operation": "Get collecting session",
+        "store": "wb_telegram_ingest",
+        "key": "string(message.chat.id)",
+        "filter": "command == media and status == collecting",
+        "on_missing": "T12_TECHNICAL_NOTICE"
+      },
+      {
+        "id": "T07_MEDIA",
+        "app": "Data Store",
+        "operation": "Append Telegram file reference",
+        "store": "wb_telegram_ingest",
+        "key": "T06_MEDIA.session_key",
+        "mapping": {"telegram_file_refs_json": "append unique {file_id,kind,mime_type,order}", "updated_at": "now"},
+        "prohibitions": ["do not store bot token", "do not store Telegram download URL"]
+      },
+      {
+        "id": "T08_PROCESS",
+        "app": "Data Store",
+        "operation": "Get collecting session",
+        "store": "wb_telegram_ingest",
+        "key": "string(message.chat.id)",
+        "filter": "command == process",
+        "on_missing": "T12_TECHNICAL_NOTICE"
+      },
+      {
+        "id": "T09_PROCESS",
+        "app": "Data Store",
+        "operation": "Atomically lock session for worker",
+        "store": "wb_telegram_ingest",
+        "key": "T08_PROCESS.session_key",
+        "precondition": "status == collecting",
+        "mapping": {"status": "locked", "locked_at": "now", "updated_at": "now"},
+        "duplicate_behavior": "if already locked/processed, stop; job idempotency handles any worker duplicate"
+      },
+      {
+        "id": "T10_DIAG",
+        "app": "Data Store",
+        "operation": "Search redacted audit by idempotency key",
+        "store": "wb_ai_audit",
+        "filter": "command == diag",
+        "outputs": ["redacted service JSON only"]
+      },
+      {
+        "id": "T11_DIAG_REPLY",
+        "app": "Telegram Bot",
+        "operation": "Send a Message",
+        "connection": "telegram_bot_mvp",
+        "filter": "command == diag",
+        "mapping": {"chat_id": "message.chat.id", "text": "redacted diagnostic JSON"}
+      },
+      {
+        "id": "T12_TECHNICAL_NOTICE",
+        "app": "Telegram Bot",
+        "operation": "Send a Message",
+        "connection": "telegram_bot_mvp",
+        "filter": "technical_error is not empty",
+        "mapping": {"chat_id": "message.chat.id", "text": "short operational error; never a buyer reply"}
+      }
+    ]
+  },
+  "scenario_scheduled_worker": {
+    "schedule": "every 1 minute; concurrency 1 for the MVP",
+    "variables": {
+      "prompt_bundle_version": "1.4.2",
+      "evaluation_signature": "sha256:5f305d7eceba13e90b5b51f2a774b6ce71c24b9b2af07cc2637210f2e25b30da",
+      "max_rewrites": 2,
+      "rewrite_count": 0
+    },
+    "modules": [
+      {
+        "id": "W01",
+        "app": "Data Store",
+        "operation": "Search locked ingest sessions",
+        "store": "wb_telegram_ingest",
+        "filter": "status == locked",
+        "limit": 1,
+        "sort": "locked_at ascending"
+      },
+      {
+        "id": "W02",
+        "app": "Data Store",
+        "operation": "Claim short worker lease",
+        "store": "wb_telegram_ingest",
+        "precondition": "status == locked and lease missing/expired",
+        "mapping": {"lease_owner": "scenario_execution_id", "lease_expires_at": "now+10m"}
+      },
+      {
+        "id": "W03",
+        "app": "Make Code / JavaScript",
+        "operation": "Verify frozen bundle identity",
+        "inputs": ["bundle_manifest.json", "frozen_bundle/prompt_manifest.json"],
+        "filter": "bundle_version == 1.4.2 and evaluation_signature exact and all artifact hashes match",
+        "on_false": "W40_TERMINAL"
+      },
+      {
+        "id": "W04",
+        "app": "Iterator",
+        "operation": "Iterate stored Telegram file refs",
+        "source": "parseJSON(W01.telegram_file_refs_json)"
+      },
+      {
+        "id": "W05",
+        "app": "Telegram Bot",
+        "operation": "Get/Download a File",
+        "connection": "telegram_bot_mvp",
+        "input": "W04.file_id",
+        "error_mapping": "record fetch_failed; never say media is absent"
+      },
+      {
+        "id": "W06",
+        "app": "Array Aggregator",
+        "operation": "Prepare media array",
+        "mapping": "photo => data URL + downloaded; failed photo => null + fetch_failed; video => present + not_processed",
+        "prohibitions": ["do not persist data URL", "do not log temporary download URL"]
+      },
+      {
+        "id": "W07",
+        "app": "Make Code / JavaScript",
+        "operation": "Normalize review",
+        "code_ref": "scripts/normalizer.mjs#normalizeTelegramInput",
+        "inputs": ["parseJSON(W01.review_json)", "W06.media", "frozen_bundle/contracts/product_context.json"],
+        "output": "review_input"
+      },
+      {
+        "id": "W08",
+        "app": "Make Code / JavaScript",
+        "operation": "Validate review input JSON Schema",
+        "code_ref": "scripts/schema_validation.mjs#assertContract(review_input.schema.json)",
+        "on_error": "W40_TERMINAL"
+      },
+      {
+        "id": "W09",
+        "app": "Make Code / JavaScript",
+        "operation": "Build idempotency key",
+        "code_ref": "scripts/idempotency.mjs#makeIdempotencyKey",
+        "mapping": "review_id + review_version + 1.4.2"
+      },
+      {
+        "id": "W10",
+        "app": "Data Store",
+        "operation": "Get job",
+        "store": "wb_review_jobs",
+        "key": "W09.idempotency_key"
+      },
+      {
+        "id": "WR_IDEMPOTENCY",
+        "app": "Router",
+        "operation": "Reuse or start",
+        "routes": [
+          {"name": "reuse", "filter": "W10.outcome in [ready,fallback,skipped] or W10.state == delivered_to_telegram", "next": "W38_TELEGRAM"},
+          {"name": "new_or_retry", "filter": "no reusable job and no live lease", "next": "W11"}
+        ]
+      },
+      {
+        "id": "W11",
+        "app": "Data Store",
+        "operation": "Upsert received/normalized job",
+        "store": "wb_review_jobs",
+        "key": "W09.idempotency_key",
+        "mapping": {"state": "normalized", "model_call_count": 0, "rewrite_count": 0, "estimated_cost_usd": 0, "normalized_input_json_redacted": "sanitizeForAudit(review_input)"}
+      },
+      {
+        "id": "W12",
+        "app": "Router",
+        "operation": "Prefilter",
+        "routes": [
+          {"name": "skip", "filter": "review_input.prefilter.model_calls_allowed == false", "next": "W13_SKIP"},
+          {"name": "model", "filter": "review_input.prefilter.model_calls_allowed == true", "next": "W15_CLASSIFIER_PAYLOAD"}
+        ]
+      },
+      {
+        "id": "W13_SKIP",
+        "app": "Data Store",
+        "operation": "Persist skipped result and audit",
+        "store": "wb_review_jobs + wb_ai_audit",
+        "mapping": {"state": "skipped", "outcome": "skipped", "model_call_count": 0, "manager_message": "empty five-star skip notice"},
+        "next": "W38_TELEGRAM"
+      },
+      {
+        "id": "W15_CLASSIFIER_PAYLOAD",
+        "app": "Make Code / JavaScript",
+        "operation": "Build and validate classifier request/body",
+        "code_ref": "frozen_bundle/tools/build_context.mjs#buildClassifierRequest + scripts/payload_builder.mjs#buildResponsesPayload",
+        "template_ref": "payloads/classifier.responses.template.json",
+        "invariant": "all dynamic text and all input_image items occur after cache breakpoint"
+      },
+      {
+        "id": "W16_CLASSIFIER_HTTP",
+        "app": "HTTP",
+        "operation": "POST /v1/responses",
+        "connection": "openai_responses_mvp",
+        "body": "W15 exact JSON body",
+        "headers": {"Content-Type": "application/json", "Authorization": "injected by connection; never mapped/logged"},
+        "retry_policy": "429/5xx/timeout exponential backoff with jitter, max 5 transport retries, same job lease"
+      },
+      {
+        "id": "W17_CLASSIFIER_SCHEMA",
+        "app": "Make Code / JavaScript",
+        "operation": "Parse and validate classifier output",
+        "code_ref": "scripts/schema_validation.mjs#assertRoleOutput(classifier)",
+        "schema_retry": "one repeat of classifier only; then W40_TERMINAL"
+      },
+      {
+        "id": "W18_ROUTE_GUARD",
+        "app": "Make Code / JavaScript",
+        "operation": "Apply frozen route guard and invariants",
+        "code_ref": "scripts/route_guard.mjs",
+        "outputs": ["classification", "guard_events", "final_route"],
+        "persist_state": "guarded"
+      },
+      {
+        "id": "W19_CASE_CODE",
+        "app": "Make Code + Data Store",
+        "operation": "Allocate/reuse deterministic case code",
+        "code_ref": "scripts/case_code.mjs#allocateCaseCode",
+        "store": "wb_case_codes",
+        "filter": "final_route == seller_chat",
+        "else": "case_code = null",
+        "constraints": ["unique active case_code", "unique idempotency_key"]
+      },
+      {
+        "id": "W20_WRITER_PAYLOAD",
+        "app": "Make Code / JavaScript",
+        "operation": "Build and validate writer request/body",
+        "code_ref": "frozen_bundle/tools/build_context.mjs#buildWriterRequest + scripts/payload_builder.mjs#buildResponsesPayload",
+        "template_ref": "payloads/writer.responses.template.json",
+        "locked_inputs": ["classification", "final_route", "case_code"]
+      },
+      {
+        "id": "W21_WRITER_HTTP",
+        "app": "HTTP",
+        "operation": "POST /v1/responses",
+        "connection": "openai_responses_mvp",
+        "body": "W20 exact JSON body",
+        "retry_policy": "same as W16"
+      },
+      {
+        "id": "W22_WRITER_SCHEMA",
+        "app": "Make Code / JavaScript",
+        "operation": "Validate writer output; set state drafted",
+        "code_ref": "scripts/schema_validation.mjs#assertRoleOutput(writer)",
+        "schema_retry": "one repeat of writer only; then W40_TERMINAL"
+      },
+      {
+        "id": "W23_VALIDATOR_PAYLOAD",
+        "app": "Make Code / JavaScript",
+        "operation": "Build validator request/body for current draft",
+        "code_ref": "frozen_bundle/tools/build_context.mjs#buildValidatorRequest + scripts/payload_builder.mjs#buildResponsesPayload",
+        "template_ref": "payloads/validator.responses.template.json",
+        "mapping": {"attempt_number": "rewrite_count", "max_rewrites": 2}
+      },
+      {
+        "id": "W24_VALIDATOR_HTTP",
+        "app": "HTTP",
+        "operation": "POST /v1/responses",
+        "connection": "openai_responses_mvp",
+        "body": "W23 exact JSON body",
+        "retry_policy": "same as W16"
+      },
+      {
+        "id": "W25_VALIDATOR_AND_DRAFT_GUARD",
+        "app": "Make Code / JavaScript",
+        "operation": "Validate validator output and run deterministic draft guard",
+        "code_ref": "scripts/schema_validation.mjs#assertRoleOutput(validator) + scripts/draft_guard.mjs#runDraftGuard",
+        "effective_status": "pass only when validator.status == pass and deterministic_errors is empty",
+        "persist_state": "validated"
+      },
+      {
+        "id": "WR_VALIDATION",
+        "app": "Router",
+        "operation": "Pass, rewrite, or fallback",
+        "routes": [
+          {"name": "pass", "filter": "effective_status == pass", "next": "W32_FINAL_GUARD"},
+          {"name": "rewrite", "filter": "effective_status != pass and rewrite_count < 2", "next": "W26_REWRITE_COUNTER"},
+          {"name": "fallback", "filter": "effective_status != pass and rewrite_count == 2", "next": "W30_FALLBACK"}
+        ]
+      },
+      {
+        "id": "W26_REWRITE_COUNTER",
+        "app": "Tools",
+        "operation": "Increment rewrite counter and state",
+        "mapping": {"rewrite_count": "rewrite_count + 1", "state": "rewrite_{rewrite_count}"},
+        "guard": "rewrite_count must be 1 or 2"
+      },
+      {
+        "id": "W27_REWRITE_PAYLOAD",
+        "app": "Make Code / JavaScript",
+        "operation": "Build and validate rewrite request/body",
+        "code_ref": "frozen_bundle/tools/build_context.mjs#buildRewriteRequest + scripts/payload_builder.mjs#buildResponsesPayload",
+        "template_ref": "payloads/rewrite.responses.template.json",
+        "locked_inputs": ["classification", "final_route", "case_code"],
+        "cache": "no breakpoint and no prompt_cache_key"
+      },
+      {
+        "id": "W28_REWRITE_HTTP",
+        "app": "HTTP",
+        "operation": "POST /v1/responses",
+        "connection": "openai_responses_mvp",
+        "body": "W27 exact JSON body",
+        "retry_policy": "same as W16"
+      },
+      {
+        "id": "W29_REWRITE_SCHEMA_LOOP",
+        "app": "Make Code / JavaScript",
+        "operation": "Validate rewrite draft and loop to W23",
+        "code_ref": "scripts/schema_validation.mjs#assertRoleOutput(rewrite)",
+        "invariant": "draft.route/case_code/CTA must match locked inputs",
+        "next": "W23_VALIDATOR_PAYLOAD"
+      },
+      {
+        "id": "W30_FALLBACK",
+        "app": "Make Code / JavaScript",
+        "operation": "Select approved same-route fallback",
+        "code_ref": "scripts/fallback.mjs#selectApprovedFallback",
+        "source": "frozen_bundle/contracts/route_fallbacks.json",
+        "precondition": "rewrite_count == 2",
+        "on_no_match": "W40_TERMINAL"
+      },
+      {
+        "id": "W31_FALLBACK_GUARD",
+        "app": "Make Code / JavaScript",
+        "operation": "Validate fallback writer schema and deterministic guard",
+        "code_ref": "scripts/schema_validation.mjs + scripts/draft_guard.mjs",
+        "on_error": "W40_TERMINAL",
+        "persist_state": "fallback_ready"
+      },
+      {
+        "id": "W32_FINAL_GUARD",
+        "app": "Make Code / JavaScript",
+        "operation": "Final immutable-route draft guard and pipeline schema",
+        "code_ref": "scripts/draft_guard.mjs + scripts/schema_validation.mjs#assertContract(pipeline_result.schema.json)",
+        "seller_chat_exact": ["one case code", "requested_materials empty", "no public evidence request"],
+        "on_error": "if rewrite_count < 2 then W26 else W30"
+      },
+      {
+        "id": "W33_USAGE_COST",
+        "app": "Make Code / JavaScript",
+        "operation": "Aggregate usage and cost",
+        "code_ref": "scripts/cost_accounting.mjs#calculateJobCost",
+        "source": "all role response usage objects + frozen Terra pricing"
+      },
+      {
+        "id": "W34_AUDIT",
+        "app": "Data Store",
+        "operation": "Append all redacted audit events",
+        "store": "wb_ai_audit",
+        "code_ref": "scripts/audit.mjs#sanitizeForAudit",
+        "mapping": "state history, role inputs/outputs, response ids, guards, usage, cost, latency, errors, final reply"
+      },
+      {
+        "id": "W35_RECENT_REPLY",
+        "app": "Data Store",
+        "operation": "Insert recent reply",
+        "store": "wb_recent_replies",
+        "filter": "publication_action == reply",
+        "mapping": "route, primary_issue, reply, sha256(reply), created_at"
+      },
+      {
+        "id": "W36_READY_JOB",
+        "app": "Data Store",
+        "operation": "Persist final job before delivery",
+        "store": "wb_review_jobs",
+        "mapping": {"state": "ready or fallback_ready", "outcome": "ready or fallback", "pipeline_result_json": "strict result", "manager_message": "final_reply", "model_call_count": "trace call count", "rewrite_count": "0..2", "estimated_cost_usd": "W33"}
+      },
+      {
+        "id": "W37_MARK_INGEST",
+        "app": "Data Store",
+        "operation": "Mark ingest processed",
+        "store": "wb_telegram_ingest",
+        "mapping": {"status": "processed", "updated_at": "now"}
+      },
+      {
+        "id": "W38_TELEGRAM",
+        "app": "Telegram Bot",
+        "operation": "Send a Message",
+        "connection": "telegram_bot_mvp",
+        "mapping": {"chat_id": "job.telegram_chat_id", "text": "saved manager_message only"},
+        "prohibitions": ["no service JSON on default path", "no WB call", "delivery retry must reuse saved message"]
+      },
+      {
+        "id": "W39_DELIVERED",
+        "app": "Data Store",
+        "operation": "Mark delivery",
+        "store": "wb_review_jobs",
+        "mapping": {"state": "delivered_to_telegram", "delivered_at": "now"}
+      },
+      {
+        "id": "W40_TERMINAL",
+        "app": "Data Store + Telegram Bot",
+        "operation": "Persist redacted terminal technical failure and notify manager",
+        "stores": ["wb_review_jobs", "wb_ai_audit"],
+        "mapping": {"state": "technical_failed_terminal", "outcome": "terminal_error", "error": "redacted"},
+        "telegram_text": "short technical notice; never send it as a buyer response"
+      }
+    ]
+  },
+  "hard_prohibitions": [
+    "No Wildberries module or WB connection",
+    "No customer publication",
+    "No prompt/contract/policy mutation",
+    "No case code outside seller_chat",
+    "No seller_chat public evidence request",
+    "No more than two rewrite calls",
+    "No credentials in variables, exports, logs, data stores, or ZIP"
+  ]
+}

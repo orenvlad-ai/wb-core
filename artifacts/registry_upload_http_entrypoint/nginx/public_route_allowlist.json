@@ -97,6 +97,48 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_feedbacks_local",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/local",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_detail",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/detail",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_autoanswers_settings",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings",
+      "methods": ["GET", "POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_autoanswers_sync_now",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/sync-now",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_autoanswers_backlog_preview",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/backlog/preview",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_autoanswers_backlog_enqueue",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/backlog/enqueue",
+      "methods": ["POST"]
+    },
+    {
+      "name": "sheet_vitrina_feedbacks_autoanswers_review_approve",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/autoanswers/review/approve",
+      "methods": ["POST"]
+    },
+    {
       "name": "sheet_vitrina_feedbacks_export",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/feedbacks/export.xlsx",
