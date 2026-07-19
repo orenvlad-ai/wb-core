@@ -113,6 +113,8 @@ ROLLBACK_TARGET_WRITE_OVERRIDE_ENV = "WB_CORE_ALLOW_ROLLBACK_TARGET_WRITE"
 ROLLBACK_TARGET_WRITE_OVERRIDE_VALUE = "I_UNDERSTAND_SELLEROS_IS_ROLLBACK_ONLY"
 CURRENT_LIVE_TARGET_FILE_HINT = "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
 ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION = "wb-core-eu-root"
+ACTIVE_HOSTED_RUNTIME_TARGET_ID = "wb_core_eu_hosted_runtime_active"
+ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE = "/opt/wb-ai/.env"
 ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS = {"89.191.226.88", "api.selleros.pro"}
 CURRENT_LIVE_PUBLIC_BASE_URL = "https://api.selleros.pro"
 CURRENT_LIVE_REQUIRED_SERVER_NAMES = ("89.191.226.88", "api.selleros.pro")
@@ -859,6 +861,7 @@ def deploy_current_checkout(
     seller_owner_contract_command = _build_seller_portal_owner_runtime_contract_command(target)
     seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
     systemd_commands = _build_managed_systemd_commands(target)
+    auth_env_preflight_command = _build_auth_env_preflight_command(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
     status_command = (
         _remote_shell_command(
@@ -891,11 +894,14 @@ def deploy_current_checkout(
             "systemd_restart": systemd_commands["restart"],
             "nginx_public_routes_update": nginx_public_routes_command,
             "status": status_command,
+            "auth_env_preflight": auth_env_preflight_command,
         },
     }
     if dry_run:
         return summary
 
+    # Never let a deploy/restart proceed against a missing hosted auth contour.
+    _run_command(auth_env_preflight_command)
     _run_command(mkdir_command)
     _run_command(rsync_plan)
     _run_command(chown_target_dir_command)
@@ -919,7 +925,24 @@ def deploy_current_checkout(
         _run_command(systemd_commands["restart"])
     if status_command:
         _run_command(status_command)
+    # Read back the same contract after all managed-unit operations.
+    _run_command(auth_env_preflight_command)
     return summary
+
+
+def _build_auth_env_preflight_command(target: HostedRuntimeTarget) -> list[str]:
+    """Fail closed on missing required WebCore auth env keys without exposing values."""
+
+    if not target.environment_file:
+        raise ValueError("deploy target is missing environment_file for auth preflight")
+    env_file = shlex.quote(target.environment_file)
+    script = (
+        "set -eu; f=" + env_file + "; test -r \"$f\" || { echo 'missing environment file'; exit 78; }; "
+        "for k in WB_CORE_WEB_AUTH_USERNAME WB_CORE_WEB_AUTH_PASSWORD_HASH WB_CORE_WEB_AUTH_SESSION_SECRET; do "
+        "grep -Eq \"^${k}=[^[:space:]]+\" \"$f\" || { echo \"missing required auth variable: ${k}\"; exit 78; }; "
+        "done"
+    )
+    return _remote_shell_command(target, script)
 
 
 def _build_deploy_metadata_command(target: HostedRuntimeTarget) -> list[str]:
@@ -2387,6 +2410,7 @@ def _build_probe_auth_cookie(target: HostedRuntimeTarget, *, timeout_seconds: fl
     """Build an app-session cookie for auth-protected health probes without logging secrets."""
 
     timeout_seconds = _validate_probe_timeout_seconds(timeout_seconds)
+    _validate_production_target_identity(target, action="auth-cookie")
     if not target.environment_file:
         return None
     if target.ssh_destination:
@@ -3927,7 +3951,38 @@ def _ensure_target_allows_mutation(target: HostedRuntimeTarget, *, action: str, 
             _warn_rollback_target_write_override(target, action=action)
             return
         raise ValueError(_rollback_only_target_mutation_error(target, action=action))
+    _validate_production_target_identity(target, action=action)
     _ensure_active_hosted_runtime_target(target, action=action)
+
+
+def _validate_production_target_identity(target: HostedRuntimeTarget, *, action: str) -> None:
+    """Validate the canonical Europe identity before any production-side action."""
+
+    production_contour = (
+        _is_current_live_target(target)
+        or _public_base_url_host(target.public_base_url) in ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS
+        or str(target.ssh_destination).strip() in {ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION, "selleros-root"}
+    )
+    if not production_contour:
+        return
+    blockers: list[str] = []
+    if target.target_id != ACTIVE_HOSTED_RUNTIME_TARGET_ID:
+        blockers.append(f"target_id must be {ACTIVE_HOSTED_RUNTIME_TARGET_ID}, got {target.target_id or '<missing>'}")
+    if str(target.target_status).strip().lower() != ACTIVE_TARGET_STATUS:
+        blockers.append(f"target_status must be {ACTIVE_TARGET_STATUS}, got {target.target_status or '<missing>'}")
+    if str(target.target_role).strip().lower() != PRIMARY_LIVE_TARGET_ROLE:
+        blockers.append(f"target_role must be {PRIMARY_LIVE_TARGET_ROLE}, got {target.target_role or '<missing>'}")
+    if str(target.target_lifecycle).strip().lower() != CURRENT_LIVE_TARGET_LIFECYCLE:
+        blockers.append(f"target_lifecycle must be {CURRENT_LIVE_TARGET_LIFECYCLE}, got {target.target_lifecycle or '<missing>'}")
+    if target.ssh_destination != ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION:
+        blockers.append(f"ssh_destination must be {ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION}, got {target.ssh_destination or '<missing>'}")
+    env_file = str(target.environment_file or "").strip()
+    if not env_file or env_file == "__SET_ME__" or "placeholder" in env_file.lower() or "template" in env_file.lower():
+        blockers.append("environment_file is empty or placeholder")
+    elif env_file != ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE:
+        blockers.append(f"environment_file must be {ACTIVE_HOSTED_RUNTIME_ENVIRONMENT_FILE}, got {env_file}")
+    if blockers:
+        raise ValueError(f"{action} refused: non-canonical production target identity: {'; '.join(blockers)}")
 
 
 def _describe_target_mutation_guard(target: HostedRuntimeTarget) -> dict[str, Any]:
