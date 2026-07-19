@@ -6,6 +6,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from decimal import Decimal
 import copy
+import json
 import os
 from pathlib import Path
 import socket
@@ -90,6 +91,7 @@ def main() -> None:
                     ),
                 )
                 _assert_route_explicit_settings_frame(f"http://127.0.0.1:{config.port}")
+                _assert_supplier_registry_stage_cost_frame(f"http://127.0.0.1:{config.port}")
                 _assert(result.get("status") == "ok", "browser flow status")
                 legacy_ff = result.get("legacy_ff_reconciliation") or {}
                 ff_evidence = next(
@@ -131,6 +133,75 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
             surface = page.frame_locator("[data-settings-embed-frame]")
             surface.locator('[data-settings-group-button="user-directory"]').wait_for()
             _assert("embedded=1" in str(frame.get_attribute("src") or ""), "settings iframe source")
+        finally:
+            browser.close()
+
+
+def _assert_supplier_registry_stage_cost_frame(base_url: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    payload = {
+        "status": "ready",
+        "columns": [
+            {
+                "shipment_id": "shipment-browser-fixture",
+                "title": "Invoice browser fixture",
+                "subtitle": "2026-07-01",
+                "order_status": "production",
+                "order_status_display": "На производстве",
+            }
+        ],
+        "sections": [
+            {
+                "section_id": "cargo_value",
+                "title": "Стоимость товара",
+                "rows": [
+                    {
+                        "row_id": "production_average_cost_rub",
+                        "label": "Средняя себестоимость: на производстве",
+                        "cells": {
+                            "shipment-browser-fixture": {
+                                "value": "100",
+                                "display": "100 ₽",
+                                "status": "complete",
+                            }
+                        },
+                    },
+                    {
+                        "row_id": "china_to_ff_average_cost_rub",
+                        "label": "Средняя себестоимость: Китай → FF",
+                        "cells": {
+                            "shipment-browser-fixture": {
+                                "value": None,
+                                "display": "—",
+                            }
+                        },
+                    },
+                ],
+            }
+        ],
+        "warnings": [],
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route(
+                "**/v1/sheet-vitrina-v1/supply/supplier-shipments/registry",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            page.goto(
+                f"{base_url}/sheet-vitrina-v1/vitrina?tab=factory-order",
+                wait_until="domcontentloaded",
+            )
+            surface = page.frame_locator('[data-operator-embed-frame="factory-order"]')
+            surface.locator('[data-supply-mode-button="shipment-registry"]').click()
+            surface.get_by_text("Средняя себестоимость: на производстве", exact=True).wait_for()
+            surface.get_by_text("Средняя себестоимость: Китай → FF", exact=True).wait_for()
         finally:
             browser.close()
 

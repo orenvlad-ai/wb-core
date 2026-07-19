@@ -462,13 +462,33 @@ def run_warehouse_ui_flow(
             "screenshot": str(settings_screenshot),
         }
 
-        supplier_url = normalized_base_url + "/sheet-vitrina-v1/supplier"
-        supplier_response = page.goto(supplier_url, wait_until="domcontentloaded", timeout=120_000)
-        _assert(supplier_response is not None and supplier_response.status == 200, "supplier registry page status")
-        page.wait_for_function(
-            "document.body.innerText.includes('Средняя себестоимость: на производстве') && document.body.innerText.includes('Средняя себестоимость: Китай → FF')",
-            timeout=60_000,
+        supplier_registry_url = normalized_base_url + "/sheet-vitrina-v1/vitrina?tab=factory-order"
+        supplier_registry_response = page.goto(
+            supplier_registry_url,
+            wait_until="domcontentloaded",
+            timeout=120_000,
         )
+        _assert(
+            supplier_registry_response is not None and supplier_registry_response.status == 200,
+            "supplier registry shell status",
+        )
+        supplier_operator = page.frame_locator('[data-operator-embed-frame="factory-order"]')
+        supplier_operator.locator('[data-supply-mode-button="shipment-registry"]').click()
+        supplier_operator.locator(
+            '[data-supply-mode-panel="shipment-registry"]:not([hidden])'
+        ).wait_for(timeout=60_000)
+        supplier_operator.get_by_text("Средняя себестоимость: на производстве", exact=True).wait_for(
+            timeout=60_000
+        )
+        supplier_operator.get_by_text("Средняя себестоимость: Китай → FF", exact=True).wait_for(
+            timeout=60_000
+        )
+        supplier_registry_embedded_url = supplier_operator.locator("body").evaluate(
+            "element => element.ownerDocument.location.href"
+        )
+        supplier_registry_screenshot = evidence_dir / "supplier_registry_stage_costs.png"
+        page.screenshot(path=str(supplier_registry_screenshot), full_page=True)
+        screenshots.append(str(supplier_registry_screenshot))
         registry_api = context.request.get(
             normalized_base_url + "/v1/sheet-vitrina-v1/supply/supplier-shipments/registry",
             headers={"Accept": "application/json"},
@@ -520,6 +540,7 @@ def run_warehouse_ui_flow(
             all(Decimal(str(item.get("amount_rub") or 0)) > 0 for item in bank_fee_lines),
             "supplier bank fee RUB equivalents",
         )
+        supplier_url = normalized_base_url + "/sheet-vitrina-v1/supplier"
         supplier_detail_url = supplier_url + "?shipment_id=" + quote(bank_fee_shipment_id, safe="") + "&tab=documents"
         supplier_detail_response = page.goto(supplier_detail_url, wait_until="domcontentloaded", timeout=120_000)
         _assert(supplier_detail_response is not None and supplier_detail_response.status == 200, "supplier fee detail page status")
@@ -559,6 +580,8 @@ def run_warehouse_ui_flow(
         screenshots.append(str(supplier_screenshot))
         supplier_evidence = {
             "url": page.url,
+            "registry_url": supplier_registry_url,
+            "registry_embedded_url": supplier_registry_embedded_url,
             "registry_status": registry_payload.get("status"),
             "production_cost_field": True,
             "china_to_ff_cost_field": True,
@@ -568,6 +591,7 @@ def run_warehouse_ui_flow(
             "bank_fee_line_count": len(bank_fee_lines),
             "bank_fee_currencies": sorted({str(item.get("currency") or "") for item in bank_fee_lines}),
             "bank_fee_sources": sorted({str((item.get("raw") or {}).get("source") or "") for item in bank_fee_lines}),
+            "registry_screenshot": str(supplier_registry_screenshot),
             "screenshot": str(supplier_screenshot),
         }
 
