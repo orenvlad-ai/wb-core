@@ -108,6 +108,12 @@ jobs:
           printf 'Host %s\n  HostName %s\n  User root\n  IdentityFile %s\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile %s\n' \
             "$target_alias" "$target_host" "$key_file" "$known_hosts_file" > "$config_file"
 
+      - name: Install reconciliation runner dependencies
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
+          pypdf==6.4.1 reportlab==4.4.5
+
       - name: Reconcile bounded exact-SHA evidence
         run: >-
           python3 apps/hosted_runtime_transport_reconcile.py

@@ -58,7 +58,11 @@ class ReconcileEvidence:
             and self.unit == "active"
             and self.main_pid > 0
             and bool(self.probe_statuses)
-            and all(status in {200, 401, 403} for status in self.probe_statuses)
+            # Authenticated JSON routes reject unauthenticated loopback probes
+            # with 401/403, while protected HTML routes use the canonical 303
+            # redirect to the login form.  All four responses prove that the
+            # exact application process is serving the expected auth boundary.
+            and all(status in {200, 303, 401, 403} for status in self.probe_statuses)
         )
 
 
