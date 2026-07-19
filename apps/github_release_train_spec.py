@@ -14,6 +14,15 @@ class TaskClass(str, Enum):
     DIAGNOSTIC = "diagnostic"
 
 
+class TaskContinuity(str, Enum):
+    """Identity relationship between a prompt and an already known task."""
+
+    NEW_TASK = "NEW_TASK"
+    ACTIVE_ADDITION = "ACTIVE_ADDITION"
+    ACTIVE_LOOP_RECOVERY = "ACTIVE_LOOP_RECOVERY"
+    TERMINAL_STALE_REFERENCE = "TERMINAL_STALE_REFERENCE"
+
+
 EXPLICIT_TASK_PROMPTS = {
     "КЛАСС ЗАДАЧИ: СТАНДАРТ": TaskClass.STANDARD,
     "КЛАСС ЗАДАЧИ: LOOP": TaskClass.LOOP,
@@ -43,6 +52,7 @@ ACTIVE_PRIMARY_LABELS = frozenset(
 )
 OVERLAY_LABELS = frozenset({NEEDS_RESUME_LABEL})
 TERMINAL_LABELS = frozenset({DONE_LABEL, PRODUCTION_LABEL, SUPERSEDED_LABEL})
+ACTIVE_STATE_LABELS = ACTIVE_PRIMARY_LABELS | OVERLAY_LABELS
 RESUMABLE_OWNER_LABELS = frozenset(
     {READY_LABEL, RUNNING_LABEL, AWAITING_AGENT_LABEL, AWAITING_UI_LABEL}
 )
@@ -109,7 +119,35 @@ RECONCILE_PROOF_MARKER = "wb-core-release-reconcile-proof"
 COMPLETION_PROOF_MARKER = "wb-core-release-completion-proof"
 HALT_PROOF_MARKER = "wb-core-release-halt-proof"
 RETRY_PROOF_MARKER = "wb-core-release-retry-proof"
+NEW_ROOT_PROOF_MARKER = "wb-core-loop-new-root-proof"
+RECOVERY_PROOF_MARKER = "wb-core-loop-recovery-proof"
+CLASSIFICATION_BLOCKER_MARKER = "wb-core-loop-classification-blocker"
+IDENTITY_CORRECTION_PROOF_MARKER = "wb-core-loop-identity-correction-proof"
 CANONICAL_PRODUCTION_TARGET_ID = "wb_core_eu_hosted_runtime_active"
+
+TERMINAL_FORBIDDEN_INHERITANCE = frozenset(
+    {
+        "branch",
+        "pr",
+        "task_identity",
+        "loop_root",
+        "acknowledgement",
+        "owner_heartbeat",
+        "recovery_identity",
+    }
+)
+
+EXPLICIT_NEW_TASK_PHRASES = frozenset(
+    {
+        "новая задача",
+        "отдельная задача",
+        "самостоятельная задача",
+        "новый loop",
+        "новая loop-задача",
+        "отдельная loop-задача",
+        "самостоятельная loop-задача",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +157,49 @@ class TaskIntent:
     production_ui: bool = False
     iterative: bool = False
     ambiguous: bool = False
+
+
+@dataclass(frozen=True)
+class ContinuityIntent:
+    """Evidence used independently from task-class selection."""
+
+    prompt: str = ""
+    explicit_addition: bool = False
+    explicit_recovery: bool = False
+    referenced_release_state: str = ""
+    defect_found_during_active_ui: bool = False
+    same_chat: bool = False
+    same_functional_area: bool = False
+
+
+def explicitly_requests_new_task(prompt: str) -> bool:
+    normalized = " ".join(prompt.casefold().replace("ё", "е").split())
+    return any(phrase in normalized for phrase in EXPLICIT_NEW_TASK_PHRASES)
+
+
+def classify_continuity(
+    intent: ContinuityIntent,
+    *,
+    task_class: TaskClass | None = None,
+) -> TaskContinuity:
+    """Classify identity continuity; ambiguity and terminal additions start fresh."""
+
+    state = intent.referenced_release_state
+    if explicitly_requests_new_task(intent.prompt):
+        return TaskContinuity.NEW_TASK
+    if intent.explicit_recovery:
+        if state in TERMINAL_LABELS:
+            return TaskContinuity.TERMINAL_STALE_REFERENCE
+        if (
+            task_class == TaskClass.LOOP
+            and state == AWAITING_UI_LABEL
+            and intent.defect_found_during_active_ui
+        ):
+            return TaskContinuity.ACTIVE_LOOP_RECOVERY
+        return TaskContinuity.NEW_TASK
+    if intent.explicit_addition and state in ACTIVE_STATE_LABELS:
+        return TaskContinuity.ACTIVE_ADDITION
+    return TaskContinuity.NEW_TASK
 
 
 def explicit_task_class(prompt: str) -> TaskClass | None:

@@ -11,7 +11,9 @@ GitHub Release Train — repo-owned сериализованная очеред�
 
 `task:loop` совместим только с `scope:live-runtime`. Диагностические задачи строго read-only и в Release Train не входят.
 
-Дополнение к уже начатой задаче или существующему PR наследует её task class и продолжает текущую branch/PR: отдельная задача и новый PR не создаются, дополнение не меняет класс молча. Изменить класс и соответствующую `task:*` label можно только по прямому указанию пользователя.
+Task class и task continuity независимы. `TaskContinuity` в `apps/github_release_train_spec.py` различает `NEW_TASK`, `ACTIVE_ADDITION`, `ACTIVE_LOOP_RECOVERY`, `TERMINAL_STALE_REFERENCE`. Только явное дополнение к active task наследует её branch/PR; только defect текущего незавершённого UI acceptance может стать same-root recovery.
+
+Одинаковый чат, экран или функциональная область continuity не доказывают. Фразы «новая/отдельная/самостоятельная задача» и «новый LOOP» принудительно создают новую identity; неоднозначность также даёт `NEW_TASK`. После `release:done`, `release:production` или `release:superseded` запрещено наследовать branch, PR, task identity, LOOP root, acknowledgement, owner heartbeat и recovery identity. Новый дефект после terminal closure всегда получает новый PR/root.
 
 ## Repo-Owned Артефакты
 
@@ -33,6 +35,8 @@ Queue eligibility требует одновременно:
 - ровно одну известную `scope:*` label;
 - отсутствие `release:blocked`, `release:halted` и `release:superseded`.
 
+LOOP дополнительно требует exact-head repo-owned registration proof. Один `loop:root-*` или `release:ready`, добавленный вручную, eligibility не доказывает.
+
 Основные state labels:
 
 - `release:ready` — task owner закончил pre-release proof и явно поставил PR в очередь;
@@ -46,9 +50,31 @@ Queue eligibility требует одновременно:
 - `release:halted` — failure после merge; вся очередь остановлена.
 - `release:superseded` — terminal audit state незамёрженной LOOP-итерации, однозначно заменённой завершённой production recovery-chain; root/task/scope/history сохраняются, активные queue/failure labels снимаются.
 
-Промежуточные `release:ready`, `release:running`, `release:awaiting-agent`, `release:needs-resume` и `release:awaiting-ui` не являются closure. `release:superseded` не является success исходной итерации, но исключает доказанно заменённый PR из активной очереди.
+Active states: `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui`, `release:needs-resume`, `release:blocked`, `release:halted`. Terminal states: `release:done`, `release:production`, `release:superseded`. Terminal state является жёсткой identity boundary и не имеет перехода обратно в очередь.
 
-Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task classification, active/overlay/terminal sets, transition matrix, critical transitions, monitor query и marker names. Runtime, waiter и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State transition заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: ack, terminal completion, deployed UI gate, acceptance и halted recovery требуют repo-owned marker и exact PR/head/merge/root/evidence.
+Каноническая машинная спецификация живёт в `apps/github_release_train_spec.py`: task class, continuity, active/overlay/terminal sets, transition matrix, critical transitions, monitor query и marker names. Runtime, waiter и smoke импортируют её, а AGENTS/docs проверяются regression assertions. Primary states взаимоисключающие, кроме временной `ready+running`; `needs-resume` — только overlay. State/identity registration заменяет полный label set одним GitHub API call, поэтому не оставляет между add/remove временного conflicting state. Ручно добавленный label не является proof: LOOP registration/recovery, ack, terminal completion, deployed UI gate, acceptance и halted recovery требуют repo-owned marker и exact PR/head/gate/merge/root/evidence.
+
+## LOOP Registration И Root Invariants
+
+Новый LOOP и recovery ставятся в очередь разными trusted-main `issue_comment` operations. Перед command уже должны существовать open non-draft PR, `task:loop + scope:live-runtime`, exact head и successful `baseline`.
+
+Новый самостоятельный LOOP:
+
+```bash
+gh pr comment <PR> --body "/wb-core loop enqueue-new <PR> head <HEAD_SHA>"
+```
+
+Handler создаёт `loop:root-<PR>`, machine new-root proof и атомарно выставляет `release:ready`. Такой root может ждать за чужим active UI gate; это normal waiting.
+
+Recovery текущего active UI Flow:
+
+```bash
+gh pr comment <RECOVERY_PR> --body "/wb-core loop enqueue-recovery <RECOVERY_PR> head <HEAD_SHA> gate <ACTIVE_GATE_PR> root <ROOT>"
+```
+
+Handler доказывает active merged `release:awaiting-ui` gate, его exact deploy/root proof, отсутствие terminal member и exact root, затем создаёт recovery proof и одним label replacement выставляет root/ready. Инварианты: `root == PR` — new chain; `root < PR` — recovery exact active gate; `root > PR` — invalid. Исчезнувший gate, terminal root, manual label или mismatching proof являются classification error; merge/deploy запрещены, status comment содержит точный code/reason, другие PR/roots не изменяются.
+
+Repeated enrollment events идемпотентны, включая отложенную повторную доставку после перехода PR в `running`, `awaiting-agent` или `blocked`: доказанная exact identity остаётся неизменной, state не откатывается в `ready`, workflow повторно не dispatch-ится. Underlying runner operations называются `enqueue-loop-new` и `enqueue-loop-recovery`, но durable proof создаёт trusted-main command handler; agents не назначают root/ready вручную.
 
 ## STANDARD Flow
 
@@ -93,7 +119,7 @@ Workflow запускает queue observation каждые пять минут. 
 
 ## Exclusive Production UI Gate
 
-После успешного LOOP merge, canonical deploy и production verify worker не ставит terminal success и не dispatch-ит следующий release. Он создаёт deterministic chain label `loop:root-<ROOT_PR>`, ставит текущей итерации `release:awaiting-ui` и завершает job. Push-triggered или повторный queue run видит gate и не выбирает несвязанный PR.
+После успешного LOOP merge, canonical deploy и production verify worker не ставит terminal success и не dispatch-ит следующий release. Он повторно проверяет зарегистрированный root/proof, ставит текущей итерации `release:awaiting-ui` и завершает job. Push-triggered или повторный queue run видит gate и не выбирает несвязанный PR.
 
 Если production UI Flow не принят, исчезновение Codex не открывает очередь: `release:awaiting-ui` остаётся durable fail-closed state.
 
@@ -107,26 +133,15 @@ gh pr comment <ACTIVE_LOOP_PR> --body "/wb-core loop accept-ui <ACTIVE_LOOP_PR> 
 
 Handler проверяет write association, active latest gate, exact deployed merge SHA, repo-owned deploy proof и evidence fingerprint. Он идемпотентно оставляет `release:production` только terminal PR, нормализует chain и dispatch-ит следующий queue run. Acceptance более старой итерации после recovery отклоняется.
 
-Terminal cleanup механический, root-bounded и idempotent. Только последний принятый PR/exact deployed SHA остаётся `release:production`. Предыдущие merged members того же exact root теряют active/failure/overlay и ложные terminal labels, сохраняют task/scope/root и получают один audit comment с terminal PR/SHA. Доказанно заменённые unmerged predecessors получают `release:superseded`, теряют active/failure labels, получают audit comment и закрываются not planned. Более новый или неоднозначный member запрещает auto-cleanup; другие roots не мутируются.
+Terminal cleanup механический, root-bounded и idempotent. До первой state mutation он проверяет repo-owned new/recovery proof каждого участника exact root; ручной same-root label делает membership неоднозначным и fail-closed. Только последний принятый PR/exact deployed SHA остаётся `release:production`. Предыдущие merged members того же exact root теряют active/failure/overlay и ложные terminal labels, сохраняют task/scope/root и получают один audit comment с terminal PR/SHA. Доказанно заменённые unmerged predecessors получают `release:superseded`, теряют active/failure labels, получают audit comment и закрываются not planned. Более новый или неоднозначный member запрещает auto-cleanup; другие roots не мутируются.
 
 ## Recovery PR
 
-Во время `release:awaiting-ui` разрешён только recovery текущей LOOP-цепочки. Связь не извлекается из title/body/free text: recovery PR обязан иметь exact dynamic label `loop:root-<ROOT_PR>`, уже созданную worker для активной chain, а также `task:loop + scope:live-runtime + release:ready`.
+Во время `release:awaiting-ui` продолжить gated chain может только recovery с exact repo-owned recovery proof. Связь не извлекается из title/body/free text и не доказывается ручной label: proof связывает recovery PR/head с конкретными gate PR и root и действителен только пока этот gate активен, а root не terminal.
 
 Одновременно могут существовать несколько LOOP roots, но global workflow concurrency `wb-core-production-release` допускает ровно один merge/deploy/reconcile. Чужой awaiting-ui держит остальные roots в normal waiting; только same-root recovery может продолжить chain. После terminal acceptance worker dispatch-ит следующий oldest ready root.
 
-Пример постановки recovery в очередь:
-
-```bash
-gh pr edit <RECOVERY_PR> \
-  --add-label task:loop \
-  --add-label scope:live-runtime \
-  --add-label loop:root-<ROOT_PR> \
-  --add-label release:ready
-python3 apps/github_release_train_wait.py <RECOVERY_PR>
-```
-
-Несвязанные STANDARD, LOOP и production-mutation PR сохраняют `release:ready`, но не выбираются. Recovery проходит новый baseline и новый exact-head acknowledgement. После его deploy `release:awaiting-ui` снимается с прежней итерации и ставится recovery PR; root label не меняется. Повторный transfer command лечит допустимый duplicate-gate partial state в пользу новой итерации, а неоднозначные roots оставляют очередь fail-closed.
+Несвязанные STANDARD, независимые LOOP roots и production-mutation PR сохраняют `release:ready`, но не выбираются. Recovery проходит новый baseline и новый exact-head acknowledgement. После его deploy `release:awaiting-ui` снимается с прежней итерации и ставится recovery PR; root label не меняется. Повторный transfer command лечит допустимый duplicate-gate partial state в пользу новой итерации, а неоднозначные roots оставляют очередь fail-closed.
 
 ## CLI Waiter Contract
 
@@ -135,6 +150,7 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 - STANDARD ждёт `release:done` для `scope:repo-only` или `release:production` для `scope:live-runtime`;
 - чужой exclusive gate выводится как normal `wait-foreign-gate`; waiter продолжает polling без terminal timeout и никогда не называет это blocked;
 - LOOP заново читает actual head, автоматически выполняет exact-head ack только на собственном `release:awaiting-agent` и продолжает polling через merge/deploy;
+- до heartbeat/resume/ack LOOP waiter проверяет new/recovery registration proof и terminal boundary;
 - LOOP возвращает код `3` на `release:awaiting-ui`, чтобы Codex выполнил UI Flow;
 - повторный запуск после acceptance ждёт `release:production`;
 - собственные `release:blocked`/`release:halted` и conflicting durable gates возвращают код `2`; чужой halted gate — normal waiting;
@@ -153,8 +169,11 @@ python3 apps/github_release_train_wait.py <RECOVERY_PR>
 - repeated label/push/dispatch events не выбирают PR без `release:ready` и не повторяют terminal merge/deploy;
 - repeated ack проверяет тот же PR/head, а consumed/stale ack не может разрешить новый merge;
 - repeated UI acceptance сохраняет terminal labels и лишь безопасно пере-dispatch-ит serialized worker.
+- repeated enqueue/correction events не дублируют proof и не меняют другие roots.
 
-Исправленный own pre-merge blocker повторно входит в очередь только через `retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`. Command требует open non-draft PR, точное совпадение current head и successful `baseline` на этом SHA; затем он ставит `release:ready` и dispatch-ит worker. Ручной label edit не считается retry proof.
+Исправленный own технический pre-merge blocker повторно входит в очередь только через `retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`; new/recovery enrollment не может снять его. Command требует open non-draft PR, exact head и successful `baseline`, сохраняет task class/scope/root и не удаляет LOOP labels. Если fix изменил LOOP head, command выпускает новый exact-head marker только при наличии prior repo-owned proof той же identity; для recovery дополнительно остаются обязательны тот же active gate/root и отсутствие terminal member. Classification provenance остаётся unresolved через любое число последующих head changes, поэтому generic retry отклоняется, пока более поздний trusted new/recovery/correction proof явно не разрешит identity.
+
+Ошибочная stale-terminal recovery identity исправляется только `/wb-core loop correct-to-new <PR> head <HEAD_SHA> old-root <ROOT>`. Command требует `OWNER`/`MEMBER` authorization, open/unmerged exact PR/head, successful baseline, exact classification-blocker proof, repo-owned terminal proof old root и отсутствие его active gate; затем одним label replacement назначает own root/ready и оставляет идемпотентный correction/new-root audit proof. Без любого evidence command fail-closed. Эта операция не применяется автоматически и не изменяет старый root или другие chains.
 
 SSH exit `255` или unexpected disconnect после merge классифицируется как `transport-indeterminate`. Repo-owned reconciler bounded-переподключается и сопоставляет canonical `target_id`, expected merge SHA, deploy metadata SHA, runtime SHA marker, systemd active/MainPID и обязательные loopback probes. Wrong/mixed SHA, inactive unit или failed probes сохраняют `release:halted`. Повторяются только `daemon-reload`, restart, probes и readback. Отдельный production-environment workflow `resume-halted` снимает halted только после healthy exact PR/head/merge/target JSON evidence; ручное снятие label не считается reconciliation.
 
@@ -170,6 +189,6 @@ SSH exit `255` или unexpected disconnect после merge классифиц�
 
 ## Проверенный LOOP Canary
 
-[PR #616](https://github.com/orenvlad-ai/wb-core/pull/616) является проверенным reference flow новой LOOP-инфраструктуры: отдельный business-no-op documentation PR прошёл `task:loop + scope:live-runtime + release:ready`, exact-head acknowledgement, merge, canonical deploy, `release:awaiting-ui`, read-only CLI Playwright/Chrome verification, exact `accept-ui`, terminal `release:production` и post-accept empty-queue dispatch. GitHub PR, comments, labels и workflow runs остаются durable evidence; временный repository marker после этого доказательства не нужен.
+[PR #616](https://github.com/orenvlad-ai/wb-core/pull/616) остаётся проверенным reference flow post-registration стадий LOOP: exact-head acknowledgement, merge, canonical deploy, `release:awaiting-ui`, read-only CLI Playwright/Chrome verification, exact `accept-ui`, terminal `release:production` и post-accept empty-queue dispatch. Он исторически предшествует отдельным new/recovery enrollment proofs и не является примером ручного назначения identity. GitHub PR, comments, labels и workflow runs остаются durable evidence; временный repository marker после этого доказательства не нужен.
 
-Новые canary/LOOP задачи повторяют тот же контракт: waiter останавливается кодом `3` на `release:awaiting-ui`, Codex выполняет production UI verification и оставляет exact `accept-ui` только при фактическом UI success. HTTP-only evidence не открывает gate.
+Новые canary/LOOP задачи сначала проходят `enqueue-new` либо `enqueue-recovery`, затем повторяют post-registration контракт: waiter останавливается кодом `3` на `release:awaiting-ui`, Codex выполняет production UI verification и оставляет exact `accept-ui` только при фактическом UI success. HTTP-only evidence не открывает gate.

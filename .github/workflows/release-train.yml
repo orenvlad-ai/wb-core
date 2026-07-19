@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   loop_command:
-    name: Handle LOOP acknowledgement or UI acceptance
+    name: Handle LOOP enrollment, correction, acknowledgement or UI acceptance
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
@@ -61,7 +61,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Apply exact LOOP command
+      - name: Apply exact LOOP identity or gate command
         run: >-
           python3 apps/github_release_train.py handle-comment
           --pr "${{ github.event.issue.number }}"

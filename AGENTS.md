@@ -44,7 +44,14 @@
 
 Если выбор остаётся неоднозначным, Codex всегда использует `стандарт`; отсутствие строки больше не требует останавливать работу и запрашивать класс. В начале автоматически классифицированной задачи Codex сообщает `Класс задачи: стандарт — определён автоматически`, `Класс задачи: loop — определён автоматически` или `Класс задачи: диагностика — определён автоматически` и кратко называет основание. Класс не расширяет requested scope или authority для mutations.
 
-Дополнение к уже начатой задаче или существующему PR наследует её класс: не создаёт новую задачу или PR, применяется в текущей ветке, не меняет класс молча и меняет его только по прямому указанию пользователя.
+Task class и task continuity — два разных решения. Class выбирает `STANDARD`/`LOOP`/`DIAGNOSTIC`, а continuity выбирает одну из машинных категорий `NEW_TASK`, `ACTIVE_ADDITION`, `ACTIVE_LOOP_RECOVERY`, `TERMINAL_STALE_REFERENCE`.
+
+- Только явное продолжение незавершённой активной задачи может наследовать её branch, PR и identity.
+- `release:done`, `release:production` и `release:superseded` — terminal boundary: после неё нельзя наследовать branch, PR, task identity, LOOP root, acknowledgement, heartbeat или recovery identity.
+- Новый дефект после terminal closure всегда получает новую задачу и новый PR, даже в том же чате, на том же экране или в том же функциональном разделе.
+- Формулировки «новая задача», «отдельная задача», «самостоятельная задача» и «новый LOOP» всегда означают `NEW_TASK`.
+- Одинаковый чат или функциональная область сами по себе ничего не доказывают. При любой неоднозначности выбирай независимую `NEW_TASK`.
+- Task class `LOOP` сам по себе не означает recovery. `ACTIVE_LOOP_RECOVERY` допустим только для дефекта, найденного во время текущего незавершённого `release:awaiting-ui`.
 
 ### `ДИАГНОСТИКА`
 
@@ -56,11 +63,13 @@
 
 ### `LOOP`
 
-Итерация с production UI Flow; пользователь обычно запускает её через `/goal`, но при неактивном формальном Goal Mode Loop-протокол всё равно обязателен. Используются отдельная branch/worktree и PR с `task:loop + scope:live-runtime + release:ready`.
+Итерация с production UI Flow; пользователь обычно запускает её через `/goal`, но при неактивном формальном Goal Mode Loop-протокол всё равно обязателен. Используются отдельная branch/worktree и PR с `task:loop + scope:live-runtime`. `loop:root-*` и `release:ready` для LOOP вручную не назначаются.
+
+Новый самостоятельный LOOP после successful `baseline` регистрируется exact command `/wb-core loop enqueue-new <PR> head <HEAD_SHA>`: repo-owned handler создаёт `loop:root-<собственный PR>`, new-root proof и атомарно ставит `release:ready`. Recovery регистрируется отдельной командой `/wb-core loop enqueue-recovery <PR> head <HEAD_SHA> gate <ACTIVE_GATE_PR> root <ROOT>` и допускается только при active `release:awaiting-ui` exact root. Root меньше номера PR означает recovery, root равен номеру PR — новую цепочку, root больше номера PR запрещён. Чужой active gate для нового root — normal waiting, не blocker.
 
 Перед каждым LOOP merge/deploy Release Train после sync и baseline ставит `release:awaiting-agent`. Активная Codex-сессия подтверждает readiness GitHub-native acknowledgement, привязанным к номеру PR и exact head SHA. Ack одноразовый, потребляется непосредственно перед merge, становится недействительным после изменения head и обязателен заново для каждого recovery PR. Пока ack нет, production и остальная очередь не меняются. Просроченное ожидание получает overlay `release:needs-resume` и точную команду восстановления, но никакого автоматического ack или пропуска очереди.
 
-После deploy задача переходит в `release:awaiting-ui`, блокируя несвязанные production releases. Codex продолжает ту же сессию и выполняет UI Flow. При ошибке создаётся recovery PR с теми же `task:loop + scope:live-runtime` и exact `loop:root-<PR>`; после нового ack и deploy gate переносится на recovery. После успешного UI Flow Codex оставляет `/wb-core loop accept-ui <PR> deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>`. Acceptance требует repo-owned deployed-SHA proof и допустим только для последнего задеплоенного PR. Только он получает `release:production`; предыдущие merged iterations теряют stale release states, а доказанно заменённые unmerged recovery PR получают `release:superseded` и закрываются.
+После deploy задача переходит в `release:awaiting-ui`, блокируя несвязанные production releases. Codex продолжает ту же сессию и выполняет UI Flow. При ошибке создаётся recovery PR с теми же `task:loop + scope:live-runtime`, затем repo-owned recovery registration связывает его с exact gate/root; после нового ack и deploy gate переносится на recovery. После успешного UI Flow Codex оставляет `/wb-core loop accept-ui <PR> deployed <MERGE_SHA> evidence sha256:<EVIDENCE_HASH>`. Acceptance требует repo-owned deployed-SHA proof и допустим только для последнего задеплоенного PR. Только он получает `release:production`; предыдущие merged iterations теряют stale release states, а доказанно заменённые unmerged recovery PR получают `release:superseded` и закрываются. После terminal acceptance этот root нельзя возобновить.
 
 Чужие `release:ready`, `release:running`, `release:awaiting-agent`, `release:awaiting-ui` и занятый global production gate всегда являются normal waiting, а не blocker. Потерянный LOOP owner на `ready/running/awaiting-agent/awaiting-ui` получает overlay `release:needs-resume`; новый владелец запускает `python3 apps/github_release_train_wait.py <PR> --resume-owner --no-ack-agent`, повторно проверяет exact head/root и затем отдельно выполняет ack/UI action. Resume идемпотентен и сам ack не выполняет.
 
@@ -108,9 +117,9 @@ Repo-owned waiter для Codex CLI:
 
 Он отличает normal waiting, own action, own failure и terminal state и продолжает polling без terminal timeout. На активном PR waiter обновляет ровно один idempotent status-comment с task title/class/stage/queue reason/root/last action/intervention/resume command и не плодит heartbeat comments. LOOP ack привязан к exact head и repo-owned proof. Код `3` означает own `release:awaiting-ui`, `4` — принятый resume без ack, `2` — own failure или conflicting invariant, `130` — interrupt. `--status-seconds` задаёт heartbeat, не timeout.
 
-Release states и transitions определены машинно в `apps/github_release_train_spec.py`: primary active — `ready/running/awaiting-agent/awaiting-ui/blocked/halted`, overlay — `needs-resume`, terminal — `done/production/superseded`. Кроме временной пары `ready+running`, два primary states запрещены. Ручной label edit не доказывает ack, deploy, acceptance или halted recovery: критический transition требует repo-owned exact PR/head/merge/root/evidence command.
+Release states, continuity и transitions определены машинно в `apps/github_release_train_spec.py`: active — `ready/running/awaiting-agent/awaiting-ui/needs-resume/blocked/halted`, terminal — `done/production/superseded`. Кроме временной пары `ready+running`, два primary states запрещены. Ручной label edit не доказывает LOOP root, recovery, ack, deploy, acceptance или halted recovery: критический transition требует repo-owned exact PR/head/gate/merge/root/evidence command.
 
-После исправления own pre-merge blocker PR возвращается из `release:blocked` в `release:ready` только через `python3 apps/github_release_train.py retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`: command повторно проверяет exact head и successful baseline. Ручное снятие blocker не является retry proof.
+После исправления own технического pre-merge blocker PR возвращается из `release:blocked` в `release:ready` только через `python3 apps/github_release_train.py retry-blocked --pr <PR> --expected-head-sha <HEAD_SHA>`: command повторно проверяет exact head и successful baseline и не меняет task class, scope или LOOP root. Enqueue-команды технический blocker не снимают. Если fix изменил head LOOP PR, retry может обновить только exact-head proof уже доказанной identity; создать или переклассифицировать identity он не может. Classification blocker сохраняет свой тип через последующие смены head, обычным retry не лечится и снимается только последующим repo-owned identity proof. Ошибочная stale-terminal recovery identity исправляется только отдельной evidence-bound `/wb-core loop correct-to-new <PR> head <HEAD_SHA> old-root <ROOT>`; вручную root не переназначается. Отложенный повтор уже доказанной enqueue/correction команды на `ready/running/awaiting-agent/blocked` является no-op и не откатывает state.
 
 ## Независимая проверка
 
