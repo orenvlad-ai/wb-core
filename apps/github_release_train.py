@@ -1978,23 +1978,6 @@ def command_transition(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_retry_blocked(args: argparse.Namespace) -> int:
-    api = _api_from_env()
-    pull = api.get_pull(args.pr)
-    actual = str(pull.get("head", {}).get("sha") or "")
-    if actual != args.expected_head_sha:
-        raise ReleaseBlocked(f"exact head mismatch: expected {args.expected_head_sha}, got {actual}")
-    labels = label_names(pull)
-    if BLOCKED_LABEL not in labels:
-        raise ReleaseBlocked("PR is not release:blocked")
-    root_labels = [label for label in labels if label.startswith(LOOP_ROOT_PREFIX)]
-    for label in root_labels:
-        api.remove_label(args.pr, label)
-    set_release_state(api, args.pr, READY_LABEL, comment="Release Train retry-blocked accepted after exact-head validation; stale LOOP recovery links removed.")
-    _json_print({"status": READY_LABEL, "pr_number": args.pr, "head_sha": actual, "removed_loop_roots": root_labels})
-    return 0
-
-
 def command_halt(args: argparse.Namespace) -> int:
     api = _api_from_env()
     status = halt_merged_release(
@@ -2217,11 +2200,6 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--state", choices=sorted(STATE_LABELS), required=True)
     transition.add_argument("--comment", default="")
     transition.set_defaults(handler=command_transition)
-    retry = subparsers.add_parser("retry-blocked")
-    retry.add_argument("--pr", type=int, required=True)
-    retry.add_argument("--expected-head-sha", required=True)
-    retry.set_defaults(handler=command_retry_blocked)
-
     halt = subparsers.add_parser("halt-merged")
     halt.add_argument("--pr", type=int, required=True)
     halt.add_argument("--merge-sha", required=True)
