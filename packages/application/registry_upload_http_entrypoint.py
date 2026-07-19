@@ -3449,6 +3449,7 @@ class RegistryUploadHttpEntrypoint:
                     refreshed_at=refreshed_at,
                     plan=plan,
                 )
+                active_refresh = active_refresh_summary(refresh_result)
                 _finish_operator_phase(
                     refresh_diagnostics,
                     save_snapshot_phase,
@@ -3543,7 +3544,7 @@ class RegistryUploadHttpEntrypoint:
                     started_at=refresh_started_at,
                     finished_at=self.activated_at_factory(),
                     duration_ms=max(0, int(round((time.perf_counter() - refresh_started_perf) * 1000))),
-                    semantic_status=refresh_result.semantic_status,
+                    semantic_status=active_refresh["status"],
                     technical_status=refresh_result.status,
                 )
                 plan = _with_refresh_diagnostics_metadata(plan, refresh_diagnostics)
@@ -3553,9 +3554,7 @@ class RegistryUploadHttpEntrypoint:
                     plan=plan,
                 )
                 payload.update(asdict(refresh_result))
-                payload["technical_status"] = payload["status"]
-                payload["status_label"] = payload["semantic_label"]
-                payload["status_reason"] = payload["semantic_reason"]
+                _apply_active_refresh_semantics(payload, refresh_result)
                 payload["updated_cells"] = updated_cells
                 payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
                 payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
@@ -3574,8 +3573,8 @@ class RegistryUploadHttpEntrypoint:
                         refreshed_at=refresh_result.refreshed_at,
                         data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
                         status_rows=refresh_result.sheet_row_counts.get("STATUS"),
-                        semantic_status=refresh_result.semantic_status,
-                        semantic_reason=refresh_result.semantic_reason,
+                        semantic_status=active_refresh["status"],
+                        semantic_reason=active_refresh["reason"],
                         updated_cells=payload["updated_cell_count"],
                         latest_confirmed_cells=payload["latest_confirmed_cell_count"],
                         duration_ms=refresh_diagnostics.get("duration_ms"),
@@ -3586,8 +3585,8 @@ class RegistryUploadHttpEntrypoint:
                         "cycle_finish",
                         cycle="refresh",
                         status="success",
-                        semantic_status=refresh_result.semantic_status,
-                        semantic_reason=refresh_result.semantic_reason,
+                        semantic_status=active_refresh["status"],
+                        semantic_reason=active_refresh["reason"],
                         route=SHEET_VITRINA_REFRESH_ROUTE,
                         snapshot_id=refresh_result.snapshot_id,
                     )
@@ -5312,16 +5311,46 @@ def _format_operator_result_payload(result_payload: Mapping[str, Any] | None) ->
 
 
 def _build_refresh_result_payload(refresh_result: Any) -> dict[str, Any]:
-    return {
+    payload = {
         "technical_status": "success",
-        "semantic_status": str(getattr(refresh_result, "semantic_status", "") or "warning"),
-        "semantic_label": str(getattr(refresh_result, "semantic_label", "") or "Внимание"),
-        "semantic_tone": str(getattr(refresh_result, "semantic_tone", "") or "warning"),
-        "semantic_reason": str(getattr(refresh_result, "semantic_reason", "") or ""),
         "snapshot_id": str(getattr(refresh_result, "snapshot_id", "") or ""),
         "as_of_date": str(getattr(refresh_result, "as_of_date", "") or ""),
         "refreshed_at": str(getattr(refresh_result, "refreshed_at", "") or ""),
     }
+    _apply_active_refresh_semantics(payload, refresh_result)
+    return payload
+
+
+def _apply_active_refresh_semantics(payload: dict[str, Any], refresh_result: Any) -> None:
+    """Expose active-source semantics while retaining archive-inclusive audit fields."""
+
+    active = active_refresh_summary(refresh_result)
+    payload["technical_semantic_status"] = str(
+        getattr(refresh_result, "semantic_status", "") or "warning"
+    )
+    payload["technical_semantic_label"] = str(
+        getattr(refresh_result, "semantic_label", "") or "Внимание"
+    )
+    payload["technical_semantic_tone"] = str(
+        getattr(refresh_result, "semantic_tone", "") or "warning"
+    )
+    payload["technical_semantic_reason"] = str(
+        getattr(refresh_result, "semantic_reason", "") or ""
+    )
+    payload["technical_source_outcome_counts"] = dict(
+        getattr(refresh_result, "source_outcome_counts", {}) or {}
+    )
+    payload["technical_source_outcomes"] = list(
+        getattr(refresh_result, "source_outcomes", []) or []
+    )
+    payload["semantic_status"] = active["status"]
+    payload["semantic_label"] = active["label"]
+    payload["semantic_tone"] = active["tone"]
+    payload["semantic_reason"] = active["reason"]
+    payload["source_outcome_counts"] = dict(active["counts"])
+    payload["source_outcomes"] = list(active["outcomes"])
+    payload["status_label"] = active["label"]
+    payload["status_reason"] = active["reason"]
 
 
 def _build_refresh_error_payload(

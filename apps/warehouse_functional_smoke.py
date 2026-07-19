@@ -48,6 +48,7 @@ from packages.application.warehouse_functional import (  # noqa: E402
     _supply_downstream_component_index,
     _supply_revision,
     _summaries,
+    _validate_historical_projection_calendar,
     _validated_financial_expense,
     _warehouse_human_evidence,
     accepted_capital_delta,
@@ -82,6 +83,7 @@ def main() -> None:
     _test_frozen_cost_map()
     _test_nomenclature_purchase_price_source()
     _test_historical_wb_projection()
+    _test_historical_projection_calendar_gate()
     _test_exact_historical_wb_quantity_evidence()
     _test_quality_localization_catalog()
     _test_human_evidence_uses_source_quality_and_date()
@@ -384,6 +386,27 @@ def _test_historical_wb_projection() -> None:
         {item["as_of_date"]: item for item in corrected}["2026-07-03"]["wac_rub"] == "130",
         "late confirmed downstream expense replays historical WAC from its effective date",
     )
+
+
+def _test_historical_projection_calendar_gate() -> None:
+    complete = [
+        {"as_of_date": day, "nm_id": 1, "quantity": "0", "wac_rub": "100"}
+        for day in ("2026-07-01", "2026-07-02", "2026-07-03")
+    ]
+    calendar = _validate_historical_projection_calendar(
+        complete,
+        effective_date="2026-07-03",
+    )
+    _assert(calendar["expected_day_count"] == 3, "complete historical calendar is accepted")
+    try:
+        _validate_historical_projection_calendar(
+            [complete[0], complete[2]],
+            effective_date="2026-07-03",
+        )
+    except Exception as exc:
+        _assert("2026-07-02" in str(exc), "missing historical day is named before activation")
+    else:
+        raise AssertionError("incomplete historical calendar must fail before activation")
 
 
 def _test_exact_historical_wb_quantity_evidence() -> None:

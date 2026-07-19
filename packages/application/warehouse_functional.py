@@ -866,6 +866,10 @@ class WarehouseFunctionalBlock:
         historical_wb_cost_projection = (
             pre_cutover_wb_cost_projection + post_cutover_wb_cost_projection
         )
+        historical_calendar = _validate_historical_projection_calendar(
+            historical_wb_cost_projection,
+            effective_date=captured_at[:10],
+        )
         lines = _replace_current_wb_costs(
             lines,
             daily_projection=post_cutover_wb_cost_projection,
@@ -913,6 +917,7 @@ class WarehouseFunctionalBlock:
                     for item in historical_wb_cost_projection
                     if _decimal(item["quantity"]) > ZERO and _decimal(item["wac_rub"]) <= ZERO
                 ),
+                "historical_wb_calendar": historical_calendar,
                 "wb_quantity_source": "official_snapshot_only",
                 "discrepancy_opening_zero": (
                     summaries[STAGE_DISCREPANCY]["quantity"] == "0"
@@ -3570,6 +3575,35 @@ def _summaries(lines: Iterable[WarehouseLine]) -> dict[str, dict[str, Any]]:
             "wb_in_way_from_client": _text(sum((item.wb_in_way_from_client for item in rows), ZERO)),
         }
     return result
+
+
+def _validate_historical_projection_calendar(
+    projection: Iterable[Mapping[str, Any]],
+    *,
+    effective_date: str,
+) -> dict[str, Any]:
+    """Fail closed before activation when any required business day is absent."""
+
+    expected_dates = _date_range("2026-07-01", str(effective_date or "")[:10])
+    projected_dates = {
+        str(item.get("as_of_date") or "")[:10]
+        for item in projection
+        if str(item.get("as_of_date") or "").strip()
+    }
+    missing_dates = sorted(set(expected_dates) - projected_dates)
+    if missing_dates:
+        raise WarehouseFunctionalError(
+            "historical WB cost projection has missing business dates: "
+            + ",".join(missing_dates)
+        )
+    return {
+        "date_from": expected_dates[0] if expected_dates else None,
+        "date_to": expected_dates[-1] if expected_dates else None,
+        "expected_day_count": len(expected_dates),
+        "projected_day_count": len(projected_dates & set(expected_dates)),
+        "missing_day_count": 0,
+        "missing_dates": [],
+    }
 
 
 def _wb_snapshot_quantities(items: Iterable[Mapping[str, Any]]) -> dict[int, Decimal]:
