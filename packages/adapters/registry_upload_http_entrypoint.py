@@ -47,6 +47,7 @@ from packages.application.sheet_vitrina_v1_feedbacks import (
 )
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.application.wb_prices_management import WbPricesManagementError
+from packages.application.wb_autoanswers_runtime import AutoanswersRuntimeError
 from packages.application.sku_management import SkuManagementError
 from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.wb_supplies import WbSuppliesBlockError
@@ -67,6 +68,7 @@ from packages.contracts.wb_supply_planning_zones import (
     SUPPLY_PLANNING_ZONE_LABELS_RU,
     SUPPLY_PLANNING_ZONE_SHORT_LABELS_RU,
 )
+from packages.contracts.wb_autoanswers import PERMISSION_ADMIN, PERMISSION_AI_REVIEW
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -96,6 +98,13 @@ DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH = (
 )
 DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH = "/v1/sheet-vitrina-v1/research/promotions/calculate"
 DEFAULT_SHEET_FEEDBACKS_PATH = "/v1/sheet-vitrina-v1/feedbacks"
+DEFAULT_SHEET_FEEDBACKS_LOCAL_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/local"
+DEFAULT_SHEET_FEEDBACKS_DETAIL_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/detail"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/settings"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/sync-now"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/backlog/preview"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/backlog/enqueue"
+DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH = f"{DEFAULT_SHEET_FEEDBACKS_PATH}/autoanswers/review/approve"
 DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH = "/v1/sheet-vitrina-v1/feedbacks/export.xlsx"
 DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-prompt"
 DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH = "/v1/sheet-vitrina-v1/feedbacks/ai-analyze"
@@ -178,6 +187,8 @@ WEB_AUTH_SECTION_VITRINA = "vitrina"
 WEB_AUTH_SECTION_SUPPLY = "supply"
 WEB_AUTH_SECTION_REPORTS = "reports"
 WEB_AUTH_SECTION_FEEDBACKS = "feedbacks"
+WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW = PERMISSION_AI_REVIEW
+WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN = PERMISSION_ADMIN
 WEB_AUTH_SECTION_ADS = "ads"
 WEB_AUTH_SECTION_PRICES = "prices"
 WEB_AUTH_SECTION_SKU_MANAGEMENT = "sku_management"
@@ -189,6 +200,8 @@ WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_SUPPLY, "label": "Поставки"},
     {"section_id": WEB_AUTH_SECTION_REPORTS, "label": "Отчёты"},
     {"section_id": WEB_AUTH_SECTION_FEEDBACKS, "label": "Отзывы"},
+    {"section_id": WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW, "label": "Отзывы: проверка AI"},
+    {"section_id": WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN, "label": "Отзывы: управление автоответами"},
     {"section_id": WEB_AUTH_SECTION_ADS, "label": "Реклама"},
     {"section_id": WEB_AUTH_SECTION_PRICES, "label": "Цены"},
     {"section_id": WEB_AUTH_SECTION_SKU_MANAGEMENT, "label": "Управление SKU"},
@@ -425,6 +438,69 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if parsed.path in {
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH,
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
+                DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH,
+            }:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN):
+                    return
+                try:
+                    body = _load_optional_request_payload(self)
+                    actor = _current_web_user_actor(self)
+                    if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_settings_update_request(
+                            body, actor_id=actor
+                        )
+                    elif parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_backlog_preview_request(
+                            actor_id=actor
+                        )
+                    else:
+                        payload = entrypoint.handle_sheet_feedbacks_autoanswers_backlog_enqueue_request(
+                            body, actor_id=actor
+                        )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except AutoanswersRuntimeError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW):
+                    return
+                try:
+                    body = _load_request_payload(self)
+                    payload = entrypoint.handle_sheet_feedbacks_autoanswers_approve_request(
+                        body, actor_id=_current_web_user_actor(self)
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except AutoanswersRuntimeError as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code})
+                    return
+                _write_json_response(self, HTTPStatus.ACCEPTED, payload)
+                return
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                try:
+                    body = _load_request_payload(self)
+                    payload = entrypoint.handle_sheet_feedbacks_autoanswers_sync_request(
+                        body, actor_id=_current_web_user_actor(self)
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.ACCEPTED, payload)
                 return
             if parsed.path == DEFAULT_SETTINGS_USERS_PATH:
                 _handle_settings_user_create(self, entrypoint)
@@ -2132,6 +2208,39 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_LOCAL_PATH:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                try:
+                    query = _resolve_autoanswers_local_query(parsed.query)
+                    payload = entrypoint.handle_sheet_feedbacks_local_request(**query)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_DETAIL_PATH:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                try:
+                    feedback_id = _resolve_single_query_param(parsed.query, "id")
+                    if not feedback_id:
+                        raise ValueError("id query parameter is required")
+                    payload = entrypoint.handle_sheet_feedbacks_detail_request(feedback_id)
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except KeyError:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": "feedback_not_found"})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+            if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                payload = entrypoint.handle_sheet_feedbacks_autoanswers_settings_request()
+                _write_json_response(self, HTTPStatus.OK, payload)
                 return
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
                 _write_html_response(
@@ -4902,6 +5011,38 @@ def _resolve_feedbacks_query(query_string: str) -> dict[str, Any]:
     }
 
 
+def _resolve_autoanswers_local_query(query_string: str) -> dict[str, Any]:
+    query = urllib_parse.parse_qs(query_string, keep_blank_values=False)
+    try:
+        page = int(str(query.get("page", ["1"])[0]))
+        page_size = int(str(query.get("page_size", ["50"])[0]))
+    except ValueError as exc:
+        raise ValueError("page and page_size must be integers") from exc
+    if page < 1:
+        raise ValueError("page must be >= 1")
+    if page_size < 1 or page_size > 100:
+        raise ValueError("page_size must be between 1 and 100")
+    filters: dict[str, Any] = {}
+    for key in (
+        "unanswered",
+        "rating",
+        "route",
+        "status",
+        "sku",
+        "has_photo",
+        "has_video",
+        "needs_review",
+        "published",
+        "error",
+        "date_from",
+        "date_to",
+    ):
+        value = str(query.get(key, [""])[0]).strip()
+        if value:
+            filters[key] = value
+    return {"page": page, "page_size": page_size, "filters": filters}
+
+
 def _resolve_job_id_from_query(query_string: str) -> str:
     query = urllib_parse.parse_qs(query_string)
     job_id = str(query.get("job_id", [""])[0]).strip()
@@ -5653,6 +5794,17 @@ def _ensure_manage_users_access(handler: BaseHTTPRequestHandler, path: str) -> b
     return False
 
 
+def _ensure_feedback_capability(handler: BaseHTTPRequestHandler, path: str, capability: str) -> bool:
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return True
+    user = _authenticated_web_user(handler, config)
+    if user and _user_has_section_access(user, capability):
+        return True
+    _write_auth_forbidden(handler, path)
+    return False
+
+
 def _current_web_user_role(handler: BaseHTTPRequestHandler) -> str:
     config = _web_auth_config()
     if not config["enabled"]:
@@ -6221,7 +6373,16 @@ def _default_allowed_sections_for_role(role: str) -> list[str]:
         # Instructions are a separately granted capability.  Keeping them out
         # of the operator fallback also prevents historical users with a
         # role-only/default record from receiving the new section implicitly.
-        return [section_id for section_id in WEB_AUTH_SECTION_IDS if section_id != WEB_AUTH_SECTION_INSTRUCTIONS]
+        return [
+            section_id
+            for section_id in WEB_AUTH_SECTION_IDS
+            if section_id
+            not in {
+                WEB_AUTH_SECTION_INSTRUCTIONS,
+                WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW,
+                WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN,
+            }
+        ]
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
         return [WEB_AUTH_SECTION_SUPPLY]
     return []
@@ -7471,6 +7632,15 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "research_calculate_path": DEFAULT_SHEET_RESEARCH_SKU_GROUP_COMPARISON_CALCULATE_PATH,
         "research_promotions_calculate_path": DEFAULT_SHEET_RESEARCH_PROMOTIONS_CALCULATE_PATH,
         "feedbacks_path": DEFAULT_SHEET_FEEDBACKS_PATH,
+        "feedbacks_local_path": DEFAULT_SHEET_FEEDBACKS_LOCAL_PATH,
+        "feedbacks_detail_path": DEFAULT_SHEET_FEEDBACKS_DETAIL_PATH,
+        "feedbacks_autoanswers_settings_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SETTINGS_PATH,
+        "feedbacks_autoanswers_sync_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_SYNC_PATH,
+        "feedbacks_autoanswers_backlog_preview_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_PREVIEW_PATH,
+        "feedbacks_autoanswers_backlog_enqueue_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_BACKLOG_ENQUEUE_PATH,
+        "feedbacks_autoanswers_approve_path": DEFAULT_SHEET_FEEDBACKS_AUTOANSWERS_APPROVE_PATH,
+        "feedbacks_can_ai_review": PERMISSION_AI_REVIEW in normalized_sections,
+        "feedbacks_can_admin": PERMISSION_ADMIN in normalized_sections,
         "feedbacks_export_path": DEFAULT_SHEET_FEEDBACKS_EXPORT_PATH,
         "feedbacks_ai_prompt_path": DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH,
         "feedbacks_ai_analyze_path": DEFAULT_SHEET_FEEDBACKS_AI_ANALYZE_PATH,

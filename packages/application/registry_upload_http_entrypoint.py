@@ -37,6 +37,7 @@ from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
+from packages.application.wb_autoanswers_runtime import AutoanswersRepository
 from packages.application.sku_management import SkuManagementBlock
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -706,6 +707,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_ai_block: SheetVitrinaV1FeedbacksAiBlock | None = None,
         feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
         feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
+        autoanswers_repository: AutoanswersRepository | None = None,
         ads_block: SheetVitrinaV1AdsBlock | None = None,
         prices_block: WbPricesManagementBlock | None = None,
         spp_tester_block: WbSppTesterBlock | None = None,
@@ -752,6 +754,10 @@ class RegistryUploadHttpEntrypoint:
             now_factory=self.now_factory,
         )
         self.feedbacks_block = feedbacks_block or SheetVitrinaV1FeedbacksBlock(now_factory=self.now_factory)
+        self.autoanswers_repository = autoanswers_repository or AutoanswersRepository(
+            runtime_dir=self.runtime.runtime_dir,
+            now_factory=self.now_factory,
+        )
         self.feedbacks_ai_block = feedbacks_ai_block or SheetVitrinaV1FeedbacksAiBlock(
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
@@ -1245,6 +1251,82 @@ class RegistryUploadHttpEntrypoint:
             date_to=date_to,
             stars=stars,
             is_answered=is_answered,
+        )
+
+    def handle_sheet_feedbacks_local_request(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        filters: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = self.autoanswers_repository.list_feedbacks(
+            page=page,
+            page_size=page_size,
+            filters=filters,
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_feedbacks_local",
+            "contract_version": "v1",
+            **payload,
+        }
+
+    def handle_sheet_feedbacks_detail_request(self, feedback_id: str) -> dict[str, Any]:
+        payload = self.autoanswers_repository.get_feedback(feedback_id)
+        if payload is None:
+            raise KeyError("feedback_not_found")
+        return {
+            "contract_name": "sheet_vitrina_v1_feedback_detail",
+            "contract_version": "v1",
+            "feedback": payload,
+        }
+
+    def handle_sheet_feedbacks_autoanswers_settings_request(self) -> dict[str, Any]:
+        settings = self.autoanswers_repository.settings()
+        return {
+            "contract_name": "sheet_vitrina_v1_feedback_autoanswers_settings",
+            "contract_version": "v1",
+            "settings": asdict(settings),
+            "budget": self.autoanswers_repository.budget_status(),
+        }
+
+    def handle_sheet_feedbacks_autoanswers_settings_update_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        settings = self.autoanswers_repository.update_settings(
+            master_enabled=payload.get("master_enabled") if "master_enabled" in payload else None,
+            mode=str(payload["mode"]) if "mode" in payload else None,
+            daily_cap_usd=payload.get("daily_cap_usd"),
+            monthly_cap_usd=payload.get("monthly_cap_usd"),
+            warning_ratio=payload.get("warning_ratio"),
+            actor_id=actor_id,
+        )
+        return {"settings": asdict(settings), "budget": self.autoanswers_repository.budget_status()}
+
+    def handle_sheet_feedbacks_autoanswers_sync_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        command = self.autoanswers_repository.enqueue_sync_command(
+            request_key=str(payload.get("request_key") or ""),
+            actor_id=actor_id,
+        )
+        return {"accepted": True, "command": command}
+
+    def handle_sheet_feedbacks_autoanswers_backlog_preview_request(self, *, actor_id: str) -> dict[str, Any]:
+        return self.autoanswers_repository.preview_backlog(actor_id=actor_id)
+
+    def handle_sheet_feedbacks_autoanswers_backlog_enqueue_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        return self.autoanswers_repository.enqueue_backlog_from_preview(
+            str(payload.get("preview_id") or ""), actor_id=actor_id
+        )
+
+    def handle_sheet_feedbacks_autoanswers_approve_request(
+        self, payload: Mapping[str, Any], *, actor_id: str
+    ) -> dict[str, Any]:
+        return self.autoanswers_repository.approve_for_publication(
+            str(payload.get("processing_key") or ""), actor_id=actor_id
         )
 
     def handle_sheet_feedbacks_export_request(self, payload: Mapping[str, Any]) -> tuple[bytes, str]:

@@ -1,0 +1,17 @@
+{
+  "profile_version": "1.0.0",
+  "profile_id": "terra",
+  "status": "primary_cost_quality_candidate",
+  "resolved_at": "2026-07-18",
+  "api": "responses",
+  "model": "gpt-5.6-terra",
+  "store": false,
+  "reasoning": {
+    "classifier": "medium",
+    "writer": "medium",
+    "validator": "medium",
+    "rewrite": "medium"
+  },
+  "structured_outputs": {"enabled": true, "strict": true},
+  "selection_note": "Recommended primary candidate: same GPT-5.6 family and reasoning profile as the Sol baseline at approximately half the token rates. Must pass the frozen gates before production use."
+}

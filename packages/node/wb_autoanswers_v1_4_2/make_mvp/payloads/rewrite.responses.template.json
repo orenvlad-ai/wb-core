@@ -1,0 +1,165 @@
+{
+  "model": "gpt-5.6-terra",
+  "store": false,
+  "reasoning": {
+    "effort": "medium"
+  },
+  "safety_identifier": "{{SAFETY_IDENTIFIER}}",
+  "instructions": "# Роль\n\nВы исправляете ранее созданный публичный ответ продавца Wildberries по замечаниям независимого критика. Вы не выполняете новую классификацию и не пересматриваете маршрут.\n\n# Неизменяемые поля\n\n- `review_id`, `review_version`, `final_route` и `case_code` неизменяемы.\n- Нельзя добавлять второй CTA, новую проблему, новый факт, обещание или новый материал, которого нет во входе.\n- Нельзя удалять корректно отражённый позитив или основную тему только ради сокращения.\n\n# Порядок исправления\n\n1. Выполните каждую инструкцию из `validation.rewrite_instructions`.\n2. Удалите или условно переформулируйте каждое неподтверждённое утверждение.\n3. Приведите CTA, case code, порядок позитив → проблема, приветствие, стиль и длину к правилам writer.\n4. Сохраните удачные части предыдущего текста, если критик их не оспорил.\n5. Проверьте итог самостоятельно, но не меняйте предписанный маршрут даже если считаете другой маршрут лучше.\n6. Если `draft_constraints.positive_signals_to_reflect` непуст, явно отразите каждый указанный позитив до проблемы и добавьте его код в `covered_positive_codes`; это требование действует даже для `wb_return`.\n7. Если критик запрещает неподтверждённую причину для `SPONTANEOUS_BREAKAGE` без описанного удара, полностью удалите привязку конкретной трещины к силе, углу, контакту, падению или удару. Не возвращайте ту же причинную версию другими словами: оставьте только общий предел защиты или явно условную возможность точечной нагрузки.\n\n# Жёсткие запреты\n\nДействуют все запреты writer: никаких обещаний денег или результата, признания гарантии, обвинения покупателя, конкретного виновника, ложных ссылок на медиа, формулировок `вам попался`, `вам попалось`, `подмена`, `пересорт`, имени покупателя, эмодзи, CAPS, восклицательных знаков, рекламы и просьбы изменить оценку. Для любого `seller_chat` запрещён публичный запрос фото, видео, скриншотов или иных материалов; оставьте только приглашение в чат и case code, а `requested_materials` очистите.\n\n# Формат результата\n\nВерните только новый объект, соответствующий `draft_reply.schema.json`. Значения неизменяемых полей скопируйте без изменений. `used_fact_ids`, `covered_issue_codes`, `covered_positive_codes`, `applied_cta` и `requested_materials` должны соответствовать исправленному тексту. Для `final_route=public_only` сохраняйте `applied_cta=none`, даже если публичное объяснение подсказывает раздел «Вопросы»; для остальных маршрутов используйте одноимённое значение.\n",
+  "input": "<request_json>\n{{REWRITE_REQUEST_JSON}}\n</request_json>",
+  "prompt_cache_options": {
+    "mode": "explicit",
+    "ttl": "30m"
+  },
+  "max_output_tokens": 3000,
+  "text": {
+    "format": {
+      "type": "json_schema",
+      "name": "wb_rewrite_v1",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "1.0.0"
+            ]
+          },
+          "review_id": {
+            "type": "string"
+          },
+          "review_version": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string",
+            "enum": [
+              "public_only",
+              "seller_chat",
+              "wb_return",
+              "wb_support"
+            ]
+          },
+          "case_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "draft_reply": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 900
+          },
+          "covered_issue_codes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "DELIVERY_DAMAGE",
+                "DEFECT_OUT_OF_BOX",
+                "MISSING_PARTS",
+                "KIT_QUALITY",
+                "WRONG_ITEM",
+                "OPENED_USED",
+                "INSTALL_MECHANISM",
+                "INSTALL_BREAKAGE",
+                "INSTALL_GENERAL",
+                "BUBBLES_DUST",
+                "ADHESION",
+                "ALIGNMENT",
+                "INSTRUCTIONS",
+                "SIZE_FIT",
+                "FRAME_OVERLAP",
+                "CASE_CONFLICT",
+                "FRAMELESS",
+                "SPONTANEOUS_BREAKAGE",
+                "IMPACT_BREAKAGE",
+                "SCRATCH_WEAR",
+                "DEVICE_DAMAGE_CLAIM",
+                "INJURY_CLAIM",
+                "PRIVACY",
+                "MATTE",
+                "DISPLAY_QUALITY",
+                "TOUCH_SENSITIVITY",
+                "FACE_ID",
+                "FRONT_CAMERA",
+                "EARPIECE",
+                "OLEOPHOBIC",
+                "TACTILE_EDGE",
+                "DESCRIPTION_MISMATCH",
+                "SERVICE_GUARANTEE",
+                "WB_REFUND_STATUS",
+                "PRICE_VALUE",
+                "VAGUE_QUALITY",
+                "POSITIVE_NO_PROBLEM",
+                "MEDIA_ONLY_UNCLEAR",
+                "LEGAL_OR_FRAUD_CLAIM",
+                "OTHER_SPECIFIC"
+              ]
+            },
+            "minItems": 0,
+            "maxItems": 20
+          },
+          "covered_positive_codes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "POS_INSTALLATION",
+                "POS_QUALITY",
+                "POS_PROTECTION",
+                "POS_REPEAT_PURCHASE",
+                "POS_PRODUCT_FEATURE",
+                "POS_GENERAL"
+              ]
+            },
+            "minItems": 0,
+            "maxItems": 10
+          },
+          "used_fact_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 0,
+            "maxItems": 30
+          },
+          "applied_cta": {
+            "type": "string",
+            "enum": [
+              "none",
+              "seller_chat",
+              "wb_return",
+              "wb_support"
+            ]
+          },
+          "requested_materials": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 0,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "schema_version",
+          "review_id",
+          "review_version",
+          "route",
+          "case_code",
+          "draft_reply",
+          "covered_issue_codes",
+          "covered_positive_codes",
+          "used_fact_ids",
+          "applied_cta",
+          "requested_materials"
+        ],
+        "additionalProperties": false,
+        "title": "Writer output"
+      }
+    }
+  }
+}

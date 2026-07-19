@@ -1,0 +1,114 @@
+{
+  "schema_version": "1.0.0",
+  "stores": [
+    {
+      "name": "wb_telegram_ingest",
+      "purpose": "Telegram review/media collection before /process",
+      "primary_key": "session_key",
+      "fields": [
+        {"name": "session_key", "type": "text", "required": true},
+        {"name": "chat_id", "type": "text", "required": true},
+        {"name": "status", "type": "text", "required": true, "allowed": ["collecting", "locked", "processed", "invalid"]},
+        {"name": "review_json", "type": "text", "required": true},
+        {"name": "telegram_file_refs_json", "type": "text", "required": true},
+        {"name": "created_at", "type": "date", "required": true},
+        {"name": "updated_at", "type": "date", "required": true},
+        {"name": "locked_at", "type": "date", "required": false}
+      ],
+      "retention": "7 days after processed",
+      "sensitive_logging": "Store Telegram file_id only; never store bot tokens or temporary download URLs."
+    },
+    {
+      "name": "wb_review_jobs",
+      "purpose": "Idempotency, state machine, result and delivery status",
+      "primary_key": "idempotency_key",
+      "key_expression": "encode(review_id)|encode(review_version)|encode(prompt_bundle_version)",
+      "fields": [
+        {"name": "idempotency_key", "type": "text", "required": true},
+        {"name": "review_id", "type": "text", "required": true},
+        {"name": "review_version", "type": "text", "required": true},
+        {"name": "prompt_bundle_version", "type": "text", "required": true},
+        {"name": "ingestion_id", "type": "text", "required": true},
+        {"name": "telegram_chat_id", "type": "text", "required": true},
+        {"name": "state", "type": "text", "required": true},
+        {"name": "outcome", "type": "text", "required": false},
+        {"name": "case_code", "type": "text", "required": false},
+        {"name": "normalized_input_json_redacted", "type": "text", "required": true},
+        {"name": "pipeline_result_json", "type": "text", "required": false},
+        {"name": "manager_message", "type": "text", "required": false},
+        {"name": "model_call_count", "type": "number", "required": true},
+        {"name": "rewrite_count", "type": "number", "required": true},
+        {"name": "estimated_cost_usd", "type": "number", "required": true},
+        {"name": "lease_owner", "type": "text", "required": false},
+        {"name": "lease_expires_at", "type": "date", "required": false},
+        {"name": "created_at", "type": "date", "required": true},
+        {"name": "updated_at", "type": "date", "required": true},
+        {"name": "delivered_at", "type": "date", "required": false},
+        {"name": "error_json_redacted", "type": "text", "required": false}
+      ],
+      "unique_constraints": ["idempotency_key"],
+      "retention": "Operational policy; do not delete while a case code is active."
+    },
+    {
+      "name": "wb_case_codes",
+      "purpose": "Unique seller_chat case-code allocation",
+      "primary_key": "case_code",
+      "fields": [
+        {"name": "case_code", "type": "text", "required": true, "pattern": "^[А-ЯЁ][0-9]{4}$"},
+        {"name": "idempotency_key", "type": "text", "required": true},
+        {"name": "review_id", "type": "text", "required": true},
+        {"name": "review_version", "type": "text", "required": true},
+        {"name": "prompt_bundle_version", "type": "text", "required": true},
+        {"name": "classification_json", "type": "text", "required": true},
+        {"name": "active", "type": "boolean", "required": true},
+        {"name": "created_at", "type": "date", "required": true},
+        {"name": "closed_at", "type": "date", "required": false}
+      ],
+      "unique_constraints": ["case_code", "idempotency_key"],
+      "write_filter": "final_route == seller_chat only"
+    },
+    {
+      "name": "wb_ai_audit",
+      "purpose": "Append-only state, role, guard, usage, cost and error audit",
+      "primary_key": "audit_id",
+      "fields": [
+        {"name": "audit_id", "type": "text", "required": true},
+        {"name": "idempotency_key", "type": "text", "required": true},
+        {"name": "sequence", "type": "number", "required": true},
+        {"name": "event_type", "type": "text", "required": true},
+        {"name": "state_from", "type": "text", "required": false},
+        {"name": "state_to", "type": "text", "required": false},
+        {"name": "role", "type": "text", "required": false},
+        {"name": "attempt", "type": "number", "required": false},
+        {"name": "response_id", "type": "text", "required": false},
+        {"name": "payload_json_redacted", "type": "text", "required": true},
+        {"name": "input_tokens", "type": "number", "required": true},
+        {"name": "cached_input_tokens", "type": "number", "required": true},
+        {"name": "cache_write_input_tokens", "type": "number", "required": true},
+        {"name": "output_tokens", "type": "number", "required": true},
+        {"name": "reasoning_tokens", "type": "number", "required": true},
+        {"name": "estimated_cost_usd", "type": "number", "required": true},
+        {"name": "latency_ms", "type": "number", "required": false},
+        {"name": "created_at", "type": "date", "required": true}
+      ],
+      "unique_constraints": ["audit_id", "idempotency_key+sequence"],
+      "retention": "Append-only audit policy",
+      "redaction": ["authorization", "API keys", "temporary/signed URLs", "media data URLs", "phone", "address", "full name", "order number"]
+    },
+    {
+      "name": "wb_recent_replies",
+      "purpose": "Recent public replies for duplicate detection",
+      "primary_key": "reply_id",
+      "fields": [
+        {"name": "reply_id", "type": "text", "required": true},
+        {"name": "idempotency_key", "type": "text", "required": true},
+        {"name": "route", "type": "text", "required": true},
+        {"name": "primary_issue", "type": "text", "required": false},
+        {"name": "reply", "type": "text", "required": true},
+        {"name": "reply_sha256", "type": "text", "required": true},
+        {"name": "created_at", "type": "date", "required": true}
+      ],
+      "retention": "Latest 200 replies or 30 days, whichever is smaller"
+    }
+  ]
+}

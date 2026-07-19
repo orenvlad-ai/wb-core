@@ -1,0 +1,465 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://selleros.local/schemas/classification.schema.json",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "1.0.0"
+      ]
+    },
+    "review_id": {
+      "type": "string"
+    },
+    "review_version": {
+      "type": "string"
+    },
+    "review_mode": {
+      "type": "string",
+      "enum": [
+        "positive",
+        "mixed",
+        "negative"
+      ]
+    },
+    "positive_signals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/positive_item"
+      },
+      "minItems": 0,
+      "maxItems": 10
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/issue_item"
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "primary_issue": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "DELIVERY_DAMAGE",
+        "DEFECT_OUT_OF_BOX",
+        "MISSING_PARTS",
+        "KIT_QUALITY",
+        "WRONG_ITEM",
+        "OPENED_USED",
+        "INSTALL_MECHANISM",
+        "INSTALL_BREAKAGE",
+        "INSTALL_GENERAL",
+        "BUBBLES_DUST",
+        "ADHESION",
+        "ALIGNMENT",
+        "INSTRUCTIONS",
+        "SIZE_FIT",
+        "FRAME_OVERLAP",
+        "CASE_CONFLICT",
+        "FRAMELESS",
+        "SPONTANEOUS_BREAKAGE",
+        "IMPACT_BREAKAGE",
+        "SCRATCH_WEAR",
+        "DEVICE_DAMAGE_CLAIM",
+        "INJURY_CLAIM",
+        "PRIVACY",
+        "MATTE",
+        "DISPLAY_QUALITY",
+        "TOUCH_SENSITIVITY",
+        "FACE_ID",
+        "FRONT_CAMERA",
+        "EARPIECE",
+        "OLEOPHOBIC",
+        "TACTILE_EDGE",
+        "DESCRIPTION_MISMATCH",
+        "SERVICE_GUARANTEE",
+        "WB_REFUND_STATUS",
+        "PRICE_VALUE",
+        "VAGUE_QUALITY",
+        "POSITIVE_NO_PROBLEM",
+        "MEDIA_ONLY_UNCLEAR",
+        "LEGAL_OR_FRAUD_CLAIM",
+        "OTHER_SPECIFIC",
+        null
+      ]
+    },
+    "primary_issue_subtype": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "delivery_delay",
+        "delivery_not_received",
+        "seller_support_no_response",
+        "promo_access_blocked",
+        null
+      ]
+    },
+    "primary_positive_signal": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "POS_INSTALLATION",
+        "POS_QUALITY",
+        "POS_PROTECTION",
+        "POS_REPEAT_PURCHASE",
+        "POS_PRODUCT_FEATURE",
+        "POS_GENERAL",
+        null
+      ]
+    },
+    "tone": {
+      "type": "string",
+      "enum": [
+        "positive_general",
+        "positive_specific",
+        "correct_negative",
+        "emotional_negative",
+        "rude_negative",
+        "vague",
+        "mixed"
+      ]
+    },
+    "factuality": {
+      "type": "string",
+      "enum": [
+        "concrete",
+        "partial",
+        "insufficient"
+      ]
+    },
+    "classification_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "media_status": {
+      "type": "string",
+      "enum": [
+        "none",
+        "analyzed",
+        "fetch_failed",
+        "video_present_unprocessed",
+        "unclear"
+      ]
+    },
+    "visual_findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/visual_finding"
+      },
+      "minItems": 0,
+      "maxItems": 30
+    },
+    "text_image_consistency": {
+      "type": "string",
+      "enum": [
+        "consistent",
+        "partially_consistent",
+        "conflicting",
+        "unknown",
+        "not_applicable"
+      ]
+    },
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "device_damage",
+          "injury",
+          "legal",
+          "fraud",
+          "personal_data",
+          "payment",
+          "delivery",
+          "wrong_item"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 8
+    },
+    "route": {
+      "type": "string",
+      "enum": [
+        "public_only",
+        "seller_chat",
+        "wb_return",
+        "wb_support"
+      ]
+    },
+    "route_reason": {
+      "type": "string"
+    },
+    "seller_investigation_subject": {
+      "type": "boolean"
+    },
+    "evidence_potential": {
+      "type": "boolean"
+    },
+    "required_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "product_photo",
+          "package_label_photo",
+          "package_photo",
+          "kit_photo",
+          "result_photo",
+          "installation_video_if_available",
+          "installation_video_required",
+          "damage_photo",
+          "usage_period",
+          "edge_photo",
+          "alignment_photo",
+          "installed_glass_photo",
+          "case_and_glass_photo",
+          "surface_photo",
+          "usage_timing",
+          "device_photo",
+          "glass_photo",
+          "box_photo",
+          "privacy_effect_photo_or_video",
+          "display_photo_or_video",
+          "touch_issue_video",
+          "sensor_area_photo",
+          "issue_video",
+          "camera_area_photo",
+          "sample_without_personal_data",
+          "earpiece_area_photo",
+          "status_screenshot",
+          "seller_chat_history",
+          "promotion_insert_photo",
+          "promotion_access_screenshot",
+          "relevant_product_or_status_evidence"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 30
+    },
+    "publication_action": {
+      "type": "string",
+      "enum": [
+        "reply"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "review_id",
+    "review_version",
+    "review_mode",
+    "positive_signals",
+    "issues",
+    "primary_issue",
+    "primary_issue_subtype",
+    "primary_positive_signal",
+    "tone",
+    "factuality",
+    "classification_confidence",
+    "media_status",
+    "visual_findings",
+    "text_image_consistency",
+    "risk_flags",
+    "route",
+    "route_reason",
+    "seller_investigation_subject",
+    "evidence_potential",
+    "required_evidence",
+    "publication_action"
+  ],
+  "additionalProperties": false,
+  "title": "Classifier output",
+  "$defs": {
+    "evidence_ref": {
+      "type": "object",
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "review_text",
+            "pros",
+            "cons",
+            "wb_tag",
+            "photo",
+            "video_frame",
+            "product_context",
+            "history"
+          ]
+        },
+        "source_ref": {
+          "type": "string"
+        },
+        "excerpt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_fact": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_type",
+        "source_ref",
+        "excerpt",
+        "observed_fact"
+      ],
+      "additionalProperties": false
+    },
+    "issue_item": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "DELIVERY_DAMAGE",
+            "DEFECT_OUT_OF_BOX",
+            "MISSING_PARTS",
+            "KIT_QUALITY",
+            "WRONG_ITEM",
+            "OPENED_USED",
+            "INSTALL_MECHANISM",
+            "INSTALL_BREAKAGE",
+            "INSTALL_GENERAL",
+            "BUBBLES_DUST",
+            "ADHESION",
+            "ALIGNMENT",
+            "INSTRUCTIONS",
+            "SIZE_FIT",
+            "FRAME_OVERLAP",
+            "CASE_CONFLICT",
+            "FRAMELESS",
+            "SPONTANEOUS_BREAKAGE",
+            "IMPACT_BREAKAGE",
+            "SCRATCH_WEAR",
+            "DEVICE_DAMAGE_CLAIM",
+            "INJURY_CLAIM",
+            "PRIVACY",
+            "MATTE",
+            "DISPLAY_QUALITY",
+            "TOUCH_SENSITIVITY",
+            "FACE_ID",
+            "FRONT_CAMERA",
+            "EARPIECE",
+            "OLEOPHOBIC",
+            "TACTILE_EDGE",
+            "DESCRIPTION_MISMATCH",
+            "SERVICE_GUARANTEE",
+            "WB_REFUND_STATUS",
+            "PRICE_VALUE",
+            "VAGUE_QUALITY",
+            "POSITIVE_NO_PROBLEM",
+            "MEDIA_ONLY_UNCLEAR",
+            "LEGAL_OR_FRAUD_CLAIM",
+            "OTHER_SPECIFIC"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence_ref"
+          },
+          "minItems": 1,
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "code",
+        "confidence",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "positive_item": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "POS_INSTALLATION",
+            "POS_QUALITY",
+            "POS_PROTECTION",
+            "POS_REPEAT_PURCHASE",
+            "POS_PRODUCT_FEATURE",
+            "POS_GENERAL"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence_ref"
+          },
+          "minItems": 1,
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "code",
+        "confidence",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "visual_finding": {
+      "type": "object",
+      "properties": {
+        "finding_code": {
+          "type": "string",
+          "enum": [
+            "crack",
+            "chip",
+            "bubbles",
+            "dust",
+            "alignment",
+            "adhesion",
+            "wrong_item",
+            "missing_part",
+            "package_damage",
+            "display_distortion",
+            "unclear",
+            "other"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "source_ref": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "finding_code",
+        "description",
+        "source_ref",
+        "confidence"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

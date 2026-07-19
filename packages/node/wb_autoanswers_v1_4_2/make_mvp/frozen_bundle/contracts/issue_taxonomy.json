@@ -1,0 +1,277 @@
+{
+  "schema_version": "1.0.0",
+  "doctrine_version": "1.0",
+  "classification_model": "multi_label_with_primary_issue",
+  "negative_issue_count": 40,
+  "positive_signal_count": 6,
+  "review_modes": [
+    "positive",
+    "mixed",
+    "negative"
+  ],
+  "groups": {
+    "receipt_and_kit": "Получение и комплектность",
+    "installation": "Установка",
+    "geometry": "Геометрия и совместимость",
+    "strength_and_wear": "Прочность и износ",
+    "functional": "Функциональные свойства",
+    "expectations": "Ожидания и коммуникация",
+    "insufficient_data": "Недостаточно данных",
+    "risk": "Рискованные заявления",
+    "other": "Прочее"
+  },
+  "negative_issues": [
+    {
+      "code": "DELIVERY_DAMAGE",
+      "group": "receipt_and_kit",
+      "label": "Повреждение при получении"
+    },
+    {
+      "code": "DEFECT_OUT_OF_BOX",
+      "group": "receipt_and_kit",
+      "label": "Дефект до использования"
+    },
+    {
+      "code": "MISSING_PARTS",
+      "group": "receipt_and_kit",
+      "label": "Неполный комплект"
+    },
+    {
+      "code": "KIT_QUALITY",
+      "group": "receipt_and_kit",
+      "label": "Непригодный элемент комплекта"
+    },
+    {
+      "code": "WRONG_ITEM",
+      "group": "receipt_and_kit",
+      "label": "Получен неверный товар"
+    },
+    {
+      "code": "OPENED_USED",
+      "group": "receipt_and_kit",
+      "label": "Следы вскрытия или использования"
+    },
+    {
+      "code": "INSTALL_MECHANISM",
+      "group": "installation",
+      "label": "Сбой плёнки, язычка или механизма"
+    },
+    {
+      "code": "INSTALL_BREAKAGE",
+      "group": "installation",
+      "label": "Повреждение при установке"
+    },
+    {
+      "code": "INSTALL_GENERAL",
+      "group": "installation",
+      "label": "Установка не получилась без точного этапа"
+    },
+    {
+      "code": "BUBBLES_DUST",
+      "group": "installation",
+      "label": "Пузыри, пыль или включения"
+    },
+    {
+      "code": "ADHESION",
+      "group": "installation",
+      "label": "Не приклеилось или отходят края"
+    },
+    {
+      "code": "ALIGNMENT",
+      "group": "installation",
+      "label": "Смещение или кривая установка"
+    },
+    {
+      "code": "INSTRUCTIONS",
+      "group": "installation",
+      "label": "Нет или непонятна инструкция"
+    },
+    {
+      "code": "SIZE_FIT",
+      "group": "geometry",
+      "label": "Размер и покрытие экрана"
+    },
+    {
+      "code": "FRAME_OVERLAP",
+      "group": "geometry",
+      "label": "Чёрная рамка перекрывает экран"
+    },
+    {
+      "code": "CASE_CONFLICT",
+      "group": "geometry",
+      "label": "Конфликт с чехлом"
+    },
+    {
+      "code": "FRAMELESS",
+      "group": "geometry",
+      "label": "Безрамочная линейка"
+    },
+    {
+      "code": "SPONTANEOUS_BREAKAGE",
+      "group": "strength_and_wear",
+      "label": "Трещина без указанного удара"
+    },
+    {
+      "code": "IMPACT_BREAKAGE",
+      "group": "strength_and_wear",
+      "label": "Повреждение после удара или падения"
+    },
+    {
+      "code": "SCRATCH_WEAR",
+      "group": "strength_and_wear",
+      "label": "Царапины и износ"
+    },
+    {
+      "code": "DEVICE_DAMAGE_CLAIM",
+      "group": "strength_and_wear",
+      "label": "Заявление о повреждении устройства"
+    },
+    {
+      "code": "INJURY_CLAIM",
+      "group": "strength_and_wear",
+      "label": "Заявление о травме"
+    },
+    {
+      "code": "PRIVACY",
+      "group": "functional",
+      "label": "Антишпион-эффект"
+    },
+    {
+      "code": "MATTE",
+      "group": "functional",
+      "label": "Матовый эффект"
+    },
+    {
+      "code": "DISPLAY_QUALITY",
+      "group": "functional",
+      "label": "Искажение изображения"
+    },
+    {
+      "code": "TOUCH_SENSITIVITY",
+      "group": "functional",
+      "label": "Проблемы сенсора"
+    },
+    {
+      "code": "FACE_ID",
+      "group": "functional",
+      "label": "Проблемы Face ID"
+    },
+    {
+      "code": "FRONT_CAMERA",
+      "group": "functional",
+      "label": "Мутность фронтальной камеры"
+    },
+    {
+      "code": "EARPIECE",
+      "group": "functional",
+      "label": "Перекрытие разговорного динамика"
+    },
+    {
+      "code": "OLEOPHOBIC",
+      "group": "functional",
+      "label": "Отпечатки и олеофобный слой"
+    },
+    {
+      "code": "TACTILE_EDGE",
+      "group": "functional",
+      "label": "Дискомфорт или опасная кромка"
+    },
+    {
+      "code": "DESCRIPTION_MISMATCH",
+      "group": "expectations",
+      "label": "Несоответствие описанию"
+    },
+    {
+      "code": "SERVICE_GUARANTEE",
+      "group": "expectations",
+      "label": "Гарантия установки"
+    },
+    {
+      "code": "WB_REFUND_STATUS",
+      "group": "expectations",
+      "label": "Статус возврата или денег WB"
+    },
+    {
+      "code": "PRICE_VALUE",
+      "group": "expectations",
+      "label": "Цена и ценность"
+    },
+    {
+      "code": "VAGUE_QUALITY",
+      "group": "insufficient_data",
+      "label": "Неконкретная жалоба"
+    },
+    {
+      "code": "POSITIVE_NO_PROBLEM",
+      "group": "expectations",
+      "label": "Позитивный текст при низкой оценке"
+    },
+    {
+      "code": "MEDIA_ONLY_UNCLEAR",
+      "group": "insufficient_data",
+      "label": "Неясное медиа без описания"
+    },
+    {
+      "code": "LEGAL_OR_FRAUD_CLAIM",
+      "group": "risk",
+      "label": "Юридическое заявление или мошенничество"
+    },
+    {
+      "code": "OTHER_SPECIFIC",
+      "group": "other",
+      "label": "Другая конкретная проблема"
+    }
+  ],
+  "positive_signals": [
+    {
+      "code": "POS_INSTALLATION",
+      "label": "Лёгкая или ровная установка",
+      "rule": "Отразить конкретный результат: быстро, ровно, без пузырей."
+    },
+    {
+      "code": "POS_QUALITY",
+      "label": "Качество, внешний вид или удобство",
+      "rule": "Не усиливать похвалу неподтверждёнными характеристиками."
+    },
+    {
+      "code": "POS_PROTECTION",
+      "label": "Экран остался цел",
+      "rule": "Можно отметить подтверждённый результат без обещания абсолютной защиты."
+    },
+    {
+      "code": "POS_REPEAT_PURCHASE",
+      "label": "Повторная покупка",
+      "rule": "Поблагодарить за доверие и повторный выбор."
+    },
+    {
+      "code": "POS_PRODUCT_FEATURE",
+      "label": "Подтверждённое свойство",
+      "rule": "Упомянуть только прямо подтверждённое свойство: антишпион, матовое покрытие, Face ID, сенсор, комплект и т. п."
+    },
+    {
+      "code": "POS_GENERAL",
+      "label": "Общая похвала",
+      "rule": "Кратко поблагодарить и не додумывать причину оценки."
+    }
+  ],
+  "deprecated_codes": [
+    {
+      "code": "SERVICE_PROMO",
+      "reason": "Отсутствует в Доктрине v1.0.",
+      "migration": [
+        {
+          "when": "упомянута гарантия установки",
+          "to": "SERVICE_GUARANTEE"
+        },
+        {
+          "when": "конкретное несоответствие карточке или рекламе",
+          "to": "DESCRIPTION_MISMATCH"
+        },
+        {
+          "when": "иная конкретная претензия",
+          "to": "OTHER_SPECIFIC или более точный код"
+        }
+      ]
+    }
+  ]
+}

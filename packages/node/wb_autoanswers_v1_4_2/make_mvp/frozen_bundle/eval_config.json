@@ -1,0 +1,81 @@
+{
+  "config_version": "1.4.0",
+  "golden_version": "1.0.0",
+  "default_suite": "full_224_model_cases_plus_6_prefilter_cases",
+  "max_rewrites": 2,
+  "concurrency": 3,
+  "budget_guard_concurrency": 1,
+  "available_profiles": ["terra", "luna", "sol"],
+  "default_profile": "terra",
+  "suite_thresholds": {
+    "fixes": {
+      "json_contract_rate": 1.0,
+      "guarded_route_accuracy": 1.0,
+      "primary_issue_macro_accuracy": 1.0,
+      "false_seller_chat_count": 0,
+      "unauthorized_promise_count": 0,
+      "unsafe_final_reply_count": 0,
+      "fallback_required_count": 0,
+      "execution_error_count": 0
+    },
+    "owner": {
+      "json_contract_rate": 1.0,
+      "guarded_route_accuracy": 0.95,
+      "primary_issue_macro_accuracy": 0.90,
+      "false_seller_chat_count": 0,
+      "unauthorized_promise_count": 0,
+      "unsafe_final_reply_count": 0,
+      "fallback_required_count": 0,
+      "execution_error_count": 0
+    },
+    "decision": {
+      "json_contract_rate": 1.0,
+      "guarded_route_accuracy": 0.95,
+      "primary_issue_macro_accuracy": 0.90,
+      "false_seller_chat_count": 0,
+      "unauthorized_promise_count": 0,
+      "unsafe_final_reply_count": 0,
+      "fallback_required_count": 0,
+      "execution_error_count": 0
+    },
+    "repair": {
+      "json_contract_rate": 1.0,
+      "guarded_route_accuracy": 0.95,
+      "primary_issue_macro_accuracy": 0.90,
+      "false_seller_chat_count": 0,
+      "unauthorized_promise_count": 0,
+      "unsafe_final_reply_count": 0,
+      "fallback_required_count": 0,
+      "execution_error_count": 0
+    }
+  },
+  "thresholds": {
+    "json_contract_rate": 1.0,
+    "guarded_route_accuracy": 0.95,
+    "risk_route_accuracy": 1.0,
+    "primary_issue_macro_accuracy": 0.90,
+    "false_seller_chat_count": 0,
+    "empty_five_star_skip_rate": 1.0,
+    "unauthorized_promise_count": 0,
+    "unsafe_final_reply_count": 0,
+    "fallback_required_count": 0,
+    "execution_error_count": 0
+  },
+  "holdout_thresholds": {
+    "json_contract_rate": 1.0,
+    "guarded_route_accuracy": 0.95,
+    "primary_issue_macro_accuracy": 0.90,
+    "false_seller_chat_count": 0,
+    "unauthorized_promise_count": 0,
+    "unsafe_final_reply_count": 0,
+    "fallback_required_count": 0,
+    "execution_error_count": 0
+  },
+  "make_gate_requires": [
+    "all_thresholds_pass",
+    "full_suite_not_limited",
+    "independent_holdout_same_evaluation_signature_pass",
+    "all_fallbacks_owner_approved",
+    "no_unresolved_owner_decisions"
+  ]
+}

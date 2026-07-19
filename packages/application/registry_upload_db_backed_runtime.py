@@ -9375,6 +9375,8 @@ _SHEET_VITRINA_USER_SECTION_IDS = (
     "supply",
     "reports",
     "feedbacks",
+    "feedbacks.ai_review",
+    "feedbacks.autoanswers_admin",
     "ads",
     "prices",
     "sku_management",
@@ -9442,7 +9444,11 @@ def _default_sheet_vitrina_sections_for_role(role: str) -> list[str]:
     if normalized == "operator":
         # New knowledge-base access is intentionally opt-in for non-admin
         # users, including historical role-only records.
-        return [section_id for section_id in _SHEET_VITRINA_USER_SECTION_IDS if section_id != "instructions"]
+        return [
+            section_id
+            for section_id in _SHEET_VITRINA_USER_SECTION_IDS
+            if section_id not in {"instructions", "feedbacks.ai_review", "feedbacks.autoanswers_admin"}
+        ]
     if normalized == "supply_operator":
         return ["supply"]
     return []

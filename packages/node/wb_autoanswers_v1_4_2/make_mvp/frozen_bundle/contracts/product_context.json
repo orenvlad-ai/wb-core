@@ -1,0 +1,938 @@
+{
+  "schema_version": "1.0.0",
+  "doctrine_version": "1.0",
+  "source_note": "Индекс отражает товары, встреченные в двух корпусах, но не подтверждает текущий статус продаж.",
+  "universal_facts": [
+    {
+      "id": "INSTALL_KIT",
+      "fact": "Комплект включает влажную и сухую очистку, микрофибру, установочный бокс с интегрированным стеклом и подложку для телефона."
+    },
+    {
+      "id": "INSTALL_CLEANING",
+      "fact": "Экран очищается сначала влажным, затем сухим способом; установку выполняют при минимальном количестве пыли."
+    },
+    {
+      "id": "INSTALL_BOX",
+      "fact": "Бокс ставится язычком со стрелкой вниз и плотно удерживается на телефоне."
+    },
+    {
+      "id": "INSTALL_PULL",
+      "fact": "Язычок вытягивается полностью, медленно и плавно."
+    },
+    {
+      "id": "INSTALL_FINISH",
+      "fact": "После выхода плёнки выполняются предусмотренные нажатия и движение по центральной линии для выхода воздуха."
+    },
+    {
+      "id": "BUBBLES",
+      "fact": "Крупный пузырь обрабатывают сразу локальным приподниманием ближайшего участка; микропузыри без пыли могут уменьшиться в течение суток."
+    },
+    {
+      "id": "PROTECTION_LIMIT",
+      "fact": "Стекло снижает риск повреждения экрана, но не гарантирует защиту при любом ударе; результат зависит от силы, угла и точки контакта."
+    }
+  ],
+  "line_contexts": {
+    "transparent": {
+      "confirmed_facts": [
+        "При правильной установке не должно заметно искажать изображение, фронтальную камеру, Face ID, сенсор или разговорный динамик."
+      ],
+      "forbidden_cross_line_facts": [
+        "матовая зернистость",
+        "приватность бокового обзора"
+      ]
+    },
+    "matte": {
+      "confirmed_facts": [
+        "Рассеивает свет и уменьшает блики.",
+        "Небольшая зернистость и снижение резкости являются особенностью покрытия."
+      ],
+      "atypical": [
+        "пятна",
+        "полосы",
+        "неравномерность"
+      ]
+    },
+    "anti_spy": {
+      "confirmed_facts": [
+        "Усиливает затемнение при боковом обзоре.",
+        "Небольшое снижение яркости при прямом обзоре неизбежно."
+      ],
+      "atypical": [
+        "полное отсутствие бокового эффекта"
+      ]
+    },
+    "frameless": {
+      "confirmed_facts": [
+        "Отдельная будущая линейка без чёрной рамки; требует собственной геометрии и правил покрытия."
+      ],
+      "status": "future_product_context_only"
+    },
+    "unknown": {
+      "confirmed_facts": [],
+      "restriction": "Запрещены специфические свойства линейки."
+    }
+  },
+  "marketing_claim_policy": {
+    "prohibited_in_replies": [
+      "100% без отпечатков",
+      "100% чувствительность",
+      "абсолютная защита",
+      "автоматический возврат денег"
+    ],
+    "requires_separate_confirmation": [
+      "9H",
+      "пять слоёв",
+      "любые абсолютные проценты и результаты фабричных тестов"
+    ]
+  },
+  "sku_index": [
+    {
+      "seller_article": "(Anti-Spy) iPhone 11 Pro",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 11 Pro"
+      ],
+      "phone_models": [
+        "iPhone 11 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 11 Pro Max",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 11 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 11 Pro Max",
+        "iPhone 11 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 12 Pro Max",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 12 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 12 Pro Max"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 13 Pro Max / 14 Plus",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 13 Pro Max / 14 Plus"
+      ],
+      "phone_models": [
+        "iPhone 13 Pro Max",
+        "iPhone 14 Plus"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 14 / 13 / 13Pro",
+      "nm_ids": [
+        391662410
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 14 / 13 / 13Pro / 16E",
+        "Защитное стекло антишпион на iPhone 14 /13/13Pro /16E /17E",
+        "Защитное стекло антишпион на iPhone 14 13 13Pro 16E 17E"
+      ],
+      "phone_models": [
+        "iPhone 17e",
+        "iPhone 16e",
+        "iPhone 13",
+        "iPhone 13 Pro",
+        "iPhone 14"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_ids": [
+        428849827
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 14 Pro"
+      ],
+      "phone_models": [
+        "iPhone 14 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 14 Pro Max",
+      "nm_ids": [
+        428850065
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 14 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 14 Pro Max",
+        "iPhone 14 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 15 / 16",
+      "nm_ids": [
+        391662965
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 15 / 16"
+      ],
+      "phone_models": [
+        "iPhone 15",
+        "iPhone 16"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 15 Pro",
+      "nm_ids": [
+        391659990
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 15 Pro"
+      ],
+      "phone_models": [
+        "iPhone 15 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 15 Pro Max",
+      "nm_ids": [
+        391663632
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 15 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 15 Pro Max",
+        "iPhone 15 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 16 Pro",
+      "nm_ids": [
+        391660889
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 16 Pro / 17"
+      ],
+      "phone_models": [
+        "iPhone 16 Pro",
+        "iPhone 17"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 16 ProMax",
+      "nm_ids": [
+        391661710
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 16 ProMax"
+      ],
+      "phone_models": [
+        "iPhone 16 Pro Max",
+        "iPhone 16 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 17 Air",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone Air"
+      ],
+      "phone_models": [
+        "iPhone Air"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 17 Pro",
+      "nm_ids": [
+        497416271
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 17 Pro"
+      ],
+      "phone_models": [
+        "iPhone 17 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Anti-Spy) iPhone 17 Pro Max",
+      "nm_ids": [
+        497416559
+      ],
+      "product_names": [
+        "Защитное стекло антишпион на iPhone 17 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 17 Pro Max",
+        "iPhone 17 Pro"
+      ],
+      "line": "anti_spy",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Clean) iPhone 17 Air",
+      "nm_ids": [
+        497413772
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone Air с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone Air"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Clean) iPhone 17 Pro",
+      "nm_ids": [
+        497414010
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 17 Pro с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 17 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Clean) iPhone 17 Pro Max",
+      "nm_ids": [
+        497414624
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 17 Pro Max с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 17 Pro Max",
+        "iPhone 17 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 11 Pro",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 11 Pro"
+      ],
+      "phone_models": [
+        "iPhone 11 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 11 Pro Max",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 11 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 11 Pro Max",
+        "iPhone 11 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 14 / 13 / 13Pro",
+      "nm_ids": [
+        428854502
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 14 / 13 / 13Pro",
+        "Защитное стекло матовое на iPhone 14 / 13 /13Pro/ 16e / 17e",
+        "Защитное стекло матовое на iPhone 14 13 13Pro 16e 17e"
+      ],
+      "phone_models": [
+        "iPhone 17e",
+        "iPhone 16e",
+        "iPhone 13",
+        "iPhone 13 Pro",
+        "iPhone 14"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 14 Pro",
+      "nm_ids": [
+        428855758
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 14 Pro"
+      ],
+      "phone_models": [
+        "iPhone 14 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 14 Pro Max",
+      "nm_ids": [
+        428855978
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 14 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 14 Pro Max",
+        "iPhone 14 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 15 / 16",
+      "nm_ids": [
+        428855306
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 15 / 16"
+      ],
+      "phone_models": [
+        "iPhone 15",
+        "iPhone 16"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 15 Pro",
+      "nm_ids": [
+        428853741
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 15 Pro"
+      ],
+      "phone_models": [
+        "iPhone 15 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 15 Pro Max",
+      "nm_ids": [
+        428855560
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 15 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 15 Pro Max",
+        "iPhone 15 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 16 Pro",
+      "nm_ids": [
+        428854140
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 16 Pro / 17"
+      ],
+      "phone_models": [
+        "iPhone 16 Pro",
+        "iPhone 17"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 16 ProMax",
+      "nm_ids": [
+        428854299
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 16 ProMax"
+      ],
+      "phone_models": [
+        "iPhone 16 Pro Max",
+        "iPhone 16 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 17 Air",
+      "nm_ids": [
+        497416931
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone Air"
+      ],
+      "phone_models": [
+        "iPhone Air"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 17 Pro",
+      "nm_ids": [
+        497417163
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 17 Pro"
+      ],
+      "phone_models": [
+        "iPhone 17 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "(Matte) iPhone 17 Pro Max",
+      "nm_ids": [
+        497417474
+      ],
+      "product_names": [
+        "Защитное стекло матовое на iPhone 17 Pro Max"
+      ],
+      "phone_models": [
+        "iPhone 17 Pro Max",
+        "iPhone 17 Pro"
+      ],
+      "line": "matte",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone11Pro",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло на iPhone 11 Pro с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 11 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone11ProMax",
+      "nm_ids": [
+        274811552
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 11 Pro Max с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 11 Pro Max",
+        "iPhone 11 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone12ProMax",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло на iPhone 12 Pro Max с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 12 Pro Max"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone13ProMax/14Plus",
+      "nm_ids": [],
+      "product_names": [
+        "Защитное стекло на iPhone 13 ProMax/14Plus с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 13 Pro Max",
+        "iPhone 14 Plus"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone14",
+      "nm_ids": [
+        210183919
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 13 14 13pro 16e 17е автоустановка",
+        "Защитное стекло на iPhone 13 14 13pro 16e автоустановка"
+      ],
+      "phone_models": [
+        "iPhone 17e",
+        "iPhone 16e",
+        "iPhone 13",
+        "iPhone 13 Pro",
+        "iPhone 14"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone14Pro",
+      "nm_ids": [
+        210184534
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 14 Pro с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 14 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone14ProMax",
+      "nm_ids": [
+        210183142
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 14 Pro Max с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 14 Pro Max",
+        "iPhone 14 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone15Pro",
+      "nm_ids": [
+        259473237
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 15 Pro с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 15 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone15ProMax",
+      "nm_ids": [
+        245720334
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 15 Pro Max с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 15 Pro Max",
+        "iPhone 15 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone15_16",
+      "nm_ids": [
+        259460529
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 15 и iPhone 16 c автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 15",
+        "iPhone 16"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone16Plus/15Plus",
+      "nm_ids": [
+        274812255
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 16 Plus/15 Plus с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 16 Plus",
+        "iPhone 15 Plus"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone16Pro",
+      "nm_ids": [
+        259466031
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 16 Pro / 17 с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 16 Pro",
+        "iPhone 17"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    },
+    {
+      "seller_article": "smk_iPhone16ProMax",
+      "nm_ids": [
+        259465495
+      ],
+      "product_names": [
+        "Защитное стекло на iPhone 16 Pro Max с автоустановкой"
+      ],
+      "phone_models": [
+        "iPhone 16 Pro Max",
+        "iPhone 16 Pro"
+      ],
+      "line": "transparent",
+      "context_status": "known",
+      "source_corpora": [
+        "negative_corpus",
+        "positive_corpus"
+      ],
+      "active_sales_status": "unknown"
+    }
+  ]
+}

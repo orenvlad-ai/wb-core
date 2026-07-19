@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://selleros.local/schemas/validation.schema.json",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "1.0.0"
+      ]
+    },
+    "review_id": {
+      "type": "string"
+    },
+    "review_version": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "rewrite",
+        "fallback"
+      ]
+    },
+    "violations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/violation_item"
+      },
+      "minItems": 0,
+      "maxItems": 30
+    },
+    "rewrite_instructions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "review_id",
+    "review_version",
+    "status",
+    "violations",
+    "rewrite_instructions",
+    "confidence"
+  ],
+  "additionalProperties": false,
+  "title": "Validator output",
+  "$defs": {
+    "violation_item": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "FACT_UNSUPPORTED",
+            "ROUTE_MISMATCH",
+            "CTA_MISMATCH",
+            "MEDIA_FALSE_CLAIM",
+            "PROMISE_UNAUTHORIZED",
+            "BUYER_BLAME",
+            "ISSUE_OMITTED",
+            "POSITIVE_ORDER",
+            "GREETING_INVALID",
+            "STYLE_FORBIDDEN",
+            "LENGTH_SOFT",
+            "LENGTH_HARD",
+            "PERSONAL_DATA",
+            "CASE_CODE_INVALID",
+            "SEMANTIC_DUPLICATE",
+            "PRODUCT_CONTEXT_MISUSE",
+            "MULTIPLE_ROUTES",
+            "POSITIVE_UNGROUNDED",
+            "EMPTY_FIVE_STAR_REPLIED",
+            "OTHER"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "rewrite_instruction": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "evidence",
+        "rewrite_instruction"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

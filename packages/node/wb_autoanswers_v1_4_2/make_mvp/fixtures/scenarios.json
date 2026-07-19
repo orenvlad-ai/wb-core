@@ -1,0 +1,254 @@
+{
+  "public_only": {
+    "raw": {
+      "ingestion_id": "tg-public-1",
+      "review_id": "mvp-public-1",
+      "review_version": "1",
+      "rating": 3,
+      "text": "После установки остались небольшие пузыри",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "BUBBLES_DUST",
+      "issue_codes": ["BUBBLES_DUST"],
+      "route": "public_only",
+      "seller_investigation_subject": false,
+      "evidence_potential": false,
+      "required_evidence": []
+    },
+    "drafts": [
+      "Здравствуйте. Понимаем, что небольшие пузыри после установки портят впечатление. Если под ними нет пыли, они могут уменьшиться в течение суток."
+    ],
+    "validator_statuses": ["pass"],
+    "expected_route": "public_only",
+    "expected_calls": 3
+  },
+  "seller_chat": {
+    "raw": {
+      "ingestion_id": "tg-chat-1",
+      "review_id": "mvp-chat-1",
+      "review_version": "2",
+      "rating": 2,
+      "text": "Устанавливала по инструкции, язычок порвался. Продавец обещал гарантию установки",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [{"full_size_url": "https://example.invalid/signed/photo.jpg", "fetch_status": "downloaded"}], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "SERVICE_GUARANTEE",
+      "issue_codes": ["SERVICE_GUARANTEE", "INSTALL_MECHANISM"],
+      "route": "seller_chat",
+      "seller_investigation_subject": true,
+      "evidence_potential": true,
+      "required_evidence": ["installation_video_required"]
+    },
+    "drafts": [
+      "Здравствуйте. Жаль, что установка не дала ожидаемого результата. Напишите нам в чат с продавцом и укажите номер обращения {{case_code}}. Разберёмся в ситуации."
+    ],
+    "validator_statuses": ["pass"],
+    "expected_route": "seller_chat",
+    "expected_calls": 3
+  },
+  "wb_return": {
+    "raw": {
+      "ingestion_id": "tg-return-1",
+      "review_id": "mvp-return-1",
+      "review_version": "1",
+      "rating": 1,
+      "text": "В коробке стекло для другой модели телефона",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "WRONG_ITEM",
+      "issue_codes": ["WRONG_ITEM"],
+      "route": "wb_return",
+      "seller_investigation_subject": false,
+      "evidence_potential": true,
+      "required_evidence": ["product_photo", "package_label_photo"]
+    },
+    "drafts": [
+      "Здравствуйте. Полученный вариант не соответствует заказанному, и это нетипичная ситуация. Пожалуйста, оформите возврат через Wildberries и приложите фотографии товара и маркировки упаковки."
+    ],
+    "validator_statuses": ["pass"],
+    "expected_route": "wb_return",
+    "expected_calls": 3
+  },
+  "wb_support": {
+    "raw": {
+      "ingestion_id": "tg-support-1",
+      "review_id": "mvp-support-1",
+      "review_version": "1",
+      "rating": 2,
+      "text": "Возврат одобрен, но деньги так и не пришли",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "WB_REFUND_STATUS",
+      "issue_codes": ["WB_REFUND_STATUS"],
+      "route": "wb_support",
+      "seller_investigation_subject": false,
+      "evidence_potential": true,
+      "required_evidence": ["status_screenshot"]
+    },
+    "drafts": [
+      "Здравствуйте. Проверить статус денег можно только по данным заказа в системе Wildberries. Откройте в личном кабинете раздел поддержки и создайте обращение по этому заказу."
+    ],
+    "validator_statuses": ["pass"],
+    "expected_route": "wb_support",
+    "expected_calls": 3
+  },
+  "empty_five_star": {
+    "raw": {
+      "ingestion_id": "tg-skip-1",
+      "review_id": "mvp-skip-1",
+      "review_version": "1",
+      "rating": 5,
+      "text": "",
+      "pros": "",
+      "cons": "",
+      "wb_tags": ["хорошее качество"],
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "expected_calls": 0
+  },
+  "unknown_sku": {
+    "raw": {
+      "ingestion_id": "tg-unknown-1",
+      "review_id": "mvp-unknown-1",
+      "review_version": "1",
+      "rating": 2,
+      "text": "Качество не понравилось",
+      "pros": "",
+      "cons": "",
+      "seller_article": "UNKNOWN-ARTICLE",
+      "nm_id": 999999999,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "VAGUE_QUALITY",
+      "issue_codes": ["VAGUE_QUALITY"],
+      "route": "public_only",
+      "seller_investigation_subject": false,
+      "evidence_potential": false,
+      "required_evidence": []
+    },
+    "drafts": [
+      "Здравствуйте. Жаль, что товар вас разочаровал. В отзыве недостаточно деталей, поэтому по имеющимся данным невозможно определить, что именно произошло."
+    ],
+    "validator_statuses": ["pass"],
+    "expected_route": "public_only",
+    "expected_calls": 3
+  },
+  "rewrite_then_pass": {
+    "raw": {
+      "ingestion_id": "tg-rewrite-1",
+      "review_id": "mvp-rewrite-1",
+      "review_version": "1",
+      "rating": 2,
+      "text": "Установка по инструкции не получилась, есть гарантия",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "SERVICE_GUARANTEE",
+      "issue_codes": ["SERVICE_GUARANTEE"],
+      "route": "seller_chat",
+      "seller_investigation_subject": true,
+      "evidence_potential": true,
+      "required_evidence": ["installation_video_required"]
+    },
+    "drafts": [
+      "Здравствуйте. Напишите нам в чат с продавцом, подготовьте фото и укажите номер обращения {{case_code}}.",
+      "Здравствуйте. Жаль, что установка не дала ожидаемого результата. Напишите нам в чат с продавцом и укажите номер обращения {{case_code}}. Разберёмся в ситуации."
+    ],
+    "validator_statuses": ["pass", "pass"],
+    "expected_route": "seller_chat",
+    "expected_calls": 5
+  },
+  "fallback_after_two": {
+    "raw": {
+      "ingestion_id": "tg-fallback-1",
+      "review_id": "mvp-fallback-1",
+      "review_version": "1",
+      "rating": 1,
+      "text": "Продавец обещал гарантию установки, но установить не получилось",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "SERVICE_GUARANTEE",
+      "issue_codes": ["SERVICE_GUARANTEE"],
+      "route": "seller_chat",
+      "seller_investigation_subject": true,
+      "evidence_potential": true,
+      "required_evidence": ["installation_video_required"]
+    },
+    "drafts": [
+      "Здравствуйте. Напишите в чат с продавцом, пришлите фото и укажите номер обращения {{case_code}}.",
+      "Здравствуйте. Напишите в чат с продавцом, подготовьте видео и укажите номер обращения {{case_code}}.",
+      "Здравствуйте. Напишите в чат с продавцом, приложите скриншоты и укажите номер обращения {{case_code}}."
+    ],
+    "validator_statuses": ["pass", "pass", "pass"],
+    "expected_route": "seller_chat",
+    "expected_calls": 7,
+    "expected_fallback_id": "INSTALL_CHAT"
+  },
+  "route_guard_return": {
+    "raw": {
+      "ingestion_id": "tg-guard-1",
+      "review_id": "mvp-guard-1",
+      "review_version": "1",
+      "rating": 1,
+      "text": "После установки на дисплее появилась глубокая царапина",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {"photos": [], "video": {"present": false}}
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "DEVICE_DAMAGE_CLAIM",
+      "issue_codes": ["DEVICE_DAMAGE_CLAIM"],
+      "route": "public_only",
+      "seller_investigation_subject": false,
+      "evidence_potential": true,
+      "required_evidence": ["device_photo"]
+    },
+    "drafts": [
+      "Здравствуйте. Понимаем, что такая ситуация вызывает серьёзные вопросы. Пожалуйста, оформите возврат через Wildberries и приложите фотографии экрана, стекла и упаковочной маркировки."
+    ],
+    "validator_statuses": ["pass"],
+    "expected_route": "wb_return",
+    "expected_calls": 3
+  }
+}

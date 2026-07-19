@@ -542,6 +542,84 @@
       max-width: 100%;
     }
 
+    .autoanswers-control-card,
+    .autoanswers-filters,
+    .autoanswers-list-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+      padding: 16px;
+    }
+
+    .autoanswers-control-grid,
+    .autoanswers-filter-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+
+    .autoanswers-control-actions,
+    .autoanswers-pagination {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .autoanswers-status {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-weight: 700;
+      background: #fef2f2;
+      color: #991b1b;
+    }
+
+    .autoanswers-status.is-on {
+      background: #ecfdf5;
+      color: #065f46;
+    }
+
+    .autoanswers-table-wrap {
+      overflow: auto;
+      margin-top: 12px;
+    }
+
+    .autoanswers-table {
+      width: 100%;
+      min-width: 1120px;
+      border-collapse: collapse;
+    }
+
+    .autoanswers-table th,
+    .autoanswers-table td {
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .autoanswers-reply {
+      max-width: 340px;
+      white-space: normal;
+    }
+
+    .autoanswers-detail-dialog {
+      width: min(920px, calc(100vw - 32px));
+      max-height: calc(100vh - 48px);
+      border: 0;
+      border-radius: 16px;
+      padding: 0;
+      box-shadow: 0 24px 80px rgba(15, 23, 42, .28);
+    }
+
+    .autoanswers-detail-dialog::backdrop { background: rgba(15, 23, 42, .55); }
+    .autoanswers-detail-body { padding: 20px; overflow: auto; max-height: calc(100vh - 96px); }
+    .autoanswers-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .autoanswers-detail-block { border: 1px solid var(--line); border-radius: 12px; padding: 12px; white-space: pre-wrap; }
+
     .feedbacks-panel,
     .feedbacks-subpanel,
     .feedbacks-workspace > *,
@@ -4827,6 +4905,9 @@
 
       .activity-layout,
       .feedbacks-filter-grid,
+      .autoanswers-control-grid,
+      .autoanswers-filter-grid,
+      .autoanswers-detail-grid,
       .research-form-grid,
       .history-fields {
         grid-template-columns: 1fr;
@@ -5291,18 +5372,58 @@
 	          <div>
 	            <h2>Отзывы</h2>
 	            <p class="panel-note">
-	              Ручное read-only чтение официального WB API feedbacks и AI-разбор в текущей сессии.
+	              Локальный реестр отзывов с фоновой синхронизацией, управляемой AI-обработкой и подтверждаемой публикацией.
 	            </p>
 	          </div>
-	          <p class="panel-meta" data-feedbacks-meta>Отзывы: read-only</p>
+	          <p class="panel-meta" data-feedbacks-meta>Отзывы: локальная БД</p>
 	        </div>
 
 	        <div class="feedbacks-subtabs" role="tablist" aria-label="Отзывы">
-	          <button class="feedbacks-subtab-button is-active" type="button" data-feedbacks-subtab="reviews" role="tab" aria-selected="true">Отзывы</button>
+	          <button class="feedbacks-subtab-button is-active" type="button" data-feedbacks-subtab="server-reviews" role="tab" aria-selected="true">Отзывы</button>
+	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="reviews" role="tab" aria-selected="false">Ручной импорт WB</button>
 	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="prompt" role="tab" aria-selected="false">AI-промпт разбора</button>
 	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="complaints" role="tab" aria-selected="false">Жалобы</button>
 	          <button class="feedbacks-subtab-button" type="button" data-feedbacks-subtab="automation" role="tab" aria-selected="false">Авто-жалобы</button>
 	        </div>
+
+	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="server-reviews">
+	          <div class="feedbacks-workspace">
+	            <section class="autoanswers-control-card">
+	              <div class="panel-top">
+	                <div><h3>Серверные автоответы</h3><p class="panel-note">Отзывы читаются из локальной БД. Wildberries получает ответ только из фоновой publication queue после hard gates и readback.</p></div>
+	                <span class="autoanswers-status" data-autoanswers-master-status>OFF</span>
+	              </div>
+	              <div class="autoanswers-control-grid">
+	                <label class="research-field"><span class="filter-label">Режим</span><select class="select" data-autoanswers-mode><option value="draft_only">draft_only</option><option value="auto_safe">auto_safe</option><option value="auto_all">auto_all</option></select></label>
+	                <div class="research-field"><span class="filter-label">Бюджет сегодня</span><strong data-autoanswers-budget-day>—</strong></div>
+	                <div class="research-field"><span class="filter-label">Бюджет месяц</span><strong data-autoanswers-budget-month>—</strong></div>
+	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-toggle>Включить</button><button class="button secondary" type="button" data-autoanswers-save-mode>Сохранить режим</button></div>
+	              </div>
+	              <p class="feedbacks-source-helper" data-autoanswers-settings-note>Загружаем настройки…</p>
+	            </section>
+
+	            <section class="autoanswers-filters">
+	              <div class="autoanswers-filter-grid">
+	                <label class="research-field"><span class="filter-label">Ответ</span><select class="select" data-autoanswers-filter="unanswered"><option value="">Все</option><option value="true">Без ответа</option></select></label>
+	                <label class="research-field"><span class="filter-label">Статус</span><input class="input" data-autoanswers-filter="status" placeholder="needs_review"></label>
+	                <label class="research-field"><span class="filter-label">Оценка</span><select class="select" data-autoanswers-filter="rating"><option value="">Все</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+	                <label class="research-field"><span class="filter-label">Route</span><select class="select" data-autoanswers-filter="route"><option value="">Все</option><option>public_only</option><option>seller_chat</option><option>wb_return</option><option>wb_support</option></select></label>
+	                <label class="research-field"><span class="filter-label">SKU / nmId</span><input class="input" data-autoanswers-filter="sku"></label>
+	                <label class="research-field"><span class="filter-label">С даты</span><input class="input" type="date" data-autoanswers-filter="date_from"></label>
+	                <label class="research-field"><span class="filter-label">По дату</span><input class="input" type="date" data-autoanswers-filter="date_to"></label>
+	                <label class="research-field"><span class="filter-label">Признак</span><select class="select" data-autoanswers-filter="flag"><option value="">Все</option><option value="has_photo">С фото</option><option value="has_video">С видео</option><option value="needs_review">Требует проверки</option><option value="published">Опубликовано</option><option value="error">Ошибка</option></select></label>
+	              </div>
+	              <div class="feedbacks-action-toolbar"><div class="autoanswers-control-actions"><button class="button primary" type="button" data-autoanswers-apply>Применить фильтры</button><button class="button secondary" type="button" data-autoanswers-sync>Синхронизировать сейчас</button><button class="button secondary" type="button" data-autoanswers-backlog>Исторический backlog</button></div><span class="research-result-note" data-autoanswers-list-meta>Последние 50</span></div>
+	            </section>
+
+	            <p class="research-error" data-autoanswers-error></p>
+	            <section class="autoanswers-list-card">
+	              <div class="autoanswers-table-wrap" data-autoanswers-result><p class="research-result-note">Загрузка локальных отзывов…</p></div>
+	              <div class="autoanswers-pagination"><button class="button ghost" type="button" data-autoanswers-prev>Назад</button><span data-autoanswers-page>Страница 1</span><button class="button ghost" type="button" data-autoanswers-next>Далее</button></div>
+	            </section>
+	          </div>
+	          <dialog class="autoanswers-detail-dialog" data-autoanswers-detail-dialog><div class="autoanswers-detail-body"><div class="panel-top"><h3>Карточка отзыва</h3><button class="button ghost" type="button" data-autoanswers-detail-close>Закрыть</button></div><div data-autoanswers-detail-body></div></div></dialog>
+	        </section>
 
 	        <section class="feedbacks-subpanel" data-feedbacks-subpanel="reviews">
 	          <div class="feedbacks-workspace">
@@ -6156,6 +6277,24 @@
     const feedbacksErrorNode = document.querySelector("[data-feedbacks-error]");
     const feedbacksSummaryNode = document.querySelector("[data-feedbacks-summary]");
     const feedbacksResultNode = document.querySelector("[data-feedbacks-result]");
+    const autoanswersMasterStatusNode = document.querySelector("[data-autoanswers-master-status]");
+    const autoanswersModeNode = document.querySelector("[data-autoanswers-mode]");
+    const autoanswersBudgetDayNode = document.querySelector("[data-autoanswers-budget-day]");
+    const autoanswersBudgetMonthNode = document.querySelector("[data-autoanswers-budget-month]");
+    const autoanswersToggleButton = document.querySelector("[data-autoanswers-toggle]");
+    const autoanswersSaveModeButton = document.querySelector("[data-autoanswers-save-mode]");
+    const autoanswersSettingsNoteNode = document.querySelector("[data-autoanswers-settings-note]");
+    const autoanswersApplyButton = document.querySelector("[data-autoanswers-apply]");
+    const autoanswersSyncButton = document.querySelector("[data-autoanswers-sync]");
+    const autoanswersBacklogButton = document.querySelector("[data-autoanswers-backlog]");
+    const autoanswersListMetaNode = document.querySelector("[data-autoanswers-list-meta]");
+    const autoanswersErrorNode = document.querySelector("[data-autoanswers-error]");
+    const autoanswersResultNode = document.querySelector("[data-autoanswers-result]");
+    const autoanswersPrevButton = document.querySelector("[data-autoanswers-prev]");
+    const autoanswersNextButton = document.querySelector("[data-autoanswers-next]");
+    const autoanswersPageNode = document.querySelector("[data-autoanswers-page]");
+    const autoanswersDetailDialog = document.querySelector("[data-autoanswers-detail-dialog]");
+    const autoanswersDetailBodyNode = document.querySelector("[data-autoanswers-detail-body]");
     const feedbacksModelSelectNode = document.querySelector("[data-feedbacks-model]");
     const feedbacksPromptTextareaNode = document.querySelector("[data-feedbacks-prompt-textarea]");
     const feedbacksPromptSaveButton = document.querySelector("[data-feedbacks-prompt-save]");
@@ -6637,7 +6776,22 @@
       },
       feedbacks: {
         initialized: false,
-        activeSubsection: "reviews",
+        activeSubsection: "server-reviews",
+        server: {
+          loading: false,
+          loaded: false,
+          settingsLoading: false,
+          settings: null,
+          budget: null,
+          items: [],
+          page: 1,
+          pageSize: 50,
+          total: 0,
+          hasMore: false,
+          filters: {},
+          detail: null,
+          error: ""
+        },
         loading: false,
         loaded: false,
         analyzing: false,
@@ -7023,6 +7177,29 @@
     });
     if (feedbacksLoadButton) {
       feedbacksLoadButton.addEventListener("click", loadFeedbacks);
+    }
+    if (autoanswersApplyButton) {
+      autoanswersApplyButton.addEventListener("click", function() {
+        state.feedbacks.server.filters = autoanswersFilterPayload();
+        loadServerFeedbacks({resetPage: true});
+      });
+    }
+    if (autoanswersSyncButton) autoanswersSyncButton.addEventListener("click", requestAutoanswersSync);
+    if (autoanswersBacklogButton) autoanswersBacklogButton.addEventListener("click", previewAutoanswersBacklog);
+    if (autoanswersToggleButton) autoanswersToggleButton.addEventListener("click", toggleAutoanswersMaster);
+    if (autoanswersSaveModeButton) autoanswersSaveModeButton.addEventListener("click", saveAutoanswersMode);
+    if (autoanswersPrevButton) {
+      autoanswersPrevButton.addEventListener("click", function() {
+        state.feedbacks.server.page = Math.max(1, state.feedbacks.server.page - 1);
+        loadServerFeedbacks();
+      });
+    }
+    if (autoanswersNextButton) {
+      autoanswersNextButton.addEventListener("click", function() {
+        if (!state.feedbacks.server.hasMore) return;
+        state.feedbacks.server.page += 1;
+        loadServerFeedbacks();
+      });
     }
     if (feedbacksAiAnalyzeButton) {
       feedbacksAiAnalyzeButton.addEventListener("click", analyzeFeedbacksWithAi);
@@ -11969,6 +12146,222 @@
       }
     }
 
+    function autoanswersFilterPayload() {
+      const filters = {};
+      document.querySelectorAll("[data-autoanswers-filter]").forEach(function(node) {
+        const key = String(node.getAttribute("data-autoanswers-filter") || "");
+        const value = String(node.value || "").trim();
+        if (!value) return;
+        if (key === "flag") filters[value] = "true";
+        else filters[key] = value;
+      });
+      return filters;
+    }
+
+    async function loadServerFeedbacks(options) {
+      const server = state.feedbacks.server;
+      if (server.loading) return;
+      if (options && options.resetPage) server.page = 1;
+      server.loading = true;
+      server.error = "";
+      renderAutoanswersServer();
+      try {
+        const url = new URL(WEB_VITRINA_CONFIG.feedbacks_local_path, window.location.origin);
+        url.searchParams.set("page", String(server.page));
+        url.searchParams.set("page_size", String(server.pageSize));
+        Object.keys(server.filters || {}).forEach(function(key) { url.searchParams.set(key, server.filters[key]); });
+        const response = await fetch(url.toString(), {method: "GET", headers: {"Accept": "application/json"}});
+        const payload = await readJsonResponse(response, "non-json local feedbacks response");
+        if (!response.ok) throw new Error(payload.error || "local feedbacks HTTP " + response.status);
+        if (payload.contract_name !== "sheet_vitrina_v1_feedbacks_local") throw new Error("unexpected local feedbacks contract");
+        server.items = Array.isArray(payload.items) ? payload.items : [];
+        server.total = Number(payload.total || 0);
+        server.hasMore = !!payload.has_more;
+        server.loaded = true;
+      } catch (error) {
+        server.error = String(error && error.message ? error.message : error);
+      } finally {
+        server.loading = false;
+        renderAutoanswersServer();
+      }
+    }
+
+    async function loadAutoanswersSettings() {
+      const server = state.feedbacks.server;
+      if (server.settingsLoading) return;
+      server.settingsLoading = true;
+      renderAutoanswersServer();
+      try {
+        const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path, {method: "GET", headers: {"Accept": "application/json"}});
+        const payload = await readJsonResponse(response, "non-json autoanswers settings response");
+        if (!response.ok) throw new Error(payload.error || "settings HTTP " + response.status);
+        server.settings = payload.settings || null;
+        server.budget = payload.budget || null;
+      } catch (error) {
+        server.error = String(error && error.message ? error.message : error);
+      } finally {
+        server.settingsLoading = false;
+        renderAutoanswersServer();
+      }
+    }
+
+    async function postAutoanswers(path, body) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"},
+        body: JSON.stringify(body || {})
+      });
+      const payload = await readJsonResponse(response, "non-json autoanswers response");
+      if (!response.ok) throw new Error(payload.error || "autoanswers HTTP " + response.status);
+      return payload;
+    }
+
+    async function updateAutoanswersSettings(change) {
+      if (!WEB_VITRINA_CONFIG.feedbacks_can_admin) return;
+      state.feedbacks.server.error = "";
+      try {
+        const payload = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path, change);
+        state.feedbacks.server.settings = payload.settings || null;
+        state.feedbacks.server.budget = payload.budget || null;
+      } catch (error) {
+        state.feedbacks.server.error = String(error && error.message ? error.message : error);
+      }
+      renderAutoanswersServer();
+    }
+
+    async function saveAutoanswersMode() {
+      const mode = String(autoanswersModeNode ? autoanswersModeNode.value : "draft_only");
+      if (mode === "auto_all") {
+        const confirmation = window.prompt("Для режима auto_all введите AUTO_ALL. Safety guards останутся включены.");
+        if (confirmation !== "AUTO_ALL") return;
+      }
+      await updateAutoanswersSettings({mode: mode});
+    }
+
+    async function toggleAutoanswersMaster() {
+      const settings = state.feedbacks.server.settings || {};
+      const enabling = !settings.master_enabled;
+      if (enabling) {
+        const confirmation = window.prompt("Для включения AI-контура введите ВКЛЮЧИТЬ. Исторический backlog не запустится.");
+        if (confirmation !== "ВКЛЮЧИТЬ") return;
+      }
+      await updateAutoanswersSettings({master_enabled: enabling});
+    }
+
+    async function requestAutoanswersSync() {
+      const requestKey = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : ("ui-" + Date.now());
+      try {
+        await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_sync_path, {request_key: requestKey});
+        state.feedbacks.server.error = "Команда синхронизации поставлена в фоновую очередь.";
+      } catch (error) {
+        state.feedbacks.server.error = String(error && error.message ? error.message : error);
+      }
+      renderAutoanswersServer();
+    }
+
+    async function previewAutoanswersBacklog() {
+      if (!WEB_VITRINA_CONFIG.feedbacks_can_admin) return;
+      try {
+        const preview = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_backlog_preview_path, {});
+        const accepted = window.confirm("Исторический backlog: " + preview.count + " отзывов, верхняя оценка стоимости $" + Number(preview.max_estimated_cost_usd || 0).toFixed(2) + ". Поставить в очередь?");
+        if (!accepted) return;
+        const result = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_backlog_enqueue_path, {preview_id: preview.preview_id});
+        state.feedbacks.server.error = "Поставлено в AI-очередь: " + Number(result.enqueued || 0) + ".";
+      } catch (error) {
+        state.feedbacks.server.error = String(error && error.message ? error.message : error);
+      }
+      renderAutoanswersServer();
+    }
+
+    async function openAutoanswersDetail(feedbackId) {
+      try {
+        const url = new URL(WEB_VITRINA_CONFIG.feedbacks_detail_path, window.location.origin);
+        url.searchParams.set("id", feedbackId);
+        const response = await fetch(url.toString(), {method: "GET", headers: {"Accept": "application/json"}});
+        const payload = await readJsonResponse(response, "non-json feedback detail response");
+        if (!response.ok) throw new Error(payload.error || "detail HTTP " + response.status);
+        state.feedbacks.server.detail = payload.feedback || null;
+        renderAutoanswersDetail();
+        if (autoanswersDetailDialog && typeof autoanswersDetailDialog.showModal === "function") autoanswersDetailDialog.showModal();
+      } catch (error) {
+        state.feedbacks.server.error = String(error && error.message ? error.message : error);
+        renderAutoanswersServer();
+      }
+    }
+
+    async function approveAutoanswersDetail(processingKey) {
+      if (!WEB_VITRINA_CONFIG.feedbacks_can_ai_review) return;
+      if (!window.confirm("Поставить точный проверенный текст в publication queue? HTTP-запрос не публикует его напрямую в WB.")) return;
+      try {
+        await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_approve_path, {processing_key: processingKey});
+        if (autoanswersDetailDialog) autoanswersDetailDialog.close();
+        await loadServerFeedbacks();
+      } catch (error) {
+        state.feedbacks.server.error = String(error && error.message ? error.message : error);
+        renderAutoanswersServer();
+      }
+    }
+
+    function renderAutoanswersServer() {
+      const server = state.feedbacks.server;
+      const settings = server.settings || {};
+      const budget = server.budget || {};
+      const effectiveOn = !!settings.effective_enabled;
+      if (autoanswersMasterStatusNode) {
+        autoanswersMasterStatusNode.textContent = settings.force_off ? "FORCE OFF" : (effectiveOn ? "ON" : "OFF");
+        autoanswersMasterStatusNode.classList.toggle("is-on", effectiveOn);
+      }
+      if (autoanswersModeNode && settings.mode) autoanswersModeNode.value = settings.mode;
+      if (autoanswersModeNode) autoanswersModeNode.disabled = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      if (autoanswersToggleButton) {
+        autoanswersToggleButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+        autoanswersToggleButton.disabled = server.settingsLoading || !!settings.force_off;
+        autoanswersToggleButton.textContent = settings.master_enabled ? "Выключить" : "Включить";
+      }
+      if (autoanswersSaveModeButton) autoanswersSaveModeButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      if (autoanswersBacklogButton) autoanswersBacklogButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
+      if (autoanswersBudgetDayNode) autoanswersBudgetDayNode.textContent = "$" + Number(budget.daily_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budget.daily_cap_usd || 5).toFixed(2);
+      if (autoanswersBudgetMonthNode) autoanswersBudgetMonthNode.textContent = "$" + Number(budget.monthly_used_and_reserved_usd || 0).toFixed(2) + " / $" + Number(budget.monthly_cap_usd || 50).toFixed(2);
+      if (autoanswersSettingsNoteNode) autoanswersSettingsNoteNode.textContent = settings.force_off ? "Emergency override WB_AUTOANSWERS_FORCE_OFF активен." : "Master-switch имеет приоритет. После повторного ON исторический backlog не запускается автоматически.";
+      if (autoanswersErrorNode) autoanswersErrorNode.textContent = server.error || "";
+      if (autoanswersListMetaNode) autoanswersListMetaNode.textContent = server.loading ? "Загрузка…" : ("Найдено: " + server.total + " · по 50 на странице");
+      if (autoanswersPrevButton) autoanswersPrevButton.disabled = server.loading || server.page <= 1;
+      if (autoanswersNextButton) autoanswersNextButton.disabled = server.loading || !server.hasMore;
+      if (autoanswersPageNode) autoanswersPageNode.textContent = "Страница " + server.page;
+      if (!autoanswersResultNode) return;
+      if (server.loading && !server.loaded) {
+        autoanswersResultNode.innerHTML = '<p class="research-result-note">Загружаем отзывы из локальной БД…</p>';
+        return;
+      }
+      if (!server.items.length) {
+        autoanswersResultNode.innerHTML = '<p class="research-result-note">Локальные отзывы по фильтрам не найдены.</p>';
+        return;
+      }
+      autoanswersResultNode.innerHTML = '<table class="autoanswers-table"><thead><tr><th>Дата</th><th>Оценка</th><th>Товар / SKU</th><th>Отзыв</th><th>Медиа</th><th>AI / route</th><th>Статус</th><th>Ответ / стоимость</th><th></th></tr></thead><tbody>' + server.items.map(function(row) {
+        const product = row.productDetails || {};
+        return '<tr><td>' + escapeHtml(row.createdDate || "—") + '</td><td>' + escapeHtml(row.productValuation || "—") + '</td><td>' + escapeHtml((product.product_name || "—") + "\n" + (product.nm_id || "") + " / " + (product.supplier_article || "")) + '</td><td>' + escapeHtml(row.text || row.pros || row.cons || "—") + '</td><td>' + (row.has_photo ? "Фото " : "") + (row.has_video ? "Видео" : "") + '</td><td>' + escapeHtml(row.route || "—") + '</td><td><span class="cell-badge">AI: ' + escapeHtml(row.processing_status || "synced") + '</span><br><span class="cell-badge">WB: ' + escapeHtml(row.publication_status || "not_queued") + '</span>' + (row.error ? '<br>' + escapeHtml(row.error) : '') + '</td><td class="autoanswers-reply">' + escapeHtml(row.generated_reply || (row.answer || {}).text || "—") + '<br><small>$' + Number(row.cost_usd || 0).toFixed(4) + ' · попыток ' + Number(row.attempts || 0) + '</small></td><td><button class="button ghost" type="button" data-autoanswers-open="' + escapeHtml(row.id) + '">Открыть</button></td></tr>';
+      }).join("") + '</tbody></table>';
+    }
+
+    function renderAutoanswersDetail() {
+      if (!autoanswersDetailBodyNode) return;
+      const row = state.feedbacks.server.detail;
+      if (!row) { autoanswersDetailBodyNode.innerHTML = ""; return; }
+      const product = row.productDetails || {};
+      const media = Array.isArray(row.media) ? row.media : [];
+      const latestJob = Array.isArray(row.ai_jobs) && row.ai_jobs.length ? row.ai_jobs[0] : null;
+      const canApprove = WEB_VITRINA_CONFIG.feedbacks_can_ai_review && latestJob && ["generated", "needs_review"].includes(String(latestJob.state || ""));
+      autoanswersDetailBodyNode.innerHTML = '<div class="autoanswers-detail-grid">' +
+        '<section class="autoanswers-detail-block"><strong>Отзыв</strong>\n' + escapeHtml(row.text || "") + '\n\nПлюсы: ' + escapeHtml(row.pros || "—") + '\nМинусы: ' + escapeHtml(row.cons || "—") + '\nТеги: ' + escapeHtml((row.tags || []).join(", ")) + '</section>' +
+        '<section class="autoanswers-detail-block"><strong>Товар</strong>\n' + escapeHtml(product.product_name || "—") + '\nnmId: ' + escapeHtml(product.nm_id || "—") + '\nАртикул: ' + escapeHtml(product.supplier_article || "—") + '\nВерсия: ' + escapeHtml(row.content_version || "—") + '</section>' +
+        '<section class="autoanswers-detail-block"><strong>AI / публикация</strong>\nRoute: ' + escapeHtml(row.route || "—") + '\nCase code: ' + escapeHtml(latestJob && latestJob.case_code || "—") + '\nAI: ' + escapeHtml(row.processing_status || "—") + '\nWB: ' + escapeHtml(row.publication_status || "not_queued") + '\nПопыток: ' + Number(row.attempts || 0) + '\nСтоимость: $' + Number(row.cost_usd || 0).toFixed(6) + '</section>' +
+        '<section class="autoanswers-detail-block"><strong>Медиа</strong>\n' + escapeHtml(media.map(function(item) { return item.kind + ": " + item.fetch_status; }).join("\n") || "Нет") + '</section>' +
+        '<section class="autoanswers-detail-block"><strong>Generated reply</strong>\n' + escapeHtml(row.generated_reply || "—") + '</section>' +
+        '<section class="autoanswers-detail-block"><strong>WB reply</strong>\n' + escapeHtml((row.answer || {}).text || "—") + '</section>' +
+        '<section class="autoanswers-detail-block" style="grid-column:1/-1"><details><summary>Audit trail (' + Number((row.audit || []).length) + ')</summary><pre>' + escapeHtml(JSON.stringify(row.audit || [], null, 2)) + '</pre></details></section>' +
+        '</div>' + (canApprove ? '<div class="autoanswers-control-actions" style="margin-top:12px"><button class="button primary" type="button" data-autoanswers-approve="' + escapeHtml(latestJob.processing_key) + '">Проверено: поставить на публикацию</button></div>' : '');
+    }
+
     function ensureFeedbacksInitialized() {
       if (!feedbacksPanelNode) {
         return;
@@ -11977,12 +12370,14 @@
         applyFeedbacksDefaultRange({allowStored: true});
         state.feedbacks.initialized = true;
         loadFeedbacksPrompt();
+        loadServerFeedbacks();
+        loadAutoanswersSettings();
       }
       renderFeedbacksPanel();
     }
 
     function activateFeedbacksSubsection(value) {
-      const normalized = value === "prompt" ? "prompt" : (value === "complaints" ? "complaints" : (value === "automation" ? "automation" : "reviews"));
+      const normalized = value === "server-reviews" ? "server-reviews" : (value === "prompt" ? "prompt" : (value === "complaints" ? "complaints" : (value === "automation" ? "automation" : "reviews")));
       state.feedbacks.activeSubsection = normalized;
       syncFeedbacksSubsections();
       if (normalized === "prompt" && !state.feedbacks.promptLoaded && !state.feedbacks.promptLoading) {
@@ -11994,11 +12389,15 @@
       if (normalized === "automation" && !state.feedbacks.automation.loaded && !state.feedbacks.automation.loading) {
         loadFeedbacksAutomation();
       }
+      if (normalized === "server-reviews" && !state.feedbacks.server.loaded && !state.feedbacks.server.loading) {
+        loadServerFeedbacks();
+        loadAutoanswersSettings();
+      }
       renderFeedbacksPanel();
     }
 
     function syncFeedbacksSubsections() {
-      const normalized = state.feedbacks.activeSubsection === "prompt" ? "prompt" : (state.feedbacks.activeSubsection === "complaints" ? "complaints" : (state.feedbacks.activeSubsection === "automation" ? "automation" : "reviews"));
+      const normalized = state.feedbacks.activeSubsection === "server-reviews" ? "server-reviews" : (state.feedbacks.activeSubsection === "prompt" ? "prompt" : (state.feedbacks.activeSubsection === "complaints" ? "complaints" : (state.feedbacks.activeSubsection === "automation" ? "automation" : "reviews")));
       feedbacksSubtabButtons.forEach(function(button) {
         const selected = button.getAttribute("data-feedbacks-subtab") === normalized;
         button.classList.toggle("is-active", selected);
@@ -12148,6 +12547,7 @@
 	      }
       renderFeedbacksSummary();
       renderFeedbacksResult();
+      renderAutoanswersServer();
       renderFeedbacksPromptPanel();
       renderFeedbacksComplaintsPanel();
       renderFeedbacksAutomationPanel();
@@ -12376,6 +12776,24 @@
     }
 
     function handleFeedbacksClick(event) {
+      const autoanswersOpen = event.target.closest("[data-autoanswers-open]");
+      if (autoanswersOpen) {
+        event.preventDefault();
+        openAutoanswersDetail(String(autoanswersOpen.getAttribute("data-autoanswers-open") || ""));
+        return;
+      }
+      const autoanswersApprove = event.target.closest("[data-autoanswers-approve]");
+      if (autoanswersApprove) {
+        event.preventDefault();
+        approveAutoanswersDetail(String(autoanswersApprove.getAttribute("data-autoanswers-approve") || ""));
+        return;
+      }
+      const autoanswersClose = event.target.closest("[data-autoanswers-detail-close]");
+      if (autoanswersClose) {
+        event.preventDefault();
+        if (autoanswersDetailDialog) autoanswersDetailDialog.close();
+        return;
+      }
       const autoDelete = event.target.closest("[data-feedbacks-auto-delete]");
       if (autoDelete) {
         event.preventDefault();

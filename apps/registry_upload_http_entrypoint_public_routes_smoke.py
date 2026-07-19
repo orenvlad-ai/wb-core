@@ -591,7 +591,7 @@ def _write_current_live_fixture(
                 "mutation_policy": "routine_writes_allowed",
                 "host_ip": "89.191.226.88",
                 "public_domain": "api.selleros.pro",
-                "target_id": "current_live_invariant_smoke",
+                "target_id": "wb_core_eu_hosted_runtime_active",
                 "public_base_url": public_base_url,
                 "loopback_base_url": "http://127.0.0.1:8765",
                 "ssh_destination": "wb-core-eu-root",
