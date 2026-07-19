@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 import apps.registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
 import apps.warehouse_opening_snapshot as warehouse_opening_snapshot  # noqa: E402
+import apps.warehouse_stocks_production_ui_flow as warehouse_ui_flow  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
     SheetVitrinaV1Envelope,
@@ -185,6 +186,15 @@ def main() -> None:
     )
     if ui_flow_args.handler is not hosted_runtime.run_warehouse_ui_flow_command:
         raise AssertionError("hosted runner must expose canonical warehouse-ui-flow command")
+    period_vitrina_url = warehouse_ui_flow._period_vitrina_url(
+        "https://api.selleros.pro/",
+        date_to="2026-07-19",
+    )
+    if period_vitrina_url != (
+        "https://api.selleros.pro/sheet-vitrina-v1/vitrina"
+        "?tab=vitrina&date_from=2026-07-01&date_to=2026-07-19"
+    ):
+        raise AssertionError("warehouse UI Flow must ignore persisted tabs for period acceptance")
     failed_backup_source = (
         "/opt/wb-core-runtime/backups/warehouse-functional/"
         "warehouse_functional_cutover_v1-20260719T001627Z.sqlite3"
