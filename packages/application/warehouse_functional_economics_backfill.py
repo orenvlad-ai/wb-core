@@ -85,6 +85,7 @@ def build_functional_economics_backfill_plan(
     archived_rows_removed = 0
     non_target_before: list[list[str]] = []
     non_target_after: list[list[str]] = []
+    non_target_mismatches: list[dict[str, str]] = []
     for snapshot in snapshots:
         try:
             transformed = _transform_snapshot(
@@ -101,6 +102,15 @@ def build_functional_economics_backfill_plan(
             ) from exc
         non_target_before.append([snapshot["bundle_version"], snapshot["as_of_date"], transformed["non_target_before"]])
         non_target_after.append([snapshot["bundle_version"], snapshot["as_of_date"], transformed["non_target_after"]])
+        if transformed["non_target_before"] != transformed["non_target_after"]:
+            non_target_mismatches.append(
+                {
+                    "bundle_version": str(snapshot["bundle_version"]),
+                    "as_of_date": str(snapshot["as_of_date"]),
+                    "before_digest": str(transformed["non_target_before"]),
+                    "after_digest": str(transformed["non_target_after"]),
+                }
+            )
         changed_cells += int(transformed["changed_cells"])
         inserted_rows += int(transformed["inserted_rows"])
         archived_rows_removed += int(transformed["archived_rows_removed"])
@@ -119,8 +129,16 @@ def build_functional_economics_backfill_plan(
             )
     before_digest = "sha256:" + _hash(non_target_before)
     after_digest = "sha256:" + _hash(non_target_after)
-    if before_digest != after_digest:
-        raise FunctionalEconomicsBackfillError("non-target ready-snapshot content changed")
+    if before_digest != after_digest or non_target_mismatches:
+        raise FunctionalEconomicsBackfillError(
+            "non-target ready-snapshot content changed: "
+            + json.dumps(
+                non_target_mismatches[:20],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     plan = {
         "contract_name": CONTRACT_NAME,
         "contract_version": "v1",
@@ -256,7 +274,8 @@ def _transform_snapshot(
     before_digest = _non_target_digest(original)
     _validate_data_projection_layout(sheet, dates=dates)
     archived_rows_removed = _remove_archived_metric_rows(rows)
-    metadata = plan.setdefault("metadata", {})
+    metadata_present = "metadata" in plan
+    metadata = plan.get("metadata") if metadata_present else {}
     if not isinstance(metadata, dict):
         raise FunctionalEconomicsBackfillError("ready snapshot metadata must be an object")
     timestamps = metadata.get("row_last_updated_at_by_row_id")
@@ -265,6 +284,16 @@ def _transform_snapshot(
             if "|" in row_id and row_id.split("|", 1)[1] in ARCHIVED_READY_METRIC_KEYS:
                 timestamps.pop(row_id, None)
     if not relevant_indices:
+        if plan == original:
+            return {
+                "after_plan_json": str(snapshot["plan_json"]),
+                "changed_cells": 0,
+                "inserted_rows": 0,
+                "archived_rows_removed": 0,
+                "dates": [],
+                "non_target_before": before_digest,
+                "non_target_after": before_digest,
+            }
         if archived_rows_removed:
             _update_data_dimensions(sheet)
         after = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -281,6 +310,8 @@ def _transform_snapshot(
     scopes = sorted({row_id.split("|", 1)[0] for row_id in by_id if row_id.startswith("SKU:")})
     if not scopes:
         raise FunctionalEconomicsBackfillError("ready snapshot has no SKU scopes")
+    if not metadata_present:
+        plan["metadata"] = metadata
     inserted = _ensure_target_rows(rows, by_id=by_id, scopes=scopes, date_count=len(dates))
     by_id = _rows_by_id(rows)
     changed = 0
@@ -534,6 +565,8 @@ def _non_target_digest(plan: Mapping[str, Any]) -> str:
                     timestamps.pop(row_id, None)
             if not timestamps:
                 metadata.pop("row_last_updated_at_by_row_id", None)
+        if not metadata:
+            value.pop("metadata", None)
     return "sha256:" + _hash(value)
 
 

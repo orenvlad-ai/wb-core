@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     emergency_apply = commands.add_parser("emergency-apply")
     _add_exact_plan_args(emergency_apply)
+    emergency_apply.add_argument("--backup-dir", required=True)
 
     economics_dry_run = commands.add_parser("economics-backfill-dry-run")
     economics_dry_run.add_argument("--output", default="")
@@ -155,6 +156,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return block.apply_plan(
             _read_exact_plan(args.plan_file, args.fingerprint, expected_kind="emergency_rebuild"),
             confirm_fingerprint=str(args.fingerprint),
+            backup_dir=Path(str(args.backup_dir)).resolve(),
         )
     if args.command == "economics-backfill-dry-run":
         return _write_optional_plan(

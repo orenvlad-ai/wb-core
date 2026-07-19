@@ -2931,9 +2931,11 @@ class RegistryUploadHttpEntrypoint:
         if not isinstance(plan, Mapping):
             raise ValueError("exact reviewed emergency plan is required")
         fingerprint = str(payload.get("fingerprint") or "")
-        return self.warehouse_functional_block.apply_plan(
-            plan,
-            confirm_fingerprint=fingerprint,
+        if not fingerprint or fingerprint != str(plan.get("plan_fingerprint") or ""):
+            raise ValueError("exact reviewed emergency plan fingerprint is required")
+        raise ValueError(
+            "synchronous emergency apply is disabled on the HTTP/UI contour; "
+            "use the repo-owned reviewed-plan runner and its status/readback flow"
         )
 
     def handle_calculation_parameters_request(self) -> dict[str, Any]:

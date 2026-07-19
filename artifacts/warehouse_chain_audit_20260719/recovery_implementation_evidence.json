@@ -1,0 +1,145 @@
+{
+  "contract_name": "warehouse_chain_audit_recovery_implementation_evidence",
+  "contract_version": "v1",
+  "task_class": "LOOP",
+  "scope": "live-runtime",
+  "generated_on": "2026-07-19",
+  "root_pr": 669,
+  "root_deployed_sha": "1ad4badc6309cbf78a7be35130bf57837f7ce0e7",
+  "prechange_evidence": "artifacts/warehouse_chain_audit_20260719/prechange_production_evidence.json",
+  "root_implementation_evidence": "artifacts/warehouse_chain_audit_20260719/implementation_evidence.json",
+  "primary_source_mutations": false,
+  "production_mutation_status": "pending_reviewed_recovery_deploy",
+  "pre_mutation_blockers": [
+    {
+      "operation": "warehouse-functional-emergency-dry-run",
+      "result": "blocked",
+      "evidence": "The deployed implementation could not derive the missing 2026-07-17 and 2026-07-18 pre-cutover dates from persisted exact stock_total columns."
+    },
+    {
+      "operation": "warehouse-functional-economics-dry-run",
+      "result": "blocked",
+      "evidence": "Absent versus empty generated metadata caused a false non-target ready-snapshot digest mismatch."
+    },
+    {
+      "operation": "warehouse-functional-emergency-apply",
+      "result": "not_attempted",
+      "evidence": "Fail-closed: no production mutation was attempted without a complete reviewed plan, fresh coherent backup and valid integrity/fingerprint gates."
+    }
+  ],
+  "historical_correction_contract": {
+    "method": "append_missing_dates_from_exact_persisted_snapshot_columns_v1",
+    "missing_dates_target": [
+      "2026-07-17",
+      "2026-07-18"
+    ],
+    "selected_evidence": "one newest coherent exact business-date stock_total column per date",
+    "later_bundle_admissibility": "a persisted bundle may be selected when its outer as_of_date is post-cutover only if date_columns contains the exact missing date",
+    "sku_coverage": "the selected column must cover the union of all SKU scopes declared for that exact date",
+    "per_sku_stitching": false,
+    "zero_quantity_without_cost_basis": "explicit zero-capital sentinel; Registry/Proxy and weekly Finance readers expose no invented zero unit cost",
+    "positive_quantity_without_cost_basis": "fail-closed",
+    "frozen_overlap_source": "immutable frozen quantities and business rows",
+    "manifest": "normalized selected exact date/SKU/quantity evidence plus source identity",
+    "manifest_digest_required": true,
+    "row_provenance_bound_to_manifest": true,
+    "date_order": "sorted canonical business-date order",
+    "apply_rederivation": [
+      "before backup from current persisted evidence",
+      "again under BEGIN IMMEDIATE"
+    ],
+    "plan_and_row_equality": "byte-semantic equality with current deterministic derivation",
+    "write_mode": "plain INSERT of uniquely derived missing identities plus versioned correction audit",
+    "updates_or_upserts_of_frozen_rows": false,
+    "supersedes_required": true,
+    "atomic_transaction": true,
+    "idempotent_repeat": "exact repeat is a no-op"
+  },
+  "backup_and_rollback_contract": {
+    "pre_backup_gates": [
+      "immutable primary-source digest",
+      "WB supply-source digest",
+      "derived historical correction rederivation"
+    ],
+    "backup_directory": "/opt/wb-core-runtime/backups/warehouse-functional-recovery",
+    "backup_mode": "0600",
+    "backup_integrity_check": "ok required",
+    "backup_freshness": "fresh backup for the exact reviewed emergency fingerprint",
+    "no_commit_cleanup": "remove only the exact backup and sidecars created by the failed attempt",
+    "committed_backup": "retained and recorded in the versioned correction audit",
+    "interrupted_backup_cleanup": "repo-owned exact-path/fingerprint dry-run and apply supports allowlisted functional-cutover and emergency names",
+    "rollback_ready": true
+  },
+  "economics_recovery": {
+    "cause": "JSON normalization treated absent and empty generated metadata as different non-target content",
+    "fix": "canonicalize generated-empty metadata for digest purposes and byte-preserve snapshots with no target dates, archived rows or generated metadata",
+    "per_snapshot_mismatch_diagnostics": true,
+    "non_target_digest_invariant": true,
+    "atomic_transaction": true,
+    "idempotent_repeat": "zero updates required"
+  },
+  "ui_recovery": {
+    "public_emergency_action": "preview-only deterministic dry-run",
+    "public_synchronous_apply": "fail-closed",
+    "reason": "coherent backup and apply can exceed the managed 180-second proxy timeout",
+    "production_apply_boundary": "repo-owned hosted CLI after reviewed deploy"
+  },
+  "semantic_review": {
+    "resolved_findings": [
+      "canonical historical rows could override exact correction evidence",
+      "emergency apply initially lacked a mandatory fresh coherent backup",
+      "functional cutover backup naming lost its timestamped rollback identity",
+      "emergency apply depended unnecessarily on mutable snapshot state",
+      "absent versus empty generated metadata caused false economics drift",
+      "public emergency apply could exceed the proxy timeout",
+      "a pre-transaction failure could retain an unused emergency backup",
+      "correction drift originally hashed unrelated ready-snapshot JSON",
+      "a partial exact-date SKU scope could be accepted",
+      "a later partial snapshot could block an older complete snapshot",
+      "ordinary snapshot merge could drop older valid per-SKU evidence",
+      "correction arithmetic could stitch SKU cells across snapshot versions",
+      "narrow snapshot windows could not prove frozen overlap",
+      "whole-SKU omission was not detected",
+      "already frozen dates entered the correction drift view",
+      "later outer-as-of bundles containing the exact missing date were excluded",
+      "correction manifest was not cryptographically rederived from row provenance",
+      "a self-consistent but non-derived correction plan could be applied",
+      "zero-stock post-cutover SKU scope could block correction derivation",
+      "emergency backup directory was missing from repo-owned failed-backup cleanup",
+      "multi-date correction evidence order could create false local-source drift",
+      "weekly Finance interpreted the zero-basis sentinel as a proven zero cost"
+    ],
+    "open_findings": 0,
+    "final_independent_review": "No discrete actionable regressions identified; modified recovery, hosted-runtime and economics-backfill flows are internally consistent."
+  },
+  "verified_tests": [
+    "apps/canonical_cost_engine_smoke.py",
+    "apps/cny_ledger_smoke.py",
+    "apps/own_product_capital_smoke.py",
+    "apps/supplier_financial_documents_smoke.py",
+    "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py",
+    "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py",
+    "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py",
+    "apps/warehouse_stocks_smoke.py",
+    "apps/warehouse_stocks_browser_smoke.py",
+    "apps/warehouse_functional_smoke.py",
+    "apps/wb_finance_weekly_cost_cutover_smoke.py",
+    "apps/registry_upload_http_entrypoint_smoke.py",
+    "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py",
+    "python3 -m compileall targeted changed modules",
+    "git diff --check"
+  ],
+  "production_closure_required": [
+    "reviewed recovery PR",
+    "Release Train exact-head acknowledgement",
+    "merge and canonical deploy",
+    "fresh production dry-run",
+    "coherent backup and fingerprint-pinned emergency apply",
+    "readback and exact-repeat idempotency",
+    "economics backfill and zero-change repeat",
+    "bounded official WB sync and hourly enable",
+    "authenticated isolated Playwright acceptance",
+    "exact /wb-core loop accept-ui command",
+    "terminal release:production"
+  ]
+}

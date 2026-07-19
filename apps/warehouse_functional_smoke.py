@@ -37,19 +37,27 @@ from packages.application.warehouse_functional import (  # noqa: E402
     WAREHOUSE_QUALITY_PRESENTATIONS,
     WarehouseFunctionalBlock,
     WarehouseLine,
+    _build_versioned_historical_correction,
     _calculation_digest,
     _counted_cny_operation,
+    _daily_wb_cost_row,
     _fingerprint,
+    _functional_local_source_view,
     _guarded_local_sources,
     _historical_recovery_source_rows,
+    _historical_snapshot_manifest_digest,
     _line_payload,
     _merge_historical_wb_quantity_evidence,
+    _missing_pre_cutover_historical_dates,
     _nomenclature_purchase_prices,
     _ready_snapshot_recovery_rows,
+    _ready_snapshot_historical_correction_rows,
     _supply_downstream_component_index,
     _supply_revision,
     _summaries,
     _validate_historical_projection_calendar,
+    _validate_historical_correction_plan,
+    _validate_historical_correction_matches_derived,
     _validated_financial_expense,
     _warehouse_human_evidence,
     accepted_capital_delta,
@@ -67,6 +75,7 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
 )
+from packages.application.wb_finance_weekly import _functional_wb_cost_state  # noqa: E402
 from apps.warehouse_functional_runner import _verify_cutover_external_recheck  # noqa: E402
 
 
@@ -85,6 +94,8 @@ def main() -> None:
     _test_nomenclature_purchase_price_source()
     _test_historical_wb_projection()
     _test_historical_projection_calendar_gate()
+    _test_versioned_historical_correction()
+    _test_zero_quantity_without_cost_basis_consumer()
     _test_exact_historical_wb_quantity_evidence()
     _test_quality_localization_catalog()
     _test_human_evidence_uses_source_quality_and_date()
@@ -410,6 +421,393 @@ def _test_historical_projection_calendar_gate() -> None:
         raise AssertionError("incomplete historical calendar must fail before activation")
 
 
+def _test_versioned_historical_correction() -> None:
+    opening = [
+        {
+            "nm_id": 104,
+            "ff_unit_cost_rub": "10",
+            "wb_unit_cost_rub": "14",
+            "quality": "direct_24_06",
+            "provenance": {"frozen": True},
+        }
+    ]
+    quantities = [
+        {
+            "as_of_date": day,
+            "nm_id": 104,
+            "physical_quantity": quantity,
+            "quantity_provenance": {"column_date": day},
+        }
+        for day, quantity in (
+            ("2026-07-01", "10"),
+            ("2026-07-02", "9"),
+            ("2026-07-03", "8"),
+        )
+    ]
+    full = build_historical_wb_cost_projection(
+        opening_cost_map=opening,
+        daily_quantity_rows=quantities,
+        downstream_rows=[],
+        cutover_date="2026-07-04",
+    )
+    snapshots = [
+        {
+            "bundle_version": "exact-history-v1",
+            "as_of_date": "2026-07-03",
+            "activated_at": "2026-07-03T23:00:00Z",
+            "refreshed_at": "2026-07-03T23:00:00Z",
+            "plan_json": json.dumps(
+                {
+                    "date_columns": ["2026-07-03"],
+                    "sheets": [
+                        {
+                            "sheet_name": "DATA_VITRINA",
+                            "rows": [["SKU", "SKU:104|stock_total", 8]],
+                        }
+                    ],
+                }
+            ),
+        }
+    ]
+    cutover = {
+        "cutover_id": FUNCTIONAL_CUTOVER_ID,
+        "cutover_at": "2026-07-04T00:00:00Z",
+        "plan_fingerprint": "sha256:cutover-smoke",
+    }
+    correction, rows = _build_versioned_historical_correction(
+        cutover=cutover,
+        opening_cost_map=opening,
+        frozen_rows=full[:2],
+        correction_quantity_rows=quantities[-1:],
+        downstream_rows=[],
+        ready_snapshot_rows=snapshots,
+    )
+    _assert(correction["required"] is True, "missing date creates a versioned correction")
+    _assert(correction["missing_dates"] == ["2026-07-03"], "only absent dates are corrected")
+    _assert(len(rows) == 1 and rows[0]["quantity"] == "8", "correction appends exact arithmetic row")
+    _assert(
+        rows[0]["provenance"]["versioned_historical_correction"][
+            "supersedes_plan_fingerprint"
+        ]
+        == "sha256:cutover-smoke",
+        "correction retains supersedes provenance",
+    )
+    zero_scope_snapshot = copy.deepcopy(snapshots[0])
+    zero_scope_snapshot["bundle_version"] = "exact-history-with-later-zero-scope"
+    zero_scope_snapshot["plan_json"] = json.dumps(
+        {
+            "date_columns": ["2026-07-03"],
+            "sheets": [
+                {
+                    "sheet_name": "DATA_VITRINA",
+                    "rows": [
+                        ["SKU", "SKU:104|stock_total", 8],
+                        ["SKU", "SKU:999|stock_total", 0],
+                    ],
+                }
+            ],
+        }
+    )
+    zero_scope_correction, zero_scope_rows = _build_versioned_historical_correction(
+        cutover=cutover,
+        opening_cost_map=opening,
+        frozen_rows=full[:2],
+        correction_quantity_rows=[
+            quantities[-1],
+            {
+                "as_of_date": "2026-07-03",
+                "nm_id": 999,
+                "physical_quantity": "0",
+                "quantity_provenance": {"column_date": "2026-07-03"},
+            },
+        ],
+        downstream_rows=[],
+        ready_snapshot_rows=[zero_scope_snapshot],
+    )
+    zero_scope_by_id = {int(item["nm_id"]): item for item in zero_scope_rows}
+    _assert(
+        zero_scope_correction["row_count"] == 2
+        and zero_scope_by_id[999]["quantity"] == "0"
+        and zero_scope_by_id[999]["wac_rub"] == "0"
+        and zero_scope_by_id[999]["quality"] == "zero_quantity_without_cost_basis",
+        "a zero-stock post-cutover SKU keeps exact coverage without inventing a cost basis",
+    )
+    _validate_historical_correction_plan(
+        zero_scope_correction,
+        rows=zero_scope_rows,
+        cutover=cutover,
+    )
+    _validate_historical_correction_plan(correction, rows=rows, cutover=cutover)
+    _validate_historical_correction_matches_derived(
+        planned_correction=correction,
+        planned_rows=rows,
+        expected_correction=correction,
+        expected_rows=rows,
+    )
+    injected_row = copy.deepcopy(rows[0])
+    injected_row["nm_id"] = 105
+    injected_row["fingerprint"] = "sha256:injected-existing-day"
+    try:
+        _validate_historical_correction_matches_derived(
+            planned_correction=correction,
+            planned_rows=[*rows, injected_row],
+            expected_correction=correction,
+            expected_rows=rows,
+        )
+    except Exception as exc:
+        _assert(
+            "rows differ from current persisted evidence" in str(exc),
+            "apply rejects a self-consistent extra row not derived from current evidence",
+        )
+    else:
+        raise AssertionError("non-derived historical correction row must fail closed")
+    forged_manifest = copy.deepcopy(correction)
+    forged_manifest["ready_snapshot_manifest"][0]["bundle_version"] = "forged"
+    forged_manifest["ready_snapshot_manifest_digest"] = (
+        _historical_snapshot_manifest_digest(
+            forged_manifest["ready_snapshot_manifest"]
+        )
+    )
+    try:
+        _validate_historical_correction_plan(
+            forged_manifest,
+            rows=rows,
+            cutover=cutover,
+        )
+    except Exception as exc:
+        _assert(
+            "manifest differs from row provenance" in str(exc)
+            or "row source manifest digest mismatch" in str(exc),
+            "correction audit manifest is cryptographically bound to row provenance",
+        )
+    else:
+        raise AssertionError("forged correction source manifest must fail closed")
+    metadata_only_snapshot = copy.deepcopy(snapshots[0])
+    metadata_only_plan = json.loads(metadata_only_snapshot["plan_json"])
+    metadata_only_plan["metadata"] = {"unrelated_publication_marker": "changed"}
+    metadata_only_plan["sheets"][0]["rows"].append(
+        ["SKU", "SKU:104|orderCount", 123]
+    )
+    metadata_only_snapshot["plan_json"] = json.dumps(metadata_only_plan)
+    original_source_view = _functional_local_source_view(
+        {
+            "historical_wb_daily_quantities": [],
+            "ready_snapshots": [],
+            "historical_correction_missing_dates": ["2026-07-03"],
+            "historical_correction_ready_snapshots": snapshots,
+        }
+    )
+    metadata_only_source_view = _functional_local_source_view(
+        {
+            "historical_wb_daily_quantities": [],
+            "ready_snapshots": [],
+            "historical_correction_missing_dates": ["2026-07-03"],
+            "historical_correction_ready_snapshots": [metadata_only_snapshot],
+        }
+    )
+    exact_correction, exact_rows = _build_versioned_historical_correction(
+        cutover=cutover,
+        opening_cost_map=opening,
+        frozen_rows=full[:2],
+        correction_quantity_rows=original_source_view[
+            "historical_correction_wb_daily_quantities"
+        ],
+        downstream_rows=[],
+        ready_snapshot_rows=snapshots,
+    )
+    _assert(
+        _guarded_local_sources(original_source_view)
+        == _guarded_local_sources(metadata_only_source_view),
+        "unrelated ready-snapshot rows and metadata do not invalidate the exact-column drift gate",
+    )
+    metadata_correction, metadata_rows = _build_versioned_historical_correction(
+        cutover=cutover,
+        opening_cost_map=opening,
+        frozen_rows=full[:2],
+        correction_quantity_rows=metadata_only_source_view[
+            "historical_correction_wb_daily_quantities"
+        ],
+        downstream_rows=[],
+        ready_snapshot_rows=[metadata_only_snapshot],
+    )
+    _assert(
+        metadata_correction["ready_snapshot_manifest_digest"]
+        == exact_correction["ready_snapshot_manifest_digest"]
+        and [item["fingerprint"] for item in metadata_rows]
+        == [item["fingerprint"] for item in exact_rows],
+        "correction manifest and rows hash only the selected exact stock_total evidence",
+    )
+    drifted_opening = copy.deepcopy(opening)
+    drifted_opening[0]["wb_unit_cost_rub"] = "15"
+    try:
+        _build_versioned_historical_correction(
+            cutover=cutover,
+            opening_cost_map=drifted_opening,
+            frozen_rows=full[:2],
+            correction_quantity_rows=quantities[-1:],
+            downstream_rows=[],
+            ready_snapshot_rows=snapshots,
+        )
+    except Exception as exc:
+        _assert(
+            "differs from existing frozen business values" in str(exc),
+            "frozen overlap arithmetic drift blocks append-only correction",
+        )
+    else:
+        raise AssertionError("historical correction must prove every overlapping frozen value")
+
+    partial_opening = [
+        *opening,
+        {
+            "nm_id": 105,
+            "ff_unit_cost_rub": "20",
+            "wb_unit_cost_rub": "24",
+            "quality": "direct_24_06",
+            "provenance": {"frozen": True},
+        },
+    ]
+    partial_quantities = [
+        *quantities,
+        {
+            "as_of_date": "2026-07-01",
+            "nm_id": 105,
+            "physical_quantity": "5",
+            "quantity_provenance": {"column_date": "2026-07-01"},
+        },
+        {
+            "as_of_date": "2026-07-02",
+            "nm_id": 105,
+            "physical_quantity": "5",
+            "quantity_provenance": {"column_date": "2026-07-02"},
+        },
+    ]
+    partial_full = build_historical_wb_cost_projection(
+        opening_cost_map=partial_opening,
+        daily_quantity_rows=partial_quantities,
+        downstream_rows=[],
+        cutover_date="2026-07-04",
+    )
+    partial_snapshot = copy.deepcopy(snapshots)
+    partial_snapshot[0]["plan_json"] = json.dumps(
+        {
+            "date_columns": ["2026-07-01", "2026-07-02", "2026-07-03"],
+            "sheets": [
+                {
+                    "sheet_name": "DATA_VITRINA",
+                    "rows": [
+                        ["SKU", "SKU:104|stock_total", 10, 9, 8],
+                        ["SKU", "SKU:105|stock_total", 5, 5, ""],
+                    ],
+                }
+            ],
+        }
+    )
+    try:
+        _build_versioned_historical_correction(
+            cutover=cutover,
+            opening_cost_map=partial_opening,
+            frozen_rows=[
+                item
+                for item in partial_full
+                if item["as_of_date"] in {"2026-07-01", "2026-07-02"}
+            ],
+            correction_quantity_rows=partial_quantities,
+            downstream_rows=[],
+            ready_snapshot_rows=partial_snapshot,
+        )
+    except Exception as exc:
+        _assert(
+            "incomplete exact stock_total evidence" in str(exc)
+            and "2026-07-03:105" in str(exc),
+            "a partially blank exact snapshot column fails closed with SKU identity",
+        )
+    else:
+        raise AssertionError("partial SKU coverage must not complete a correction date")
+
+    coherent_older_snapshot = copy.deepcopy(partial_snapshot[0])
+    coherent_older_snapshot["bundle_version"] = "exact-history-older-coherent"
+    coherent_older_snapshot["activated_at"] = "2026-07-03T21:00:00Z"
+    coherent_older_snapshot["refreshed_at"] = "2026-07-03T21:00:00Z"
+    coherent_older_snapshot["plan_json"] = json.dumps(
+        {
+            "date_columns": ["2026-07-01", "2026-07-02", "2026-07-03"],
+            "sheets": [
+                {
+                    "sheet_name": "DATA_VITRINA",
+                    "rows": [
+                        ["SKU", "SKU:104|stock_total", 10, 9, 8],
+                        ["SKU", "SKU:105|stock_total", 5, 5, 4],
+                        ["SKU", "SKU:105|orderCount", 0, 0, 0],
+                    ],
+                }
+            ],
+        }
+    )
+    later_partial_snapshot = copy.deepcopy(partial_snapshot[0])
+    later_partial_snapshot["bundle_version"] = "exact-history-later-partial"
+    later_partial_snapshot["activated_at"] = "2026-07-03T23:00:00Z"
+    later_partial_snapshot["refreshed_at"] = "2026-07-03T23:00:00Z"
+    later_partial_snapshot["plan_json"] = json.dumps(
+        {
+            "date_columns": ["2026-07-01", "2026-07-02", "2026-07-03"],
+            "sheets": [
+                {
+                    "sheet_name": "DATA_VITRINA",
+                    "rows": [
+                        ["SKU", "SKU:104|stock_total", 10, 9, 8],
+                    ],
+                }
+            ],
+        }
+    )
+    coherent_quantities = [
+        *partial_quantities,
+        {
+            "as_of_date": "2026-07-03",
+            "nm_id": 105,
+            "physical_quantity": "4",
+            "quantity_provenance": {"column_date": "2026-07-03"},
+        },
+    ]
+    coherent_source_view = _functional_local_source_view(
+        {
+            "historical_wb_daily_quantities": [],
+            "ready_snapshots": [],
+            "historical_correction_missing_dates": ["2026-07-03"],
+            "historical_correction_ready_snapshots": [
+                coherent_older_snapshot,
+                later_partial_snapshot,
+            ],
+        }
+    )
+    coherent_source_quantities = coherent_source_view[
+        "historical_correction_wb_daily_quantities"
+    ]
+    correction, rows = _build_versioned_historical_correction(
+        cutover=cutover,
+        opening_cost_map=partial_opening,
+        frozen_rows=[
+            item
+            for item in build_historical_wb_cost_projection(
+                opening_cost_map=partial_opening,
+                daily_quantity_rows=coherent_quantities,
+                downstream_rows=[],
+                cutover_date="2026-07-04",
+            )
+            if item["as_of_date"] in {"2026-07-01", "2026-07-02"}
+        ],
+        correction_quantity_rows=coherent_source_quantities,
+        downstream_rows=[],
+        ready_snapshot_rows=[coherent_older_snapshot, later_partial_snapshot],
+    )
+    _assert(
+        correction["row_count"] == 2
+        and {(int(item["nm_id"]), item["quantity"]) for item in rows}
+        == {(104, "8"), (105, "4")},
+        "a later snapshot that omits a whole SKU scope is skipped in favor of the newest coherent exact column",
+    )
+
+
 def _test_exact_historical_wb_quantity_evidence() -> None:
     period_plan = {
         "date_columns": ["2026-07-17", "2026-07-18", "2026-07-19"],
@@ -435,6 +833,109 @@ def _test_exact_historical_wb_quantity_evidence() -> None:
             }
         ],
     )
+    correction_view = _functional_local_source_view(
+        {
+            "historical_wb_daily_quantities": [
+                {"as_of_date": "2026-07-18", "nm_id": 104, "physical_quantity": "999"}
+            ],
+            "ready_snapshots": [],
+            "historical_correction_missing_dates": ["2026-07-18"],
+            "historical_correction_ready_snapshots": [
+                {
+                    "bundle_version": "exact-period-v1",
+                    "as_of_date": "2026-07-18",
+                    "activated_at": "2026-07-18T12:00:00Z",
+                    "refreshed_at": "2026-07-18T12:00:00Z",
+                    "plan_json": json.dumps(period_plan),
+                }
+            ],
+        }
+    )
+    unrelated_day_plan = copy.deepcopy(period_plan)
+    unrelated_day_plan["sheets"][0]["rows"][0][2] = 700
+    unrelated_day_view = _functional_local_source_view(
+        {
+            "historical_wb_daily_quantities": [
+                {"as_of_date": "2026-07-18", "nm_id": 104, "physical_quantity": "999"}
+            ],
+            "ready_snapshots": [],
+            "historical_correction_missing_dates": ["2026-07-18"],
+            "historical_correction_ready_snapshots": [
+                {
+                    "bundle_version": "exact-period-v1",
+                    "as_of_date": "2026-07-18",
+                    "activated_at": "2026-07-18T12:00:00Z",
+                    "refreshed_at": "2026-07-18T12:00:00Z",
+                    "plan_json": json.dumps(unrelated_day_plan),
+                }
+            ],
+        }
+    )
+    _assert(
+        _guarded_local_sources(correction_view)
+        == _guarded_local_sources(unrelated_day_view),
+        "exact-column drift ignores stock_total changes outside the dates being corrected",
+    )
+    multi_day_snapshot = {
+        "bundle_version": "multi-day-later",
+        "as_of_date": "2026-07-19",
+        "activated_at": "2026-07-19T12:00:00Z",
+        "refreshed_at": "2026-07-19T12:00:00Z",
+        "plan_json": json.dumps(
+            {
+                "date_columns": ["2026-07-17", "2026-07-18"],
+                "sheets": [
+                    {
+                        "sheet_name": "DATA_VITRINA",
+                        "rows": [["SKU", "SKU:104|stock_total", 7, 8]],
+                    }
+                ],
+            }
+        ),
+    }
+    older_same_selected_day = {
+        "bundle_version": "older-same-selected-day",
+        "as_of_date": "2026-07-18",
+        "activated_at": "2026-07-18T12:00:00Z",
+        "refreshed_at": "2026-07-18T12:00:00Z",
+        "plan_json": json.dumps(
+            {
+                "date_columns": ["2026-07-18"],
+                "sheets": [
+                    {
+                        "sheet_name": "DATA_VITRINA",
+                        "rows": [["SKU", "SKU:104|stock_total", 8]],
+                    }
+                ],
+            }
+        ),
+    }
+    multi_day_sources = {
+        "historical_wb_daily_quantities": [],
+        "ready_snapshots": [],
+        "historical_correction_missing_dates": ["2026-07-17", "2026-07-18"],
+        "historical_correction_ready_snapshots": [multi_day_snapshot],
+    }
+    multi_day_with_older = {
+        **multi_day_sources,
+        "historical_correction_ready_snapshots": [
+            older_same_selected_day,
+            multi_day_snapshot,
+        ],
+    }
+    _assert(
+        _guarded_local_sources(_functional_local_source_view(multi_day_sources))
+        == _guarded_local_sources(_functional_local_source_view(multi_day_with_older)),
+        "unchanged selected multi-date evidence has a stable business-date order and drift digest",
+    )
+    correction_quantities = {
+        (item["as_of_date"], int(item["nm_id"])): item["physical_quantity"]
+        for item in correction_view["historical_correction_wb_daily_quantities"]
+    }
+    _assert(
+        correction_quantities[("2026-07-18", 104)] == "8",
+        "historical correction ignores later mutable canonical rows in favor of exact columns",
+    )
     by_key = {(item["as_of_date"], int(item["nm_id"])): item for item in merged}
     _assert(by_key[("2026-07-17", 104)]["physical_quantity"] == "7", "17 July uses its exact period column")
     _assert(by_key[("2026-07-18", 104)]["physical_quantity"] == "8", "18 July uses its exact period column")
@@ -444,6 +945,102 @@ def _test_exact_historical_wb_quantity_evidence() -> None:
         by_key[("2026-07-18", 104)]["quantity_provenance"]["column_date"] == "2026-07-18",
         "historical provenance binds the exact business date",
     )
+    older_complete = copy.deepcopy(period_plan)
+    older_complete["date_columns"] = ["2026-07-18"]
+    older_complete["sheets"][0]["rows"] = [
+        ["SKU", "SKU:104|stock_total", 8],
+        ["SKU", "SKU:105|stock_total", 3],
+    ]
+    later_partial = copy.deepcopy(older_complete)
+    later_partial["sheets"][0]["rows"] = [["SKU", "SKU:104|stock_total", 9]]
+    retained = _merge_historical_wb_quantity_evidence(
+        canonical_rows=[],
+        ready_snapshot_rows=[
+            {
+                "bundle_version": "older-complete",
+                "as_of_date": "2026-07-18",
+                "activated_at": "2026-07-18T20:00:00Z",
+                "refreshed_at": "2026-07-18T20:00:00Z",
+                "plan_json": json.dumps(older_complete),
+            },
+            {
+                "bundle_version": "later-partial",
+                "as_of_date": "2026-07-18",
+                "activated_at": "2026-07-18T21:00:00Z",
+                "refreshed_at": "2026-07-18T21:00:00Z",
+                "plan_json": json.dumps(later_partial),
+            },
+        ],
+    )
+    retained_by_key = {
+        (item["as_of_date"], int(item["nm_id"])): item["physical_quantity"]
+        for item in retained
+    }
+    _assert(
+        retained_by_key == {("2026-07-18", 104): "9", ("2026-07-18", 105): "3"},
+        "ordinary historical merge never drops an older valid SKU cell",
+    )
+
+
+def _test_zero_quantity_without_cost_basis_consumer() -> None:
+    with tempfile.TemporaryDirectory(prefix="warehouse-zero-cost-basis-") as temp_dir:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir))
+        WarehouseFunctionalBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers(
+                       cutover_id,cutover_at,status,plan_fingerprint,source_watermarks_json,
+                       absorbed_supply_revisions_json,backup_json,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    FUNCTIONAL_CUTOVER_ID,
+                    "2026-07-19T00:00:00Z",
+                    "posted",
+                    "sha256:zero-basis-cutover",
+                    "{}",
+                    "{}",
+                    "{}",
+                    NOW,
+                    NOW,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
+                       cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,
+                       quality,provenance_json,fingerprint,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    FUNCTIONAL_CUTOVER_ID,
+                    "2026-07-18",
+                    999,
+                    "0",
+                    "0",
+                    "0",
+                    "zero_quantity_without_cost_basis",
+                    "{}",
+                    "sha256:zero-basis-row",
+                    NOW,
+                ),
+            )
+            conn.commit()
+            finance_state, functional_applies = _functional_wb_cost_state(
+                conn,
+                as_of_date="2026-07-18",
+                nm_id="999",
+            )
+        state = runtime.load_our_wb_cost_daily_state(as_of_date="2026-07-18")
+        _assert(
+            state[999]["stock_qty"] == 0.0
+            and state[999]["our_wb_unit_cost_rub"] is None,
+            "zero-stock historical coverage never becomes an invented zero WB unit cost",
+        )
+        _assert(
+            functional_applies
+            and finance_state is not None
+            and finance_state["our_wb_unit_cost_rub"] is None,
+            "weekly Finance consumes the zero-basis marker as an unknown unit cost",
+        )
 
 
 def _test_quality_localization_catalog() -> None:
@@ -457,6 +1054,7 @@ def _test_quality_localization_catalog() -> None:
         "periodic_snapshot_wac",
         "periodic_snapshot_wac_provisional",
         "periodic_snapshot_wac_closed",
+        "zero_quantity_without_cost_basis",
         "direct_24_06",
         "same_purchase_price",
         "interpolation",
@@ -1055,6 +1653,12 @@ def _test_guarded_publication() -> None:
         )
         block._local_source_digest = lambda **_: "sha256:local"  # type: ignore[method-assign]
         block._wb_supply_source_digest = lambda **_: "sha256:supply"  # type: ignore[method-assign]
+        # This legacy guarded-publication fixture uses a hand-built plan and
+        # intentionally has no complete canonical source tables. Dedicated
+        # correction tests above exercise deterministic evidence re-derivation.
+        block._validate_emergency_correction_against_current = (  # type: ignore[method-assign]
+            lambda *_, **__: None
+        )
         with sqlite3.connect(runtime.db_path) as conn:
             conn.execute("CREATE TABLE immutable_warehouse_opening_v1(id TEXT PRIMARY KEY)")
             conn.execute("INSERT INTO immutable_warehouse_opening_v1 VALUES('audit')")
@@ -1319,7 +1923,188 @@ def _test_guarded_publication() -> None:
             _assert("active functional warehouse version drifted" in str(exc), "stale active guard")
         else:
             raise AssertionError("stale concurrent functional plan must not publish")
+        with sqlite3.connect(runtime.db_path) as conn:
+            frozen_before = conn.execute(
+                """SELECT fingerprint,created_at
+                   FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                   WHERE cutover_id=? AND as_of_date='2026-07-17' AND nm_id=104""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            ).fetchone()
+        correction_id = "whcorr_smoke_missing_day"
+        correction_snapshot_manifest = [
+            {
+                "business_date": "2026-07-16",
+                "bundle_version": "smoke-history",
+                "snapshot_as_of_date": "2026-07-16",
+                "activated_at": NOW,
+                "refreshed_at": NOW,
+                "sku_count": 1,
+                "exact_stock_total_sha256": "sha256:smoke-column",
+            }
+        ]
+        correction_snapshot_manifest_digest = _historical_snapshot_manifest_digest(
+            correction_snapshot_manifest
+        )
+        correction_row = _daily_wb_cost_row(
+            day="2026-07-16",
+            nm_id=104,
+            quantity=Decimal("1"),
+            wac=Decimal("14"),
+            quality="direct_24_06",
+            provenance={
+                "quantity_evidence": {
+                    "bundle_version": "smoke-history",
+                    "snapshot_as_of_date": "2026-07-16",
+                    "snapshot_activated_at": NOW,
+                    "snapshot_refreshed_at": NOW,
+                    "snapshot_exact_stock_total_sha256": "sha256:smoke-column",
+                },
+                "versioned_historical_correction": {
+                    "correction_id": correction_id,
+                    "supersedes_cutover_id": FUNCTIONAL_CUTOVER_ID,
+                    "supersedes_plan_fingerprint": plan["plan_fingerprint"],
+                    "ready_snapshot_manifest_digest": correction_snapshot_manifest_digest,
+                }
+            },
+        )
+        emergency_plan = copy.deepcopy(sync_plan)
+        emergency_plan.update(
+            {
+                "kind": "emergency_rebuild",
+                "base_active_version_id": sync_applied["active_version"]["version_id"],
+                "historical_wb_cost_projection": [
+                    correction_row,
+                    *sync_plan["historical_wb_cost_projection"],
+                ],
+                "historical_correction": {
+                    "required": True,
+                    "correction_id": correction_id,
+                    "missing_dates": ["2026-07-16"],
+                    "row_count": 1,
+                    "row_fingerprints": [correction_row["fingerprint"]],
+                    "ready_snapshot_manifest": correction_snapshot_manifest,
+                    "ready_snapshot_manifest_digest": correction_snapshot_manifest_digest,
+                    "supersedes_cutover_id": FUNCTIONAL_CUTOVER_ID,
+                    "supersedes_plan_fingerprint": plan["plan_fingerprint"],
+                },
+            }
+        )
+        emergency_plan.pop("plan_fingerprint", None)
+        emergency_plan["plan_fingerprint"] = _fingerprint(emergency_plan)
+        rejected_emergency_plan = copy.deepcopy(emergency_plan)
+        rejected_emergency_plan["local_source_digest"] = "sha256:drifted-before-backup"
+        rejected_emergency_plan.pop("plan_fingerprint", None)
+        rejected_emergency_plan["plan_fingerprint"] = _fingerprint(
+            rejected_emergency_plan
+        )
+        rejected_backup_dir = root / "rejected-emergency-backups"
+        try:
+            block.apply_plan(
+                rejected_emergency_plan,
+                confirm_fingerprint=rejected_emergency_plan["plan_fingerprint"],
+                backup_dir=rejected_backup_dir,
+            )
+        except Exception as exc:
+            _assert(
+                "local sources drifted" in str(exc),
+                "emergency drift is rejected before backup",
+            )
+        else:
+            raise AssertionError("drifted emergency plan must not apply")
+        _assert(
+            not rejected_backup_dir.exists()
+            or not list(rejected_backup_dir.iterdir()),
+            "rejected emergency plan leaves no full backup",
+        )
+        locked_drift_plan = copy.deepcopy(emergency_plan)
+        locked_drift_plan["source_watermarks"] = {"locked_drift_smoke": True}
+        locked_drift_plan.pop("plan_fingerprint", None)
+        locked_drift_plan["plan_fingerprint"] = _fingerprint(locked_drift_plan)
+        locked_drift_backup_dir = root / "locked-drift-emergency-backups"
+        with patch.object(
+            block,
+            "_local_source_digest",
+            side_effect=["sha256:local", "sha256:locked-drift"],
+        ):
+            try:
+                block.apply_plan(
+                    locked_drift_plan,
+                    confirm_fingerprint=locked_drift_plan["plan_fingerprint"],
+                    backup_dir=locked_drift_backup_dir,
+                )
+            except Exception as exc:
+                _assert(
+                    "while acquiring apply lock" in str(exc),
+                    "locked source drift aborts before any transaction commit",
+                )
+            else:
+                raise AssertionError("locked source drift must abort emergency apply")
+        _assert(
+            not locked_drift_backup_dir.exists()
+            or not list(locked_drift_backup_dir.iterdir()),
+            "rolled-back emergency apply removes its unused coherent backup",
+        )
+        emergency_applied = block.apply_plan(
+            emergency_plan,
+            confirm_fingerprint=emergency_plan["plan_fingerprint"],
+            backup_dir=root / "emergency-backups",
+        )
+        emergency_backup = emergency_applied.get("backup") or {}
+        _assert(
+            emergency_backup.get("integrity_check") == "ok",
+            "emergency apply creates a coherent backup before derived mutation",
+        )
+        _assert(
+            Path(str(emergency_backup["path"])).stat().st_mode & 0o777 == 0o600,
+            "emergency backup remains owner-only",
+        )
+        with sqlite3.connect(runtime.db_path) as conn:
+            frozen_after = conn.execute(
+                """SELECT fingerprint,created_at
+                   FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                   WHERE cutover_id=? AND as_of_date='2026-07-17' AND nm_id=104""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            ).fetchone()
+            corrected = conn.execute(
+                """SELECT fingerprint FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                   WHERE cutover_id=? AND as_of_date='2026-07-16' AND nm_id=104""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            ).fetchone()
+            correction_audit = conn.execute(
+                """SELECT correction_id,ready_snapshot_manifest_json,backup_json
+                   FROM sheet_vitrina_v1_warehouse_wb_daily_cost_corrections
+                   WHERE correction_id=?""",
+                (correction_id,),
+            ).fetchone()
+        _assert(frozen_after == frozen_before, "emergency correction does not rewrite frozen rows")
+        _assert(corrected[0] == correction_row["fingerprint"], "missing row is appended exactly")
+        _assert(correction_audit is not None, "versioned correction audit is persisted atomically")
+        _assert(
+            json.loads(correction_audit[1]) == correction_snapshot_manifest,
+            "correction audit retains the exact normalized source manifest",
+        )
+        emergency_repeated = block.apply_plan(
+            emergency_plan,
+            confirm_fingerprint=emergency_plan["plan_fingerprint"],
+            backup_dir=root / "emergency-backups",
+        )
+        _assert(emergency_repeated["idempotent"] is True, "exact emergency apply is a no-op")
         entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=runtime.runtime_dir, runtime=runtime)
+        try:
+            entrypoint.handle_warehouse_emergency_apply_request(
+                {
+                    "confirm": True,
+                    "plan": emergency_plan,
+                    "fingerprint": emergency_plan["plan_fingerprint"],
+                }
+            )
+        except ValueError as exc:
+            _assert(
+                "synchronous emergency apply is disabled" in str(exc),
+                "HTTP/UI contour cannot start a mutation that outlives proxy timeout",
+            )
+        else:
+            raise AssertionError("HTTP/UI emergency apply must stay preview-only")
         overview = entrypoint.handle_warehouses_overview_request()
         _assert(overview["contract_name"] == "sheet_vitrina_v1_warehouse_functional", "functional HTTP overview")
         _assert(len(overview["warehouses"]) == 6, "functional HTTP exposes six warehouses")
@@ -1373,6 +2158,11 @@ def _test_guarded_publication() -> None:
             _assert(conn.execute("SELECT COUNT(*) FROM immutable_warehouse_opening_v1").fetchone()[0] == 1, "old opening audit preserved")
         backup_path = Path(str(applied["backup"]["path"]))
         _assert(backup_path.stat().st_mode & 0o777 == 0o600, "backup mode 0600")
+        _assert(
+            backup_path.name.startswith(f"{FUNCTIONAL_CUTOVER_ID}-")
+            and backup_path.name != f"{FUNCTIONAL_CUTOVER_ID}.sqlite3",
+            "functional cutover backup keeps the canonical timestamped recovery name",
+        )
 
 
 def _test_ready_snapshot_recovery_scan_is_bounded(runtime: RegistryUploadDbBackedRuntime) -> None:
@@ -1429,6 +2219,18 @@ def _test_ready_snapshot_recovery_scan_is_bounded(runtime: RegistryUploadDbBacke
             all(item["bundle_version"] != "future-recovery-smoke" for item in snapshots),
             "post-cutover ready snapshots are excluded from the recovery source scan",
         )
+        correction_snapshots = _ready_snapshot_historical_correction_rows(
+            conn,
+            missing_dates=["2026-07-17"],
+        )
+        _assert(
+            {
+                item["bundle_version"]
+                for item in correction_snapshots
+            }
+            >= {"future-recovery-smoke", "late-predated-recovery-smoke"},
+            "missing-date correction admits later persisted bundles carrying the exact old column",
+        )
         ready_snapshots, frozen = _historical_recovery_source_rows(
             conn,
             cutover_at=NOW,
@@ -1439,9 +2241,52 @@ def _test_ready_snapshot_recovery_scan_is_bounded(runtime: RegistryUploadDbBacke
             "an established cutover rejects even later-published snapshots with pre-cutover outer dates",
         )
         _assert(
-            [(item["as_of_date"], item["fingerprint"]) for item in frozen]
-            == [("2026-07-17", "sha256:pre-cutover-daily")],
-            "post-cutover source capture reuses only the persisted frozen daily projection",
+            [item["as_of_date"] for item in frozen] == ["2026-07-16", "2026-07-17"]
+            and frozen[1]["fingerprint"] == "sha256:pre-cutover-daily",
+            "post-cutover source capture reuses original plus append-only corrected frozen rows",
+        )
+        for day in range(1, 16):
+            business_date = f"2026-07-{day:02d}"
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
+                       cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,quality,
+                       provenance_json,fingerprint,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    FUNCTIONAL_CUTOVER_ID,
+                    business_date,
+                    104,
+                    "1",
+                    "14",
+                    "14",
+                    "direct_24_06",
+                    "{}",
+                    f"sha256:complete-calendar-{day:02d}",
+                    NOW,
+                ),
+            )
+        complete_frozen_calendar = [
+            {"as_of_date": row[0]}
+            for row in conn.execute(
+                """SELECT DISTINCT as_of_date
+                   FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+                   WHERE cutover_id=? AND as_of_date<'2026-07-18'
+                   ORDER BY as_of_date""",
+                (FUNCTIONAL_CUTOVER_ID,),
+            ).fetchall()
+        ]
+        _assert(
+            _missing_pre_cutover_historical_dates(
+                complete_frozen_calendar,
+                cutover_date="2026-07-18",
+            )
+            == [],
+            "complete frozen calendar gates mutable snapshots out of ordinary emergency digest",
+        )
+        conn.execute(
+            """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+               WHERE cutover_id=? AND fingerprint LIKE 'sha256:complete-calendar-%'""",
+            (FUNCTIONAL_CUTOVER_ID,),
         )
         conn.execute(
             """DELETE FROM sheet_vitrina_v1_ready_snapshots
@@ -1475,7 +2320,6 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                 ],
             }
         ],
-        "metadata": {"preserved": True},
     }
     pre_boundary_plan = {
         "date_columns": ["2026-06-30"],
@@ -1495,6 +2339,20 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             "row_last_updated_at_by_row_id": {"SKU:104|proxy_profit_2_rub": NOW},
         },
     }
+    untouched_pre_boundary_plan_json = json.dumps(
+        {
+            "date_columns": ["2026-06-29"],
+            "sheets": [
+                {
+                    "sheet_name": "DATA_VITRINA",
+                    "write_start_cell": "A1",
+                    "header": ["Показатель", "row_id", "2026-06-29"],
+                    "rows": [["Legacy", "SKU:104|non_target", 444]],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute(
             """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
@@ -1525,6 +2383,20 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                 "v1",
                 NOW,
                 json.dumps(pre_boundary_plan),
+            ),
+        )
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_ready_snapshots(
+                   bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "economics-smoke",
+                NOW,
+                "2026-06-29",
+                "snap-economics-untouched-pre-boundary",
+                "v1",
+                NOW,
+                untouched_pre_boundary_plan_json,
             ),
         )
         conn.commit()
@@ -1575,12 +2447,20 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
                WHERE bundle_version='economics-smoke' AND as_of_date='2026-06-30'"""
         ).fetchone()[0])
+        untouched_pre_boundary_stored = conn.execute(
+            """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+               WHERE bundle_version='economics-smoke' AND as_of_date='2026-06-29'"""
+        ).fetchone()[0]
     rows = {row[1]: row for row in stored["sheets"][0]["rows"]}
     profit = Decimal(str(rows["SKU:104|proxy_profit_3_rub"][2]))
     margin = Decimal(str(rows["SKU:104|proxy_margin_3_pct"][2]))
     _assert(profit == Decimal("15.48"), "Proxy 3 default settings formula")
     _assert(abs(margin - profit / Decimal("91")) < Decimal("0.0000005"), "Proxy 3 margin uses expected buyout revenue")
     _assert(rows["SKU:104|non_target"][2] == 777, "functional economics backfill preserves non-target cells")
+    _assert(
+        untouched_pre_boundary_stored == untouched_pre_boundary_plan_json,
+        "economics backfill byte-preserves snapshots with no target date or archived metric",
+    )
     for archived_key in (
         "SKU:104|our_wb_cost_confirmed_share_pct",
         "SKU:104|proxy_profit_2_rub",
