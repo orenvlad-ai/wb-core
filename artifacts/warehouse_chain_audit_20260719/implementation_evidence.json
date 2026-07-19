@@ -67,7 +67,7 @@
     "production_execution_status": "not_started_before_merge_and_release_train_deploy"
   },
   "semantic_review": {
-    "runs_completed": 2,
+    "runs_completed": 7,
     "resolved_findings": [
       "dry-run/apply digest used different source views",
       "mutable production values were embedded in the reusable UI Flow",
@@ -76,10 +76,17 @@
       "FF and FF-to-WB evidence duplicated aggregates or hid operation-level contributions",
       "ready-snapshot recovery scan was not bounded by cutover",
       "normal live refresh could recreate archived materializations",
-      "public status still degraded on an archived-only source"
+      "public status still degraded on an archived-only source",
+      "transport success was conflated with active-source semantic status and source counts/list could diverge",
+      "nested FF ledger operations were hidden from human-readable evidence",
+      "failed manual sync did not reload and retain the last-good warehouse surface",
+      "an incomplete historical business-date calendar could be detected only after activation",
+      "archived-only failure semantics were not applied consistently to persisted manual/automatic job state",
+      "post-cutover sync could select a later mutable ready snapshot and rewrite frozen pre-cutover history"
     ],
     "open_findings": 0,
-    "post_rebase_review_required": true
+    "post_rebase_review_required": false,
+    "final_independent_review": "No actionable correctness regressions were found"
   },
   "verified_tests": [
     "apps/canonical_cost_engine_smoke.py",
@@ -95,7 +102,10 @@
     "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py",
     "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
     "apps/sheet_vitrina_v1_web_vitrina_group_action_ui_smoke.py",
+    "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py",
     "apps/warehouse_functional_smoke.py",
+    "apps/warehouse_stocks_browser_smoke.py",
+    "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py",
     "python3 -m py_compile targeted changed modules",
     "git diff --check"
   ],
