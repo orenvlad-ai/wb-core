@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import ssl
 import sys
 import time
 from typing import Any, Iterable, Mapping, Protocol
@@ -100,6 +101,22 @@ TERMINAL_CHECK_FAILURES = {
     "startup_failure",
     "timed_out",
 }
+
+
+def ensure_ca_bundle() -> None:
+    """Use a verified platform CA bundle when framework Python has none configured."""
+
+    if os.environ.get("SSL_CERT_FILE", "").strip() or ssl.get_default_verify_paths().cafile:
+        return
+    for candidate in (
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/opt/homebrew/etc/ca-certificates/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+    ):
+        if Path(candidate).is_file():
+            os.environ["SSL_CERT_FILE"] = candidate
+            return
 
 
 class ReleaseTrainError(RuntimeError):
@@ -1880,6 +1897,7 @@ def write_github_output(path: str | None, values: Mapping[str, Any]) -> None:
 
 
 def _api_from_env() -> GitHubApi:
+    ensure_ca_bundle()
     return GitHubApi(
         repository=os.environ.get("GITHUB_REPOSITORY", ""),
         token=os.environ.get("GITHUB_TOKEN", ""),
